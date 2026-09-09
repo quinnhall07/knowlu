@@ -3,6 +3,13 @@
 name: spike-toolchain
 on:
   workflow_dispatch: {}
+  # workflow_dispatch alone cannot reach a workflow that is not on the default branch,
+  # and main is not ours to push. The spike runs from its own branch instead.
+  push:
+    branches: [c0-ci-release]
+    paths:
+      - .github/workflows/spike-toolchain.yml
+      - scripts/ci/toolchain.ps1
 
 jobs:
   gnu-image:
