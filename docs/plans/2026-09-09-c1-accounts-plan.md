@@ -48,7 +48,7 @@ Asked **one at a time, when the task reaches them, with the context** — never 
 | # | Needed by | What, and what breaks without it |
 |---|---|---|
 | **P1** | Task 1 | **Supabase.** An organisation with two projects, region **US**: `knowlu-staging` and `knowlu-prod`. What I need (none secret): each project's **reference id**, its **URL** (`https://<ref>.supabase.co`) and its **anon key**. Quinn runs `supabase link` under his own login; no key is typed into this session. **Without it:** Tasks 1–9 can be written and unit-tested (they are pure modules), but nothing can be applied or deployed, and Task 10 has no `api_base` to compile in. The stream cannot reach its exit gate. |
-| **P2** | Task 4 | **Stripe, test mode.** An account; one product **"Knowlu"** with two prices — **$9.99/month** and **$69.99 / academic year** (recurring yearly) — and the **Customer Portal** configured with cancellation enabled and no survey gate. Values I need (public): the two price ids and the publishable key. Values Quinn sets as Supabase function secrets, never shown here: `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET` from the webhook endpoint he points at the staging project's `stripe-webhook` function. Also, **in Stripe's Checkout settings, the terms-of-service URL set to `https://knowlu.com/terms.html`** — Stripe rejects a session carrying `consent_collection[terms_of_service]=required` unless one is configured, so without it every Checkout 400s with a message nobody can act on. (That also sequences Task 19 before Task 4's first live Checkout.) Also **an email provider account** (Resend's free tier is enough), used for **two** things: the annual renewal reminder California requires, and — R-C1-3's second half — **Supabase Auth's custom SMTP**, because the built-in sender is a few messages an hour and is explicitly not for production, and `enable_confirmations = true` means every single sign-up depends on that mail arriving. Values: `EMAIL_API_URL`, `EMAIL_FROM`, and the SMTP host, port and username (all public); `EMAIL_API_KEY` and the SMTP password (secrets Quinn sets). **Without it:** Tasks 4 and 5 cannot be deployed or exercised; the app can create an account but can never become entitled; and the second person to sign up in an hour never receives their confirmation. |
+| **P2** | Task 4 | **Stripe, test mode.** An account; one product **"Knowlu"** with two prices — **$9.99/month** and **$69.99 / academic year** (recurring yearly) — and the **Customer Portal** configured with cancellation enabled and no survey gate. Values I need (public): the two price ids and the publishable key. Values Quinn sets as Supabase function secrets, never shown here: `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET` from the webhook endpoint he points at the staging project's `stripe-webhook` function — **and that endpoint's API version set to `2025-03-31.basil`**, the version `_shared/stripe.ts` pins, because an event delivered under a later version puts `current_period_end` somewhere the handler does not read. Also, **in Stripe's Checkout settings, the terms-of-service URL set to `https://knowlu.com/terms.html`** — Stripe rejects a session carrying `consent_collection[terms_of_service]=required` unless one is configured, so without it every Checkout 400s with a message nobody can act on. (That also sequences Task 19 before Task 4's first live Checkout.) Also **an email provider account** (Resend's free tier is enough), used for **two** things: the annual renewal reminder California requires, and — R-C1-3's second half — **Supabase Auth's custom SMTP**, because the built-in sender is a few messages an hour and is explicitly not for production, and `enable_confirmations = true` means every single sign-up depends on that mail arriving. Values: `EMAIL_API_URL`, `EMAIL_FROM`, and the SMTP host, port and username (all public); `EMAIL_API_KEY` and the SMTP password (secrets Quinn sets). **Without it:** Tasks 4 and 5 cannot be deployed or exercised; the app can create an account but can never become entitled; and the second person to sign up in an hour never receives their confirmation. |
 | **P3** | Task 4 step 10 | **Stripe Tax**, enabled, with a **Kentucky** registration recorded before the first Kentucky sale (Kentucky has taxed SaaS at 6% since 2023-01-01), and a written answer from a CPA on Alabama (every tracker reads the Department as *not taxable* for true SaaS; no rule addresses it). **Without it:** Checkout still works, but every Kentucky sale is under-collected tax Knowlu owes out of its own margin, and a UK-campus cohort arrives in one month. This blocks the first live sale, not the code. |
 | **P4** | Task 20 | **The Google Cloud OAuth consent screen**, submitted for **restricted-scope verification**. It needs: app name, logo, the homepage `https://knowlu.com`, the privacy-policy URL `https://knowlu.com/privacy.html` (Task 19 publishes it), `knowlu.com` **verified as an authorised domain** (C0's P3 puts it on Cloudflare Pages), a written `gmail.readonly` justification and a demo video. Task 20 hands Quinn the exact justification text and the video shot list; he does the submission. **Without it:** verification never starts, and C2's Gmail reader ships to at most 100 named test users with 7-day refresh tokens for as long as it takes — weeks, then an annual CASA assessment. This is the longest-lead item in the product and it is the whole reason D12's cost lands in C1 rather than C2 (§11 R1). |
 | **P5** | Task 19 | **The privacy policy and terms text, read by Quinn** before they are published, and read by **a lawyer before the first non-founder paid sign-up**. The two questions that matter most: the **18+ attestation** as Alabama's § 26-1-1(f) makes it work, and the **cancel flow** against ROSCA, California's ARL as amended by AB 2863, and NY GBL § 527-a. **Without it:** CalOPPA is breached by the first Californian who signs up (no threshold, any size), Google's consent screen has no policy URL to point at (P4 stalls), and the terms the Checkout consent checkbox references do not exist. |
@@ -115,7 +115,7 @@ Every decision this plan carries, and the task that carries it.
 - `cloud/supabase/migrations/20260910000400_telemetry.sql` — `telemetry_events`, `corrections`, the two minimum-cohort views; RLS.
 - `cloud/supabase/migrations/20260910000500_issues.sql` — `issues` and its 90-day sweep; RLS.
 - `cloud/supabase/migrations_test.ts` — the SQL invariants (no birthdate, RLS everywhere, no client write path, the filename shape).
-- `cloud/supabase/functions/_shared/http.ts` — `json()`, `readJson()`, `methodNotAllowed()`, `asResponse()`. No I/O.
+- `cloud/supabase/functions/_shared/http.ts` — `json()`, `fail()`, `readJson()`, `methodNotAllowed()`, `subPath()`, `asResponse()`. No I/O.
 - `cloud/supabase/functions/_shared/auth.ts` — `parseBearer()`, `requireUser()`; verification is injected.
 - `cloud/supabase/functions/_shared/entitlement.ts` — **the C2 contract**: `requireActiveEntitlement(req)`.
 - `cloud/supabase/functions/_shared/stripe.ts` — webhook signature verification and form encoding. Pure.
@@ -286,7 +286,7 @@ Files this stream may not edit. **H1 is pre-flight** — the controller applies 
 
 ### H1 (pre-flight, before Task 10) — `app/src/lib.rs` and four empty modules
 
-`app/src/lib.rs` is thirteen lines of `pub mod`. Add four, alphabetically placed:
+`app/src/lib.rs` is ten lines of `pub mod`. Add four, alphabetically placed:
 
 ```rust
 pub mod account;
@@ -401,11 +401,12 @@ if this drifts, and note that the two lists are different windows, not one:
 
 ### H6 (Task 17) — `scripts/wizard-check.py`, the headless wizard walk
 
-The wizard goes from seven panels to nine and its first two become an account and a subscription, so this script's `check()` no longer describes anything real. **The replacement is given here in full**, not generated at execution time: a hand-off whose payload does not exist yet cannot be reviewed and cannot be applied by a controller who was not in the room. Replace three regions of `scripts/wizard-check.py` — the two constants, the `FAKE` recorder, and `check()` — with exactly this. Everything else in the file (the `Quiet` handler, `names`, `first_args`, `main`) is unchanged.
+The wizard goes from seven panels to nine and its first two become an account and a subscription, so this script's `check()` no longer describes anything real. **The replacement is given here in full**, not generated at execution time: a hand-off whose payload does not exist yet cannot be reviewed and cannot be applied by a controller who was not in the room. Replace three regions of `scripts/wizard-check.py` — the three constants, the `FAKE` recorder, and `check()` — with exactly this. Everything else in the file (the `Quiet` handler, `names`, `first_args`, `main`) is unchanged.
 
 **Acceptance:** `.wv\Scripts\python scripts/wizard-check.py` prints one word, `ok`, and exits 0 against the nine-panel wizard.
 
-The two constants near the top become:
+The three constants near the top become — and `PARENT` goes with them, unused once the paths are
+spelled out:
 
 ```python
 DEST_OLD = "C:\\Users\\Ada\\Knowlu\\Fall 2026"
@@ -418,6 +419,7 @@ BEFORE_FINISH_OK = {"launch_state", "pick_folder", "sign_up", "sign_in", "send_m
                     "verify_email_code", "entitlement_now", "open_checkout", "open_policy",
                     "open_lms_window", "capture_calendar_link", "capture_courses",
                     "paste_calendar_link", "close_lms_window", "discover_coursework",
+                    "campus_search", "timezone_for_state",
                     "store_credentials", "retarget_credentials"}
 ```
 
@@ -441,6 +443,9 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'open_policy') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'open_lms_window') { return Promise.resolve({ ok: true, error: null, opened: true, session_dir: 'T:\\tmp\\lms' }); }
   if (cmd === 'timezone_for_state') { return Promise.resolve({ ok: true, error: null, timezone: 'America/Chicago' }); }
+  if (cmd === 'campus_search') {
+    return Promise.resolve({ ok: true, error: null,
+      hits: [[100751, 'The University of Alabama', 'Tuscaloosa', 'AL']] }); }
   if (cmd === 'capture_calendar_link') {
     return Promise.resolve({ ok: true, error: null, link: { url: 'https://lms.example.invalid/feed/a.ics', events: 12, courses: 4 } }); }
   if (cmd === 'paste_calendar_link') {
@@ -661,14 +666,33 @@ And a new bullet after the credentials one: *"The account's session JWT is Crede
 
 ---
 
-### H9 (mid-stream, at Task 13 step 3) — `app/src/main.rs`, the five `lms_link` commands, early
+### H9 (mid-stream, **split in two**) — `app/src/main.rs`, the `lms_link` commands as they come to exist
 
 Task 13's spike opens a window, and a window cannot be opened from a command that is not registered.
-This is **one of two mid-stream pauses in the plan** (the other is H11: `include_str!` makes `app/campuses.json` compile-blocking, so the controller runs the generator and commits the file on the branch's base when Task 14c asks, before that task's first `cargo test`): apply the `lms_link` fifth of H3 — the five
-commands in the shell's `generate_handler!` list, and `lms_link` in the `use` line — on the branch's
-base when Task 13 asks, and leave the rest of H3 for merge. The five are
-`lms_link::open_lms_window`, `lms_link::capture_calendar_link`, `lms_link::capture_courses`,
-`lms_link::paste_calendar_link`, `lms_link::close_lms_window`, spelled exactly as in H3's list above.
+But `generate_handler!` on a path that does not resolve is a **compile error**, so registering all
+five at Task 13 would break the build the registration exists to unblock: Task 13 defines three,
+`paste_calendar_link` arrives in Task 14 and `capture_courses` in Task 14b. **Ruling R-C1-11: H9 is
+applied in two parts, and never asks the controller to register a name that does not compile yet.**
+
+**H9a — at Task 13 step 3.** Add `lms_link` to `main.rs`'s `use` line and **exactly these three** to
+the shell's `generate_handler!` list:
+
+```
+lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::close_lms_window
+```
+
+**H9b — at Task 14b step 3a**, after step 3 has written `capture_courses` and before step 5's
+`cargo test`. (Step 2's red run comes *before* this and must not have it: the two names do not resolve
+yet, and a `generate_handler!` compile error is not the failure that step is watching for.) Add the
+remaining two, in H3's order:
+
+```
+lms_link::paste_calendar_link, lms_link::capture_courses
+```
+
+`paste_calendar_link` exists from Task 14 step 4 and `capture_courses` from Task 14b step 3, so H9b
+is safe the moment Task 14b's `lms_link.rs` is written. Everything else in H3 — the four commands
+`onboarding` and `account` add, and the console window's whole list — waits for merge.
 
 ---
 
@@ -933,8 +957,9 @@ try {
   foreach ($r in $keep) {
     # `WEBADDR` is inconsistent: some rows carry a scheme, some a path, some a trailing slash, some
     # nothing at all. Keep the HOST and nothing else -- partly because that is all the wizard shows,
-    # and partly because `app/tests/static_assets.rs` forbids an `http(s)://` literal anywhere under
-    # `app/static/`, and this file lives there.
+    # and partly because `app/tests/onboarding.rs::the_campus_list_is_bundled_headed_and_small`
+    # asserts the whole file carries no `http(s)://`. (`app/tests/static_assets.rs` cannot: its
+    # `read()` helper resolves against `app/static/`, and this file is `app/campuses.json`.)
     # `$webhost`, not `$host`: `$Host` is a PowerShell automatic variable (the PSHost object), and
     # assigning to it shadows it in this scope. It usually works and PSScriptAnalyzer flags it, which
     # is one rename too many arguments.
@@ -959,10 +984,11 @@ try {
   # One row per line, compact: about 400 KB, diffable, and a new school shows up as one added line
   # rather than a reflowed file.
   $sb = New-Object System.Text.StringBuilder
-  # **No URL in the header.** `app/tests/static_assets.rs` asserts the whole file carries no
-  # `http(s)://` — the same rule that makes this script strip schemes off `WEBADDR` — and a header
-  # naming the download would break it on line one. The source is named in words; the URL lives in
-  # this script's own `-Url` default, which is where somebody looking to regenerate it will look.
+  # **No URL in the header.** `app/tests/onboarding.rs::the_campus_list_is_bundled_headed_and_small`
+  # asserts the whole file carries no `http(s)://` — the same rule that makes this script strip
+  # schemes off `WEBADDR` — and a header naming the download would break it on line one. The source is
+  # named in words; the URL lives in this script's own `-Url` default, which is where somebody looking
+  # to regenerate it will look.
   [void]$sb.AppendLine(('{{"source":"NCES IPEDS {0}","retrieved":"{1}","count":{2},"campuses":[' -f `
     $Csv, (Get-Date -Format "yyyy-MM-dd"), $campuses.Count))
   for ($i = 0; $i -lt $campuses.Count; $i++) {
@@ -1075,13 +1101,16 @@ double_confirm_changes = true
 # production — the second person to sign up in an hour would never get theirs. The provider is the
 # same one `billing-jobs` uses for the renewal reminder (P2), so there is one account to watch.
 # `pass` is a project secret (`SMTP_PASSWORD`), set by Quinn, never in this file.
-[auth.email.smtp]
-host = "<P2: the provider's SMTP host>"
-port = 587
-user = "<P2: the provider's SMTP username>"
-pass = "env(SMTP_PASSWORD)"
-admin_email = "<P2: EMAIL_FROM>"
-sender_name = "Knowlu"
+# **Commented out until Task 4 step 1 fills it.** The first command that parses this file is Task 1
+# step 7's `supabase db push`, and four `<P2: …>` placeholders in a block the CLI validates would fail
+# there — at the exact moment P1 is being wired, for a reason that has nothing to do with P1.
+# [auth.email.smtp]
+# host = "<P2: the provider's SMTP host>"
+# port = 587
+# user = "<P2: the provider's SMTP username>"
+# pass = "env(SMTP_PASSWORD)"
+# admin_email = "<P2: EMAIL_FROM>"
+# sender_name = "Knowlu"
 
 # The magic link's mail carries a **six-digit code as well as a link**, because a desktop app cannot
 # receive the link's redirect: `site/signed-in.html` says so, and the wizard asks for the code
@@ -1122,7 +1151,7 @@ verify_jwt = false
 <p>If you did not ask for this, you can ignore it. The code stops working in an hour.</p>
 ```
 
-  **The four `<P2: …>` slots in `config.toml`'s `[auth.email.smtp]` block are filled at Task 4 step 1**, when Quinn supplies the provider's host, port, username and `EMAIL_FROM`. Until then the block stays as written and staging keeps the built-in sender; the block is added now so the file is one decision rather than two.
+  **The `[auth.email.smtp]` block is written commented out, and Task 4 step 1 uncomments it** and fills its four `<P2: …>` slots when Quinn supplies the provider's host, port, username and `EMAIL_FROM`. The block is added now so the file is one decision rather than two — but behind `#`, because the first command that parses `config.toml` is Task 1 step 7's `supabase db push`, and four literal placeholders in a block the CLI validates would fail there, at the exact moment P1 is being wired, for a reason that has nothing to do with P1. Until Task 4, staging keeps the built-in sender.
 
 - [ ] **Step 5: `cloud/supabase/.gitignore`.**
 
@@ -1352,7 +1381,7 @@ Message: `cloud: the Supabase codebase's skeleton and its one shared response mo
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: the tables `public.accounts`, `public.entitlements`, `public.consents`, `public.sources` and the trigger `on_auth_user_created`. Every later cloud task reads or writes these through PostgREST with the service role.
+- Produces: the tables `public.accounts`, `public.entitlements`, `public.consents`, `public.sources`, `public.webhook_events` and the trigger `on_auth_user_created`. Every later cloud task reads or writes these through PostgREST with the service role.
 
 - [ ] **Step 1: Write the failing test** — `cloud/supabase/migrations_test.ts`:
 
@@ -1634,16 +1663,16 @@ Expected: `Applying migration 20260910000100_accounts.sql...` then `Finished sup
 select count(*) from pg_policies where schemaname = 'public' and cmd <> 'SELECT';
 ```
 
-Expected: `0`. Then confirm the four tables exist and all four have `rowsecurity = true`:
+Expected: `0`. Then confirm the five tables exist and all five have `rowsecurity = true`:
 
 ```sql
 select relname, relrowsecurity from pg_class
 where relnamespace = 'public'::regnamespace and relkind = 'r' order by relname;
 ```
 
-Expected: four rows, all `t`.
+Expected: five rows — `accounts`, `consents`, `entitlements`, `sources`, `webhook_events` — all `t`.
 
-- [ ] **Step 9: Record the outcome.** Add to this task, above step 1: `Applied to staging <date>; four tables, four RLS, zero non-SELECT policies.`
+- [ ] **Step 9: Record the outcome.** Add to this task, above step 1: `Applied to staging <date>; five tables, five RLS, zero non-SELECT policies.`
 
 ---
 
@@ -1663,7 +1692,7 @@ Expected: four rows, all `t`.
 - [ ] **Step 1: Write the failing tests** — `cloud/supabase/functions/_shared/auth_test.ts`:
 
 ```ts
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { parseBearer, requireUser } from "./auth.ts";
 
 const req = (headers: Record<string, string>) => new Request("http://127.0.0.1:1/", { headers });
@@ -1704,7 +1733,6 @@ Deno.test("requireUser hands back exactly what the verifier said", async () => {
     (t) => Promise.resolve(t === "good" ? { id: "acc-1", email: "a@example.invalid" } : null),
   );
   assertEquals(u, { id: "acc-1", email: "a@example.invalid" });
-  assert(true);
 });
 ```
 
@@ -2151,7 +2179,7 @@ Expected: `HTTP/2 401` and `{"error":"no bearer token"}`. That single call prove
 - Create: `cloud/supabase/functions/_shared/stripe.ts`, `cloud/supabase/functions/_shared/stripe_test.ts`
 - Create: `cloud/supabase/functions/billing-checkout/{handler.ts,index.ts,handler_test.ts}`
 - Create: `cloud/supabase/functions/stripe-webhook/{handler.ts,index.ts,handler_test.ts}`
-- Create: `cloud/supabase/functions/billing-portal/{handler.ts,index.ts}`
+- Create: `cloud/supabase/functions/billing-portal/{handler.ts,index.ts,handler_test.ts}`
 
 **Interfaces:**
 - Consumes: everything in `_shared/`.
@@ -2172,6 +2200,11 @@ supabase secrets set SOURCES_ENC_KEY --project-ref <ref>
 *`SOURCES_ENC_KEY` is 32 random bytes, base64 — generate it with `[Convert]::ToBase64String((1..32 | ForEach-Object { [byte](Get-Random -Max 256) }))` and paste it straight into the command. `EMAIL_API_KEY` is from an email provider (Resend's free tier is enough): California requires an annual renewal reminder for a monthly subscription and Stripe cannot send it. I also need three non-secret values: `STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_YEAR` and `EMAIL_FROM`."*
 
 Record the non-secret values as function **environment variables** (also `supabase secrets set`, which is how the platform passes any variable) and write them nowhere else.
+
+  **Then uncomment `[auth.email.smtp]` in `cloud/supabase/config.toml`** — Task 0 step 3 left the whole
+  block behind `#` so the CLI would not have to validate four placeholders at Task 1 — and fill its
+  four values from what Quinn sent. `pass = "env(SMTP_PASSWORD)"` stays as it is; the password is a
+  secret he sets.
 
 - [ ] **Step 2: Write the failing test** — `cloud/supabase/functions/_shared/stripe_test.ts`:
 
@@ -2374,7 +2407,6 @@ Deno.test("an account with no Stripe customer gets one, once, and it is saved", 
       priceCentsFor: () => 999,
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
-      now: () => new Date("2026-09-10T12:00:00.000Z"),
     },
   );
   assertEquals(res.status, 200);
@@ -2404,7 +2436,6 @@ Deno.test("the auto-renew consent is logged with its version and the price, befo
       priceCentsFor: (p) => (p === "academic_year" ? 6999 : 999),
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
-      now: () => new Date("2026-09-10T12:00:00.000Z"),
     },
   );
   assertEquals(consents.length, 1);
@@ -2439,7 +2470,6 @@ Deno.test("an unknown plan is 400 and never reaches Stripe", async () => {
       priceCentsFor: () => 999,
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
-      now: () => new Date(),
     },
   ).catch((e) => e as Response);
   assertEquals(res.status, 400);
@@ -2486,7 +2516,6 @@ export interface Deps {
   priceCentsFor: (plan: Plan) => number;
   successUrl: string;
   cancelUrl: string;
-  now: () => Date;
 }
 
 export function checkoutForm(a: {
@@ -2620,7 +2649,6 @@ Deno.serve(async (req) => {
       priceCentsFor: (p) => cents[p],
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
-      now: () => new Date(),
     });
   } catch (e) {
     return asResponse(e);
@@ -2637,7 +2665,7 @@ import { accountIdFromEvent, entitlementFromSubscription, handle } from "./handl
 
 const SECRET = "whsec_test_only_not_a_real_key";
 
-Deno.test("a Stripe subscription becomes exactly the four fields the device reads", () => {
+Deno.test("a Stripe subscription becomes exactly the three fields the device reads", () => {
   assertEquals(
     entitlementFromSubscription({
       status: "trialing",
@@ -2951,7 +2979,68 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 12: Run every test.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` → `ok | 37 passed | 0 failed`.
+- [ ] **Step 11a: And its tests** — `cloud/supabase/functions/billing-portal/handler_test.ts`. The
+  File-structure rule is one `deno test` file per handler, and this is the *Cancel subscription* path
+  the terms promise (Task 19 §5) and the legal note leans on: all three of its branches get an
+  assertion.
+
+```ts
+import { assertEquals } from "@std/assert";
+import { handle } from "./handler.ts";
+
+const verify = (t: string) => Promise.resolve(t === "good" ? { id: "acc-1", email: "a@example.invalid" } : null);
+const post = () =>
+  new Request("http://127.0.0.1:1/billing-portal", {
+    method: "POST",
+    headers: { authorization: "Bearer good" },
+  });
+const never: (path: string, form: Record<string, string>) => Promise<Record<string, unknown>> = () =>
+  Promise.reject(new Error("Stripe must not be called"));
+
+Deno.test("a GET is 405 and says so in the header", async () => {
+  const res = await handle(new Request("http://127.0.0.1:1/billing-portal"), {
+    verify,
+    getCustomerId: () => Promise.resolve("cus_1"),
+    stripe: never,
+    returnUrl: "https://knowlu.com/index.html",
+  });
+  assertEquals(res.status, 405);
+  assertEquals(res.headers.get("allow"), "POST");
+});
+
+Deno.test("an account that never subscribed is 409, and Stripe is not called", async () => {
+  const res = await handle(post(), {
+    verify,
+    getCustomerId: () => Promise.resolve(null),
+    stripe: never,
+    returnUrl: "https://knowlu.com/index.html",
+  }).catch((e) => e as Response);
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), { error: "this account has never subscribed" });
+});
+
+Deno.test("a subscriber gets the portal link, and the return URL goes with it", async () => {
+  // A list, not a `let x = null` the compiler narrows to `null`: the assignment happens inside a
+  // callback, which TypeScript's flow analysis does not follow.
+  const sent: Record<string, string>[] = [];
+  const res = await handle(post(), {
+    verify,
+    getCustomerId: () => Promise.resolve("cus_1"),
+    stripe: (path, form) => {
+      assertEquals(path, "/v1/billing_portal/sessions");
+      sent.push(form);
+      return Promise.resolve({ url: "https://billing.stripe.com/p/session_1" });
+    },
+    returnUrl: "https://knowlu.com/index.html",
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { url: "https://billing.stripe.com/p/session_1" });
+  // The return URL is the promise the ARL rests on: cancelling lands the student back in Knowlu.
+  assertEquals(sent, [{ customer: "cus_1", return_url: "https://knowlu.com/index.html" }]);
+});
+```
+
+- [ ] **Step 12: Run every test.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` → `ok | 40 passed | 0 failed`.
 
 - [ ] **Step 13: Deploy and prove it on staging.**
 
@@ -2977,6 +3066,7 @@ R3, ruled: **both** the academic-year price and the summer pause. A pause that h
 **Files:**
 - Create: `cloud/supabase/migrations/20260910000200_billing_jobs.sql`
 - Create: `cloud/supabase/functions/billing-jobs/{handler.ts,index.ts,handler_test.ts}`
+- Modify: `cloud/supabase/functions/stripe-webhook/{handler.ts,index.ts,handler_test.ts}` — steps 6, 6a and 6b widen the webhook for the three new columns, the invoice branch and the idempotency guard.
 
 **Interfaces:**
 - Consumes: `_shared/{http,db,stripe}.ts`.
@@ -3379,7 +3469,9 @@ export function entitlementFromSubscription(sub: Json): EntitlementWrite {
 }
 ```
 
-…update `stripe-webhook/handler_test.ts`'s two `entitlementFromSubscription` assertions to the six-key shape (add `stripe_subscription_id: null`, `paused: false`, `started_at: null` to the first, and `paused: true` to the paused case by giving that fixture `pause_collection`), **move both fixtures' `current_period_end` onto `items.data[0]`** and add a third asserting the pre-`basil` top-level shape still parses, and update `index.ts`'s upsert to carry the three new columns.
+…rename `a Stripe subscription becomes exactly the three fields the device reads` to
+`a Stripe subscription becomes exactly the six fields the row carries`, update
+`stripe-webhook/handler_test.ts`'s two `entitlementFromSubscription` assertions to the six-key shape (add `stripe_subscription_id: null`, `paused: false`, `started_at: null` to the first, and `paused: true` to the paused case by giving that fixture `pause_collection`), **move both fixtures' `current_period_end` onto `items.data[0]`** and add a third asserting the pre-`basil` top-level shape still parses, and update `index.ts`'s upsert to carry the three new columns.
 
 - [ ] **Step 6a: The invoice branch, which today is dead code.** `accountIdFromEvent` reads
   `data.object.metadata.account_id` or `.client_reference_id`. On an **Invoice**, `metadata` is the
@@ -3445,7 +3537,7 @@ export interface Deps {
   `restSelect` on `entitlements`, and passes `updated_at: createdIso` in the upsert instead of
   `new Date().toISOString()`.
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 47 passed | 0 failed` — the six this task added, plus the four the webhook gained in steps 6, 6a and 6b.
+- [ ] **Step 7: Run every test.** Expected: `ok | 50 passed | 0 failed` — the six this task added, plus the four the webhook gained in steps 6, 6a and 6b.
 
 - [ ] **Step 8: Apply and deploy to staging.**
 
@@ -3460,7 +3552,14 @@ Expected: `Applying migration 20260910000200_billing_jobs.sql...`, then `HTTP/2 
 
 - [ ] **Step 9: Ask Quinn to set the two database settings**, with the exact block from the migration's comment and a token he generates the same way as `SOURCES_ENC_KEY`. Then, in the SQL editor: `select jobname, schedule from cron.job;` → one row, `knowlu-billing-jobs`, `17 7 * * *`.
 
-- [ ] **Step 10: Commit.** `cloud: the summer pause and the annual reminder — one daily job, and a resumed subscription always tells the student first (C1 Task 5)`.
+- [ ] **Step 10: Commit.**
+
+```bash
+git add cloud/supabase/migrations/20260910000200_billing_jobs.sql cloud/supabase/functions/billing-jobs/ cloud/supabase/functions/stripe-webhook/
+git commit -F <message file>
+```
+
+  Message: `cloud: the summer pause and the annual reminder — one daily job, and a resumed subscription always tells the student first; the webhook gains the three billing columns, the invoice branch and its idempotency guard (C1 Task 5)`.
 
 ---
 ### Task 6: `DELETE /account` and `GET /account/export` — the deletion and access rights, implemented for everyone
@@ -3773,7 +3872,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 6: Run every test.** Expected: `ok | 52 passed | 0 failed`.
+- [ ] **Step 6: Run every test.** Expected: `ok | 55 passed | 0 failed`.
 
 - [ ] **Step 7: Apply and deploy, then prove it.**
 
@@ -3785,6 +3884,11 @@ curl.exe -i "https://<ref>.supabase.co/functions/v1/account/nope"
 ```
 
 Expected: `401 {"error":"no bearer token"}` and `404 {"error":"no route /nope"}`.
+
+  **Neither route is exercised with a real token yet, and must not be.** `purge` deletes from
+  `telemetry_events`, `corrections` and `issues`, and `exportAll` selects from all three — tables that
+  arrive in Task 8's and Task 9's migrations. A real `DELETE /account` here would 502 on a missing
+  relation. **Re-run this check with a real token at Task 9 step 8**, once `20260910000500` is applied.
 
 - [ ] **Step 8: Commit.** `cloud: DELETE /account and GET /account/export — cancel at period end, purge, tombstone for ninety days, kill the login last (C1 Task 6)`.
 
@@ -4060,7 +4164,7 @@ async function getSources(req: Request, deps: Deps): Promise<Response> {
 
 …with `import { encryptString, importAesKey } from "../_shared/crypto.ts";` at the top.
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 62 passed | 0 failed` (the four crypto tests and six route tests this task adds — the last two being the `calendar_ics` kind §11a introduced and the refusal of `google_calendar` from a client).
+- [ ] **Step 7: Run every test.** Expected: `ok | 65 passed | 0 failed` (the four crypto tests and six route tests this task adds — the last two being the `calendar_ics` kind §11a introduced and the refusal of `google_calendar` from a client).
 
 - [ ] **Step 8: Deploy and prove the 402 on staging.**
 
@@ -4082,6 +4186,7 @@ Spec §6 and D5. Two rules do the work: **(a) and (b) carry no free text and no 
 **Files:**
 - Create: `cloud/supabase/migrations/20260910000400_telemetry.sql`
 - Create: `cloud/supabase/functions/telemetry/{handler.ts,index.ts,handler_test.ts}`
+- Modify: `cloud/supabase/migrations_test.ts` — step 2 adds the minimum-cohort assertion.
 
 **Interfaces:**
 - Consumes: `_shared/{http,auth,db}.ts`.
@@ -4467,7 +4572,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 70 passed | 0 failed`.
+- [ ] **Step 7: Run every test.** Expected: `ok | 73 passed | 0 failed`.
 
 - [ ] **Step 8: Apply, deploy, prove.**
 
@@ -4728,7 +4833,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 76 passed | 0 failed`. Then `deno lint` and `deno fmt --check`, both clean.
+- [ ] **Step 7: Run every test.** Expected: `ok | 79 passed | 0 failed`. Then `deno lint` and `deno fmt --check`, both clean.
 
 - [ ] **Step 8: Apply, deploy, prove.**
 
@@ -4753,7 +4858,7 @@ Expected: `401 {"error":"no bearer token"}`. Then `select jobname from cron.job 
 
 **Interfaces:**
 - Consumes: `crate::credentials::{target_for, write, exists, delete}`, `knowlu_engine::wincred::read_credential`, `crate::profiles::id_for`.
-- Produces: `PENDING_TARGET`, `TOS_VERSION`, `PRIVACY_VERSION`, `api_base()`, `anon_key()`, `check_api_base()`, `auth_base()`, `struct Session`, `save_session()`, `load_session()`, `move_session()`, `sign_up_at()`, `sign_in_at()`, `magic_link_at()`, `verify_email_code_at()`, `refresh_at()`, `valid_access_token_at()`, `open_in_browser()`, and the eight wizard commands (`sign_up`, `sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`, `entitlement_now`, `open_checkout`, `open_policy`). Tasks 11, 12, 14, 17 and 18 all build on these.
+- Produces: `PENDING_TARGET`, `TOS_VERSION`, `PRIVACY_VERSION`, `api_base()`, `anon_key()`, `check_api_base()`, `auth_base()`, `struct Session`, `save_session()`, `load_session()`, `move_session()`, `sign_up_at()`, `sign_in_at()`, `magic_link_at()`, `verify_email_code_at()`, `refresh_at()`, `valid_access_token_at()`, `open_in_browser()`, and **six** commands (`sign_up`, `sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`, `open_policy`) — `entitlement_now` and `open_checkout` are written in Task 18, beside the rest of the console-side surface. Tasks 11, 12, 14, 17 and 18 all build on these.
 
 - [ ] **Step 1: The loopback harness and the first failing test** — `app/tests/account.rs`:
 
@@ -4900,7 +5005,7 @@ fn signing_up_sends_the_attestation_and_both_policy_versions_as_user_metadata() 
 - [ ] **Step 2: Run and watch them fail.**
 
 Run: `cargo test -p knowlu --test account`
-Expected: `error[E0432]: unresolved import `knowlu::account::auth_base`` — five tests, none of them compiled.
+Expected: `error[E0432]: unresolved import `knowlu::account::auth_base`` — six tests, none of them compiled.
 
 - [ ] **Step 3: Fill `app/src/account.rs` — the values, the session and the four HTTP calls.**
 
@@ -5151,7 +5256,7 @@ curl.exe -i -X POST "https://<the STAGING ref>.supabase.co/auth/v1/verify" -H "a
 Run: `cargo test -p knowlu --test account`
 Expected: `test result: ok. 6 passed; 0 failed`.
 
-- [ ] **Step 6: The eight wizard commands**, appended to `app/src/account.rs`:
+- [ ] **Step 6: The six wizard commands**, appended to `app/src/account.rs`:
 
 ```rust
 fn env_pair() -> Result<(String, String, String), String> {
@@ -5888,6 +5993,12 @@ pub const CAMPUSES: [(&str, &str, &str); 2] = [
 ];
 ```
 
+**This table is provisional and Task 14c replaces it.** R-OB-4 turns `CAMPUSES` into a `Curated`
+struct keyed by the IPEDS `UNITID`, moves the LMS host into that struct and takes the list out of
+`launch_state` altogether; the tuple here — and the `launch_state` map in step 3 below, and Task 13's
+destructure of the third column — are what Task 13's spike needs in the meantime. Task 14c's *Files*
+lists both files, and its steps 5 and 6 do the replacing. Read the drift as scheduled, not as drift.
+
 ```rust
 #[derive(Debug, Clone)]
 pub struct VaultPlan {
@@ -6043,40 +6154,10 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
     };
-    // **The page sends course CODES; the slugs are made here.** `CS 100` is what a student types and
-    // what a title says; `cs-100` is the vault's own name for it — the note's stem, every task's
-    // `course:` field, and the value `judge::Heuristics::knows_course` tests. A page that invented
-    // vault identifiers would be a page deciding what the engine may know (R-OB-1, R-OB-2).
-    // The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in `scaffold.rs`).
-    let slug = knowlu_engine::ingest::slugify;
-    let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
-        .filter(|b| !b.label.trim().is_empty())
-        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.label), label: b.label.clone() })
-        .collect();
-    let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
-        .filter(|v| !v.label.trim().is_empty())
-        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.label), label: v.label.clone() })
-        .collect();
-    let course_map: Vec<(String, String)> = plan.course_map.iter()
-        .map(|(code, _)| (code.clone(), slug(code)))
-        .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
-        .collect();
-    let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
-        .map(|c| crate::scaffold::CourseSeed {
-            code: c.code.clone(),
-            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
-            slug: if c.slug.trim().is_empty() { slug(&c.code) } else { c.slug.clone() },
-        })
-        .filter(|c| !c.slug.is_empty())
-        .collect();
     let vp = crate::scaffold::VaultPlan {
         profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
         personal_calendar: plan.personal_calendar.clone().filter(|u| !u.trim().is_empty()),
-        zybooks_courses,
-        vhl_sections,
-        course_map,
-        courses,
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
@@ -6107,12 +6188,29 @@ pub fn create_vault(app: tauri::AppHandle, name: String, plan: WizardPlan) -> Va
 }
 ```
 
+**This function grows twice more, and both times explicitly.** At Task 12 the plan carries the two
+feeds, the slots, the timezone, the campus preset and the three cloud values, and that is all
+`VaultPlan` has. **Task 14a** adds the coursework mapping (`zybooks_courses`, `vhl_sections`,
+`course_map`) and the slug-making block that fills it from the page's course codes; **Task 14b** adds
+`courses`; **Task 14c** adds `campus_choice`. Each of those tasks says so at the step that does it.
+Nothing here reads a field that does not exist yet.
+
 `finish_profile_in`, `finish_or_roll_back`, `apply_profile_settings_in` and `restore_vault` all take the backup root as a parameter now instead of reading `plan.backup_dir` — change each signature to `(…, plan: &WizardPlan, backup_dir: Option<PathBuf>)` and set `backup_dir: backup_dir` in the `Settings` they build. `restore_vault`'s caller passes `Some(default_folders_in(&home).1.into())`; `apply_profile_settings` passes `None` (an adopted vault keeps whatever it had). `check_backup_dir` is unchanged and still runs — the default pair are siblings, so it passes by construction.
 
 - [ ] **Step 5: Run the app suite.**
 
 Run: `cargo test -p knowlu`
 Expected: `scaffold` and `onboarding` green with the three new tests (`cloud.yaml`'s four keys, `create_vault` writing it, and the `calendars:` list); every other file unchanged; 0 warnings. Any test that still constructs a `VaultPlan` or a `WizardPlan` with the old shape fails to compile — fix each by adding the three cloud fields (use `"https://example.supabase.co/functions/v1"`, `"anon"`, `"acc-1"`) and dropping `backup_dir`; **do not weaken an assertion to make one pass.**
+
+  **One test needs more than that, and it is the one this instruction would otherwise delete.**
+  `a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered` in `app/tests/onboarding.rs`
+  is built entirely out of `plan_with(bdir)` and asserts `check_backup_dir`'s three refusals
+  (R-P4a-25): a backups folder **inside** the vault, one that **is** the vault, and one **above** it
+  that would take the vault's siblings with it. Dropping `backup_dir` from `WizardPlan` deletes its
+  subject. **Rewrite it, do not weaken it**: step 4 gives `finish_or_roll_back` a
+  `backup_dir: Option<PathBuf>` parameter, so pass each of the three roots there instead of through
+  the plan. All three cases stay, and so do their sentences — the check itself is unchanged, only
+  where the value comes from.
 
 - [ ] **Step 6: Commit.** `app: the app decides where the vault goes, and writes the account into it — %USERPROFILE%\Knowlu\<name>, Backups beside it, config/cloud.yaml's four keys (C1 Task 12)`.
 
@@ -6235,7 +6333,9 @@ Expected: it compiles. **If `data_directory`, `navigate` or `url` does not exist
 
 - [ ] **Step 2: A temporary spike button.** In `app/static/index.html`, inside `wiz-lms`'s panel, add `<button class="b" id="wiz-spike">Spike: open</button><button class="b" id="wiz-spike2">Spike: read</button><pre class="meta" id="wiz-spike-out"></pre>`; in `console.js`, wire them to `open_lms_window` and `capture_calendar_link` and print the envelope into `#wiz-spike-out`. **These three elements and their handlers are deleted in step 7.**
 
-- [ ] **Step 3: Ask the controller for hand-off H9.** The three commands cannot be invoked until `main.rs` registers them, and `main.rs` is not this stream's. Post the H9 block (below, in *Controller hand-offs*) and wait for it on the branch's base. This is the only mid-stream pause in the plan.
+- [ ] **Step 3: Ask the controller for hand-off H9a.** The three commands cannot be invoked until `main.rs` registers them, and `main.rs` is not this stream's. Post **H9a** — `lms_link` in the `use` line and the **three** commands step 1 defines, and no more: `generate_handler!` on a name that does not resolve is a compile error, which is why H9 is split (R-C1-11). Wait for it on the branch's base.
+
+  **This is the second of the plan's five controller applications, and the third is not far.** In order (R-C1-11): **H1** before Task 10 — pre-flight, already applied, `app/src/lib.rs` plus the four stub modules; **H9a** here, the three commands step 1 defines; **H10** before **Task 14a step 6**, so `coursework-discover` exists to run — correctness-blocking, not compile-blocking, and therefore the easiest of the five to walk past; **H9b** at **Task 14b step 3a**, adding `paste_calendar_link` and `capture_courses` once both resolve; and **H11** before **Task 14c**'s first `cargo test`, because `include_str!("../campuses.json")` will not compile without the asset. Everything else in H3–H8 waits for merge, and no task after 14c pauses at all.
 
 - [ ] **Step 4: Run it, with Quinn.** `cargo run -p knowlu` from a scratch profile (`.\scripts\scratch-vault.ps1 -Source engine\tests\fixtures\vault-full`, then launch with `--vault <that path>` — **never a real vault**). Walk to the LMS panel, pick *University of Alabama*, press **Spike: open**. Quinn signs in — myBama, then Duo — **in that window, on the university's page**. Then, with the calendar open, press **Spike: read** and record what `url()` returned.
 
@@ -6894,7 +6994,7 @@ fn discovery_output_becomes_rows_with_a_suggestion_each() {
 }
 ```
 
-- [ ] **Step 1a: One `VaultPlan` literal, not five.** Four tests in `app/tests/scaffold.rs` now build the same eighteen-field struct, and the next field added would touch all of them. Extract the helper first, and rewrite the existing literals to use it:
+- [ ] **Step 1a: One `VaultPlan` literal, not two helpers.** `app/tests/scaffold.rs` already has a `plan(id)` helper that builds this struct for three of its tests, and Task 12 added two raw `VaultPlan {` literals beside it. A second helper would leave two doing one job. **Widen the existing `plan(id)` into `plan_for(dest: &Path)`** — the profile id is the only thing it was taking, and `id_for(dest)` is where that comes from — then rewrite its three call sites and Task 12's two literals to call it:
 
 ```rust
 /// The plan every scaffold test starts from: no feeds, no mappings, no courses — each test sets the
@@ -6923,7 +7023,7 @@ fn plan_for(dest: &std::path::Path) -> knowlu::scaffold::VaultPlan {
 
 - [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test scaffold --test onboarding` → unresolved imports `suggest_course`, `BookMapping`, `rows_from_discovery`; `VaultPlan` missing four fields. (`slugify` resolves already — it is `knowlu_engine::ingest::slugify`, and there is no second one to write.)
 
-- [ ] **Step 3: `app/src/scaffold.rs`.** Two structs, two helpers, four `VaultPlan` fields, and a real `coursework:` block.
+- [ ] **Step 3: `app/src/scaffold.rs`.** Three structs, two helpers, four `VaultPlan` fields, and a real `coursework:` block.
 
 ```rust
 /// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
@@ -6994,6 +7094,21 @@ fn trim_prefix(subject: &str) -> String {
         return subject[2..].to_string();
     }
     subject.to_string()
+}
+```
+
+The third struct is the enrolled course. **It is declared here, not in Task 14b**, because the
+`VaultPlan` field below names it and a field whose type does not exist is a crate that does not
+compile; Task 14b writes the seed loop that reads it:
+
+```rust
+/// One course to seed. `code` is what a task's title says (`CS 100`), `slug` what its `course:` field
+/// carries, `name` what the student sees. Filled by Task 14b's capture; empty until then.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CourseSeed {
+    pub code: String,
+    pub name: String,
+    pub slug: String,
 }
 ```
 
@@ -7190,11 +7305,54 @@ pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
     pub courses: Vec<crate::scaffold::CourseSeed>,
 ```
 
-…with `serde::Deserialize` added to `BookMapping` and `SectionMapping`'s derives, and `create_vault_in` passing all three straight into `VaultPlan` (plus `courses`, from Task 14b).
+…with `serde::Deserialize` added to `BookMapping` and `SectionMapping`'s derives.
 
-- [ ] **Step 5: Run the tests.** `cargo test -p knowlu --test scaffold --test onboarding` — the two new scaffold tests and the new onboarding one pass; every existing test in both files still passes with the four new `VaultPlan` fields added to its literal (`Vec::new()` in each).
+**And `onboarding::create_vault_in` grows the block Task 12 pointed forward to.** Task 12 built a
+`VaultPlan` out of the feeds, the slots, the campus preset and the three cloud values, because those
+were all `VaultPlan` had; the four fields above are what this task adds to it. Insert this immediately
+before the `let vp = crate::scaffold::VaultPlan {` literal, and add the four names to that literal
+after `personal_calendar`:
 
-- [ ] **Step 6: Prove it against Quinn's own account, once, by hand.** With the scratch profile's credentials stored, run the subcommand directly and read what comes back:
+```rust
+    // **The page sends course CODES; the slugs are made here.** `CS 100` is what a student types and
+    // what a title says; `cs-100` is the vault's own name for it — the note's stem, every task's
+    // `course:` field, and the value `judge::Heuristics::knows_course` tests. A page that invented
+    // vault identifiers would be a page deciding what the engine may know (R-OB-1, R-OB-2).
+    // The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in `scaffold.rs`).
+    let slug = knowlu_engine::ingest::slugify;
+    let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
+        .filter(|b| !b.label.trim().is_empty())
+        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.label), label: b.label.clone() })
+        .collect();
+    let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
+        .filter(|v| !v.label.trim().is_empty())
+        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.label), label: v.label.clone() })
+        .collect();
+    let course_map: Vec<(String, String)> = plan.course_map.iter()
+        .map(|(code, _)| (code.clone(), slug(code)))
+        .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
+        .collect();
+    // `courses` is empty until Task 14b's capture fills it, and empty is a correct answer: a student
+    // whose campus we cannot read types the list on the panel instead.
+    let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
+        .map(|c| crate::scaffold::CourseSeed {
+            code: c.code.clone(),
+            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
+            slug: if c.slug.trim().is_empty() { slug(&c.code) } else { c.slug.clone() },
+        })
+        .filter(|c| !c.slug.is_empty())
+        .collect();
+```
+
+- [ ] **Step 5: Run the tests.** `cargo test -p knowlu --test scaffold --test onboarding` — the two new scaffold tests and the new onboarding one pass; every existing test in both files still passes, with the four new `VaultPlan` fields set to `Vec::new()` in the one place step 1a left them: `plan_for`. Any literal `onboarding.rs` still builds gets them by hand.
+
+- [ ] **Step 6: Prove it against Quinn's own account, once, by hand — and ask for hand-off H10 first.**
+  `coursework-discover` is an `engine/` subcommand and `engine/` is not this stream's: the Rust in this
+  task compiles without it (the spawn is by name, at run time), but this step cannot run until it
+  exists. Post the **H10** block and wait for it on the branch's base — it is the third of the plan's
+  five controller applications (R-C1-11: H1 → H9a → H10 → H9b → H11), and unlike the other four it is
+  correctness-blocking rather than compile-blocking, which is why it is easy to walk past. With the
+  scratch profile's credentials stored, run the subcommand directly and read what comes back:
 
 ```powershell
 target\debug\knowlu-engine.exe coursework-discover --zybooks-target "knowlu/<the scratch profile id>/zybooks" --vhl-target "knowlu/<the scratch profile id>/vhl"
@@ -7430,20 +7588,16 @@ fn course_list_url(campus: &str) -> Option<&'static str> {
 }
 ```
 
-- [ ] **Step 4: `app/src/scaffold.rs` — the seed notes.**
+- [ ] **Step 3a: Ask the controller for hand-off H9b.** `capture_courses` now exists (step 3) and
+  `paste_calendar_link` has since Task 14 step 4, so the two names left out of **H9a** resolve. Post the
+  H9b block and wait for it on the branch's base, **before step 5's `cargo test`** — the page invokes
+  `capture_courses` and an unregistered command answers "not allowed by the ACL", not an error anybody
+  would read as a missing registration. This is the fourth of the plan's five controller applications
+  (R-C1-11: H1 → H9a → H10 → H9b → H11), and the last one that touches `main.rs`.
 
-```rust
-/// One course to seed. `code` is what a task's title says (`CS 100`), `slug` what its `course:` field
-/// carries, `name` what the student sees.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CourseSeed {
-    pub code: String,
-    pub name: String,
-    pub slug: String,
-}
-```
-
-…and `seed_writes` gains, after the first task and before it returns:
+- [ ] **Step 4: `app/src/scaffold.rs` — the seed notes.** `CourseSeed` already exists: Task 14a step 3
+declared it, because `VaultPlan.courses` names it. This is the seed loop for the struct Task 14a
+declared — `seed_writes` gains, after the first task and before it returns:
 
 ```rust
     // R-OB-2: one note per enrolled course, so tier-1 judgment can place a task and the model has a
@@ -7528,7 +7682,7 @@ controller for it at step 1 — it is a script run, not a decision, and it takes
 **Files:**
 - Create: `app/campuses.json` (by H11's script; committed — the controller's file, read here)
 - Modify: `app/src/scaffold.rs`, `app/src/onboarding.rs`, `app/src/lms_link.rs`
-- Test: `app/tests/scaffold.rs`, `app/tests/static_assets.rs`
+- Test: `app/tests/onboarding.rs`, `app/tests/scaffold.rs`, `app/tests/lms_link.rs` — **not `static_assets.rs`**: its `read()` helper resolves against `app/static/` only, and `app/campuses.json` is not under `app/static/` (step 2 says why).
 
 **Interfaces:**
 - Consumes: H11's asset.
@@ -7576,8 +7730,9 @@ fn the_campus_list_is_bundled_headed_and_small() {
     // a script that half-ran, and a bundle that holds 40,000 is one that stopped filtering.
     assert!(rows.len() > 5_000 && rows.len() < 8_000, "{} schools is not a US institution list", rows.len());
 
-    // `[unitid, name, city, state, host]`, and the host is a HOST: `app/static/` carries no
-    // `http(s)://` literal, and this file lives there.
+    // `[unitid, name, city, state, host]`, and the host is a HOST: this test is the guard that the
+    // bundled list carries no `http(s)://` literal — `static_assets.rs` cannot be, because its
+    // `read()` helper resolves against `app/static/` and this asset is `app/campuses.json`.
     let first = rows[0].as_array().expect("a row is an array");
     assert_eq!(first.len(), 5, "a row is [unitid, name, city, state, host]");
     assert!(first[0].is_number() && first[1].is_string() && first[3].is_string());
@@ -7901,7 +8056,9 @@ pub fn timezone_for_state(state: String) -> Value {
 ```
 
   `launch_state`'s `campuses` key is **removed**: the radio list it fed does not exist any more, and the
-  page reads `campuses.json` itself. Delete the key and the `CAMPUSES.iter().map(…)` expression with it.
+  page asks `campus_search` for ten rows at a time instead — it never holds the list and never fetches
+  the asset (step 4a says why). Delete the key and the `CAMPUSES.iter().map(…)` expression with it, and
+  `WIZ.campuses` with them (Task 17's `WIZ` no longer declares it).
 
 - [ ] **Step 6: `app/src/lms_link.rs` — key on the unitid, and ask when nobody knows.**
   `capture_steps` and `course_list_url` take a **unitid** instead of a campus key, and both consult
@@ -7983,7 +8140,7 @@ fn every_curated_endpoint_is_built_from_that_schools_own_host() {
 }
 ```
 
-- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test scaffold --test static_assets` → the three new tests pass; every existing `VaultPlan` literal gains `campus_choice: Default::default()` (or the `plan_for` helper does it once).
+- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test onboarding --test scaffold --test lms_link` → the five new tests pass — three in `onboarding.rs` (the bundled list's shape, `campus_search`'s ranking, `timezone_for_state`), one in `scaffold.rs` (`campus_config_yaml`) and one in `lms_link.rs` (`lms_home` by unitid). Every existing `VaultPlan` literal gains `campus_choice: Default::default()` (or the `plan_for` helper does it once).
 
 - [ ] **Step 8: Commit.** `app: the school comes from every US institution, not two radios — the IPEDS list bundled, the curated layer keyed by unitid, config/campus.yaml, and a timezone from the state (C1 Task 14c, R-OB-4)`.
 
@@ -7999,7 +8156,7 @@ Spec §6 and D5. Both classes are computed **on the device**, and neither carrie
 
 **Interfaces:**
 - Consumes: `account::{cloud_config, auth_base, valid_access_token_at, check_api_base}` (Tasks 10–11).
-- Produces: `VALUED_FIELDS`, `FLAGGED_FIELDS`, `struct EventRow`, `struct CorrectionRow`, `struct Batch`, `read_events(vault, since)`, `read_corrections(vault, since)`, `watermark_path(data_dir)`, `load_watermark`, `save_watermark`, `post_batch_at(api_base, token, &Batch)`, `send(vault, data_dir)`. Task 17 shows nothing of this; the scheduler calls `send`.
+- Produces: `VALUED_FIELDS`, `FLAGGED_FIELDS`, `struct EventRow`, `struct CorrectionRow`, `struct Batch`, `read_events(vault, since)`, `read_corrections(vault, since)`, `watermark_path(data_dir)`, `load_watermark`, `save_watermark`, `watermark(last_event, last_correction, capped)`, `post_batch_at(api_base, token, &Batch)`, `send(vault, data_dir)`. Task 17 shows nothing of this; the scheduler calls `send`.
 
 - [ ] **Step 1: Write the failing tests** — `app/tests/telemetry.rs`:
 
@@ -8086,7 +8243,7 @@ fn a_correction_is_a_human_overriding_a_field_the_agent_set() {
 /// events 501-600 forever and leave the comment claiming the opposite.
 #[test]
 fn a_capped_batch_advances_the_watermark_only_as_far_as_the_slower_stream() {
-    use knowlu::telemetry::{read_corrections, read_events};
+    use knowlu::telemetry::{read_corrections, read_events, watermark};
     let v = vault("watermark");
     // 600 events across two days, and one correction dated after all of them.
     let day = |n: usize, base: &str| -> Vec<String> {
@@ -8104,10 +8261,19 @@ fn a_capped_batch_advances_the_watermark_only_as_far_as_the_slower_stream() {
     let corrections = read_corrections(&v, None);
     assert_eq!(events.len(), 600);
     assert_eq!(corrections.len(), 1);
-    // `send` is what computes the watermark, and it needs a cloud config it will not get here — so
-    // this asserts the property `send` relies on: the 500th event is EARLIER than the correction, so
-    // the watermark must be the 500th event's ts and not the correction's.
+    // The fixture's own property first: the 500th event is EARLIER than the correction, so a
+    // watermark taken as the maximum would step past events 501-600.
     assert!(events[499].ts < corrections[0].ts, "the fixture must have a later correction than the cap");
+    // …and then the arithmetic itself, both branches. `send` needs a cloud config it will not get
+    // here, so the rule lives in `watermark`, where a test can reach it.
+    let e = events[499].ts.clone();
+    let c = corrections[0].ts.clone();
+    assert_eq!(watermark(Some(e.as_str()), Some(c.as_str()), true), e, "a capped batch stops at the earlier tail");
+    assert_eq!(watermark(Some(e.as_str()), Some(c.as_str()), false), c, "an uncapped batch goes as far as either stream got");
+    // One empty stream is still answerable, and an empty batch has no watermark at all.
+    assert_eq!(watermark(None, Some(c.as_str()), true), c);
+    assert_eq!(watermark(Some(e.as_str()), None, false), e);
+    assert_eq!(watermark(None, None, false), String::new());
     let _ = std::fs::remove_dir_all(&v);
 }
 
@@ -8318,6 +8484,19 @@ pub fn post_batch_at(api_base: &str, token: &str, batch: &Batch) -> Result<(usiz
     ))
 }
 
+/// **How far the watermark may advance.** A stream that hit the cap contributes only its own last
+/// `ts` and the answer is the **earliest** of the contributions: taking the maximum across both would
+/// step past a truncated stream's tail, so a vault with 600 pending events and one late correction
+/// would advance past events 501-600 and never send them. With neither stream capped there is nothing
+/// to step past and the answer is the latest of the two. An empty batch has no watermark.
+///
+/// Its own function because it is the one piece of arithmetic here that is wrong silently — the
+/// symptom is events that were never sent and nothing anywhere saying so.
+pub fn watermark(last_event: Option<&str>, last_correction: Option<&str>, capped: bool) -> String {
+    let ends = [last_event, last_correction].into_iter().flatten();
+    if capped { ends.min() } else { ends.max() }.unwrap_or_default().to_string()
+}
+
 /// One send: read since the watermark, post, advance the watermark only on success. **At most 500 of
 /// each** — the server's cap — so a vault with a long history catches up over several slots instead
 /// of being refused forever.
@@ -8326,24 +8505,15 @@ pub fn send(vault: &Path, data_dir: &Path) -> Result<(usize, usize), String> {
     let since = load_watermark(data_dir);
     let mut events = read_events(vault, since.as_deref());
     let mut corrections = read_corrections(vault, since.as_deref());
-    // **The watermark can only advance as far as the SLOWER stream got.** Truncating each list to 500
-    // and then taking the maximum `ts` across both would step past a truncated stream's tail: a vault
-    // with 600 pending events and one late correction would advance past events 501–600 and never
-    // send them. So a stream that hit the cap contributes only its own last `ts`, and the watermark
-    // is the minimum of the contributions — which is what makes "catches up over several slots" true.
-    let events_capped = events.len() > 500;
-    let corrections_capped = corrections.len() > 500;
+    // **The watermark can only advance as far as the SLOWER stream got** — `watermark` above is that
+    // rule, and the reason it is a rule. This is what makes "catches up over several slots" true.
+    let capped = events.len() > 500 || corrections.len() > 500;
     events.truncate(500);
     corrections.truncate(500);
     if events.is_empty() && corrections.is_empty() { return Ok((0, 0)); }
     let last_event = events.last().map(|e| e.ts.clone());
     let last_correction = corrections.last().map(|c| c.ts.clone());
-    let high = if events_capped || corrections_capped {
-        // At least one stream is behind: go no further than the earliest of the two tails.
-        [last_event.clone(), last_correction.clone()].into_iter().flatten().min().unwrap_or_default()
-    } else {
-        [last_event, last_correction].into_iter().flatten().max().unwrap_or_default()
-    };
+    let high = watermark(last_event.as_deref(), last_correction.as_deref(), capped);
     if high.is_empty() { return Ok((0, 0)); }
     let auth = crate::account::auth_base(&cfg.api_base)?;
     let token = crate::account::valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, jiff::Timestamp::now().as_second())?;
@@ -8425,7 +8595,7 @@ Legal note §9, and Google's Limited Use: **the preview screen is the documented
 
 **Interfaces:**
 - Consumes: `account::{cloud_config, auth_base, valid_access_token_at, check_api_base}`; `state::ConsoleState`; `knowlu_engine::surface::runs_panel`.
-- Produces: `scrub(&str) -> String`, `vault_shape(&Path) -> Vec<(String, usize)>`, `log_tail(&Path, usize) -> Vec<String>`, `preview_text(cs, view) -> String`, `send_at(api_base, token, text, meta) -> Result<String, String>`, and the two commands `report_preview`, `report_send`.
+- Produces: `scrub(&str) -> String`, `vault_shape(&Path) -> Vec<(String, usize)>`, `log_tail(&Path, usize) -> Vec<String>`, `preview_text(cs, view) -> String`, `send_at(api_base, token, text, profile_id) -> Result<String, String>`, and the two commands `report_preview`, `report_send`.
 
 - [ ] **Step 1: Write the failing test** — `app/tests/report.rs`:
 
@@ -8720,10 +8890,28 @@ pub fn report_send(cs: State<'_, ConsoleState>, text: String) -> Value {
 - Test: `app/tests/static_assets.rs`
 
 **Interfaces:**
-- Consumes: `onboarding::{launch_state, create_vault, store_credentials, retarget_credentials, finish_onboarding}`; `account::{sign_up, sign_in, send_magic_link, verify_email_code, sign_out, entitlement_now, open_checkout, open_policy, account_status, open_portal, delete_my_data}`; `lms_link::{open_lms_window, capture_calendar_link, paste_calendar_link, close_lms_window}`; `report::{report_preview, report_send}`.
+- Consumes: `onboarding::{launch_state, create_vault, store_credentials, retarget_credentials, finish_onboarding}`; `account::{sign_up, sign_in, send_magic_link, verify_email_code, sign_out, entitlement_now, open_checkout, open_policy, account_status, open_portal, delete_my_data}` — **`entitlement_now` and `open_checkout` are written in Task 18**, beside the rest of the console-side surface, so the subscribe panel and its poll are inert markup until that task lands; the page is strings and `main.rs` is merge-time, so nothing fails to compile in between; `lms_link::{open_lms_window, capture_calendar_link, paste_calendar_link, close_lms_window}`; `report::{report_preview, report_send}`.
 - Produces: `PANELS` (nine), `window.KNOWLU_OPEN_REPORT`, and the `KNOWLU_SHOTS` seam extended with `openReport`.
 
-- [ ] **Step 1: Write the failing tests.** In `app/tests/static_assets.rs`, replace `the_wizard_has_seven_panels_the_privacy_words_and_no_live_fetch` with:
+- [ ] **Step 1: Write the failing tests.** In `app/tests/static_assets.rs`, replace `the_wizard_has_seven_panels_the_privacy_words_and_no_live_fetch` with the tests below. **Two tests already in that file are about markup this task removes, and both are settled here — neither pin is dropped, both move:**
+
+  - **Delete `the_wizard_offers_local_judgment_without_doing_anything`.** It asserts `html.contains("id=\"wiz-judge\"")` and `js.contains("offer_inference")` — the checkbox and the flag this task takes off the page. Its pin moves, inverted, into `the_wizard_never_offers_a_local_model` (the last test in this step), which asserts `!html.contains("id=\"wiz-judge\"")` and that nothing on the page names a runtime, a model or `offer_inference`. Keeping both would make the suite unpassable in either direction.
+  - **Amend `the_wizard_takes_its_default_folders_from_the_launch_state`.** It asserts `js.contains("l.default_backup")`, and the backup panel is gone: `create_vault` puts `Backups` beside the vault itself (Task 12's `vault_dest_in`) and the wizard never sees a backups root. The body becomes exactly this — the `default_parent` half stays, and the `default_backup` half inverts:
+
+```rust
+#[test]
+fn the_wizard_takes_its_default_folders_from_the_launch_state() {
+    let js = read("console.js");
+    // The vault's parent still comes from `launch_state` (renamed on main 2026-09-09:
+    // `documents` -> `default_parent`).
+    assert!(js.contains("l.default_parent"), "the parent folder still comes from launch_state");
+    // …but nothing reads a backups root any more. There is no backup panel and no folder picker in
+    // the wizard at all; `create_vault` puts `Backups` beside the vault (Task 12, spec §4.1).
+    assert!(!js.contains("l.default_backup"), "the wizard must not read a backups root it cannot show");
+}
+```
+
+  And the replacement for `the_wizard_has_seven_panels_the_privacy_words_and_no_live_fetch`:
 
 ```rust
 #[test]
@@ -8763,6 +8951,7 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
 #[test]
 fn the_page_has_no_lms_credential_field_anywhere() {
     let html = read("index.html");
+    let js = read("console.js");
     // Every password field on the page is one of ours, by id: the wizard's account password, the
     // upgrade overlay's (Task 18), and the two coursework logins the student chose to store (D11).
     // Counted by allow-list rather than by number, so adding one of ours is fine and adding
@@ -8812,8 +9001,7 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-courses\"") && panel.contains("id=\"wiz-course-rows\""), "the class list");
     assert!(panel.contains("id=\"wiz-course-add\""), "…and the typed fallback beside it");
     assert!(js.contains("\"capture_courses\"") && js.contains("function renderCourses("), "the capture and its rows");
-    let js_all = read("console.js");
-    assert!(!js_all.contains("\"connect_google\"") && !js_all.contains("gmail.readonly"), "no Google connect in C1");
+    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Google connect in C1");
     let slots = html.split("id=\"wiz-slots\"").nth(1).and_then(|s| s.split("id=\"wiz-finish\"").next()).expect("the slots panel");
     assert!(!slots.contains("id=\"wiz-school\""), "the school must not also be on the slots panel");
 }
@@ -8923,7 +9111,7 @@ fn the_wizard_never_offers_a_local_model() {
         .find(|l| l.starts_with("<p>") && l.contains("Your vault stays on this machine"))
 ```
 
-- [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test static_assets` → five failures naming the missing panels.
+- [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test static_assets` → **six** failures: the five new or rewritten tests naming the missing panels, ids and handlers, and the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, which fails on `l.default_backup` until step 4 rewrites the wizard. (`the_wizard_offers_local_judgment_without_doing_anything` is deleted in step 1, so it neither passes nor fails.)
 
 - [ ] **Step 3: `app/static/index.html`** — replace the whole `<section class="wiz" id="wizard">` block with:
 
@@ -9050,8 +9238,12 @@ fn the_wizard_never_offers_a_local_model() {
               // up in the plan, and both are allowed to be empty — a student with no coursework
               // logins has nothing to map, and a campus whose API we cannot read is typed in.
               map: [], courses: [],
-              sessionDir: "", tz: "", slots: ["12:00", "18:00"], autostart: true, campus: "none",
-              zy: false, vhl: false, campuses: [], credVault: "", error: "" };
+              // **`campus` is declared once, above.** A second `campus:` key here would silently
+              // replace the choice object with a string, `WIZ.campus.unitid` would be `undefined` in
+              // every `lms_link` call, and `wizFinish` would send a `campus_choice` serde cannot read.
+              // `campuses: []` is gone with it: Task 14c takes the list out of `launch_state`.
+              sessionDir: "", tz: "", slots: ["12:00", "18:00"], autostart: true,
+              zy: false, vhl: false, credVault: "", error: "" };
 
   function dest() {
     var p = WIZ.parent.trim().replace(/[\\/]+$/, ""), n = WIZ.name.trim();
@@ -9518,7 +9710,7 @@ fn the_wizard_never_offers_a_local_model() {
 
   **A plain `'` in both, not `&rsquo;` in the HTML.** The test takes the `<p>`'s inner text verbatim and compares it to the `console.js` literal, so an entity on one side would have to be an entity on the other — and `EL("wiz-privacy").textContent = PRIVACY` would then print `Knowlu&rsquo;s` on the welcome panel. One apostrophe, both files, byte for byte. Run the test; if it fails, make the two strings identical rather than loosening the test. The old sentence ("Knowlu has no account and sends nothing anywhere") is **false from this release**: delete it from `console.js` in this step and from the rest of the site in Task 19.
 
-- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test static_assets` → all green, including the five rewritten or new ones (`…nine_panels…`, `…no_lms_credential_field…`, `…gates_on_eighteen…`, `…issue_report_is_previewed…`, `…never_offers_a_local_model`) and the sentence pin that step 6a made passable.
+- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test static_assets` → all green, including the five rewritten or new ones (`…nine_panels…`, `…no_lms_credential_field…`, `…gates_on_eighteen…`, `…issue_report_is_previewed…`, `…never_offers_a_local_model`), the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, and the sentence pin that step 6a made passable. The file has **one test fewer** than before this task and one more than that: `the_wizard_offers_local_judgment_without_doing_anything` is gone and `…never_offers_a_local_model` carries its pin, inverted.
 
 - [ ] **Step 8: Run everything.** `cargo test -p knowlu` at 0 warnings.
 
@@ -9660,9 +9852,9 @@ fn the_console_can_sign_an_existing_install_in_without_re_onboarding_it() {
     // …and its policy links must be the browser-opening kind, asserted **over this panel's markup**
     // rather than over the whole file: the wizard having them is not the same claim.
     assert_eq!(panel.matches("class=\"policy\"").count(), 2, "both policy links open in the browser");
+    let js = read("console.js");
     let listener = js.split("EL(\"upgrade\").addEventListener(\"click\"").nth(1).and_then(|s| s.split("function finishUpgrade(").next()).expect("the upgrade listener");
     assert!(listener.contains("a.policy") && listener.contains("preventDefault()"), "the overlay's own listener must intercept them");
-    let js = read("console.js");
     assert!(js.contains("function maybeUpgrade("), "maybeUpgrade");
     assert!(js.contains("\"attach_account\""), "the upgrade ends by attaching the account to this vault");
     // …it only appears when the vault says it needs one, never on a healthy console…
@@ -9696,14 +9888,24 @@ pub fn needs_account(vault: &Path) -> bool { cloud_config(vault).is_err() }
 /// nothing is a vault that cannot reach the cloud with nothing anywhere saying why.
 pub fn attach_in(vault: &Path, profile_id: &str, pending_target: &str) -> Result<(), String> {
     let (account_id, _) = load_session(pending_target)?;
+    // **Every field, because `VaultPlan` has grown**: Tasks 14a and 14b added `zybooks_courses`,
+    // `vhl_sections`, `course_map` and `courses`, and Task 14c added `campus_choice`. An adopted
+    // vault gains `config/cloud.yaml` and nothing else — its feeds, its mappings, its courses and its
+    // campus are already on disk and are not rewritten — so every plan field but the three cloud ones
+    // is empty by construction, and `write_cloud_yaml_if_absent` is the only writer this calls.
     let plan = crate::scaffold::VaultPlan {
         profile_id: profile_id.to_string(),
         ics_url: None,
         personal_calendar: None,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
         timezone: String::new(),
         slots: Vec::new(),
         device: String::new(),
         campus: "none".to_string(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         api_base: api_base(),
@@ -10202,7 +10404,7 @@ the Task 13 spike (<one sentence>).
 - **Any flow that asks for, stores, or automates a campus SSO credential.** VISION's standing rule and spec §9 forbid it and §11a leaves it unchanged. If a future spike revisits it, the shape is the one §11a already ruled — *sign in yourself, in a window, and we keep only the link* — and it is a separate spec, not an extension of this plan.
 - **`knowlu-prod`'s migrations.** Every apply and deploy in this plan names `knowlu-staging`. Production is migrated by Quinn, or by CI once C0's workflow can carry it — and the first production deploy is its own decision, with the first paying user behind it.
 - **CI.** `.github/**` is C0's; C1's `deno test` job is hand-off H7, added by the controller at merge.
-- **A second campus.** `scaffold::CAMPUSES` keeps its two entries. Adding one is a preset file under `app/assets/campus/` (which this stream does not own) plus one line, and it is a task for the day a second campus has a student.
+- **A third curated campus.** `scaffold::CAMPUSES` keeps its two curated rows — Alabama **with** event feeds, Kentucky **without**, because `events_preset_for` returns `none` for it and `app/assets/campus/` holds only `none.yaml` and `university-of-alabama.yaml`, and that directory is not this stream's. Every other US institution is in the bundled list and works without curation. A third curated row is one preset file and one line.
 
 ---
 
@@ -10265,6 +10467,26 @@ re-review's two Importants — the ruled outcome-C branch for the course list is
 `read_current_document` has all three bodies, and `scaffold::slugify` is gone in favour of the
 engine's `knowlu_engine::ingest::slugify`, which is the function `judge::Heuristics` reads back —
 and both its Minors. Nothing was deferred.
+
+**Pre-flight round (2026-09-09, before Task 1 — rulings R-C1-10 and R-C1-11):** a pre-flight scan read
+the whole plan for cross-task consistency and found 10 blocking, 13 important and 10 minor. **All 33 are
+fixed in place; nothing is deferred.** The blocking ones were all of one kind — code written against a
+state the plan does not reach until a later task — and they are worth naming as a class, because it is
+the failure mode of writing a long plan in dependency order and then revising the early tasks last:
+`create_vault_in` (Task 12) read four `VaultPlan` fields Tasks 14a and 14b add; `attach_in` (Task 18)
+built the struct five fields short; `CourseSeed` was declared one task after the field that names it;
+two tests used an unbound `js`; `WIZ` declared `campus` twice and the string won; and two tests already
+in `app/tests/static_assets.rs` asserted the exact markup Task 17 removes. **Every one of them is a
+compile error, and none of them is visible from inside the task that contains it.** The important ones
+were mostly arithmetic and ownership bookkeeping — five tables counted as four, eight commands counted
+as six, three tasks editing files their *Files* block did not list, `billing-portal` shipping without a
+test (now three assertions, and every Deno total from Task 4 on moved by +3 to 40 / 50 / 55 / 65 / 73 /
+79), and the Stripe API version pinned in code but not on the endpoint. **R-C1-11's sequencing** is now
+stated identically in three places: H9 is split into **H9a** (Task 13 step 3, three commands) and
+**H9b** (Task 14b step 3a, two more), and the five controller applications run H1 → H9a → H10 → H9b →
+H11. Two Task-0 lines changed, both named by findings (I13's commented-out `[auth.email.smtp]`, which
+would otherwise fail `supabase db push` at Task 1 step 7, and M9's `fail()`); nothing else in Task 0 was
+touched, because it is being implemented as this round lands.
 
 **Amendment 2, fix round (2026-09-09):** the R-OB-4 re-review's three Importants and three Minors, plus
 the Part-A residual, all fixed in place; nothing deferred. The largest: **the page never fetches the
