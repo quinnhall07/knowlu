@@ -265,12 +265,29 @@ Deno.test("GET /account/sources returns kinds and dates, and never the URL", asy
   assert(!text.includes("http"), "a URL reached the response body");
 });
 
-// `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so the
-// export's only guard against ever shipping a source's capability URL — that its `select=` list
-// names `kind,added_at` and nothing else — has no runtime test to pin it. Reading the file as text
-// is the guard: these two column names must never appear in it, in this function or any future one.
-Deno.test("the export never selects a source's capability URL storage columns", async () => {
+// `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so its
+// reads of `sources` have no runtime test to pin them. Reading the file as text is the guard,
+// narrowed to what it actually protects (R-C1-21): `putSource` now legitimately writes
+// `url_ciphertext`/`url_iv`, so the rule is not "the file never says these names" but "no *read* of
+// `sources` — `restSelect`/`restSelectAll`, called directly or through `exportAll`'s `one`/`all`
+// wrappers — ever selects them or `*`, in this function or any future one".
+Deno.test("every read of the sources table selects kind and added_at, and never a capability URL column", async () => {
   const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  assert(!text.includes("url_ciphertext"), "index.ts must never select the encrypted URL column");
-  assert(!text.includes("url_iv"), "index.ts must never select the URL's IV column");
+  // Pinned by name: exportAll's own line, so an edit that drops or narrows it is caught here too.
+  assert(
+    text.includes('sources: await all("sources", `${eq(id)}&select=kind,added_at&order=kind`)'),
+    "exportAll must read sources with select=kind,added_at",
+  );
+  // Every call in the file naming "sources" as a table argument immediately followed by its query
+  // template literal — the direct `restSelect(rest, "sources", ...)` in getSources and the indirect
+  // `all("sources", ...)` in exportAll alike. A write (`restUpsert(rest, "sources", [...])`) is not
+  // followed by a template literal here and so is not matched — this guard is about reads.
+  const reads = [...text.matchAll(/"sources",\s*`([^`]*)`/g)];
+  assert(reads.length >= 2, `expected at least 2 reads of sources in index.ts, found ${reads.length}`);
+  for (const [, query] of reads) {
+    assert(query.includes("select=kind,added_at"), `a sources read did not select kind,added_at: ${query}`);
+    assert(!query.includes("select=*"), `a sources read selected everything: ${query}`);
+    assert(!query.includes("url_ciphertext"), `a sources read selected the ciphertext column: ${query}`);
+    assert(!query.includes("url_iv"), `a sources read selected the IV column: ${query}`);
+  }
 });

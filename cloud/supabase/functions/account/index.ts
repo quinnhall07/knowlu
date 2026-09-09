@@ -8,7 +8,7 @@ import {
   restSelectAll,
   restUpsert,
 } from "../_shared/db.ts";
-import { encryptString, importAesKey, URL_CIPHERTEXT_COLUMN, URL_IV_COLUMN } from "../_shared/crypto.ts";
+import { encryptString, importAesKey } from "../_shared/crypto.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
@@ -98,8 +98,8 @@ Deno.serve(async (req) => {
         await restUpsert(rest, "sources", [{
           account_id: id,
           kind,
-          [URL_CIPHERTEXT_COLUMN]: box.ciphertext,
-          [URL_IV_COLUMN]: box.iv,
+          url_ciphertext: box.ciphertext,
+          url_iv: box.iv,
           added_at: new Date().toISOString(),
         }], "account_id,kind");
       },

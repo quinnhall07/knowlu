@@ -43,12 +43,3 @@ export async function decryptString(key: CryptoKey, ciphertext: string, iv: stri
   );
   return new TextDecoder().decode(plain);
 }
-
-/**
- * The two `sources` columns a box's ciphertext and IV live in. Named here, not as literal strings in
- * `account/index.ts`, so `account/handler_test.ts`'s guard — that index.ts's own text never contains
- * a source's capability-URL storage columns, "in this function or any future one" — stays a blanket
- * rule over every function that file grows, including the write path this task adds.
- */
-export const URL_CIPHERTEXT_COLUMN = "url_ciphertext";
-export const URL_IV_COLUMN = "url_iv";
