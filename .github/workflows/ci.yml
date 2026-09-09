@@ -27,12 +27,19 @@ jobs:
         shell: pwsh
       - name: test (workspace, 0 warnings)
         shell: pwsh
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           cargo test --workspace --no-fail-fast 2>&1 | Tee-Object test.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # The one accepted linker line; any other 'warning:' is a failure even if rustc passed.
-          $w = Select-String -Path test.log -Pattern '^warning:' | Where-Object { $_.Line -notmatch 'rsrc merge failure: multiple non-default manifests' }
-          if ($w) { $w | ForEach-Object { $_.Line }; exit 1 }
+          $code = $LASTEXITCODE
+          # The grep must run on every push, pass or fail, so a real warning is never hidden behind a
+          # test failure exiting first. The one accepted linker line; any other 'warning:' is a
+          # failure even if rustc and every test passed.
+          $all = @(Select-String -Path test.log -Pattern '^warning:')
+          $other = @($all | Where-Object { $_.Line -notmatch 'rsrc merge failure: multiple non-default manifests' })
+          Write-Output "warnings: $($all.Count - $other.Count) accepted (.rsrc), $($other.Count) other"
+          if ($other.Count -gt 0) { $other | ForEach-Object { $_.Line }; exit 1 }
+          if ($code -ne 0) { exit $code }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
         with: { name: test-log, path: test.log }

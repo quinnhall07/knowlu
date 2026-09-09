@@ -11,6 +11,10 @@
 $ErrorActionPreference = "Stop"
 $bad = @()
 $rows = git ls-files --eol
+if (-not $rows -or @($rows).Count -eq 0) {
+  Write-Output "eol-check: git ls-files --eol returned no rows"
+  exit 1
+}
 foreach ($row in $rows) {
   $meta, $path = $row -split "`t", 2
   $f = $meta.Trim() -split "\s+"
