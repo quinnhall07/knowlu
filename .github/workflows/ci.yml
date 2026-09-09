@@ -52,3 +52,20 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
         with: { name: test-log, path: test.log }
+
+  # The cloud codebase (Supabase Edge Functions, Deno). A separate job: nothing in it is Windows-specific
+  # and the Rust job above is the long pole. C1 hand-off H7, applied early (R-C1-23); C2 amends this one
+  # job (R-X-7) — nothing adds a second `cloud` job.
+  cloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        with: { deno-version: "2.x" }
+      - name: deno check
+        run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts
+      - name: deno lint
+        run: deno lint --config cloud/supabase/deno.json cloud/supabase/
+      - name: deno test
+        run: deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/
