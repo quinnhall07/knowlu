@@ -4,19 +4,25 @@
 #
 # PowerShell 5.1: no &&, no ||, no ternary, no ?? - chains are `A; if ($?) { B }`.
 #
-# NO SECRET IS EVER WRITTEN TO DISK. The Tauri updater's private key is read from Windows
-# Credential Manager into an environment variable for the length of one `cargo tauri build` and
-# cleared in a finally (R-P4a-14). Authenticode signing needs no secret at all: Trusted Signing
-# authenticates through Quinn's own Azure login, and sign.ps1 reads the profile from outside the
-# repo.
+# NO SECRET IS EVER WRITTEN TO DISK, AND THIS SCRIPT NOW HOLDS NONE. The Tauri updater's private
+# key arrives as $env:TAURI_SIGNING_PRIVATE_KEY, set by the release workflow from the repository
+# secret for the length of one step; this script only checks that it is there and lets `cargo tauri
+# build` inherit it (R-P4a-14). It never reads Credential Manager, never copies the key into a
+# variable and never clears it - the variable belongs to whoever set it. Authenticode signing needs
+# no secret at all: Trusted Signing authenticates through the ambient Azure login (`azure/login`
+# with OIDC in CI), and sign.ps1 reads the profile from a file outside the repo.
 #
-# This script NEVER uploads and never signs after the fact. `site\` goes to Cloudflare Pages by
-# hand (plan 4a Task 10).
+# CI IS THE RELEASE PATH (C0 Task 3). .github/workflows/release.yml runs this on a `v*` tag, then
+# deploys `site\` to Cloudflare Pages and creates the GitHub Release. A human runs it with -DryRun:
+# that builds and bundles a throwaway installer, needs no key, signs nothing with the updater key
+# and publishes nothing.
 param(
   [switch]$SkipBuild,
   [switch]$StageOnly,
-  [string]$UpdaterCredential = "knowlu/updater-key",
-  [string]$UpdaterPasswordCredential = "knowlu/updater-key-password"
+  [switch]$DryRun,
+  # Handed to sign.ps1 through $env:KNOWLU_SIGNING_PROFILE, because the bundler's signCommand is a
+  # fixed argv that cannot carry a parameter. Empty means "use sign.ps1's own default".
+  [string]$SigningProfile = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -49,6 +55,18 @@ $conf = Get-Content (Join-Path $repo "app\tauri.conf.json") -Raw | ConvertFrom-J
 $version = $conf.version
 Write-Output "Knowlu $version"
 
+# --- the tag is the version, or this is not a release ------------------------------------------
+# The workflow triggers on `v*` and names the tag in the GitHub Release, while the updater manifest
+# and the download page take their version from app\tauri.conf.json. If the two ever disagree the
+# release is published under one number and installs as another, and the mismatch is invisible
+# until a user's updater refuses the file. GITHUB_REF_NAME is set only by Actions, so this costs a
+# local run nothing; -DryRun skips it because a dry run publishes nothing to disagree with.
+if ($env:GITHUB_REF_NAME -and (-not $DryRun)) {
+  if ($env:GITHUB_REF_NAME -ne ("v" + $version)) {
+    throw ("tag " + $env:GITHUB_REF_NAME + " does not match app/tauri.conf.json version " + $version)
+  }
+}
+
 # The sidecar's stem, in ONE place. This line and `bundle.externalBin` in app\tauri.conf.json are
 # the only two spellings (app\build.rs's placeholder is pinned to the config by a static test), and
 # the check below refuses to build if they ever disagree.
@@ -69,37 +87,10 @@ if ($declared -ne ("binaries/" + $sidecar)) {
   throw "bundle.externalBin is '$declared' but this script stages 'binaries/$sidecar' - the sidecar is named in one place, and the two have drifted"
 }
 
-# --- Credential Manager, read-only, in-memory ------------------------------------------------
-# The engine reads credentials in Rust and the app writes them in Rust; PowerShell has no cmdlet
-# for generic credentials, so this is the same CredReadW through Add-Type. The blob is UTF-16LE
-# and CredentialBlobSize counts BYTES, not code units - the one trap wincred.rs documents.
-# Guarded: Add-Type throws if the type is already defined, which a second run in one session hits.
-# No -UsingNamespace here: -MemberDefinition already emits `using System.Runtime.InteropServices;`
-# itself, and Add-Type compiles with warnings-as-errors, so naming it again is a hard build error
-# ("The using directive ... appeared previously in this namespace"). ComTypes.FILETIME below is
-# spelled out in full for the same reason.
-if (-not ("Knowlu.Cred" -as [type])) {
-  Add-Type -Namespace Knowlu -Name Cred -MemberDefinition @'
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-public struct CREDENTIAL {
-  public uint Flags; public uint Type; public string TargetName; public string Comment;
-  public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-  public uint CredentialBlobSize; public IntPtr CredentialBlob; public uint Persist;
-  public uint AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
-}
-[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool CredReadW(string target, uint type, uint flags, out IntPtr credential);
-[DllImport("advapi32.dll")] public static extern void CredFree(IntPtr buffer);
-public static string Read(string target) {
-  IntPtr p;
-  if (!CredReadW(target, 1, 0, out p)) { return null; }
-  try {
-    CREDENTIAL c = (CREDENTIAL)Marshal.PtrToStructure(p, typeof(CREDENTIAL));
-    return Marshal.PtrToStringUni(c.CredentialBlob, (int)(c.CredentialBlobSize / 2));
-  } finally { CredFree(p); }
-}
-'@
-}
+# The CredReadW/Add-Type block that used to sit here is gone (C0 Task 3). Reading the updater key
+# from Credential Manager tied a release to one machine's credential store, which is precisely the
+# single-user assumption CLAUDE.md's first rule forbids and precisely what CI cannot have. The key
+# now comes from the environment and from nowhere else; see the header.
 
 # --- the toolchain, resolved before anything is judged by an exit code -------------------------
 # A missing exe is a launch failure, not an exit code, and PowerShell reports it without touching
@@ -127,8 +118,10 @@ if ($treeClean) {
 }
 Pop-Location
 # -StageOnly produces no installer, so there is nothing for a commit to match, and a developer
-# staging a real sidecar beside a plain cargo build is expected to have a dirty tree.
-if ((-not $StageOnly) -and (-not $treeClean)) { throw "working tree has uncommitted changes - commit or stash before releasing, so the installer matches a commit" }
+# staging a real sidecar beside a plain cargo build is expected to have a dirty tree. -DryRun is
+# exempt for the same reason: its installer is a throwaway that is never copied anywhere, and the
+# whole point of running it is to check work that is not committed yet.
+if ((-not $StageOnly) -and (-not $DryRun) -and (-not $treeClean)) { throw "working tree has uncommitted changes - commit or stash before releasing, so the installer matches a commit" }
 
 if (-not $SkipBuild) {
   Push-Location $repo
@@ -179,17 +172,37 @@ if ($wantsUpdater -and (-not $hasUpdaterPlugin)) {
   throw "bundle.createUpdaterArtifacts is set but plugins.updater is missing from app\tauri.conf.json - cargo tauri build fails before it bundles. Land plan 4a Task 8's gated step, or set createUpdaterArtifacts to false."
 }
 $needsKey = ($wantsUpdater -and $hasUpdaterPlugin)
-if (-not $needsKey) {
+
+# --- -DryRun turns the updater off for ONE build, through the CLI, never through the file -------
+# R-C0-22: the override is written to a temp JSON file and passed as `--config <path>`, not as an
+# inline `{"bundle":...}` argument. PowerShell 5.1 mangles embedded double quotes on the way to a
+# native exe, so the inline form is a coin flip. tauri-cli treats a --config value starting with
+# `{` as JSON and anything else as a path, and deep-merges it over app\tauri.conf.json - so
+# createUpdaterArtifacts goes false while the rest of `bundle` survives untouched.
+#
+# app\tauri.conf.json is NEVER edited by this script. That is what keeps the static
+# createUpdaterArtifacts <-> plugins.updater test true, and what keeps a dry run from ever
+# becoming a commit.
+$dryRunConfig = ""
+if ($DryRun) {
+  $dryRunConfig = Join-Path $env:TEMP ("knowlu-dryrun-" + [guid]::NewGuid().ToString("N") + ".json")
+  [System.IO.File]::WriteAllText($dryRunConfig, '{"bundle":{"createUpdaterArtifacts":false}}', (New-Object System.Text.UTF8Encoding($false)))
+  if ($needsKey) {
+    Write-Output "DRY RUN: updater artefacts are turned off for this build with --config, so no key is needed and app\tauri.conf.json is untouched."
+  }
+  $needsKey = $false
+}
+if ((-not $needsKey) -and (-not $DryRun)) {
   Write-Output "UPDATER OFF: createUpdaterArtifacts is false / plugins.updater is absent - this build ships an installer only, and friends will not be offered an in-app update (plan 4a Task 8)."
 }
 
-# --- the updater key, for exactly one build ----------------------------------------------------
-$key = $null
-$pw = $null
+# --- the updater key: present in the environment, or this is not a release ---------------------
+# Checked, never copied. `cargo tauri build` inherits the variable from this process; binding it to
+# a PowerShell variable would only put a second copy of a private key somewhere to be printed by
+# accident. The password is optional and is handled the same way - by not touching it.
 if ($needsKey) {
-  $key = [Knowlu.Cred]::Read($UpdaterCredential)
-  if (-not $key) {
-    throw "updater artefacts are enabled but $UpdaterCredential is not in Credential Manager. Create it with: cmdkey /generic:$UpdaterCredential /user:knowlu /pass"
+  if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    throw "TAURI_SIGNING_PRIVATE_KEY is not set - releases are built by CI (.github/workflows/release.yml); run with -DryRun locally"
   }
 }
 # --- can anything be signed at all? ------------------------------------------------------------
@@ -216,23 +229,25 @@ if (-not $signToolPresent) {
 
 try {
   if (-not $signToolPresent) { $env:TAURI_SKIP_SIDECAR_SIGNATURE_CHECK = "true" }
-  if ($key) {
-    $env:TAURI_SIGNING_PRIVATE_KEY = $key
-    $pw = [Knowlu.Cred]::Read($UpdaterPasswordCredential)
-    if ($pw) { $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $pw }
-  }
+  # sign.ps1 is launched by the bundler, not by this script, so the only channel to it is the
+  # environment its child process inherits.
+  if ($SigningProfile -ne "") { $env:KNOWLU_SIGNING_PROFILE = $SigningProfile }
+  $buildArgs = @("tauri", "build")
+  if ($DryRun) { $buildArgs += @("--config", $dryRunConfig) }
   Push-Location (Join-Path $repo "app")
-  Invoke-Native cargo @("tauri", "build")
+  Invoke-Native cargo $buildArgs
   $built = (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -eq 0))
   Pop-Location
   if (-not $built) { throw "cargo tauri build failed - if it stopped at 'Verifying NSIS package' the bundler could not reach GitHub/Microsoft for NSIS, nsis_tauri_utils.dll and the WebView2 bootstrapper, which it downloads once and caches under %LOCALAPPDATA%\tauri\" }
 } finally {
-  # Cleared whatever happened, including on the throw above.
-  if (Test-Path Env:\TAURI_SIGNING_PRIVATE_KEY) { Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY }
-  if (Test-Path Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD }
-  $key = $null
-  $pw = $null
+  # Only what this script set is unset, whatever happened, including on the throw above.
+  # TAURI_SIGNING_PRIVATE_KEY is deliberately NOT touched: this script never set it, the workflow
+  # scoped it to one step, and clearing a caller's variable would break a second run in one shell.
   if (Test-Path Env:\TAURI_SKIP_SIDECAR_SIGNATURE_CHECK) { Remove-Item Env:\TAURI_SKIP_SIDECAR_SIGNATURE_CHECK }
+  if ($SigningProfile -ne "") {
+    if (Test-Path Env:\KNOWLU_SIGNING_PROFILE) { Remove-Item Env:\KNOWLU_SIGNING_PROFILE }
+  }
+  if ($dryRunConfig -ne "") { Remove-Item $dryRunConfig -Force -ErrorAction SilentlyContinue }
 }
 
 $bundle = Join-Path $repo "target\release\bundle\nsis"
@@ -244,13 +259,31 @@ if (-not $setup) { throw "no installer in $bundle" }
 Write-Output ("installer: " + $setup.FullName + " (" + [math]::Round($setup.Length / 1MB, 2) + " MB)")
 Write-Output "authenticode: whatever scripts\sign.ps1 printed above - an UNSIGNED: line means Windows will warn on install"
 
+# The RELEASE line below is space-separated and release.yml splits it on single spaces, so a space
+# anywhere in an artefact path would silently split one value into two and upload the wrong thing.
+# Every artefact path is derived from this one, so checking it here catches all three, before a
+# ten-minute build is followed by a bad upload.
+if ($setup.FullName -match "\s") { throw ("installer path contains whitespace, which the RELEASE line cannot carry: " + $setup.FullName + " - check the repository out at a path without spaces") }
+
 # --- artefacts and the manifest ----------------------------------------------------------------
+# A dry run stops here: nothing is copied into site\releases, so `git status` after it is as clean
+# as it was before, and no half-made release can be deployed by a later Pages push.
+if ($DryRun) {
+  Write-Output ("DRY RUN: installer built at " + $setup.FullName + "; nothing signed with the updater key, nothing published")
+  # The same last line CI parses, printed with the two fields a dry run genuinely has none of. It
+  # costs nothing and it proves the format locally, before a tag depends on it.
+  Write-Output ("RELEASE installer=" + $setup.FullName + " sig=none manifest=none")
+  exit 0
+}
+
 $rel = Join-Path $repo "site\releases"
 if (-not (Test-Path $rel)) { New-Item -ItemType Directory -Force $rel | Out-Null }
 Copy-Item $setup.FullName $rel -Force
 # M5: a stable name the download page can link forever, beside the versioned file.
 Copy-Item $setup.FullName (Join-Path $rel "Knowlu-setup.exe") -Force
 
+$sigOut = "none"
+$manifestOut = "none"
 if ($needsKey) {
   # Tauri 2's updater artefact IS the installer, with a detached minisign signature beside it:
   # Knowlu_<v>_x64-setup.exe plus .sig. The .nsis.zip pair this script first looked for is the v1
@@ -276,9 +309,20 @@ if ($needsKey) {
   # S10: UTF-8 WITHOUT a BOM. Out-File -Encoding utf8 writes one in 5.1, and a BOM in front of `{`
   # makes the manifest fail to parse in the updater, in a browser, and in jq.
   $json = $manifest | ConvertTo-Json -Depth 6
-  [System.IO.File]::WriteAllText((Join-Path $rel "latest.json"), $json, (New-Object System.Text.UTF8Encoding($false)))
-  Write-Output ("manifest: " + (Join-Path $rel "latest.json"))
+  $manifestOut = Join-Path $rel "latest.json"
+  [System.IO.File]::WriteAllText($manifestOut, $json, (New-Object System.Text.UTF8Encoding($false)))
+  $sigOut = $sig.FullName
+  Write-Output ("manifest: " + $manifestOut)
 } else {
   Write-Output "no updater artefacts (see UPDATER OFF above) - installer only, and no latest.json was written"
 }
-Write-Output "upload site\ to Cloudflare Pages by hand (plan 4a Task 10; no account yet)"
+Write-Output "publish: .github/workflows/release.yml deploys site\ and creates the GitHub Release"
+
+# --- the last line, and the only one the workflow reads ----------------------------------------
+# `release.yml` splits this on single spaces and exports REL_INSTALLER / REL_SIG / REL_MANIFEST,
+# which the size gate, the Authenticode check and `gh release create` all consume. The paths were
+# checked for whitespace above, where the installer path was resolved.
+Write-Output ("RELEASE installer=" + $setup.FullName + " sig=" + $sigOut + " manifest=" + $manifestOut)
+# Explicit, so the caller's $LASTEXITCODE is this script's verdict and not whatever the last native
+# command inside it happened to leave behind. release.yml reads it immediately.
+exit 0

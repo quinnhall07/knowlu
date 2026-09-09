@@ -22,7 +22,11 @@ jobs:
           $v = (rustc -vV | Out-String)
           Write-Output $v
           if ($v -notmatch "host: x86_64-pc-windows-gnu") { Write-Output "expected host: x86_64-pc-windows-gnu"; exit 1 }
+      # cache-on-failure, because the cache otherwise saves only on a green run and this job's whole
+      # purpose is to go red: every fix-up round would start from a cold build of the entire
+      # dependency graph (R-C0-20).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with: { cache-on-failure: true }
       - run: ./scripts/ci/eol-check.ps1
         shell: pwsh
       - name: test (workspace, 0 warnings)
