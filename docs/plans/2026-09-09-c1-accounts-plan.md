@@ -1490,7 +1490,7 @@ Expected: `no migrations found` on the first test (the directory does not exist 
 ```sql
 -- Knowlu C1, Task 1 — the account, its subscription, its consent log and the one source we store.
 -- Spec §5.1. Three rules are load-bearing and are pinned by cloud/supabase/migrations_test.ts:
---   1. There is NO birthdate column, in this file or any other (spec §9, minors).
+--   1. There is NO date-of-birth column, in this file or any other (spec §9, minors).
 --   2. Row-level security is on for every table.
 --   3. No table has a client write policy. Every write in this system goes through an edge function
 --      that verified the caller's JWT and then used the service role, which bypasses RLS. That is
@@ -1510,7 +1510,7 @@ create table public.accounts (
   status             text not null default 'active' check (status in ('active', 'closed'))
 );
 comment on table public.accounts is
-  'Spec §5.1, exactly. No birthdate column exists, or ever may: the 18+ gate is an attestation.';
+  'Spec §5.1, exactly. No date-of-birth column exists, or ever may: the 18+ gate is an attestation.';
 
 create table public.entitlements (
   account_id         uuid primary key references public.accounts (id) on delete cascade,
@@ -1597,7 +1597,7 @@ alter table public.webhook_events enable row level security;
 --
 -- The `raise exception` is the 18+ gate, server side: Alabama's Ala. Code § 26-1-1(f) makes an
 -- 18-year-old's contract binding, a 17-year-old's is voidable, and the cheapest compliant path is to
--- decline rather than collect a birthdate. The app refuses first, with a sentence; this refuses
+-- decline rather than collect a date of birth. The app refuses first, with a sentence; this refuses
 -- second, so a patched client gets an account it cannot use either.
 create function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public, extensions as $$

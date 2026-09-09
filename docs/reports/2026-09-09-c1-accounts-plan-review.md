@@ -1491,3 +1491,13 @@ the two it is most careful about. I would execute it.
 - Three amendment rounds after Quinn's first real run (R-OB-1, R-OB-2, R-OB-4) and their fix rounds; the final re-review verdict is READY TO EXECUTE conditional on two controller corrections, both applied: the first-run predicate is `!vault.join("state").join("today.md").exists()` at every site the review named (Task 17 step 8a, the seam test, Task 18 step 6's scratch-vault premise — the fixture carries no ranked page, so the step writes one first), and H11 is promoted to a mid-stream hand-off beside H3's `lms_link` fifth because `include_str!` makes `app/campuses.json` compile-blocking.
 - Rulings carried into the plan today: R-OB-1 (Task 14a, H10), R-OB-2 (Task 14b, Task 13 step 4a; course capture only for curated schools, typed codes for everyone else), R-OB-4 (Task 14c, H11, `campus_search`), and main's corrected `needs_first_run` (`19a1a8d`).
 - The plan is final at 25 tasks and is committed with this review.
+
+## Execution rulings (the controller, from the C1 ledger — durable copy)
+
+The SDD ledger (`.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`) is git-ignored scratch; the rulings it records during execution are copied here so they survive it.
+
+- **R-C1-9** — Task 0 (toolchain + skeleton, no shared file, no interface consumer) ran in parallel with the pre-flight scan; anything the scan found against it became its fix round.
+- **R-C1-10** — every blocking and important pre-flight finding was fixed in the plan text before Task 1 was dispatched (33 findings; the scan agent re-checked the amended text).
+- **R-C1-11** — the controller's mid-stream hand-off order is H1 → H9a → H10 → H9b → H11: H1 before Task 10; H9's `lms_link` registration only after Tasks 14/14b define all five commands; H11 before Task 14c's first `cargo test`; H10 before Task 14a step 6. The first Quinn precondition is P1 at Task 1 step 7.
+- **R-C1-12** — `Supabase.CLI` is not in this machine's winget catalog; the CLI (v2.117.0) was installed from `supabase/cli`'s GitHub release with its SHA-256 checked against the release's checksums file. Same upstream; Task 0's text records it at the next touch.
+- **R-C1-13** — Task 1's migration comments said "birthdate" three times while the task's own second test forbids the word anywhere in a C1 migration (the pre-flight row for Task 1 was wrong on this). The test is the spec's rule and stays verbatim; the three comment sentences say "date-of-birth" / "date of birth" instead. Cost if wrong: none — comments.
