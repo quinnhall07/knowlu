@@ -24,9 +24,10 @@ older under `docs/` is history or design authority from the previous repository 
   imports. **He asked to reset and re-onboard once C1's wizard carries those rulings.** The reset
   (move the vault, `profiles.json` and `profiles\` into `%LOCALAPPDATA%\knowlu-pre-cut-2026-09-09\attempt-1\`,
   delete the two `knowlu/profile_a95daa1d40/*` credentials, remove the autostart entry, copy the
-  `19a1a8d` build over `%LOCALAPPDATA%\Programs\Knowlu\`) **is scripted and runs the moment Knowlu is
-  not running — it was still running when this was written; check `Get-Process knowlu` and run it.**
-  The old `quinn-ops-local-runner` task is unregistered (its XML is in the pre-cut folder and can be
+  `19a1a8d` build over `%LOCALAPPDATA%\Programs\Knowlu\`) **was run on 2026-09-09 after he quit
+  Knowlu: `%LOCALAPPDATA%\knowlu\` is empty, `%USERPROFILE%\Knowlu\` holds only `Backups\`, the
+  installed build is `19a1a8d`, and the next launch opens the wizard.** Nothing is scheduled: the
+  old `quinn-ops-local-runner` task is unregistered (its XML is in the pre-cut folder and can be
   re-registered as the interim page until C1 — offered to Quinn, not yet answered). **`quinn-ops` is
   not yet archived** — Quinn's go, at the machine.
 - **A bug of this session, fixed:** the first-run predicate (`scheduler::needs_first_run`) checked a
@@ -107,7 +108,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 |---|---|---|
 | now | **Go to push `main`** | `main` holds the signed spec, the plans, cut-day's app fixes and the C0 merge; pushing makes `ci / test` the gate on every PR and closes PR #1 as merged. Nothing else waits on it except branch protection (C0 Task 6). |
 | now | **Archive `quinn-ops`** (cut day step 6) | with him present: remove its worktrees, leave the checkout on `main`, `gh repo archive quinnhall07/quinn-ops`. The old vault survives in that archive's history. Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
-| now | **Quit Knowlu** so the reset runs; then decide the interim | re-register the old runner task from its saved XML (recommended) or go without a daily page until C1's wizard lands. |
+| now | **The interim page** | re-register the old runner task from its saved XML (`Register-ScheduledTask -Xml (Get-Content …\quinn-ops-local-runner.xml -Raw) -TaskName quinn-ops-local-runner`) so the old vault keeps producing a page until C1's wizard lands — recommended — or go without. |
 | C0 T4 | **Retire the old updater key** (P4) | the exact PowerShell block in the plan's Task 4 generates the new pair, sets the two secrets, prints only the public key; then `cmdkey /delete:knowlu/updater-key{,-password}` and the OneDrive file + its version history. Old key id `C2EC981122E1D2DF`. |
 | C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
 | C0 T3 run | **Cloudflare** (P2, P3) | account, Pages project `knowlu` (direct upload), API token Pages:Edit, account id; `knowlu.com` on Cloudflare DNS → Pages. |
