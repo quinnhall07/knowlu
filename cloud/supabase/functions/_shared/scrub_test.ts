@@ -20,8 +20,9 @@ Deno.test("the seven things a report must never carry", () => {
   );
   // A note's filename is its title, slugified.
   assertEquals(scrub("1 unreadable: read-chapter-3-of-calculus.md)"), "1 unreadable: <note>)");
-  // A long opaque run of key-ish characters.
-  assertEquals(scrub("key=sk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), "key=<token>");
+  // A long opaque run of key-ish characters. Fix round 1b: `key` joined the credential keyword
+  // list, so this is claimed by CREDENTIAL before TOKEN ever sees it — `<secret>`, not `<token>`.
+  assertEquals(scrub("key=sk_live_51Hxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), "key=<secret>");
   // The Windows account name, which is usually a person's name.
   assertEquals(
     scrub("could not open C:\\Users\\Ada\\Knowlu\\Fall 2026\\tasks\\a.md"),
@@ -81,9 +82,10 @@ Deno.test("a two-word Windows account name is scrubbed whole, forward slashes to
 Deno.test("a named credential is redacted whatever its length", () => {
   assertEquals(scrub("password=hunter2"), "password=<secret>");
   assertEquals(scrub("Authorization: Bearer abc123"), "Authorization=<secret>");
-  // A bare `key=`, with no `api` prefix, is not one of the named keywords and is not 20 characters
-  // either — ordinary key=value prose (a log line, a JSON fragment) survives untouched.
-  assertEquals(scrub("key=sk_live_abc123"), "key=sk_live_abc123");
+  // Fix round 1b (ruled): bare `key` joins the keyword list too — `key=sk_live_abc123` in a pasted
+  // log is a credential shape, and prose with `key=` is rare enough that over-scrubbing is the
+  // safe side.
+  assertEquals(scrub("key=sk_live_abc123"), "key=<secret>");
 });
 
 // Fix round 1, item 4: `scrubJson` is documented as reaching "every string, at any depth" — a key

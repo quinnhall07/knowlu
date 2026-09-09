@@ -24,9 +24,11 @@ const NOTE = /\b[\w.-]+\.md\b/g;
 // 20-character floor exists to catch opaque runs, not to decide what counts as a password.
 // `bearer` is itself one of the keywords, so `Authorization: Bearer <token>` claims the whole
 // header as one redaction instead of leaving the scheme name standing next to a token too short
-// for TOKEN to have caught on its own.
+// for TOKEN to have caught on its own. Fix round 1b (ruled): bare `key` joins the list too —
+// `key=sk_live_…` in a pasted log is a credential shape, and `api[_-]?key` stays alongside it so
+// both spellings match.
 const CREDENTIAL =
-  /\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi;
+  /\b(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi;
 const TOKEN = /\b[A-Za-z0-9_.-]{20,}\b/g;
 
 export function scrub(text: string): string {
