@@ -183,10 +183,12 @@ $needsKey = ($wantsUpdater -and $hasUpdaterPlugin)
 # app\tauri.conf.json is NEVER edited by this script. That is what keeps the static
 # createUpdaterArtifacts <-> plugins.updater test true, and what keeps a dry run from ever
 # becoming a commit.
+#
+# The decision is made here; the FILE is written inside the try below, whose finally deletes it,
+# so that nothing between the two can leave a stray file in %TEMP%. Declared here because the
+# finally reads it.
 $dryRunConfig = ""
 if ($DryRun) {
-  $dryRunConfig = Join-Path $env:TEMP ("knowlu-dryrun-" + [guid]::NewGuid().ToString("N") + ".json")
-  [System.IO.File]::WriteAllText($dryRunConfig, '{"bundle":{"createUpdaterArtifacts":false}}', (New-Object System.Text.UTF8Encoding($false)))
   if ($needsKey) {
     Write-Output "DRY RUN: updater artefacts are turned off for this build with --config, so no key is needed and app\tauri.conf.json is untouched."
   }
@@ -228,6 +230,11 @@ if (-not $signToolPresent) {
 }
 
 try {
+  # Written as the first thing inside the try, so the finally below is guaranteed to remove it.
+  if ($DryRun) {
+    $dryRunConfig = Join-Path $env:TEMP ("knowlu-dryrun-" + [guid]::NewGuid().ToString("N") + ".json")
+    [System.IO.File]::WriteAllText($dryRunConfig, '{"bundle":{"createUpdaterArtifacts":false}}', (New-Object System.Text.UTF8Encoding($false)))
+  }
   if (-not $signToolPresent) { $env:TAURI_SKIP_SIDECAR_SIGNATURE_CHECK = "true" }
   # sign.ps1 is launched by the bundler, not by this script, so the only channel to it is the
   # environment its child process inherits.

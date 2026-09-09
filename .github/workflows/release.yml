@@ -68,8 +68,11 @@ jobs:
           [System.IO.File]::WriteAllText("release-notes.md", (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
           Get-Content release-notes.md
           exit 0
+      # Pinned exactly, not "^2". The sidecar's signed path below is read out of tauri-bundler
+      # 2.9.4's source, which is what this version pulls in, and it is the version the dev machine
+      # runs - the same reason the compiler is pinned. Bumping it is a one-line change here.
       - name: tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version 2.11.4 --locked
         shell: pwsh
       # The Authenticode signing library. signtool.exe itself comes from the Windows SDK on the
       # runner image (find-signtool.ps1 resolves it through the registry), but /dlib is Microsoft's
@@ -83,8 +86,22 @@ jobs:
           $dlib = Get-ChildItem "$env:RUNNER_TEMP\tsc" -Recurse -Filter Azure.CodeSigning.Dlib.dll | Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1
           if (-not $dlib) { throw "no Azure.CodeSigning.Dlib.dll in the package" }
           Add-Content $env:GITHUB_ENV "KNOWLU_SIGN_DLIB=$($dlib.FullName)"
-      # OIDC, so no client secret exists anywhere: the federated credential on the Entra app trusts
-      # this repository's `v*` tag refs, and the token is minted for this run only.
+      # OIDC, so no client secret exists anywhere: the token is minted for this run only and the
+      # Entra app's federated credential is what accepts it.
+      #
+      # THE SUBJECT CLAIM IS THE ENVIRONMENT, NOT THE TAG. Because this job declares
+      # `environment: release`, GitHub's default subject substitutes the environment for the ref, so
+      # the token carries exactly:
+      #
+      #     repo:quinnhall07/knowlu:environment:release
+      #
+      # The federated credential must therefore be entity type **Environment** with the value
+      # `release` (issuer https://token.actions.githubusercontent.com, audience api://AzureADTokenExchange).
+      # A credential scoped to a branch or tag - entity type Tag, `refs/tags/v*`, which is the
+      # natural thing to write for a workflow that triggers on `v*` - never matches this subject:
+      # `azure/login` fails with AADSTS700213 and the release stops here, before anything is signed.
+      # If the `environment:` line above is ever removed, the subject becomes
+      # `repo:quinnhall07/knowlu:ref:refs/tags/<tag>` and the credential has to change with it.
       - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c  # v3.0.2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -123,10 +140,15 @@ jobs:
       # resources.rs external_binaries) - and Settings::copy_binaries lifts THAT file into the
       # installer with the triple stripped. Checking the cargo copy would fail every release while
       # the shipped bytes were signed all along. Globbed, so the triple is not spelled here too.
+      #
+      # -like and Sort-Object LastWriteTime, exactly as release.ps1's own installer lookup does it
+      # and for the reason documented there: the FileSystem provider's -Filter uses Win32 wildcards,
+      # where 8.3 aliasing lets a 3-letter extension match a longer one, so `*.exe` can pick up a
+      # file this check has no business reading.
       - name: verify Authenticode
         shell: pwsh
         run: |
-          $sidecar = Get-ChildItem "app\binaries" -Filter "knowlu-engine-*.exe" | Select-Object -First 1
+          $sidecar = Get-ChildItem "app\binaries" -File | Where-Object { $_.Name -like "knowlu-engine-*.exe" } | Sort-Object LastWriteTime | Select-Object -Last 1
           if (-not $sidecar) { throw "no staged sidecar under app\binaries" }
           foreach ($f in @($env:REL_INSTALLER, "target\release\knowlu.exe", $sidecar.FullName)) {
             $s = Get-AuthenticodeSignature $f

@@ -3,11 +3,17 @@
 # URL, and keeping them out of the secret store keeps the log readable when something is wrong.
 #
 # ExcludeCredentials is the point of this file. Azure.CodeSigning.Dlib.dll authenticates with
-# DefaultAzureCredential, which walks a chain; the excluded four are the ones that either hang
+# DefaultAzureCredential, which walks a chain; the excluded five are the ones that either hang
 # (InteractiveBrowserCredential wants a browser on a headless runner) or silently pick up the
 # wrong identity on a machine that has ever had Visual Studio or a managed identity attached.
-# What is left - EnvironmentCredential, WorkloadIdentityCredential, AzureCliCredential - is
-# exactly what `azure/login` with OIDC populates, so the dlib signs with NO client secret anywhere.
+#
+# AzureCliCredential is the one that actually signs, and it must stay in the chain.
+# `azure/login` at the SHA release.yml pins does an Azure CLI login and nothing else: it exchanges
+# the workflow's OIDC token for a token in `az`'s own cache. It does not write
+# AZURE_FEDERATED_TOKEN_FILE or the other variables EnvironmentCredential and
+# WorkloadIdentityCredential read, so neither of those can authenticate here - the dlib reaches
+# AzureCliCredential, which shells out to `az account get-access-token`. That is why the signing
+# step must come after the login step, and why no client secret exists anywhere.
 #
 # PowerShell 5.1: no &&, no ||, no ternary, no ??.
 param([string]$Path = (Join-Path $env:USERPROFILE ".knowlu\trusted-signing.json"))
