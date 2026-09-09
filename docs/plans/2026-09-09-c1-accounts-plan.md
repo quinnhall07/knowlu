@@ -3650,8 +3650,9 @@ async function putSource(req: Request, deps: Deps): Promise<Response> {
   const kind = String(body.kind ?? "");
   const url = String(body.url ?? "");
   if (!SOURCE_KINDS.includes(kind)) throw fail(400, `unknown source kind; use ${SOURCE_KINDS.join(", ")}`);
-  // `google_calendar` is a real kind of the account's and **not one a client may write**: C2's
-  // `google-callback` writes that row with the service role, which bypasses this handler entirely.
+  // `google_calendar` is a reserved kind **nobody writes** (R-X-9): a Google grant has no URL and
+  // lives in C2's `google_accounts`, so no row of this kind ever exists here; the value is in the
+  // vocabulary only so the constraint never needs a C2 migration.
   // The device is already narrowed by `lms_link::DEVICE_KINDS`; this is the same rule on the end that
   // a patched client actually talks to, so a forged row cannot become an iCal URL C2 then fetches.
   if (kind === "google_calendar") throw fail(403, "that calendar is connected by signing in, not by pasting a link");
