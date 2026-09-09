@@ -77,6 +77,11 @@ Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
 | §11 R5 | Global rules (cross-account promotion) are **reviewed by hand** before activation | cloud design §11 R5 | Task 12: `rules.scope = 'global'` rows are inserted `active = false`, and there is no code path that activates one; the promotion job only ever writes `scope = 'account'` |
 | §11 R6 | Staging project from day one | cloud design §11 R6 | Every migration and deploy in this plan targets the staging ref; Task 15 records what production still needs |
 | §11 R8 | Anthropic as the launch provider; **the eval suite picks the model, not taste** | cloud design §11 R8 | Task 1 seeds `models` at the cheapest Haiku-class id; Task 14 is the only thing allowed to change a pin, and only through a migration row |
+| §11a | **R-OB-1 (C1 + C2): an unknown book on a later run is a proposal, never a silent skip** (`/ingest-coursework` reconcile) | cloud design §11a, ruling of 2026-09-09 | **Task 7a.** The reply gains `proposals`; `pickZybooks`'s `unmapped` branch stops warning, and the handler translates `parse_vhl`'s own `section … not in config` warning the same way — **so both parsers stay byte-identical to their frozen references and the policy lives where the routing already did**. The engine writes one `kind: coursework-map` card per unmapped key through `write::create` (hand-off H12 keeps `rank` from touching it), the deck answers it, and `coursework` applies it **before its next fetch**. **The mapping's home is the vault's `config/ingest.yaml`** (§4.3: *the parsers move; the credentials and the vault stay*) — it is already there, the device already sends a redacted copy on every call, and C1's wizard writes the initial one, so a server-side copy would be a second writer of one value. Recorded in *Interfaces with C1* contract 8 |
+| §11a | **R-OB-3 (C2, and the device's `ingest` until then): a first ingest never creates a task already past due** — such items are recorded as seen and archived as `imported-past` | cloud design §11a, ruling of 2026-09-09 | **Task 8a**, in two halves with one of them authoritative. The **device's** (hand-off H11) is the guarantee: it works with no account, it is the only half that can write `archive/` and `state/ingest-seen.md`, and it is what a pre-C1 install runs — `sync_tasks` gains `first_run`, and a past-due item on a first run is **one `create` into `archive/`** with `status: archived` and `archived_reason: imported-past`, plus one `record_seen`. Not skipped (the uid would be unseen and the next run would create it) and not created-then-deleted (two journal records and a note that briefly ranks). The **server's** `GET /ingest-ics?first_run=1` returns `past_due_uids` as corroboration and as what the wizard counts; when they disagree the device wins, because the device knows the vault's timezone. **Strictly before today, never before *now*** — an item due at 23:59 today is today's work; the residue, stated so nobody reads exit-gate 7b as a stronger promise than it is, is that a vault created at 14:00 still imports this morning's 09:00 deadline as a live, already-overdue task, and that is the right side to err on. Later runs are unchanged, because an item that goes past due while the vault is watching is exactly what the system exists to shout about. **The `first_run` predicate is ruling R-C2-9's** (the row below), not the seen-ledger's. Carried by `ingest_on_a_fresh_vault_archives_past_due_items` |
+| §11a | **R-C2-9: `first_run` is the absence of `state/today.md`, not of `state/ingest-seen.md`** | ruling of 2026-09-09, on the re-review's Critical 1 | **Task 8a / hand-off H11, Change 1.** The amendment's first draft derived the flag from `state/ingest-seen.md`. That ledger is shared: `coursework` imports `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the slot order is `coursework → ingest → judge → rank` — so the file exists by the time `ingest` runs and R-OB-3 never fires on the one slot it was written for. `ingest::is_first_run(vault) = !vault.join("state").join("today.md").exists()` instead: `today.md` is written by `rank`, the last step, and it is the same predicate the app already uses to decide a vault needs its first slot (`app/src/scheduler.rs::needs_first_run`, main `f8649d5`). **Residue, accepted:** a first slot that fails before `rank` makes the next slot "first" again — nothing is double-archived (the uid is in the seen-ledger) and no page exists yet for the student to have seen the difference. Carried by `first_run_is_the_absence_of_today_md_not_of_ingest_seen` |
+| §11a | **R-C2-8: `apply_map_cards` may not round-trip `config/ingest.yaml`** — the mapping is inserted at the text level and only ever ADDS a key | ruling of 2026-09-09, on CLAUDE.md's engine invariant | **Task 7a, step 7.** The first draft of `write_mapping` parsed the file with `serde_yaml_ng` and wrote it back with `to_string`, on the reading that CLAUDE.md's "no note is ever parsed and re-dumped" is a rule about *notes*. **Overruled:** the invariant is absolute, `src/yamlemit.rs` is the crate's one YAML emitter, and `scaffold::ingest_yaml` writing the file at birth is creation, not a rewrite. `write_mapping` now finds the `courses:` / `sections:` line, inserts three lines beneath it at the file's own indentation through `pystr::read_text` / `write_text`, and changes exactly one existing line — a `courses: {}` scalar replaced by the block form. **The lost ability to update an existing key costs nothing**: a mapped book never yields a card, so no card ever names a key that is already there. Carried by `a_mapping_is_inserted_under_an_existing_block`, `an_empty_flow_mapping_becomes_the_block_form`, `a_second_apply_of_the_same_key_is_a_no_op` and `every_byte_outside_the_inserted_lines_is_unchanged`; stated in *Interfaces with C1* contract 4a |
+| §11a | **R-OB-2 (C1): the sign-in window also captures the enrolled course list and seeds `courses/` and `course_map`** | cloud design §11a | **C1's, and named here because C2 is the visible consequence of it not existing yet.** Until it lands, a fresh vault has no `course_map` and no `courses/` notes, so every Blackboard task arrives `course: null` with `needs_enrichment: true` — which is the accepted judgment gap, and which C2's `/judge-task` is the answer to (§11a's own last sentence). C2 builds none of it; `Heuristics::knows_course` already degrades correctly to "no course rather than a wrong one" |
 | §5.2 | Confidence floor 0.6, known-course check; the log holds ids, field values and confidences and **never the body** | cloud design §5.2, §5.6 | Task 2's `validate()` and `logJudgment()`. The `judgments` table has no column a body can go in, and Task 2's `a_body_token_reaches_no_judgment_row` plants a token and proves it |
 | §5.2 | Per-account daily caps (enrichment 200, events 300, email 500), a per-call timeout, a monthly budget alert | cloud design §5.2 | Task 1's `usage_daily`, Task 2's `chargeCap()`, Task 3's `CALL_TIMEOUT_MS`, Task 14's `monthly_spend` view and its alert threshold |
 | §5.3 | `origin = 'gmail_api'` on every derived row; the (c) export filter excludes them; message text discarded after judgment | cloud design §5.3, §9 | Task 11: the `origin` column, `export_training_rows()` and `gmail_rows_are_excluded_from_the_training_export` |
@@ -256,6 +261,28 @@ create index if not exists corrections_judgment_kind_ts on public.corrections (j
 - **There is no `features` column and C2 does not ask for one** (ruling R-X-11). Rule promotion reads its four keys from `judgment_features` over `judgments.fields`, which is where `featureMap` puts them — the correction does not have to carry them.
 
 
+**4a. The coursework mapping — C1 writes the first one, C2 writes the rest, and both write the same file** (§11a, R-OB-1). The mapping from a discovered zyBook code or VHL section id to a course slug lives in the **vault's `config/ingest.yaml`**, under `coursework.zybooks.courses.<code>` and `coursework.vhl.sections.<id>`, each `{course, label}`:
+
+```yaml
+coursework:
+  zybooks:
+    enabled: true
+    credential_target: 'knowlu/<profile_id>/zybooks'
+    courses:
+      UACS100Fall2026: { course: cs-100, label: CS 100 }
+  vhl:
+    enabled: true
+    credential_target: 'knowlu/<profile_id>/vhl'
+    sections:
+      '2102121': { course: gn-103, label: GN 103 Hausaufgaben }
+```
+
+- **The two writers derive `label:` differently, and that is a decision, not a slip.** C1's wizard carries the label the student typed or the discovery found, so a VHL section can be `GN 103 Hausaufgaben` as in the example above. A C2 card derives it mechanically from the confirmed course slug (`gn-103` → `GN 103`), because one field on a card is one decision and this one is spelling. The label prefixes every title the parser produces, so the same section mapped by the two paths yields two title prefixes — both correct, one longer. A student who wants the longer one edits the file, which is the point of it being text.
+- **C1** writes the initial mapping at onboarding: after the first coursework fetch the wizard shows the discovered books and sections with a suggested course and the student confirms them (R-OB-1's other half). C1 owns that panel and `scaffold`.
+- **C2** writes every later one, and only through a card the student approved: `/ingest-coursework` returns a `proposals` array for anything the mapping does not know, the engine files a `kind: coursework-map` approval, and `coursework::apply_map_cards` writes the confirmed mapping into the same file before the next fetch.
+- **It is not a `sources` row and there is no server-side copy.** §4.3 is the reason — *the parsers move; the credentials and the vault stay* — and the mapping is already a request field the device sends (redacted) on every call. A second home would make two writers of one value that the student can also edit by hand, which is VISION's *every automation is editable text*.
+- **The write is a text-level insertion, and it may only ever ADD a key** (ruling **R-C2-8**). CLAUDE.md's invariant has no config exemption — *no vault file is parsed and re-dumped*, and `src/yamlemit.rs` is the one YAML emitter — so `apply_map_cards` does **not** round-trip the file through `serde_yaml_ng::to_string`. `write_mapping` finds the `coursework.zybooks.courses:` (or `coursework.vhl.sections:`) line, inserts the new key's three lines directly beneath it at the file's own indentation, and touches no other byte; the single exception is a `courses: {}` / `sections: {}` scalar, replaced in place by the block form the insertion needs. C1's `scaffold::ingest_yaml` writing this file at birth is **creation**, which is a different act. **"It cannot update an existing key" costs nothing**: a book or section that is already mapped never yields a card — `route_zybook` answers `Mapped`, `parse_vhl` finds its section, and `/ingest-coursework` reports no proposal — so no card ever asks for a key that is already there. A second apply of the same key is a logged no-op that does not open the file for writing; a student who wants to change a mapping edits the file, which is the point of it being text. The **card** is a note and is journalled through `write` like everything else, which is where the audit trail lives.
+
 **5. `cloud/supabase/functions/_shared/entitlement.ts`** — C1's, imported by every C2 function and called first:
 
 ```ts
@@ -330,13 +357,21 @@ pub mod cloudmodel;
     // the service, and a non-zero step is retry backoff and an amber tray twice a day forever.
     // Exit 1 now means what it says: there was no way at all to get a feed.
     let cloud = crate::cloudmodel::resolve(vault).ok();
+    // R-OB-3 (hand-off H11), by R-C2-9's predicate: this vault has never been through a whole slot
+    // if `rank` has never written `today.md`. NOT the seen-ledger — `coursework` runs before
+    // `ingest` in the same slot and calls `record_seen`, so that file exists on the very first run.
+    let first_run = crate::ingest::is_first_run(vault);
     let fetched = match (fetch, &cloud) {
         (Some(f), _) => {
             if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
             f(&url)
         }
-        (None, Some(client)) => match crate::cloudmodel::fetch_ics(client) {
-            Ok(text) => Ok(text),
+        // `_past` is bound and unused on purpose: the device archives on its own comparison, which
+        // is the guarantee (it knows the vault's timezone), and the service's list is corroboration
+        // and what the wizard counts. Binding it here is what makes the next reader ask which half
+        // is authoritative; the answer is in `fetch_ics`'s doc comment.
+        (None, Some(client)) => match crate::cloudmodel::fetch_ics(client, first_run) {
+            Ok((text, _past)) => Ok(text),
             Err(e) if url.is_empty() => {
                 return (1, vec![format!("ingest: no feed — the service is unavailable ({e}) and no ics_url is configured")]);
             }
@@ -873,7 +908,205 @@ C1's third assertion — `console.js` contains neither `"connect_google"` nor `g
 **If any part of (a) cannot land at merge, land none of it.** A button without (a2)/(a3) connects a calendar the engine never reads; (a4) without the two assertion changes turns two suites red. Phase (b) is separable and can land alone or not at all. The fallback in every case is the one this plan already relies on: **the personal calendar reaches Knowlu by its secret iCal address**, which is C1's `calendar_ics` path and works with no Google grant at all. Nothing else in C2 depends on H9 — `/ingest-calendar` still serves `?name=personal`, and `google-connect` simply has no caller until the button exists.
 
 
-### H10 — nothing for the coursework split
+### H11 — `engine/src/ingest.rs`, the first-run archive (needed by Task 8a; §11a, ruling R-OB-3)
+
+**This is the half that is the guarantee.** It works with no account, it is the only half that can write `archive/` and `state/ingest-seen.md`, and it is what a pre-C1 install runs. The service's `past_due_uids` corroborates it and is what the wizard counts; when the two disagree the device wins, because the device knows the vault's own timezone.
+
+**Change 1 — the predicate `ingest` alone owns** (ruling **R-C2-9**). Beside `load_seen` / `record_seen`:
+
+```rust
+/// R-OB-3: is this the first ingest this vault has ever had?
+///
+/// **The absence of `today.md`, and deliberately not the absence of `state/ingest-seen.md`**
+/// (ruling R-C2-9). That ledger is not `ingest`'s alone: `coursework` imports
+/// `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the
+/// slot order is `coursework → ingest → judge → rank`. So on a genuinely fresh vault the
+/// seen-ledger already exists by the time `ingest` looks at it, and a flag derived from it is
+/// `false` on exactly the run R-OB-3 was written for. `today.md` is written by `rank`, the LAST
+/// step of the slot, so the first `ingest` always sees it absent and every later one sees it
+/// present.
+///
+/// It is also the predicate the app already uses to decide a vault needs its first slot at all
+/// (`app/src/scheduler.rs::needs_first_run`, main `f8649d5`), so the two halves of "this vault has
+/// never been through a slot" now agree by construction rather than by coincidence.
+///
+/// **The residue, and it is acceptable:** a first slot that dies before `rank` leaves `today.md`
+/// absent, so the *next* slot is "first" again and archives whatever has gone past in between.
+/// Nothing is double-archived — the uid is already in the seen-ledger — and no page has been
+/// rendered for the student to have seen the difference, because `today.md` not existing is
+/// precisely the premise.
+pub fn is_first_run(vault: &Path) -> bool {
+    !vault.join("state").join("today.md").exists()
+}
+```
+
+**Change 2 — one constant and one parameter.** Beside `NOTE_TEMPLATE`:
+
+```rust
+/// R-OB-3: why a note went straight to `archive/` on a first ingest. A frontmatter field rather
+/// than a naming convention, so a human reading the note in six months can see it, and so a future
+/// `surface` view can filter on it without parsing a filename.
+pub const IMPORTED_PAST: &str = "imported-past";
+
+/// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
+/// deliberately a second template rather than a substitution on the first, because the two differ
+/// in what they MEAN and a reader should not have to diff them to see it.
+pub const IMPORTED_PAST_TEMPLATE: &str = r#"---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: 1.0
+effort_confidence: low
+effort_source: inferred
+importance: 3
+importance_reason: "pending enrichment"
+status: archived
+archived_reason: imported-past
+progress: 0
+created_by: blackboard
+source_uid: {uid}
+needs_enrichment: false
+---
+
+{body}
+"#;
+```
+
+`needs_enrichment: false`, deliberately: an archived item is not work, and flagging it would send every stale import to `/judge-task` at a penny a time for nothing.
+
+**Change 3 — `sync_tasks` takes `first_run`.** Its signature gains one parameter, after `today`:
+
+```rust
+pub fn sync_tasks(
+    events: &[Event],
+    vault: &Path,
+    course_map: &[(String, String)],
+    ctx: Option<&crate::write::WriteContext>,
+    journal: &mut crate::journal::Journal,
+    today: Option<Date>,
+    /// R-OB-3. `true` only on a vault that has never been through a whole slot — `is_first_run`
+    /// above, which is the absence of `today.md` and **not** of the seen-ledger (R-C2-9).
+    /// `run_lines` computes it; every caller in the tests passes `false`, which is the behaviour
+    /// they were written against.
+    first_run: bool,
+) -> Vec<String> {
+```
+
+**Change 4 — the create branch.** Immediately after `let course = match_course(event, course_map);` and before the slug is built, insert:
+
+```rust
+        // R-OB-3: a feed's window reaches backwards, and a vault born today has no history to
+        // reconcile against — Quinn's first slot imported four items already past due, one of them
+        // from 2025. On a FIRST ingest such an item is recorded as seen and written straight into
+        // `archive/`, so the first page a student ever sees shows the future.
+        //
+        // **Not skipped** — skipping leaves the uid unseen and the next run creates it. **Not
+        // created-then-deleted** — that is two journal records and a note that briefly ranks. One
+        // `create` into `archive/`, one `record_seen`, one line.
+        //
+        // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work,
+        // and the one thing worse than importing a stale task is archiving a live one.
+        let past_due = first_run
+            && match due {
+                Due::Date(d) => d < stamp_date,
+                Due::DateTime(dt) => dt.date() < stamp_date,
+            };
+        if past_due {
+            let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
+            let archive_dir = vault.join("archive");
+            let _ = std::fs::create_dir_all(&archive_dir);
+            let mut path = archive_dir.join(format!("{slug}.md"));
+            let mut suffix = 2;
+            while path.exists() {
+                path = archive_dir.join(format!("{slug}-{suffix}.md"));
+                suffix += 1;
+            }
+            let body = IMPORTED_PAST_TEMPLATE
+                .replace("{title}", &json_dumps_unicode(&event.title))
+                .replace(
+                    "{course}",
+                    &course.as_deref().map(json_dumps_unicode).unwrap_or_else(|| "null".to_string()),
+                )
+                .replace("{due}", &new_due)
+                .replace("{uid}", &json_dumps_unicode(&event.uid))
+                .replace("{body}", &event.description);
+            let rel_path = crate::ids::rel(vault, &path);
+            match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
+                Ok(created) => {
+                    let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    log.push(format!("archived (imported-past) {stem}"));
+                    known.insert(event.uid.clone(), created);
+                    let _ = record_seen(vault, &event.uid, &event.title, &stamp);
+                }
+                Err(err) => log.push(format!("skipped (unwritable): {err}")),
+            }
+            continue;
+        }
+```
+
+with, beside the existing `let stamp = …` at the top of `sync_tasks`:
+
+```rust
+    let stamp_date = today.unwrap_or_else(|| jiff::Zoned::now().date());
+    let stamp = stamp_date.strftime("%Y-%m-%d").to_string();
+```
+
+(`stamp` is unchanged in value; the date it was formatted from is now kept, because the comparison needs it and re-parsing a string it just printed would be the wrong shape.)
+
+**Change 5 — `run_lines` computes the flag and passes it.** Two edits. First, beside the `cloud` binding H3 adds:
+
+```rust
+    // R-OB-3, by R-C2-9's predicate: this vault has never been through a whole slot if `rank` has
+    // never written `today.md`. NOT the seen-ledger — `coursework` runs before `ingest` in the
+    // same slot and calls `record_seen`, so that file exists on the very first run.
+    let first_run = is_first_run(vault);
+```
+
+Second, the `sync_tasks` call gains it:
+
+```rust
+    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None, first_run);
+```
+
+and, when the service also answered (H3's `(None, Some(client))` arm), the two lists are unioned — the device's own check is the guarantee and this only adds to it:
+
+```rust
+    if first_run {
+        log.push(format!("ingest: first run — {} item(s) already past were archived", 
+            log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
+    }
+```
+
+**Change 6 — H3's two `fetch_ics` call sites** take the flag and the tuple (Task 8a step 6):
+
+```rust
+        (None, Some(client)) => match crate::cloudmodel::fetch_ics(client, first_run) {
+            Ok((text, _past)) => Ok(text),
+```
+
+`_past` is bound and unused on purpose: the device archives on its own comparison, and binding the list here is what makes the next reader ask which half is authoritative. The answer is in `fetch_ics`'s doc comment.
+
+**Every existing caller of `sync_tasks` passes `false`.** There are three, all in `ingest.rs`'s own test module; `false` is exactly the behaviour they were written against, so no assertion moves. `cli.rs` does not call it.
+
+### H12 — `engine/src/approvals.rs`, one more arm (needed by Task 7a; ruling R-OB-1)
+
+The same shape as H6's `kind: rule` arm, and for the same reason. Insert it beside that one, in `process_approvals`' `status == "approved"` chain:
+
+```rust
+        } else if kind == "coursework-map" {
+            // C2 (§11a, R-OB-1): a mapping from an unmapped zyBook or VHL section to a course.
+            // `rank` does not apply it — the next `coursework` step does, before it fetches, so a
+            // card approved at 11am is a mapping the noon slot already uses. Left exactly as it is
+            // here, and deliberately not an `unknown kind` warning: a WARN line on every run until
+            // the next slot would train the reader to ignore the list.
+        } else {
+```
+
+A **rejected** card is archived by `process_approvals` as any rejection is, and the mapping is simply never written. It is **not** re-proposed on the next slot, and that needs a guard rather than a hope: `write::create`'s `Exists` check only sees `approvals/`, so Task 7a's `asked_map_keys` scans `approvals/` **and** `archive/` for a `kind: coursework-map` card carrying the same `map_key`, and suppresses the proposal while that card's own `expires:` is still in the future. **Where the memory lives:** the card itself, at `archive/map-<source>-<slug>.md`, which the vault keeps forever and whose move the journal records — no new state anywhere. **For how long:** 30 days from the day it was minted (`write_map_card` sets `expires` to `today + 30`), after which a still-unmapped book is proposed once more. That is the right loop: a student who does not recognise a book is asked again next month, not never and not twice a day.
+
+
+### H13 — nothing for the coursework split
 
 Recorded so the next reader does not go looking: `coursework.rs` is wholly C2's for this stream, and the cloud branch Task 7 adds is inside it. No other file changes for the coursework split.
 
@@ -4731,7 +4964,7 @@ git commit -F .git-commit-msg.txt   # "cloud: the VHL parser moves server-side, 
 - Consumes: Tasks 5 and 6's parsers; Task 4's `CloudClient`.
 - Produces:
   - Request `{ timezone: string, sources: Array<{ name: "zybooks", config: object, books: Array<{ code: string, payload: unknown }> } | { name: "vhl", config: object, html: string }> }`
-  - Reply `{ assignments: Assignment[], warnings: string[] }` — warnings already carry the `"{source}: "` prefix `collect` gives them.
+  - Reply `{ assignments: Assignment[], warnings: string[] }` — warnings already carry the `"{source}: "` prefix `collect` gives them. **Task 7a adds a third field, `proposals`** (R-OB-1).
   - `zybooks::fetch_payloads(email: &str, password: &str) -> Result<Vec<(String, Json)>, SourceError>` — sign in, list the codes, fetch each book's payload. **No parsing, no routing.** It takes the two strings rather than the config mapping because the credential is read by the caller (`coursework::collect_cloud`, which owns `wincred`) and this function must never be a second place a `credential_target` is resolved. `#[cfg(windows)]`, like every function on the credentialed path.
   - `coursework::CLOUD_CONFIG_KEYS: [&str; 2]` (`["zybooks", "vhl"]`) and `coursework::redact(cfg: &Mapping, source: &str) -> Mapping`
   - `coursework::collect_cloud(config: &Mapping, warnings: &mut Vec<String>, client: &CloudClient) -> Vec<Assignment>`
@@ -5214,6 +5447,911 @@ git commit -F .git-commit-msg.txt   # "engine+cloud: coursework fetches on the d
 
 ---
 
+---
+
+### Task 7a: R-OB-1 — an unmapped book or section is a proposal, never a silent skip
+
+**Why this task exists.** Quinn's first slot on the fresh vault produced no zyBooks or VHL work at all. The wizard had stored both portal logins, but nothing had mapped the discovered zyBook and the discovered VHL section to a course — so `route_zybook` answered `Unmapped`, `parse_dashboard` answered `section … not in config`, and both became one `WARN` line in `state/runner-log.md` that nobody reads at 8am. **A source the student connected, that authenticated, that returned a payload, and that then produced nothing, is the failure this system exists to prevent** (VISION: *a source that later breaks fails visibly rather than silently going quiet*). It becomes a card in the deck.
+
+**Where the mapping lives — decided, and it is the vault** (§4.3: *the parsers move; the credentials and the vault stay*). The three candidates were the vault's `config/ingest.yaml`, a server-side row beside `sources`, and both. It is the vault, for three reasons: the mapping is **already there** and the device already sends a redacted copy of it on every `/ingest-coursework` call, so nothing new travels; **C1's wizard writes the initial mapping** into that same file (R-OB-1's other half), and a second home would make two writers of one value; and a student can open and edit it, which is VISION's *every automation is editable text*. A server-side copy would be a second source of truth for a value the parser only ever sees as a request field anyway.
+
+**And the write into it is a text-level insertion** (ruling **R-C2-8**). The obvious implementation — parse the file with `serde_yaml_ng`, insert the key, `to_string` it back — is forbidden: CLAUDE.md's *no vault file is parsed and re-dumped* has no config exemption, and `src/yamlemit.rs` is the crate's one YAML emitter. `write_mapping` (step 7) therefore finds the `courses:` / `sections:` line and splices three lines in beneath it at the file's own indentation, rewriting exactly one existing line and only when it is the birth shape `courses: {}`. **It can only add a key, and that is free**: a book that is already mapped never yields a card, so no card ever names a key the file already has.
+
+**Files:**
+- Modify: `cloud/supabase/functions/ingest-coursework/handler.ts` (the reply gains `proposals`), `engine/src/coursework.rs` (write the cards, apply an approved one)
+- Test: `cloud/supabase/functions/ingest-coursework/handler_test.ts`, new tests in `engine/src/coursework.rs`
+- **Hand-off this task needs:** H12 (`engine/src/approvals.rs` — one arm for `kind: coursework-map`)
+
+**Interfaces:**
+- Consumes: Task 7's `ingestHandler`, `routeZybook`, `collect_cloud`.
+- Produces:
+  - The reply gains `proposals: Array<{ source: "zybooks" | "vhl", key: string, label: string, suggested_course: string | null }>`.
+  - `suggestCourse(name: string): string | null` in `handler.ts`.
+  - `coursework::MAP_ACTOR: &str = "agent:knowlu.coursework"`, `coursework::write_map_card`, `coursework::apply_map_cards`.
+
+- [ ] **Step 1: Write the failing server test** — append to `cloud/supabase/functions/ingest-coursework/handler_test.ts`:
+
+```ts
+Deno.test("an unknown zybook is one proposal and zero warnings", async () => {
+  // R-OB-1: the old behaviour was `warnings: ["zybooks: zybook X not in config; skipped"]` and
+  // nothing else — a line in a log nobody reads, on the very first run of a vault whose whole
+  // point was to show the student their coursework.
+  const body = JSON.stringify({
+    timezone: "America/Chicago",
+    sources: [{
+      name: "zybooks",
+      config: { courses: {}, ignore: ["HowToUseZyBooks2"], categories: {}, effort: {}, importance: {} },
+      books: [{ code: "UACS100Fall2026", payload: { assignments: [] } }],
+    }],
+  });
+  const reply = await (await ingestHandler(OK)(new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }))).json();
+  assertEquals(reply.assignments, []);
+  assertEquals(reply.warnings, [], "an unmapped book is a proposal, not a warning");
+  assertEquals(reply.proposals, [{
+    source: "zybooks",
+    key: "UACS100Fall2026",
+    label: "UACS100Fall2026",
+    suggested_course: "cs-100",
+  }]);
+});
+
+Deno.test("an ignored book is still silent, and a known one still yields its items", async () => {
+  // `HowToUseZyBooks2` is zyBooks' own onboarding book: a proposal there would fire on every
+  // healthy run for every student, which is exactly the noise R-OB-1 is trying to stop.
+  const payload = JSON.parse((await Deno.readTextFile(new URL("zybooks-assignments.json", FIXTURES))).replace(/^\uFEFF/, ""));
+  const body = JSON.stringify({
+    timezone: "America/Chicago",
+    sources: [{
+      name: "zybooks",
+      config: {
+        courses: { "cs-100-2026": { course: "cs-100", label: "CS 100" } },
+        ignore: ["HowToUseZyBooks2"],
+        categories: { HW: "hw", Lab: "lab", Project: "project" },
+        effort: { minutes_per_section: 6, floors: { hw: 0.25, lab: 0.5, project: 1.0 } },
+        importance: { hw: 2, lab: 2, project: 2 },
+      },
+      books: [{ code: "cs-100-2026", payload }, { code: "HowToUseZyBooks2", payload: { assignments: [] } }],
+    }],
+  });
+  const reply = await (await ingestHandler(OK)(new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }))).json();
+  assertEquals(reply.assignments.length, 24);
+  assertEquals(reply.proposals, []);
+  assertEquals(reply.warnings, []);
+});
+
+Deno.test("an unmapped VHL section becomes a proposal with no course to suggest", async () => {
+  // The dashboard carries a section id and a due date and no course name at all, so there is
+  // nothing to guess from — and a guess would be worse than a question. The card asks.
+  const html = await Deno.readTextFile(new URL("vhl-dashboard.html", FIXTURES));
+  const body = JSON.stringify({
+    timezone: "America/Chicago",
+    sources: [{ name: "vhl", config: { sections: {}, importance: 3, importance_reason: "" }, html }],
+  });
+  const reply = await (await ingestHandler(OK)(new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }))).json();
+  assertEquals(reply.assignments, []);
+  assertEquals(reply.proposals, [{ source: "vhl", key: "2102121", label: "VHL section 2102121", suggested_course: null }]);
+  assertEquals(reply.warnings.filter((w: string) => w.includes("not in config")), []);
+});
+
+Deno.test("a course is suggested from a zybook code, or not at all", () => {
+  // The institution prefix comes off only when the term suffix says the code carries one, so a
+  // department that happens to be four letters keeps all four.
+  assertEquals(suggestCourse("UACS100Fall2026"), "cs-100");
+  assertEquals(suggestCourse("UAMATH120Fall2026"), "math-120");
+  assertEquals(suggestCourse("PH106Spring2027"), "ph-106");
+  assertEquals(suggestCourse("MATH125"), "math-125");
+  assertEquals(suggestCourse("cs-100-2026"), "cs-100");
+  // zyBooks' own onboarding book, and a VHL section id: neither is a course code.
+  assertEquals(suggestCourse("HowToUseZyBooks2"), null);
+  assertEquals(suggestCourse("2102121"), null);
+  assertEquals(suggestCourse("SomeBookWithNoCode"), null);
+  assertEquals(suggestCourse(""), null);
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/functions/ingest-coursework/` → `reply.proposals` is `undefined` and the warnings are the old ones.
+
+- [ ] **Step 3: Write the server half** in `cloud/supabase/functions/ingest-coursework/handler.ts`.
+
+```ts
+/// One thing the account's mapping does not know about (R-OB-1).
+export interface MapProposal {
+  source: "zybooks" | "vhl";
+  /** What goes in the config: the zybook code, or the VHL section id. */
+  key: string;
+  /**
+   * What a human reads on the card — **display only**. It is the vendor's own name for the book
+   * (`UACS100Fall2026`, `VHL section 2102121`), which is exactly what the config's `label:` must
+   * NOT be: that one prefixes every title the parser produces (`CS 100 HW 01`), so `write_mapping`
+   * derives it from the course slug the student confirmed and never from this.
+   */
+  label: string;
+  /** A guess the student confirms or replaces, or null when there is nothing to guess from. */
+  suggested_course: string | null;
+}
+
+/** zyBooks' term words. Their presence at the end is what marks an institution-hosted code. */
+const TERM = /(?:Spring|Summer|Fall|Winter)\s?\d{4}\s*$/i;
+
+/**
+ * A course slug from a zybook code, or null.
+ *
+ * zyBooks mints an **institution-hosted** book as `<II><DEPT><number><Term><Year>` —
+ * `UACS100Fall2026` is the University of Alabama's CS 100 — and a plain catalogue book as
+ * `<DEPT><number>`, `MATH125`. **The term suffix is the only marker there is**: nothing inside the
+ * letter run says where `UA` stops and `CS` starts, and an unconditional strip would turn `MATH125`
+ * into `th-125`. So the two-letter institution prefix comes off only when the code carries a term
+ * AND the letter run is longer than a two-letter department could be. That leaves `MATH125` and
+ * `PH106Spring2027` alone and turns `UAMATH120Fall2026` into `math-120`.
+ *
+ * A three-letter institution abbreviation would still guess wrong, and that is **allowed**: the
+ * card shows the guess, the student confirms or replaces it, and `write_mapping` never writes a
+ * value nobody confirmed. A wrong guess costs one tap.
+ *
+ * `null` when nothing matches, because an invented slug on a card is worse than a blank one: the
+ * student would have to notice it was wrong rather than fill it in.
+ */
+export function suggestCourse(name: string): string | null {
+  const m = /^([A-Za-z]{2,8})[\s_-]?(\d{3,4})(.*)$/.exec(name.trim());
+  if (m === null) return null;
+  const [, letters, number, tail] = m;
+  const dept = TERM.test(tail) && letters.length > 2 ? letters.slice(2) : letters;
+  return `${dept.toLowerCase()}-${number}`;
+}
+
+/** `section <id> not in config; skipped` — the one VHL warning that is really a proposal. */
+const VHL_UNMAPPED = /^section (\d+) not in config; skipped$/;
+```
+
+`pickZybooks` gains the `proposals` out-parameter and stops warning:
+
+```ts
+function pickZybooks(
+  source: Obj,
+  timeZone: string,
+  warnings: string[],
+  proposals: MapProposal[],
+): Assignment[] {
+  const cfg = obj(source.config);
+  const courses = obj(cfg.courses);
+  const ignore = Array.isArray(cfg.ignore) ? cfg.ignore.map(String) : [];
+  const out: Assignment[] = [];
+  for (const raw of Array.isArray(source.books) ? source.books : []) {
+    const book = obj(raw);
+    const code = String(book.code ?? "");
+    const routing = routeZybook(code, courses, ignore);
+    // `ignored` stays silent: `HowToUseZyBooks2` is zyBooks' own onboarding book, and a proposal
+    // there would fire on every healthy run for every student.
+    if (routing.kind === "ignored") continue;
+    if (routing.kind === "unmapped") {
+      // R-OB-1: never a warning. A book that authenticated and returned a payload and then
+      // produced nothing is the failure the deck exists to surface.
+      proposals.push({ source: "zybooks", key: code, label: code, suggested_course: suggestCourse(code) });
+      continue;
+    }
+    out.push(...parseAssignments(
+      book.payload,
+      String(routing.mapping.course ?? ""),
+      String(routing.mapping.label ?? ""),
+      cfg,
+      timeZone,
+      warnings,
+    ));
+  }
+  return out;
+}
+```
+
+and the VHL branch **translates the parser's own warning** rather than changing the parser — `parse_vhl.ts` stays byte-identical to the frozen `vhl-parsed-reference.json`, and the policy lives in the handler where the zyBooks policy already does:
+
+```ts
+        if (name === "vhl") {
+          items = parseDashboard(String(source.html ?? ""), obj(source.config), own);
+          // The parser reports an unmapped section as a warning because that is what the Python it
+          // was ported from did, and its behaviour is frozen against a reference. R-OB-1 is a
+          // policy about what to DO with that, so it is applied here: the warning becomes a
+          // proposal and is dropped from the list.
+          for (let i = own.length - 1; i >= 0; i--) {
+            const m = VHL_UNMAPPED.exec(own[i]);
+            if (m === null) continue;
+            proposals.push({
+              source: "vhl",
+              key: m[1],
+              // The dashboard carries a section id and due dates and no course name at all, so
+              // there is nothing to guess from — and a guess would be worse than a question.
+              label: `VHL section ${m[1]}`,
+              suggested_course: null,
+            });
+            own.splice(i, 1);
+          }
+        }
+```
+
+with `const proposals: MapProposal[] = []` beside `assignments` and `warnings`, `proposals` passed into `pickZybooks`, and the reply becoming `Response.json({ assignments, warnings, proposals })`.
+
+**One consequence, and it is deliberate:** a source whose every book is unmapped now returns zero assignments, which still trips the *an-empty-parse-is-a-failure* rule and still warns `zybooks: 0 assignments parsed; treating as failure`. That warning is correct — the run really did produce nothing — and it now sits **beside** a card that says what to do about it, which is the whole difference.
+
+- [ ] **Step 4: Run it and watch it pass.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/functions/ingest-coursework/` → 4 more tests than at the end of Task 7.
+
+- [ ] **Step 5: Write the failing engine tests** — in `engine/src/coursework.rs`'s test module:
+
+```rust
+    /// R-OB-1: the reply's proposals become cards in the deck, one per unmapped source.
+    #[test]
+    fn an_unmapped_book_becomes_a_card_the_deck_can_answer() {
+        let vault = scratch_vault("map-card");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let stem = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(),
+                key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(),
+                suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .expect("the card writes");
+        let card = std::fs::read_to_string(vault.join("approvals").join(format!("{stem}.md"))).unwrap();
+        assert!(card.contains("kind: coursework-map"));
+        assert!(card.contains("source: zybooks"));
+        assert!(card.contains("map_key: UACS100Fall2026"));
+        assert!(card.contains("course: cs-100"));
+        assert!(card.contains("status: pending"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card is never minted twice for one key — the next slot fetches the same unmapped book.
+    #[test]
+    fn a_map_card_is_never_minted_twice_for_one_key() {
+        let vault = scratch_vault("map-once");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let p = MapProposal {
+            source: "vhl".into(), key: "2102121".into(),
+            label: "VHL section 2102121".into(), suggested_course: None,
+        };
+        let today = jiff::civil::date(2026, 9, 9);
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_ok());
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_err());
+        assert_eq!(crate::approvals::sorted_md(&vault.join("approvals")).len(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card the student REJECTED is not re-asked on the next slot — `write::create`'s `Exists`
+    /// guard only sees `approvals/`, and a rejected card lives in `archive/`.
+    #[test]
+    fn a_rejected_map_card_is_not_re_asked_until_it_expires() {
+        let vault = scratch_vault("map-rejected");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let today = jiff::civil::date(2026, 9, 9);
+        let p = MapProposal {
+            source: "zybooks".into(), key: "UACS100Fall2026".into(),
+            label: "UACS100Fall2026".into(), suggested_course: Some("cs-100".into()),
+        };
+        let stem = write_map_card(&vault, &p, today, &ctx, &mut journal).unwrap();
+
+        // The student says no, and `process_approvals` settles the card into `archive/`.
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "rejected".to_string())],
+            &ctx, &mut journal, &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        crate::write::delete(&vault, &format!("approvals/{stem}.md"), &ctx, &mut journal).unwrap();
+        assert!(crate::approvals::sorted_md(&vault.join("approvals")).is_empty());
+
+        // The next slot fetches the same unmapped book and asks nothing.
+        let key = ("zybooks".to_string(), "UACS100Fall2026".to_string());
+        assert!(asked_map_keys(&vault, today).contains(&key), "the archived card is the memory");
+        // …until it expires, 30 days out, when the question is worth asking again.
+        assert!(
+            asked_map_keys(&vault, jiff::civil::date(2026, 10, 10)).is_empty(),
+            "asked again next month, not twice a day forever"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Approving one writes the mapping into `config/ingest.yaml` and archives the card.
+    #[test]
+    fn an_approved_map_card_writes_the_mapping_and_is_archived() {
+        let vault = scratch_vault("map-apply");
+        std::fs::write(
+            vault.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n",
+        )
+        .unwrap();
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let stem = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(), key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(), suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .unwrap();
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("mapped UACS100Fall2026")), "{lines:?}");
+        let cfg = crate::pystr::read_text(&vault.join("config").join("ingest.yaml")).unwrap();
+        assert!(cfg.contains("\"UACS100Fall2026\":"), "{cfg}");
+        assert!(cfg.contains("course: \"cs-100\""), "{cfg}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: the insertion goes directly beneath an existing `courses:` line, at the
+    /// indentation the file already uses, and the entry that was there is left exactly as it was.
+    #[test]
+    fn a_mapping_is_inserted_under_an_existing_block() {
+        let vault = scratch_vault("map-insert");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     'UAMATH120Fall2026':\n        course: 'math-120'\n        label: 'MATH 120'\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+
+        assert_eq!(
+            crate::pystr::read_text(&path).unwrap(),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     \"UACS100Fall2026\":\n        course: \"cs-100\"\n        label: \"CS 100\"\n\
+             \u{20}     'UAMATH120Fall2026':\n        course: 'math-120'\n        label: 'MATH 120'\n"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: `courses: {}` — what C1's `scaffold::ingest_yaml` writes at birth — becomes the
+    /// block form, one line replaced in place at its own indentation. The VHL half is `sections`.
+    #[test]
+    fn an_empty_flow_mapping_becomes_the_block_form() {
+        let vault = scratch_vault("map-flow");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n\
+             \u{20} vhl:\n    enabled: true\n    sections: {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        assert_eq!(write_mapping(&vault, "vhl", "2102121", "gn-103"), Ok(true));
+
+        assert_eq!(
+            crate::pystr::read_text(&path).unwrap(),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     \"UACS100Fall2026\":\n        course: \"cs-100\"\n        label: \"CS 100\"\n\
+             \u{20} vhl:\n    enabled: true\n    sections:\n\
+             \u{20}     \"2102121\":\n        course: \"gn-103\"\n        label: \"GN 103\"\n"
+        );
+        // The section id survives as a STRING key, which is the whole reason it is quoted:
+        // `route_section` looks it up by the text the dashboard gave it.
+        let cfg: Yaml = serde_yaml_ng::from_str(&crate::pystr::read_text(&path).unwrap()).unwrap();
+        assert!(cfg["coursework"]["vhl"]["sections"]["2102121"]["course"].as_str() == Some("gn-103"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: a second apply of the same key is a no-op with a log line — not a duplicate key,
+    /// which would be a YAML load error and would take the whole config down with it.
+    #[test]
+    fn a_second_apply_of_the_same_key_is_a_no_op() {
+        let vault = scratch_vault("map-again");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        let once = std::fs::read(&path).unwrap();
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(false));
+        assert_eq!(std::fs::read(&path).unwrap(), once, "the file is not even opened for writing");
+
+        // And the card that asks for it a second time is still executed and archived, with the
+        // line that says why nothing changed.
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let stem = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(), key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(), suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9), &ctx, &mut journal,
+        )
+        .unwrap();
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("was already mapped")), "{lines:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), once, "still byte-identical");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8, the invariant itself: **every byte outside the inserted lines is unchanged** —
+    /// comments, blank lines, key order, the single-quoted style `scaffold::ingest_yaml` uses, and
+    /// the file's own line terminator. This is the test a `serde_yaml_ng::to_string` round trip
+    /// cannot pass, and it is why the ruling exists.
+    #[test]
+    fn every_byte_outside_the_inserted_lines_is_unchanged() {
+        let vault = scratch_vault("map-bytes");
+        let path = vault.join("config").join("ingest.yaml");
+        let original = [
+            "ics_url: 'https://lms.example.invalid/feed/a.ics'",
+            "timezone: America/Chicago",
+            "course_map: {}",
+            "calendars: []",
+            "",
+            "# Passwords are NOT here. They live in Windows Credential Manager under the",
+            "# credential_target names below.",
+            "coursework:",
+            "  zybooks:",
+            "    enabled: true",
+            "    credential_target: 'knowlu/p1/zybooks'",
+            "    ignore:",
+            "      - 'HowToUseZyBooks2'",
+            "    courses:",
+            "      'UAMATH120Fall2026':",
+            "        course: 'math-120'",
+            "        label: 'MATH 120'   # hand-edited, and it stays hand-edited",
+            "  vhl:",
+            "    enabled: true",
+            "    sections: {}",
+            "",
+        ]
+        .join("\n");
+        // Written through `write_text`, so the fixture is in THIS platform's own terminator and the
+        // comparison below is a real byte comparison rather than a line-ending artefact.
+        crate::pystr::write_text(&path, &original).unwrap();
+        let before = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        let after = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+
+        let nl = crate::pystr::NEWLINE;
+        let inserted = format!(
+            "      \"UACS100Fall2026\":{nl}        course: \"cs-100\"{nl}        label: \"CS 100\"{nl}"
+        );
+        assert!(after.contains(&format!("    courses:{nl}{inserted}      'UAMATH120Fall2026':")));
+        assert_eq!(after.replacen(&inserted, "", 1), before, "three lines added and nothing else");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card with no course on it is refused rather than writing an empty mapping — an empty
+    /// `course` would make every item from that book `course: ""`, which reads as attributed.
+    #[test]
+    fn a_map_card_with_no_course_is_refused_and_kept() {
+        let vault = scratch_vault("map-blank");
+        std::fs::write(
+            vault.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncoursework:\n  vhl:\n    enabled: true\n    sections: {}\n",
+        )
+        .unwrap();
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let stem = write_map_card(
+            &vault,
+            &MapProposal { source: "vhl".into(), key: "2102121".into(), label: "VHL section 2102121".into(), suggested_course: None },
+            jiff::civil::date(2026, 9, 9), &ctx, &mut journal,
+        )
+        .unwrap();
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("no course on the card")), "{lines:?}");
+        let card = std::fs::read_to_string(vault.join("approvals").join(format!("{stem}.md")))
+            .expect("the card survives to be edited");
+        assert!(card.contains("status: pending"), "back to pending, so it ages and expires: {card}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+```
+
+- [ ] **Step 6: Run it and watch it fail.** `cargo test -p knowlu-engine coursework::` → `cannot find function write_map_card`.
+
+- [ ] **Step 7: Write the engine half** in `engine/src/coursework.rs`.
+
+```rust
+/// The agent actor for coursework-mapping cards. `agent:` prefix, so `provenance::is_agent` holds.
+pub const MAP_ACTOR: &str = "agent:knowlu.coursework";
+
+/// One thing the account's mapping does not know about (R-OB-1), as the service reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapProposal {
+    pub source: String,
+    pub key: String,
+    pub label: String,
+    pub suggested_course: Option<String>,
+}
+
+/// The card the deck renders. `kind: coursework-map` is a kind `approvals.rs` leaves alone
+/// (hand-off H12): the decision is *applied* by the next `coursework` step, which then archives it.
+///
+/// `Err` when a card for this key already exists — the next slot fetches the same unmapped book and
+/// must not mint a second card for it. The stem carries the key, so the guard is the filename.
+/// That guard sees only `approvals/`, which is why `asked_map_keys` (above) is the real one and
+/// this is defence in depth: a **rejected** card is in `archive/` and this check cannot see it.
+pub fn write_map_card(
+    vault: &Path,
+    proposal: &MapProposal,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<String, String> {
+    let lit = |s: &str| crate::write::to_literal(&Yaml::String(s.to_string()));
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let expires = today
+        .checked_add(jiff::Span::new().days(30))
+        .unwrap_or(today)
+        .strftime("%Y-%m-%d")
+        .to_string();
+    let course = proposal.suggested_course.clone().unwrap_or_default();
+    let text = format!(
+        "---\ntype: approval\nkind: coursework-map\ntitle: {}\nstatus: pending\n\
+         proposed_at: {stamp}\nfirst_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\n\
+         created_by: coursework\nsource: {}\nmap_key: {}\ncourse: {}\n---\n\n\
+         {} returned work, and nothing in your setup says which course it belongs to — so none of \
+         it reached your list.\n\n\
+         Approve to map it. **Edit `course:` above first if the guess is wrong**, or if it is \
+         blank: it is the course slug the items will be filed under, the same one your course note \
+         uses.\n",
+        lit(&format!("Map {} to a course", proposal.label)),
+        lit(&proposal.source),
+        lit(&proposal.key),
+        if course.is_empty() { "\"\"".to_string() } else { lit(&course) },
+        proposal.label,
+    );
+    let approvals = vault.join("approvals");
+    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    // The key is in the stem, so a second card for the same book is `WriteError::Exists` and not a
+    // duplicate — the same guard `find_pending_amendment` gives an amend card.
+    let stem = format!("map-{}-{}", proposal.source, crate::ingest::slugify(&proposal.key));
+    let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+/// Every `(source, map_key)` a card has already asked about and whose card has not yet expired —
+/// `approvals/` for the live ones and **`archive/` for the decided ones**, which is the whole point.
+///
+/// The same mechanism as Task 12's `existing_rule_ids`, and for the same reason. `write_map_card`'s
+/// only other guard is `write::create`'s `Exists` on `approvals/map-<source>-<slug>.md`, and a
+/// **rejected** card is not there — `process_approvals` settles it into `archive/`. Without this
+/// the next `coursework` run finds the book still unmapped, gets the same proposal and mints a
+/// fresh card, twice a day, forever, each one charging the 15-a-day proposal budget.
+///
+/// **Where the memory lives:** in the card itself, at `archive/map-<source>-<slug>.md`. The vault
+/// keeps `archive/` forever and the journal records the move, so nothing new has to be remembered
+/// anywhere else. **For how long:** until the `expires:` that card was minted with —
+/// `write_map_card` sets it to 30 days out — after which a still-unmapped book is proposed
+/// again. That is the loop H12 describes, and this is what makes it true: a student who does not
+/// recognise a book is asked again next month, not twice a day forever.
+fn asked_map_keys(vault: &Path, today: Date) -> std::collections::BTreeSet<(String, String)> {
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let mut out = std::collections::BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("coursework-map") {
+                continue;
+            }
+            // ISO dates compare correctly as text, which is why the vault writes them that way.
+            let expires = crate::yaml::opt_text(crate::yaml::get(&meta, "expires")).unwrap_or_default();
+            if expires < stamp {
+                continue;
+            }
+            let source = crate::yaml::opt_text(crate::yaml::get(&meta, "source")).unwrap_or_default();
+            let key = crate::yaml::opt_text(crate::yaml::get(&meta, "map_key")).unwrap_or_default();
+            if !key.is_empty() {
+                out.insert((source, key));
+            }
+        }
+    }
+    out
+}
+
+/// Apply every approved `kind: coursework-map` card, then archive it.
+///
+/// **The write into `config/ingest.yaml` is a text-level insertion, never a rewrite** (ruling
+/// R-C2-8). CLAUDE.md's invariant is absolute and has no config exemption — *no vault file is
+/// parsed and re-dumped*, and `src/yamlemit.rs` is the crate's one YAML emitter. (`scaffold::
+/// ingest_yaml` writing this file at birth is **creation**, which is a different act from
+/// rewriting one that already exists.) So `write_mapping` below finds the `courses:` /
+/// `sections:` line and inserts three lines beneath it, and the *card* it came from is journalled
+/// through `write` like every other note, which is where the audit trail lives.
+pub fn apply_map_cards(vault: &Path, ctx: &WriteContext, journal: &mut Journal) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for path in crate::approvals::sorted_md(&vault.join("approvals")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("coursework-map") {
+            continue;
+        }
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "status")).as_deref() != Some("approved") {
+            continue;
+        }
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let source = crate::yaml::opt_text(crate::yaml::get(&meta, "source")).unwrap_or_default();
+        let key = crate::yaml::opt_text(crate::yaml::get(&meta, "map_key")).unwrap_or_default();
+        let course = crate::yaml::opt_text(crate::yaml::get(&meta, "course")).unwrap_or_default();
+        if course.trim().is_empty() {
+            // Kept, not archived: an empty `course` would file every item from that book under
+            // `course: ""`, which reads as attributed-to-nothing rather than unattributed. The
+            // student edits the card and approves it again.
+            //
+            // Written back to **pending**, which is what `approvals.rs` does with a recoverable
+            // refusal (`approvals.rs:1360-1368`) and for the same reason: a card left `approved` on
+            // disk is never counted, never escalated into Must do and never expires, so it re-logs
+            // this line every run forever. Pending, it ages.
+            let rel = crate::ids::rel(vault, &path);
+            let pending = vec![("status".to_string(), "pending".to_string())];
+            let _ = crate::write::write_literals(vault, &rel, &pending, ctx, journal, &WriteOpts::default());
+            lines.push(format!("coursework: {stem} not applied (no course on the card)"));
+            continue;
+        }
+        match write_mapping(vault, &source, &key, &course) {
+            Ok(inserted) => {
+                let rel = crate::ids::rel(vault, &path);
+                let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
+                let literals = vec![
+                    ("status".to_string(), "executed".to_string()),
+                    ("executed_at".to_string(), stamped),
+                ];
+                if crate::write::write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default()).is_ok() {
+                    let _ = crate::write::delete(vault, &rel, ctx, journal);
+                }
+                // R-C2-8's idempotence. `Ok(false)` is "the key was already there" — a re-approved
+                // card, or a hand edit that got there first — and it is a line, not an error: the
+                // file already says what the card was asking for, so the card is still archived.
+                lines.push(if inserted {
+                    format!("coursework: mapped {key} to {course}")
+                } else {
+                    format!("coursework: {key} was already mapped; card archived, file untouched")
+                });
+            }
+            // Unwritable — there is no `coursework.<source>:` block to insert under, so the
+            // mapping would be dead config. Same treatment as a blank course, and the same reason.
+            Err(e) => {
+                let rel = crate::ids::rel(vault, &path);
+                let pending = vec![("status".to_string(), "pending".to_string())];
+                let _ = crate::write::write_literals(vault, &rel, &pending, ctx, journal, &WriteOpts::default());
+                lines.push(format!("coursework: {stem} not applied ({e})"));
+            }
+        }
+    }
+    lines
+}
+
+/// The indentation of a line, in spaces. Vault YAML is space-indented — a tab is invalid YAML
+/// there and every reader in the crate would already have refused the file.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// A line that carries no structure: blank, or a comment. Its column means nothing, so neither
+/// helper below may let one end a block or set an indent.
+fn is_filler(line: &str) -> bool {
+    let t = line.trim_start();
+    t.is_empty() || t.starts_with('#')
+}
+
+/// The first line in `[from, end)` at exactly `depth` whose key is `name`, or `None` if the block
+/// ends first. A block ends at the first structural line indented *less* than `depth`.
+fn find_key(lines: &[String], from: usize, end: usize, name: &str, depth: usize) -> Option<usize> {
+    for i in from..end.min(lines.len()) {
+        if is_filler(&lines[i]) {
+            continue;
+        }
+        let ind = indent_of(&lines[i]);
+        if ind < depth {
+            return None;
+        }
+        if ind == depth {
+            let rest = lines[i].trim_start();
+            if rest == format!("{name}:") || rest.starts_with(&format!("{name}: ")) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Where the block headed by `header` ends: the first structural line indented no deeper than the
+/// header itself, or the end of the file.
+fn block_end(lines: &[String], header: usize) -> usize {
+    let depth = indent_of(&lines[header]);
+    (header + 1..lines.len())
+        .find(|&i| !is_filler(&lines[i]) && indent_of(&lines[i]) <= depth)
+        .unwrap_or(lines.len())
+}
+
+/// **The file's own indentation**: the column of the first structural child of `header`, or the
+/// header's own plus 2 when it has none yet. Never a constant — a student who indents by four
+/// keeps indenting by four.
+fn child_indent(lines: &[String], header: usize, end: usize) -> usize {
+    (header + 1..end)
+        .find(|&i| !is_filler(&lines[i]))
+        .map(|i| indent_of(&lines[i]))
+        .unwrap_or_else(|| indent_of(&lines[header]) + 2)
+}
+
+/// Insert one mapping into `config/ingest.yaml` — `coursework.zybooks.courses.<code>` or
+/// `coursework.vhl.sections.<id>`, each `{course, label}`.
+///
+/// **A text-level insertion, never a parse-and-re-dump** (ruling R-C2-8). CLAUDE.md's engine
+/// invariant is absolute and has no config exemption: *no vault file is parsed and re-dumped*,
+/// and `src/yamlemit.rs` is the crate's one YAML emitter. A `serde_yaml_ng::to_string` round trip
+/// would re-render every line of a file whose whole point is that it is editable text — comments
+/// gone, quoting style changed, key order at the serialiser's mercy. (`scaffold::ingest_yaml`
+/// writing this file at birth is **creation**, a different act from rewriting one that exists.)
+///
+/// So this finds the `courses:` / `sections:` line and inserts three lines directly beneath it at
+/// the file's own indentation, and **touches no other byte**. The one shape it rewrites is a
+/// `courses: {}` scalar, which becomes the block form the insertion needs — one line replaced,
+/// in place, with the same leading spaces it already had.
+///
+/// **It can only ADD a key, and that costs nothing.** A book or section that is already mapped
+/// never produces a card in the first place: `route_zybook` answers `BookRouting::Mapped` and
+/// `parse_vhl` finds its section, so `/ingest-coursework` reports no proposal and there is no path
+/// by which an existing key needs updating. A student who wants to change one edits the file,
+/// which is the point of it being text.
+///
+/// `Ok(true)` inserted, `Ok(false)` the key was already there — a no-op, and the file is not
+/// opened for writing at all. `Err` when the source's block is missing, because a mapping under a
+/// `coursework.vhl:` nobody configured is dead config; the card is kept so the student sees why.
+///
+/// Line endings are the crate's usual discipline: `pystr::read_text` normalises to `\n` and
+/// `pystr::write_text` writes `os.linesep` back, so a CRLF vault file stays CRLF exactly as it
+/// does for every note this engine writes.
+fn write_mapping(vault: &Path, source: &str, key: &str, course: &str) -> Result<bool, String> {
+    let (block, field) = match source {
+        "zybooks" => ("zybooks", "courses"),
+        "vhl" => ("vhl", "sections"),
+        other => return Err(format!("unknown coursework source {other:?}")),
+    };
+    let path = vault.join("config").join("ingest.yaml");
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+
+    let coursework = find_key(&lines, 0, lines.len(), "coursework", 0)
+        .ok_or_else(|| "config/ingest.yaml has no coursework: block".to_string())?;
+    let coursework_end = block_end(&lines, coursework);
+    let source_depth = child_indent(&lines, coursework, coursework_end);
+    let source_line = find_key(&lines, coursework + 1, coursework_end, block, source_depth)
+        .ok_or_else(|| format!("config/ingest.yaml has no coursework.{block}: block"))?;
+    let source_end = block_end(&lines, source_line);
+    let field_depth = child_indent(&lines, source_line, source_end);
+
+    // Both scalars go through the crate's ONE literal writer — `write::to_literal`, the same
+    // function every frontmatter value goes through, which routes anything non-scalar to
+    // `yamlemit`. No second emitter is introduced. Quoting the key is what makes it work: an
+    // unquoted `2102121:` is an integer key and `yaml::get(sections, "2102121")` then misses.
+    let lit = |s: &str| crate::write::to_literal(&Yaml::String(s.to_string()));
+    // The label prefixes every title the parser produces (`CS 100 HW 01`). Derived from the slug
+    // rather than asked for: one field on the card is one decision, and this one is mechanical.
+    let label = course.trim().to_uppercase().replace('-', " ");
+
+    let (insert_at, entry_indent) = match find_key(&lines, source_line + 1, source_end, field, field_depth) {
+        Some(at) => {
+            let value = lines[at].trim_start()[field.len() + 1..].trim().to_string();
+            if value == "{}" || value == "{ }" {
+                // The birth shape `courses: {}` (C1's `scaffold::ingest_yaml`). One line replaced,
+                // in place, by the block header the insertion needs — same indentation, and it is
+                // the only line in the file this function ever rewrites.
+                lines[at] = format!("{}{field}:", " ".repeat(field_depth));
+            } else if !value.is_empty() {
+                return Err(format!("coursework.{block}.{field} is not a block mapping ({value})"));
+            }
+            let end = block_end(&lines, at);
+            let deeper = child_indent(&lines, at, end);
+            // Idempotence: a key already under this field is a no-op, never a second entry — two
+            // `UACS100Fall2026:` keys is a duplicate-key YAML error and the file stops loading.
+            for i in (at + 1)..end {
+                if is_filler(&lines[i]) || indent_of(&lines[i]) != deeper {
+                    continue;
+                }
+                let name = lines[i].trim_start();
+                let name = name.split(':').next().unwrap_or("").trim_matches(['\'', '"']);
+                if name == key {
+                    return Ok(false);
+                }
+            }
+            (at + 1, deeper)
+        }
+        // No `courses:` line under a `zybooks:` that exists: insert the field header too. Still a
+        // pure insertion — two lines added, none changed.
+        None => {
+            lines.insert(source_line + 1, format!("{}{field}:", " ".repeat(field_depth)));
+            (source_line + 2, field_depth + 2)
+        }
+    };
+
+    let pad = " ".repeat(entry_indent);
+    lines.splice(
+        insert_at..insert_at,
+        [
+            format!("{pad}{}:", lit(key)),
+            format!("{pad}  course: {}", lit(course.trim())),
+            format!("{pad}  label: {}", lit(&label)),
+        ],
+    );
+    pystr::write_text(&path, &lines.join("\n")).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+```
+
+and, in `collect_cloud`, after the reply's warnings are read:
+
+```rust
+    // R-OB-1: one card per unmapped book or section, before the items are written, so a student
+    // whose only zyBook is unmapped opens the deck to a question rather than to an empty list.
+    let mut journal = Journal::new(vault);
+    let card_ctx = ctx_or_default.with_actor(MAP_ACTOR);
+    // Every key already asked about, live or decided — computed ONCE before the loop, exactly as
+    // Task 12's `existing_rule_ids` is. `write::create`'s `Exists` guard only sees `approvals/`, and
+    // a rejected card is in `archive/`; without this a book the student said no to is re-proposed
+    // every slot until the end of time.
+    let asked = asked_map_keys(vault, today);
+    for row in reply.get("proposals").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        let text = |k: &str| row.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+        let proposal = MapProposal {
+            source: text("source").unwrap_or_default(),
+            key: match text("key") { Some(k) if !k.is_empty() => k, _ => continue },
+            label: text("label").unwrap_or_default(),
+            suggested_course: text("suggested_course").filter(|c| !c.is_empty()),
+        };
+        if asked.contains(&(proposal.source.clone(), proposal.key.clone())) {
+            continue;
+        }
+        match write_map_card(vault, &proposal, today, &card_ctx, &mut journal) {
+            // `Exists` is now all but unreachable (`asked` catches the same case a step earlier)
+            // and stays as defence in depth; either way it is not worth a line.
+            Ok(stem) => warnings.push(format!("{}: not mapped; proposed ({stem})", proposal.source)),
+            Err(e) if e.contains("already exists") => {}
+            Err(e) => warnings.push(format!("{}: proposal not written ({e})", proposal.source)),
+        }
+    }
+```
+
+`coursework::main_with_fetchers` calls `apply_map_cards` **first**, before any fetch, so a card approved in the console at 11am is a mapping the noon slot already uses.
+
+- [ ] **Step 8: Run everything.** `cargo test --workspace` at 0 warnings; `oracle.rs` and `surface_oracle.rs` unchanged (the fixture vaults carry no `coursework:` block, so nothing here runs on them).
+
+- [ ] **Step 9: Name hand-off H12 and commit.**
+
+```bash
+git add cloud/supabase/functions/ingest-coursework/handler.ts cloud/supabase/functions/ingest-coursework/handler_test.ts engine/src/coursework.rs
+git commit -F .git-commit-msg.txt   # "engine+cloud: an unmapped zyBook or VHL section is a card in the deck, never a warning nobody reads (C2 Task 7a, R-OB-1, R-C2-8)"
+```
+
 ### Task 8: `/ingest-ics` and `/ingest-calendar` — the capability URLs leave the vault
 
 The capability URL moves into the account, encrypted, and the feed is fetched server-side. **The ICS *parse* stays on the device** — see *What is NOT in this plan* for why, and for the recommendation.
@@ -5677,6 +6815,268 @@ git commit -F .git-commit-msg.txt   # "cloud: GET /ingest-ics and /ingest-calend
 Nothing under `engine/src/ingest.rs`, `engine/src/cli.rs` or `engine/src/calfeed.rs` is staged: those files' changes are hand-offs H3 and H4, applied by the controller.
 
 ---
+
+---
+
+### Task 8a: R-OB-3 — a first ingest never creates a task that is already past due
+
+**Why this task exists.** Quinn's first slot imported four items already past due, one of them from 2025 — a feed's window reaches backwards, and a vault born today has no history to reconcile them against. The first page a student ever sees is the retention moment (VISION success criterion 5), and four overdue items they can do nothing about is the worst possible version of it.
+
+**The rule.** On a **first** ingest — the vault has no `today.md`, so `rank` has never finished a slot on it (ruling **R-C2-9**; **not** the absence of `state/ingest-seen.md`, which `coursework` creates earlier in the very same slot) — an item whose due date is already past is **recorded as seen and written straight into `archive/`** with `status: archived` and `archived_reason: imported-past`. Not skipped: skipping would leave the uid unseen, and the next run would create it. Not created-then-deleted: that is two journal records and a note that briefly ranks. **One `create` into `archive/`, one `record_seen`, one log line.** Every later run is unchanged — an item that goes past due while the vault is watching it is exactly the item the system exists to shout about.
+
+**Files:**
+- Modify: `cloud/supabase/functions/ingest-ics/{handler.ts,index.ts,handler_test.ts}`, `engine/src/cloudmodel.rs` (`fetch_ics` returns the past-due list)
+- Test: `engine/tests/cloud_contract.rs`
+- **Hand-off this task needs:** H11 (`engine/src/ingest.rs` — the device half, which is the guarantee)
+
+**Interfaces:**
+- Produces: `GET /ingest-ics?first_run=1` → `{ ics, courses, past_due_uids: string[] }`; `cloudmodel::fetch_ics(client, first_run: bool) -> Result<(String, Vec<String>), CloudError>`; and, in H11, `ingest::is_first_run(&Path) -> bool`, `ingest::sync_tasks(…, first_run: bool)` and `ingest::IMPORTED_PAST`.
+
+**Which half is the guarantee.** The **device's**, and only the device's: it is the half that works with no account at all, it is the half that can write `archive/` and `ingest-seen`, and it is the half a pre-C1 install runs. The server's `past_due_uids` is corroboration — it is what the wizard counts to say *"14 upcoming items, 4 already past"* on the finish panel, and it costs one UID-and-DTEND scan of a feed the server has just fetched anyway. **When they disagree, the device wins**, because the device is the one that knows the vault's own timezone.
+
+- [ ] **Step 1: Write the failing device test** — in `engine/tests/cloud_contract.rs` (C2-owned; `engine/src/ingest.rs` is the controller's and no task here edits it). **This test is red until hand-off H11 is applied, and that is the point.**
+
+```rust
+/// R-OB-3: the first page a student ever sees must show the future.
+///
+/// A feed's window reaches backwards, and a vault born today has no history to reconcile against —
+/// so Quinn's first slot imported four overdue items, one from 2025. On a FIRST ingest (no
+/// `today.md`, R-C2-9) a past-due item is recorded as seen and written straight into
+/// `archive/`; on every later run it is created normally, because an item that goes past due while
+/// the vault is watching it is exactly the item the system exists to shout about.
+#[test]
+fn ingest_on_a_fresh_vault_archives_past_due_items() {
+    let dir = std::env::temp_dir().join(format!("knowlu-c2-firstrun-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["config", "tasks", "state", "archive"] {
+        std::fs::create_dir_all(dir.join(sub)).expect("scratch vault");
+    }
+    std::fs::write(
+        dir.join("config").join("ingest.yaml"),
+        "ics_url: \"https://example.invalid/learn.ics\"\ntimezone: America/Chicago\ncourse_map:\n  CS-100: cs-100\n",
+    )
+    .expect("write ingest.yaml");
+    // One item long past, one comfortably ahead. `parse_ics` reads `DTSTART` as the due date.
+    let feed = "BEGIN:VCALENDAR\r\n\
+        BEGIN:VEVENT\r\nUID:bb-old\r\nSUMMARY:CS-100 Homework 1\r\nDTSTART:20250902T045900Z\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:bb-new\r\nSUMMARY:CS-100 Homework 9\r\nDTSTART:20991002T045900Z\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    let fetch = |_: &str| Ok(feed.to_string());
+
+    // First run is the absence of `today.md`, NOT of the seen-ledger (R-C2-9) — and this test
+    // proves the distinction by writing the ledger first, exactly as `coursework` does at
+    // `coursework.rs:310` earlier in the same slot.
+    std::fs::write(
+        dir.join("state").join("ingest-seen.md"),
+        "# header\n- zybooks:UACS100Fall2026:1.2 · Section 1.2 · first seen 2026-09-09\n",
+    )
+    .expect("coursework got here first");
+    assert!(!dir.join("state").join("today.md").exists());
+    let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, Some(&fetch));
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("archived (imported-past)") && l.contains("bb-old") == false),
+        "the past-due item is archived and named by its stem: {lines:?}"
+    );
+
+    // The future item is a task; the past one is in `archive/` and in nothing else.
+    let tasks: Vec<_> = knowlu_engine::approvals::sorted_md(&dir.join("tasks"));
+    assert_eq!(tasks.len(), 1, "only the future item is a task");
+    assert!(std::fs::read_to_string(&tasks[0]).unwrap().contains("Homework 9"));
+    let archived: Vec<_> = knowlu_engine::approvals::sorted_md(&dir.join("archive"));
+    assert_eq!(archived.len(), 1);
+    let note = std::fs::read_to_string(&archived[0]).unwrap();
+    assert!(note.contains("Homework 1"));
+    assert!(note.contains("status: archived"));
+    assert!(note.contains("archived_reason: imported-past"));
+    // Recorded as seen, so a second run does not resurrect it.
+    let seen = std::fs::read_to_string(dir.join("state").join("ingest-seen.md")).unwrap();
+    assert!(seen.contains("bb-old") && seen.contains("bb-new"));
+
+    // `rank` has since finished the slot and written `today.md`, which is what makes the next
+    // ingest not-first. A LATER run is unchanged: a new past-due item is created as a task, loudly.
+    std::fs::write(dir.join("state").join("today.md"), "# Today\n").expect("rank wrote today.md");
+    let later = "BEGIN:VCALENDAR\r\n\
+        BEGIN:VEVENT\r\nUID:bb-late\r\nSUMMARY:CS-100 Homework 2\r\nDTSTART:20250903T045900Z\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    let fetch_later = |_: &str| Ok(later.to_string());
+    let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, Some(&fetch_later));
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(knowlu_engine::approvals::sorted_md(&dir.join("tasks")).len(), 2, "{lines:?}");
+    assert_eq!(knowlu_engine::approvals::sorted_md(&dir.join("archive")).len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R-C2-9: the predicate is the absence of `today.md`, not of `state/ingest-seen.md`.
+///
+/// The slot order is `coursework → ingest → judge → rank`, and `coursework` calls
+/// `ingest::record_seen` (`coursework.rs:19`, `:310`, `:415`) — so on the very first slot the
+/// seen-ledger already exists by the time `ingest` runs, and a `first_run` derived from it is
+/// `false` on exactly the run R-OB-3 was written for. `today.md` is `rank`'s, the last step, so the
+/// first `ingest` always sees it absent and every later one sees it present. It is also the
+/// predicate the app already uses (`app/src/scheduler.rs::needs_first_run`).
+#[test]
+fn first_run_is_the_absence_of_today_md_not_of_ingest_seen() {
+    let dir = std::env::temp_dir().join(format!("knowlu-c2-firstpred-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+
+    // What `coursework` leaves behind on the first slot, before `ingest` has run at all.
+    std::fs::write(dir.join("state").join("ingest-seen.md"), "# header\n").unwrap();
+    assert!(
+        knowlu_engine::ingest::is_first_run(&dir),
+        "the seen-ledger is shared with coursework and cannot be the predicate"
+    );
+
+    // What `rank` leaves behind at the end of that same slot.
+    std::fs::write(dir.join("state").join("today.md"), "# Today\n").unwrap();
+    assert!(!knowlu_engine::ingest::is_first_run(&dir));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+```
+
+- [ ] **Step 2: Run it and watch it fail.** `cargo test -p knowlu-engine --test cloud_contract ingest_on_a_fresh_vault` → the past-due item is a task and `archive/` is empty.
+
+- [ ] **Step 3: Write hand-off H11's code** (below, in *Controller hand-offs*) and hand it over. **Do not edit `engine/src/ingest.rs`.** The test stays red on this branch and the report says so.
+
+- [ ] **Step 4: Write the failing server test** — append to `cloud/supabase/functions/ingest-ics/handler_test.ts`:
+
+```ts
+Deno.test("first_run reports which uids are already past, and otherwise reports none", async () => {
+  // R-OB-3's corroborating half. The DEVICE's check is the guarantee — it is the half that works
+  // with no account and the half that knows the vault's timezone — and this is what the wizard
+  // counts to say "14 upcoming, 4 already past" on the finish panel.
+  const feed = "BEGIN:VCALENDAR\r\n" +
+    "BEGIN:VEVENT\r\nUID:bb-old\r\nSUMMARY:Old\r\nDTSTART:20250902T045900Z\r\nEND:VEVENT\r\n" +
+    "BEGIN:VEVENT\r\nUID:bb-new\r\nSUMMARY:New\r\nDTSTART:20991002T045900Z\r\nEND:VEVENT\r\n" +
+    "END:VCALENDAR\r\n";
+  const deps = {
+    urlFor: () => Promise.resolve("https://lms.example.invalid/feed/secret-capability.ics"),
+    fetchText: () => Promise.resolve(feed),
+  };
+  const first = await (await icsHandler(OK, deps)(new Request("http://127.0.0.1/ingest-ics?first_run=1"))).json();
+  assertEquals(first.past_due_uids, ["bb-old"]);
+  assertEquals(first.courses, 2);
+  const later = await (await icsHandler(OK, deps)(new Request("http://127.0.0.1/ingest-ics"))).json();
+  assertEquals(later.past_due_uids, [], "only a first ingest has a past to skip");
+});
+
+Deno.test("an event with no date at all is never called past due", async () => {
+  const feed = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:bb-none\r\nSUMMARY:No date\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  const reply = await (await icsHandler(OK, {
+    urlFor: () => Promise.resolve("https://lms.example.invalid/f.ics"),
+    fetchText: () => Promise.resolve(feed),
+  })(new Request("http://127.0.0.1/ingest-ics?first_run=1"))).json();
+  assertEquals(reply.past_due_uids, []);
+});
+```
+
+- [ ] **Step 5: Write the server half** in `cloud/supabase/functions/ingest-ics/handler.ts`.
+
+```ts
+/**
+ * The uids whose date is already past, for a **first** ingest only (R-OB-3).
+ *
+ * A deliberate 15-line scan and **not** a second ICS parser: it reads `UID` and the first of
+ * `DTSTART` / `DTEND` per `VEVENT` and compares dates, and it does not unfold, unescape, expand a
+ * recurrence or resolve a `TZID`. It cannot: the vault's timezone is on the device and so is
+ * `parse_ics`, which is where the real reading happens and where the golden `today.md` oracle
+ * covers it. **The device's own check is the guarantee**; this list is corroboration, and it is
+ * what the wizard counts to say "14 upcoming items, 4 already past" on the finish panel.
+ */
+export function pastDueUids(ics: string, now: Date): string[] {
+  const out: string[] = [];
+  for (const block of ics.split(/BEGIN:VEVENT/i).slice(1)) {
+    const body = block.split(/END:VEVENT/i)[0];
+    const uid = /^UID:(.*)$/im.exec(body)?.[1]?.trim();
+    if (uid === undefined || uid === "") continue;
+    // `DTSTART` is what `ingest::parse_ics` reads as the due date; `DTEND` is the fallback for a
+    // feed that carries only an end. Both forms: `20250902T045900Z` and a bare `20250902`.
+    const stamp = (/^DTSTART[^:]*:(\d{8})/im.exec(body) ?? /^DTEND[^:]*:(\d{8})/im.exec(body))?.[1];
+    if (stamp === undefined) continue;
+    const day = new Date(Date.UTC(+stamp.slice(0, 4), +stamp.slice(4, 6) - 1, +stamp.slice(6, 8)));
+    // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work, and
+    // the one thing worse than importing a stale task is archiving a live one.
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    if (day.getTime() < today.getTime()) out.push(uid);
+  }
+  return out;
+}
+```
+
+and, in the handler, after the `BEGIN:VCALENDAR` check:
+
+```ts
+      const courses = (ics.match(/^BEGIN:VEVENT/gm) ?? []).length;
+      // `first_run=1` is sent by the engine when the vault has no `today.md` (R-C2-9).
+      const firstRun = new URL(req.url).searchParams.get("first_run") === "1";
+      return Response.json({
+        ics,
+        courses,
+        past_due_uids: firstRun ? pastDueUids(ics, deps.now()) : [],
+      });
+```
+
+with `now(): Date` added to `IcsDeps` and wired to `() => new Date()` in `index.ts`.
+
+- [ ] **Step 6: Widen `cloudmodel::fetch_ics`** so the flag travels and the list comes back:
+
+```rust
+/// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not
+/// judgment** — `ingest` parses what comes back with the same `parse_ics` the golden `today.md`
+/// oracle covers, so the vault's bytes are unchanged by the move.
+///
+/// `first_run` is R-OB-3: on a vault with no `today.md` (R-C2-9) the service also returns the
+/// uids whose date is already past, which the wizard counts. **The device's own check is the
+/// guarantee** — this list is corroboration, and `sync_tasks` archives on either.
+pub fn fetch_ics(client: &CloudClient, first_run: bool) -> Result<(String, Vec<String>), CloudError> {
+    let path = if first_run { "/ingest-ics?first_run=1" } else { "/ingest-ics" };
+    let reply = client.get(path)?;
+    let ics = reply
+        .get("ics")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| CloudError::Body("the reply carried no ics field".to_string()))?;
+    let past = reply
+        .get("past_due_uids")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Ok((ics, past))
+}
+```
+
+Hand-off **H3**'s two call sites become `crate::cloudmodel::fetch_ics(client, first_run)` and take the `.0`; H3's code below carries that change, and `first_run` is the same `crate::ingest::is_first_run(vault)` H11 adds.
+
+- [ ] **Step 7: Extend the loopback contract test** in `engine/tests/cloud_contract.rs`:
+
+```rust
+#[test]
+fn the_ics_fetch_sends_first_run_and_reads_the_past_due_list() {
+    let feed = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+    let body = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "ics": feed, "courses": 0, "past_due_uids": ["bb-old"],
+    }));
+    let mut server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (ics, past) = knowlu_engine::cloudmodel::fetch_ics(&client, true).expect("the service answered");
+    assert!(ics.contains("BEGIN:VCALENDAR"));
+    assert_eq!(past, vec!["bb-old".to_string()]);
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("GET /functions/v1/ingest-ics?first_run=1 HTTP/1.1"), "{sent}");
+}
+```
+
+- [ ] **Step 8: Run everything.** `deno test --allow-read --allow-net=127.0.0.1 --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/` then `cargo test --workspace`. `ingest_on_a_fresh_vault_archives_past_due_items` stays **red until H11 is applied** — say so in the report rather than weakening it. `oracle.rs` and `surface_oracle.rs` are unchanged for a better reason than the fixtures' contents: `oracle.rs` shells out to `rank` only (`oracle.rs:84`) and `surface_oracle.rs` to `surface`, and `first_run` is read nowhere but `ingest`. **None of the three fixture vaults has a `today.md`** — `rank` writes one every run — so the predicate would call them all first runs; it is never asked.
+
+- [ ] **Step 9: Name hand-offs H3 (widened) and H11, and commit.**
+
+```bash
+git add cloud/supabase/functions/ingest-ics/ engine/src/cloudmodel.rs engine/tests/cloud_contract.rs
+git commit -F .git-commit-msg.txt   # "engine+cloud: a first ingest archives what is already past, so the first page shows the future (C2 Task 8a, R-OB-3)"
+```
 
 ### Task 9: `/judge-event` and `/events` — the feeds the desktop could never reach
 
@@ -9162,7 +10562,7 @@ git commit -F .git-commit-msg.txt   # "eval: the seed replayed on every prompt o
 - [ ] **Step 2: `git status --porcelain --untracked-files=all engine/tests/fixtures/`** → empty. The eleven references are untouched (ruling R-3a-24).
 - [ ] **Step 3: The account-scoping scan, over the function directories** — Task 2's `judge_db_test.ts` covers `_shared/`; extend it to `cloud/supabase/functions/*/index.ts` so a `db.select` on `gmail_seen`, `gmail_queue`, `google_accounts`, `rules` or `sources` that omits `account_id=eq.` fails the suite. The service role bypasses RLS; this scan is the backstop.
 - [ ] **Step 4: `git diff --name-only main...c2-judge`** → confirm every path is inside C2's ownership: `cloud/supabase/functions/{judge-*,ingest-*,events,gmail-*}/**`, `cloud/supabase/functions/_shared/judge_*.ts`, `cloud/supabase/migrations/20260911*.sql`, `cloud/eval/**`, `engine/src/{cloudmodel,judge,enrich,events,coursework,zybooks,vhl}.rs`, `engine/tests/**`, and this plan. **An overlap is a stop, not a rebase**: report it to the controller.
-- [ ] **Step 5: The hand-off list.** One section in the task report: H1–H9, each with the exact code from *Controller hand-offs*, the task that needed it, and what breaks without it. Order them: **H7** (config.toml + deno.json — nothing deploys without the eleven `verify_jwt` entries), **H1** (`lib.rs`), **H3** (`ingest.rs` — the amber-tray fix), **H4** (`cli.rs` — the events **and calendar** proxies), **H5** (`scheduler.rs`'s `|| cloud`, after C1), **H6** (`approvals.rs`), **H8** (CI), **H9** (the Google button, in two phases across eight files and three owners: **(a)** the wizard window's `google_connect_url` / `google_connected` / `open_external`, the `WizardPlan` and `VaultPlan` flag, `scaffold::ingest_yaml`'s second `calendars:` entry, the listener on C1's existing `#wiz-google`, and the amendments to C1's `static_assets.rs` assertion and the controller's `scripts/wizard-check.py` walk — **all of (a) or none of it**; **(b)** the console window's `set_google_calendar`, whose settings row is C4's. Deferrable in whole to C4 without blocking anything, because the `calendar_ics` secret address is the fallback. It moves C1's command counts by four, so C1's Task 21 recount is re-run rather than edited). H2 is "none, deliberately"; H10 is a note that nothing is owed for the coursework split. And state plainly that **`app/src/scheduler.rs`'s judge gate is C1's, not a hand-off** — it is *Interfaces with C1* contract 6.
+- [ ] **Step 5: The hand-off list.** One section in the task report: H1–H13, each with the exact code from *Controller hand-offs*, the task that needed it, and what breaks without it. Order them: **H7** (config.toml + deno.json — nothing deploys without the eleven `verify_jwt` entries), **H1** (`lib.rs`), **H3** (`ingest.rs` — the amber-tray fix), **H4** (`cli.rs` — the events **and calendar** proxies), **H5** (`scheduler.rs`'s `|| cloud`, after C1), **H6** (`approvals.rs`), **H8** (CI), **H9** (the Google button, in two phases across eight files and three owners: **(a)** the wizard window's `google_connect_url` / `google_connected` / `open_external`, the `WizardPlan` and `VaultPlan` flag, `scaffold::ingest_yaml`'s second `calendars:` entry, the listener on C1's existing `#wiz-google`, and the amendments to C1's `static_assets.rs` assertion and the controller's `scripts/wizard-check.py` walk — **all of (a) or none of it**; **(b)** the console window's `set_google_calendar`, whose settings row is C4's. Deferrable in whole to C4 without blocking anything, because the `calendar_ics` secret address is the fallback. It moves C1's command counts by four, so C1's Task 21 recount is re-run rather than edited). **H11** (`ingest.rs`'s first-run archive — R-OB-3's guarantee, and the test in `cloud_contract.rs` is red until it lands) and **H12** (`approvals.rs`'s `coursework-map` arm — R-OB-1). H2 is "none, deliberately"; H13 is a note that nothing is owed for the coursework split. And state plainly that **`app/src/scheduler.rs`'s judge gate is C1's, not a hand-off** — it is *Interfaces with C1* contract 6.
 - [ ] **Step 6: Docs.** `HANDOFF.md` gains a `▶ C2 DONE <date>` block: the ten endpoints live on staging, the pinned model per kind with its sampling and price, the eval thresholds as measured, the Gmail verification state, and **what production still needs**:
   - its own `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `SOURCES_ENC_KEY`, and the migrations pushed;
   - the Google OAuth client's production redirect URI, and **two** consent-screen scopes — `calendar.readonly` (sensitive) submitted and cleared first, `gmail.readonly` (restricted) behind verification and the annual CASA;
@@ -9193,12 +10593,14 @@ git commit -F .git-commit-msg.txt   # "docs: C2 closed — the judgment service 
 6. `/ingest-coursework` reconciles both sources from real captured payloads, and the request body carries no username, no password, no `credential_target`, no `base_url` and no filesystem path.
 7. `/ingest-ics` reads C1's `url_ciphertext` / `url_iv`, decrypts with C1's `_shared/crypto.ts`, and that URL appears in no reply, no error body and no log line. With H3 applied, a cloud vault with a blank `ics_url` **reaches the service before it exits 1**.
 7a. `/ingest-calendar` resolves **`?name=personal` to the `calendar_ics` `sources` row and `?name=google` to the `google_accounts` grant** — never to a `sources` row of kind `google_calendar`, which nothing writes and `the_google_calendar_is_never_looked_for_in_the_sources_table` pins — and returns ICS either way. The secret address appears in no reply or error body; a missing grant is a 409 and an unknown name a 404. `calfeed` parses what comes back through its own horizon, dedup and snapshot with **no change to `calfeed.rs`** — the `cloud:<name>` branch lives in hand-off H4 — and the `calendar_ics` path still works on a vault with no account at all.
+6a. **R-OB-1:** a payload carrying a book or section the mapping does not know yields **one proposal and zero warnings**, a known one yields its items, and zyBooks' own `HowToUseZyBooks2` yields neither. `suggestCourse` answers `cs-100` for `UACS100Fall2026`, `math-125` for `MATH125` and `null` for `HowToUseZyBooks2` and `2102121` — the institution prefix comes off only when a term suffix says there is one. **A card the student rejected is not re-minted while it is unexpired** (`asked_map_keys` scans `approvals/` and `archive/`; `a_rejected_map_card_is_not_re_asked_until_it_expires`), and a card that cannot be applied goes back to `pending` so it ages instead of logging the same line twice a day forever. The card reaches `approvals/`, `rank` leaves it alone (H12), and approving it writes `coursework.<source>.<table>.<key>` into `config/ingest.yaml` before the next fetch — with a blank `course:` refused and the card kept, never a mapping to the empty string. **That write is a text-level insertion** (R-C2-8): three lines beneath the `courses:` / `sections:` line at the file's own indentation, no `serde_yaml_ng::to_string` anywhere near it, a second apply of the same key a logged no-op, and `every_byte_outside_the_inserted_lines_is_unchanged` green.
+7b. **R-OB-3:** on a vault with no `today.md` (R-C2-9's predicate — and `first_run_is_the_absence_of_today_md_not_of_ingest_seen` proves it is not the seen-ledger's, which `coursework` writes earlier in the same slot), an item already past due is written to `archive/` with `status: archived` and `archived_reason: imported-past`, is recorded in `ingest-seen`, and appears in no task list — and the **next** run creates a newly-past item as an ordinary task. `ingest_on_a_fresh_vault_archives_past_due_items` passes with H11 applied; `GET /ingest-ics?first_run=1` returns the corroborating `past_due_uids` and returns `[]` without the flag.
 8. `/events` fetches a source the desktop could not, refuses every private, plaintext and bare-label URL, and `rank` uses it through the existing `Fetchers.events` seam with no model call anywhere in `rank`.
 9. **The first Google consent asks for `calendar.readonly` alone** (a *sensitive* scope: lighter review, no CASA); `gmail.readonly` is a second, optional, incremental consent (`include_granted_scopes=true`) and `google_accounts.scopes` records what was actually granted, with `read_google_grant` refusing a reader whose scope is missing. `calendar_is_asked_for_before_gmail_and_never_together` passes. The refresh token exists only in Supabase Vault; disconnect revokes at Google (every scope at once — there is no partial revoke) before it forgets the row; attachments are never fetched; the Gmail read stops at its own wall-clock budget and says `more`; every derived row carries `origin = 'gmail_api'`, and `export_training_rows` excludes them. **Testing-mode limits (100 test users, 7-day tokens) are stated for both scopes**, in the wizard copy of hand-off H9 and in the Gmail step. `GET /google-connect?status=1` answers `{connected, scopes}` for the wizard's poll, mints no nonce, and distinguishes a Gmail-only grant from a calendar one.
 10. `promote_rules()` runs without error on staging and returns a number; no `scope = 'global'` row is active, and no code path can activate one. A `kind: rule` card can be filed, answered in the deck, sent once and archived.
 11. The eval suite runs on the **frozen seed** (and on any correction that arrived with a replayable `request` — none until C4, by ruling R-C2-4), writes `eval_runs` rows with the threshold each was measured against, and exits non-zero below one. `cloud/eval/seed/` passes its scrub test and names no person.
 12. The daily caps, the monthly ceiling and the model's price were chosen **together**, the arithmetic is written down beside `DAILY_CAP`, `usage_daily` records real token counts, and `enforce_budget` refuses a call rather than reporting one after the fact.
-13. Every hand-off H1–H9 is listed in the final report with exact code, `app/src/scheduler.rs`'s judge gate is stated as **C1's dependency and not a hand-off**, and **no commit on `c2-judge` touches a file outside C2's ownership** (`git diff --name-only main...c2-judge` proves it).
+13. Every hand-off H1–H13 is listed in the final report with exact code, `app/src/scheduler.rs`'s judge gate is stated as **C1's dependency and not a hand-off**, and **no commit on `c2-judge` touches a file outside C2's ownership** (`git diff --name-only main...c2-judge` proves it).
 
 ## What is NOT in this plan
 
@@ -9210,6 +10612,7 @@ git commit -F .git-commit-msg.txt   # "docs: C2 closed — the judgment service 
 - **Email ingestion by forwarding** (a Cloudflare Email Routing inbox). Documented in §13 as the fallback if Google refuses verification; not built. `judge::EmailModel` is the seam it would use unchanged — which is also why that trait exists although the Gmail path judges server-side.
 - **The Batch API, prompt caching, and a second model tier.** All three are cost levers, all three are recorded in `judge_anthropic.ts` with the reason they are not used yet, and the first one to reach for is Batch.
 - **Calendar *write*.** `calendar.readonly` is the only calendar scope C2 asks for. Write is a third, later consent, requested only when the student approves their first calendar-event card (VISION: rare writes behind explicit approval), and nothing here builds it.
+- **R-OB-2 — seeding `courses/` and `course_map` from the enrolled course list the sign-in window captures — is C1's**, and part of its sign-in spike's go/no-go. C2 builds none of it. Until it lands a fresh vault's Blackboard tasks arrive `course: null` with `needs_enrichment: true`, which is the accepted judgment gap and which `/judge-task` is the answer to: `Heuristics::knows_course` degrades to *no course* rather than a wrong one, and the enrichment names the course in `importance_reason` when it cannot place it.
 - **Reading grades from the signed-in LMS session** (§11a, "wanted", not designed): it waits on the university-policy read and on C1's link capture proving out.
 - **The console's visual redesign, mobile, a second campus, production go-live.** Task 15 records production's list.
 

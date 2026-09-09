@@ -1135,3 +1135,370 @@ shapes, Vault's PostgREST reachability, `UPDATE … FROM LATERAL`) remain assess
 - **R-X-17 (H9 at merge):** H9(a) lands as one controller commit immediately after C1's merge and before C2's own merge, with C1's `static_assets` and `scaffold` suites and `scripts/wizard-check.py` run in that commit and C1's Task 21 recount re-run; if any part cannot land cleanly, H9 is deferred whole to C4 — the personal calendar still arrives by its secret address and `google-connect` simply has no caller until then.
 - Out-of-scope items parked with rulings: the close-out sections now exist in both reports; C1's H8 command counts move with H9 and Task 21's recount is the mechanism; nothing else open.
 - The plan is final and is committed with this review.
+
+---
+
+## Re-review of the R-OB amendment (2026-09-09)
+
+Scope: the amendment as a unit — Task 7a (R-OB-1 + R-C2-8), Task 8a (R-OB-3), hand-offs H11 and H12,
+contract 4a, the three new fidelity rows and exit-gate items 6a and 7b — against §11a's newest rows,
+D11, the write invariants, the ownership list, the frozen references and the testing rules; plus the
+three questions the controller put (double-apply, "strictly before today", new breakage). Plan
+re-read at 10,449 lines, concentrated on `plan.md:78-84`, `:270-283`, `:908-1076`, `:5419-6194` and
+`:6661-…`. Every claim about existing code I checked against the source: `write::to_literal` and
+`ISO_DATE_LIKE` (`engine/src/write.rs:158-181`), `write::create` (`:379-428`), `sync_tasks`'
+signature and its `ctx` shadow (`engine/src/ingest.rs:560-576`), `record_seen` / `load_seen`
+(`:445-470`), and `coursework.rs`'s use of both (`:19`, `:310`, `:415`).
+
+**Verdict: NEEDS FIXES — the amendment is well-reasoned and R-C2-8 is honoured to the letter, but
+R-OB-3's `first_run` flag is computed from a file that the *previous step of the same slot* creates,
+so the ruling does not fire on the first slot it was written for.** One Critical, two Important, four
+Minor.
+
+### Fidelity to §11a's new rows
+
+| Row | Verdict | Note |
+|---|---|---|
+| **R-OB-1** — an unknown book is a proposal, never a silent skip | **Honoured, and placed well.** The policy sits in `handler.ts` where the routing already was: `pickZybooks`'s `unmapped` branch proposes instead of warning (`plan.md:5572`), and the handler translates `parse_vhl`'s own `section … not in config; skipped` warning through `VHL_UNMAPPED` (`plan.md:5546`) rather than editing the parser. That is the right call and it is the reason **both parsers stay byte-identical to their frozen references** — which I confirmed from the Files list: Task 7a modifies `handler.ts` and `engine/src/coursework.rs` and nothing else (`plan.md:5425`-region). |
+| **R-OB-3** — a first ingest never creates a past-due task | **Honoured in shape, defeated in practice** — Critical 1. The mechanism is right: one `create` into `archive/` plus one `record_seen`, never skipped and never created-then-deleted, with the reasoning for both rejections written out (`plan.md:963-970`). The device is correctly named the authority over the server's `past_due_uids` because it knows the vault's timezone (`plan.md:910`). |
+| **R-OB-2** — the sign-in window seeds `courses/` and `course_map` | **Correctly not built.** Named as C1's, with C2's `/judge-task` identified as the answer meanwhile and `Heuristics::knows_course` cited as degrading to "no course rather than a wrong one" (`plan.md:83`). |
+| **R-OB-4** — the IPEDS school list | Not C2's, not touched. Correct. |
+| **R-C2-8** — no round-trip of `config/ingest.yaml` | **Honoured to the letter, and this is the best work in the amendment.** The first draft's `serde_yaml_ng::to_string` is named as the overruled version rather than quietly replaced (`plan.md:82`), and the replacement is a real text-level insertion with four helpers (`indent_of`, `is_filler`, `find_key`, `block_end`, `child_indent`) that respect the file's own indentation instead of a constant (`plan.md:6000-6050`). `every_byte_outside_the_inserted_lines_is_unchanged` is the assertion that makes it a property rather than an intention. |
+
+### D11, the write invariants, ownership, the frozen references, the testing rules
+
+- **D11 — credentials never leave the device: holds.** Nothing in 7a or 8a widens the request body.
+  A proposal carries `{source, key, label, suggested_course}` and no credential; `redact`'s allowlist
+  is untouched, so `the_coursework_payload_carries_no_credential` still covers the new path.
+- **Journal first: holds.** Every note write in the amendment goes through `write::create` /
+  `write_literals` / `delete` — the card (`plan.md:5940`), the archived import (`plan.md:1000`), the
+  card's stamp-and-archive (`plan.md:5979-5985`). The config insertion is not a note and, under
+  R-C2-8, deliberately not journalled; the plan says where the audit trail lives instead — "the
+  *card* it came from is journalled through `write` like every other note" (`plan.md:5952`).
+- **The insertion touches no other byte: holds, and is tested.** `write_mapping` splices into a
+  `Vec<String>` from `text.split('\n')` and rewrites exactly one existing line, only in the
+  `courses: {}` case (`plan.md:6119-6123`). `pystr::read_text`/`write_text` keep the vault's line
+  endings, and the plan says so (`plan.md:6079-6082`). The `split('\n')`-not-`lines()` choice is
+  correct here because `read_text` has already normalised CRLF — CLAUDE.md's trap avoided.
+- **A numeric VHL section id stays a quoted string key: holds — I verified it against the real
+  code.** `write::to_literal(&Yaml::String("2102121"))` takes the `Value::String` arm; `ISO_DATE_LIKE`
+  is `^\d{4}-\d{2}-\d{2}(T…)?$` (`engine/src/write.rs:158-159`), which `2102121` does not match, so it
+  falls to `serde_json::to_string` → `"2102121"` **with quotes**. The plan uses exactly that call
+  (`plan.md:6106`), explains why ("an unquoted `2102121:` is an integer key and
+  `yaml::get(sections, "2102121")` then misses"), and `an_empty_flow_mapping_becomes_the_block_form`
+  proves it end to end by loading the written file with `serde_yaml_ng` and reading
+  `["sections"]["2102121"]["course"]` back (`plan.md:5754-5756`). That is the right way to test it.
+- **Ownership: clean.** `engine/src/ingest.rs` and `engine/src/approvals.rs` are controller files and
+  are H11 and H12 with exact code (`plan.md:908-1058`, `:1059-1074`); `engine/src/coursework.rs` and
+  `engine/tests/cloud_contract.rs` are C2's, so `write_map_card`, `apply_map_cards` and
+  `write_mapping` correctly live in a task. **Nothing engine-shaped is hidden in a task**: I checked
+  Task 7a's and Task 8a's `git add` lines and they stage only `handler.ts`, `handler_test.ts`,
+  `engine/src/coursework.rs` and C2's own test files. H10 → H13 renumbering is consistent.
+- **Frozen references: untouched.** No task in the amendment reads, writes or regenerates one, and
+  the parser files are not modified — which is precisely why the VHL half is done by translating a
+  warning in the handler.
+- **Testing rules: held.** No new socket, no network. Task 8a's `ingest_on_a_fresh_vault_archives_
+  past_due_items` lives in C2-owned `engine/tests/cloud_contract.rs` and the plan states it is **red
+  until H11 lands** — the right disclosure for a test whose subject is a controller file. The oracle
+  claim at `plan.md:5883` ("the fixture vaults carry no `coursework:` block, so nothing here runs on
+  them") is sound for 7a, and 8a is safe for a different reason worth adding: `oracle.rs` exercises
+  `cli::run`, and `ingest` is a separate command that the oracle never invokes.
+
+### Critical
+
+**1. `plan.md:1039` — `first_run` is computed from a file the previous slot step has already created,
+so R-OB-3 does not fire on the first slot.**
+H11 computes `let first_run = !vault.join("state").join("ingest-seen.md").exists();`. But
+`state/ingest-seen.md` is **one ledger shared with `coursework`**: `coursework.rs:19` imports
+`crate::ingest::record_seen` and calls it at `coursework.rs:310` and `:415`, and `record_seen`
+writes that exact path (`engine/src/ingest.rs:460-470`). The slot order is
+`coursework → ingest → judge → rank`. So on a genuinely fresh vault the sequence is:
+
+1. `coursework` fetches, syncs, calls `record_seen` → **`state/ingest-seen.md` now exists**;
+2. `ingest` computes `first_run` → **`false`**;
+3. every past-due Blackboard item is created live — the exact symptom §11a's diagnosis names.
+
+The flag is only ever true when `coursework` wrote nothing first — which is the state Quinn's run was
+in *because* the books were unmapped. So the amendment's two halves cancel: R-OB-3 works today and
+stops working the moment R-OB-1 fixes the mapping. **Fix:** compute the flag from something `ingest`
+alone owns. The seen ledger already discriminates by uid shape — coursework writes `zybooks:…` and
+`vhl:…:…`, Gmail writes `gmail:…`, and the ICS feed's uids are the feed's own
+(`_blackboard.platform.gradebook2.GradableItem-…`, `engine/src/ingest.rs:950`) — so
+`let first_run = crate::ingest::load_seen(vault).iter().all(|u| u.starts_with("zybooks:") ||
+u.starts_with("vhl:") || u.starts_with("gmail:"));` is a one-line change with no new file and no new
+state. Whichever form is chosen, H11's comment must stop saying "this vault has never ingested if it
+has no seen-ledger", because that ledger is not `ingest`'s alone.
+
+### Important
+
+**2. `plan.md:1073` and `:6174` — a rejected map card is re-proposed on the next slot, not in 30 days.**
+H12 says a rejected card "is archived by `process_approvals` as any rejection is … and the service
+proposes it again **after the card expires in 30 days**". It cannot: `write::delete` settles the card
+into `archive/`, so `approvals/map-<source>-<slug>.md` no longer exists, and `write_map_card`'s only
+guard is `write::create`'s `Exists` on that path (`plan.md:5936-5938`). The next `coursework` run
+finds the book still unmapped, gets the same proposal, and creates a fresh card — twice a day,
+forever, each one charging the 15-a-day proposal budget through `defer_over_budget`. This is the same
+"a line on every run trains the reader to ignore the list" failure H12's own comment is written to
+avoid, in card form. Task 12 already solved the identical problem for rule cards with
+`existing_rule_ids(vault)`, which scans `approvals/` **and** `archive/`. **Fix:** give
+`write_map_card` the same guard — scan both folders for a card whose `map_key` matches — and, if
+"ask again next term" is really wanted, gate the re-ask on the archived card's `decided_at` being
+more than N days old rather than on nothing at all.
+
+**3. `plan.md:5504` versus `plan.md:5540` — `suggestCourse`'s headline test fails against the
+implementation the same step ships.** The test asserts
+`assertEquals(suggestCourse("UACS100Fall2026"), "cs-100")`. The regex is
+`/([A-Za-z]{2,4})[\s-]?(\d{3})/`, unanchored, with a **greedy** `{2,4}`: at index 0 it takes `UACS`,
+the optional separator matches empty, `\d{3}` matches `100`, and the result is **`"uacs-100"`**. No
+backtracking rescues it, because the match succeeds as written. The other four assertions do pass —
+`PH106Spring2027` → `ph-106` (only `PH` is available), `cs-100-2026` → `cs-100`, and the two nulls.
+So exactly one assertion fails, and it is the example named in the ruling and in the task's own title
+sentence. **Fix, and I recommend the first:** (a) assert `"uacs-100"` and say in one line why a
+mechanical suggestion is allowed to be wrong — the whole point of the card is that a human confirms
+it, and `write_mapping` never writes an unconfirmed value; or (b) if the institution prefix must be
+stripped, that needs a real rule (the course code is a *suffix* of `UACS`, which no regex over this
+string can know), which is more machinery than a suggestion deserves.
+
+### Minor
+
+**4. `plan.md:6108-6110` — the card-written label and the wizard-written label differ for the same
+section.** `write_mapping` derives `label` mechanically from the course slug
+(`course.trim().to_uppercase().replace('-', " ")`), so `gn-103` becomes `GN 103`. C1's wizard-written
+mapping in contract 4a's own example is `label: GN 103 Hausaufgaben` (`plan.md:272`), and that label
+prefixes every VHL title the parser produces. Two mappings for one section therefore yield two title
+prefixes depending on which path created it. The derivation is argued ("one field on the card is one
+decision, and this one is mechanical") and I would keep it — but say so beside the example in
+contract 4a, so the difference is a decision and not a surprise.
+
+**5. `plan.md:5931`, `:6108` — `MapProposal.label` is carried to the card and then ignored.** The card
+renders it, `write_mapping` derives its own. Either use it (it is the vendor's own name for the book)
+or say why it is display-only.
+
+**6. `plan.md:5996` — an unwritable mapping retries forever with no ageing.** When `write_mapping`
+returns `Err` (no `coursework.vhl:` block), the card is kept `approved` and one line is logged, every
+run, indefinitely. `approvals.rs`'s comparable case — a recoverable amendment refusal — writes the
+status back to `pending` precisely so the card is counted, escalated and eventually expired
+(`engine/src/approvals.rs:1360-1368`). Do the same here, or say why a permanent line is preferable.
+
+**7. `plan.md:978-982` — R-OB-3's mid-day residue is real and should be stated where the ruling is.**
+"Strictly before today, never before *now*" is the right choice and I would make it too: archiving a
+9 a.m. item at 2 p.m. would hide live work. But the consequence is that a vault created at 14:00
+still imports this morning's 09:00 deadline as a live, already-overdue task — which is one of the
+four shapes §11a's diagnosis complains about. The fidelity row states the rule (`plan.md:81`); it
+should also state the residue in the same sentence, so nobody reads exit-gate item 7b as a promise
+that a first page never shows an overdue item.
+
+### The controller's three questions, answered
+
+- **Can `apply_map_cards` loop or double-apply?** Not through the config: `write_mapping` scans the
+  target block for the key and returns `Ok(false)` before opening the file, so a re-approved card, a
+  hand edit that got there first, or a card whose archive failed all converge on "already mapped;
+  file untouched" (`plan.md:6126-6136`), and `a_second_apply_of_the_same_key_is_a_no_op` asserts the
+  bytes are identical. The success path stamps and archives, and `sorted_md` only scans `approvals/`,
+  so an archived card is never re-read. The loop that *does* exist is the proposal loop — finding 2.
+- **Is "strictly before today" right?** Yes, with the residue in finding 7.
+- **New breakage:** findings 1, 2 and 3 are all introduced by this amendment; nothing that was right
+  before it is broken by it. I re-checked the three places the amendment reaches into settled work:
+  `sync_tasks`' new parameter (its three existing callers all pass `false`, which is their current
+  behaviour, `plan.md:1057`); H3's two `fetch_ics` call sites, which now destructure a tuple and bind
+  `_past` deliberately (`plan.md:1052-1055`); and H12's arm, which sits beside H6's in the same
+  `status == "approved"` chain and is a complete `else if` block.
+
+### Out of scope — for the controller to park
+
+- Exit-gate item 7b and the fidelity row for R-OB-3 will both need a word if finding 1's fix changes
+  how `first_run` is derived; they currently describe the file-existence test by name.
+- `IMPORTED_PAST_TEMPLATE` hard-codes `created_by: blackboard`, which is right for the ICS path it
+  serves but means the constant cannot be reused if a second feed ever needs the same treatment.
+
+### Not re-examined
+
+Everything outside the amendment — Tasks 0–7, 8–15 and the H1–H9 hand-offs are unchanged from the
+round-3 text I verdicted READY TO EXECUTE, and I re-read only the regions the amendment touches.
+Still nothing executed: the regex analysis in finding 3, the slot-order analysis in finding 1 and the
+`to_literal` quoting in the invariants section are all from reading the source, not from running it —
+though finding 3 is the kind of thing one `deno test` would settle in a second, and finding 1 one
+`ls state/` after a first slot.
+
+---
+
+## Re-review of the amendment fix round (2026-09-09)
+
+Scope: verdict the seven findings from the R-OB re-review; re-derive `suggestCourse` by hand on all
+nine cases against the regex as written; check `is_first_run`'s placement against the slot order and
+the oracle fixtures; check that `asked_map_keys` cannot re-mint on the same slot; new breakage this
+round only. Plan re-read at 10,646 lines at the changed regions (`plan.md:81-82`, `:280`, `:915-1010`,
+`:5536-5600`, `:5727`, `:5971`, `:6050-6079`, `:6318-6330`, `:6874-6937`, `:7072`). Every claim about
+existing code re-checked against the source: `engine/src/cli.rs:404`, `app/src/scheduler.rs:188`,
+`engine/src/coursework.rs:19,310,415`, `engine/src/ingest.rs:445-470`, and the three fixture vaults'
+actual contents.
+
+**Verdict: NEEDS ONE FIX — six of the seven findings are addressed, and R-C2-9's reasoning is exactly
+right, but the predicate is written against the wrong path: `today.md` lives at
+`vault/state/today.md`, not at the vault root.** 1 Critical, 0 Important, 2 Minor.
+
+### The seven findings
+
+| # | Finding | Verdict | Evidence |
+|---|---|---|---|
+| **1** | Critical — `first_run` derived from a ledger `coursework` writes first | **NOT ADDRESSED** | The diagnosis is right and beautifully written (`plan.md:919-926` names `coursework.rs:19`, `:310`, `:415` and the slot order), and the ruling R-C2-9 row exists (`plan.md:82`). **But `is_first_run` is `!vault.join("today.md").exists()` (`plan.md:939`) and the engine writes `vault/state/today.md`** (`engine/src/cli.rs:404`: `let output = vault.join("state").join("today.md");`). See below. |
+| **2** | Important — a rejected map card is re-proposed every slot | **ADDRESSED** | `asked_map_keys(vault, today)` scans `approvals/` **and** `archive/`, filters on `kind: coursework-map`, drops cards whose `expires` is past, and keys on `(source, map_key)` (`plan.md:6056-6079`). It is computed **once before the loop** (`plan.md:6322`) with a comment that names the exact defect — "`write::create`'s `Exists` guard only sees `approvals/`, and a rejected card is in `archive/`". `write_map_card` mints `expires:` 30 days out (`plan.md:6009`, `:6017`), H12's sentence is corrected (`plan.md:1106`: "It is **not** re-proposed on the next slot"), and `a_rejected_map_card_is_not_re_asked_until_it_expires` (`plan.md:5727-5751`) covers both sides of the boundary. |
+| **3** | Important — `suggestCourse`'s headline test failed against its own regex | **ADDRESSED** | Rewritten anchored with an institution-prefix rule (`plan.md:5594-5600`) and nine cases (`plan.md:5539-5548`). I re-derived all nine by hand — all nine pass. Working below. |
+| **4** | Minor — card-derived and wizard-derived labels differ | **ADDRESSED** | A new bullet in contract 4a: "**The two writers derive `label:` differently, and that is a decision, not a slip**" (`plan.md:280`), with C1's carrying what the student typed and C2's derived mechanically. |
+| **5** | Minor — `MapProposal.label` carried and ignored | **ADDRESSED** | Same bullet; the proposal's label is display-only on the card and the written label is derived, stated rather than left to be discovered. |
+| **6** | Minor — an unwritable mapping retried forever with no ageing | **ADDRESSED** | The card is written back to `pending` so it ages, escalates and expires, matching `approvals.rs`'s recoverable-refusal path — `assert!(card.contains("status: pending"), "back to pending, so it ages and expires")` (`plan.md:5971`). |
+| **7** | Minor — R-OB-3's mid-day residue unstated | **ADDRESSED, verbatim where I asked for it** | In the R-OB-3 fidelity row itself: "the residue, stated so nobody reads exit-gate 7b as a stronger promise than it is, is that a vault created at 14:00 still imports this morning's 09:00 deadline as a live, already-overdue task, and that is the right side to err on" (`plan.md:81`). |
+
+### Critical 1, in full — the predicate is one word wrong
+
+The engine's only writer of that file is `cli::run`:
+
+```rust
+let output = vault.join("state").join("today.md");        // engine/src/cli.rs:404
+```
+
+and every reader in the crate agrees (`cli.rs:936`, `:962`, `:979`, `:1080`). The amendment's
+predicate looks at the vault **root**:
+
+```rust
+pub fn is_first_run(vault: &Path) -> bool { !vault.join("today.md").exists() }   // plan.md:939
+```
+
+No code in this repository ever creates `<vault>/today.md`, so `is_first_run` is **`true` on every
+run of every vault, forever**. The failure has flipped rather than closed: R-OB-3 went from never
+firing to always firing. Later runs are then not "unchanged" as the fidelity row promises — a feed
+item that arrives already past due on run 200 is silently archived as `imported-past` instead of
+being created as the live overdue task the row says "the system exists to shout about". Nothing is
+double-archived (the uid is in the seen ledger), so the damage is bounded and one-directional, but it
+is exactly the behaviour the ruling carved out.
+
+**Three things hide it, and all three are worth naming:**
+
+- **The tests manufacture the file production never writes.** `plan.md:6898` —
+  `std::fs::write(dir.join("today.md"), "# Today\n").expect("rank wrote today.md")` — and
+  `plan.md:6933`, with the comment "What `rank` leaves behind at the end of that same slot." `rank`
+  leaves behind `state/today.md`. The suite is green and the field is broken: the same defect class
+  the C1 review caught four times (a source-reading test written against a remembered file), here in
+  its state-reading form.
+- **The ruling's own wording invited it.** R-C2-9 is phrased "the absence of `today.md`, not of
+  `state/ingest-seen.md`" (`plan.md:82`) — one path bare, the other prefixed. The writer implemented
+  it literally.
+- **The cited precedent is itself wrong.** `plan.md:929-931` argues the two halves "now agree by
+  construction rather than by coincidence" by pointing at
+  `app/src/scheduler.rs:188 — pub fn needs_first_run(vault: &Path) -> bool { !vault.join("today.md").exists() }`.
+  They do agree; both are wrong. That app-side bug is out of scope for C2 (see below) but it is the
+  authority this change leans on, so it cannot stay unremarked.
+
+**Fix — one word, four sites:** `!vault.join("state").join("today.md").exists()` at `plan.md:939`;
+the two test writes at `plan.md:6898` and `:6933` (and their comments); and the R-C2-9 row's own
+phrasing at `plan.md:82`, so the next reader is not sent down the same path. Everything else in the
+change — the diagnosis, `sync_tasks`' new parameter, `run_lines`' call, the server half, the doc
+comments, the exit gate — is correct and needs nothing.
+
+**Placement against the slot order, once the path is right:** correct, and this is the good part of
+the design. `rank` is the **last** step of `coursework → ingest → judge → rank` and the only writer
+of `state/today.md`, so the first `ingest` always sees it absent and every later one sees it present.
+It is a file `ingest` shares with no other step, which is precisely what the seen ledger was not.
+**Against the oracle fixtures:** unaffected either way — `vault-full/state/` holds `calendar.md`,
+`events-seen.md`, `events.md`, `journal`, `runs`; `vault-s1-migrated/state/` holds `journal`, `runs`;
+`vault-s1` has no `state/` at all — so none has a `today.md` under either reading, and `oracle.rs`
+shells out to `rank` and never runs `ingest`. Step 8's claim survives the fix; see Minor 2.
+
+### `suggestCourse` re-derived by hand — nine of nine pass
+
+`R = /^([A-Za-z]{2,8})[\s_-]?(\d{3,4})(.*)$/` on `name.trim()`;
+`TERM = /(?:Spring|Summer|Fall|Winter)\s?\d{4}\s*$/i`;
+`dept = TERM.test(tail) && letters.length > 2 ? letters.slice(2) : letters`.
+
+| Input | letters | sep | number | tail | TERM | len>2 | dept | Result | Expected |
+|---|---|---|---|---|---|---|---|---|---|
+| `UACS100Fall2026` | `UACS` (greedy stops at `1`) | `` | `100` (no 4th digit) | `Fall2026` | ✓ | ✓ | `CS` | **`cs-100`** | `cs-100` ✓ |
+| `UAMATH120Fall2026` | `UAMATH` | `` | `120` | `Fall2026` | ✓ | ✓ | `MATH` | **`math-120`** | `math-120` ✓ |
+| `PH106Spring2027` | `PH` | `` | `106` | `Spring2027` | ✓ | **✗ (2>2 false)** | `PH` | **`ph-106`** | `ph-106` ✓ |
+| `MATH125` | `MATH` | `` | `125` | `` | ✗ | — | `MATH` | **`math-125`** | `math-125` ✓ |
+| `cs-100-2026` | `cs` | `-` | `100` (`-` ends it) | `-2026` | ✗ | — | `cs` | **`cs-100`** | `cs-100` ✓ |
+| `HowToUseZyBooks2` | greedy `HowToUse`, then `Z` is not a digit; backtracks 7→2, every next char a letter | — | — | — | — | — | — | **`null`** | `null` ✓ |
+| `2102121` | `^[A-Za-z]{2,8}` fails at index 0 | — | — | — | — | — | — | **`null`** | `null` ✓ |
+| `SomeBookWithNoCode` | no digits anywhere after any letter run | — | — | — | — | — | — | **`null`** | `null` ✓ |
+| `""` | needs ≥2 letters | — | — | — | — | — | — | **`null`** | `null` ✓ |
+
+The `^`/`$` anchoring is what makes case 6 correct — the old unanchored form would have matched
+mid-string had digits existed — and the `letters.length > 2` guard is what keeps `PH106Spring2027`
+whole. The regex is right as written and the nine assertions all hold. One untested shape, Minor 1.
+
+### `asked_map_keys` cannot re-mint on the same slot — checked
+
+Two independent reasons, and either alone is sufficient. (a) `apply_map_cards` runs **before** the
+fetch and stamps an applied card `executed` before `write::delete` moves it to `archive/` — the
+`expires:` it was minted with is untouched by that write, so a card applied minutes earlier is ≤30
+days old, passes `expires < stamp`'s filter, and is in the set `collect_cloud` then consults
+(`plan.md:6322`). (b) Once the mapping is in `config/ingest.yaml`, the device sends it in the
+redacted config, `routeZybook` answers `Mapped` and `parse_vhl` finds its section, so the server
+returns no proposal for that key at all. The set is computed once per run, not per proposal, so there
+is no path by which minting a card in the loop changes what the loop sees. The `Exists` guard on the
+card path remains as a third backstop for the same-folder case.
+
+### New breakage this round — none beyond Critical 1
+
+I checked each edit for collateral: `sync_tasks`' parameter and its three test callers are unchanged
+from the round that introduced them; `run_lines`' `first_run` binding moved from a `state/` stat to
+`is_first_run(vault)` and is still computed before the sync; H3's two `fetch_ics` sites still
+destructure the tuple; `asked_map_keys` adds a read of `archive/` that no other caller shares; and
+the `status: pending` write-back in Minor 6 reuses the literal path `apply_map_cards` already had.
+The renumbering of H11's changes (old 1–5 → new 2–6) is consistent throughout.
+
+### Minor
+
+**1. `plan.md:5595-5598` — the case that distinguishes the rule from a coin flip is untested and
+mishandled.** `MATH125Fall2026` — a department code with a term and no institution prefix — gives
+letters `MATH` (4 > 2) and `TERM.test("Fall2026")` true, so `dept = "TH"` and the suggestion is
+**`th-125`**. The doc's justification says the guard "leaves `MATH125` … alone", which is true only
+because that example carries no term; adding one breaks it. The wrongness is explicitly allowed
+(`plan.md:5587-5589`: the card is confirmed by a human and `write_mapping` never writes an
+unconfirmed value), and I would keep the rule — but add `MATH125Fall2026` as a tenth case asserting
+`th-125` with a one-line comment, so the limit is a decision rather than a surprise found in the
+field.
+
+**2. `plan.md:7072` — Step 8's oracle sentence now gives a reason that will read as wrong after the
+fix.** "none of the fixture vaults has a `today.md`" is true under both readings, but the load-bearing
+reason is the one the sentence puts second: `oracle.rs` shells out to `rank` and never invokes
+`ingest`, so `is_first_run` is never evaluated on a fixture vault at all. Lead with that, and the
+sentence survives any future change to the predicate.
+
+### Out of scope — for the controller
+
+- **`app/src/scheduler.rs:188` has the same wrong path.** `needs_first_run(vault)` is
+  `!vault.join("today.md").exists()`, so it is always `true` and `scheduler::spawn` fires a slot at
+  **every** console launch, not only after onboarding. That is C1/controller territory and predates
+  this amendment, but §11a's calendar row leans on `needs_first_run` to make the wizard's finish show
+  today's page, and the C2 amendment now cites it as its precedent — so the two should be fixed in
+  one commit, not two.
+
+### Closing verdict
+
+**Not yet — one word.** Everything the fix round set out to do it did, and did well: the rejected-card
+loop is closed with the same `approvals/`-plus-`archive/` shape Task 12 already proved, the
+`suggestCourse` regex is now anchored and correct on all nine of its cases (I re-derived every one by
+hand rather than taking the table on trust), all four minors are addressed in the places I asked for
+them, and R-C2-9's *reasoning* about why the seen ledger cannot be the predicate is the clearest
+paragraph in the amendment. But the predicate it reaches for is `vault/today.md`, and this engine
+writes `vault/state/today.md` — so `is_first_run` is permanently true, R-OB-3 fires on every run
+instead of none, and two tests that write the root file by hand keep the suite green while it does.
+The correction is `!vault.join("state").join("today.md").exists()` at `plan.md:939`, the same prefix
+in the two test writes at `:6898` and `:6933`, and the same in R-C2-9's own wording at `:82`; with
+those four edits and the two minors above, the amendment is sound and the plan as a whole is READY TO
+EXECUTE. I would also have the controller fix `app/src/scheduler.rs:188` in the same commit, since it
+is the precedent this change cites and it is wrong for the identical reason.
+
+### Not re-examined
+
+Everything outside the amendment's changed regions; the plan's main body is unchanged from the text I
+verdicted READY TO EXECUTE in round 3. Nothing executed — the regex derivation, the slot-order
+analysis and the path check are all from reading the source, though the last of them is one
+`ls <vault>` away from settling itself, and I would run `cargo test -p knowlu-engine --test
+cloud_contract first_run` against a real post-slot vault before believing any predicate here again.
+
+## Controller close-out of the amendment (2026-09-09)
+
+- The amendment fix round's last finding — `is_first_run` checked `vault/today.md` while the engine writes `vault/state/today.md` (`cli.rs:404`) — was applied by the controller at the four sites the review named (plan lines 82, 939, 6898, 6933): **R-C2-10, the predicate is `!vault.join("state").join("today.md").exists()`.** The same wrong path was in the app's `scheduler::needs_first_run` on `main` (the precedent the plan cited); fixed there test-first the same evening.
+- With that, every finding of the amendment rounds is addressed; `suggestCourse`'s nine cases were re-derived by hand by the reviewer; `asked_map_keys` cannot re-mint within a slot. READY TO EXECUTE after C1.
