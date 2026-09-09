@@ -96,14 +96,21 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 - The identifier is **`com.knowlu.desktop`**, permanent: uninstall key, autostart entry and window state are keyed by it.
 - The updater is configured: `tauri-plugin-updater`, `plugins.updater` (endpoint + minisign public
   key) and `bundle.createUpdaterArtifacts: true` are one decision — a static test pins flag ⇔ plugin.
-  The private key is in Credential Manager (`knowlu/updater-key`), read by `release.ps1` for one build.
+  The private key exists **only** as the GitHub secret `TAURI_SIGNING_PRIVATE_KEY` (C0 Task 4
+  regenerates it; the laptop's old Credential Manager copy is retired); `release.ps1` takes it from
+  the environment and nowhere else. If it is ever lost, regenerate: one `pubkey` line and a release,
+  and installed apps need one manual reinstall.
 - `app/src/inference.rs`: `SUPPORTED_RUNTIMES` is a compiled-in table of release tag, asset name and
   SHA-256; both install paths verify against it, so there is no unverified path to executing a
   runtime. Adding a release is a code change. Model files are data, not pinned. Not bundled.
 - Plain `cargo build` / `cargo test` work on a fresh checkout because `app/build.rs` drops a
-  zero-byte placeholder sidecar at `app/binaries/knowlu-engine-<triple>.exe`. **Releases go through
-  `scripts\release.ps1` only** — a hand-run `cargo tauri build` skips the clean-tree gate, the sidecar
-  staging and the placeholder check, and can ship a zero-byte engine.
+  zero-byte placeholder sidecar at `app/binaries/knowlu-engine-<triple>.exe`. **Releases are CI-only**
+  (`.github/workflows/release.yml`, on a `v*` tag): `scripts\release.ps1` is what CI runs; a human runs
+  it only with `-DryRun`, which bundles unsigned and publishes nothing. A hand-run `cargo tauri build`
+  is unsupported — it skips the clean-tree gate, the sidecar staging and the placeholder check, and
+  can ship a zero-byte engine. `ci.yml` is the gate on every push and PR: `cargo test --workspace` at
+  0 warnings (the gate prints `warnings: N accepted (.rsrc), N tallies, N other`), the eol contract
+  (`scripts/ci/eol-check.ps1`), SHA-pinned actions (`engine/tests/workflows.rs`).
 - Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.

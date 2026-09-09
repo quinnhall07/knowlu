@@ -176,27 +176,30 @@ is the half SmartScreen actually inspects. `sign.ps1` prints one loud `UNSIGNED:
 when there is no Trusted Signing profile, no `signtool.exe` or no Azure dlib, because a non-zero exit
 there fails the whole `cargo tauri build` and a dev build still has to bundle.
 
-**No secret reaches disk.** Authenticode needs none — Trusted Signing authenticates through Quinn's
-own Azure login and `sign.ps1` reads the profile from `%USERPROFILE%\.knowlu\trusted-signing.json`,
-outside the checkout. The Tauri **updater** key is read from Windows Credential Manager
-(`knowlu/updater-key`, plus `knowlu/updater-key-password` if set) into `TAURI_SIGNING_PRIVATE_KEY`
-for the length of one `cargo tauri build` and cleared in a `finally`. It is never written to a file
-and never printed.
+**No secret reaches disk, and the laptop holds none (C0 Task 3).** Authenticode needs no secret —
+Trusted Signing authenticates through the ambient Azure login (`azure/login` with OIDC on the runner)
+and `sign.ps1` reads the profile from the path `KNOWLU_SIGNING_PROFILE` names (default
+`%USERPROFILE%\.knowlu\trusted-signing.json`) and the dlib from `KNOWLU_SIGN_DLIB`. The Tauri
+**updater** key exists only as the GitHub secret `TAURI_SIGNING_PRIVATE_KEY`: `release.yml` sets it in
+the environment for one step, `release.ps1` checks it is there and lets `cargo tauri build` inherit
+it, and nothing reads Credential Manager any more. It is never written to a file and never printed.
 
 `bundle.createUpdaterArtifacts` and `plugins.updater` are **one** decision. `tauri-cli` reads
 `plugins > updater` whenever the flag is anything but `false`, and fails the build outright with
 *"failed to get updater configuration: plugins > updater doesn't exist"* if the plugin is absent — so
 the two must be turned on in the same edit. Plan 4a Task 8's key-gated step turned **both on**, so
 `release.ps1` no longer prints `UPDATER OFF` — and **every release now requires the updater signing
-key**: with `createUpdaterArtifacts: true` the script reads `knowlu/updater-key` from Credential
-Manager and refuses to build without it (*"updater artefacts are enabled but knowlu/updater-key is
-not in Credential Manager"*), where before it would happily ship an installer alone.
+key**: with `createUpdaterArtifacts: true` the script refuses to build unless
+`TAURI_SIGNING_PRIVATE_KEY` is set (*"TAURI_SIGNING_PRIVATE_KEY is not set - releases are built by CI
+(.github/workflows/release.yml); run with -DryRun locally"*). `-DryRun` turns the updater artefacts
+off for that one build through a temporary `--config` file, never by editing `tauri.conf.json`.
 
 What it needs installed: `tauri-cli` (`cargo install tauri-cli`), mingw-w64 on `PATH` (see above),
 `signtool.exe` from the Windows SDK and a Trusted Signing profile for a signed build, and network
 access the first time — the bundler downloads NSIS, `nsis_tauri_utils.dll` and the WebView2
-bootstrapper into `%LOCALAPPDATA%\tauri\` and caches them. **`release.ps1` never uploads**; `site/`
-goes to Cloudflare Pages by hand.
+bootstrapper into `%LOCALAPPDATA%\tauri\` and caches them. **`release.ps1` never uploads**;
+`.github/workflows/release.yml` deploys `site/` to Cloudflare Pages and creates the GitHub Release
+on a `v*` tag. A human runs `release.ps1` only with `-DryRun`.
 ## Where the app's data lives, and how a launch resolves
 
 ```
