@@ -2193,7 +2193,7 @@ Expected: `HTTP/2 401` and `{"error":"no bearer token"}`. That single call prove
   - `billing-checkout/handler.ts`: `type Plan = "monthly" | "academic_year"`, `checkoutForm(args): Record<string, string>`, `handle(req, deps)`.
   - `stripe-webhook/handler.ts`: `entitlementFromSubscription(sub): { plan: string | null; status: EntitlementStatus; current_period_end: string | null }`, `accountIdFromEvent(event): string | null`, `handle(req, deps)`.
 
-- [ ] **Step 1: Ask Quinn for P2.** One message: *"C1 is at the billing step. It needs a Stripe account in **test mode** with one product, **Knowlu**, and two prices: **$9.99/month** and **$69.99 per academic year** (a yearly recurring price). Turn the Customer Portal on with cancellation enabled and no cancellation survey — the law wants cancelling to be no harder than signing up. Then add a webhook endpoint pointing at `https://<staging ref>.supabase.co/functions/v1/stripe-webhook` subscribed to `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted` and `invoice.payment_failed`. Send me the two **price ids** and the **publishable key** — those are public. Set these yourself and never show me the values:*
+- [ ] **Step 1: Ask Quinn for P2.** One message: *"C1 is at the billing step. It needs a Stripe account in **test mode** with one product, **Knowlu**, and two prices: **$9.99/month** and **$69.99 per academic year** (a yearly recurring price). Turn the Customer Portal on with cancellation enabled and no cancellation survey — the law wants cancelling to be no harder than signing up. Then add a webhook endpoint pointing at `https://<staging ref>.supabase.co/functions/v1/stripe-webhook` subscribed to `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted` and `invoice.payment_failed`, **created at API version `2025-03-31.basil`** — the version the webhook parses. In the account's public business details set the **Terms of service URL** (and the privacy policy URL) to the site's pages: Checkout refuses `consent_collection[terms_of_service]=required` without the first, so every session would 502. Send me the two **price ids** and the **publishable key** — those are public. Set these yourself and never show me the values:*
 
 ```powershell
 supabase secrets set STRIPE_SECRET_KEY --project-ref <ref>
@@ -2875,6 +2875,8 @@ export function entitlementFromSubscription(sub: Json): EntitlementWrite {
   const plan = interval === "month" ? "monthly" : interval === "year" ? "academic_year" : null;
   const end = typeof sub?.current_period_end === "number"
     ? new Date(sub.current_period_end * 1000).toISOString()
+    : typeof sub?.items?.data?.[0]?.current_period_end === "number" // `2025-03-31.basil` moved the field onto the item (R-C1-15)
+    ? new Date(sub.items.data[0].current_period_end * 1000).toISOString()
     : null;
   // A `pause_collection` window (R3, June to August) leaves Stripe's own status `active`: the
   // student keeps the product and is not charged. Nothing here needs to know about the pause.
