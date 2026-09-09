@@ -149,7 +149,10 @@ Deno.test("an unknown path is 404 and an unknown method on a known path is 405",
 });
 
 Deno.test("every route needs a bearer token", async () => {
-  for (const [m, p] of [["DELETE", ""], ["GET", "/export"]] as const) {
+  // PUT is not in this loop: the deps() stub's requireEntitled resolves regardless of the token, so
+  // a PUT here would not exercise deps.verify the way DELETE/GET/GET do — its own 401 is not pinned
+  // by this loop, and it is production's requireActiveEntitlement that actually calls requireUser.
+  for (const [m, p] of [["DELETE", ""], ["GET", "/export"], ["GET", "/sources"]] as const) {
     const res = await handle(req(m, p, undefined, "Basic nope"), deps()).catch((e) => e as Response);
     assertEquals(res.status, 401, `${m} ${p}`);
   }
@@ -263,6 +266,64 @@ Deno.test("GET /account/sources returns kinds and dates, and never the URL", asy
   const text = await res.text();
   assertEquals(JSON.parse(text), { sources: [{ kind: "lms_ics", added_at: "2026-09-10T00:00:00+00:00" }] });
   assert(!text.includes("http"), "a URL reached the response body");
+});
+
+Deno.test("PUT /account/sources checks entitlement before it reads the body — an unparseable body still answers the gate's 402", async () => {
+  const res = await handle(
+    new Request("http://127.0.0.1:1/functions/v1/account/sources", {
+      method: "PUT",
+      headers: { authorization: "Bearer good" },
+      body: "not json",
+    }),
+    deps({
+      requireEntitled: () =>
+        Promise.reject(
+          new Response(JSON.stringify({ error: "this account has no active subscription" }), {
+            status: 402,
+          }),
+        ),
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 402);
+});
+
+Deno.test("POST /account/sources is 405 with the exact methods the route allows", async () => {
+  const res = await handle(
+    req("POST", "/sources", { kind: "lms_ics", url: "https://lms.example.invalid/feed/abc.ics" }),
+    deps(),
+  );
+  assertEquals(res.status, 405);
+  assertEquals(res.headers.get("allow"), "GET, PUT");
+});
+
+Deno.test("PUT /account/sources — a null JSON body is 400, not 500", async () => {
+  const res = await handle(req("PUT", "/sources", null), deps()).catch((e) => e as Response);
+  assertEquals(res.status, 400);
+});
+
+Deno.test("PUT /account/sources — the unknown-kind message lists only the kinds a client may send", async () => {
+  const res = await handle(
+    req("PUT", "/sources", { kind: "gradebook", url: "https://lms.example.invalid/x.ics" }),
+    deps(),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertEquals(body.error, "unknown source kind; use lms_ics, calendar_ics");
+  assert(!String(body.error).includes("google_calendar"), "the message must not advertise google_calendar");
+});
+
+// `index.ts` is never loaded by `deno test`, so nothing today would fail if `putSource` wrote
+// `url_plaintext: url` or dropped the encryption call entirely — this pins both.
+Deno.test("putSource encrypts the URL before the row it writes ever reaches restUpsert", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const match = text.match(/putSource: async[\s\S]*?\}\], "account_id,kind"\);/);
+  assert(match, "could not find putSource's body, from its declaration to the closing of restUpsert");
+  const body = match[0];
+  assert(body.includes("encryptString("), "putSource must call encryptString before it writes");
+  assert(body.includes("importAesKey("), "putSource must call importAesKey to get a key to encrypt with");
+  // No key in the upserted row literal may hold the bare `url` parameter as its value — every URL
+  // that leaves this function must go through `encryptString` first.
+  assert(!/:\s*url\b/.test(body), "the upserted row must not store the bare url in any column");
 });
 
 // `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so its

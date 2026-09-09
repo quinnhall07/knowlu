@@ -79,15 +79,25 @@ async function exportAccount(req: Request, deps: Deps): Promise<Response> {
  * `google_calendar` is a reserved value nobody writes (R-X-9): a Google grant has no URL and lives in
  * C2's `google_accounts`. It is listed here from the start so C2 never has to edit a C1-owned file. */
 const SOURCE_KINDS = ["lms_ics", "calendar_ics", "google_calendar"];
+// The kinds a client may actually send. `google_calendar` stays in `SOURCE_KINDS` (it is a known,
+// reserved value — refused below with its own 403, not folded into "unknown") but the 400 message
+// for a genuinely unknown kind must not advertise it as something worth trying.
+const CLIENT_SOURCE_KINDS = SOURCE_KINDS.filter((k) => k !== "google_calendar");
 const MAX_URL = 2048;
 
 async function putSource(req: Request, deps: Deps): Promise<Response> {
   // The gate C2 imports, exercised here in C1 so the contract is proved by something that ships.
   const { account_id } = await deps.requireEntitled(req);
-  const body = await readJson<{ kind?: string; url?: string }>(req);
-  const kind = String(body.kind ?? "");
-  const url = String(body.url ?? "");
-  if (!SOURCE_KINDS.includes(kind)) throw fail(400, `unknown source kind; use ${SOURCE_KINDS.join(", ")}`);
+  const body = await readJson<{ kind?: string; url?: string } | null>(req);
+  // A body of `null` is valid JSON, so `readJson` does not throw — without this, `body.kind` below
+  // throws a bare TypeError that reaches no `fail()` call and answers 500, not the 400 a bad request
+  // should get.
+  const fields = (body ?? {}) as { kind?: string; url?: string };
+  const kind = String(fields.kind ?? "");
+  const url = String(fields.url ?? "");
+  if (!SOURCE_KINDS.includes(kind)) {
+    throw fail(400, `unknown source kind; use ${CLIENT_SOURCE_KINDS.join(", ")}`);
+  }
   // `google_calendar` is a reserved kind **nobody writes** (R-X-9): a Google grant has no URL and
   // lives in C2's `google_accounts`, so no row of this kind ever exists here; the value is in the
   // vocabulary only so the constraint never needs a C2 migration.
