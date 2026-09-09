@@ -172,11 +172,11 @@ Agreed with the C2 plan, written in parallel. Use them verbatim; changing one is
    |---|---|---|---|
    | `lms_ics` | **C1** — `lms_link::finish` the moment the school feed validates (Task 14), and Task 18's back-fill for a vault adopted in place | **C2** — `/ingest-ics` | `config/ingest.yaml`'s `ics_url:` |
    | `calendar_ics` | **C1** — the same panel's personal-calendar field, by its secret iCal address (Task 14); the back-fill covers it too | **C2** — `/ingest-calendar` | `config/ingest.yaml`'s `calendars:` list, as `- name: personal` / `ics_url:` |
-   | `google_calendar` | **C2** — its `google-callback`, from a token this machine never sees | **C2** — `/ingest-calendar` | nowhere: C1's device never writes or reads this kind |
+   | `google_calendar` | **nobody** — a reserved value (R-X-9): a Google grant has no URL for `url_ciphertext`/`url_iv`, so it lives in C2's `google_accounts`, never in this table | **C2** — `/ingest-calendar` resolves `name=google` from `google_accounts`, not from a row here | nowhere: C1's device never writes or reads this kind |
 
    **All three are already in the check constraint and in both `SOURCE_KINDS` lists** (`20260910000100_accounts.sql`, `functions/account/handler.ts`, `app/src/lms_link.rs`), so **C2 never has to edit a C1-owned file to add its kind** — the ownership list forbids it, and a check constraint is the one thing two streams cannot both edit safely. C1's device-side guard is a second, narrower list, `lms_link::DEVICE_KINDS = ["lms_ics", "calendar_ics"]`, and `validate_for` refuses anything else, so no page can invent a `google_calendar` row. One Rust test (`the_source_kind_vocabulary_is_one_list_in_three_places`) pins the three copies to each other.
 
-   The vault copy exists because on-device `ingest` keeps running until C2 delivers its readers (spec §7.2's judgment gap). When `/ingest-ics` and `/ingest-calendar` ship, **C2** removes the vault copies, not C1.
+   The vault copy exists because on-device `ingest` keeps running until C2 delivers its readers (spec §7.2's judgment gap). When `/ingest-ics` and `/ingest-calendar` ship, the vault copies **stay** as the offline fallback that keeps `ingest` at exit 0 (R-X-16); C3 or C4 removes them, not C1 and not C2.
 
    **C1 defines no Google connect command, and no Google code at all.** The calendars panel carries a labelled, **`disabled`** placeholder and nothing behind it; a static test asserts `console.js` contains neither `"connect_google"` nor `gmail.readonly`. **C2's hand-off H9** carries the button's enablement, its click listener and the `google_connect_url` / `open_external` commands into `app/` at C2's merge. Its hook, verbatim, is the element C1 leaves for it:
 
@@ -1144,8 +1144,9 @@ create table public.sources (
   -- **Three kinds, all declared here, in C1's migration, on purpose.** `lms_ics` is the school's
   -- assignment feed and `calendar_ics` the student's own busy time — the secret iCal address Google
   -- Calendar hands out; the wizard asks for both on one panel (spec §11a). `google_calendar` is
-  -- **C2's**, written by its `google-callback` when a student signs in with Google instead, and it is
-  -- in this constraint from the start so that C2 never has to alter a table in a C1-owned migration:
+  -- **reserved and written by nobody** (R-X-9): a Google grant has no URL for the two not-null
+  -- columns, so it lives in C2's `google_accounts`, and `/ingest-calendar` resolves `google` from
+  -- there. The value is in this constraint from the start so that C2 never has to alter a table in a C1-owned migration:
   -- the ownership list forbids it, and a check constraint is the one thing two streams cannot both
   -- edit safely. C1 writes rows of the first two kinds only.
   kind           text not null check (kind in ('lms_ics', 'calendar_ics', 'google_calendar')),
@@ -1155,9 +1156,10 @@ create table public.sources (
   primary key (account_id, kind)
 );
 comment on table public.sources is
-  'Both kinds are capability URLs: anyone holding one reads that student''s schedule — the school feed
+  'The two URL kinds are capability URLs: anyone holding one reads that student''s schedule — the school feed
    their assignments, the personal one their life. Both are AES-GCM encrypted by the account function
-   before they arrive here, and GET /account/sources never returns either.';
+   before they arrive here, and GET /account/sources never returns either. google_calendar is reserved
+   and never written: a Google grant has no URL and lives in google_accounts (C2).';
 
 alter table public.accounts enable row level security;
 alter table public.entitlements enable row level security;
@@ -6289,8 +6291,9 @@ pub fn store_source(api_base: &str, session_target: &str, kind: &str, url: &str)
 pub const SOURCE_KINDS: [&str; 3] = ["lms_ics", "calendar_ics", "google_calendar"];
 
 /// The two the **device** may write (spec §11a: one panel, both calendars). `google_calendar` is
-/// C2's — its `google-callback` writes that row server-side, from a token this machine never sees —
-/// so `validate_for` refuses it here rather than letting a page invent one.
+/// a reserved value nobody writes (R-X-9) — a Google grant has no URL and lives in C2's
+/// `google_accounts`, from a token this machine never sees — so `validate_for` refuses it here
+/// rather than letting a page invent one.
 pub const DEVICE_KINDS: [&str; 2] = ["lms_ics", "calendar_ics"];
 
 /// `validate`, plus the one rule that differs between the two kinds a device may write.
