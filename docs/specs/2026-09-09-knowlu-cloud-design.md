@@ -1,6 +1,6 @@
 # Knowlu in the cloud — design
 
-**Status: DRAFT for Quinn's review, written 2026-09-09.** This spec redirects the product per Quinn's decisions of 2026-09-09 (§1) and supersedes, where they conflict, the Knowlu independent-app design (2026-09-04), the friends-shell design (2026-09-05), plan 3a's runtime tasks, and the plan-2/3/4 queue. It amends `VISION.md` (§10) and the product plan's open decisions. **Everything below that is not marked *decided* is a recommendation for Quinn to confirm or change.**
+**Status: SIGNED 2026-09-09.** Quinn confirmed §1 (all twelve decisions) on 2026-09-09; §11 was ruled the same day — R3: keep both the academic-year price and the June–August pause; R1, R2, R4, R5, R6, R8 taken at their defaults (yes); R7 later — and §10 was applied to `VISION.md` in the same commit. Written 2026-09-09 as a draft. This spec redirects the product per Quinn's decisions of 2026-09-09 (§1) and supersedes, where they conflict, the Knowlu independent-app design (2026-09-04), the friends-shell design (2026-09-05), plan 3a's runtime tasks, and the plan-2/3/4 queue. It amends `VISION.md` (§10) and the product plan's open decisions. **Everything below that is not marked *decided* is a recommendation for Quinn to confirm or change.**
 
 **Sources:** `VISION.md`; `docs/superpowers/specs/2026-09-04-knowlu-independent-app-design.md`; `docs/superpowers/specs/2026-09-05-knowlu-friends-shell-design.md`; `docs/superpowers/notes/2026-09-01-product-and-business-plan.md` (§2 AI architecture, §7 telemetry, §8 legal, §12 rulings); `docs/superpowers/notes/2026-09-01-market-pricing-and-distribution.md`; `docs/superpowers/notes/2026-09-09-knowlu-cloud-legal-landscape.md` (the legal briefing — §9 here summarises it and corrects one finding against Google's current pages); Google's *API Services User Data Policy*, *Workspace API User Data and Developer Policy* (2026-07-22), Gmail scope classification and restricted-scope verification pages, all read 2026-09-09.
 
@@ -327,18 +327,20 @@ The "People" amendment, the tutoring/SetNForget/content domains, the success cri
 
 ---
 
-## 11. Recommendations awaiting Quinn's word
+## 11. Recommendations — ruled 2026-09-09
 
-| # | Recommendation | Default if unanswered |
+Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the June–August pause ("we'll have to keep it"). Every other row stands at its default.
+
+| # | Recommendation | Ruling |
 |---|---|---|
-| R1 | Start the Google verification track in C1 week 1 — domain, privacy policy, consent screen, demo video — so it is not on C2's critical path | yes |
-| R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes |
-| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | year price yes; pause: **decide** — it is the one thing nobody else does and it halves summer revenue |
-| R4 | Client-side encryption of note bodies in sync (account-derived key) | yes; it forecloses server-side search we do not need |
-| R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes |
-| R6 | Staging Supabase project + test Stripe from day one | yes |
+| R1 | Start the Google verification track in C1 week 1 — domain, privacy policy, consent screen, demo video — so it is not on C2's critical path | yes (default) |
+| R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes (default) |
+| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
+| R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need |
+| R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
+| R6 | Staging Supabase project + test Stripe from day one | yes (default) |
 | R7 | Replace the three fixture vaults with synthetic ones before any public code release | later; noted in `PROVENANCE.md` |
-| R8 | Anthropic as the launch inference provider (zero-retention API terms; the eval suite picks the model) | yes |
+| R8 | Anthropic as the launch inference provider (zero-retention API terms; the eval suite picks the model) | yes (default) |
 
 ---
 
@@ -359,4 +361,4 @@ Each plan is written with the writing-plans skill from this spec, carries a fide
 
 ## 13. What this spec does not decide
 
-The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); the price of an academic year; whether the summer pause survives.
+The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)

@@ -145,4 +145,18 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   checkpoints; every plan carries a fidelity ledger and every review lands in `docs/reports/`. Quinn
   reviews at checkpoints — surface trade-offs, ask before assuming.
 
-Direction as of 2026-09-09: see HANDOFF.md and docs/notes/ — accounts, cloud AI, CI releases; the local llama.cpp runtime under app/src/inference.rs is scheduled for removal.
+## Direction (signed 2026-09-09)
+
+- The authority is `docs/specs/2026-09-09-knowlu-cloud-design.md`: its §1 decisions D1–D12 are
+  Quinn's and signed; §11's recommendations are ruled (R3: the academic-year price and the June–August
+  pause both stay). Where an older spec or note disagrees with it, the cloud design wins.
+- In one line: **accounts + $9.99/month, no free tier; every judgment runs in our cloud (Supabase +
+  Cloudflare + Stripe, Anthropic API); CI builds and signs every release; the vault stays plain
+  text on the student's machine and is created by the app; portal credentials never leave the
+  device — fetch on device, think in the cloud.**
+- The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
+  telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
+  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). Until C4 lands, that runtime
+  code stays and is not extended.
+- Cut day (spec §7.2) is a procedure with Quinn at the machine: the old `quinn-ops` vault is archived,
+  not migrated; Quinn re-onboards into `%USERPROFILE%\Knowlu\`.
