@@ -178,7 +178,7 @@ Agreed with the C2 plan, written in parallel. Use them verbatim; changing one is
 
    The vault copy exists because on-device `ingest` keeps running until C2 delivers its readers (spec §7.2's judgment gap). When `/ingest-ics` and `/ingest-calendar` ship, the vault copies **stay** as the offline fallback that keeps `ingest` at exit 0 (R-X-16); C3 or C4 removes them, not C1 and not C2.
 
-   **C1 defines no Google connect command, and no Google code at all.** The calendars panel carries a labelled, **`disabled`** placeholder and nothing behind it; a static test asserts `console.js` contains neither `"connect_google"` nor `gmail.readonly`. **C2's hand-off H9** carries the button's enablement, its click listener and the `google_connect_url` / `open_external` commands into `app/` at C2's merge. Its hook, verbatim, is the element C1 leaves for it:
+   **C1 defines no Google connect command, and no Google code at all.** The calendars panel carries a labelled, **`disabled`** placeholder and nothing behind it; a static test asserts `console.js` contains neither `"connect_google"` nor `gmail.readonly`. **C2's hand-off H9** carries the button's enablement, its click listener, the three vault-less wizard-window commands `google_connect_url` / `google_connected` / `open_external`, and the `WizardPlan.google_calendar` flag that `scaffold::ingest_yaml` turns into the `- name: google` entry at Finish, into `app/` at C2's merge (R-X-15). Its hook, verbatim, is the element C1 leaves for it:
 
    ```html
    <div class="wiz-row" id="wiz-google-row"><button class="b" id="wiz-google" disabled>Sign in with Google instead</button><span class="meta">…</span></div>
@@ -3638,8 +3638,8 @@ Deno.test("GET /account/sources returns kinds and dates, and never the URL", asy
  * `app/tests/lms_link.rs::the_source_kind_vocabulary_is_one_list_in_three_places`.
  *
  * C1's wizard writes `lms_ics` and `calendar_ics` (spec §11a, one panel, both calendars).
- * `google_calendar` is written by **C2's** `google-callback` through this same endpoint, and it is
- * listed here from the start so C2 never has to edit a C1-owned file to add it. */
+ * `google_calendar` is a reserved value nobody writes (R-X-9): a Google grant has no URL and lives in
+ * C2's `google_accounts`. It is listed here from the start so C2 never has to edit a C1-owned file. */
 const SOURCE_KINDS = ["lms_ics", "calendar_ics", "google_calendar"];
 const MAX_URL = 2048;
 
@@ -5950,8 +5950,8 @@ fn the_source_kind_vocabulary_is_one_list_in_three_places() {
     }
     assert_eq!(listed.matches('"').count() / 2, SOURCE_KINDS.len(), "the endpoint lists a kind this crate does not: {listed}");
     assert_eq!(constraint.matches('\'').count() / 2, SOURCE_KINDS.len(), "the constraint allows a kind this crate does not: {constraint}");
-    // …and the device writes only two of the three: `google_calendar` is C2's, from a token this
-    // machine never sees, so nothing here may produce one.
+    // …and the device writes only two of the three: `google_calendar` is reserved and written by
+    // nobody (R-X-9) — the Google grant lives in C2's `google_accounts` — so nothing here may produce one.
     assert_eq!(DEVICE_KINDS.len(), 2);
     assert!(!DEVICE_KINDS.contains(&"google_calendar"));
 }
