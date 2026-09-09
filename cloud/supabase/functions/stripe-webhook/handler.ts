@@ -29,6 +29,14 @@ export interface Deps {
   recordEvent: (eventId: string, type: string, createdIso: string) => Promise<void>;
   /** `entitlements.updated_at` for this account, or null. It carries the EVENT's `created`. */
   currentUpdatedAt: (accountId: string) => Promise<string | null>;
+  /**
+   * `true` when `accounts.id` still has a row. `DELETE /account` can leave Stripe still sending
+   * events for a customer we no longer know: `customer.subscription.updated` fires immediately from
+   * the `cancel_at_period_end` write, and `customer.subscription.deleted` follows at period end.
+   * Without this check `writeEntitlement` would upsert into `entitlements` against a foreign key that
+   * no longer resolves — a 502 Stripe retries for days and can eventually disable the endpoint.
+   */
+  accountExists: (accountId: string) => Promise<boolean>;
   writeEntitlement: (accountId: string, row: EntitlementWrite, updatedAt: string) => Promise<void>;
   /** `checkout.session.completed` carries a subscription id, not the subscription. */
   fetchSubscription: (id: string) => Promise<Json | null>;
@@ -123,6 +131,8 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
 
   const accountId = accountIdFromEvent(event);
   if (!accountId) return json(200, { ignored: "no account id on the event" });
+  // A deleted account: nothing left to write against, and nothing to retry — acknowledge and drop.
+  if (!(await deps.accountExists(accountId))) return json(200, { ignored: "no such account" });
 
   let sub: Json | null = null;
   if (SUBSCRIPTION_EVENTS.has(type)) {

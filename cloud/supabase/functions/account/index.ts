@@ -5,6 +5,7 @@ import {
   restFromEnv,
   restPatch,
   restSelect,
+  restSelectAll,
   restUpsert,
 } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
@@ -66,19 +67,25 @@ Deno.serve(async (req) => {
       tombstone: (hash, at) =>
         restUpsert(rest, "deleted_accounts", [{ email_hash: hash, deleted_at: at }], "email_hash"),
       exportAll: async (id) => {
+        // Single-row reads stay `restSelect`: there is at most one `accounts`/`entitlements` row per
+        // account. Everything else can run past PostgREST's own `max_rows` (1000), and an access
+        // right that silently truncates at row 1000 is a bug, not a smaller export — so those five
+        // page with `restSelectAll`, each ordered by its own primary key so paging is stable.
         const one = async <T>(table: string, q: string) => await restSelect<T>(rest, table, q);
+        const all = async <T>(table: string, q: string) => await restSelectAll<T>(rest, table, q);
         return {
           account: (await one("accounts", `id=eq.${encodeURIComponent(id)}&select=*`))[0] ?? null,
           entitlement: (await one("entitlements", `${eq(id)}&select=*`))[0] ?? null,
-          consents: await one("consents", `${eq(id)}&select=*`),
+          consents: await all("consents", `${eq(id)}&select=*&order=id`),
           // Kinds and dates, not the URL — and the comment now says what the code does. The access
           // right does cover the capability URL, but an export is a file that ends up in a downloads
           // folder, and a feed link is a password: the student can always re-copy it from their own
           // LMS, which is where it came from. `GET /account/sources` returns the same two columns.
-          sources: await one("sources", `${eq(id)}&select=kind,added_at`),
-          telemetry_events: await one("telemetry_events", `${eq(id)}&select=*`),
-          corrections: await one("corrections", `${eq(id)}&select=*`),
-          issues: await one("issues", `${eq(id)}&select=*`),
+          // `sources`' primary key is `(account_id, kind)`, so it orders by `kind`, not `id`.
+          sources: await all("sources", `${eq(id)}&select=kind,added_at&order=kind`),
+          telemetry_events: await all("telemetry_events", `${eq(id)}&select=*&order=id`),
+          corrections: await all("corrections", `${eq(id)}&select=*&order=id`),
+          issues: await all("issues", `${eq(id)}&select=*&order=id`),
         };
       },
       hashEmail: sha256Hex,

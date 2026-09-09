@@ -72,7 +72,7 @@ Deno.test("DELETE /account cancels at period end, purges, tombstones, and kills 
 });
 
 Deno.test("DELETE /account on an account that never subscribed still deletes everything", async () => {
-  let purged = false;
+  const order: string[] = [];
   const res = await handle(
     req("DELETE", ""),
     deps({
@@ -81,13 +81,49 @@ Deno.test("DELETE /account on an account that never subscribed still deletes eve
         throw new Error("Stripe must not be called when there is no subscription");
       },
       purge: () => {
-        purged = true;
+        order.push("purge");
+        return Promise.resolve();
+      },
+      tombstone: (h) => {
+        order.push(`tombstone ${h}`);
+        return Promise.resolve();
+      },
+      deleteAuthUser: () => {
+        order.push("deleteAuthUser");
         return Promise.resolve();
       },
     }),
   );
   assertEquals(res.status, 200);
-  assert(purged);
+  assertEquals(await res.json(), { deleted: true });
+  assertEquals(order, ["purge", "tombstone hash(a@example.invalid)", "deleteAuthUser"]);
+});
+
+Deno.test("DELETE /account when the accounts row is already gone still tombstones and finishes the login (a retry after a partial deletion)", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    deps({
+      getAccount: () => Promise.resolve(null),
+      stripe: () => {
+        throw new Error("Stripe must not be called once the accounts row is gone");
+      },
+      purge: () => {
+        throw new Error("purge must not run once the accounts row is gone — there is nothing left to purge");
+      },
+      tombstone: (h) => {
+        order.push(`tombstone ${h}`);
+        return Promise.resolve();
+      },
+      deleteAuthUser: () => {
+        order.push("deleteAuthUser");
+        return Promise.resolve();
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { deleted: true });
+  assertEquals(order, ["tombstone hash(a@example.invalid)", "deleteAuthUser"]);
 });
 
 Deno.test("GET /account/export hands back every table, keyed and complete", async () => {
@@ -117,4 +153,14 @@ Deno.test("every route needs a bearer token", async () => {
     const res = await handle(req(m, p, undefined, "Basic nope"), deps()).catch((e) => e as Response);
     assertEquals(res.status, 401, `${m} ${p}`);
   }
+});
+
+// `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so the
+// export's only guard against ever shipping a source's capability URL — that its `select=` list
+// names `kind,added_at` and nothing else — has no runtime test to pin it. Reading the file as text
+// is the guard: these two column names must never appear in it, in this function or any future one.
+Deno.test("the export never selects a source's capability URL storage columns", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(!text.includes("url_ciphertext"), "index.ts must never select the encrypted URL column");
+  assert(!text.includes("url_iv"), "index.ts must never select the URL's IV column");
 });

@@ -30,6 +30,14 @@ Deno.serve(async (req) => {
           event_type: type,
           created_at: createdIso,
         }], "event_id"),
+      accountExists: async (accountId) => {
+        const rows = await restSelect<{ id: string }>(
+          rest,
+          "accounts",
+          `id=eq.${encodeURIComponent(accountId)}&select=id&limit=1`,
+        );
+        return rows.length > 0;
+      },
       currentUpdatedAt: async (accountId) => {
         const rows = await restSelect<{ updated_at: string }>(
           rest,

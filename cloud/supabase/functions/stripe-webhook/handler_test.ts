@@ -11,6 +11,7 @@ function noopGuards() {
     seenEvent: () => Promise.resolve(false),
     recordEvent: () => Promise.resolve(),
     currentUpdatedAt: () => Promise.resolve(null as string | null),
+    accountExists: () => Promise.resolve(true),
   };
 }
 
@@ -270,6 +271,63 @@ Deno.test("an event type we do not handle is 200 and a no-op — Stripe must not
   assert(!wrote);
 });
 
+Deno.test("an event for an account that no longer exists is 200 and a no-op — DELETE /account must not leave a retry storm behind", async () => {
+  const event = {
+    id: "evt_gone_1",
+    type: "customer.subscription.updated",
+    created: 1_700_000_000,
+    data: {
+      object: {
+        metadata: { account_id: "acc-deleted" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  let fetchedAny = false;
+  let wrote = false;
+  let recordedAny = false;
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      seenEvent: () => Promise.resolve(false),
+      recordEvent: () => {
+        recordedAny = true;
+        return Promise.resolve();
+      },
+      currentUpdatedAt: () => Promise.resolve(null),
+      accountExists: () => Promise.resolve(false),
+      writeEntitlement: () => {
+        wrote = true;
+        return Promise.resolve();
+      },
+      fetchSubscription: (id) => {
+        fetchedAny = true;
+        return Promise.resolve({ id });
+      },
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.clone().json(), { ignored: "no such account" });
+  assert(!fetchedAny, "a deleted account must never reach fetchSubscription");
+  assert(!wrote, "a deleted account must never reach writeEntitlement");
+  assert(!recordedAny, "a deleted account must never reach recordEvent");
+});
+
 Deno.test("invoice.payment_failed under the pinned API version reaches fetchSubscription and writes", async () => {
   const fetched: string[] = [];
   const written: unknown[] = [];
@@ -391,6 +449,7 @@ Deno.test("the same signed event twice writes once", async () => {
       return Promise.resolve();
     },
     currentUpdatedAt: () => Promise.resolve(null as string | null),
+    accountExists: () => Promise.resolve(true),
     writeEntitlement: (accountId: string, row: unknown, updatedAt: string) => {
       written.push([accountId, row, updatedAt]);
       return Promise.resolve();
@@ -454,6 +513,7 @@ Deno.test("an event whose created precedes the row's updated_at writes nothing",
       // In PostgREST's own `timestamptz` text form (`+00:00`, not `.000Z`) — the shape the stale
       // guard must compare as an instant, not as a string.
       currentUpdatedAt: () => Promise.resolve("2025-01-01T00:00:00+00:00"),
+      accountExists: () => Promise.resolve(true),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();
@@ -505,6 +565,7 @@ Deno.test("an event whose created exactly equals the row's updated_at is also st
       // compare would call this NOT stale (`'+' < '.'`); comparing as instants correctly calls it
       // stale — the row is not older, so a late-arriving duplicate must not overwrite it.
       currentUpdatedAt: () => Promise.resolve("2023-11-14T22:13:20+00:00"),
+      accountExists: () => Promise.resolve(true),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();

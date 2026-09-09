@@ -41,11 +41,22 @@ export interface Deps {
 async function deleteAccount(req: Request, deps: Deps): Promise<Response> {
   const user = await requireUser(req, deps.verify);
   const account = await deps.getAccount(user.id);
-  if (!account) throw fail(404, "no such account");
+  if (!account) {
+    // The `accounts` row is already gone — a previous DELETE reached it and then failed on the
+    // tombstone or the login. There is nothing left to cancel or purge; finish the job from where it
+    // stopped rather than answering 404 forever to a login this account can never shed.
+    if (user.email) {
+      await deps.tombstone(await deps.hashEmail(user.email), deps.now().toISOString());
+    }
+    await deps.deleteAuthUser(user.id);
+    return json(200, { deleted: true });
+  }
 
   const sub = await deps.getSubscriptionId(user.id);
   if (sub) {
     // At period end, not immediately: the student paid for this month and deleting is not a refund.
+    // The Stripe *customer* object itself is not deleted here — it stays under Stripe's own
+    // billing-record retention, and removing it is not part of this right.
     await deps.stripe(`/v1/subscriptions/${sub}`, { cancel_at_period_end: "true" });
   }
   await deps.purge(user.id);
