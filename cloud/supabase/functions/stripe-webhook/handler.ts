@@ -49,8 +49,13 @@ function statusOf(stripeStatus: string): EntitlementStatus {
 export function entitlementFromSubscription(sub: Json): EntitlementWrite {
   const interval = sub?.items?.data?.[0]?.price?.recurring?.interval ?? null;
   const plan = interval === "month" ? "monthly" : interval === "year" ? "academic_year" : null;
+  // Under the pinned STRIPE_API_VERSION (2025-03-31.basil), `current_period_end` left the
+  // Subscription for `items.data[].current_period_end`. Read the top-level field first — an
+  // account whose events still carry it should keep working — and fall back to the item.
   const end = typeof sub?.current_period_end === "number"
     ? new Date(sub.current_period_end * 1000).toISOString()
+    : typeof sub?.items?.data?.[0]?.current_period_end === "number"
+    ? new Date(sub.items.data[0].current_period_end * 1000).toISOString()
     : null;
   // A `pause_collection` window (R3, June to August) leaves Stripe's own status `active`: the
   // student keeps the product and is not charged. Nothing here needs to know about the pause.

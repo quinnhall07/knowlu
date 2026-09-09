@@ -72,6 +72,26 @@ Deno.test("an unsigned or badly signed webhook is 400 and writes nothing", async
   assert(!wrote, "a bad signature must never reach the write");
 });
 
+Deno.test("no stripe-signature header at all is 400 and writes nothing", async () => {
+  let wrote = false;
+  const body = JSON.stringify({ type: "customer.subscription.updated", data: { object: {} } });
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", { method: "POST", body }),
+    {
+      secret: SECRET,
+      nowSeconds: () => 1,
+      writeEntitlement: () => {
+        wrote = true;
+        return Promise.resolve();
+      },
+      fetchSubscription: () => Promise.resolve(null),
+    },
+  );
+  assertEquals(res.status, 400);
+  assertEquals(await res.json(), { error: "signature does not verify" });
+  assert(!wrote, "no signature header must never reach the write");
+});
+
 Deno.test("a signed subscription event writes the entitlement, once, keyed to the account", async () => {
   const written: unknown[] = [];
   const event = {
@@ -82,6 +102,50 @@ Deno.test("a signed subscription event writes the entitlement, once, keyed to th
         status: "active",
         current_period_end: 1_760_000_000,
         items: { data: [{ price: { id: "price_monthly", recurring: { interval: "month" } } }] },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      writeEntitlement: (accountId, row) => {
+        written.push([accountId, row]);
+        return Promise.resolve();
+      },
+      fetchSubscription: () => Promise.resolve(null),
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(written, [["acc-1", {
+    plan: "monthly",
+    status: "active",
+    current_period_end: "2025-10-09T08:53:20.000Z",
+  }]]);
+});
+
+Deno.test("under the pinned API version, current_period_end comes off the subscription item when the top-level field is absent", async () => {
+  const written: unknown[] = [];
+  const event = {
+    type: "customer.subscription.updated",
+    data: {
+      object: {
+        metadata: { account_id: "acc-1" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
       },
     },
   };

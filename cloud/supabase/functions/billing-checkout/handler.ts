@@ -87,7 +87,8 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
       email: account.email,
       "metadata[account_id]": user.id,
     });
-    customer = String(created.id);
+    if (typeof created.id !== "string") throw fail(502, "the payment provider returned no customer id");
+    customer = created.id;
     await deps.saveCustomerId(user.id, customer);
   }
 
