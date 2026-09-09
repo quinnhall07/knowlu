@@ -344,6 +344,16 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 
 ---
 
+## 11a. Rulings after signing
+
+| Date | Ruling (Quinn) | Consequence |
+|---|---|---|
+| 2026-09-09 | **The LMS calendar link is captured by a sign-in window, not pasted.** The wizard opens the campus LMS in a pop-up window; the student signs in there themselves (campus SSO + Duo, in their own session); the app then navigates that window to the calendar's share page itself and keeps **only the calendar link**. No credential is asked for, stored or replayed; the window's session data is discarded after capture. | Amends §4.2 step 3. C1 delivers it behind one swappable module with a feasibility spike first (Quinn present for the SSO login) and the paste-a-link path as the fallback for a campus whose pages defeat it. Standing rule unchanged: never request campus SSO credentials — the student types them into the LMS's own page, never into ours. The university-policy read (§9) must cover the flow before the pilot widens. |
+| 2026-09-09 | **Grades are wanted** from the same signed-in session, later. | Not designed. The same window could read the student's own grade pages; it waits on the policy read and on C1's link capture proving out. Listed in §13. |
+| 2026-09-09 | **Cut day proceeds with the current wizard**; the account requirement arrives with C1 and existing installs are adopted in place (sign-in on first launch after C1, no re-onboarding). The current wizard's defaults become `%USERPROFILE%\Knowlu` (vault parent) and `%USERPROFILE%\Knowlu\Backups` (backups) — the folder question itself goes away in C1 (§4.1). | A one-line change on `main` before C1 branches; C1's plan gains an "adopt existing install" task. |
+
+---
+
 ## 12. Plans, in order
 
 | Plan | Delivers | Gate to start |
@@ -361,4 +371,4 @@ Each plan is written with the writing-plans skill from this spec, carries a fide
 
 ## 13. What this spec does not decide
 
-The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
+The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); reading grades from the student's signed-in LMS session (wanted — §11a). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
