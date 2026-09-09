@@ -1,4 +1,4 @@
-import { restFromEnv, restSelect, restUpsert } from "../_shared/db.ts";
+import { restFromEnv, restSelectAll, restUpsert } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
 import { handle, Subscriber } from "./handler.ts";
@@ -18,7 +18,9 @@ Deno.serve(async (req) => {
       now: () => new Date(),
       listSubscribers: async () => {
         // One view read, not a join written here: `billing_subscribers` is the migration's view.
-        return await restSelect<Subscriber>(rest, "billing_subscribers", "select=*");
+        // Paged, not a single `select=*`: `config.toml`'s `max_rows = 1000` caps any one request,
+        // and `order=account_id` is what makes the paging stable.
+        return await restSelectAll<Subscriber>(rest, "billing_subscribers", "select=*&order=account_id");
       },
       stripe: stripePostFrom(stripeKey, globalThis.fetch),
       sendEmail: async (m) => {

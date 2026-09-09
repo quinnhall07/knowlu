@@ -17,7 +17,10 @@ select a.id                              as account_id,
        e.plan                            as plan,
        coalesce(e.paused, false)         as paused,
        coalesce(e.started_at, a.created_at) as started_at,
-       r.last_reminded_at                as last_reminded_at
+       r.last_reminded_at                as last_reminded_at,
+       -- Not read by either mail today (that's a separate call, Quinn's to make); this only makes
+       -- the renewal date possible for the job to name without a second query.
+       e.current_period_end              as current_period_end
 from public.accounts a
 join public.entitlements e on e.account_id = a.id
 left join public.billing_reminders r on r.account_id = a.id

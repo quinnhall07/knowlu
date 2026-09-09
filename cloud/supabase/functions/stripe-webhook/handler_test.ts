@@ -83,9 +83,19 @@ Deno.test("a Stripe subscription becomes exactly the six fields the row carries"
   );
 });
 
-Deno.test("the account id comes from the metadata, then the client reference, then nothing", () => {
+Deno.test("the account id comes from a subscription's own metadata, the basil invoice location, the older invoice location, the client reference, or nothing", () => {
   assertEquals(accountIdFromEvent({ data: { object: { metadata: { account_id: "acc-1" } } } }), "acc-1");
-  assertEquals(accountIdFromEvent({ data: { object: { client_reference_id: "acc-2" } } }), "acc-2");
+  assertEquals(
+    accountIdFromEvent({
+      data: { object: { parent: { subscription_details: { metadata: { account_id: "acc-2" } } } } },
+    }),
+    "acc-2",
+  );
+  assertEquals(
+    accountIdFromEvent({ data: { object: { subscription_details: { metadata: { account_id: "acc-3" } } } } }),
+    "acc-3",
+  );
+  assertEquals(accountIdFromEvent({ data: { object: { client_reference_id: "acc-4" } } }), "acc-4");
   assertEquals(accountIdFromEvent({ data: { object: {} } }), null);
 });
 
@@ -441,7 +451,9 @@ Deno.test("an event whose created precedes the row's updated_at writes nothing",
         return Promise.resolve();
       },
       // Newer than the event's `created` (1_600_000_000 -> 2020-09-13...): the row already moved on.
-      currentUpdatedAt: () => Promise.resolve("2025-01-01T00:00:00.000Z"),
+      // In PostgREST's own `timestamptz` text form (`+00:00`, not `.000Z`) — the shape the stale
+      // guard must compare as an instant, not as a string.
+      currentUpdatedAt: () => Promise.resolve("2025-01-01T00:00:00+00:00"),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();
@@ -453,4 +465,54 @@ Deno.test("an event whose created precedes the row's updated_at writes nothing",
   assertEquals(await res.clone().json(), { stale: "evt_stale_1" });
   assert(!wrote, "a stale event must never overwrite newer state");
   assertEquals(recorded, ["evt_stale_1", "customer.subscription.updated", "2020-09-13T12:26:40.000Z"]);
+});
+
+Deno.test("an event whose created exactly equals the row's updated_at is also stale", async () => {
+  let wrote = false;
+  const event = {
+    id: "evt_stale_2",
+    type: "customer.subscription.updated",
+    created: 1_700_000_000,
+    data: {
+      object: {
+        metadata: { account_id: "acc-1" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      seenEvent: () => Promise.resolve(false),
+      recordEvent: () => Promise.resolve(),
+      // PostgREST's own text form of the SAME instant as the event's `created`
+      // (1_700_000_000 -> 2023-11-14T22:13:20Z): `+00:00`, not `.000Z`. A byte-for-byte string
+      // compare would call this NOT stale (`'+' < '.'`); comparing as instants correctly calls it
+      // stale — the row is not older, so a late-arriving duplicate must not overwrite it.
+      currentUpdatedAt: () => Promise.resolve("2023-11-14T22:13:20+00:00"),
+      writeEntitlement: () => {
+        wrote = true;
+        return Promise.resolve();
+      },
+      fetchSubscription: () => Promise.resolve(null),
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.clone().json(), { stale: "evt_stale_2" });
+  assert(!wrote);
 });

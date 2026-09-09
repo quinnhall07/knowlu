@@ -40,6 +40,30 @@ export async function restSelect<T>(rest: Rest, table: string, query: string): P
   return await res.json() as T[];
 }
 
+/**
+ * `restSelect`, but past PostgREST's own row cap (`config.toml`'s `max_rows`, 1000 in this project):
+ * one project-wide setting a single `select` cannot see past, silently. Pages by `limit`/`offset`
+ * until a page comes back shorter than `pageSize`, which is also how the last page is recognised
+ * with no separate count call.
+ *
+ * **The caller's `query` must carry its own `order=`.** `offset` paging is only stable over a
+ * deterministically ordered result; without one, PostgREST is free to hand back the same row twice
+ * across two pages, or skip one, as the underlying scan plan shifts between requests.
+ */
+export async function restSelectAll<T>(
+  rest: Rest,
+  table: string,
+  query: string,
+  pageSize = 1000,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let offset = 0;; offset += pageSize) {
+    const page = await restSelect<T>(rest, table, `${query}&limit=${pageSize}&offset=${offset}`);
+    out.push(...page);
+    if (page.length < pageSize) return out;
+  }
+}
+
 export async function restUpsert(
   rest: Rest,
   table: string,

@@ -36,7 +36,10 @@ Deno.serve(async (req) => {
           "entitlements",
           `account_id=eq.${encodeURIComponent(accountId)}&select=updated_at`,
         );
-        return rows.length > 0 ? rows[0].updated_at : null;
+        // Normalised to the same `toISOString()` shape `createdIso` is: PostgREST hands back
+        // `timestamptz` as `…+00:00` (or another offset, if the database's `TimeZone` is ever not
+        // UTC), and `handler.ts`'s stale guard compares these as instants, never as raw strings.
+        return rows.length > 0 ? new Date(rows[0].updated_at).toISOString() : null;
       },
       writeEntitlement: (accountId, row, updatedAt) =>
         restUpsert(rest, "entitlements", [{

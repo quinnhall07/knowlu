@@ -139,9 +139,16 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   }
   if (!sub) return json(200, { ignored: `no subscription on ${type}` });
 
-  // A late event must not resurrect a state a later one already replaced.
+  // A late event must not resurrect a state a later one already replaced. Compared as INSTANTS, not
+  // strings: `createdIso` is `toISOString()` (`…:00.000Z`) but PostgREST's own `timestamptz` text
+  // (`…:00+00:00`, and not necessarily UTC if the database's `TimeZone` is ever anything else) sorts
+  // differently byte for byte — `'+'` sorts before `'.'`, so a string compare never calls an event
+  // stale even when its `created` exactly equals the row's `updated_at`. A parse failure on either
+  // side is treated as "not stale" — a row we cannot date does not get to block a write.
   const seen = await deps.currentUpdatedAt(accountId);
-  if (seen !== null && seen >= createdIso) {
+  const seenMs = seen === null ? NaN : Date.parse(seen);
+  const createdMs = Date.parse(createdIso);
+  if (Number.isFinite(seenMs) && Number.isFinite(createdMs) && seenMs >= createdMs) {
     await deps.recordEvent(eventId, type, createdIso);
     return json(200, { stale: eventId });
   }
