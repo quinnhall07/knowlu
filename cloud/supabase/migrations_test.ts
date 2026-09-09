@@ -87,3 +87,16 @@ Deno.test("entitlements is readable by its owner and by nothing else", async () 
   const policies = [...sql.matchAll(/create\s+policy\s+(\w+)\s+on\s+public\.entitlements/g)].map((m) => m[1]);
   assertEquals(policies, ["entitlements_select_own"], `entitlements has extra policies: ${policies}`);
 });
+
+Deno.test("no reporting view may be read below the minimum cohort", async () => {
+  const sql = (await migrations()).map((m) => m.sql).join("\n").toLowerCase();
+  const views = [...sql.matchAll(/create\s+view\s+public\.(\w+)/g)].map((m) => m[1]);
+  for (const v of views) {
+    if (v === "billing_subscribers") continue; // an operational read of one row per subscriber, not a slice
+    const body = sql.split(`create view public.${v}`)[1].split(";")[0];
+    assert(
+      body.includes("count(distinct account_id) >= 10"),
+      `view ${v} has no minimum cohort — product plan §7, spec §6`,
+    );
+  }
+});
