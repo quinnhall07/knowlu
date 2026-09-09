@@ -8,13 +8,25 @@
  * the shape a reader needs.
  */
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const URL_RE = /\bhttps?:\/\/\S+/g;
-// The Windows account name is usually a person's name, and the engine's stdout is full of paths that
-// carry it. Only that one segment is replaced — the rest of the path is what makes a log readable.
-const WINUSER = /(:\\Users\\)[^\\/\s"']+/gi;
+// Fix round 1, item 1: any scheme, not only the two web ones — `webcal://` is the same capability
+// URL a calendar subscription or the LMS feed hands out, and it is the exact thing legal §9 names.
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+// The Windows account name is usually a person's name — sometimes a two-word one — and the engine's
+// stdout carries it with either slash. Only that one segment is replaced — the rest of the path is
+// what makes a log readable. Fix round 1, item 2: no `\s` in the exclusion set, so a name with a
+// space is consumed whole rather than truncated at its first word; `[:\\\/]` and `[\\\/]` around
+// `Users` accept a forward slash too.
+const WINUSER = /([:\\\/]Users[\\\/])[^\\\/"']+/gi;
 // `.md` before the token rule, because a note's filename would match both and it is the more
 // specific fact. Dots are inside the token class so a JWT is one token rather than three.
 const NOTE = /\b[\w.-]+\.md\b/g;
+// Fix round 1, item 3: a named credential is a secret whatever its length — the token rule's
+// 20-character floor exists to catch opaque runs, not to decide what counts as a password.
+// `bearer` is itself one of the keywords, so `Authorization: Bearer <token>` claims the whole
+// header as one redaction instead of leaving the scheme name standing next to a token too short
+// for TOKEN to have caught on its own.
+const CREDENTIAL =
+  /\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi;
 const TOKEN = /\b[A-Za-z0-9_.-]{20,}\b/g;
 
 export function scrub(text: string): string {
@@ -23,6 +35,7 @@ export function scrub(text: string): string {
     .replace(URL_RE, "<url>")
     .replace(WINUSER, "$1<user>")
     .replace(NOTE, "<note>")
+    .replace(CREDENTIAL, "$1=<secret>")
     .replace(TOKEN, "<token>");
 }
 
@@ -31,7 +44,9 @@ export function scrubJson(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(scrubJson);
   if (v && typeof v === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = scrubJson(val);
+    // Fix round 1, item 4: a key is a string too, and a Gmail-derived key in a `payload` object is
+    // exactly the kind of stray PII this function exists to catch.
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[scrub(k)] = scrubJson(val);
     return out;
   }
   return v;

@@ -15,6 +15,10 @@ alter table public.issues enable row level security;
 create policy issues_select_own on public.issues
   for select to authenticated using (account_id = auth.uid());
 
+-- Task 6's export and purge both filter by account_id; the daily sweep orders by created_at — one
+-- index serves both.
+create index issues_account_idx on public.issues (account_id, created_at desc);
+
 select cron.schedule(
   'knowlu-issue-sweep',
   '53 7 * * *',

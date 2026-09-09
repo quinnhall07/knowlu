@@ -69,3 +69,83 @@ Deno.test("no bearer token is 401 — a report is never anonymous", async () => 
   );
   assertEquals(res.status, 401);
 });
+
+// Fix round 1, item 5: the four metadata columns are token-shaped or refused. Untyped, uncapped
+// text in these columns is exactly the kind of stray free text the scrub function exists to keep
+// out of the store in the first place — better to refuse a malformed one than to store it.
+Deno.test("a metadata field that is not token-shaped is refused, naming the field", async () => {
+  const res = await handle(
+    post({ body: "hello", payload: {}, os_build: "x".repeat(200) }),
+    base,
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 400);
+  assertEquals(((await res.json()) as { error: string }).error.includes("os_build"), true);
+});
+
+// Fix round 1, item 6: `payload` must be a plain object when present — not an array, not a scalar.
+Deno.test("a payload that is not an object is refused", async () => {
+  const res = await handle(post({ body: "hello", payload: "text" }), base).catch((e) => e as Response);
+  assertEquals(res.status, 400);
+});
+
+// Fix round 1, item 7: the pins.
+Deno.test("GET is 405 with an exact allow header", async () => {
+  const res = await handle(
+    new Request("http://127.0.0.1:1/issues", { method: "GET" }),
+    base,
+  );
+  assertEquals(res.status, 405);
+  assertEquals(res.headers.get("allow"), "POST");
+});
+
+Deno.test("a token that does not verify is 401 — the session is not valid", async () => {
+  const res = await handle(post({ body: "hello", payload: {} }, "Bearer nope"), base).catch((e) =>
+    e as Response
+  );
+  assertEquals(res.status, 401);
+  assertEquals(((await res.json()) as { error: string }).error, "the session is not valid");
+});
+
+Deno.test("a client-sent account_id is ignored — the stored row carries the verified user's", async () => {
+  let stored: Record<string, unknown> | null = null;
+  await handle(
+    post({ body: "hello", payload: {}, account_id: "acc-evil" }),
+    {
+      ...base,
+      save: (row) => {
+        stored = row as Record<string, unknown>;
+        return Promise.resolve("id-1");
+      },
+    },
+  );
+  assert(stored);
+  const row = stored as Record<string, unknown>;
+  assertEquals(row.account_id, "acc-1");
+});
+
+Deno.test("valid metadata values pass through and land on the stored row untouched", async () => {
+  let stored: Record<string, unknown> | null = null;
+  await handle(
+    post({
+      body: "hello",
+      payload: {},
+      app_version: "0.1.0",
+      engine_build: "6a257c87ba6f08462860101b579145ce21124a2b",
+      os_build: "10.0.26200",
+      profile_id: "profile_a95daa1d40",
+    }),
+    {
+      ...base,
+      save: (row) => {
+        stored = row as Record<string, unknown>;
+        return Promise.resolve("id-1");
+      },
+    },
+  );
+  assert(stored);
+  const row = stored as Record<string, unknown>;
+  assertEquals(row.app_version, "0.1.0");
+  assertEquals(row.engine_build, "6a257c87ba6f08462860101b579145ce21124a2b");
+  assertEquals(row.os_build, "10.0.26200");
+  assertEquals(row.profile_id, "profile_a95daa1d40");
+});
