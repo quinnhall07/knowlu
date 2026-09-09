@@ -1,0 +1,71 @@
+# Knowlu's Supabase project (C1). ONE codebase, TWO projects — `knowlu-staging` and `knowlu-prod`
+# (spec §11 R6). `supabase link --project-ref <ref>` decides which one a command talks to, and
+# nothing in this file names a project, so neither can be reached by accident.
+project_id = "knowlu"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[auth]
+enabled = true
+site_url = "https://knowlu.com"
+additional_redirect_urls = ["https://knowlu.com/signed-in.html"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+enable_confirmations = true
+double_confirm_changes = true
+
+# R-C1-3, second half. `enable_confirmations = true` means every sign-up depends on this mail
+# arriving, and Supabase's built-in sender is a few messages an hour and is explicitly not for
+# production — the second person to sign up in an hour would never get theirs. The provider is the
+# same one `billing-jobs` uses for the renewal reminder (P2), so there is one account to watch.
+# `pass` is a project secret (`SMTP_PASSWORD`), set by Quinn, never in this file.
+[auth.email.smtp]
+host = "<P2: the provider's SMTP host>"
+port = 587
+user = "<P2: the provider's SMTP username>"
+pass = "env(SMTP_PASSWORD)"
+admin_email = "<P2: EMAIL_FROM>"
+sender_name = "Knowlu"
+
+# The magic link's mail carries a **six-digit code as well as a link**, because a desktop app cannot
+# receive the link's redirect: `site/signed-in.html` says so, and the wizard asks for the code
+# (`account::verify_email_code`). `{{ .Token }}` is GoTrue's own placeholder for it.
+[auth.email.template.magic_link]
+subject = "Your Knowlu sign-in code"
+content_path = "./templates/magic_link.html"
+
+# `verify_jwt = false` on every function, and it is not laxity. Each handler verifies the bearer
+# token itself and answers 401 or 402 in OUR shape — the shape `_shared/entitlement.ts` promises C2
+# and the app's `account.rs` parses. Supabase's gateway rejection is a different body with a
+# different status, so leaving the gate to it would make the contract untestable. `stripe-webhook`
+# has no JWT at all: it is authenticated by its signature.
+[functions.entitlement]
+verify_jwt = false
+[functions.billing-checkout]
+verify_jwt = false
+[functions.billing-portal]
+verify_jwt = false
+[functions.stripe-webhook]
+verify_jwt = false
+[functions.billing-jobs]
+verify_jwt = false
+[functions.account]
+verify_jwt = false
+[functions.telemetry]
+verify_jwt = false
+[functions.issues]
+verify_jwt = false

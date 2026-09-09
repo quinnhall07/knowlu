@@ -1,0 +1,6 @@
+# Nothing secret is ever committed. `supabase link` writes .temp/, `supabase db diff` writes
+# .branches/, and a local `.env` is how the CLI passes secrets to `functions serve`.
+.env
+.env.*
+.branches/
+.temp/
