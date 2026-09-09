@@ -98,9 +98,10 @@ calendar URLs stay as the offline fallback until C3/C4).
    `a8dbf3f`): Task 0 dispatched; the pre-flight scan (`…/preflight.md`) found **33 plan-text
    defects (10 blocking)** — symbols used before their defining task, two existing static tests the
    new markup would break, a hand-off registering commands that do not exist yet — the writer fixed
-   all 33 in the text (committed; hand-off order for the controller **H1 → H9a → H10 → H9b → H11**)
-   and the scan agent's re-check of those fixes is the last gate before **Task 1** (rulings
-   R-C1-10/11 in the ledger `.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`). Task 0 is
+   all 33 in the text, the scan agent re-checked them, and the residue is fixed too — **the plan
+   is final at `d8fd00d` (10,595 lines) and Task 1 is the next dispatch** (its brief is generated;
+   hand-off order for the controller **H1 → H9a → H10 → H9b → H11**; rulings R-C1-9…12 in the ledger
+   `.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`). Task 0 is
    built and green (PR #2, draft) with one follow-up: its `config.toml` must have the
    `[auth.email.smtp]` block commented out until P2, as the amended plan now says. Tasks 0–9 are cloud
    code testable with `deno test` alone; the first Quinn precondition is P1 at Task 1 step 7. Then **C2**,
