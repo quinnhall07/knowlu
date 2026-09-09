@@ -95,9 +95,12 @@ calendar URLs stay as the offline fallback until C3/C4).
    incl. 14a/14b/14c; C2: 18 tasks incl. 7a/8a), committed.
 4. **Cut day:** the reset (§1) and the archive step remain (§4).
 5. **C1 execution started** on `c1-accounts` (worktree `.claude/worktrees/c1-accounts`, base
-   `a8dbf3f`): Task 0 dispatched, the pre-flight scan running; ledger
-   `.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`. Tasks 0–9 are cloud code testable
-   with `deno test` alone; Task 4 (Stripe) and the first staging apply need P1/P2. Then **C2**,
+   `a8dbf3f`): Task 0 dispatched; the pre-flight scan (`…/preflight.md`) found **33 plan-text
+   defects (10 blocking)** — symbols used before their defining task, two existing static tests the
+   new markup would break, a hand-off registering commands that do not exist yet — and the plan
+   writer's fix round is in flight; **Task 1 waits for that round and a re-scan** (rulings R-C1-10/11
+   in the ledger `.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`). Tasks 0–9 are cloud
+   code testable with `deno test` alone; the first Quinn precondition is P1 at Task 1 step 7. Then **C2**,
    merging C1 first; apply H9 between the two merges.
 6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
    settings-panel Google connect/disconnect; the "source went quiet" surface) get plans after C2.
