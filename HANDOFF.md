@@ -1,139 +1,145 @@
 # HANDOFF — where Knowlu stands and how the next session runs it
 
-**Written 2026-09-09 ~05:30 CT by the session that created this repository.** Read this whole file, then
-`CLAUDE.md`, then `docs/specs/2026-09-09-knowlu-cloud-design.md` (the direction; still marked DRAFT
-for Quinn's review), then `docs/plans/2026-09-09-c0-ci-release-plan.md` (the first plan). Everything
+**Rewritten 2026-09-09 (evening) by the session that signed the spec, ran cut day and executed C0
+Tasks 1–3.** Read this whole file, then `CLAUDE.md`, then `docs/specs/2026-09-09-knowlu-cloud-design.md`
+(signed; §11a holds the rulings made after signing), then the plan you are executing. Everything
 older under `docs/` is history or design authority from the previous repository (`PROVENANCE.md`).
 
 ---
 
 ## 1. State, in facts
 
-- **This repo:** `quinnhall07/knowlu`, private. `main` = `99784fb`: the orphan import `0967ac2`
-  (cut from `quinn-ops` `283d710`), plan C0, and the two cloud docs. One Cargo workspace:
-  `engine/` (`knowlu-engine`), `app/` (`knowlu`). Gates at the import: engine **888 passed / 3
-  ignored**, app **129 / 1**, fresh clone **1017 / 0 / 4**, 0 warnings; `knowlu-engine.exe`
-  4,517,376 bytes, `knowlu.exe` 7,666,176. `.gitattributes`: LF everywhere, `*.ps1` CRLF,
-  `engine/tests/fixtures/** -text` (frozen bytes — never re-encode, never regenerate; see `CLAUDE.md`).
-- **The old repo `quinn-ops`** (`C:\Users\danie\GitHub\quinn-ops`) is **still live until cut day**:
-  it is Quinn's vault; a PowerShell scheduled task `quinn-ops-local-runner` writes it at 12:00 and
-  18:00 CT with the old engine; Knowlu build `3f2d438` runs from the Start-menu shortcut against it;
-  the Claude cloud routine pushes to it twice a day. **Do not build, run or edit anything there** —
-  read its docs if you must (`docs/HANDOFF.md` top block explains the redirection). It becomes an
-  archive on cut day.
-- **Quinn's decisions of record (2026-09-09)** are the spec's §1, D1–D12. In one line: accounts +
-  $9.99/month, no free tier; all judgment in the cloud (Supabase + Cloudflare + Stripe, Anthropic
-  API, cheapest model that passes the eval suite); no local model; CI-built releases; the vault is
-  wiped and Quinn re-onboards fresh at cut day; Obsidian dropped; Gmail by **OAuth** (Quinn's
-  choice, with the verification + CASA track); portal scraping (zyBooks/VHL) stays on the device —
-  *fetch on device, think in the cloud*.
-- **Cancelled, never resume:** the old plan 2 Tasks 9–10, plans 3b, 3c, 4b; plan 3a's runtime is
-  scheduled for removal (C4). The old `local-run.ps1`, the dual-run harness and Python are not in
-  this repo by design.
-- **Tooling on this laptop:** Rust 1.98 `stable-x86_64-pc-windows-gnu` + WinLibs POSIX MSVCRT mingw;
-  `cargo tauri` CLI; Windows SDK 10.0.26100 (`signtool` found by `scripts/find-signtool.ps1`);
-  GitHub CLI 2.100.0 **logged in as `quinnhall07`** (`repo`, `workflow` scopes); no Trusted Signing
-  profile yet (Azure identity validation started 2026-09-04); the current updater keypair
-  (`C2EC981122E1D2DF`) is to be **retired** by C0 Task 4 — its private half once sat in OneDrive.
-- **Legal:** `docs/notes/2026-09-09-knowlu-cloud-legal-landscape.md` (sourced, not advice). The
-  spec's §9 turns it into design consequences and corrects one finding against Google's current pages.
+- **This repo:** `quinnhall07/knowlu`, private. `main` is ahead of `origin/main` (`0aaa771`) by the
+  commits of 2026-09-09 — **not pushed; Quinn's go is the first ask below.** They are: the signed
+  spec + VISION §10 + CLAUDE direction (`48b83dc`), spec §11a rulings (`f7f1816`, `b569fc9`), the
+  wizard defaults (`18cadd2`), the first slot at launch (`f8649d5`), plans C1 (`58954ef`, `c6a18ca`,
+  `c95a6d1`) and C2 (`ede9b70`), the C0 merge (`d67bafa`, `--no-ff`, first parent `ede9b70`), and the
+  C0 docs. Gates: PR #1's last run 34356994036 on the runner **1021 passed / 0 failed**, `warnings: 1
+  accepted (.rsrc), 2 tallies, 0 other`, `eol contract holds over 223 files`; the local workspace
+  run on the merged tree is recorded in the C0 ledger.
+- **Cut day is done except the archive step.** Quinn quit the old Knowlu, disabled the cloud
+  routine, and onboarded with the new build into `C:\Users\danie\Knowlu\Vault` (he kept the wizard's
+  default name, so the profile is "Vault", `profile_a95daa1d40`; backups at `%USERPROFILE%\Knowlu\Backups`;
+  Blackboard feed set; zyBooks/VHL credentials at `knowlu/profile_a95daa1d40/{zybooks,vhl}`;
+  `runners.yaml` app-scheduled, slots 12:00/18:00). The installed build is at
+  `%LOCALAPPDATA%\Programs\Knowlu\` (`knowlu.exe`, `knowlu-engine.exe`, `WebView2Loader.dll`) and the
+  Start-menu shortcut points there; the app re-registered its own autostart entry. **A newer build
+  (`f8649d5`, first slot at launch) is built in `target\release\` but not installed** — copy the three
+  files in the next time Knowlu is quit. The old `quinn-ops-local-runner` task is unregistered (its
+  XML, the old autostart value and the two old profiles are in `%LOCALAPPDATA%\knowlu-pre-cut-2026-09-09\`).
+  **`quinn-ops` is not yet archived**: its worktrees are still there and `gh repo archive` has not run
+  — Quinn's go, at the machine.
+- **As of the last check no slot had run in the new vault** (no `today.md`); the page is empty until
+  Quinn presses *Run now* in the tray or 12:00 arrives, and the personal calendar is not connected
+  (`calendars: []` in `config/ingest.yaml`) — the current wizard never asks. He was told how to add
+  the secret iCal address by hand.
+- **The old repo `quinn-ops`** (`C:\Users\danie\GitHub\quinn-ops`) is now inert (no task, no routine,
+  no running app) but still Quinn's old vault. **Do not build, run or edit anything there** except the
+  archive step.
+- **Tooling on this laptop:** as before (Rust 1.98 GNU host + WinLibs 16.1.0-r4 MSVCRT, tauri-cli
+  2.11.4, Windows SDK 10.0.26100, `gh` as `quinnhall07`), plus nothing new. No Deno, no Supabase CLI,
+  no Docker — C1/C2's Task 0 installs the first two with winget.
+- **Legal:** unchanged (`docs/notes/2026-09-09-knowlu-cloud-legal-landscape.md`; spec §9).
 
 ## 2. What gets built, and how it is kept apart
 
-Work runs as **independent streams, one git worktree each, one plan each, disjoint file ownership**.
-A stream never edits a file another stream owns; shared files are edited only by the controller at
-merge time, in one commit, on `main`. Merge order is fixed so rebases stay trivial: **C0 → C1 → C2**.
+Streams, one worktree each (`.claude/worktrees/<branch>`, git-ignored), one plan each, disjoint
+files; shared files only by the controller at merge. Merge order **C0 → C1 → C2**.
 
-| Stream | Plan | Worktree branch | Owns (exclusive) | Needs from Quinn |
+| Stream | Plan | Branch | Owns (exclusive) | Needs from Quinn |
 |---|---|---|---|---|
-| **C0 — CI release** | written: `docs/plans/2026-09-09-c0-ci-release-plan.md` | `c0-ci-release` | `.github/**`, `scripts/ci/**`, `scripts/release.ps1`, `scripts/sign.ps1`, `engine/tests/workflows.rs`; `app/tauri.conf.json` **only** the `plugins.updater.pubkey`, `endpoints` and `version` keys | P1 Azure app registration + federated credential + Trusted Signing names; P2 Cloudflare Pages project + token; P3 `knowlu.com` on Pages; P4 approval to retire the old updater key |
-| **C1 — accounts, entitlement, the new wizard, telemetry, issue reports** | **to be written** from spec §4.1–4.2, §5.1, §6 after the spec review | `c1-accounts` | `cloud/supabase/**` (migrations, `entitlement`, `telemetry`, `issues`, `account` functions), `app/src/{onboarding,profiles,scaffold,credentials}.rs`, `app/src/account.rs` (new), `app/static/**`, `app/tests/**` except `workflows`, `site/privacy.html`, `site/terms.html` (new) | a Supabase organisation with **two** projects (prod, staging); a Stripe account (test mode first) with the $9.99 product; the Google Cloud OAuth consent screen (needs the site + privacy policy URL) submitted for restricted-scope verification; the privacy-policy and ToS text reviewed |
-| **C2 — the judgment service** | **to be written** from spec §3.2, §5.2–5.4, §4.3 | `c2-judge` | `cloud/supabase/functions/judge-*`, `ingest-*`, `events`, `gmail-*`; `engine/src/{judge,enrich,cloudmodel}.rs`, `engine/src/coursework.rs` (the fetch/parse split), `engine/tests/` new files | an Anthropic API key in the Supabase project's secrets (Quinn sets it; never in this repo); the eval seed read once from the `quinn-ops` archive |
-| **Cut day** | spec §7.2 — a procedure, not a plan | none (uses a laptop build of `main`) | nothing in-tree; `HANDOFF.md` afterwards | Quinn at the machine for ~30 minutes |
-| **Docs** | — | controller only, on `main` | `VISION.md` (the spec's §10 diff, applied once Quinn approves), `CLAUDE.md`, `README.md`, this file | spec sign-off |
+| **C0 — CI release** | `docs/plans/2026-09-09-c0-ci-release-plan.md` — **Tasks 1–3 DONE and merged**; Tasks 4–6 remain | `c0-ci-release` (merged; **make `c0-release-key` from `main` for Tasks 4–6**) | `.github/**`, `scripts/ci/**`, `scripts/release.ps1`, `scripts/sign.ps1`, `engine/tests/workflows.rs`; `app/tauri.conf.json` only `plugins.updater.pubkey`, `endpoints`, `version` | P4 (retire the old updater key — Task 4's PowerShell block), P1 Azure (**federated credential entity-type Environment = `release`**, not the tag), P2 Cloudflare, P3 `knowlu.com`, the secrets |
+| **C1 — accounts, entitlement, the calendars-first wizard, telemetry, issue reports** | `docs/plans/2026-09-09-c1-accounts-plan.md` — **written, reviewed (4 rounds), ready** | `c1-accounts` | `cloud/supabase/**` except C2's function dirs and `_shared/judge_*.ts`; `app/src/{onboarding,profiles,scaffold,credentials,scheduler}.rs`; new `app/src/{account,telemetry,report,lms_link}.rs`; `app/static/**`; `app/tests/**`; `site/**` | Supabase org (prod + staging); Stripe test mode with both prices, the pause, the Portal, the webhook; **an e-mail provider (Resend free tier) for Supabase Auth mail and the annual reminder**; Stripe Tax + Kentucky; the Google consent screen (two scopes); privacy/ToS read |
+| **C2 — the judgment service** | `docs/plans/2026-09-09-c2-judge-plan.md` — **written, reviewed (3 rounds), ready after C1** | `c2-judge` | `cloud/supabase/functions/{judge-*,ingest-*,events,google-*,gmail-read}`, `_shared/judge_*.ts`, `migrations/20260911*.sql`, `cloud/eval/**`; `engine/src/{judge,enrich,cloudmodel,coursework,judgelog,events}.rs`; new `engine/tests/*.rs` | `ANTHROPIC_API_KEY` in the staging project's secrets; the Google OAuth client id/secret; Quinn as the first Gmail test user; the one-time go to read the `quinn-ops` archive for the eval seed |
+| **Cut day** | spec §7.2 | — | — | the archive step only |
+| **Docs** | — | controller, on `main` | `VISION.md`, `CLAUDE.md`, `README.md`, this file, the spec | — |
 
-**Shared files with a single owner:** root `Cargo.toml`/`Cargo.lock` (controller; a stream that needs
-a dependency says so in its report and the controller adds it on `main` first), `app/src/main.rs`
-(controller — the `generate_handler!` lists; a stream adds commands in its own module and the
-controller registers them at merge), `app/src/lib.rs` (controller), `app/tauri.conf.json` outside the
-three keys above (controller), `engine/src/lib.rs` (controller, one `pub mod` line per new module).
+**Shared files with a single owner:** root `Cargo.toml`/`Cargo.lock`, `app/src/main.rs` (the two
+`generate_handler!` lists), `app/src/lib.rs`, `app/src/commands.rs`, `app/src/tray.rs`,
+`app/src/updates.rs`, `app/src/state.rs`, `app/tauri.conf.json` outside C0's three keys,
+`engine/src/lib.rs`, `engine/src/{main,cli,ingest,runtime,inference}.rs`, `scripts/*.py`. Every plan
+lists what it needs there under **"Controller hand-offs"** with exact code; the controller applies
+them at merge. **H9 of C2** (the wizard's Google button, five C1 files) lands as one controller
+commit between C1's and C2's merges, or is deferred whole to C4 (R-X-17).
 
-**Controller rules:**
-- Use `superpowers:subagent-driven-development` per plan, **one implementer at a time per worktree**;
-  reviewers may run in parallel; ledgers live in `.superpowers/sdd/<plan>/progress.md` (git-ignored).
-  Streams may run concurrently **because their file sets are disjoint** — verify that with
-  `git diff --name-only main...<branch>` before every merge; an overlap is a stop, not a rebase.
-- Plans are written before execution (`superpowers:writing-plans`), from the spec, with a fidelity
-  ledger against the spec's §1 decisions; C1 and C2 plans can be written in parallel (docs only).
-- Every merge to `main` goes through a PR with `ci / test` green once C0 Task 2 exists; before that,
-  `cargo test --workspace` locally at 0 warnings. Merge with `--no-ff`, first parent `main`.
-- Record every ruling in the stream's ledger; never park the session on a question Quinn can answer
-  later — decide, record, continue; **stop only for** an irreversible action, a secret, a spend, a
-  push to a shared branch, or anything that touches `quinn-ops`.
+**Rulings of record made during execution** live in the review reports
+(`docs/reports/2026-09-09-c1-accounts-plan-review.md`, `…c2-judge-plan-review.md`: R-C1-*, R-C2-*,
+R-X-1…17) and in the C0 ledger (`.superpowers/sdd/2026-09-09-c0-ci-release-plan/progress.md`, R-C0-*).
+Two Quinn may want to reverse: **R-C2-4** (corrections become eval cases only under the (c) opt-in —
+follows from D5/§6; reversing means amending D5) and **R-X-16** (the vault copies of the LMS and
+calendar URLs stay as the offline fallback until C3/C4).
+
+**Controller rules (unchanged, plus what today taught):**
+- `superpowers:subagent-driven-development` per plan, one implementer at a time per worktree,
+  reviewers in parallel, ledgers in `.superpowers/sdd/<plan>/`. Disjointness by
+  `git diff --name-only main...<branch>` before every merge.
+- **Implementer subagents stop instead of blocking on a CI run** and no notification comes for the
+  run: the controller watches the run itself (`gh run watch <id> --exit-status` in a background Bash)
+  and resumes the agent with the result. Every dispatch says so.
+- **Every dispatch names the trailer model explicitly** (`Co-Authored-By: <this session's model>`);
+  one implementer used its own model name and the commit had to be amended.
+- **Never `cd` in the controller's shell**: the working directory persists and a `cd` into a worktree
+  re-homes the whole session. Use `git -C <path>` and absolute paths.
+- Stop only for an irreversible action, a secret, a spend, a push to a shared branch, or anything
+  touching `quinn-ops`. Everything else: rule, ledger, continue.
 
 ## 3. Sequence
 
-1. **Spec review with Quinn** (§1 decisions, §10 VISION diff, §11 recommendations) — walk him
-   through it in chat, one section at a time; apply his edits; flip the status line from DRAFT;
-   apply the §10 diff to `VISION.md`; rewrite `CLAUDE.md`'s last line into a real "direction" section.
-2. **Start C0 now** (Tasks 1–2 need nothing from Quinn; Task 3 waits on P1/P2; Task 4 on P4).
-3. **Write plans C1 and C2** (parallel, docs only), review each independently (as plan 3a was),
-   commit to `main`.
-4. **Cut day** whenever Quinn has 30 minutes at the laptop — it does not wait on C0/C1/C2 and
-   nothing waits on it except the archive of `quinn-ops`. Steps: spec §7.2. A judgment gap follows
-   until C2's first endpoint; Quinn accepted it.
-5. **Execute C1 and C2** in their worktrees, concurrently, merging C1 first.
-6. C3 (sync; git out of the product) and C4 (remove the local runtime) get plans after C2 merges.
+1. ~~Spec review~~ — done; §11a records the rulings since.
+2. **C0:** Tasks 1–3 merged. **Next:** branch `c0-release-key` from `main`; Task 4 (P4 + Quinn's
+   keygen block), Task 3's first real run needs P1/P2/secrets, Task 5 (first tag `v0.1.0`, the
+   updater proof), Task 6 (branch protection, docs close). CLAUDE.md and `app/README.md` already say
+   the CI-only truth.
+3. ~~Plans C1 and C2~~ — written, reviewed, committed.
+4. **Cut day:** the archive step remains (§4). Copy the `f8649d5` build in when Knowlu is next quit.
+5. **Execute C1** (branch from `main`; Task 0 installs Deno + Supabase CLI), then **C2**, merging C1
+   first; apply H9 between the two merges.
+6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
+   settings-panel Google connect/disconnect; the "source went quiet" surface) get plans after C2.
 
-## 4. Quinn's queue — what needs his opinion, what needs his hands
-
-Ask **one at a time, when reached, with the context** — never a list of chores. In rough order:
+## 4. Quinn's queue — one at a time, when reached, with the context
 
 | When | Ask | Context to give him |
 |---|---|---|
-| first | **Spec sign-off**, §1 → §10 → §11 | §11's R3 (summer pause) is the one with real revenue consequence; R2 (7-day trial) changes the wizard; everything else has a safe default |
-| first | **Cut day: pick the 30 minutes** | he quits Knowlu, you unregister the task, he disables the routine at claude.ai/code/routines, he runs the wizard into `%USERPROFILE%\Knowlu\`, you repoint the shortcut and archive the old repo; the old vault survives in that archive's history |
-| C0 T3 | **Azure** (P1) | the Trusted Signing account + certificate profile he started 2026-09-04; an Entra app registration with a federated credential for `repo:quinnhall07/knowlu:ref:refs/tags/v*`; the role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret) |
-| C0 T3 | **Cloudflare** (P2, P3) | an account, a Pages project `knowlu` (direct upload), an API token scoped to Pages:Edit, the account id; `knowlu.com` moved to Cloudflare DNS and attached to Pages — the updater endpoint is baked into the app, so the domain matters early |
-| C0 T3 | **Set the secrets himself** | `gh secret set NAME --repo quinnhall07/knowlu < file` — you name them, he sets them; you never see a value |
-| C0 T4 | **Retire the old updater key** (P4) | the private half was in a OneDrive file; regeneration costs one `pubkey` line and this laptop's install re-installing once; give him the exact PowerShell block from the plan |
-| C1 | **Supabase** | an organisation, projects `knowlu-prod` and `knowlu-staging`, region US; project URL + anon key are public, the service-role key is a secret he sets |
-| C1 | **Stripe** | an account; test mode; one product "Knowlu" at $9.99/month; whether to add the $69.99/academic-year price and the summer pause (spec §11 R3); Stripe Tax with Kentucky registration before the first Kentucky sale |
-| C1 | **Google OAuth consent screen** | on the existing Cloud project: app name, logo, homepage `knowlu.com`, privacy policy URL, authorised domain, `gmail.readonly` justification and a demo video; submit for restricted-scope verification — weeks; CASA afterwards; until then 100 test users and 7-day tokens |
-| C1 | **Privacy policy + ToS text** | drafted by you from the legal note's "cheapest compliant path"; he reads them; a lawyer before the first non-founder paid sign-up (Alabama 18+ attestation and the cancel flow are the two questions that matter most) |
-| C2 | **Anthropic API key** | set in Supabase project secrets by him; never in this repo, never in a log |
-| soon | **Rotate the Blackboard token and the Google Calendar capability URL** | both sat in a OneDrive mirror on 2026-09-09; under C1 the ICS URL moves server-side anyway — rotate when he sets it there |
-| later | The first friend; the lawyer; a co-founder (VISION lists it as unowned) | — |
+| now | **Go to push `main`** | `main` holds the signed spec, the plans, cut-day's app fixes and the C0 merge; pushing makes `ci / test` the gate on every PR and closes PR #1 as merged. Nothing else waits on it except branch protection (C0 Task 6). |
+| now | **Archive `quinn-ops`** (cut day step 6) | with him present: remove its worktrees, leave the checkout on `main`, `gh repo archive quinnhall07/quinn-ops`. The old vault survives in that archive's history. Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
+| now | **Run now + the personal calendar** | tray → *Run now* fills the empty page; the secret iCal address (Reset it first) goes into `config/ingest.yaml`'s `calendars:` list by hand until C1's wizard asks. |
+| C0 T4 | **Retire the old updater key** (P4) | the exact PowerShell block in the plan's Task 4 generates the new pair, sets the two secrets, prints only the public key; then `cmdkey /delete:knowlu/updater-key{,-password}` and the OneDrive file + its version history. Old key id `C2EC981122E1D2DF`. |
+| C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
+| C0 T3 run | **Cloudflare** (P2, P3) | account, Pages project `knowlu` (direct upload), API token Pages:Edit, account id; `knowlu.com` on Cloudflare DNS → Pages. |
+| C0 T3 run | **Set the secrets himself** | `gh secret set NAME --repo quinnhall07/knowlu < file` for `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `gh variable set` for `TS_ENDPOINT`, `TS_ACCOUNT`, `TS_PROFILE`. You name them, he sets them. |
+| C1 | **Supabase, Stripe, the e-mail provider, Google consent (two scopes), the policy texts** | as the C1 plan's P1–P5 say; the e-mail provider is new (Resend free tier; Supabase Auth's built-in sender is not for production and California's annual reminder needs a sender). |
+| C2 | **Anthropic key; Google OAuth client; first test user; the archive read** | as the C2 plan's P0a–P4 say. |
+| soon | **Rotate the Blackboard token and the Google Calendar capability URL** | he regenerated neither yet as far as this session knows; both sat in a OneDrive mirror. |
+| later | The first friend; the lawyer; a co-founder | — |
 
-## 5. Standing rules for this repository (the short list; `CLAUDE.md` has the rest)
+## 5. Standing rules (the short list; `CLAUDE.md` has the rest)
 
-- **Never touch `quinn-ops`** except to read docs and, on cut day, to archive it. Never run any
-  engine binary with `--vault` pointing at a real vault; tests use `engine/tests/fixtures/` and
-  temp copies (`scripts/scratch-vault.ps1 -Source <fixture>`).
+- **Never touch `quinn-ops`** except the archive step. Never run any engine binary with `--vault`
+  pointing at a real vault (Quinn's is `C:\Users\danie\Knowlu\Vault` now); tests use fixtures and
+  temp copies.
 - **No secret ever enters this repo, a log, a commit message, a fixture, a prompt or a test name.**
-  Secrets are GitHub secrets or Supabase secrets set by Quinn. If a value is ever printed, say so
-  immediately and treat it as exposed.
-- **0 warnings is part of green**; the one accepted line is the app's `.rsrc merge failure:
-  multiple non-default manifests`. The eight frozen references and the three surface references
-  are never regenerated (the three: only in a commit whose diff shows why).
-- **Releases come only from CI** once C0 lands; until then nothing is released at all.
-  `scripts/release.ps1 -DryRun` is the only local use.
-- **Desktop safety:** never synthetic keyboard/mouse input; screenshots by window handle
-  (`PrintWindow`) only; never launch `knowlu.exe` yourself against a real profile — Quinn does.
-- **Commits:** specific `git add`, message via `-F <file>`, trailers `Co-Authored-By: <your model
-  name> <noreply@anthropic.com>` and `Claude-Session: <this session's URL>`.
-- Line endings are the repo's: LF, `.ps1` CRLF, fixtures bytes. The **engine** still translates CRLF
-  on every vault read and write because users' vaults are whatever Windows made them.
+- **0 warnings is part of green**; the gate line `warnings: N accepted (.rsrc), N tallies, N other`
+  must end in `0 other`. The eight frozen references and the three surface references are never
+  regenerated.
+- **Releases come only from CI** (`release.yml` on a `v*` tag); `scripts\release.ps1 -DryRun` is the
+  only local use. No tag until C0 Task 4 has landed the new key.
+- **Desktop safety:** never synthetic input; screenshots by `PrintWindow` only; never launch
+  `knowlu.exe` against a real profile yourself — Quinn does.
+- **Commits:** specific `git add`, message via `-F <file>`, trailers with **this session's** model
+  name and URL.
+- Line endings are the repo's: LF, `.ps1` CRLF, fixtures bytes.
 
 ## 6. Quick reference
 
 ```
-cargo test --workspace                       # both crates; ~2 min warm
-cargo build --release --workspace            # target\release\knowlu-engine.exe, knowlu.exe
-.\scripts\release.ps1 -DryRun                # local bundle, unsigned, publishes nothing (after C0 T3)
-.\scripts\scratch-vault.ps1 -Source engine\tests\fixtures\vault-full   # a throwaway vault to demo against
-gh run watch / gh pr create --fill           # CI, once .github/workflows exist
+cargo test --workspace                       # both crates; the gate CI runs
+cargo build --release --workspace            # target\release\knowlu-engine.exe, knowlu.exe (+ WebView2Loader.dll)
+.\scripts\release.ps1 -DryRun                # local bundle, unsigned, publishes nothing
+.\scripts\ci\eol-check.ps1                   # the line-ending contract
+.\scripts\scratch-vault.ps1 -Source engine\tests\fixtures\vault-full   # a throwaway vault
+gh run list --workflow ci.yml / gh run watch <id> --exit-status        # CI
 ```
 
-App data: `%LOCALAPPDATA%\knowlu\` (`profiles.json`, `profiles\<id>\`). New vaults (spec §4.1):
-`%USERPROFILE%\Knowlu\<Profile>\`, backups `%USERPROFILE%\Knowlu\Backups\`.
+App data: `%LOCALAPPDATA%\knowlu\` (`profiles.json`, `profiles\<id>\`). Vaults: `%USERPROFILE%\Knowlu\<Profile>\`,
+backups `%USERPROFILE%\Knowlu\Backups\`. The installed app: `%LOCALAPPDATA%\Programs\Knowlu\`.
