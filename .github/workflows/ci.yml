@@ -34,10 +34,15 @@ jobs:
           $code = $LASTEXITCODE
           # The grep must run on every push, pass or fail, so a real warning is never hidden behind a
           # test failure exiting first. The one accepted linker line; any other 'warning:' is a
-          # failure even if rustc and every test passed.
+          # failure even if rustc and every test passed. Cargo also prints one "generated N warning"
+          # tally line per target that hit the accepted warning (once for the bin, once for its test
+          # binary) — that is cargo counting the same accepted warning again, not a second warning,
+          # so tallies are split out and never counted as "other".
           $all = @(Select-String -Path test.log -Pattern '^warning:')
-          $other = @($all | Where-Object { $_.Line -notmatch 'rsrc merge failure: multiple non-default manifests' })
-          Write-Output "warnings: $($all.Count - $other.Count) accepted (.rsrc), $($other.Count) other"
+          $tallies = @($all | Where-Object { $_.Line -match ' generated \d+ warnings?( \(\d+ duplicates?\))?$' })
+          $accepted = @($all | Where-Object { $_.Line -match 'rsrc merge failure: multiple non-default manifests' })
+          $other = @($all | Where-Object { $_.Line -notmatch 'rsrc merge failure: multiple non-default manifests' -and $_.Line -notmatch ' generated \d+ warnings?( \(\d+ duplicates?\))?$' })
+          Write-Output "warnings: $($accepted.Count) accepted (.rsrc), $($tallies.Count) tallies, $($other.Count) other"
           if ($other.Count -gt 0) { $other | ForEach-Object { $_.Line }; exit 1 }
           if ($code -ne 0) { exit $code }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
