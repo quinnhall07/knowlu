@@ -101,11 +101,11 @@ calendar URLs stay as the offline fallback until C3/C4).
    offline halves:** Task 0 (skeleton), 1 (the account tables + RLS), 2 (`_shared` REST / bearer /
    entitlement — the 402 contract C2 imports), 3 (`GET /entitlement`), 4 (Stripe Checkout, the webhook
    as the only writer of `entitlements`, the Portal — one fix round), 5 (the billing job, the invoice
-   branch and the idempotency/ordering guard — one fix round; re-review pending at the time of writing).
+   branch and the idempotency/ordering guard — one fix round, review clean); Task 6 (`DELETE /account`, export) in flight at the time of writing.
    **Every staging step is batched until P1/P2** (ruling R-C1-14): Task 1 steps 7–9, Task 3 step 6,
    Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…18 are in
    the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
-   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 6 (`DELETE /account`, export),
+   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 6 if it has not landed,
    7 (sources, encryption), 8 (telemetry), 9 (issues), then hand-off H1 and the app tasks 10–18 (the
    test counts in the plan are +10 behind the branch after Task 5 — R-C1-16). Then **C2**, merging C1
    first; apply H9 between the two merges.
