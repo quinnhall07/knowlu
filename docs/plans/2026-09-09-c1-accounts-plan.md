@@ -282,7 +282,7 @@ Agreed with the C2 plan, written in parallel. Use them verbatim; changing one is
 
 ## Controller hand-offs
 
-Files this stream may not edit. **H1 is pre-flight** — the controller applies it on `main` **before** C1 execution starts, because it is compile-blocking. Everything from H3 down is applied at merge, in one commit on `main`, keyed to the task that needs it.
+Files this stream may not edit. **H1 is pre-flight** — the controller applies it on `main` **before** C1 execution starts, because it is compile-blocking. Everything from H3 down is applied at merge, in one commit on `main`, keyed to the task that needs it — **except the four mid-stream applications R-C1-11 orders: H9a, H10, H9b and H11**, each applied on the branch's base at the step that names it (Task 13 step 3, Task 14a step 6, Task 14b step 3a, Task 14c step 1). With H1 that is five, and H9's block lists them in order.
 
 ### H1 (pre-flight, before Task 10) — `app/src/lib.rs` and four empty modules
 
@@ -691,8 +691,13 @@ lms_link::paste_calendar_link, lms_link::capture_courses
 ```
 
 `paste_calendar_link` exists from Task 14 step 4 and `capture_courses` from Task 14b step 3, so H9b
-is safe the moment Task 14b's `lms_link.rs` is written. Everything else in H3 — the four commands
-`onboarding` and `account` add, and the console window's whole list — waits for merge.
+is safe the moment Task 14b's `lms_link.rs` is written. Everything else in H3 — the **eleven** commands
+`account` and `onboarding` add (eight and three), and the console window's whole list — waits for merge.
+
+**Where these two sit in the plan's five controller applications**, the same order Task 13 step 3,
+Task 14a step 6 and Task 14b step 3a state: **H1** (pre-flight, before Task 10) → **H9a** (Task 13
+step 3) → **H10** (Task 14a step 6) → **H9b** (Task 14b step 3a) → **H11** (Task 14c, before its first
+`cargo test`). H10 comes between the two halves of H9 because Task 14a runs before Task 14b.
 
 ---
 
@@ -2184,7 +2189,7 @@ Expected: `HTTP/2 401` and `{"error":"no bearer token"}`. That single call prove
 **Interfaces:**
 - Consumes: everything in `_shared/`.
 - Produces:
-  - `stripe.ts`: `formEncode(params: Record<string, string | number | boolean | undefined | null>): string`, `hmacHex(secret, message): Promise<string>`, `parseStripeSignature(header): { t: number; v1: string[] } | null`, `verifyStripeSignature(payload, header, secret, nowSeconds, tolerance?): Promise<boolean>`, `type StripePost = (path: string, form: Record<string, string>) => Promise<Record<string, unknown>>`, `stripePostFrom(secret, fetchImpl): StripePost`.
+  - `stripe.ts`: `STRIPE_API_VERSION`, `formEncode(params: Record<string, string | number | boolean | undefined | null>): string`, `hmacHex(secret, message): Promise<string>`, `parseStripeSignature(header): { t: number; v1: string[] } | null`, `verifyStripeSignature(payload, header, secret, nowSeconds, tolerance?): Promise<boolean>`, `type StripePost = (path: string, form: Record<string, string>) => Promise<Record<string, unknown>>`, `stripePostFrom(secret, fetchImpl): StripePost`, `type StripeGet = (path: string) => Promise<Record<string, unknown> | null>`, `stripeGetFrom(secret, fetchImpl): StripeGet`.
   - `billing-checkout/handler.ts`: `type Plan = "monthly" | "academic_year"`, `checkoutForm(args): Record<string, string>`, `handle(req, deps)`.
   - `stripe-webhook/handler.ts`: `entitlementFromSubscription(sub): { plan: string | null; status: EntitlementStatus; current_period_end: string | null }`, `accountIdFromEvent(event): string | null`, `handle(req, deps)`.
 
@@ -2210,7 +2215,15 @@ Record the non-secret values as function **environment variables** (also `supaba
 
 ```ts
 import { assert, assertEquals } from "@std/assert";
-import { formEncode, hmacHex, parseStripeSignature, verifyStripeSignature } from "./stripe.ts";
+import {
+  formEncode,
+  hmacHex,
+  parseStripeSignature,
+  STRIPE_API_VERSION,
+  stripeGetFrom,
+  stripePostFrom,
+  verifyStripeSignature,
+} from "./stripe.ts";
 
 Deno.test("formEncode drops nullish values and escapes the bracket keys Stripe uses", () => {
   assertEquals(
@@ -2238,6 +2251,29 @@ Deno.test("a signature Stripe would have made verifies, and one byte off does no
   assert(!await verifyStripeSignature(payload, `t=${t},v1=${sig.slice(0, -1)}0`, secret, t + 10), "signature changed");
   assert(!await verifyStripeSignature(payload, `t=${t},v1=${sig}`, secret, t + 400), "outside the tolerance");
   assert(!await verifyStripeSignature(payload, `t=${t},v1=${sig}`, "another_secret", t + 10), "wrong secret");
+});
+
+Deno.test("every Stripe call carries the API version this code parses", async () => {
+  // P2 sets the WEBHOOK ENDPOINT's version, which governs the event payloads Stripe pushes. This is
+  // the other half: the calls we make ourselves. The GET matters most — its body is what
+  // `entitlementFromSubscription` reads, and unversioned it comes back under the account's own
+  // default, where `current_period_end` is on neither shape the handler looks at.
+  const seen: Array<[string, Headers]> = [];
+  const fake: typeof fetch = (input, init) => {
+    seen.push([String(input), new Headers(init?.headers)]);
+    return Promise.resolve(
+      new Response(JSON.stringify({ id: "sub_1" }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+  // Not a credential of any account: `sk_test_` plus words, never sent anywhere by this test.
+  const key = "sk_test_not_a_real_key";
+  await stripePostFrom(key, fake)("/v1/customers", { email: "a@example.invalid" });
+  await stripeGetFrom(key, fake)("/v1/subscriptions/sub_1");
+  assertEquals(seen.length, 2);
+  for (const [url, headers] of seen) {
+    assertEquals(headers.get("stripe-version"), STRIPE_API_VERSION, url);
+  }
+  assertEquals(seen[1][0], "https://api.stripe.com/v1/subscriptions/sub_1");
 });
 ```
 
@@ -2344,6 +2380,30 @@ export function stripePostFrom(secret: string, fetchImpl: typeof fetch): StripeP
       throw fail(502, "the payment provider refused the request");
     }
     return body;
+  };
+}
+
+export type StripeGet = (path: string) => Promise<Record<string, unknown> | null>;
+
+/**
+ * The one `GET` this stream makes: the Subscription the webhook re-reads when an event carries an id
+ * and nothing else. **Versioned exactly like the `POST`s** — this body is what
+ * `entitlementFromSubscription` parses, and an unversioned read arrives under the account's own
+ * default (well past `2025-03-31.basil`), where `current_period_end` is on neither the Subscription
+ * nor the item the handler looks at, so every entitlement row would carry `null`.
+ *
+ * `null` on any non-2xx: a subscription we cannot read is an event to ignore, not a 500 — Stripe
+ * retries a 500 and would replay it for days.
+ */
+export function stripeGetFrom(secret: string, fetchImpl: typeof fetch): StripeGet {
+  return async (path) => {
+    const res = await fetchImpl(`https://api.stripe.com${path}`, {
+      headers: {
+        authorization: `Bearer ${secret}`,
+        "stripe-version": STRIPE_API_VERSION,
+      },
+    });
+    return res.ok ? await res.json() as Record<string, unknown> : null;
   };
 }
 ```
@@ -2878,6 +2938,7 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
 ```ts
 import { restFromEnv, restUpsert } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
+import { stripeGetFrom } from "../_shared/stripe.ts";
 import { handle } from "./handler.ts";
 
 function env(name: string): string {
@@ -2902,12 +2963,11 @@ Deno.serve(async (req) => {
           source: "stripe",
           updated_at: new Date().toISOString(),
         }], "account_id"),
-      fetchSubscription: async (id) => {
-        const res = await fetch(`https://api.stripe.com/v1/subscriptions/${id}`, {
-          headers: { authorization: `Bearer ${stripeKey}` },
-        });
-        return res.ok ? await res.json() : null;
-      },
+      // **Through `stripeGetFrom`, not a bare `fetch`**: it pins `Stripe-Version` to the version
+      // `entitlementFromSubscription` is written against, which is the same version P2 sets on the
+      // webhook endpoint. The id is path-encoded — it is Stripe's, but it arrives over the wire.
+      fetchSubscription: (id) =>
+        stripeGetFrom(stripeKey, globalThis.fetch)(`/v1/subscriptions/${encodeURIComponent(id)}`),
     });
   } catch (e) {
     return asResponse(e);
@@ -2981,8 +3041,9 @@ Deno.serve(async (req) => {
 
 - [ ] **Step 11a: And its tests** — `cloud/supabase/functions/billing-portal/handler_test.ts`. The
   File-structure rule is one `deno test` file per handler, and this is the *Cancel subscription* path
-  the terms promise (Task 19 §5) and the legal note leans on: all three of its branches get an
-  assertion.
+  the terms promise (Task 19 §5) and the legal note leans on: **all four of its branches get an
+  assertion** — the method check, the never-subscribed refusal, a provider answer with no link, and
+  the happy path.
 
 ```ts
 import { assertEquals } from "@std/assert";
@@ -3038,9 +3099,22 @@ Deno.test("a subscriber gets the portal link, and the return URL goes with it", 
   // The return URL is the promise the ARL rests on: cancelling lands the student back in Knowlu.
   assertEquals(sent, [{ customer: "cus_1", return_url: "https://knowlu.com/index.html" }]);
 });
+
+Deno.test("a portal session with no url is 502, not a 200 carrying undefined", async () => {
+  const res = await handle(post(), {
+    verify,
+    getCustomerId: () => Promise.resolve("cus_1"),
+    // Stripe answered, but not with a link. Returning `{url: undefined}` would put the app's
+    // *Cancel subscription* button through `open_in_browser(undefined)` and fail with nothing to say.
+    stripe: () => Promise.resolve({ id: "bps_1" }),
+    returnUrl: "https://knowlu.com/index.html",
+  }).catch((e) => e as Response);
+  assertEquals(res.status, 502);
+  assertEquals(await res.json(), { error: "the payment provider returned no portal link" });
+});
 ```
 
-- [ ] **Step 12: Run every test.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` → `ok | 40 passed | 0 failed`.
+- [ ] **Step 12: Run every test.** `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` → `ok | 42 passed | 0 failed` — seventeen this task adds: four in `_shared/stripe_test.ts`, four in `billing-checkout`, five in `stripe-webhook`, four in `billing-portal`.
 
 - [ ] **Step 13: Deploy and prove it on staging.**
 
@@ -3537,7 +3611,7 @@ export interface Deps {
   `restSelect` on `entitlements`, and passes `updated_at: createdIso` in the upsert instead of
   `new Date().toISOString()`.
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 50 passed | 0 failed` — the six this task added, plus the four the webhook gained in steps 6, 6a and 6b.
+- [ ] **Step 7: Run every test.** Expected: `ok | 52 passed | 0 failed` — the six this task added, plus the four the webhook gained in steps 6, 6a and 6b.
 
 - [ ] **Step 8: Apply and deploy to staging.**
 
@@ -3872,7 +3946,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 6: Run every test.** Expected: `ok | 55 passed | 0 failed`.
+- [ ] **Step 6: Run every test.** Expected: `ok | 57 passed | 0 failed`.
 
 - [ ] **Step 7: Apply and deploy, then prove it.**
 
@@ -4164,7 +4238,7 @@ async function getSources(req: Request, deps: Deps): Promise<Response> {
 
 …with `import { encryptString, importAesKey } from "../_shared/crypto.ts";` at the top.
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 65 passed | 0 failed` (the four crypto tests and six route tests this task adds — the last two being the `calendar_ics` kind §11a introduced and the refusal of `google_calendar` from a client).
+- [ ] **Step 7: Run every test.** Expected: `ok | 67 passed | 0 failed` (the four crypto tests and six route tests this task adds — the last two being the `calendar_ics` kind §11a introduced and the refusal of `google_calendar` from a client).
 
 - [ ] **Step 8: Deploy and prove the 402 on staging.**
 
@@ -4572,7 +4646,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 73 passed | 0 failed`.
+- [ ] **Step 7: Run every test.** Expected: `ok | 75 passed | 0 failed`.
 
 - [ ] **Step 8: Apply, deploy, prove.**
 
@@ -4833,7 +4907,7 @@ Deno.serve(async (req) => {
 });
 ```
 
-- [ ] **Step 7: Run every test.** Expected: `ok | 79 passed | 0 failed`. Then `deno lint` and `deno fmt --check`, both clean.
+- [ ] **Step 7: Run every test.** Expected: `ok | 81 passed | 0 failed`. Then `deno lint` and `deno fmt --check`, both clean.
 
 - [ ] **Step 8: Apply, deploy, prove.**
 
@@ -6858,8 +6932,10 @@ pub fn paste_calendar_link(kind: String, url: String) -> Value {
 ---
 ### Task 14a: The coursework mapping — the wizard turns a discovered book into a course (R-OB-1)
 
-**Precondition: hand-off H10** (the engine's `coursework-discover`) applied on the branch's base. Ask
-the controller for it at step 1, the same way Task 13 asks for H9.
+**Precondition: hand-off H10** (the engine's `coursework-discover`) applied on the branch's base.
+**Ask the controller for it at step 6**, where it is first needed — the Rust in this task compiles
+without it, because the spawn is by name at run time — the same way Task 13 step 3 asks for **H9a**.
+There is one ask, and it is step 6's; do not also post it at step 1.
 
 Quinn's first slot is the specification: the wizard had stored both logins and written
 `coursework.zybooks.courses: {}` and `coursework.vhl.sections: {}`, so `coursework` said
@@ -6994,7 +7070,7 @@ fn discovery_output_becomes_rows_with_a_suggestion_each() {
 }
 ```
 
-- [ ] **Step 1a: One `VaultPlan` literal, not two helpers.** `app/tests/scaffold.rs` already has a `plan(id)` helper that builds this struct for three of its tests, and Task 12 added two raw `VaultPlan {` literals beside it. A second helper would leave two doing one job. **Widen the existing `plan(id)` into `plan_for(dest: &Path)`** — the profile id is the only thing it was taking, and `id_for(dest)` is where that comes from — then rewrite its three call sites and Task 12's two literals to call it:
+- [ ] **Step 1a: One `VaultPlan` literal, not two helpers.** `app/tests/scaffold.rs` already has a `plan(id)` helper that builds this struct for three of its tests, and Task 12 added **three** raw `VaultPlan {` literals beside it. A second helper would leave two doing one job. **Widen the existing `plan(id)` into `plan_for(dest: &Path)`** — the profile id is the only thing it was taking, and `id_for(dest)` is where that comes from — then rewrite its three call sites and **two** of Task 12's three literals to call it. **The third keeps its own**: `a_new_vault_carries_the_four_cloud_keys_and_no_secret` compares `cloud_yaml`'s output byte for byte, including `session_credential_target: 'knowlu/profile_0123456789/session'`, so it needs a profile id it chose rather than one `plan_for` derives from a temp path. Add the four new fields to that literal by hand; it is the one place in this file where a literal is the point.
 
 ```rust
 /// The plan every scaffold test starts from: no feeds, no mappings, no courses — each test sets the
@@ -9096,6 +9172,9 @@ fn the_wizard_never_offers_a_local_model() {
     // until C4 — happens to fall inside a text slice is a fact about line ordering, not about the
     // wizard. Each command appears exactly once, and after `renderInference`, which is the settings
     // row's own function; anything the wizard called would appear earlier and twice.
+    // The flag the deleted `the_wizard_offers_local_judgment_without_doing_anything` pinned, inverted:
+    // the checkbox is gone from the markup, so the plan field it filled must be gone from the page.
+    assert!(!js.contains("offer_inference"), "the wizard's local-judgment flag is gone with its checkbox");
     let at = |needle: &str| js.find(needle).unwrap_or_else(|| panic!("{needle} is not in console.js"));
     let inference = at("function renderInference(");
     for cmd in ["\"install_inference_download\"", "\"install_inference_file\"", "\"inference_status\""] {
@@ -9111,7 +9190,7 @@ fn the_wizard_never_offers_a_local_model() {
         .find(|l| l.starts_with("<p>") && l.contains("Your vault stays on this machine"))
 ```
 
-- [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test static_assets` → **six** failures: the five new or rewritten tests naming the missing panels, ids and handlers, and the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, which fails on `l.default_backup` until step 4 rewrites the wizard. (`the_wizard_offers_local_judgment_without_doing_anything` is deleted in step 1, so it neither passes nor fails.)
+- [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test static_assets` → **eight** failures. Five are the new or rewritten tests naming the missing panels, ids and handlers; the sixth is the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, which fails on `l.default_backup` until step 4 rewrites the wizard; and two more are existing tests this step's rewrites make red until later steps — `the_logins_panel_maps_what_it_finds_to_a_course` (green at step 4) and `the_unreachable_clause_is_one_string_on_both_sides` (green at step 6a). (`the_wizard_offers_local_judgment_without_doing_anything` is deleted in step 1, so it neither passes nor fails.)
 
 - [ ] **Step 3: `app/static/index.html`** — replace the whole `<section class="wiz" id="wizard">` block with:
 
@@ -9710,7 +9789,7 @@ fn the_wizard_never_offers_a_local_model() {
 
   **A plain `'` in both, not `&rsquo;` in the HTML.** The test takes the `<p>`'s inner text verbatim and compares it to the `console.js` literal, so an entity on one side would have to be an entity on the other — and `EL("wiz-privacy").textContent = PRIVACY` would then print `Knowlu&rsquo;s` on the welcome panel. One apostrophe, both files, byte for byte. Run the test; if it fails, make the two strings identical rather than loosening the test. The old sentence ("Knowlu has no account and sends nothing anywhere") is **false from this release**: delete it from `console.js` in this step and from the rest of the site in Task 19.
 
-- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test static_assets` → all green, including the five rewritten or new ones (`…nine_panels…`, `…no_lms_credential_field…`, `…gates_on_eighteen…`, `…issue_report_is_previewed…`, `…never_offers_a_local_model`), the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, and the sentence pin that step 6a made passable. The file has **one test fewer** than before this task and one more than that: `the_wizard_offers_local_judgment_without_doing_anything` is gone and `…never_offers_a_local_model` carries its pin, inverted.
+- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test static_assets` → all green — every one of the eight step 2 left red: the five rewritten or new ones (`…nine_panels…`, `…no_lms_credential_field…`, `…gates_on_eighteen…`, `…issue_report_is_previewed…`, `…never_offers_a_local_model`), the amended `the_wizard_takes_its_default_folders_from_the_launch_state`, `the_logins_panel_maps_what_it_finds_to_a_course`, and `the_unreachable_clause_is_one_string_on_both_sides` — which is the sentence pin step 6a made passable. The file has **one test fewer** than before this task: `the_wizard_offers_local_judgment_without_doing_anything` is gone and `…never_offers_a_local_model` carries its pin, inverted.
 
 - [ ] **Step 8: Run everything.** `cargo test -p knowlu` at 0 warnings.
 
@@ -10480,13 +10559,31 @@ in `app/tests/static_assets.rs` asserted the exact markup Task 17 removes. **Eve
 compile error, and none of them is visible from inside the task that contains it.** The important ones
 were mostly arithmetic and ownership bookkeeping — five tables counted as four, eight commands counted
 as six, three tasks editing files their *Files* block did not list, `billing-portal` shipping without a
-test (now three assertions, and every Deno total from Task 4 on moved by +3 to 40 / 50 / 55 / 65 / 73 /
-79), and the Stripe API version pinned in code but not on the endpoint. **R-C1-11's sequencing** is now
-stated identically in three places: H9 is split into **H9a** (Task 13 step 3, three commands) and
-**H9b** (Task 14b step 3a, two more), and the five controller applications run H1 → H9a → H10 → H9b →
-H11. Two Task-0 lines changed, both named by findings (I13's commented-out `[auth.email.smtp]`, which
-would otherwise fail `supabase db push` at Task 1 step 7, and M9's `fail()`); nothing else in Task 0 was
-touched, because it is being implemented as this round lands.
+test, and the Stripe API version pinned in code but not on the endpoint. **R-C1-11's sequencing** is now
+stated identically in **four** places — H9's own block, Task 13 step 3, Task 14a step 6 and Task 14b
+step 3a: H9 is split into **H9a** (Task 13 step 3, three commands) and **H9b** (Task 14b step 3a, two
+more), and the five controller applications run H1 → H9a → H10 → H9b → H11. Two Task-0 lines changed,
+both named by findings (I13's commented-out `[auth.email.smtp]`, which would otherwise fail
+`supabase db push` at Task 1 step 7, and M9's `fail()`); nothing else in Task 0 was touched, because it
+is being implemented as this round lands.
+
+**Pre-flight re-check (2026-09-09, late):** the scan re-read all 33 fixes — 30 clean, two fixed with a
+new problem, one half-fixed — and raised one important and six minors. **All ten are fixed; nothing
+deferred.** The half-fixed one is the only one that would have shipped a wrong value: **I2**. P2 named
+the API version for the webhook *endpoint*, which governs the events Stripe pushes, but
+`stripe-webhook/index.ts`'s `fetchSubscription` was a bare `fetch` with one header, so the one **GET**
+whose body `entitlementFromSubscription` parses came back under the account's own default version —
+where `current_period_end` is on neither shape the handler reads, and every entitlement row would carry
+`null`. It is now `stripeGetFrom` in `_shared/stripe.ts`, pinned like every `POST`, with a test that
+asserts the header on both. `billing-portal`'s uncovered 502 branch got its fourth test with it, so the
+Deno totals moved again — **42 / 52 / 57 / 67 / 75 / 81** from Task 4 on, seventeen tests in Task 4
+(four stripe, four checkout, five webhook, four portal). The rest were bookkeeping the fixes had just
+disturbed: Task 14a asked for H10 at two different steps (now step 6 only), H9's own block did not
+state the order the three task sites state, the hand-offs intro still said everything from H3 down waits
+for merge, Task 17's red count was six against eight actually-red tests, a pin promised as "inverted"
+did not assert `offer_inference`, and Task 12 has three `VaultPlan` literals rather than two — one of
+which, `a_new_vault_carries_the_four_cloud_keys_and_no_secret`, pins the profile id in its expected
+string and therefore keeps its own literal on purpose.
 
 **Amendment 2, fix round (2026-09-09):** the R-OB-4 re-review's three Importants and three Minors, plus
 the Part-A residual, all fixed in place; nothing deferred. The largest: **the page never fetches the
