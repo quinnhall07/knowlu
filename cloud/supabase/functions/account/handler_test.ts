@@ -155,6 +155,116 @@ Deno.test("every route needs a bearer token", async () => {
   }
 });
 
+Deno.test("PUT /account/sources stores an https .ics link and answers with the kind only", async () => {
+  let stored: [string, string, string] | null = null;
+  const res = await handle(
+    req("PUT", "/sources", { kind: "lms_ics", url: "https://lms.example.invalid/feed/abc.ics" }),
+    deps({
+      putSource: (a, k, u) => {
+        stored = [a, k, u];
+        return Promise.resolve();
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { kind: "lms_ics" });
+  assertEquals(stored, ["acc-1", "lms_ics", "https://lms.example.invalid/feed/abc.ics"]);
+});
+
+Deno.test("PUT /account/sources refuses google_calendar from a client — that row is C2's to write", async () => {
+  let stored = false;
+  const res = await handle(
+    req("PUT", "/sources", { kind: "google_calendar", url: "https://calendar.google.com/x.ics" }),
+    deps({
+      putSource: () => {
+        stored = true;
+        return Promise.resolve();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 403);
+  assert(!stored, "a client must not be able to forge the kind C2's callback writes");
+});
+
+Deno.test("PUT /account/sources needs an ACTIVE subscription — the 402 C2 imports", async () => {
+  let stored = false;
+  const res = await handle(
+    req("PUT", "/sources", { kind: "lms_ics", url: "https://lms.example.invalid/feed/abc.ics" }),
+    deps({
+      requireEntitled: () =>
+        Promise.reject(
+          new Response(JSON.stringify({ error: "this account has no active subscription" }), {
+            status: 402,
+          }),
+        ),
+      putSource: () => {
+        stored = true;
+        return Promise.resolve();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 402);
+  assert(!stored);
+});
+
+Deno.test("PUT /account/sources takes a personal calendar too, under its own kind", async () => {
+  let stored: [string, string, string] | null = null;
+  const res = await handle(
+    req("PUT", "/sources", {
+      kind: "calendar_ics",
+      url: "https://calendar.google.com/calendar/ical/abc%40group.calendar.google.com/private-def/basic.ics",
+    }),
+    deps({
+      putSource: (a, k, u) => {
+        stored = [a, k, u];
+        return Promise.resolve();
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { kind: "calendar_ics" });
+  assertEquals(stored![1], "calendar_ics");
+  // The secret address is a capability URL like the school one, and the reply does not echo it.
+  assertEquals(
+    Object.keys(
+      await (await handle(
+        req("PUT", "/sources", {
+          kind: "calendar_ics",
+          url: "https://calendar.google.com/calendar/ical/x/private-def/basic.ics",
+        }),
+        deps(),
+      )).json(),
+    ),
+    ["kind"],
+  );
+});
+
+Deno.test("PUT /account/sources refuses a URL that is not https, and an unknown kind", async () => {
+  for (
+    const body of [
+      { kind: "lms_ics", url: "http://lms.example.invalid/feed/abc.ics" },
+      { kind: "lms_ics", url: "file:///c:/x.ics" },
+      { kind: "gradebook", url: "https://lms.example.invalid/x.ics" },
+      { kind: "calendar_ics", url: "webcal://calendar.google.com/x.ics" },
+      { kind: "lms_ics", url: "https://" + "a".repeat(3000) },
+    ]
+  ) {
+    const res = await handle(req("PUT", "/sources", body), deps()).catch((e) => e as Response);
+    assertEquals(res.status, 400, JSON.stringify(body));
+  }
+});
+
+Deno.test("GET /account/sources returns kinds and dates, and never the URL", async () => {
+  const res = await handle(
+    req("GET", "/sources"),
+    deps({ getSources: () => Promise.resolve([{ kind: "lms_ics", added_at: "2026-09-10T00:00:00+00:00" }]) }),
+  );
+  assertEquals(res.status, 200);
+  const text = await res.text();
+  assertEquals(JSON.parse(text), { sources: [{ kind: "lms_ics", added_at: "2026-09-10T00:00:00+00:00" }] });
+  assert(!text.includes("http"), "a URL reached the response body");
+});
+
 // `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so the
 // export's only guard against ever shipping a source's capability URL — that its `select=` list
 // names `kind,added_at` and nothing else — has no runtime test to pin it. Reading the file as text

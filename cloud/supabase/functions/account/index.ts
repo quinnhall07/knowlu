@@ -8,6 +8,7 @@ import {
   restSelectAll,
   restUpsert,
 } from "../_shared/db.ts";
+import { encryptString, importAesKey, URL_CIPHERTEXT_COLUMN, URL_IV_COLUMN } from "../_shared/crypto.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
@@ -90,7 +91,18 @@ Deno.serve(async (req) => {
       },
       hashEmail: sha256Hex,
       getSources: async (id) => await restSelect(rest, "sources", `${eq(id)}&select=kind,added_at`),
-      putSource: () => Promise.reject(fail(501, "not yet")),
+      putSource: async (id, kind, url) => {
+        const keyB64 = Deno.env.get("SOURCES_ENC_KEY");
+        if (!keyB64) throw fail(500, "the function is not configured");
+        const box = await encryptString(await importAesKey(keyB64), url);
+        await restUpsert(rest, "sources", [{
+          account_id: id,
+          kind,
+          [URL_CIPHERTEXT_COLUMN]: box.ciphertext,
+          [URL_IV_COLUMN]: box.iv,
+          added_at: new Date().toISOString(),
+        }], "account_id,kind");
+      },
       now: () => new Date(),
     });
   } catch (e) {
