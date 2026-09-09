@@ -90,10 +90,16 @@ Deno.test("entitlements is readable by its owner and by nothing else", async () 
 
 Deno.test("no reporting view may be read below the minimum cohort", async () => {
   const sql = (await migrations()).map((m) => m.sql).join("\n").toLowerCase();
-  const views = [...sql.matchAll(/create\s+view\s+public\.(\w+)/g)].map((m) => m[1]);
+  // Fix round 1, item 6: `create or replace view` and `create materialized view` are both ways to
+  // define a readable view, and neither may skip the floor check by skipping this regex.
+  const VIEW_DEF = /create\s+(?:or\s+replace\s+)?(?:materialized\s+)?view\s+public\.(\w+)/g;
+  const views = [...sql.matchAll(VIEW_DEF)].map((m) => m[1]);
   for (const v of views) {
     if (v === "billing_subscribers") continue; // an operational read of one row per subscriber, not a slice
-    const body = sql.split(`create view public.${v}`)[1].split(";")[0];
+    const start = sql.search(
+      new RegExp(`create\\s+(?:or\\s+replace\\s+)?(?:materialized\\s+)?view\\s+public\\.${v}\\b`),
+    );
+    const body = sql.slice(start).split(";")[0];
     assert(
       body.includes("count(distinct account_id) >= 10"),
       `view ${v} has no minimum cohort — product plan §7, spec §6`,
