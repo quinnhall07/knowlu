@@ -70,6 +70,10 @@ Secrets are set with `gh secret set NAME` **from a file or a piped value Quinn p
 
 ### Task 1: Spike — can the GNU toolchain build this workspace on `windows-latest`?
 
+**Outcome: B** — all three jobs were green on `windows-latest` (image `windows-2025-vs2026` 20260824.214.3) with byte-for-byte identical results — 1017 passed, 0 failed, 4 ignored, 23 `test result: ok` lines each — so the tie-break picks WinLibs: `gnu-winlibs` reproduced the laptop's toolchain exactly (gcc 16.1.0 `x86_64-msvcrt-posix-seh` r4, binutils 2.47.20260726, pinned by SHA-256 and verified on the runner) and printed only the one accepted `.rsrc merge failure: multiple non-default manifests` line, whereas `gnu-image` passed on an **undocumented, UCRT-flavour** gcc 15.2.0 / binutils 2.46 that happens to sit at `C:\mingw64\bin` ahead of Strawberry Perl's gcc on the image's PATH — green today, unpinned and one image bump from silently changing. `toolchain.ps1` therefore keeps its `winlibs` flavour only, and takes no parameter.
+
+Run [34341678223](https://github.com/quinnhall07/knowlu/actions/runs/34341678223); step 3 was satisfied from the winget manifest winget itself verified when it installed the laptop's copy (R-C0-2: no laptop download — the runner checks the bytes against the pinned digest).
+
 **Throwaway allowed; only `scripts/ci/toolchain.ps1` and this task's `Outcome:` line are kept.** The dev machine builds `x86_64-pc-windows-gnu` with WinLibs POSIX **MSVCRT** mingw (CLAUDE.md). GitHub's image ships a mingw-w64 at `C:\mingw64` whose CRT flavour and `as`/`dlltool` availability are not documented for our purpose. Three outcomes, decided by a real run:
 
 - **A** — the image's mingw builds and tests the workspace green: `toolchain.ps1` only prepends `C:\mingw64\bin` to `GITHUB_PATH`.
@@ -79,7 +83,7 @@ Secrets are set with `gh secret set NAME` **from a file or a piped value Quinn p
 **Files:**
 - Create: `scripts/ci/toolchain.ps1`, `.github/workflows/spike-toolchain.yml` (deleted in step 5)
 
-- [ ] **Step 1: The spike workflow.** `.github/workflows/spike-toolchain.yml`, `on: workflow_dispatch`, one job per candidate, `runs-on: windows-latest`, `timeout-minutes: 45`:
+- [x] **Step 1: The spike workflow.** `.github/workflows/spike-toolchain.yml`, `on: workflow_dispatch`, one job per candidate, `runs-on: windows-latest`, `timeout-minutes: 45`:
 
 ```yaml
 name: spike-toolchain
@@ -127,7 +131,7 @@ jobs:
         with: { name: msvc-log, path: msvc.log }
 ```
 
-- [ ] **Step 2: `scripts/ci/toolchain.ps1`** (PowerShell 5.1-safe, runs under pwsh too):
+- [x] **Step 2: `scripts/ci/toolchain.ps1`** (PowerShell 5.1-safe, runs under pwsh too):
 
 ```powershell
 # Puts a GNU host toolchain on PATH for the x86_64-pc-windows-gnu Rust target on a GitHub runner.
@@ -160,9 +164,9 @@ Write-Output "toolchain: winlibs at $bin"
 exit 0
 ```
 
-- [ ] **Step 3: Pin the WinLibs asset.** On the laptop: `winget show BrechtSanders.WinLibs.POSIX.MSVCRT` → the installer URL; download it to `%TEMP%`, `Get-FileHash -Algorithm SHA256`, paste URL and hash into the script, delete the download. The version must equal the one installed (`gcc --version` on the laptop).
-- [ ] **Step 4: Run it.** Commit the two files on the branch, push, `gh workflow run spike-toolchain --ref c0-ci-release`, wait (`gh run watch`), download the three logs. Read each log's final `test result:` lines and any `error:`/`warning:`.
-- [ ] **Step 5: Record the outcome and remove the spike workflow.** Write, at the top of this task: `Outcome: A|B|C — <one sentence of evidence: which jobs were green, the test counts, the first error of each red one>`. Delete `.github/workflows/spike-toolchain.yml`; keep `toolchain.ps1` with the unused flavour deleted (A keeps only `image`; B keeps only `winlibs`; C deletes the script and Task 2's job matrix gains `msvc` as the shipping toolchain and `gnu` as the parity job if any GNU flavour was green, else MSVC only). Commit: `ci: toolchain spike — Outcome <letter>`.
+- [x] **Step 3: Pin the WinLibs asset.** On the laptop: `winget show BrechtSanders.WinLibs.POSIX.MSVCRT` → the installer URL; download it to `%TEMP%`, `Get-FileHash -Algorithm SHA256`, paste URL and hash into the script, delete the download. The version must equal the one installed (`gcc --version` on the laptop).
+- [x] **Step 4: Run it.** Commit the two files on the branch, push, `gh workflow run spike-toolchain --ref c0-ci-release`, wait (`gh run watch`), download the three logs. Read each log's final `test result:` lines and any `error:`/`warning:`.
+- [x] **Step 5: Record the outcome and remove the spike workflow.** Write, at the top of this task: `Outcome: A|B|C — <one sentence of evidence: which jobs were green, the test counts, the first error of each red one>`. Delete `.github/workflows/spike-toolchain.yml`; keep `toolchain.ps1` with the unused flavour deleted (A keeps only `image`; B keeps only `winlibs`; C deletes the script and Task 2's job matrix gains `msvc` as the shipping toolchain and `gnu` as the parity job if any GNU flavour was green, else MSVC only). Commit: `ci: toolchain spike — Outcome <letter>`.
 
 ---
 
@@ -175,7 +179,7 @@ exit 0
 - Consumes: Task 1's `toolchain.ps1` (or the MSVC decision).
 - Produces: a required check `ci / test` that branch protection on `main` will require (Task 6 turns protection on).
 
-- [ ] **Step 1: The failing test** — `engine/tests/workflows.rs`:
+- [x] **Step 1: The failing test** — `engine/tests/workflows.rs`:
 
 ```rust
 //! Static pins on the two GitHub workflows: an action referenced by a floating tag can change under
@@ -234,8 +238,8 @@ fn ci_enforces_zero_warnings_and_the_eol_contract() {
 
 (`regex` is already an engine dependency; it is a dev use here — add `regex` under `[dev-dependencies]` only if `cargo test` says it is not visible to integration tests.)
 
-- [ ] **Step 2: Run it to verify it fails** — `cargo test -p knowlu-engine --test workflows` → 4 failures, each `No such file` on `.github/workflows/…`.
-- [ ] **Step 3: `scripts/ci/eol-check.ps1`:**
+- [x] **Step 2: Run it to verify it fails** — `cargo test -p knowlu-engine --test workflows` → 4 failures, each `No such file` on `.github/workflows/…`.
+- [x] **Step 3: `scripts/ci/eol-check.ps1`:**
 
 ```powershell
 # The line-ending contract from .gitattributes, enforced: code and docs LF in the index, PowerShell
@@ -260,7 +264,7 @@ Write-Output ("eol contract holds over " + $rows.Count + " files")
 exit 0
 ```
 
-- [ ] **Step 4: `ci.yml`.** Every `uses:` pinned to a full SHA (look each up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and write the tag as a trailing comment):
+- [x] **Step 4: `ci.yml`.** Every `uses:` pinned to a full SHA (look each up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and write the tag as a trailing comment):
 
 ```yaml
 name: ci
@@ -299,8 +303,8 @@ jobs:
 
 If Task 1 chose **C**, the job gets `strategy.matrix.toolchain: [msvc, gnu]` with the GNU leg allowed to fail only if Task 1 found no green GNU flavour.
 
-- [ ] **Step 5: Run the tests locally** — `cargo test -p knowlu-engine --test workflows` → 4 passed (the `release.yml` assertions will fail until Task 3; run `--test workflows every_action ci_enforces` selectively and note it). Push the branch; `gh pr create --fill --draft`; watch `ci / test` go green on the runner (`gh run watch`). Paste the runner's `test result:` lines into the commit message body.
-- [ ] **Step 6: Commit** — `ci: the gate — cargo test --workspace at 0 warnings, the eol contract, SHA-pinned actions (C0 Task 2)`.
+- [x] **Step 5: Run the tests locally** — `cargo test -p knowlu-engine --test workflows` → 4 passed (the `release.yml` assertions will fail until Task 3; run `--test workflows every_action ci_enforces` selectively and note it). Push the branch; `gh pr create --fill --draft`; watch `ci / test` go green on the runner (`gh run watch`). Paste the runner's `test result:` lines into the commit message body.
+- [x] **Step 6: Commit** — `ci: the gate — cargo test --workspace at 0 warnings, the eol contract, SHA-pinned actions (C0 Task 2)`.
 
 ---
 
@@ -315,7 +319,7 @@ If Task 1 chose **C**, the job gets `strategy.matrix.toolchain: [msvc, gnu]` wit
 - Produces: `RELEASE installer=… sig=… manifest=…` as `release.ps1`'s last line; the Pages deploy; the GitHub Release.
 
 - [ ] **Step 1: The secrets (Quinn sets each with `gh secret set <NAME>` from a file or `--body` he pastes; I never see values).** Repository secrets: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (both created by **Task 4**, which runs before this task's first release — this task's first run may use the *current* keypair only if Task 4 is not yet done, and must then be re-run after Task 4), `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` (ids, not secrets, but kept as secrets so the workflow reads uniformly), `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Repository **variables** (non-secret): `TS_ENDPOINT`, `TS_ACCOUNT`, `TS_PROFILE`. Verify with `gh secret list` / `gh variable list` (names only).
-- [ ] **Step 2: `scripts/ci/write-signing-profile.ps1`** — writes the file `sign.ps1` already expects, from the three variables:
+- [x] **Step 2: `scripts/ci/write-signing-profile.ps1`** — writes the file `sign.ps1` already expects, from the three variables:
 
 ```powershell
 # Writes the Trusted Signing metadata file sign.ps1 reads (no secret in it: endpoint, account, profile).
@@ -339,15 +343,15 @@ exit 0
 
 (`ExcludeCredentials` leaves `EnvironmentCredential`/`AzureCliCredential`/`WorkloadIdentityCredential` in the chain — `azure/login` with OIDC satisfies the workload-identity path, so the dlib signs with **no client secret anywhere**.)
 
-- [ ] **Step 3: `release.ps1` changes**, each a small surgical edit with the surrounding comment updated:
+- [x] **Step 3: `release.ps1` changes**, each a small surgical edit with the surrounding comment updated:
   1. **Parameters:** add `[switch]$DryRun` and `[string]$SigningProfile = ""`. Remove `$UpdaterCredential`/`$UpdaterPasswordCredential` and the whole `Knowlu.Cred` `Add-Type` block: **the updater key is read from `$env:TAURI_SIGNING_PRIVATE_KEY` only**. When `$needsKey` and the env var is empty and not `-DryRun`: `throw "TAURI_SIGNING_PRIVATE_KEY is not set - releases are built by CI (.github/workflows/release.yml); run with -DryRun locally"`.
   2. **`-DryRun`:** skips the clean-tree gate, passes `--config '{"bundle":{"createUpdaterArtifacts":false}}'` to `cargo tauri build` (so no key is needed and the static ⇔ test stays true — the file is untouched), writes no `latest.json`, copies nothing into `site\releases`, and prints `DRY RUN: installer built at <path>; nothing signed with the updater key, nothing published`. `sign.ps1` still runs (it prints `UNSIGNED:` per file when no profile exists — expected locally after Task 6).
   3. **Tag ⇔ version:** if `$env:GITHUB_REF_NAME` is set and not `-DryRun`, require it to equal `"v" + $version` else throw `tag <ref> does not match app/tauri.conf.json version <version>`.
   4. **Signing profile passthrough:** if `-SigningProfile` is non-empty, set `$env:KNOWLU_SIGNING_PROFILE = $SigningProfile` for the duration of the build (cleared in the `finally`).
   5. **Last line:** on success print exactly `RELEASE installer=<full path> sig=<full path or none> manifest=<full path or none>`; the workflow parses it.
   6. Replace the final `Write-Output "upload site\ ..."` with `Write-Output "publish: .github/workflows/release.yml deploys site\ and creates the GitHub Release"`.
-- [ ] **Step 4: `sign.ps1`:** default `$SigningProfile` becomes `$(if ($env:KNOWLU_SIGNING_PROFILE) { $env:KNOWLU_SIGNING_PROFILE } else { Join-Path $env:USERPROFILE ".knowlu\trusted-signing.json" })` — the bundler's fixed `signCommand` cannot pass parameters, so the override rides the environment. Nothing else changes.
-- [ ] **Step 5: `scripts/ci/size-gate.ps1`:**
+- [x] **Step 4: `sign.ps1`:** default `$SigningProfile` becomes `$(if ($env:KNOWLU_SIGNING_PROFILE) { $env:KNOWLU_SIGNING_PROFILE } else { Join-Path $env:USERPROFILE ".knowlu\trusted-signing.json" })` — the bundler's fixed `signCommand` cannot pass parameters, so the override rides the environment. Nothing else changes.
+- [x] **Step 5: `scripts/ci/size-gate.ps1`:**
 
 ```powershell
 param([Parameter(Mandatory=$true)][string]$Engine, [Parameter(Mandatory=$true)][string]$Installer)
@@ -359,7 +363,7 @@ if ($i -gt 15MB) { Write-Output "installer over 15 MiB"; exit 1 }
 exit 0
 ```
 
-- [ ] **Step 6: `release.yml`** (all `uses:` SHA-pinned):
+- [x] **Step 6: `release.yml`** (all `uses:` SHA-pinned):
 
 ```yaml
 name: release
@@ -442,8 +446,8 @@ jobs:
 
 `release-notes.md` is generated by one earlier step from `git log --oneline <previous tag>..HEAD` (add it). The `release` **environment** exists so a required reviewer can be added later without editing the workflow.
 
-- [ ] **Step 7: Local proof before any tag.** `.\scripts\release.ps1 -DryRun` on the laptop: builds, prints `UNSIGNED:` per file (fine), prints the `DRY RUN:` line, writes nothing to `site\releases`, exit 0. Then `cargo test -p knowlu-engine --test workflows` → 4 passed. Then `git status` shows only the intended files.
-- [ ] **Step 8: Commit** — `release: CI is the release path — release.ps1 takes the key from the environment, -DryRun for humans, release.yml signs with Trusted Signing over OIDC and publishes to Pages and a GitHub Release (C0 Task 3)`.
+- [x] **Step 7: Local proof before any tag.** `.\scripts\release.ps1 -DryRun` on the laptop: builds, prints `UNSIGNED:` per file (fine), prints the `DRY RUN:` line, writes nothing to `site\releases`, exit 0. Then `cargo test -p knowlu-engine --test workflows` → 4 passed. Then `git status` shows only the intended files.
+- [x] **Step 8: Commit** — `release: CI is the release path — release.ps1 takes the key from the environment, -DryRun for humans, release.yml signs with Trusted Signing over OIDC and publishes to Pages and a GitHub Release (C0 Task 3)`.
 
 ---
 

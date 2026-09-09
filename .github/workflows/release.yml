@@ -1,0 +1,176 @@
+# The release path, and the only one. A `v*` tag builds both binaries from that one commit, signs
+# everything with Trusted Signing over Azure OIDC, deploys site\ to Cloudflare Pages and creates the
+# GitHub Release. Nothing here is reproducible on a laptop by design: the updater key and the
+# signing identity exist only as repository secrets and a federated credential, so a hand-run
+# `cargo tauri build` cannot ship (C0 Task 3).
+#
+# Every `uses:` is pinned to a full commit SHA with its tag as a trailing comment - a floating tag
+# is a supply chain that can change under a signing job. engine/tests/workflows.rs is the judge.
+name: release
+on:
+  push: { tags: ['v*'] }
+permissions:
+  contents: write        # the GitHub Release
+  id-token: write        # Azure OIDC
+jobs:
+  build-sign-publish:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    # Created by GitHub on the first run. It exists so a required reviewer can be added later
+    # without editing this file.
+    environment: release
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      # fetch-depth: 0 - the release notes need the tag history, and checkout's default depth of 1
+      # would make `git describe --tags HEAD^` find nothing on every release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0 }
+      # The toolchain steps are ci.yml's, line for line: same pinned action, same host triple, same
+      # WinLibs archive. A release built on a different compiler than the one CI tested is not the
+      # thing CI tested.
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+        with: { toolchain: "1.98.0-x86_64-pc-windows-gnu" }
+      - run: .\scripts\ci\toolchain.ps1
+        shell: pwsh
+      - name: assert gnu host toolchain
+        shell: pwsh
+        run: |
+          $v = (rustc -vV | Out-String)
+          Write-Output $v
+          if ($v -notmatch "host: x86_64-pc-windows-gnu") { Write-Output "expected host: x86_64-pc-windows-gnu"; exit 1 }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - name: release notes
+        shell: pwsh
+        run: |
+          # The previous tag, or - on the first release, when there is none - the root commit, said
+          # out loud in the first line so nobody reads a whole-history changelog as one release's.
+          # git describe's EXIT CODE is what is read, never its stderr: merging a native command's
+          # stderr under $ErrorActionPreference = "stop" terminates the step on output that is not
+          # an error.
+          #
+          # git hands back the raw UTF-8 bytes it stored. Without this line PowerShell decodes them
+          # with the console codepage and every em dash in this repository's commit subjects lands
+          # in the release notes as mojibake.
+          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+          $prev = (git describe --tags --abbrev=0 "HEAD^")
+          if ($LASTEXITCODE -eq 0) {
+            $head = "Changes since $prev."
+            $log = @(git log --oneline ($prev + "..HEAD"))
+          } else {
+            # A range starting at the root commit would exclude the root commit itself, so the
+            # first release lists the whole history instead.
+            $root = @(git rev-list --max-parents=0 HEAD)[0]
+            $head = "First release - every commit since the root commit $root."
+            $log = @(git log --oneline HEAD)
+          }
+          $lines = @("Knowlu $env:GITHUB_REF_NAME", "", $head, "") + @($log | ForEach-Object { "- $_" })
+          [System.IO.File]::WriteAllText("release-notes.md", (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content release-notes.md
+          exit 0
+      # Pinned exactly, not "^2". The sidecar's signed path below is read out of tauri-bundler
+      # 2.9.4's source, which is what this version pulls in, and it is the version the dev machine
+      # runs - the same reason the compiler is pinned. Bumping it is a one-line change here.
+      - name: tauri-cli
+        run: cargo install tauri-cli --version 2.11.4 --locked
+        shell: pwsh
+      # The Authenticode signing library. signtool.exe itself comes from the Windows SDK on the
+      # runner image (find-signtool.ps1 resolves it through the registry), but /dlib is Microsoft's
+      # Trusted Signing client, which is a NuGet package and is not installed anywhere on the image.
+      # KNOWLU_SIGN_DLIB is how sign.ps1 - launched by the bundler with a fixed argv - is told where
+      # it landed; without it every file would print UNSIGNED: and the check below would fail.
+      - name: Trusted Signing client
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Trusted.Signing.Client -Version 1.0.95 -OutputDirectory "$env:RUNNER_TEMP\tsc"
+          $dlib = Get-ChildItem "$env:RUNNER_TEMP\tsc" -Recurse -Filter Azure.CodeSigning.Dlib.dll | Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1
+          if (-not $dlib) { throw "no Azure.CodeSigning.Dlib.dll in the package" }
+          Add-Content $env:GITHUB_ENV "KNOWLU_SIGN_DLIB=$($dlib.FullName)"
+      # OIDC, so no client secret exists anywhere: the token is minted for this run only and the
+      # Entra app's federated credential is what accepts it.
+      #
+      # THE SUBJECT CLAIM IS THE ENVIRONMENT, NOT THE TAG. Because this job declares
+      # `environment: release`, GitHub's default subject substitutes the environment for the ref, so
+      # the token carries exactly:
+      #
+      #     repo:quinnhall07/knowlu:environment:release
+      #
+      # The federated credential must therefore be entity type **Environment** with the value
+      # `release` (issuer https://token.actions.githubusercontent.com, audience api://AzureADTokenExchange).
+      # A credential scoped to a branch or tag - entity type Tag, `refs/tags/v*`, which is the
+      # natural thing to write for a workflow that triggers on `v*` - never matches this subject:
+      # `azure/login` fails with AADSTS700213 and the release stops here, before anything is signed.
+      # If the `environment:` line above is ever removed, the subject becomes
+      # `repo:quinnhall07/knowlu:ref:refs/tags/<tag>` and the credential has to change with it.
+      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c  # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Endpoint, account and profile are repository VARIABLES, not secrets - they are names, and
+      # keeping them out of the secret store keeps the log readable when one is wrong.
+      - name: signing profile
+        shell: pwsh
+        env: { TS_ENDPOINT: "${{ vars.TS_ENDPOINT }}", TS_ACCOUNT: "${{ vars.TS_ACCOUNT }}", TS_PROFILE: "${{ vars.TS_PROFILE }}" }
+        run: .\scripts\ci\write-signing-profile.ps1 -Path "$env:RUNNER_TEMP\trusted-signing.json"
+      # The updater key exists as an environment variable for the length of THIS STEP and nowhere
+      # else: release.ps1 only checks that it is set and lets `cargo tauri build` inherit it.
+      - name: release.ps1
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          .\scripts\release.ps1 -SigningProfile "$env:RUNNER_TEMP\trusted-signing.json" 2>&1 | Tee-Object release.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $last = (Get-Content release.log | Where-Object { $_ -like "RELEASE *" } | Select-Object -Last 1)
+          if (-not $last) { throw "release.ps1 printed no RELEASE line" }
+          foreach ($kv in ($last -replace "^RELEASE ", "") -split " ") { $k, $v = $kv -split "=", 2; Add-Content $env:GITHUB_ENV ("REL_" + $k.ToUpper() + "=" + $v) }
+      - name: size gate
+        shell: pwsh
+        run: .\scripts\ci\size-gate.ps1 -Engine target\release\knowlu-engine.exe -Installer $env:REL_INSTALLER
+      # The one check that proves signing actually happened. sign.ps1 exits 0 when it cannot sign -
+      # it has to, or an unsigned dev build could not bundle - so a silent UNSIGNED: run would
+      # otherwise publish an installer Windows warns on.
+      #
+      # The sidecar is checked at app\binaries\, NOT at target\release\knowlu-engine.exe. Those are
+      # two different files: target\release\knowlu-engine.exe is cargo's own build output, while the
+      # bundler signs settings.external_binaries() - `binaries/knowlu-engine-<triple>.exe` relative
+      # to the tauri dir (tauri-bundler 2.9.4 bundle.rs sign_binaries_if_needed, tauri-utils 2.9.3
+      # resources.rs external_binaries) - and Settings::copy_binaries lifts THAT file into the
+      # installer with the triple stripped. Checking the cargo copy would fail every release while
+      # the shipped bytes were signed all along. Globbed, so the triple is not spelled here too.
+      #
+      # -like and Sort-Object LastWriteTime, exactly as release.ps1's own installer lookup does it
+      # and for the reason documented there: the FileSystem provider's -Filter uses Win32 wildcards,
+      # where 8.3 aliasing lets a 3-letter extension match a longer one, so `*.exe` can pick up a
+      # file this check has no business reading.
+      - name: verify Authenticode
+        shell: pwsh
+        run: |
+          $sidecar = Get-ChildItem "app\binaries" -File | Where-Object { $_.Name -like "knowlu-engine-*.exe" } | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $sidecar) { throw "no staged sidecar under app\binaries" }
+          foreach ($f in @($env:REL_INSTALLER, "target\release\knowlu.exe", $sidecar.FullName)) {
+            $s = Get-AuthenticodeSignature $f
+            Write-Output ("{0}: {1} {2}" -f $f, $s.Status, $s.SignerCertificate.Subject)
+            if ($s.Status -ne "Valid") { throw "not validly signed: $f" }
+          }
+      # site\releases\ now holds the versioned installer, the stable Knowlu-setup.exe and
+      # latest.json - the updater endpoint baked into the app.
+      - uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site --project-name knowlu --branch main --commit-dirty=true
+      - name: GitHub Release
+        shell: pwsh
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          $files = @($env:REL_INSTALLER, $env:REL_SIG, $env:REL_MANIFEST) | Where-Object { $_ -and $_ -ne "none" }
+          gh release create $env:GITHUB_REF_NAME $files --title "Knowlu $env:GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
+      # The profile file names an Azure account; release.log carries whatever the build printed.
+      # Neither is a secret, and neither has any business outliving the job.
+      - name: scrub
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP\trusted-signing.json" -ErrorAction SilentlyContinue; Remove-Item release.log -ErrorAction SilentlyContinue
