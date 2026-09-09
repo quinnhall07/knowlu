@@ -1,0 +1,11 @@
+day_start: "08:00"
+day_end: "18:00"
+min_block_minutes: 45
+classes:
+  mon: []
+  tue: []
+  wed: []
+  thu: []
+  fri: []
+  sat: []
+  sun: []

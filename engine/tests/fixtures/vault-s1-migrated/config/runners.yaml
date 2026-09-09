@@ -1,0 +1,12 @@
+# Expected runner schedule (spec §2.6). The dashboard (S2) compares run records against this.
+# grace_minutes: how late a run may start before it counts as missing. Cloud is 45 because on
+# 2026-08-26 the scheduler fired 31 minutes late and a healthy run was diagnosed as dead.
+runners:
+  - name: cloud
+    times: ["13:00", "20:00"]
+    tz: UTC
+    grace_minutes: 45
+  - name: local
+    times: ["12:00", "18:00"]
+    tz: America/Chicago
+    grace_minutes: 20

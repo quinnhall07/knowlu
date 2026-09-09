@@ -1,0 +1,17 @@
+:root {
+  --canvas: #0A0B0D; --s2c: #15181B; --hair: #22262B; --hair-2: #30353B;
+  --t1: #F1F3F4; --t2: #C3C9CE; --t3: #878E95; --acc: #3FB68B;
+  --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s7: 48px; --r2: 6px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--canvas); color: var(--t1); margin: 0; font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+main { max-width: 680px; margin: 0 auto; padding: var(--s7) var(--s4); }
+h1 { font-size: 30px; margin: 0 0 var(--s2); }
+h2 { font-size: 18px; margin: var(--s5) 0 var(--s2); }
+p { color: var(--t2); }
+.mark { width: 16px; height: 16px; border-radius: 4px; background: var(--acc); display: inline-block; vertical-align: -2px; margin-right: var(--s2); }
+.dl { display: inline-block; background: var(--acc); color: #08130F; font-weight: 700; text-decoration: none; padding: 10px var(--s5); border-radius: var(--r2); margin: var(--s3) 0; }
+.meta, footer { color: var(--t3); font-size: 13px; }
+footer { border-top: 1px solid var(--hair); margin-top: var(--s7); padding-top: var(--s4); }
+ul { color: var(--t2); }

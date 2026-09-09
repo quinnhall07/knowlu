@@ -1,0 +1,19 @@
+# Cargo — one target/ for the workspace. Never commit it.
+/target/
+# Build output of the app: the staged engine sidecar (scripts\release.ps1 puts it here, app\build.rs
+# drops a zero-byte placeholder when it is missing) and tauri-build's generated schemas.
+/app/binaries/
+/app/gen/
+# Release artefacts: the site's drop folder holds installers and the updater manifest, never in git.
+/site/releases/*
+!/site/releases/.gitkeep
+# Tooling and scratch.
+.superpowers/
+.claude/worktrees/
+*.log
+/shots/
+__pycache__/
+*.pyc
+# WebView2 user-data folders left behind by running the console or the shot scripts from the repo.
+.wv/
+.wv2/

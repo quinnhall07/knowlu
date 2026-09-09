@@ -1,0 +1,48 @@
+[package]
+name = "knowlu-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Knowlu's deterministic engine: ranking, ingest, coursework, judgment and the read model behind the app"
+publish = false
+
+# ONE CRATE for the engine, deliberately. The module graph it was ported from contains four true
+# cycles (ingest<->write, ids->ingest->write->ids, coursework<->vhl, coursework<->zybooks). Cargo
+# rejects circular dependencies between CRATES but permits them between modules inside one, so
+# splitting the engine into several crates would force a refactor of the write path — exactly the
+# unforced behaviour change the golden-file oracle exists to catch. See the rewrite spec section 4.
+# (The app is a separate crate in the same workspace; it depends on this one, never the reverse.)
+[lib]
+name = "knowlu_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "knowlu-engine"
+path = "src/main.rs"
+
+# The size-tuned release profile lives in the workspace root Cargo.toml — Cargo honours
+# [profile.*] only there — and tests/dependency_boundary.rs pins it. NOTE: its panic = "abort"
+# means `cargo test --release` will not link the test harness, which needs unwinding. Run
+# `cargo test` (dev profile). This is the normal trade and is intentional.
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+getrandom = "0.2"
+html-escape = "0.2.15"
+jiff = "0.2.35"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml_ng = "0.10.0"
+sha1 = "0.11.0"
+# `cookies` is not a default feature and VHL does not work without it: login is CAS on
+# www.vhlcentral.com and the dashboard is on m3a.vhlcentral.com, so the session cookie has to
+# survive both the redirect chain and the host change. Session cookies are scoped to
+# .vhlcentral.com, which is exactly why one jar spans both hosts (coursework spec 7.2).
+ureq = { version = "3.4.0", features = ["cookies"] }
+# Knowlu foundation plan, Task 4 — dated zip snapshots for the backup mirror. Deflate only;
+# no encryption, no bzip2/zstd — the vault is markdown and small JSON, not worth the crate size.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Security_Credentials", "Win32_Foundation"] }

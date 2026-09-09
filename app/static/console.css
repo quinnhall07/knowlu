@@ -1,0 +1,478 @@
+/* Ops Console — S2 chosen direction (docs/mockups/2026-08-31-s2-console-CHOSEN.html),
+   vendored offline (spec §6: CSP default-src 'self', no network reference anywhere under
+   app/static/). Tokens first, then @font-face, then the mockup's rules verbatim (lines
+   39-235 of the mockup) minus three deletions — the keyboard-shortcut legend (both the base
+   rule and its @media hide), the page footnote paragraph, and the ribbon peak's ::after
+   content label — replaced by real markup Task 12 renders. New region rules (S2 §6, not in
+   the mockup) follow at the end. */
+
+:root {
+  --canvas: #0A0B0D; /* the page ground */
+  --s1c:    #101215; /* surface lift 1 — row hover, nav sections */
+  --s2c:    #15181B; /* surface lift 2 — cards, pills, active nav */
+  --s3c:    #1A1D21; /* surface lift 3 — track background, sliver */
+  --hair:   #22262B; /* hairline border, quiet */
+  --hair-2: #30353B; /* hairline border, one step brighter */
+  --t1: #F1F3F4; /* text — highest emphasis */
+  --t2: #C3C9CE; /* text — body */
+  --t3: #878E95; /* text — secondary */
+  --t4: #5A6169; /* text — quiet / metadata */
+  --acc:     #3FB68B; /* the one accent — interactive + "this fits" */
+  --acc-dim: #15302A; /* accent, dimmed for fills behind it */
+  --crit:    #E0605A; /* overdue / critical */
+  --crit-dim:#33191A; /* critical, dimmed for fills */
+  --warn:    #D9A441; /* soon / warn */
+  --warn-dim:#302512; /* warn, dimmed for fills */
+
+  --r1: 4px; --r2: 6px; --r3: 8px; /* corner radii, small to large */
+
+  /* SPACING SCALE — 4px base. Every gap on this page comes from here. */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px;
+  --s5: 24px; --s6: 32px; --s7: 48px; --s8: 64px;
+
+  --measure: 900px; /* main column reading width */
+  --shell:  1560px; /* the whole app's max width */
+
+  --sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif; /* body face */
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; /* data/metadata face */
+}
+/* Deliberately single-theme: a console is dark. Every colour is painted from a
+   token, so the page never borrows the host ground. */
+:root { color-scheme: dark; }
+
+/* ---- vendored fonts (S2 §6: the shipped page is offline by construction) ---- */
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/instrument-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/instrument-sans-500.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/instrument-sans-600.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/instrument-sans-700.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/jetbrains-mono-400.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/jetbrains-mono-500.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/jetbrains-mono-600.woff2") format("woff2"); }
+
+* { box-sizing: border-box; }
+body { background: var(--canvas); color: var(--t1); font-family: var(--sans); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+
+.app { display: grid; grid-template-columns: 264px minmax(0,1fr) 356px; min-height: 100vh; max-width: var(--shell); margin: 0 auto; }
+
+/* ============ left rail: identity, navigation, the day ============ */
+nav { border-right: 1px solid var(--hair); padding: var(--s5) var(--s4) var(--s7); }
+.brand { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s2) var(--s5); }
+.mark { width: 15px; height: 15px; border-radius: var(--r1); background: var(--acc); flex: none; }
+.brand b { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; }
+nav a {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 5px var(--s2); margin-bottom: 1px; border-radius: var(--r2);
+  color: var(--t3); text-decoration: none; font-size: 13.5px; font-weight: 500;
+}
+nav a .ct { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); font-variant-numeric: tabular-nums; }
+nav a:hover { background: var(--s2c); color: var(--t2); }
+nav a.on { background: var(--s2c); color: var(--t1); }
+.dot { width: 5px; height: 5px; border-radius: 50%; background: var(--hair-2); flex: none; }
+.dot.crit { background: var(--crit); }
+.dot.warn { background: var(--warn); }
+nav a.on .dot { background: var(--acc); }
+nav .grp { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--t4); font-weight: 600; padding: var(--s5) var(--s2) var(--s2); }
+
+.navsec { margin-top: var(--s6); padding-top: var(--s4); border-top: 1px solid var(--hair); }
+.navsec-hd { display: flex; align-items: baseline; gap: var(--s2); padding: 0 var(--s2) var(--s3); }
+.navsec-hd h2 { margin: 0; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--t4); font-weight: 600; }
+.navsec-hd .n { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); }
+
+/* the day — vertical, because the left rail is a column */
+.day { padding: 0 var(--s2); }
+.blk { display: grid; grid-template-columns: 1fr auto; gap: var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
+.blk:last-child { border-bottom: 0; }
+.blk .t { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
+.blk .w { font-size: 13px; color: var(--t2); min-width: 0; }
+.blk .h { font-family: var(--mono); font-size: 11px; color: var(--t4); }
+.blk.free .w { color: var(--acc); }
+.blk .sl { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: var(--s2); padding-top: 3px; font-family: var(--mono); font-size: 11px; color: var(--t3); }
+.blk .sl span:first-child::before { content: "└ "; color: var(--hair-2); }
+.blk .sl span:last-child { color: var(--t4); }
+
+/* ============ main ============ */
+main { padding: var(--s5) var(--s7) var(--s8); min-width: 0; }
+main > * { max-width: var(--measure); }
+.topline { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; font-family: var(--mono); font-size: 11px; color: var(--t4); margin-bottom: var(--s5); }
+.topline .live { color: var(--acc); }
+h1 { font-size: clamp(21px,1.9vw,28px); font-weight: 600; letter-spacing: -.025em; line-height: 1.22; margin: 0 0 var(--s2); max-width: 30ch; text-wrap: balance; }
+h1 .no { color: var(--crit); }
+.lede { color: var(--t3); max-width: 62ch; margin: 0 0 var(--s7); font-size: 14.5px; }
+
+/* ---- SIGNATURE ---- */
+.meter { margin-bottom: var(--s7); }
+.meter-hd { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s3); }
+.meter-hd h2 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.meter-hd .sub { font-family: var(--mono); font-size: 11px; color: var(--t4); margin-left: auto; }
+.meter-body { display: flex; align-items: flex-start; gap: var(--s2); flex-wrap: wrap; }
+.fits { display: flex; gap: 2px; padding: 6px; border: 1px solid var(--acc); border-radius: var(--r3); background: var(--acc-dim); flex: none; }
+.fits i { width: 11px; height: 30px; border-radius: 2px; background: var(--acc); display: block; }
+.spill { display: flex; gap: 2px; flex-wrap: wrap; padding-top: 7px; flex: 1; min-width: 180px; }
+.spill i { width: 11px; height: 30px; border-radius: 2px; background: var(--crit-dim); border: 1px solid var(--crit); display: block; }
+.meter-key { display: flex; gap: var(--s3) var(--s5); flex-wrap: wrap; margin-top: var(--s4); font-family: var(--mono); font-size: 11px; color: var(--t4); }
+.meter-key b { color: var(--t2); font-weight: 500; }
+.meter-key .c { color: var(--crit); }
+.meter-key .a { color: var(--acc); }
+
+.sec { margin-bottom: var(--s7); }
+.sec:last-of-type { margin-bottom: 0; }
+.sec-hd { display: flex; align-items: baseline; gap: var(--s3); padding-bottom: var(--s2); margin-bottom: var(--s1); border-bottom: 1px solid var(--hair); }
+.sec-hd h2 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.sec-hd .n { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); }
+.grp { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; color: var(--t4); padding: var(--s5) 0 var(--s1); }
+.grp:first-of-type { padding-top: var(--s4); }
+
+.row { position: relative; display: grid; grid-template-columns: 5px minmax(0,1fr) 88px 50px; gap: var(--s3); align-items: center; padding: var(--s2) var(--s2) var(--s2) 0; border-radius: var(--r2); }
+.row:hover { background: var(--s1c); }
+.row .pip { width: 5px; height: 5px; border-radius: 50%; background: var(--hair-2); }
+.row.od .pip { background: var(--crit); }
+.row.soon .pip { background: var(--warn); }
+.ttl { min-width: 0; }
+.ttl .a { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ttl .b { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: 2px; font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
+.ttl .b .fl { color: var(--warn); }
+.ttl .b .mg { color: var(--acc); }
+.track { height: 4px; border-radius: 2px; background: var(--s3c); position: relative; }
+.track.none { background: transparent; }
+.track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--acc); }
+.hrs { font-family: var(--mono); font-size: 12px; color: var(--t3); text-align: right; font-variant-numeric: tabular-nums; }
+.more { font-family: var(--mono); font-size: 11px; color: var(--t4); padding: var(--s3) 0 0; }
+
+/* ============ right rail ============ */
+aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s8); min-width: 0; }
+.rblock + .rblock { margin-top: var(--s7); }
+.rail-hd { display: flex; align-items: baseline; gap: var(--s2); margin: 0 0 var(--s3); padding-bottom: var(--s2); border-bottom: 1px solid var(--hair); }
+.rail-hd h2 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.rail-hd .n { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); }
+
+/* ---- decisions: a deck, not a list ---- */
+.deck { position: relative; padding-bottom: 14px; }
+.deck .card {
+  position: relative;
+  background: var(--s1c); border: 1px solid var(--hair-2); border-radius: var(--r3);
+  padding: var(--s3) var(--s4);
+  transition: transform .28s cubic-bezier(.2,.7,.3,1), opacity .2s ease;
+}
+/* Task 14: the acted-on card slides out to the right over 260ms, then paint()'s forced
+   repaint (a fresh state after decide()) replaces it with whatever is next in the queue. */
+/* Final fix wave A4: decideCard() adds .gone to whatever [data-id] element it was handed --
+   the deck's card in the rail, the .row.dec in the Decisions view -- so the row needs the
+   same slide-out and the same removal from hit-testing. */
+.deck .card.gone, .row.dec.gone { transform: translateX(110%); opacity: 0; transition: 260ms; }
+/* Review fix (Important): a .gone card stays hit-testable for the length of that transition
+   (and however long the IPC round-trip takes beyond it) unless removed from hit-testing too —
+   this is belt-and-suspenders alongside decideCard's own disabled-buttons/busy-flag guard. */
+.card.gone, .row.dec.gone { pointer-events: none; }
+/* the two slivers behind the top card are the rest of the queue, at a glance */
+.deck .sliver {
+  height: 9px; border: 1px solid var(--hair-2); border-top: 0;
+  border-radius: 0 0 var(--r3) var(--r3); background: var(--s3c);
+  margin: 0 auto; transition: width .28s ease;
+}
+.deck .sliver.s1 { width: calc(100% - 18px); }
+.deck .sliver.s2 { width: calc(100% - 36px); height: 7px; border-color: var(--hair); background: var(--s2c); }
+.deck-foot { display: flex; align-items: baseline; gap: var(--s2); margin-top: var(--s3); font-family: var(--mono); font-size: 11px; color: var(--t4); }
+.deck-foot .adv { margin-left: auto; }
+.card .t { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--s1); }
+.card .w { color: var(--t3); font-size: 12.5px; margin-bottom: var(--s3); }
+.card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
+.acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+button.b { font-family: var(--sans); font-size: 12.5px; font-weight: 500; border-radius: var(--r2); padding: 4px 10px; cursor: pointer; border: 1px solid var(--hair-2); background: var(--s2c); color: var(--t2); }
+button.b:hover { border-color: var(--t4); color: var(--t1); }
+button.b.pri { background: var(--acc); border-color: var(--acc); color: #04140F; }
+button.b.pri:hover { background: #4FC79A; }
+button.b:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+.nb { margin-top: var(--s3); }
+.nb input { background: transparent; border: 0; border-bottom: 1px solid var(--hair-2); border-radius: 0; padding: 4px 2px; font-size: 12.5px; color: var(--t2); }
+.nb input::placeholder { color: var(--t4); }
+.nb input:focus { outline: 0; border-bottom-color: var(--acc); color: var(--t1); }
+input[type=text] { width: 100%; background: var(--canvas); border: 1px solid var(--hair-2); border-radius: var(--r2); color: var(--t1); font-family: var(--sans); font-size: 13px; padding: 6px 8px; }
+input[type=text]:focus { outline: 2px solid var(--acc); outline-offset: -1px; border-color: transparent; }
+.clear { padding: var(--s5) 0; font-family: var(--mono); font-size: 11.5px; color: var(--acc); }
+
+/* ---- ahead: hours due per day ---- */
+.ribbon { display: flex; align-items: flex-end; gap: 3px; height: 76px; margin: var(--s4) 0 var(--s1); }
+.ribbon .d { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; position: relative; }
+.ribbon .d i { display: block; background: var(--t4); border-radius: 1px; min-height: 2px; }
+.ribbon .d.pk i { background: var(--warn); }
+.ribbon .d.wknd i { background: var(--hair-2); }
+.ribbon .d.zero i { background: var(--hair); min-height: 1px; }
+.ribbon-ax { display: flex; gap: 3px; font-family: var(--mono); font-size: 9.5px; color: var(--t4); }
+.ribbon-ax span { flex: 1; text-align: center; }
+.ribbon-ax span.pk { color: var(--warn); }
+.ahead-note { display: flex; gap: var(--s2); align-items: flex-start; margin-top: var(--s3); font-size: 12.5px; color: var(--t3); }
+.ahead-note b { color: var(--t2); font-weight: 600; }
+
+.ln { position: relative; display: grid; grid-template-columns: 48px minmax(0,1fr) minmax(0,112px); gap: var(--s3); align-items: baseline; padding: var(--s1) 0; font-family: var(--mono); font-size: 11px; color: var(--t3); }
+.ln > span:nth-child(2) { min-width: 0; }
+/* S2 grid-collision fix: a bare .run also matched other elements, so the runs-row
+   layout is scoped to .ln.run rather than .run alone. */
+.ln.run { grid-template-columns: 46px 62px minmax(0,1fr); }
+.run .rt { text-align: left; }
+.ln .k { font-size: 10px; letter-spacing: .04em; }
+.ln .k.ag, .ln .k.gd { color: var(--acc); }
+.ln .k.me { color: var(--t2); }
+.ln .k.lp { color: var(--t4); }
+.ln .k.wn { color: var(--warn); }
+.ln .k.ms { color: var(--crit); }
+/* console-shots.py caught this at every desktop width: the third column was `auto`, and
+   an unbounded nowrap organizer/expiry string (e.g. "Office of Undergraduate Research" in
+   coming_up) claimed the whole row's remaining space, collapsing the title column's
+   minmax(0,1fr) to 0 and letting its overflow-visible text spill left, on top of the organizer
+   text. Capped to 112px with ellipsis so the title column always keeps its share; .ln.run's
+   own grid-template-columns override (above) is untouched, so run timestamps are unaffected. */
+.ln .rt { color: var(--t4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ============ breakpoints ============ */
+@media (max-width: 1400px) {
+  .app { grid-template-columns: 248px minmax(0,1fr) 324px; }
+  main { padding-left: var(--s6); padding-right: var(--s6); }
+}
+@media (max-width: 1180px) {
+  .app { grid-template-columns: 240px minmax(0,1fr); }
+  aside {
+    grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--hair);
+    padding: var(--s7) var(--s6) var(--s8);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--s7); align-items: start;
+  }
+  .rblock + .rblock { margin-top: 0; }
+}
+@media (max-width: 820px) {
+  .app { grid-template-columns: 1fr; }
+  nav { border-right: 0; border-bottom: 1px solid var(--hair); padding: var(--s3) var(--s4) var(--s5); }
+  .brand { padding: 0 var(--s2) var(--s3); }
+  .navlinks { display: flex; flex-wrap: wrap; gap: var(--s1); }
+  nav .grp { display: none; }
+  nav a { margin-bottom: 0; }
+  nav a .ct { margin-left: var(--s1); }
+  .navsec { margin-top: var(--s5); }
+  main { padding: var(--s5) var(--s4) var(--s7); }
+  aside { padding: var(--s6) var(--s4) var(--s7); gap: var(--s6); }
+  .ttl .a { white-space: normal; }
+  .row { grid-template-columns: 5px minmax(0,1fr) 50px; align-items: start; }
+  .row .track { display: none; }
+  .row .pip { margin-top: 6px; }
+}
+@media (prefers-reduced-motion: reduce) { *, .deck .card, .deck .card.gone, .deck .sliver { transition: none !important; } }
+
+/* ---- regions the mockup did not have (S2 §6) ---- */
+.delta { font-family: var(--mono); font-size: 11px; color: var(--t3); display: flex; gap: var(--s3); align-items: baseline; margin: var(--s2) 0 var(--s4); }
+.delta button { font: inherit; color: var(--acc); background: none; border: 0; padding: 0; cursor: pointer; }
+.topline .rw { color: var(--t2); } .topline .rw.behind { color: var(--crit); } .topline .rw.tight { color: var(--warn); }
+.row .sb { font-family: var(--mono); font-size: 10.5px; color: var(--t4); } .row .sb.od { color: var(--crit); }
+.row .ttl .b .amend { color: var(--warn); } .row .ttl .b .os { color: var(--t4); border: 1px solid var(--hair-2); border-radius: var(--r1); padding: 0 4px; }
+.row .ttl .b .flag { color: var(--t4); cursor: pointer; background: none; border: 0; padding: 0; font: inherit; font-size: inherit; } .row .ttl .b .flag:hover { color: var(--t2); } .row .ttl .b .cf { color: var(--warn); }
+.row .why { grid-column: 1 / -1; font-size: 12px; color: var(--t3); padding: 0 0 var(--s2) 13px; }
+.row.unreadable .ttl .a { color: var(--crit); font-family: var(--mono); font-size: 12px; }
+.overflow { font-family: var(--mono); font-size: 11.5px; color: var(--warn); margin: var(--s2) 0 0; }
+/* R33(b): index.html puts #allday and #commitments as siblings of .day (#theday), not
+   children — ".day .allday"/".day .commit" never matched anything. #allday already carries
+   class="allday" itself, so it needs no ancestor; #commitments' rows carry class="commit". */
+.day .blk.class .w { color: var(--t4); } .allday { font-family: var(--mono); font-size: 10.5px; color: var(--t3); margin-bottom: var(--s2); }
+#commitments .commit { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--t2); padding: 2px 0; }
+.ribbon .pklabel { position: absolute; top: -13px; right: -2px; font-family: var(--mono); font-size: 9.5px; color: var(--warn); white-space: nowrap; }
+.rblock .empty { font-size: 12.5px; color: var(--t4); padding: var(--s2) 0; }
+/* Final fix wave A6: the same look in the main column -- Decisions, Good to know, Issues and
+   Runs all emit <div class="empty"> and only the rail's copy was ever styled. */
+.gauge { display: inline-flex; align-items: flex-end; gap: 1px; height: 12px; margin-left: 8px; }
+.gauge i { display: inline-block; width: 3px; background: currentColor; opacity: .7; }
+.gauge .word { margin-left: 6px; font: 500 11px var(--mono); }
+main .empty { font-size: 12.5px; color: var(--t4); padding: var(--s2) 0; }
+.navlinks a .ct small { color: var(--t4); font-weight: 400; margin-left: 4px; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--s1c); border-left: 1px solid var(--hair); padding: var(--s5); overflow: auto; box-shadow: -24px 0 48px rgba(0,0,0,.4); }
+.drawer[hidden] { display: none; } .drawer h2 { margin: 0 0 var(--s3); } .drawer dl { display: grid; grid-template-columns: 160px minmax(0,1fr); gap: 4px var(--s3); font-size: 12.5px; }
+.drawer dt { color: var(--t4); font-family: var(--mono); font-size: 11px; } .drawer dd { margin: 0; color: var(--t2); word-break: break-word; }
+.drawer .hist { font-family: var(--mono); font-size: 11px; color: var(--t3); border-top: 1px solid var(--hair); padding-top: var(--s3); margin-top: var(--s4); }
+.drawer .close { float: right; background: none; border: 0; color: var(--t3); font-size: 18px; cursor: pointer; }
+/* console-shots.py caught this: below 820px nav stops being a left rail and becomes a
+   wrapping top bar, but the drawer (position:fixed, right:0, top:0, bottom:0) still only
+   spanned min(560px,100vw) — a fixed panel from the top always overlaps whatever sits in its
+   rightmost span at any height, so it cut the nav's wrapped second row in half instead of
+   leaving it fully visible or covering it cleanly. Placed after the base .drawer rule (not
+   inside the shared max-width:820px block above) so it wins the cascade at equal specificity. */
+@media (max-width: 820px) { .drawer { width: 100vw; } }
+
+/* ---- Task 13: the page writes — click-to-edit, progress drag, new-task row, delete ---- */
+.sec-hd #newtask { margin-left: auto; }
+/* the small editable metadata chips (course/due/importance/status) in a row's second line —
+   a dotted underline says "click me", distinct from the plain informational chips beside them */
+.ttl .b .ed { cursor: pointer; border-bottom: 1px dotted var(--t4); }
+.ttl .b .ed:hover { color: var(--t2); border-bottom-color: var(--t3); }
+/* the progress track itself is a drag target, not a click-to-edit field */
+.track { cursor: ew-resize; touch-action: none; }
+.track.none { cursor: default; }
+/* the input editField swaps in over a clicked span/dd — sized to its context, not the page default */
+.row input[type=text], .row input[type=number], .row input[type=date], .row input[type=datetime-local],
+.drawer dd input[type=text], .drawer dd input[type=number], .drawer dd input[type=date], .drawer dd input[type=datetime-local] {
+  font: inherit; background: var(--canvas); color: var(--t1); border: 1px solid var(--acc); border-radius: 3px; padding: 0 4px; width: 100%; max-width: 160px;
+}
+.row .a input { max-width: none; width: 100%; }
+/* the drawer's read-only fields (id/source_uid/also_uids/judgment) — shown, never editable */
+.drawer dd.ro { color: var(--t4); font-family: var(--mono); font-size: 11px; }
+/* a refused write's message — a toast on the body, since paint() already replaced whatever
+   element the click came from by the time this appears (see showRefusal) */
+.refusal {
+  position: fixed; top: var(--s4); right: var(--s4); z-index: 50; max-width: 320px;
+  background: var(--crit-dim); color: var(--crit); border: 1px solid var(--crit); border-radius: var(--r2);
+  padding: var(--s2) var(--s3); font-family: var(--mono); font-size: 11.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+}
+/* the inline "+ task" form, prepended into #mustdo */
+.newrow { align-items: center; }
+.newrow .ttl { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.newrow input {
+  background: var(--canvas); border: 1px solid var(--hair-2); border-radius: var(--r2); color: var(--t1);
+  font-family: var(--sans); font-size: 12.5px; padding: 4px 8px;
+}
+.newrow input:focus { outline: 2px solid var(--acc); outline-offset: -1px; border-color: transparent; }
+.newrow input[name=title] { flex: 1 1 160px; min-width: 120px; }
+.newrow input[name=course] { width: 100px; }
+.newrow input[name=due] { width: 132px; }
+.newrow input[name=effort_hours] { width: 64px; }
+button.b.crit { border-color: var(--crit); color: var(--crit); }
+button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-color: var(--crit); }
+/* Review fix (Important, attribution): a refused write flags its row for 6s too, since the
+   toast alone doesn't say which row it was about once several are on screen. An inset
+   box-shadow reads as a left border without touching the grid's box model (no reflow). */
+.row.refused { box-shadow: inset 3px 0 0 0 var(--crit); }
+
+/* Plan 4a Task 8's update banner, above the sync line: the same monospace row the lines around it
+   are, with the offer's button on the same baseline. `[hidden]` needs its own rule — a class
+   `display` beats the UA stylesheet's, the `.app[hidden]` / `.wiz-row[hidden]` lesson — and it
+   matters here more than anywhere: `renderUpdateOffer` hides this element on every poll that has no
+   staged version, which is every poll until a release the running build is behind actually exists —
+   and, once one does, every poll while a slot is running (the offer is withheld mid-run, R9). */
+.upd { display: flex; align-items: baseline; gap: var(--s2); font-family: var(--mono); font-size: 11px; margin: 0 0 var(--s2); }
+.upd[hidden] { display: none; }
+
+/* ---- Task 15: sync/backup/scheduler topline, the Runs view, interaction events ---- */
+.syncline { font-family: var(--mono); font-size: 11px; color: var(--t3); display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; margin: 0 0 var(--s2); }
+.syncline button { font: inherit; }
+.calm { color: var(--acc); }
+.amber { color: var(--warn); }
+.crit { color: var(--crit); }
+#main-runs h1 { margin: 0 0 var(--s4); }
+.ln.run .summary {
+  grid-column: 1 / -1; margin: 4px 0 0; padding: var(--s2) var(--s3); background: var(--s2c);
+  border: 1px solid var(--hair-2); border-radius: var(--r2); font-family: var(--mono); font-size: 11px;
+  color: var(--t3); white-space: pre-wrap; word-break: break-word;
+}
+.warnings {
+  margin-top: var(--s4); padding: var(--s3); border: 1px solid var(--warn); border-radius: var(--r2);
+  background: var(--warn-dim); color: var(--warn); font-family: var(--mono); font-size: 11.5px;
+}
+.warnings div { padding: 2px 0; }
+#delta-detail { font-family: var(--mono); font-size: 11px; color: var(--t3); flex-basis: 100%; padding-top: var(--s1); }
+#delta-detail div { padding: 1px 0; }
+
+/* ---- Task 14: the deck acts, the ⚑ flag popover, info close ---- */
+/* the flag lives top-right on a card (always agent-authored) and inline in a judged row's
+   metadata chips (.row .ttl .b .flag, above) */
+.card .t { padding-right: 22px; }
+.card .flag { position: absolute; top: var(--s3); right: var(--s3); background: none; border: 0; color: var(--t4); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px; }
+.card .flag:hover { color: var(--t2); }
+.flagpop {
+  position: absolute; z-index: 40; top: 100%; right: 0; margin-top: 4px; width: 260px;
+  background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3);
+  padding: var(--s3); box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.flagpop .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: var(--s2); }
+.flagpop .chip, .row.iss .chip { font-family: var(--mono); font-size: 10.5px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--hair-2); background: var(--s3c); color: var(--t3); cursor: pointer; }
+.flagpop .chip:hover { color: var(--t2); border-color: var(--t4); }
+.flagpop .chip.on, .row.iss .chip.on { background: var(--acc-dim); border-color: var(--acc); color: var(--acc); }
+.flagpop textarea {
+  width: 100%; min-height: 60px; background: var(--canvas); border: 1px solid var(--hair-2);
+  border-radius: var(--r2); color: var(--t1); font: inherit; font-size: 12.5px; padding: 6px 8px; resize: vertical;
+}
+.flagpop textarea:focus { outline: 2px solid var(--acc); outline-offset: -1px; border-color: transparent; }
+.flagpop .acts { margin-top: var(--s2); justify-content: flex-end; }
+.flagpop button.b[disabled] { opacity: .5; cursor: not-allowed; }
+/* the overflow "…" snooze control — the date input stays hidden until the button's first click */
+.deck .card input[type=date] { margin-left: var(--s2); background: var(--canvas); border: 1px solid var(--hair-2); border-radius: var(--r2); color: var(--t1); font: inherit; font-size: 12px; padding: 3px 6px; }
+.deck .card input[type=date][hidden] { display: none; }
+.nb input[disabled] { color: var(--t4); }
+/* GOOD TO KNOW's "close" button needs a fourth grid track that the shared .ln rule doesn't have */
+#gtk .ln { grid-template-columns: 48px minmax(0,1fr) minmax(0,80px) auto; }
+#gtk .ln button.b { padding: 2px 8px; font-size: 11px; }
+
+/* ---- Plan 2 Task 1: the Decisions view — every pending approval, acting like the deck ---- */
+/* Final fix wave A1: all three plan-2 row kinds are .row, and .row's four tracks
+   (5px pip / title / 88px progress / 50px hours) fit none of them — the ⚑ button landed in
+   the 5px pip track, .acts in the 88px progress track, and an Issues row's title in the 5px
+   one. Each kind states its own tracks instead. .row.dec/.row.gtk-row keep a 5px first
+   column for the ⚑; .row.iss has no ⚑ and so no first column. Specificity 0-2-0 beats the
+   820px breakpoint's bare `.row` override (a media query adds none), so these hold at every
+   width — which is what the console-shots run at eight viewports checks. */
+.row.dec, .row.gtk-row { grid-template-columns: 5px minmax(0,1fr) auto; }
+.row.iss { grid-template-columns: minmax(0,1fr) auto; }
+.row.iss { align-items: flex-start; }
+.row.dec { align-items: flex-start; }
+.row .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); margin-left: 8px; }
+.row.dec .why { color: var(--t2); font-size: 13px; margin-top: 4px; max-width: 72ch; }
+.row.dec .changes { margin-top: 4px; font: 500 11px/1.5 var(--mono); color: var(--t4); }
+.row.dec .acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.row.dec .dnote { width: 16ch; }
+
+/* ---- Plan 2 Task 2: the Good to know view — open info items with the close action ---- */
+.row.gtk-row .acts { justify-content: flex-end; }
+/* quiet metadata text beside a section heading, e.g. #dec-hint (review rider, Task 1/2) */
+.hint { color: var(--t4); font-size: 12px; margin: 0 0 8px; }
+
+/* ---- Plan 2 Task 3: the Issues view — flags with categories, target and resolution ---- */
+.row.iss .chips { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+/* these chips are read-only labels, not the flag popover's toggle buttons */
+.row.iss .chip { cursor: default; }
+.lnk { background: none; border: 0; color: var(--acc); cursor: pointer; padding: 0; font: inherit; }
+
+/* ---- Plan 4a Task 2: the profile picker — the window with no vault behind it ---- */
+/* `.app` is `display: grid`, and a class rule beats the UA stylesheet's `[hidden]`, so hiding the
+   console with `.hidden = true` did nothing: the picker rendered BELOW a full-height empty grid
+   (review round 1, IMPORTANT 1). `.drawer[hidden]` above has always needed the same line. */
+.app[hidden] { display: none; }
+.picker { max-width: 560px; margin: var(--s8) auto; padding: 0 var(--s5); }
+.picker h1 { font-size: 22px; margin: 0 0 var(--s2); }
+.row.pick { border-bottom: 1px solid var(--hair); padding: var(--s3) 0; display: flex; align-items: center; }
+.row.pick .ttl { flex: 1; min-width: 0; }
+.row.pick .acts { margin-left: auto; }
+.row.pick .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); display: block; }
+.wiz-nav { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s5); }
+
+/* ---- Plan 4a Task 6: the first-run wizard — seven panels in this same document ---- */
+.wiz { max-width: 640px; margin: var(--s7) auto; padding: 0 var(--s5); }
+.wiz-hd { display: flex; align-items: baseline; justify-content: space-between; }
+.wiz-panel h2 { font-size: 17px; margin: var(--s5) 0 var(--s2); }
+.wiz-panel label { display: block; padding: var(--s1) 0; color: var(--t2); }
+.wiz-row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin: var(--s3) 0; }
+.wiz-panel input[type="text"], .wiz-panel input[type="password"] { background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 6px 8px; font: inherit; min-width: 22ch; }
+/* The `.app[hidden]` lesson again (Task 2, review round 1): `.wiz-row` is a flex container, and
+   a class rule beats the UA stylesheet's `[hidden]` — without this the adopt and restore rows
+   stayed on screen while CREATING a vault, offering three folder pickers at once. */
+.wiz-row[hidden] { display: none; }
+/* `input[type=text]` is 100% wide page-wide (elsewhere it is an edit-in-place field filling its
+   cell), which inside a row put every field on a line of its own. A field in a row is sized by
+   its content; the one field that IS its own row — the feed link — keeps the full width. */
+.wiz-row input[type="text"], .wiz-row input[type="password"] { width: auto; }
+/* a slot time is five characters, not a folder name — at the shared 22ch the third field wrapped */
+#wiz-slot1, #wiz-slot2 { width: 11ch; min-width: 11ch; }
+.wiz-panel .meta { color: var(--t4); font: 500 11px/1.5 var(--mono); }
+.wiz .crit { color: var(--crit); margin-right: auto; }
+
+/* ---- Plan 4a Task 7: the settings overlay — a panel in the page, never a view ---- */
+/* `display` is stated TWICE on purpose. The panel is an <aside>, and the 1180px breakpoint turns
+   every <aside> into `display: grid` (specificity 0-0-1, but `[hidden]` is a UA rule and loses to
+   any author `display`) — so `[hidden]` alone would never hide it below 1180px, and `block` alone
+   would let the breakpoint grid its rows apart when it is open. `.drawer` carries only the
+   `[hidden]` half; it is not this rule's business to change that. */
+.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; }
+.setpanel[hidden] { display: none; }
+.set-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--s3); }
+.set-hd h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.set-row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
+.set-row .k { min-width: 13ch; color: var(--t3); }
+.set-row .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); flex: 1 1 12ch; overflow-wrap: anywhere; }
+.set-row input[type="text"] { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; flex: 1 1 14ch; }
+/* A disabled button in a settings row has to LOOK disabled — the only other [disabled] rule in the
+   sheet is .flagpop's. (Written for the Updates row while it was a placeholder; Task 8 wired that
+   row, and the rule stands for any row control a command turns off.) */
+.set-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
+.set-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }

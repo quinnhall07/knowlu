@@ -1,0 +1,9 @@
+timezone: America/Chicago
+
+# Deliberately no ics_url: load_calendar_events warns "no ics_url" and falls back to
+# state/calendar.md. That keeps the fixture offline and still exercises read_snapshot,
+# the 28-day window merge, and busy time's effect on capacity. A real URL here would
+# mean a network call inside cargo test; a file:// URL would work in urllib and not in
+# ureq, so it would diverge by construction.
+calendars:
+  - name: personal

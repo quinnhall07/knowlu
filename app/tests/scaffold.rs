@@ -1,0 +1,371 @@
+use knowlu::commands::state_inner;
+use knowlu::scaffold::{campus_yaml, create_vault, ingest_yaml, runners_yaml, VaultPlan, CAMPUSES};
+use knowlu::state::ConsoleState;
+use std::path::{Path, PathBuf};
+
+fn temp(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("knowlu-scaffold-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn plan(id: &str) -> VaultPlan {
+    VaultPlan {
+        profile_id: id.to_string(),
+        ics_url: Some("https://lms.example.invalid/feed/learn.ics".to_string()),
+        timezone: "America/Chicago".to_string(),
+        slots: vec!["12:00".to_string(), "18:00".to_string()],
+        device: "TEST-MACHINE".to_string(),
+        campus: "university-of-alabama".to_string(),
+        zybooks: true,
+        vhl: false,
+    }
+}
+
+/// Every `.knowlu-new-*` sitting in `parent` right now. Empty is the only right answer after
+/// `create_vault` returns, whichever way it returned.
+fn strays(parent: &Path) -> Vec<String> {
+    std::fs::read_dir(parent).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".knowlu-new-"))
+        .collect()
+}
+
+/// Every journal line in the vault, as JSON, oldest file first.
+fn journal_text(vault: &Path) -> String {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(vault.join("state").join("journal")).unwrap()
+        .flatten().map(|e| e.path()).collect();
+    files.sort();
+    files.iter().map(|p| std::fs::read_to_string(p).unwrap().replace("\r\n", "\n")).collect::<Vec<_>>().join("")
+}
+
+fn journal_records(vault: &Path) -> Vec<serde_json::Value> {
+    journal_text(vault).lines().filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).collect()
+}
+
+/// The same records with the three fields that are *supposed* to differ between two runs removed:
+/// the minted note `id` (random), `ts` (the clock) and `seq` (a process counter). What is left is
+/// everything a vault's location could possibly have influenced.
+fn journal_shape(vault: &Path) -> Vec<serde_json::Value> {
+    journal_records(vault).into_iter().map(|mut r| {
+        let obj = r.as_object_mut().unwrap();
+        for k in ["id", "ts", "seq"] { obj.remove(k); }
+        if let Some(n) = obj.get_mut("new").and_then(|n| n.as_object_mut()) { n.remove("id"); }
+        r
+    }).collect()
+}
+
+/// The whole point of the scaffold: a vault that did not exist a second ago RANKS — no crash, and
+/// **no `journal has no migration records`**, which is what a friend would otherwise meet on their
+/// first slot (decision 5). No network: `run_with`'s two fetcher seams both refuse.
+///
+/// The warning set is pinned, not merely searched: the only warnings a fresh vault may produce are
+/// one per campus source, from the stub. Anything else — a config the engine cannot read, a pass
+/// that complains — would be a scaffold defect arriving on a friend's very first run.
+#[test]
+fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
+    let root = temp("ranks");
+    let v = root.join("Vault");
+    let p = plan("profile_1111111111");
+    create_vault(&v, &p).unwrap();
+
+    let no_net = |_: &str| -> Result<String, String> { Err("no network in tests".to_string()) };
+    let fetchers = knowlu_engine::cli::Fetchers {
+        calendar: Some(&no_net as &dyn Fn(&str) -> Result<String, String>),
+        events: Some(&no_net as &dyn Fn(&str) -> Result<String, String>),
+    };
+    let out = knowlu_engine::cli::run_with(&v, Some("2026-09-07"), "local", None, fetchers).expect("rank runs");
+    assert!(out.output.is_file(), "state/today.md was written");
+    let all = format!("{} {}", out.summary, out.steps.iter().map(|s| s.message.clone()).collect::<Vec<_>>().join(" "));
+    assert!(!all.contains("journal has no migration records"), "the unmigrated guard is satisfied from day one: {all}");
+    let tasks = out.steps.iter().find(|s| s.name == "tasks").unwrap();
+    assert!(tasks.counts.iter().any(|(_, n)| *n >= 1), "the first task is there to order: {:?}", tasks.counts);
+
+    // One warning per preset source, and no other warning anywhere.
+    let (cfg, _) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
+    let events = out.steps.iter().find(|s| s.name == "events").unwrap();
+    let lines: Vec<&str> = events.message.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), cfg.sources.len(), "one stubbed fetch failure per source: {:?}", lines);
+    for line in &lines {
+        assert!(line.contains("fetch failed") && line.contains("no network in tests"), "unexpected event warning: {line}");
+    }
+    for step in out.steps.iter().filter(|s| s.name != "events") {
+        assert!(step.message.trim().is_empty(), "{} warned on a fresh vault: {}", step.name, step.message);
+    }
+}
+
+/// Decision 3 + spec §3.1: the scaffold is materialised beside the target and renamed in, so a
+/// crash never leaves a half-vault. A refused create leaves NOTHING — not the destination, not a
+/// staging folder.
+#[test]
+fn the_scaffold_is_all_or_nothing() {
+    let root = temp("atomic");
+    let v = root.join("Vault");
+    create_vault(&v, &plan("profile_2222222222")).unwrap();
+    assert!(v.join("config").join("planning.yaml").is_file());
+    // …and the seed is part of the same atomic step, not a second call the caller could skip or
+    // fail at (review round 1, Important 2).
+    assert!(v.join("archive").join("_migrated.md").is_file());
+    assert!(v.join("tasks").join("get-to-know-knowlu.md").is_file());
+    assert!(strays(&root).is_empty(), "the staging folder is renamed, never left behind");
+
+    let err = create_vault(&v, &plan("profile_2222222222")).unwrap_err();
+    assert!(err.contains("already"), "{err}");
+    assert!(strays(&root).is_empty(), "a refused create cleans its staging folder up");
+}
+
+/// The refusal above returns before staging exists, so it proves nothing about cleanup. THIS is
+/// the real case: `build_into` gets three files onto disk, then a wizard value is rejected. The
+/// destination must not appear, the staging folder must not survive, and the error must name what
+/// went wrong (review round 1, Important 2).
+#[test]
+fn a_failure_part_way_through_leaves_nothing() {
+    let root = temp("partway");
+    let v = root.join("Vault");
+
+    // A control character in a value the engine would read back: caught at `config/ingest.yaml`,
+    // by which point planning.yaml, week_template.yaml, .gitignore and events.yaml exist.
+    let mut p = plan("profile_7777777777");
+    p.timezone = "America/Chi\ncago".into();
+    let err = create_vault(&v, &p).unwrap_err();
+    assert!(err.contains("timezone") && err.contains("control character"), "{err}");
+    assert!(!v.exists(), "no destination is created from a failed materialisation");
+    assert!(strays(&root).is_empty(), "the part-built staging folder is removed: {:?}", strays(&root));
+
+    // Same again from the other fallible half of build_into.
+    let mut p = plan("profile_7777777777");
+    p.campus = "not-a-campus".into();
+    let err = create_vault(&v, &p).unwrap_err();
+    assert!(err.contains("not-a-campus"), "{err}");
+    assert!(!v.exists());
+    assert!(strays(&root).is_empty());
+
+    // A real filesystem error, and it carries the path it happened at.
+    let blocked = root.join("a-file");
+    std::fs::write(&blocked, "not a folder").unwrap();
+    let err = create_vault(&blocked.join("Vault"), &plan("profile_7777777777")).unwrap_err();
+    assert!(err.contains("a-file"), "an fs error names the path it happened at: {err}");
+}
+
+/// Decision 4: a vault born in the wizard is `scheduler: app` on the machine that made it, from
+/// birth — and `device:` still gates a second install (F3).
+#[test]
+fn a_fresh_vault_is_scheduler_app_on_the_machine_that_made_it() {
+    let v = temp("runners").join("Vault");
+    create_vault(&v, &plan("profile_3333333333")).unwrap();
+    let cfg = v.join("config").join("runners.yaml");
+    let s = knowlu_engine::runs::runner_settings(&cfg, "local");
+    assert_eq!(s.scheduler, knowlu_engine::schedule::SchedulerMode::App);
+    assert_eq!(s.device.as_deref(), Some("TEST-MACHINE"));
+    let runners = knowlu_engine::runs::load_runners_config(&cfg).unwrap();
+    let local = runners.iter().find(|r| r.name == "local").unwrap();
+    assert_eq!(local.times, vec!["12:00".to_string(), "18:00".to_string()]);
+    assert_eq!(local.tz, "America/Chicago");
+    assert_eq!(local.grace_minutes, 20);
+}
+
+/// Important 1: a wizard value is DATA, never structure. Every field a friend can type is loaded
+/// with YAML metacharacters and every reader still reads exactly what was typed.
+///
+/// The stake is `config/runners.yaml`: `load_runners_config` turns an unparsable file into
+/// `Ok(vec![])` and `runner_settings` into `scheduler: Script`, so a value that broke the file
+/// would switch a friend's only runner off in total silence.
+#[test]
+fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
+    let root = temp("quoting");
+    let v = root.join("Vault");
+    // Not a real timezone, deliberately: the scaffold's job is to write faithfully, and the engine
+    // is the one that judges an unknown zone — a value that vanished or reshaped the file could
+    // never even be diagnosed.
+    let nasty = "Odd/Zone: x #c 'q' \"d\" {e} [f], g";
+    let url = "https://lms.example.invalid/f?a=1&b={x}#frag: 'q' \"d\"";
+    let p = VaultPlan {
+        profile_id: "profile_8888888888".into(),
+        ics_url: Some(url.to_string()),
+        timezone: nasty.to_string(),
+        slots: vec!["12:00: x #c 'q'".into(), "18:00 {b} \"d\"".into()],
+        device: "DESK: TOP #1 'q' \"d\" {z}".into(),
+        campus: "university-of-alabama".into(),
+        zybooks: true,
+        vhl: true,
+    };
+    create_vault(&v, &p).unwrap();
+    let cfg = v.join("config").join("runners.yaml");
+
+    let runners = knowlu_engine::runs::load_runners_config(&cfg).unwrap();
+    let local = runners.iter().find(|r| r.name == "local").expect("runners.yaml still parses");
+    assert_eq!(local.tz, nasty);
+    assert_eq!(local.times, p.slots, "each slot survives whole, commas and colons included");
+    assert_eq!(local.grace_minutes, 20);
+    let s = knowlu_engine::runs::runner_settings(&cfg, "local");
+    assert_eq!(s.scheduler, knowlu_engine::schedule::SchedulerMode::App, "the runner is NOT silently switched off");
+    assert_eq!(s.device.as_deref(), Some(p.device.as_str()));
+
+    // The campus preset is untouched by any of it.
+    let (ev, warnings) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ev.sources.len(), 6);
+
+    // `ics_url` round-trips byte for byte — the engine fetches exactly what was pasted.
+    let text = std::fs::read_to_string(v.join("config").join("ingest.yaml")).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("ingest.yaml still parses");
+    assert_eq!(parsed.get("ics_url").and_then(|u| u.as_str()), Some(url));
+    assert_eq!(parsed.get("timezone").and_then(|t| t.as_str()), Some(nasty));
+    assert_eq!(
+        knowlu::scheduler::ics_state(&v),
+        knowlu::scheduler::IcsState::Feed,
+        "the slot still knows there is a feed"
+    );
+    let cw = parsed.get("coursework").expect("the coursework block survives");
+    assert_eq!(cw.get("zybooks").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/zybooks"));
+    assert_eq!(cw.get("vhl").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/vhl"));
+
+    // A control character cannot be quoted onto one line, so it is refused by field name rather
+    // than written out and silently breaking the file.
+    for (field, mut bad) in [
+        ("timezone", plan("profile_9999999999")),
+        ("device name", plan("profile_9999999999")),
+        ("slot 2", plan("profile_9999999999")),
+        ("LMS feed URL", plan("profile_9999999999")),
+    ] {
+        match field {
+            "timezone" => bad.timezone = "America/\u{7}Chicago".into(),
+            "device name" => bad.device = "DESK\u{1}TOP".into(),
+            "slot 2" => bad.slots = vec!["12:00".into(), "18:\u{9}00".into()],
+            _ => bad.ics_url = Some("https://x.invalid/\u{b}a.ics".into()),
+        }
+        let err = create_vault(&root.join(format!("V-{field}")), &bad).unwrap_err();
+        assert!(err.contains(field) && err.contains("control character"), "{field}: {err}");
+    }
+    // The two generators say the same thing on their own, so a future caller cannot route round it.
+    assert!(ingest_yaml(&{ let mut b = plan("profile_9999999999"); b.timezone = "a\rb".into(); b }).is_err());
+    assert!(runners_yaml(&{ let mut b = plan("profile_9999999999"); b.device = "a\rb".into(); b }).is_err());
+}
+
+/// The campus preset is a file, and the file is the shape `load_events_config` already reads —
+/// so adding a campus is adding a file, and never a code change (spec §3, panel 6).
+#[test]
+fn the_campus_preset_is_the_shape_the_engine_already_reads() {
+    let v = temp("campus").join("Vault");
+    create_vault(&v, &plan("profile_4444444444")).unwrap();
+    let (cfg, warnings) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(cfg.sources.len(), 6, "the six UA sources");
+    assert_eq!(CAMPUSES.len(), 2);
+    assert!(campus_yaml("none").unwrap().contains("sources: []"));
+    assert!(campus_yaml("not-a-campus").is_none());
+    // Every key of the radio list resolves to a file — a label with no preset behind it would be a
+    // wizard that fails at Finish.
+    for (key, label) in CAMPUSES { assert!(campus_yaml(key).is_some(), "{key} ({label}) has no preset file"); }
+    assert!(campus_yaml("university-of-alabama").unwrap().contains("timezone:"), "the preset tells a copier to set its own timezone");
+
+    let none = temp("campus-none").join("Vault");
+    let mut p = plan("profile_5555555555"); p.campus = "none".into();
+    create_vault(&none, &p).unwrap();
+    let (cfg, warnings) = knowlu_engine::events::load_events_config(&none.join("config").join("events.yaml"));
+    assert!(warnings.is_empty() && cfg.sources.is_empty());
+}
+
+/// I2 (final review): **the read model over a vault the wizard has just made.** The console's first
+/// poll happens seconds after *Finish*, on a vault where nothing has ever run: no `state/today.md`,
+/// no `state/runs/`, no `state/runner-log.md`, not even a git repository. Every view the console
+/// serves has to answer on it — a view that refused would be a friend's first screen showing an
+/// error toast over an empty column, on a vault with nothing wrong with it.
+///
+/// Every name `surface::View::parse` accepts, so a view added there without a thought for an empty
+/// vault fails here rather than in front of someone.
+#[test]
+fn every_view_answers_over_a_vault_the_wizard_has_just_made() {
+    let root = temp("readmodel");
+    let v = root.join("Vault");
+    create_vault(&v, &plan("profile_8888888888")).unwrap();
+    // The things a rank, a slot and a sync leave behind — none of them exist yet.
+    assert!(!v.join("state").join("today.md").exists(), "nothing has ranked this vault");
+    assert!(!v.join("state").join("runs").exists(), "no run records");
+    assert!(!v.join("state").join("runner-log.md").exists(), "no runner log");
+    assert!(!v.join(".git").exists(), "and it is not a repository");
+
+    let cs = ConsoleState::open(v.clone(), root.join("appdata"));
+    for view in ["today", "overdue", "week", "later", "all", "decisions", "good-to-know", "issues", "runs"] {
+        let env = state_inner(&cs, view).unwrap_or_else(|e| panic!("{view}: {e}"));
+        assert_eq!(env["ok"], true, "{view}: {env}");
+        assert_eq!(env["state"]["schema"], 1, "{view}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R2 + decision 5: exactly ONE `system:migration` record, and every other write the wizard makes
+/// is an ordinary `quinn`/`dashboard` one. An adopted vault gets neither.
+#[test]
+fn one_migration_record_and_the_rest_are_dashboard_writes() {
+    let v = temp("journal").join("Vault");
+    let p = plan("profile_6666666666");
+    create_vault(&v, &p).unwrap();
+    let records = journal_records(&v);
+    let migration: Vec<_> = records.iter().filter(|r| r["actor"] == "system:migration").collect();
+    assert_eq!(migration.len(), 1, "exactly one, and it is a create");
+    assert_eq!(migration[0]["op"], "create");
+    assert_eq!(migration[0]["via"], "cli", "the S1 migration's own shape — the via vocabulary does not grow");
+    assert!(migration[0]["path"].as_str().unwrap().contains("archive/_migrated.md"));
+    let others: Vec<_> = records.iter().filter(|r| r["actor"] != "system:migration").collect();
+    assert_eq!(others.len(), 1, "the first task, and nothing else");
+    assert_eq!(others[0]["actor"], "quinn");
+    assert_eq!(others[0]["via"], "dashboard");
+    // The credential target the engine will read is named, and holds no secret.
+    let ingest = std::fs::read_to_string(v.join("config").join("ingest.yaml")).unwrap();
+    assert!(ingest.contains("credential_target: 'knowlu/profile_6666666666/zybooks'"), "{ingest}");
+    assert!(!ingest.contains("vhl:"), "a friend with no VHL course gets no VHL block");
+}
+
+/// Important 2: seeding happens in the staging folder, so the journal the rename carries into
+/// `dest` must be the journal seeding `dest` directly would have written. It is, because a record
+/// names its note by a VAULT-RELATIVE path (`write::create` → `ids::rel`) and nothing else in a
+/// record depends on where the vault sits.
+///
+/// Proved two ways: two vaults built at different destinations, through differently-named staging
+/// folders, produce identical records once the three fields that are meant to differ (the minted
+/// `id`, `ts`, `seq`) are removed; and neither journal contains an absolute path or the staging
+/// folder's name at all.
+#[test]
+fn the_move_does_not_leak_the_staging_path_into_the_journal() {
+    let root = temp("relocate");
+    let a = root.join("One");
+    let b = root.join("deeper").join("Two");
+    create_vault(&a, &plan("profile_aaaaaaaaaa")).unwrap();
+    create_vault(&b, &plan("profile_aaaaaaaaaa")).unwrap();
+    assert_eq!(journal_shape(&a), journal_shape(&b), "a record does not depend on where the vault sits");
+
+    for v in [&a, &b] {
+        let text = journal_text(v);
+        assert!(!text.contains("knowlu-new"), "the staging folder's name reached the journal: {text}");
+        assert!(!text.contains(":\\\\"), "an absolute path reached the journal: {text}");
+        let paths: Vec<String> = journal_records(v).iter().map(|r| r["path"].as_str().unwrap().to_string()).collect();
+        assert_eq!(paths, vec!["archive/_migrated.md".to_string(), "tasks/get-to-know-knowlu.md".to_string()]);
+        // Written through `ledger::dumps_value`, and the move did not rewrite a byte of it.
+        assert!(text.contains("\", \"") && text.contains("\": \""), "Python's json.dumps separators: {text}");
+    }
+}
+
+/// Nothing shipped inside the binary may carry a live feed, a token or a personal calendar. The
+/// campus preset is public campus URLs and nothing else; `config/ingest.yaml`'s own `ics_url:` and
+/// `calendars:` lines must never be copied into an asset (spec §5).
+#[test]
+fn no_embedded_asset_carries_a_live_feed_or_a_secret() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() { walk(&p, out) } else { out.push(p) }
+        }
+    }
+    let mut files = Vec::new();
+    walk(Path::new("assets"), &mut files);
+    assert!(files.len() >= 5, "the scaffold's assets are there to check: {files:?}");
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        for needle in ["ualearn", "calendarFeed", "calendar.google.com/calendar/ical", "webcal:", "password", "token="] {
+            assert!(!text.contains(needle), "{} carries {needle:?}", f.display());
+        }
+    }
+}

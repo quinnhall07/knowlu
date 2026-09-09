@@ -1,0 +1,85 @@
+[package]
+name = "knowlu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Knowlu, the desktop app: a Tauri window around the page, driving the sibling engine"
+publish = false
+
+# A separate crate on purpose: the rewrite spec forbids `tauri` in the engine crate. When the app
+# needs the engine it takes it as a path dependency (`knowlu-engine = { path = "../engine" }`),
+# never the other way round. Both crates share the workspace's one Cargo.lock and target/.
+
+[lib]
+name = "knowlu"
+
+[[bin]]
+name = "knowlu"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# `common-controls-v6` is one of tauri's own defaults, so it is off by naming the rest of the
+# default set explicitly rather than adding `tray-icon` on top of it (Task 7 build fix, see
+# README's "Known wrinkles"): it makes `muda` compile a plain-by-name PE import of
+# `TaskDialogIndirect`, which mingw links as an ordinary DLL import. MSVC only ever resolves that
+# symbol through an isolation-aware stub (an activation-context + ordinal lookup compiled into the
+# *caller*, from the Windows SDK's isolation-aware headers) — `comctl32.dll` does not export it by
+# name at all, on any Windows build, to any loader. A GNU binary that statically imports it by name
+# fails to load with STATUS_ENTRYPOINT_NOT_FOUND before a single line of `main` runs (verified via
+# `LoadLibraryW("comctl32.dll")` + `GetProcAddress` returning `ERROR_PROC_NOT_FOUND` for that exact
+# name, both from System32 and the WinSxS v6 assembly). This is also the other half of the
+# pre-existing "`.rsrc` merge failure: multiple non-default manifests" linker warning — one of
+# those two manifests was `common-controls-v6`'s. Losing it costs classic (not runtime-themed)
+# chrome on any native Win32 control outside the webview; the tray menu is unaffected.
+[dependencies]
+knowlu-engine = { path = "../engine" }
+tauri = { version = "2", default-features = false, features = ["wry", "compression", "dynamic-acl", "x11", "dbus", "tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-clipboard-manager = "2"
+# The updater (plan 4a, Task 8, key-gated step). Default features are taken deliberately: they are
+# `rustls-tls` + `system-proxy` + `zip`. `rustls-tls` pulls `rustls` with `ring` and pins
+# `reqwest/rustls-no-provider`, so nothing in this graph links OpenSSL — the same rule the engine
+# crate follows. `zip` is what lets `Update::install` accept a v1-style zipped bundle as well as the
+# bare NSIS `-setup.exe` this project produces; it costs a few tens of KiB and removes a class of
+# "the artefact is fine but the installer will not open it" failure. This dependency and
+# `plugins.updater` in `tauri.conf.json` MUST land in the same commit (R-P4a-13): `pubkey` has no
+# serde default (`config.rs:137`) and the plugin's `setup` runs at startup, so a build with the
+# plugin and no config block does not start at all.
+tauri-plugin-updater = "2"
+# The folder picker (plan 4a, Task 2). `tauri-plugin-dialog` 2.7.3 is what the brief asked for and
+# it CANNOT be used on this toolchain: it depends on `rfd` with `features = ["common-controls-v6"]`
+# hard-coded, which is exactly the `TaskDialogIndirect` by-name import from `comctl32.dll` the
+# comment above says makes a GNU binary unloadable (STATUS_ENTRYPOINT_NOT_FOUND, verified here with
+# `objdump -p` on the test exe before this line was written). Depending on the same `rfd` DIRECTLY
+# with that feature off gives the identical native `IFileOpenDialog` folder picker — rfd only needs
+# the feature for message dialogs, which Knowlu does not use — and imports nothing from comctl32.
+# Nothing else in the graph enables the feature, so cargo's unification cannot turn it back on.
+rfd = { version = "0.16", default-features = false }
+# Knowlu plan 3a Task 8. All three are ALREADY in Cargo.lock through the graph — `sha2` and
+# `zip` transitively, `ureq` through `knowlu-engine` — so naming them here adds no compilation and no
+# new version to audit; cargo unifies them onto the versions already resolved.
+#
+# `sha2`: a downloaded executable is verified against a pinned digest before it is ever run. The
+# updater's minisign discipline does not apply — upstream's llama.cpp build is not signed by us —
+# so a hash pinned in a manifest we serve is what stands in for it.
+sha2 = "0.10"
+# `zip`: upstream ships the Windows runtime as a zip. Deflate only, no encryption — the same
+# feature set the engine crate takes for backup snapshots.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# `ureq`: the manifest fetch and the asset download. Default features, matching the engine's line
+# minus `cookies`; nothing here needs a jar.
+ureq = "3.4.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+jiff = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials"] }
+
+# The release profile (rewrite spec §5: compiled size is a product budget line) is the workspace
+# root's — Cargo ignores [profile.*] in a member crate, and a copy here would only earn a warning.

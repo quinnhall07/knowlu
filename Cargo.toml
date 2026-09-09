@@ -1,0 +1,25 @@
+# Knowlu — the workspace. Two crates: `engine/` (knowlu-engine: the deterministic engine and its
+# CLI, with no GUI dependency) and `app/` (knowlu: the Tauri desktop app, which links the engine
+# as a library and runs its binary as a sibling process). One lockfile, one target/.
+[workspace]
+members = ["engine", "app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+
+# Compiled size is a product budget line (product plan section 5.2 targets a sub-50 MB app with
+# 1-5 MB for the engine), not an optimisation. Cargo honours [profile.*] only in the workspace
+# root, so this is the ONE release profile, for both crates; engine/tests/dependency_boundary.rs
+# pins these five settings.
+#
+# NOTE: panic = "abort" means `cargo test --release` will not link the test harness, which needs
+# unwinding. Run `cargo test` (dev profile). This is the normal trade and is intentional.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

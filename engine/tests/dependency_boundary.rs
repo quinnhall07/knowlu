@@ -1,0 +1,75 @@
+//! Guards on the dependency budget.
+//!
+//! The engine's Python rule — stdlib + PyYAML + tzdata — exists so the runner never drags a heavy
+//! tree into its environment. The Rust equivalent is a short, justified list (rewrite spec section
+//! 5), and these tests pin the two mistakes this project has already explicitly decided against.
+//!
+//! Cheap, and they fail at the moment someone adds the dependency rather than at the moment
+//! somebody notices the binary doubled.
+
+/// The engine crate's own manifest.
+const MANIFEST: &str = include_str!("../Cargo.toml");
+/// The workspace root's manifest: the only place Cargo reads `[profile.*]` from, and the other
+/// place a dependency could reach this crate (`[workspace.dependencies]`).
+const WORKSPACE: &str = include_str!("../../Cargo.toml");
+/// Both, named, so a failure says which one grew the dependency.
+const MANIFESTS: [(&str, &str); 2] = [("engine/Cargo.toml", MANIFEST), ("Cargo.toml", WORKSPACE)];
+
+/// `tauri` belongs to the SHELL, not the engine.
+///
+/// `CLAUDE.md` already enforces this boundary between `engine/` and the window layer, and it exists
+/// so the engine stays linkable from a scheduler, a test harness, and eventually a mobile target —
+/// none of which want a GUI toolkit. Rewrite spec section 5.
+#[test]
+fn engine_does_not_depend_on_a_gui_toolkit() {
+    for (name, manifest) in MANIFESTS {
+        for forbidden in ["tauri", "webview", "wry"] {
+            assert!(
+                !manifest.contains(forbidden),
+                "`{forbidden}` must not be a dependency of the engine crate ({name}). \
+                 GUI dependencies belong to the shell. See the rewrite spec section 5."
+            );
+        }
+    }
+}
+
+/// TLS is `rustls`/`ring`, never OpenSSL.
+///
+/// This is what lets the GNU host toolchain build without a Visual Studio install, and it keeps the
+/// cross-compilation story simple for the eventual mobile targets. `ureq` selects rustls by default;
+/// this test catches someone enabling `native-tls` to work around a certificate problem.
+#[test]
+fn tls_is_rustls_never_openssl() {
+    for (name, manifest) in MANIFESTS {
+        for forbidden in ["openssl", "native-tls"] {
+            assert!(
+                !manifest.contains(forbidden),
+                "`{forbidden}` must not appear in {name}. TLS is rustls/ring - see the rewrite spec \
+                 section 5 and CLAUDE.md. Enabling it also reintroduces a C toolchain requirement."
+            );
+        }
+    }
+}
+
+/// The release profile is a shipping requirement, not an optimisation.
+///
+/// The product plan section 5.2 targets a sub-50 MB app with 1-5 MB budgeted for the compiled
+/// engine. These five settings routinely cut a naive release build 30-50%, and they are fixed from
+/// wave 0 so the number never comes as a surprise at cutover. They live in the WORKSPACE ROOT
+/// manifest — Cargo ignores `[profile.*]` in a member crate — so that is where this test looks.
+#[test]
+fn release_profile_is_size_tuned() {
+    for setting in [
+        "opt-level = \"z\"",
+        "lto = true",
+        "codegen-units = 1",
+        "panic = \"abort\"",
+        "strip = true",
+    ] {
+        assert!(
+            WORKSPACE.contains(setting),
+            "the workspace root's release profile is missing `{setting}` - compiled engine size is a product budget \
+             line (product plan section 5.2), not a preference."
+        );
+    }
+}

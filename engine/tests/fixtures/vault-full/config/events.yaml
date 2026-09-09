@@ -1,0 +1,34 @@
+# Fixture events config. All four source types, all enabled, all unreachable.
+#
+# The scheme is deliberately unknown, so the fetch fails in the URL parser and never
+# opens a socket: 0.019s, versus 2.0s per source for a refused loopback connection
+# (Windows retries the SYN). Four sources made that an 8-second test.
+#
+# Failing here drives cli.run down its "every feed failed" branch, which reads
+# state/events.md instead of blanking the page Quinn reads -- the path that is
+# load-bearing on a bad-network morning and is otherwise untested end to end.
+roster_window_days: 90
+audit_window_days: 14
+judge_per_run_cap: 150
+propose_horizon_days: 14
+urgency_window_days: 7
+daily_proposal_target: 5
+daily_proposal_ceiling: 15
+
+sources:
+  - name: fixture-ics
+    type: ics
+    url: "unreachable://fixture/events.ics"
+    enabled: true
+  - name: fixture-localist
+    type: localist
+    url: "unreachable://fixture/localist.json"
+    enabled: true
+  - name: fixture-engage
+    type: engage
+    url: "unreachable://fixture/engage.json"
+    enabled: true
+  - name: fixture-html
+    type: html
+    url: "unreachable://fixture/events.html"
+    enabled: true

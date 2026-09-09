@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The console window: core APIs, window-state, autostart, clipboard. The folder picker is `rfd` called from an app command, not a plugin, so it needs no permission here. NO UPDATER PERMISSION IS GRANTED (R-P4a-30): the app drives `tauri-plugin-updater` from Rust, through `Manager::state` (`updater_builder`/`updater`), which is not capability-gated at all — the only thing `updater:default` would add is the plugin's four IPC commands, and `updater:allow-install` / `updater:allow-download-and-install` would let any page script call `invoke('plugin:updater|download_and_install')` and walk straight past `update_offer`'s mid-run gate and `hold_for_install`. The gate lives in `check_for_updates` and `install_update`, and those are the only doors the page gets.",
+  "windows": ["main"],
+  "permissions": ["core:default", "window-state:default", "autostart:default", "clipboard-manager:allow-write-text"]
+}

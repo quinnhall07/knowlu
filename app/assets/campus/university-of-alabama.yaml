@@ -1,0 +1,36 @@
+# University of Alabama. Six public event feeds; each host must be reachable from this machine.
+# Copying this file for a new campus: add `timezone: <IANA name>` unless the campus is Central —
+# `events::load_events_config` defaults a missing `timezone:` to America/Chicago.
+roster_window_days: 90
+audit_window_days: 14
+judge_per_run_cap: 150
+propose_horizon_days: 14
+urgency_window_days: 7
+daily_proposal_target: 5
+daily_proposal_ceiling: 15
+
+sources:
+  - name: blount
+    type: ics
+    url: "https://blount.as.ua.edu/events/?ical=1"
+    enabled: true
+  - name: career-center
+    type: ics
+    url: "https://calendar.ua.edu/department/career_center/calendar.ics"
+    enabled: true
+  - name: campus
+    type: localist
+    url: "https://calendar.ua.edu/api/2/events"
+    enabled: true
+  - name: clubs
+    type: engage
+    url: "https://ua.campuslabs.com/engage/api/discovery/event/search"
+    enabled: true
+  - name: engineering
+    type: html
+    url: "https://students.eng.ua.edu/events/"
+    enabled: true
+  - name: edge
+    type: html
+    url: "https://edge.culverhouse.ua.edu/events/"
+    enabled: true
