@@ -70,6 +70,10 @@ Secrets are set with `gh secret set NAME` **from a file or a piped value Quinn p
 
 ### Task 1: Spike — can the GNU toolchain build this workspace on `windows-latest`?
 
+**Outcome: B** — all three jobs were green on `windows-latest` (image `windows-2025-vs2026` 20260824.214.3) with byte-for-byte identical results — 1017 passed, 0 failed, 4 ignored, 23 `test result: ok` lines each — so the tie-break picks WinLibs: `gnu-winlibs` reproduced the laptop's toolchain exactly (gcc 16.1.0 `x86_64-msvcrt-posix-seh` r4, binutils 2.47.20260726, pinned by SHA-256 and verified on the runner) and printed only the one accepted `.rsrc merge failure: multiple non-default manifests` line, whereas `gnu-image` passed on an **undocumented, UCRT-flavour** gcc 15.2.0 / binutils 2.46 that happens to sit at `C:\mingw64\bin` ahead of Strawberry Perl's gcc on the image's PATH — green today, unpinned and one image bump from silently changing. `toolchain.ps1` therefore keeps its `winlibs` flavour only, and takes no parameter.
+
+Run [34341678223](https://github.com/quinnhall07/knowlu/actions/runs/34341678223); step 3 was satisfied from the winget manifest winget itself verified when it installed the laptop's copy (R-C0-2: no laptop download — the runner checks the bytes against the pinned digest).
+
 **Throwaway allowed; only `scripts/ci/toolchain.ps1` and this task's `Outcome:` line are kept.** The dev machine builds `x86_64-pc-windows-gnu` with WinLibs POSIX **MSVCRT** mingw (CLAUDE.md). GitHub's image ships a mingw-w64 at `C:\mingw64` whose CRT flavour and `as`/`dlltool` availability are not documented for our purpose. Three outcomes, decided by a real run:
 
 - **A** — the image's mingw builds and tests the workspace green: `toolchain.ps1` only prepends `C:\mingw64\bin` to `GITHUB_PATH`.
@@ -79,7 +83,7 @@ Secrets are set with `gh secret set NAME` **from a file or a piped value Quinn p
 **Files:**
 - Create: `scripts/ci/toolchain.ps1`, `.github/workflows/spike-toolchain.yml` (deleted in step 5)
 
-- [ ] **Step 1: The spike workflow.** `.github/workflows/spike-toolchain.yml`, `on: workflow_dispatch`, one job per candidate, `runs-on: windows-latest`, `timeout-minutes: 45`:
+- [x] **Step 1: The spike workflow.** `.github/workflows/spike-toolchain.yml`, `on: workflow_dispatch`, one job per candidate, `runs-on: windows-latest`, `timeout-minutes: 45`:
 
 ```yaml
 name: spike-toolchain
@@ -127,7 +131,7 @@ jobs:
         with: { name: msvc-log, path: msvc.log }
 ```
 
-- [ ] **Step 2: `scripts/ci/toolchain.ps1`** (PowerShell 5.1-safe, runs under pwsh too):
+- [x] **Step 2: `scripts/ci/toolchain.ps1`** (PowerShell 5.1-safe, runs under pwsh too):
 
 ```powershell
 # Puts a GNU host toolchain on PATH for the x86_64-pc-windows-gnu Rust target on a GitHub runner.
@@ -160,9 +164,9 @@ Write-Output "toolchain: winlibs at $bin"
 exit 0
 ```
 
-- [ ] **Step 3: Pin the WinLibs asset.** On the laptop: `winget show BrechtSanders.WinLibs.POSIX.MSVCRT` → the installer URL; download it to `%TEMP%`, `Get-FileHash -Algorithm SHA256`, paste URL and hash into the script, delete the download. The version must equal the one installed (`gcc --version` on the laptop).
-- [ ] **Step 4: Run it.** Commit the two files on the branch, push, `gh workflow run spike-toolchain --ref c0-ci-release`, wait (`gh run watch`), download the three logs. Read each log's final `test result:` lines and any `error:`/`warning:`.
-- [ ] **Step 5: Record the outcome and remove the spike workflow.** Write, at the top of this task: `Outcome: A|B|C — <one sentence of evidence: which jobs were green, the test counts, the first error of each red one>`. Delete `.github/workflows/spike-toolchain.yml`; keep `toolchain.ps1` with the unused flavour deleted (A keeps only `image`; B keeps only `winlibs`; C deletes the script and Task 2's job matrix gains `msvc` as the shipping toolchain and `gnu` as the parity job if any GNU flavour was green, else MSVC only). Commit: `ci: toolchain spike — Outcome <letter>`.
+- [x] **Step 3: Pin the WinLibs asset.** On the laptop: `winget show BrechtSanders.WinLibs.POSIX.MSVCRT` → the installer URL; download it to `%TEMP%`, `Get-FileHash -Algorithm SHA256`, paste URL and hash into the script, delete the download. The version must equal the one installed (`gcc --version` on the laptop).
+- [x] **Step 4: Run it.** Commit the two files on the branch, push, `gh workflow run spike-toolchain --ref c0-ci-release`, wait (`gh run watch`), download the three logs. Read each log's final `test result:` lines and any `error:`/`warning:`.
+- [x] **Step 5: Record the outcome and remove the spike workflow.** Write, at the top of this task: `Outcome: A|B|C — <one sentence of evidence: which jobs were green, the test counts, the first error of each red one>`. Delete `.github/workflows/spike-toolchain.yml`; keep `toolchain.ps1` with the unused flavour deleted (A keeps only `image`; B keeps only `winlibs`; C deletes the script and Task 2's job matrix gains `msvc` as the shipping toolchain and `gnu` as the parity job if any GNU flavour was green, else MSVC only). Commit: `ci: toolchain spike — Outcome <letter>`.
 
 ---
 

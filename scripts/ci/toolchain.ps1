@@ -1,29 +1,16 @@
-# Puts a GNU host toolchain on PATH for the x86_64-pc-windows-gnu Rust target on a GitHub runner.
-# -Flavor image   : whatever mingw-w64 the runner image already carries (probed, not assumed).
-# -Flavor winlibs : the pinned WinLibs POSIX MSVCRT release the dev machine uses, verified by SHA-256.
-# Never installs anything outside $env:RUNNER_TEMP. Exit 1 on any failure - a silently missing `as`
-# reads as `dlltool ... CreateProcess` failures deep inside a windows-* crate build (CLAUDE.md).
-param([ValidateSet("image", "winlibs")][string]$Flavor = "image")
+# Puts the GNU host toolchain for the x86_64-pc-windows-gnu Rust target on PATH on a GitHub runner.
+#
+# It downloads the same WinLibs POSIX MSVCRT release the dev machine runs (winget
+# BrechtSanders.WinLibs.POSIX.MSVCRT) and refuses to extract it unless the bytes match the pinned
+# SHA-256. Nothing is installed outside $env:RUNNER_TEMP. Exit 1 on any failure - a silently missing
+# `as` reads as `dlltool ... CreateProcess` failures deep inside a windows-* crate build (CLAUDE.md).
+#
+# The runner image does carry a mingw-w64 of its own, and C0 Task 1 proved the workspace green on it
+# (run 34341678223). We do not use it: it is a UCRT build we do not target, the image readme does not
+# document it, its version is not ours to pin, and it is on PATH only ahead of Strawberry Perl's much
+# older gcc. Pinning the laptop's exact compiler is what makes a CI build and a laptop build the same
+# build. Bumping it is a one-line change here, with a new digest.
 $ErrorActionPreference = "Stop"
-if ($Flavor -eq "image") {
-  $onPath = Get-Command gcc.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($onPath) {
-    Write-Output ("toolchain: image mingw at " + (Split-Path $onPath.Source -Parent))
-    exit 0
-  }
-  $candidates = @("C:\mingw64\bin", "C:\ProgramData\mingw64\mingw64\bin", "C:\msys64\mingw64\bin")
-  foreach ($dir in $candidates) {
-    if (Test-Path (Join-Path $dir "gcc.exe")) {
-      Add-Content $env:GITHUB_PATH $dir
-      Write-Output "toolchain: image mingw at $dir"
-      exit 0
-    }
-  }
-  Write-Output ("no mingw gcc.exe on this image (looked on PATH, then " + ($candidates -join ", ") + ")")
-  exit 1
-}
-# WinLibs: the exact asset the laptop has (winget BrechtSanders.WinLibs.POSIX.MSVCRT), gcc 16.1.0 /
-# binutils 2.47.20260726, POSIX threads, SEH, msvcrt CRT. The runner verifies the bytes it downloads.
 $url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-msvcrt-r4/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64msvcrt-14.0.0-r4.zip"
 $sha = "3e1627cada82e8ad18b20dc6456d8fb23da221a29eacc26bdcc9576b8043770f"
 $zip = Join-Path $env:RUNNER_TEMP "winlibs.zip"
