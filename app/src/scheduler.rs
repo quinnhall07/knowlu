@@ -182,10 +182,12 @@ pub fn has_ics_url(vault: &Path) -> bool { ics_state(vault) == IcsState::Feed }
 
 /// A vault that has never been ranked is owed its first slot at launch, whatever the clock says
 /// (cloud design §4.2 step 7 — "the first slot runs immediately"; Quinn's cut-day note,
-/// 2026-09-09: an empty first page until 12:00 is not a first session). `today.md` is rewritten
-/// by every `rank`, so its absence is the whole test; once it exists, launch owes nothing until
-/// the next scheduled slot.
-pub fn needs_first_run(vault: &Path) -> bool { !vault.join("today.md").exists() }
+/// 2026-09-09: an empty first page until 12:00 is not a first session). `state/today.md` — the
+/// file `rank` actually writes (`cli.rs`), never a root `today.md` — is rewritten by every `rank`,
+/// so its absence is the whole test; once it exists, launch owes nothing until the next scheduled
+/// slot. The first draft checked the vault root, which no engine step writes, and would have run a
+/// slot at every launch; the C2 plan review caught it (R-C2-10).
+pub fn needs_first_run(vault: &Path) -> bool { !vault.join("state").join("today.md").exists() }
 
 /// Everything `knowlu-engine judge` needs that only the app knows: where the runtime was installed,
 /// which model file was chosen, and this profile's own judgments directory.

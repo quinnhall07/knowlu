@@ -504,9 +504,13 @@ use knowlu::scheduler::needs_first_run;
 #[test]
 fn a_vault_that_has_never_been_ranked_is_owed_its_first_run_at_launch() {
     let v = scratch("first-run");
-    std::fs::create_dir_all(&v).unwrap();
-    assert!(needs_first_run(&v), "no today.md yet: the first slot is owed at launch");
-    std::fs::write(v.join("today.md"), "# Today\n").unwrap();
+    std::fs::create_dir_all(v.join("state")).unwrap();
+    assert!(needs_first_run(&v), "no state/today.md yet: the first slot is owed at launch");
+    // The engine writes `state/today.md` (cli.rs), never a root `today.md`: a root file must not
+    // count, or the predicate is permanently true and every launch runs a slot.
+    std::fs::write(v.join("today.md"), "# not the engine's file\n").unwrap();
+    assert!(needs_first_run(&v), "a root today.md is not the engine's page");
+    std::fs::write(v.join("state").join("today.md"), "# Today\n").unwrap();
     assert!(!needs_first_run(&v), "once ranked, launch owes nothing until the next slot");
     let _ = std::fs::remove_dir_all(&v);
 }
