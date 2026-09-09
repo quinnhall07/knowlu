@@ -179,7 +179,7 @@ exit 0
 - Consumes: Task 1's `toolchain.ps1` (or the MSVC decision).
 - Produces: a required check `ci / test` that branch protection on `main` will require (Task 6 turns protection on).
 
-- [ ] **Step 1: The failing test** — `engine/tests/workflows.rs`:
+- [x] **Step 1: The failing test** — `engine/tests/workflows.rs`:
 
 ```rust
 //! Static pins on the two GitHub workflows: an action referenced by a floating tag can change under
@@ -238,8 +238,8 @@ fn ci_enforces_zero_warnings_and_the_eol_contract() {
 
 (`regex` is already an engine dependency; it is a dev use here — add `regex` under `[dev-dependencies]` only if `cargo test` says it is not visible to integration tests.)
 
-- [ ] **Step 2: Run it to verify it fails** — `cargo test -p knowlu-engine --test workflows` → 4 failures, each `No such file` on `.github/workflows/…`.
-- [ ] **Step 3: `scripts/ci/eol-check.ps1`:**
+- [x] **Step 2: Run it to verify it fails** — `cargo test -p knowlu-engine --test workflows` → 4 failures, each `No such file` on `.github/workflows/…`.
+- [x] **Step 3: `scripts/ci/eol-check.ps1`:**
 
 ```powershell
 # The line-ending contract from .gitattributes, enforced: code and docs LF in the index, PowerShell
@@ -264,7 +264,7 @@ Write-Output ("eol contract holds over " + $rows.Count + " files")
 exit 0
 ```
 
-- [ ] **Step 4: `ci.yml`.** Every `uses:` pinned to a full SHA (look each up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and write the tag as a trailing comment):
+- [x] **Step 4: `ci.yml`.** Every `uses:` pinned to a full SHA (look each up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and write the tag as a trailing comment):
 
 ```yaml
 name: ci
@@ -303,8 +303,8 @@ jobs:
 
 If Task 1 chose **C**, the job gets `strategy.matrix.toolchain: [msvc, gnu]` with the GNU leg allowed to fail only if Task 1 found no green GNU flavour.
 
-- [ ] **Step 5: Run the tests locally** — `cargo test -p knowlu-engine --test workflows` → 4 passed (the `release.yml` assertions will fail until Task 3; run `--test workflows every_action ci_enforces` selectively and note it). Push the branch; `gh pr create --fill --draft`; watch `ci / test` go green on the runner (`gh run watch`). Paste the runner's `test result:` lines into the commit message body.
-- [ ] **Step 6: Commit** — `ci: the gate — cargo test --workspace at 0 warnings, the eol contract, SHA-pinned actions (C0 Task 2)`.
+- [x] **Step 5: Run the tests locally** — `cargo test -p knowlu-engine --test workflows` → 4 passed (the `release.yml` assertions will fail until Task 3; run `--test workflows every_action ci_enforces` selectively and note it). Push the branch; `gh pr create --fill --draft`; watch `ci / test` go green on the runner (`gh run watch`). Paste the runner's `test result:` lines into the commit message body.
+- [x] **Step 6: Commit** — `ci: the gate — cargo test --workspace at 0 warnings, the eol contract, SHA-pinned actions (C0 Task 2)`.
 
 ---
 
