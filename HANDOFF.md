@@ -17,6 +17,8 @@ older under `docs/` is history or design authority from the previous repository 
   C0 docs. Gates: PR #1's last run 34356994036 on the runner **1021 passed / 0 failed**, `warnings: 1
   accepted (.rsrc), 2 tallies, 0 other`, `eol contract holds over 223 files`; the local workspace
   run on the merged tree is recorded in the C0 ledger.
+- **Evening additions on `main`, also unpushed:** the C1 plan amendments `39c7a52` and `234c28b`, the
+  review report's execution rulings `823fb83`, this HANDOFF. `main` is ~36 commits ahead of `origin/main`.
 - **Cut day happened, then Quinn asked for a reset.** He quit the old Knowlu, disabled the cloud
   routine, onboarded with the new build into `C:\Users\danie\Knowlu\Vault` (profile "Vault",
   `profile_a95daa1d40`), pressed *Run now* — and the first slot exposed the onboarding gaps recorded
@@ -94,18 +96,19 @@ calendar URLs stay as the offline fallback until C3/C4).
 3. ~~Plans C1 and C2~~ — written, reviewed, amended for what the first run taught (C1: 25 tasks
    incl. 14a/14b/14c; C2: 18 tasks incl. 7a/8a), committed.
 4. **Cut day:** the reset (§1) and the archive step remain (§4).
-5. **C1 execution started** on `c1-accounts` (worktree `.claude/worktrees/c1-accounts`, base
-   `a8dbf3f`): Task 0 dispatched; the pre-flight scan (`…/preflight.md`) found **33 plan-text
-   defects (10 blocking)** — symbols used before their defining task, two existing static tests the
-   new markup would break, a hand-off registering commands that do not exist yet — the writer fixed
-   all 33 in the text, the scan agent re-checked them, and the residue is fixed too — **the plan
-   is final at `d8fd00d` (10,595 lines) and Task 1 is the next dispatch** (its brief is generated;
-   hand-off order for the controller **H1 → H9a → H10 → H9b → H11**; rulings R-C1-9…12 in the ledger
-   `.superpowers/sdd/2026-09-09-c1-accounts-plan/progress.md`). Task 0 is
-   built and green (PR #2, draft) with one follow-up: its `config.toml` must have the
-   `[auth.email.smtp]` block commented out until P2, as the amended plan now says. Tasks 0–9 are cloud
-   code testable with `deno test` alone; the first Quinn precondition is P1 at Task 1 step 7. Then **C2**,
-   merging C1 first; apply H9 between the two merges.
+5. **C1 is executing** on `c1-accounts` (worktree `.claude/worktrees/c1-accounts`, PR #2 draft, CI green
+   on every push so far). The plan is final (`d8fd00d`, amended by `39c7a52` and `234c28b`). **Done,
+   offline halves:** Task 0 (skeleton), 1 (the account tables + RLS), 2 (`_shared` REST / bearer /
+   entitlement — the 402 contract C2 imports), 3 (`GET /entitlement`), 4 (Stripe Checkout, the webhook
+   as the only writer of `entitlements`, the Portal — one fix round), 5 (the billing job, the invoice
+   branch and the idempotency/ordering guard — one fix round; re-review pending at the time of writing).
+   **Every staging step is batched until P1/P2** (ruling R-C1-14): Task 1 steps 7–9, Task 3 step 6,
+   Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…18 are in
+   the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
+   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 6 (`DELETE /account`, export),
+   7 (sources, encryption), 8 (telemetry), 9 (issues), then hand-off H1 and the app tasks 10–18 (the
+   test counts in the plan are +10 behind the branch after Task 5 — R-C1-16). Then **C2**, merging C1
+   first; apply H9 between the two merges.
 6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
    settings-panel Google connect/disconnect; the "source went quiet" surface) get plans after C2.
 
@@ -120,7 +123,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 | C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
 | C0 T3 run | **Cloudflare** (P2, P3) | account, Pages project `knowlu` (direct upload), API token Pages:Edit, account id; `knowlu.com` on Cloudflare DNS → Pages. |
 | C0 T3 run | **Set the secrets himself** | `gh secret set NAME --repo quinnhall07/knowlu < file` for `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `gh variable set` for `TS_ENDPOINT`, `TS_ACCOUNT`, `TS_PROFILE`. You name them, he sets them. |
-| C1 | **Supabase, Stripe, the e-mail provider, Google consent (two scopes), the policy texts** | as the C1 plan's P1–P5 say; the e-mail provider is new (Resend free tier; Supabase Auth's built-in sender is not for production and California's annual reminder needs a sender). |
+| C1 | **Supabase, Stripe, the e-mail provider, Google consent (two scopes), the policy texts** | as the C1 plan's P1–P5 say, plus what Task 4's and Task 5's reviews added: **P2 must also set the Terms of service URL (and the privacy URL) in Stripe's public business details** — Checkout refuses the terms checkbox without it — **and create the webhook endpoint at API version `2025-03-31.basil`**; the four secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `EMAIL_API_KEY`, `SOURCES_ENC_KEY`) by `supabase secrets set`; the billing job's two database settings (Task 5 step 9). The e-mail provider is new (Resend free tier). A legal call is open: whether the annual reminder must name the next charge date (R-C1-18). |
 | C2 | **Anthropic key; Google OAuth client; first test user; the archive read** | as the C2 plan's P0a–P4 say. |
 | soon | **Rotate the Blackboard token and the Google Calendar capability URL** | he regenerated neither yet as far as this session knows; both sat in a OneDrive mirror. |
 | later | The first friend; the lawyer; a co-founder | — |
@@ -141,6 +144,14 @@ calendar URLs stay as the offline fallback until C3/C4).
 - **Commits:** specific `git add`, message via `-F <file>`, trailers with **this session's** model
   name and URL.
 - Line endings are the repo's: LF, `.ps1` CRLF, fixtures bytes.
+- **Suite counts drift from the plan by design:** fix rounds add tests (R-C1-16). Every dispatch states
+  the plan's number and the real one.
+- **Stripe API `2025-03-31.basil` moved fields** — `current_period_end` onto the subscription item, the
+  invoice's subscription under `parent.subscription_details`. Every new read of a Stripe object handles
+  both shapes (R-C1-15, R-C1-17).
+- **Subagent shells may lack Deno on PATH** (installed after the session started) — every dispatch
+  carries the refresh line. `review-package` run from a worktree writes under that worktree's own
+  `.superpowers/`: pass the OUTFILE argument.
 
 ## 6. Quick reference
 
