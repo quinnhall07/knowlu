@@ -4,14 +4,35 @@ import { accountIdFromEvent, entitlementFromSubscription, handle } from "./handl
 
 const SECRET = "whsec_test_only_not_a_real_key";
 
-Deno.test("a Stripe subscription becomes exactly the three fields the device reads", () => {
+/** Every test below that reaches the write path needs the same three no-op guards; this is the one
+ * place their shape is written down. */
+function noopGuards() {
+  return {
+    seenEvent: () => Promise.resolve(false),
+    recordEvent: () => Promise.resolve(),
+    currentUpdatedAt: () => Promise.resolve(null as string | null),
+  };
+}
+
+Deno.test("a Stripe subscription becomes exactly the six fields the row carries", () => {
   assertEquals(
     entitlementFromSubscription({
       status: "trialing",
-      current_period_end: 1_760_000_000,
-      items: { data: [{ price: { id: "price_monthly", recurring: { interval: "month" } } }] },
+      items: {
+        data: [{
+          current_period_end: 1_760_000_000,
+          price: { id: "price_monthly", recurring: { interval: "month" } },
+        }],
+      },
     }),
-    { plan: "monthly", status: "trialing", current_period_end: "2025-10-09T08:53:20.000Z" },
+    {
+      plan: "monthly",
+      status: "trialing",
+      current_period_end: "2025-10-09T08:53:20.000Z",
+      stripe_subscription_id: null,
+      paused: false,
+      started_at: null,
+    },
   );
   // A paused collection (the June-August window, R3) leaves Stripe's own status `active`, so the
   // student keeps the product through the summer and is simply not charged. That is the whole
@@ -19,27 +40,46 @@ Deno.test("a Stripe subscription becomes exactly the three fields the device rea
   assertEquals(
     entitlementFromSubscription({
       status: "active",
+      id: "sub_1",
       pause_collection: { behavior: "void" },
-      current_period_end: 1_760_000_000,
-      items: { data: [{ price: { id: "price_year", recurring: { interval: "year" } } }] },
-    }).status,
-    "active",
+      start_date: 1_700_000_000,
+      items: {
+        data: [{
+          current_period_end: 1_760_000_000,
+          price: { id: "price_year", recurring: { interval: "year" } },
+        }],
+      },
+    }),
+    {
+      plan: "academic_year",
+      status: "active",
+      current_period_end: "2025-10-09T08:53:20.000Z",
+      stripe_subscription_id: "sub_1",
+      paused: true,
+      started_at: "2023-11-14T22:13:20.000Z",
+    },
   );
   assertEquals(
-    entitlementFromSubscription({ status: "unpaid", current_period_end: null, items: { data: [] } }).status,
+    entitlementFromSubscription({ status: "unpaid", items: { data: [] } }).status,
     "past_due",
   );
   assertEquals(
-    entitlementFromSubscription({
-      status: "incomplete_expired",
-      current_period_end: null,
-      items: { data: [] },
-    }).status,
+    entitlementFromSubscription({ status: "incomplete_expired", items: { data: [] } }).status,
     "canceled",
   );
   assertEquals(
-    entitlementFromSubscription({ status: "wat", current_period_end: null, items: { data: [] } }).status,
+    entitlementFromSubscription({ status: "wat", items: { data: [] } }).status,
     "none",
+  );
+  // The pre-basil shape: `current_period_end` still lives on the Subscription itself, not the item.
+  // An account whose events still carry it that way must keep working.
+  assertEquals(
+    entitlementFromSubscription({
+      status: "active",
+      current_period_end: 1_760_000_000,
+      items: { data: [{ price: { id: "price_monthly", recurring: { interval: "month" } } }] },
+    }).current_period_end,
+    "2025-10-09T08:53:20.000Z",
   );
 });
 
@@ -61,6 +101,7 @@ Deno.test("an unsigned or badly signed webhook is 400 and writes nothing", async
     {
       secret: SECRET,
       nowSeconds: () => 1,
+      ...noopGuards(),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();
@@ -80,6 +121,7 @@ Deno.test("no stripe-signature header at all is 400 and writes nothing", async (
     {
       secret: SECRET,
       nowSeconds: () => 1,
+      ...noopGuards(),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();
@@ -95,47 +137,9 @@ Deno.test("no stripe-signature header at all is 400 and writes nothing", async (
 Deno.test("a signed subscription event writes the entitlement, once, keyed to the account", async () => {
   const written: unknown[] = [];
   const event = {
+    id: "evt_1",
     type: "customer.subscription.updated",
-    data: {
-      object: {
-        metadata: { account_id: "acc-1" },
-        status: "active",
-        current_period_end: 1_760_000_000,
-        items: { data: [{ price: { id: "price_monthly", recurring: { interval: "month" } } }] },
-      },
-    },
-  };
-  const body = JSON.stringify(event);
-  const t = 1_700_000_000;
-  const sig = await hmacHex(SECRET, `${t}.${body}`);
-  const res = await handle(
-    new Request("http://127.0.0.1:1/", {
-      method: "POST",
-      body,
-      headers: { "stripe-signature": `t=${t},v1=${sig}` },
-    }),
-    {
-      secret: SECRET,
-      nowSeconds: () => t,
-      writeEntitlement: (accountId, row) => {
-        written.push([accountId, row]);
-        return Promise.resolve();
-      },
-      fetchSubscription: () => Promise.resolve(null),
-    },
-  );
-  assertEquals(res.status, 200);
-  assertEquals(written, [["acc-1", {
-    plan: "monthly",
-    status: "active",
-    current_period_end: "2025-10-09T08:53:20.000Z",
-  }]]);
-});
-
-Deno.test("under the pinned API version, current_period_end comes off the subscription item when the top-level field is absent", async () => {
-  const written: unknown[] = [];
-  const event = {
-    type: "customer.subscription.updated",
+    created: 1_700_000_000,
     data: {
       object: {
         metadata: { account_id: "acc-1" },
@@ -161,8 +165,9 @@ Deno.test("under the pinned API version, current_period_end comes off the subscr
     {
       secret: SECRET,
       nowSeconds: () => t,
-      writeEntitlement: (accountId, row) => {
-        written.push([accountId, row]);
+      ...noopGuards(),
+      writeEntitlement: (accountId, row, updatedAt) => {
+        written.push([accountId, row, updatedAt]);
         return Promise.resolve();
       },
       fetchSubscription: () => Promise.resolve(null),
@@ -173,7 +178,60 @@ Deno.test("under the pinned API version, current_period_end comes off the subscr
     plan: "monthly",
     status: "active",
     current_period_end: "2025-10-09T08:53:20.000Z",
-  }]]);
+    stripe_subscription_id: null,
+    paused: false,
+    started_at: null,
+  }, "2023-11-14T22:13:20.000Z"]]);
+});
+
+Deno.test("under the pinned API version, current_period_end comes off the subscription item when the top-level field is absent", async () => {
+  const written: unknown[] = [];
+  const event = {
+    id: "evt_2",
+    type: "customer.subscription.updated",
+    created: 1_700_000_000,
+    data: {
+      object: {
+        metadata: { account_id: "acc-1" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      ...noopGuards(),
+      writeEntitlement: (accountId, row, updatedAt) => {
+        written.push([accountId, row, updatedAt]);
+        return Promise.resolve();
+      },
+      fetchSubscription: () => Promise.resolve(null),
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(written, [["acc-1", {
+    plan: "monthly",
+    status: "active",
+    current_period_end: "2025-10-09T08:53:20.000Z",
+    stripe_subscription_id: null,
+    paused: false,
+    started_at: null,
+  }, "2023-11-14T22:13:20.000Z"]]);
 });
 
 Deno.test("an event type we do not handle is 200 and a no-op — Stripe must not retry it forever", async () => {
@@ -190,6 +248,7 @@ Deno.test("an event type we do not handle is 200 and a no-op — Stripe must not
     {
       secret: SECRET,
       nowSeconds: () => t,
+      ...noopGuards(),
       writeEntitlement: () => {
         wrote = true;
         return Promise.resolve();
@@ -199,4 +258,199 @@ Deno.test("an event type we do not handle is 200 and a no-op — Stripe must not
   );
   assertEquals(res.status, 200);
   assert(!wrote);
+});
+
+Deno.test("invoice.payment_failed under the pinned API version reaches fetchSubscription and writes", async () => {
+  const fetched: string[] = [];
+  const written: unknown[] = [];
+  const event = {
+    id: "evt_invoice_1",
+    type: "invoice.payment_failed",
+    created: 1_700_000_000,
+    data: {
+      object: {
+        parent: {
+          subscription_details: {
+            subscription: "sub_9",
+            metadata: { account_id: "acc-9" },
+          },
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      ...noopGuards(),
+      writeEntitlement: (accountId, row, updatedAt) => {
+        written.push([accountId, row, updatedAt]);
+        return Promise.resolve();
+      },
+      fetchSubscription: (id) => {
+        fetched.push(id);
+        return Promise.resolve({
+          id: "sub_9",
+          status: "past_due",
+          items: { data: [{ price: { id: "price_monthly", recurring: { interval: "month" } } }] },
+        });
+      },
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(fetched, ["sub_9"]);
+  assertEquals(written.length, 1);
+  assertEquals((written[0] as [string, unknown, string])[0], "acc-9");
+});
+
+Deno.test("invoice.payment_failed carrying neither an account id nor a client reference is still ignored", async () => {
+  let fetchedAny = false;
+  let wrote = false;
+  const event = {
+    id: "evt_invoice_2",
+    type: "invoice.payment_failed",
+    created: 1_700_000_000,
+    data: { object: {} },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      ...noopGuards(),
+      writeEntitlement: () => {
+        wrote = true;
+        return Promise.resolve();
+      },
+      fetchSubscription: (id) => {
+        fetchedAny = true;
+        return Promise.resolve({ id });
+      },
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.clone().json(), { ignored: "no account id on the event" });
+  assert(!fetchedAny, "no account id means no subscription fetch");
+  assert(!wrote);
+});
+
+Deno.test("the same signed event twice writes once", async () => {
+  const written: unknown[] = [];
+  const seen = new Set<string>();
+  const event = {
+    id: "evt_dup_1",
+    type: "customer.subscription.updated",
+    created: 1_700_000_000,
+    data: {
+      object: {
+        metadata: { account_id: "acc-1" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const deps = {
+    secret: SECRET,
+    nowSeconds: () => t,
+    seenEvent: (eventId: string) => Promise.resolve(seen.has(eventId)),
+    recordEvent: (eventId: string) => {
+      seen.add(eventId);
+      return Promise.resolve();
+    },
+    currentUpdatedAt: () => Promise.resolve(null as string | null),
+    writeEntitlement: (accountId: string, row: unknown, updatedAt: string) => {
+      written.push([accountId, row, updatedAt]);
+      return Promise.resolve();
+    },
+    fetchSubscription: () => Promise.resolve(null),
+  };
+  const req = () =>
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    });
+  const first = await handle(req(), deps);
+  const second = await handle(req(), deps);
+  assertEquals(first.status, 200);
+  assertEquals(await first.clone().json(), { ok: true });
+  assertEquals(second.status, 200);
+  assertEquals(await second.clone().json(), { duplicate: "evt_dup_1" });
+  assertEquals(written.length, 1, "a duplicate delivery must never write twice");
+});
+
+Deno.test("an event whose created precedes the row's updated_at writes nothing", async () => {
+  let wrote = false;
+  let recorded: [string, string, string] | null = null;
+  const event = {
+    id: "evt_stale_1",
+    type: "customer.subscription.updated",
+    // Older than the row's own updated_at below.
+    created: 1_600_000_000,
+    data: {
+      object: {
+        metadata: { account_id: "acc-1" },
+        status: "active",
+        items: {
+          data: [{
+            current_period_end: 1_760_000_000,
+            price: { id: "price_monthly", recurring: { interval: "month" } },
+          }],
+        },
+      },
+    },
+  };
+  const body = JSON.stringify(event);
+  const t = 1_700_000_000;
+  const sig = await hmacHex(SECRET, `${t}.${body}`);
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      body,
+      headers: { "stripe-signature": `t=${t},v1=${sig}` },
+    }),
+    {
+      secret: SECRET,
+      nowSeconds: () => t,
+      seenEvent: () => Promise.resolve(false),
+      recordEvent: (eventId, type, createdIso) => {
+        recorded = [eventId, type, createdIso];
+        return Promise.resolve();
+      },
+      // Newer than the event's `created` (1_600_000_000 -> 2020-09-13...): the row already moved on.
+      currentUpdatedAt: () => Promise.resolve("2025-01-01T00:00:00.000Z"),
+      writeEntitlement: () => {
+        wrote = true;
+        return Promise.resolve();
+      },
+      fetchSubscription: () => Promise.resolve(null),
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.clone().json(), { stale: "evt_stale_1" });
+  assert(!wrote, "a stale event must never overwrite newer state");
+  assertEquals(recorded, ["evt_stale_1", "customer.subscription.updated", "2020-09-13T12:26:40.000Z"]);
 });

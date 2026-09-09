@@ -17,12 +17,19 @@ export interface EntitlementWrite {
   plan: string | null;
   status: EntitlementStatus;
   current_period_end: string | null;
+  stripe_subscription_id: string | null;
+  paused: boolean;
+  started_at: string | null;
 }
 
 export interface Deps {
   secret: string;
   nowSeconds: () => number;
-  writeEntitlement: (accountId: string, row: EntitlementWrite) => Promise<void>;
+  seenEvent: (eventId: string) => Promise<boolean>;
+  recordEvent: (eventId: string, type: string, createdIso: string) => Promise<void>;
+  /** `entitlements.updated_at` for this account, or null. It carries the EVENT's `created`. */
+  currentUpdatedAt: (accountId: string) => Promise<string | null>;
+  writeEntitlement: (accountId: string, row: EntitlementWrite, updatedAt: string) => Promise<void>;
   /** `checkout.session.completed` carries a subscription id, not the subscription. */
   fetchSubscription: (id: string) => Promise<Json | null>;
 }
@@ -47,24 +54,36 @@ function statusOf(stripeStatus: string): EntitlementStatus {
 }
 
 export function entitlementFromSubscription(sub: Json): EntitlementWrite {
-  const interval = sub?.items?.data?.[0]?.price?.recurring?.interval ?? null;
+  const item = sub?.items?.data?.[0] ?? null;
+  const interval = item?.price?.recurring?.interval ?? null;
   const plan = interval === "month" ? "monthly" : interval === "year" ? "academic_year" : null;
-  // Under the pinned STRIPE_API_VERSION (2025-03-31.basil), `current_period_end` left the
-  // Subscription for `items.data[].current_period_end`. Read the top-level field first — an
-  // account whose events still carry it should keep working — and fall back to the item.
-  const end = typeof sub?.current_period_end === "number"
-    ? new Date(sub.current_period_end * 1000).toISOString()
-    : typeof sub?.items?.data?.[0]?.current_period_end === "number"
-    ? new Date(sub.items.data[0].current_period_end * 1000).toISOString()
-    : null;
-  // A `pause_collection` window (R3, June to August) leaves Stripe's own status `active`: the
-  // student keeps the product and is not charged. Nothing here needs to know about the pause.
-  return { plan, status: statusOf(String(sub?.status ?? "")), current_period_end: end };
+  // **The period end moved.** In Stripe API `2025-03-31.basil` `current_period_end` left the
+  // Subscription for each item; `_shared/stripe.ts` pins that version, and the item is read first so
+  // the field is found on either shape rather than becoming a silent `null` in every row.
+  const endSeconds = typeof item?.current_period_end === "number"
+    ? item.current_period_end
+    : (typeof sub?.current_period_end === "number" ? sub.current_period_end : null);
+  const end = endSeconds === null ? null : new Date(endSeconds * 1000).toISOString();
+  const started = typeof sub?.start_date === "number" ? new Date(sub.start_date * 1000).toISOString() : null;
+  return {
+    plan,
+    status: statusOf(String(sub?.status ?? "")),
+    current_period_end: end,
+    stripe_subscription_id: typeof sub?.id === "string" ? sub.id : null,
+    // A `pause_collection` window leaves Stripe's status `active`, so this flag — not the status —
+    // is what the summer job reads to know whether it has already acted.
+    paused: !!sub?.pause_collection,
+    started_at: started,
+  };
 }
 
 export function accountIdFromEvent(event: Json): string | null {
   const o = event?.data?.object ?? {};
-  return o?.metadata?.account_id ?? o?.client_reference_id ?? null;
+  // In order: a subscription's own metadata, an invoice's parent.subscription_details.metadata under
+  // the pinned `2025-03-31.basil` API version (invoice metadata is the invoice's own and is empty),
+  // the pre-basil subscription_details.metadata location, then Checkout's client_reference_id.
+  return o?.metadata?.account_id ?? o?.parent?.subscription_details?.metadata?.account_id ??
+    o?.subscription_details?.metadata?.account_id ?? o?.client_reference_id ?? null;
 }
 
 const SUBSCRIPTION_EVENTS = new Set([
@@ -97,6 +116,11 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     return json(200, { ignored: type });
   }
 
+  const eventId = String(event?.id ?? "");
+  if (!eventId) return fail(400, "the event has no id");
+  if (await deps.seenEvent(eventId)) return json(200, { duplicate: eventId });
+  const createdIso = new Date((Number(event?.created) || deps.nowSeconds()) * 1000).toISOString();
+
   const accountId = accountIdFromEvent(event);
   if (!accountId) return json(200, { ignored: "no account id on the event" });
 
@@ -107,11 +131,21 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     const id = event?.data?.object?.subscription;
     sub = typeof id === "string" ? await deps.fetchSubscription(id) : null;
   } else if (type === "invoice.payment_failed") {
-    const id = event?.data?.object?.subscription;
+    // Under the pinned `2025-03-31.basil` API version, an Invoice's subscription moved to
+    // `parent.subscription_details.subscription`; the pre-basil `subscription` field is the fallback.
+    const id = event?.data?.object?.parent?.subscription_details?.subscription ??
+      event?.data?.object?.subscription;
     sub = typeof id === "string" ? await deps.fetchSubscription(id) : null;
   }
   if (!sub) return json(200, { ignored: `no subscription on ${type}` });
 
-  await deps.writeEntitlement(accountId, entitlementFromSubscription(sub));
+  // A late event must not resurrect a state a later one already replaced.
+  const seen = await deps.currentUpdatedAt(accountId);
+  if (seen !== null && seen >= createdIso) {
+    await deps.recordEvent(eventId, type, createdIso);
+    return json(200, { stale: eventId });
+  }
+  await deps.writeEntitlement(accountId, entitlementFromSubscription(sub), createdIso);
+  await deps.recordEvent(eventId, type, createdIso);
   return json(200, { ok: true });
 }
