@@ -180,6 +180,13 @@ pub fn ics_state(vault: &Path) -> IcsState {
 
 pub fn has_ics_url(vault: &Path) -> bool { ics_state(vault) == IcsState::Feed }
 
+/// A vault that has never been ranked is owed its first slot at launch, whatever the clock says
+/// (cloud design §4.2 step 7 — "the first slot runs immediately"; Quinn's cut-day note,
+/// 2026-09-09: an empty first page until 12:00 is not a first session). `today.md` is rewritten
+/// by every `rank`, so its absence is the whole test; once it exists, launch owes nothing until
+/// the next scheduled slot.
+pub fn needs_first_run(vault: &Path) -> bool { !vault.join("today.md").exists() }
+
 /// Everything `knowlu-engine judge` needs that only the app knows: where the runtime was installed,
 /// which model file was chosen, and this profile's own judgments directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +558,15 @@ pub fn spawn(app: AppHandle) {
         // `Default` placeholder until the housekeeping thread's first 60 s pass (review item 5).
         let sch = app.state::<Scheduler>();
         *lock(&sch.mode_device) = (mode(&cs.vault), device_ok(&cs.vault));
+        // The first slot of a never-ranked vault runs now (`needs_first_run`), under the same
+        // guards the tick applies — an app-scheduled vault on its designated device — and on its
+        // own thread so the window is never held. `run_slot` serialises against a slot already in
+        // flight and the tick's `due_slot` bookkeeping sees this run's `start` record like any
+        // other, so nothing is run twice.
+        if mode(&cs.vault) == SchedulerMode::App && device_ok(&cs.vault) && needs_first_run(&cs.vault) {
+            let first = app.clone();
+            std::thread::spawn(move || { let _ = run_slot(&first, false); });
+        }
     }
 
     let tick = app.clone();

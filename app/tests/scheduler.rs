@@ -494,3 +494,19 @@ fn quit_flush_backs_up_and_reports_within_the_cap() {
 #[test]
 #[ignore = "runs the real engine exe against a scratch vault; needs a built target/release/knowlu-engine.exe and network for rank's feeds — run by hand before Task 17"]
 fn run_slot_end_to_end() { unimplemented!("see the ignore reason") }
+
+use knowlu::scheduler::needs_first_run;
+
+/// Spec §4.2 step 7, and Quinn's cut-day note (2026-09-09): a vault that has never been ranked
+/// runs its first slot at launch, whatever the clock says — otherwise the first page a new user
+/// sees is empty until the next scheduled slot. `today.md` is rewritten by every `rank`, so its
+/// absence is the whole test; once it exists, launch owes nothing until the next slot.
+#[test]
+fn a_vault_that_has_never_been_ranked_is_owed_its_first_run_at_launch() {
+    let v = scratch("first-run");
+    std::fs::create_dir_all(&v).unwrap();
+    assert!(needs_first_run(&v), "no today.md yet: the first slot is owed at launch");
+    std::fs::write(v.join("today.md"), "# Today\n").unwrap();
+    assert!(!needs_first_run(&v), "once ranked, launch owes nothing until the next slot");
+    let _ = std::fs::remove_dir_all(&v);
+}
