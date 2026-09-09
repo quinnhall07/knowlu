@@ -101,13 +101,13 @@ calendar URLs stay as the offline fallback until C3/C4).
    offline halves:** Task 0 (skeleton), 1 (the account tables + RLS), 2 (`_shared` REST / bearer /
    entitlement — the 402 contract C2 imports), 3 (`GET /entitlement`), 4 (Stripe Checkout, the webhook
    as the only writer of `entitlements`, the Portal — one fix round), 5 (the billing job, the invoice
-   branch and the idempotency/ordering guard — one fix round, review clean), 6 (`DELETE /account`, export — one fix round: the deleted-account webhook loop, the retryable deletion, the paged export); Task 7 (sources, encryption) in flight at the time of writing.
+   branch and the idempotency/ordering guard — one fix round, review clean), 6 (`DELETE /account`, export — one fix round: the deleted-account webhook loop, the retryable deletion, the paged export), 7 (the sources routes, AES-GCM at rest — R-C1-21 narrowed the export guard, one fix round of security pins), 8 (telemetry — one fix round: the class-(c) opt-in can no longer come from the request, R-C1-24); Task 9 (issues) in flight at the time of writing. **H1 is on `main`** (`e9db073`, the four empty app modules) and merges into the branch before Task 10. **The `cloud` CI job (H7) was pulled forward onto `main` and merged into the branch** (R-C1-23), so every push now runs `deno check/lint/test` too.
    **Every staging step is batched until P1/P2** (ruling R-C1-14): Task 1 steps 7–9, Task 3 step 6,
-   Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…20 are in
+   Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…24 are in
    the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
-   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 7 if it has not landed,
+   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 9 if it has not landed,
    7 (sources, encryption), 8 (telemetry), 9 (issues), then hand-off H1 and the app tasks 10–18 (the
-   test counts in the plan are +13 behind the branch after Task 6 — R-C1-16). Then **C2**, merging C1
+   test counts in the plan are +28 behind the branch after Task 8 — R-C1-16). Then **C2**, merging C1
    first; apply H9 between the two merges.
 6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
    settings-panel Google connect/disconnect; the "source went quiet" surface) get plans after C2.
