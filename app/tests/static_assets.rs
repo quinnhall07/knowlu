@@ -642,3 +642,14 @@ fn the_wizard_offers_local_judgment_without_doing_anything() {
         assert!(!wizard.contains(cmd), "the wizard offers and never installs: {cmd}");
     }
 }
+
+/// The wizard's default folders come from `launch_state` (`default_parent`, `default_backup`,
+/// cloud design §11a) — the page never builds a path, and the retired `documents` key (which named
+/// the OneDrive-redirected folder) is read nowhere.
+#[test]
+fn the_wizard_takes_its_default_folders_from_the_launch_state() {
+    let js = read("console.js");
+    assert!(js.contains("l.default_parent"), "the page reads default_parent from launch_state");
+    assert!(js.contains("l.default_backup"), "the page reads default_backup from launch_state");
+    assert!(!js.contains("l.documents"), "the retired `documents` key is gone from the page");
+}

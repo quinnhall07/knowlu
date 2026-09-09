@@ -1222,10 +1222,12 @@
     document.querySelector(".app").hidden = true;
     WIZ.tz = l.tz || "";
     WIZ.campuses = l.campuses || [];
-    // The default parent is the engine's, never built in the page (spec §3 panel 2). The name is a
-    // plain default the user overwrites; it becomes the vault folder's name AND the profile label,
-    // which the settings panel can rename later.
-    WIZ.parent = l.documents || "";
+    // The default folders are the app's, never built in the page (cloud design §4.1: `<home>\Knowlu`
+    // and its `Backups` sibling). The name is a plain default the user overwrites; it becomes the
+    // vault folder's name AND the profile label, which the settings panel can rename later. The
+    // backup default is shown on its panel, where Skip still clears it.
+    WIZ.parent = l.default_parent || "";
+    WIZ.bdir = WIZ.bdir || l.default_backup || "";
     EL("wiz-name").value = WIZ.name;
     EL("wiz-privacy").textContent = PRIVACY;
     EL("wiz-tz").value = WIZ.tz;

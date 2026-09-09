@@ -26,15 +26,32 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
             "profiles": serde_json::to_value(&*o.profiles.lock().unwrap_or_else(|e| e.into_inner())).unwrap_or(Value::Null),
             "machine": knowlu_engine::journal::device_name(),
             "tz": jiff::tz::TimeZone::system().iana_name().unwrap_or("America/Chicago"),
-            // The wizard's default PARENT folder for a new vault (spec §3 panel 2,
-            // `%USERPROFILE%\Documents\Knowlu\<name>`): the page never builds a path itself.
-            "documents": std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join("Documents").join("Knowlu").to_string_lossy().to_string()),
+            // The wizard's default folders (cloud design §4.1 and §11a, 2026-09-09): the vault's
+            // PARENT is `%USERPROFILE%\Knowlu` and the mirror goes to its `Backups` sibling — visible,
+            // and not OneDrive-redirected the way `Documents` is. The page never builds a path itself.
+            "default_parent": default_folders().map(|(p, _)| p),
+            "default_backup": default_folders().map(|(_, b)| b),
             // The wizard's campus radios (Task 6): adding a campus is adding a file and a line in
             // `scaffold::CAMPUSES`, never a string in the page.
             "campuses": crate::scaffold::CAMPUSES.iter().map(|(k, l)| json!({ "key": k, "label": l })).collect::<Vec<_>>(),
         }),
         None => json!({ "ok": true, "error": Value::Null, "mode": "console" }),
     }
+}
+
+/// The wizard's default vault parent and backup folder under a home directory: `<home>\Knowlu`
+/// and `<home>\Knowlu\Backups` (cloud design §4.1). Siblings, so the backup rule (R-P4a-25: the
+/// mirror may not be the vault or sit inside it) holds for the defaults by construction. Handle-free
+/// so the test can drive it with any home.
+pub fn default_folders_in(home: &Path) -> (String, String) {
+    let root = home.join("Knowlu");
+    (root.to_string_lossy().to_string(), root.join("Backups").to_string_lossy().to_string())
+}
+
+/// `None` only when there is no `USERPROFILE` to derive from — the page then shows "no folder
+/// chosen yet" and the picker, exactly as before a default existed.
+fn default_folders() -> Option<(String, String)> {
+    std::env::var("USERPROFILE").ok().map(|h| default_folders_in(Path::new(&h)))
 }
 
 /// A native folder picker. `(async)` because the blocking dialog must not run on the webview

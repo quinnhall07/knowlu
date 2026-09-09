@@ -4,7 +4,7 @@
 //! promise on both is the same — it is read, never written.
 use knowlu::onboarding::{
     adopt_vault_in, apply_profile_settings_in, create_vault_in, dest_for, finish_or_roll_back,
-    offer_marker, restore_vault_in, WizardPlan,
+    default_folders_in, offer_marker, restore_vault_in, WizardPlan,
 };
 use std::path::{Path, PathBuf};
 
@@ -129,8 +129,9 @@ fn a_name_windows_would_rewrite_is_refused_by_name() {
 /// vault and may not sit INSIDE it — a mirror inside the thing it mirrors copies itself — and a
 /// vault inside the backup folder is allowed, because the mirror writes under
 /// `<backup>\<profile>\vault`. The allowed case is not academic: the wizard's default parent is
-/// `%USERPROFILE%\Documents\Knowlu` and its default vault is `Documents\Knowlu\<name>`, so refusing
-/// it made the most obvious folder on the machine unpickable.
+/// `%USERPROFILE%\Knowlu` and its default vault is `Knowlu\<name>` (since 2026-09-09; it was the
+/// OneDrive-redirected `Documents\Knowlu` before), so refusing it made the most obvious folder on
+/// the machine unpickable.
 #[test]
 fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
     let root = tmp("rollback");
@@ -348,4 +349,16 @@ fn adopt_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     assert_eq!(out2["ok"], true, "{out2}");
     assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Cloud design §4.1 and §11a (2026-09-09): the wizard's defaults are `<home>\Knowlu` for the
+/// vault's parent and its `Backups` sibling for the mirror — never `Documents`, which OneDrive
+/// redirects (that is how a live token reached Microsoft's cloud on 2026-09-09). Siblings, so the
+/// backup rule (R-P4a-25: not the vault, not inside it) holds for the defaults by construction.
+#[test]
+fn the_default_folders_are_knowlu_under_home_and_its_backups_sibling() {
+    let (parent, backup) = default_folders_in(Path::new(r"C:\Users\someone"));
+    assert_eq!(parent, r"C:\Users\someone\Knowlu");
+    assert_eq!(backup, r"C:\Users\someone\Knowlu\Backups");
+    assert!(!parent.contains("Documents") && !backup.contains("Documents"), "never the redirected folder");
 }
