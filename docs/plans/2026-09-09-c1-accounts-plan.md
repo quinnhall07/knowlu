@@ -80,6 +80,10 @@ Every decision this plan carries, and the task that carries it.
 | §10 | VISION: onboarding creates the vault; nobody picks a folder | §10, §11a | Tasks 12 and 17. **Task 18 too**: an install that already has a vault is never asked the question either — it is adopted in place, keeping its folder, settings, credentials and profile id |
 | §11a | **The LMS calendar link is captured by a sign-in window, not pasted.** The student signs in on the campus's own page inside a pop-up; the app navigates that window to the calendar's share page and keeps only the link; the window's session data is discarded | spec §11a, ruled 2026-09-09 | Task 13 is the feasibility spike — Quinn present for the SSO login, with a written go/no-go; Task 14 is `lms_link.rs`, the window flow as the primary path and paste-a-link as the fallback for a campus whose pages defeat it; Task 17 is the panel |
 | §11a | **Connect your calendars — school and personal, together, before coursework logins and Gmail.** The current wizard never asked for busy time, so `calendars:` stayed empty and the first page showed a day that looked free | spec §11a, ruled 2026-09-09 | Task 17's panel 5 of nine carries both halves: the sign-in window for school, and the **secret iCal address** for the student's own calendar — validated on the device by the same `lms_link::validate`, stored server-side as a `sources` row of kind `calendar_ics` (Tasks 7 and 14), and written into the vault's `calendars:` list by Task 12's `ingest_yaml` so today's engine counts busy time on the very first slot. C2's Google sign-in has a labelled, inert place on the same panel |
+| §11a R-OB-1 | **Onboarding maps the coursework sources to courses.** Quinn's first slot: the wizard had stored the zyBooks and VHL logins and written `courses: {}` / `sections: {}`, so `coursework` answered `zybook UACS100Fall2026 not in config; skipped`, `section 2102121 not in config; skipped`, then `0 assignments parsed; treating as failure` | spec §11a, ruled 2026-09-09 | **Task 14a.** After the logins panel stores the credentials the wizard runs the engine's discovery (hand-off **H10**'s `coursework-discover`), shows every book and section with a **suggested** course derived from its code, and writes what the student confirms into `config/ingest.yaml` — `courses:` with `course:`/`label:`, `sections:` for VHL, the `ignore:` entry for zyBooks' own `HowToUseZyBooks2`, and the engine's `categories`/`effort`/`importance` blocks. C2 owns the other half of the ruling (an unknown book on a **later** run is a proposal, not a silent skip) |
+| §11a R-OB-2 | **The sign-in window also captures the enrolled course list**, seeding `courses/` and `course_map` — so a first ingest is not 28 tasks with `course: null` | spec §11a, ruled 2026-09-09 | **Task 13** asks it as the spike's second go/no-go question; **Task 14b** captures the list, seeds one `courses/<slug>.md` note per course through the same `write::create` the seed task uses, and writes a `course_map:` line per course; the fallback when the window cannot read them is the same panel with the codes typed in |
+| §11a R-OB-3 | A first ingest never creates a task already past due | spec §11a, ruled 2026-09-09 | **Not C1's.** C2's `/ingest-ics`, and the device's `ingest` until then — both are `engine/`, which this stream does not own. Named under *What is NOT in this plan* so nobody reads its absence as an oversight |
+| §11a R-OB-4 | **The school is chosen from a searchable list of every US institution**, not from two radios; the chosen school writes `campus:` into the vault, `CAMPUSES` becomes the *curated* layer on top, and the timezone is suggested from the state | spec §11a, ruled 2026-09-09 | **Task 14c**, on hand-off **H11**'s generated `app/campuses.json` (federal IPEDS, public domain, 6,072 schools, ~400 KB, header-stamped, read by `onboarding::campus_search` — the page cannot fetch it and does not hold it). `config/campus.yaml` carries `unitid`, `name`, `state`, `lms`, `curated`; `scaffold::CAMPUSES` is keyed by `UNITID` and adds event feeds and a known LMS; an uncurated school gets no feeds and an LMS from where the sign-in window lands, or a two-button question. Task 17 is the typeahead |
 | §11a | **Every wizard finish runs the first slot at once** (§4.2 step 7) | spec §11a, ruled 2026-09-09 | Nothing new: `scheduler::needs_first_run` and `spawn`'s first-run block are on `main` already. Task 17 step 8a **references** them and pins the seam both ways — a wizard-made vault has no `today.md` and is owed a run; an adopted one (Task 18) has one and is not |
 | VISION 6 | "Adding a source is one action — a URL or a login — and a source that later breaks fails visibly" | `VISION.md`, success criterion 6 | Tasks 13, 14 and 17: one action is *sign in to your school, the way you always do*. The mechanism sits behind `lms_link::capture()` so the spike's outcome can be swapped without the wizard moving |
 | VISION rule | "Never request campus SSO credentials" — **unchanged by §11a** | `VISION.md` standing rules; spec §9 University policies; §11a | Task 14 asks for **nothing**, sees **nothing** and stores **nothing** but the resulting link: the student types their password into the LMS's own page, in a window with no capability grant and its own throwaway data directory that Task 14 deletes. Task 17's static test proves the app's own page has no LMS credential field at all |
@@ -127,15 +131,16 @@ Every decision this plan carries, and the task that carries it.
 - `app/src/lms_link.rs` — **capture of the LMS calendar link through a sign-in window** (spec §11a; VISION success criterion 6, "adding a source is one action"): the pop-up webview with its own ephemeral data directory, the campus URLs, the capture, the shape check, the validating fetch, and the paste-a-link fallback. One responsibility: *turn a sign-in the student does themselves into one validated `.ics` URL, holding no credential and keeping no session*, behind an interface small enough that Task 13's spike outcome can be swapped without anything outside this file moving.
 - `app/src/telemetry.rs` — (a) from `state/events-ui/`, (b) derived from the journal, the watermark, the POST. One responsibility: *what leaves the device, and never more than that.*
 - `app/src/report.rs` — the diagnostic payload, the scrub, the preview text, the POST, two Tauri commands. One responsibility: *what the user reads before they send it.*
-- `app/tests/account.rs`, `app/tests/lms_link.rs`, `app/tests/telemetry.rs`, `app/tests/report.rs` — one integration-test crate per module.
+- `app/tests/account.rs`, `app/tests/lms_link.rs`, `app/tests/telemetry.rs`, `app/tests/report.rs` — one integration-test crate per module. `app/tests/scaffold.rs` and `app/tests/onboarding.rs` grow the coursework-mapping and course-seed cases (Tasks 14a, 14b).
 
 **Modified — app**
 
-- `app/src/scaffold.rs` — `VaultPlan` gains `account_id`; a new `cloud_yaml()`; `build_into` writes `config/cloud.yaml`; a new `write_cloud_yaml_if_absent()` for the vault that already exists (Task 18), and `CAMPUSES` grows a third column — the campus's own calendar-settings URL.
+- `app/src/scaffold.rs` — `VaultPlan` gains `account_id`, `personal_calendar`, the coursework mappings and the seeded courses (R-OB-1, R-OB-2); a new `cloud_yaml()`; `build_into` writes `config/cloud.yaml`; a new `write_cloud_yaml_if_absent()` for the vault that already exists (Task 18), and `CAMPUSES` grows a third column — the campus's own calendar-settings URL.
 - `app/src/onboarding.rs` — `knowlu_root()`, `vault_dest()`, `backups_dir()`; `WizardPlan` loses the folder fields and gains the account ones; `create_vault` takes a name, not a parent.
 - `app/src/scheduler.rs` — `entitlement_state()`, the judge gate that reads it, and the telemetry step.
 - `app/src/profiles.rs`, `app/src/credentials.rs` — **not modified.** They are inside this stream's ownership so that a needed change would not be a hand-off, but nothing here needs one: `profiles::id_for` and `credentials::target_for` already produce exactly the ids and target names the cloud contract asks for.
 - `app/static/index.html`, `app/static/console.js`, `app/static/console.css` — the nine-panel wizard, the settings account row, the issue-report preview overlay.
+- `app/campuses.json` — **new, generated and committed by hand-off H11**, and therefore the controller's file, not this stream's: every active two- and four-year US institution, `[unitid, name, city, state, host]`, ~400 KB, header line naming its IPEDS source and date. It sits beside `tauri.conf.json` and **not** under `app/static/`, because the page never loads it — `scaffold`/`onboarding` `include_str!` it and `campus_search` answers from it — and a 400 KB file in `frontendDist` would ship twice, once in the bundle and once in the binary. C1 reads it and tests it.
 - `app/tests/{static_assets,onboarding,scaffold,scheduler}.rs` — the pins follow the code.
 
 **Modified — site**
@@ -314,10 +319,10 @@ pub mod telemetry;
 
 ### H3 (Tasks 10, 11, 14, 17, 18) — `app/src/main.rs`, the two `generate_handler!` lists
 
-The vault-less shell's list (11 today) gains twelve, so **23**:
+The vault-less shell's list (11 today) gains sixteen, so **27**:
 
 ```rust
-.invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, account::sign_up, account::sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::entitlement_now, account::open_checkout, account::open_policy, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::paste_calendar_link, lms_link::close_lms_window])
+.invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, account::sign_up, account::sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::entitlement_now, account::open_checkout, account::open_policy, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::capture_courses, lms_link::paste_calendar_link, lms_link::close_lms_window, onboarding::discover_coursework, onboarding::timezone_for_state, onboarding::campus_search])
 ```
 
 The console window's list (29 today) gains fourteen, so **43**:
@@ -326,7 +331,7 @@ The console window's list (29 today) gains fourteen, so **43**:
 .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::decide, commands::close_info, commands::open_issue, commands::resolve_issue, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, commands::inference_status, commands::install_inference_file, commands::install_inference_download, commands::remove_inference_model, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, account::sign_up, account::sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::entitlement_now, account::open_checkout, account::open_policy, account::account_status, account::open_portal, account::attach_account, account::delete_my_data, report::report_preview, report::report_send])
 ```
 
-The eight sign-in commands are in **both** lists on purpose: Task 18's upgrade overlay runs inside the console window, over an existing vault, and needs exactly the same eight. `lms_link`'s four are the shell's alone — an install that already exists already has its feed.
+The eight sign-in commands are in **both** lists on purpose: Task 18's upgrade overlay runs inside the console window, over an existing vault, and needs exactly the same eight. `lms_link`'s five and `onboarding`'s three new ones (`discover_coursework`, `timezone_for_state`, `campus_search`) are the shell's alone — an install that already exists already has its feed, its mapping and its school.
 
 …the `use` line at the top of `main.rs` gains the three modules:
 
@@ -334,7 +339,7 @@ The eight sign-in commands are in **both** lists on purpose: Task 18's upgrade o
 use knowlu::{account, commands, lms_link, onboarding, profiles, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray};
 ```
 
-New totals to quote afterwards: **23 + 43, 55 distinct** (`launch_state`, `pick_folder`, `pick_file` and the eight sign-in commands are in both lists). **Nine** commands now mutate the vault: the existing seven, plus `account::attach_account` (which writes `config/cloud.yaml` into a vault that already exists) and `account::delete_my_data` (which removes the vault, its backups folder for this profile, and the account). The other nine new ones touch app data, the cloud, a second window or the system browser — never a note.
+New totals to quote afterwards: **27 + 43, 59 distinct** (`launch_state`, `pick_folder`, `pick_file` and the eight sign-in commands are in both lists). **Nine** commands now mutate the vault: the existing seven, plus `account::attach_account` (which writes `config/cloud.yaml` into a vault that already exists) and `account::delete_my_data` (which removes the vault, its backups folder for this profile, and the account). The other nine new ones touch app data, the cloud, a second window or the system browser — never a note.
 
 **`account::open_policy` exists because a link cannot.** The wizard's account panel and the upgrade overlay both ask the user to accept the terms and the privacy policy, and both link them. `app/static/` holds four files — `index.html`, `console.css`, `console.js`, `fonts/` — so a plain `<a href="terms.html">` navigates the one webview to a missing asset and the window is lost until restart. The `href` stays (the static test reads it, and it is the honest markup), the click handler calls `preventDefault()` and invokes `open_policy(which)`, and `open_policy` opens `https://knowlu.com/<which>.html` in the system browser through the same `explorer.exe` call *Open vault folder* uses.
 
@@ -378,9 +383,9 @@ New totals to quote afterwards: **23 + 43, 55 distinct** (`launch_state`, `pick_
 Replace the "Thirty-two `#[tauri::command]`s exist" paragraph and its two bullets with:
 
 ```markdown
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Fifty-five**
-`#[tauri::command]`s exist — **twenty-six in `src/commands.rs`, eleven in `src/onboarding.rs`, twelve
-in `src/account.rs`, four in `src/lms_link.rs` and two in `src/report.rs`**. Commands live beside the
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Fifty-nine**
+`#[tauri::command]`s exist — **twenty-six in `src/commands.rs`, fourteen in `src/onboarding.rs`, twelve
+in `src/account.rs`, five in `src/lms_link.rs` and two in `src/report.rs`**. Commands live beside the
 module they serve, never all in one file. Count them in `src/main.rs`'s two `generate_handler!` lists
 if this drifts, and note that the two lists are different windows, not one:
 
@@ -388,9 +393,9 @@ if this drifts, and note that the two lists are different windows, not one:
   `pick_file` from `onboarding.rs`; all 12 of `account.rs` (the eight sign-in commands included,
   because an install that predates the account is upgraded in place, inside this window, over its own
   vault); and both of `report.rs`.
-- **The vault-less shell** (picker or wizard) registers 23 — the 11 of `onboarding.rs`, eight of
+- **The vault-less shell** (picker or wizard) registers 27 — the 14 of `onboarding.rs`, eight of
   `account.rs` (`sign_up`, `sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`,
-  `entitlement_now`, `open_checkout`, `open_policy`) and all four of `lms_link.rs`: there is no
+  `entitlement_now`, `open_checkout`, `open_policy`) and all five of `lms_link.rs`: there is no
   `ConsoleState` yet, so no command that needs one can be called.
 ```
 
@@ -411,8 +416,9 @@ DEST_NEW = "C:\\Users\\Ada\\Knowlu\\Spring 2027"
 # something reached this machine's disk before the user said go.
 BEFORE_FINISH_OK = {"launch_state", "pick_folder", "sign_up", "sign_in", "send_magic_link",
                     "verify_email_code", "entitlement_now", "open_checkout", "open_policy",
-                    "open_lms_window", "capture_calendar_link", "paste_calendar_link",
-                    "close_lms_window", "store_credentials", "retarget_credentials"}
+                    "open_lms_window", "capture_calendar_link", "capture_courses",
+                    "paste_calendar_link", "close_lms_window", "discover_coursework",
+                    "store_credentials", "retarget_credentials"}
 ```
 
 `FAKE`'s invoke recorder gains the C1 commands (the `launch_state` reply carries the renamed folder keys):
@@ -423,7 +429,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'wizard', profiles: [], machine: 'M',
       tz: 'America/Chicago', default_parent: 'C:\\Users\\Ada\\Knowlu',
       default_backup: 'C:\\Users\\Ada\\Knowlu\\Backups',
-      campuses: [{ key: 'none', label: 'None' }, { key: 'university-of-alabama', label: 'University of Alabama' }] }); }
+      }); }
   if (cmd === 'sign_up' || cmd === 'sign_in') {
     return (args.email || '').indexOf('fail') === 0
       ? Promise.resolve({ ok: false, error: 'Invalid login credentials', account_id: null })
@@ -434,11 +440,19 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'entitlement_now') { return Promise.resolve({ ok: true, error: null, status: 'trialing', plan: 'monthly', current_period_end: null }); }
   if (cmd === 'open_policy') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'open_lms_window') { return Promise.resolve({ ok: true, error: null, opened: true, session_dir: 'T:\\tmp\\lms' }); }
+  if (cmd === 'timezone_for_state') { return Promise.resolve({ ok: true, error: null, timezone: 'America/Chicago' }); }
   if (cmd === 'capture_calendar_link') {
     return Promise.resolve({ ok: true, error: null, link: { url: 'https://lms.example.invalid/feed/a.ics', events: 12, courses: 4 } }); }
   if (cmd === 'paste_calendar_link') {
     return Promise.resolve({ ok: true, error: null, link: { url: 'https://lms.example.invalid/feed/a.ics', events: 12, courses: 4 } }); }
   if (cmd === 'close_lms_window') { return Promise.resolve({ ok: true, error: null }); }
+  if (cmd === 'capture_courses') {
+    return Promise.resolve({ ok: true, error: null, typed: false,
+      courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100' }] }); }
+  if (cmd === 'discover_coursework') {
+    return Promise.resolve({ ok: true, error: null, note: null, rows: [
+      { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
+      { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
   if (cmd === 'store_credentials') {
     return (args.user || '').indexOf('fail') === 0
       ? Promise.resolve({ ok: false, error: 'credential write failed for ' + args.source })
@@ -495,10 +509,16 @@ def check(page) -> list:
     # 5. The calendars panel: BOTH calendars, before logins and Gmail (spec §11a).
     page.click("#wiz-next"); page.wait_for_timeout(150)
     if page.is_hidden("#wiz-calendars"): bad.append("Next did not reach the calendars panel")
-    if not page.query_selector("#wiz-calendars #wiz-campus"): bad.append("the campus radios are not on the calendars panel")
-    page.check('#wiz-campus input[value="university-of-alabama"]'); page.wait_for_timeout(120)
+    if not page.query_selector("#wiz-calendars #wiz-school"): bad.append("the school search is not on the calendars panel")
+    # R-OB-4: the school is typed, not picked off two radios. Three letters, one hit, one click.
+    page.fill("#wiz-school", "alabama"); page.wait_for_timeout(250)
+    hits = page.query_selector_all("#wiz-school-hits [data-school]")
+    if not hits: bad.append("typing a school name found nothing in campuses.json")
+    else: hits[0].click()
+    page.wait_for_timeout(200)
+    if "Alabama" not in page.input_value("#wiz-school"): bad.append("picking a school did not fill the field")
     page.click("#wiz-lms-open"); page.wait_for_timeout(400)
-    if (first_args(page, "open_lms_window") or {}).get("campus") != "university-of-alabama":
+    if (first_args(page, "open_lms_window") or {}).get("unitid") != "100751":
         bad.append("the sign-in window was opened for the wrong school")
     if "12 assignments" not in page.inner_text("#wiz-lms-state"): bad.append("the captured feed was not summarised")
     # …and the personal one, by its secret address, under its own kind.
@@ -511,6 +531,11 @@ def check(page) -> list:
         bad.append("the personal calendar was not summarised")
     if not page.query_selector("#wiz-google[disabled]"):
         bad.append("the Google placeholder must be present and inert in C1")
+    # R-OB-2: the captured class list is on this panel, with a typed fallback beside it.
+    if page.is_hidden("#wiz-courses"): bad.append("the class list did not appear after the sign-in")
+    if "CS 100" not in page.inner_text("#wiz-course-rows"): bad.append("the captured course is not listed")
+    page.fill("#wiz-course-add", "GN 103"); page.click("#wiz-course-add-go"); page.wait_for_timeout(120)
+    if "GN 103" not in page.inner_text("#wiz-course-rows"): bad.append("a typed course was not added")
 
     # 6. Coursework logins: half a pair is a typo, not a choice; a failed write keeps the user here.
     page.click("#wiz-next"); page.wait_for_timeout(200)
@@ -526,8 +551,19 @@ def check(page) -> list:
     if page.is_hidden("#wiz-logins"): bad.append("a failed credential write advanced anyway")
     if page.input_value("#wiz-zy-pass") == "": bad.append("a failed write cleared the fields the user must retype")
     page.fill("#wiz-zy-user", "a@example.invalid")
+    # R-OB-1: the first Next after a successful store runs discovery and STAYS on the panel with the
+    # rows; the second one moves on. A wizard that took the password and skipped the mapping is the
+    # run this exists because of.
+    page.click("#wiz-next"); page.wait_for_timeout(400)
+    if page.is_hidden("#wiz-logins"): bad.append("the mapping step was skipped after the credentials were stored")
+    if "discover_coursework" not in names(page): bad.append("discovery did not run after the credentials were stored")
+    if page.is_hidden("#wiz-map"): bad.append("the mapping rows did not appear")
+    rows = page.inner_text("#wiz-map-rows")
+    if "UACS100Fall2026" not in rows or "2102121" not in rows: bad.append(f"the discovered sources are not listed: {rows!r}")
+    if page.input_value('[data-course-for="0"]') != "CS 100": bad.append("the suggestion was not pre-filled")
+    page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
-    if page.is_hidden("#wiz-gmail"): bad.append("a stored credential did not advance to the Gmail panel")
+    if page.is_hidden("#wiz-gmail"): bad.append("a confirmed mapping did not advance to the Gmail panel")
     if page.input_value("#wiz-zy-pass") != "": bad.append("the password field was not cleared")
     cred_vault = page.evaluate("(window.__CALLS.filter(c => c[0] === 'store_credentials').slice(-1)[0] || [null, {}])[1].vault || ''")
     if cred_vault != DEST_OLD: bad.append(f"store_credentials named {cred_vault!r}, not {DEST_OLD!r}")
@@ -575,7 +611,17 @@ def check(page) -> list:
         if "backup_dir" in plan: bad.append("the plan still carries a backup folder")
         if not str(plan.get("ics_url") or "").endswith(".ics"): bad.append("the plan did not carry the captured feed")
         if not str(plan.get("personal_calendar") or "").endswith(".ics"): bad.append("the plan did not carry the personal calendar")
-        if plan.get("campus") != "university-of-alabama": bad.append("the plan did not carry the campus")
+        if ((plan.get("campus_choice") or {}).get("unitid")) != "100751": bad.append("the plan did not carry the school")
+        zy = plan.get("zybooks_courses") or []
+        if not any(b.get("code") == "UACS100Fall2026" and b.get("label") == "CS 100" for b in zy):
+            bad.append(f"the plan did not carry the zyBooks mapping: {zy!r}")
+        vh = plan.get("vhl_sections") or []
+        if not any(v.get("section") == "2102121" and v.get("label") == "GN 103" for v in vh):
+            bad.append(f"the plan did not carry the VHL mapping: {vh!r}")
+        if not any(c[0] == "CS 100" for c in (plan.get("course_map") or [])):
+            bad.append("the plan did not carry the course map")
+        if not any(c.get("code") == "UACS100Fall2026" for c in (plan.get("courses") or [])):
+            bad.append("the plan did not carry the enrolled courses")
         if plan.get("zybooks") is not True: bad.append("the plan did not record that a zyBooks login was stored")
         if plan.get("timezone") != "America/Chicago": bad.append("the plan did not carry the timezone")
         if plan.get("slots") != ["09:00", "18:00"]: bad.append(f"the plan carried slots {plan.get('slots')!r}")
@@ -609,20 +655,339 @@ Pin `denoland/setup-deno` by full commit SHA, as `engine/tests/workflows.rs::eve
 
 ### H8 (Task 21) — `CLAUDE.md`, two edits
 
-The "Knowlu (the app)" section's command-count sentence becomes: *"**Tauri commands, recounted 2026-09-\<dd\>** from the two `generate_handler!` lists in `app/src/main.rs`: the console window registers **43**, the vault-less picker/wizard window **23** — 55 distinct. Commands live beside the module they serve (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one file. Recount before quoting a number."*
+The "Knowlu (the app)" section's command-count sentence becomes: *"**Tauri commands, recounted 2026-09-\<dd\>** from the two `generate_handler!` lists in `app/src/main.rs`: the console window registers **43**, the vault-less picker/wizard window **27** — 59 distinct. Commands live beside the module they serve (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one file. Recount before quoting a number."*
 
 And a new bullet after the credentials one: *"The account's session JWT is Credential Manager's `knowlu/<profile_id>/session` (`app/src/account.rs`), moved there at onboarding from a pre-vault `knowlu/pending/session` entry; `config/cloud.yaml` names it alongside the project's `api_base`, its public `anon_key` and the `account_id`. Entitlement is cached at `profiles\<id>\entitlement.json` with a 72-hour grace, and past it every cloud step is a named skipped step, never a failure."*
 
 ---
 
-### H9 (mid-stream, at Task 13 step 3) — `app/src/main.rs`, the four `lms_link` commands, early
+### H9 (mid-stream, at Task 13 step 3) — `app/src/main.rs`, the five `lms_link` commands, early
 
 Task 13's spike opens a window, and a window cannot be opened from a command that is not registered.
-This is the **only mid-stream pause in the plan**: apply the `lms_link` third of H3 — the four
+This is **one of two mid-stream pauses in the plan** (the other is H11: `include_str!` makes `app/campuses.json` compile-blocking, so the controller runs the generator and commits the file on the branch's base when Task 14c asks, before that task's first `cargo test`): apply the `lms_link` fifth of H3 — the five
 commands in the shell's `generate_handler!` list, and `lms_link` in the `use` line — on the branch's
-base when Task 13 asks, and leave the rest of H3 for merge. The four are
-`lms_link::open_lms_window`, `lms_link::capture_calendar_link`, `lms_link::paste_calendar_link`,
-`lms_link::close_lms_window`, spelled exactly as in H3's list above.
+base when Task 13 asks, and leave the rest of H3 for merge. The five are
+`lms_link::open_lms_window`, `lms_link::capture_calendar_link`, `lms_link::capture_courses`,
+`lms_link::paste_calendar_link`, `lms_link::close_lms_window`, spelled exactly as in H3's list above.
+
+---
+
+### H10 (Task 14a) — `engine/`, one new subcommand: `coursework-discover`
+
+**Why an engine change at all.** `coursework --dry-run` fetches and syncs in dry mode; what it *says*
+about an unmapped book is a warning on stdout (`zybook UACS100Fall2026 not in config; skipped`), and
+the wizard would have to parse English to learn the codes. It also needs a vault, which the wizard does
+not have yet. So the discovery is its own read-only subcommand that takes credential targets, writes
+nothing, and answers in JSON. **Always exits 0** — no credential, no network and no source are normal
+outcomes for an app that is still onboarding.
+
+`engine/src/main.rs`, in the `Command` enum:
+
+```rust
+    /// What the coursework sources can see, without writing anything: the zyBooks books and the VHL
+    /// sections this account reaches, and — with `--vault` — whether that vault's `config/ingest.yaml`
+    /// already places each one. One JSON object on stdout; always exit 0.
+    CourseworkDiscover {
+        /// Optional: with it, the credential targets and `enabled` flags come from the vault's own
+        /// config and `mapped` is computed. Without it (the wizard, whose vault does not exist yet)
+        /// the targets come from the two flags and `mapped` is always false.
+        #[arg(long)]
+        vault: Option<PathBuf>,
+        #[arg(long = "zybooks-target")]
+        zybooks_target: Option<String>,
+        #[arg(long = "vhl-target")]
+        vhl_target: Option<String>,
+    },
+```
+
+…and in the dispatch:
+
+```rust
+        Command::CourseworkDiscover { vault, zybooks_target, vhl_target } => {
+            println!("{}", coursework::discover_json(vault.as_deref(), zybooks_target.as_deref(), vhl_target.as_deref()));
+            0
+        }
+```
+
+`engine/src/vhl.rs` — the discovery half of `parse_dashboard`, which needs no `sections:` config
+because finding out what that config should say is the point:
+
+```rust
+/// `(course_id, section_id)` for every summary the dashboard carries, first-seen order, deduplicated.
+/// The summaries name no course **title** — only `/courses/<id>/sections/<id>/` — so onboarding shows
+/// the pair and asks the student for the code and the label rather than inventing one.
+pub fn discover_sections(html: &str) -> Vec<(String, String)> {
+    static COURSE_SECTION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"/courses/(\d+)/sections/(\d+)/").unwrap());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for caps in COURSE_SECTION.captures_iter(html) {
+        let pair = (caps[1].to_string(), caps[2].to_string());
+        if !out.contains(&pair) {
+            out.push(pair);
+        }
+    }
+    out
+}
+```
+
+…with its test beside the committed fixture:
+
+```rust
+    #[test]
+    fn discover_sections_finds_every_course_and_section_once() {
+        let pairs = discover_sections(&dashboard_html());
+        assert!(pairs.contains(&("1623220".to_string(), "2102121".to_string())), "{pairs:?}");
+        let mut sorted = pairs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), pairs.len(), "a pair was reported twice");
+    }
+```
+
+`engine/src/coursework.rs` — the subcommand's body:
+
+```rust
+/// Everything onboarding needs to build a mapping, and nothing else. **Never writes**, never starts a
+/// run record, and always returns a JSON object — a source that could not be reached is an `errors`
+/// entry, not an exit code, because the wizard's answer to "we could not reach zyBooks" is to let the
+/// student type the mapping, not to stop.
+#[cfg(windows)]
+pub fn discover_json(vault: Option<&Path>, zybooks_target: Option<&str>, vhl_target: Option<&str>) -> String {
+    use serde_json::json;
+    let config: Mapping = vault
+        .and_then(|v| load_coursework_config(v).ok())
+        .map(|(cfg, _)| cfg)
+        .unwrap_or_default();
+    let block = match crate::yaml::get(&config, "coursework") {
+        Some(Yaml::Mapping(map)) => map,
+        _ => Mapping::new(),
+    };
+    let source = |name: &str| -> Mapping {
+        match crate::yaml::get(&block, name) {
+            Some(Yaml::Mapping(map)) => map,
+            _ => Mapping::new(),
+        }
+    };
+    let mut errors: Vec<String> = Vec::new();
+
+    // ---- zyBooks
+    let zycfg = source("zybooks");
+    let zytarget = zybooks_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&zycfg, "credential_target", ""));
+    let mut zybooks: Vec<serde_json::Value> = Vec::new();
+    if !zytarget.is_empty() {
+        let courses = match crate::yaml::get(&zycfg, "courses") {
+            Some(Yaml::Mapping(map)) => map,
+            _ => Mapping::new(),
+        };
+        let ignore: Vec<String> = match crate::yaml::get(&zycfg, "ignore") {
+            Some(Yaml::Sequence(items)) => items.iter().map(yaml_str).collect(),
+            _ => Vec::new(),
+        };
+        match (|| -> Result<Vec<String>, SourceError> {
+            let cred = crate::wincred::read_credential(&zytarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            let (token, user_id) =
+                crate::zybooks::signin(&cred.username, cred.password.expose(), None)?;
+            crate::zybooks::fetch_zybook_codes(&token, user_id, None)
+        })() {
+            Ok(codes) => {
+                for code in codes {
+                    let routing = route_zybook(&code, &courses, &ignore);
+                    zybooks.push(json!({
+                        "code": code,
+                        "mapped": matches!(routing, BookRouting::Mapped(_)),
+                        "ignored": matches!(routing, BookRouting::Ignored),
+                    }));
+                }
+            }
+            Err(err) => errors.push(format!("zybooks: {err}")),
+        }
+    }
+
+    // ---- VHL
+    let vhlcfg = source("vhl");
+    let vhltarget = vhl_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&vhlcfg, "credential_target", ""));
+    let mut vhl: Vec<serde_json::Value> = Vec::new();
+    if !vhltarget.is_empty() {
+        let sections = match crate::yaml::get(&vhlcfg, "sections") {
+            Some(Yaml::Mapping(map)) => map,
+            _ => Mapping::new(),
+        };
+        match (|| -> Result<String, SourceError> {
+            let cred = crate::wincred::read_credential(&vhltarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            crate::vhl::login_and_fetch_dashboard(
+                &cred.username,
+                cred.password.expose(),
+                &cfg_str(&vhlcfg, "base_url", "https://www.vhlcentral.com"),
+                None,
+            )
+        })() {
+            Ok(html) => {
+                for (course_id, section_id) in crate::vhl::discover_sections(&html) {
+                    let mapped = matches!(
+                        crate::yaml::get(&sections, &section_id),
+                        Some(Yaml::Mapping(ref inner)) if !inner.is_empty()
+                    );
+                    vhl.push(json!({ "course_id": course_id, "section": section_id, "mapped": mapped }));
+                }
+            }
+            Err(err) => errors.push(format!("vhl: {err}")),
+        }
+    }
+
+    crate::ledger::dumps_value(&json!({ "zybooks": zybooks, "vhl": vhl, "errors": errors }))
+}
+
+/// The credential store is Windows-only, so discovery is too — and it says so rather than reporting
+/// an empty semester, which is the same rule `fetch_zybooks` follows.
+#[cfg(not(windows))]
+pub fn discover_json(_vault: Option<&Path>, _zybooks_target: Option<&str>, _vhl_target: Option<&str>) -> String {
+    use serde_json::json;
+    crate::ledger::dumps_value(&json!({
+        "zybooks": [], "vhl": [],
+        "errors": ["credential store unavailable on this platform"],
+    }))
+}
+```
+
+**Nothing else in `engine/` changes**: no run record, no journal record, no write path, and none of the
+eight frozen references is read or regenerated. `CLAUDE.md`'s command list gains one line at merge —
+`coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — beside `coursework`.
+
+---
+
+
+### H11 (Task 14c) — `scripts/campuses-from-ipeds.ps1`, the generator for `app/campuses.json`
+
+**Applied mid-stream, like H3's `lms_link` fifth:** `include_str!("../campuses.json")` makes the asset compile-blocking, so the controller runs this script and commits `app/campuses.json` on the branch's base when Task 14c asks, before that task's first `cargo test`; the rest of the hand-offs wait for merge.
+
+`scripts/` is the controller's, and so is the **output** — `app/campuses.json`, which this script
+writes and C1 only reads. It is committed: the wizard has to work on a first run with no network, which
+is most first runs. It sits beside `tauri.conf.json` rather than under `app/static/` because the page
+never loads it (the app's own CSP forbids a `fetch` of it, and `campus_search` answers from Rust), and
+a 400 KB file in `frontendDist` would ship twice. Regenerated **by hand, once a year**, when NCES
+publishes the next `HD####` file.
+
+**The source, verified 2026-09-09.** The federal IPEDS *Institutional Characteristics* file, published
+by the National Center for Education Statistics: `https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip`
+— a ~1 MB zip holding `HD2024.csv`, **6,072 rows plus a header**, **latin-1** (a BOM sits in front of
+`UNITID`). It is US federal government data and therefore public domain; no licence file ships with the
+asset because none is required, and the header records where it came from so that stays checkable.
+
+The columns this uses: `UNITID`, `INSTNM`, `CITY`, `STABBR`, `WEBADDR`, `ICLEVEL` (1 = four-year,
+2 = two-year, 3 = less than two-year), `CYACTIVE` (1 = active). `SECTOR`, `CONTROL`, `ZIP`, `LATITUDE`
+and `LONGITUD` are in the file and are **not** used — a student picking their school needs a name, a
+town and a state, and every extra column is bytes in an asset that ships in the installer.
+
+```powershell
+# scripts/campuses-from-ipeds.ps1 -- regenerate app/campuses.json from IPEDS.
+#
+# Run by hand, about once a year, when NCES publishes the next HD file. The output is COMMITTED: the
+# wizard's school typeahead has to work on a first run with no network, which is most first runs.
+#
+# US federal data (NCES), public domain. The header line records which file this came from and when,
+# so "is this current?" is answerable without re-downloading it.
+#
+# PowerShell 5.1. `Import-Csv -Encoding Default` reads the ANSI code page, which is what latin-1 means
+# on a US Windows install -- the file has accented institution names and reading it as UTF-8 mangles
+# them into replacement characters that then ship to every user.
+[CmdletBinding()]
+param(
+  [string]$Url = "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip",
+  [string]$Csv = "HD2024.csv",
+  [string]$Out = "app/campuses.json"
+)
+$ErrorActionPreference = "Stop"
+
+$work = Join-Path $env:TEMP ("ipeds-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory $work | Out-Null
+try {
+  $zip = Join-Path $work "hd.zip"
+  Write-Output "downloading $Url"
+  Invoke-WebRequest -Uri $Url -OutFile $zip
+  Expand-Archive -Path $zip -DestinationPath $work -Force
+  $csvPath = Join-Path $work $Csv
+  if (-not (Test-Path $csvPath)) { throw "$Csv is not in that zip" }
+
+  $rows = Import-Csv -Path $csvPath -Encoding Default
+  Write-Output ("read {0} rows from {1}" -f $rows.Count, $Csv)
+
+  # The first column's name carries the file's BOM, so `$_.UNITID` misses on some hosts. Bind the
+  # property by position once instead of trusting the name.
+  $unitidName = ($rows[0].PSObject.Properties | Select-Object -First 1).Name
+
+  $keep = $rows | Where-Object {
+    $_.CYACTIVE -eq "1" -and ($_.ICLEVEL -eq "1" -or $_.ICLEVEL -eq "2")
+  }
+  Write-Output ("keeping {0} active two- and four-year institutions" -f $keep.Count)
+
+  # A generic list, not `@()` with `+=`: the latter reallocates the whole array on each of six
+  # thousand iterations. It finishes either way and this runs once a year — but one line removes the
+  # only quadratic thing in the script.
+  $campuses = New-Object System.Collections.Generic.List[object]
+  foreach ($r in $keep) {
+    # `WEBADDR` is inconsistent: some rows carry a scheme, some a path, some a trailing slash, some
+    # nothing at all. Keep the HOST and nothing else -- partly because that is all the wizard shows,
+    # and partly because `app/tests/static_assets.rs` forbids an `http(s)://` literal anywhere under
+    # `app/static/`, and this file lives there.
+    # `$webhost`, not `$host`: `$Host` is a PowerShell automatic variable (the PSHost object), and
+    # assigning to it shadows it in this scope. It usually works and PSScriptAnalyzer flags it, which
+    # is one rename too many arguments.
+    $webhost = ""
+    $raw = ($r.WEBADDR + "").Trim()
+    if ($raw) {
+      $h = $raw -replace '^\s*https?://', ''
+      $h = $h -replace '^www\.', ''
+      $h = ($h -split '[/?#]')[0]
+      $webhost = $h.ToLowerInvariant().Trim()
+      if ($webhost -match '\s') { $webhost = "" }
+    }
+    [void]$campuses.Add(@(
+      [int]$r.$unitidName,
+      ($r.INSTNM + "").Trim(),
+      ($r.CITY + "").Trim(),
+      ($r.STABBR + "").Trim(),
+      $webhost
+    ))
+  }
+
+  # One row per line, compact: about 400 KB, diffable, and a new school shows up as one added line
+  # rather than a reflowed file.
+  $sb = New-Object System.Text.StringBuilder
+  # **No URL in the header.** `app/tests/static_assets.rs` asserts the whole file carries no
+  # `http(s)://` — the same rule that makes this script strip schemes off `WEBADDR` — and a header
+  # naming the download would break it on line one. The source is named in words; the URL lives in
+  # this script's own `-Url` default, which is where somebody looking to regenerate it will look.
+  [void]$sb.AppendLine(('{{"source":"NCES IPEDS {0}","retrieved":"{1}","count":{2},"campuses":[' -f `
+    $Csv, (Get-Date -Format "yyyy-MM-dd"), $campuses.Count))
+  for ($i = 0; $i -lt $campuses.Count; $i++) {
+    $line = ConvertTo-Json $campuses[$i] -Compress
+    if ($i -lt $campuses.Count - 1) { $line += "," }
+    [void]$sb.AppendLine($line)
+  }
+  [void]$sb.AppendLine("]}")
+
+  $full = Join-Path (Get-Location) $Out
+  # LF, and UTF-8 without a BOM: `.gitattributes` says `* text=auto eol=lf`, and a BOM in a file the
+  # page fetches is a parse error in some webviews.
+  $text = $sb.ToString() -replace "`r`n", "`n"
+  [System.IO.File]::WriteAllText($full, $text, (New-Object System.Text.UTF8Encoding($false)))
+  $kb = [math]::Round((Get-Item $full).Length / 1KB)
+  Write-Output ("wrote {0} ({1} schools, {2} KB)" -f $Out, $campuses.Count, $kb)
+  if ($kb -gt 600) { throw "campuses.json is ${kb} KB; the guard in app/tests/onboarding.rs is 600" }
+}
+finally {
+  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+```
+
+**When the next HD file lands**, the only change is `-Url` and `-Csv`; the header records both, so the
+asset says which year it is without anyone remembering.
 
 ---
 
@@ -5678,10 +6043,40 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
     };
+    // **The page sends course CODES; the slugs are made here.** `CS 100` is what a student types and
+    // what a title says; `cs-100` is the vault's own name for it — the note's stem, every task's
+    // `course:` field, and the value `judge::Heuristics::knows_course` tests. A page that invented
+    // vault identifiers would be a page deciding what the engine may know (R-OB-1, R-OB-2).
+    // The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in `scaffold.rs`).
+    let slug = knowlu_engine::ingest::slugify;
+    let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
+        .filter(|b| !b.label.trim().is_empty())
+        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.label), label: b.label.clone() })
+        .collect();
+    let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
+        .filter(|v| !v.label.trim().is_empty())
+        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.label), label: v.label.clone() })
+        .collect();
+    let course_map: Vec<(String, String)> = plan.course_map.iter()
+        .map(|(code, _)| (code.clone(), slug(code)))
+        .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
+        .collect();
+    let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
+        .map(|c| crate::scaffold::CourseSeed {
+            code: c.code.clone(),
+            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
+            slug: if c.slug.trim().is_empty() { slug(&c.code) } else { c.slug.clone() },
+        })
+        .filter(|c| !c.slug.is_empty())
+        .collect();
     let vp = crate::scaffold::VaultPlan {
         profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
         personal_calendar: plan.personal_calendar.clone().filter(|u| !u.trim().is_empty()),
+        zybooks_courses,
+        vhl_sections,
+        course_map,
+        courses,
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
@@ -5728,6 +6123,14 @@ Expected: `scaffold` and `onboarding` green with the three new tests (`cloud.yam
 **Quinn is present at the laptop for this one**, because the only way to answer it is a real campus SSO login with Duo. Spec §11a, ruled 2026-09-09: *the student signs in on the campus's own page, inside a window we opened; the app then navigates that window to the calendar's share page and keeps only the link.* **The standing rule is unchanged: Knowlu never requests campus SSO credentials.** Nothing in this task or the next puts a username or password field on a Knowlu page; the student types into the university's own page, and the app never sees, stores or replays what they typed.
 
 **Throwaway allowed.** What is kept: this task's `Outcome:` line, and whichever of the three capture bodies it selects (Task 14 keeps exactly one).
+
+**Two questions, one login.** The calendar link is the first; **the enrolled course list is the second**
+(§11a R-OB-2), and it is asked in the same sitting because it needs the same signed-in window and
+Quinn's presence costs the same either way. Blackboard Ultra publishes the signed-in student's own
+enrolment at `/learn/api/public/v1/users/me/courses`; Canvas at `/api/v1/courses`; both are the
+student's own data, read from the student's own session, and neither needs a credential of ours. Record
+a **separate** go/no-go for it: the calendar can prove out while the course list does not, and then
+Task 14b ships its typed-codes fallback and nothing else changes.
 
 Three outcomes, decided by a real run:
 
@@ -5841,9 +6244,11 @@ Expected: it compiles. **If `data_directory`, `navigate` or `url` does not exist
   2. **B:** if not, check whether `app.get_webview_window(WINDOW).unwrap().cookies_for_url(u)` compiles and returns the LMS session cookies (add three lines to `capture_calendar_link` for the run and delete them after). If it does, fetch the campus feed endpoint with `ureq` carrying them and record whether the reply contains a feed URL.
   3. **C:** if neither, record what the share page *does* show and whether the link is selectable and copyable from inside our window.
 
+- [ ] **Step 4a: The course list, in the same window, before you close it.** With Quinn still signed in, drive the window to `https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses` and press **Spike: read**. Record: does the window reach it at all (or redirect to a login, which means the API is on a different session than the UI); does the body come back as JSON; and — verbatim — the **first course object's keys**, because `lms_link::courses_from_json` is written against them. If outcome **A** was chosen for the calendar, note whether the address alone is enough here (it is not — a JSON body is not a URL) and which of the outcome-**B** cookie handover or a `window.eval` read gets the body out. Write the answer as its own line: `Courses: yes|no — <endpoint>, <first object's keys>, <method>`.
+
 - [ ] **Step 5: Do the same for Canvas.** Quinn has no Canvas account; use the public demo (`https://canvas.instructure.com/`) or any Canvas instance he can sign in to, and record whether `Calendar → Calendar Feed` puts the `.ics` URL in the address or only in a dialog. If no Canvas login is available, record **"not tested"** — do not guess. Canvas then ships on the fallback path until somebody can test it, and that is a true statement rather than a broken feature.
 
-- [ ] **Step 6: Write the outcome.** At the top of this task: `Outcome: A|B|C — <which Tauri calls exist; what the UA run showed, step by step; what the Canvas run showed or that it was not tested; the exact campus URLs that worked>`. Also record the **calendar page URL** and the **share/feed control's URL** for UA, verbatim: Task 14's `capture` navigates to them by name.
+- [ ] **Step 6: Write the outcome.** At the top of this task: `Outcome: A|B|C — <which Tauri calls exist; what the UA run showed, step by step; what the Canvas run showed or that it was not tested; the exact campus URLs that worked>` and, on its own line, `Courses: yes|no — …` from step 4a. Task 14b's `course_list_url` and its body-reading half are written from that second line. Also record the **calendar page URL** and the **share/feed control's URL** for UA, verbatim: Task 14's `capture` navigates to them by name.
 
 - [ ] **Step 7: Remove the spike surface.** Delete the two buttons, the `<pre>` and their handlers from `index.html` and `console.js`; leave `lms_link.rs`'s window scaffolding, which Task 14 builds on. `cargo test -p knowlu` green, 0 warnings.
 
@@ -6351,6 +6756,1239 @@ pub fn paste_calendar_link(kind: String, url: String) -> Value {
 **All four `lms_link` commands ship, whichever outcome Task 13 chose** — `open_lms_window`, `capture_calendar_link`, `paste_calendar_link`, `close_lms_window`. Outcome C makes `capture_calendar_link` navigate and return `paste: true`; the panel calls the same four either way, so the wizard's step set and the hand-off lists do not depend on the outcome.
 
 ---
+### Task 14a: The coursework mapping — the wizard turns a discovered book into a course (R-OB-1)
+
+**Precondition: hand-off H10** (the engine's `coursework-discover`) applied on the branch's base. Ask
+the controller for it at step 1, the same way Task 13 asks for H9.
+
+Quinn's first slot is the specification: the wizard had stored both logins and written
+`coursework.zybooks.courses: {}` and `coursework.vhl.sections: {}`, so `coursework` said
+`zybook UACS100Fall2026 not in config; skipped`, `section 2102121 not in config; skipped`, and then
+`0 assignments parsed; treating as failure` — three warnings for one missing sentence. A wizard that
+takes a password and then throws the work away is worse than one that never asked.
+
+**Files:**
+- Modify: `app/src/scaffold.rs`, `app/src/onboarding.rs`
+- Test: `app/tests/scaffold.rs`, `app/tests/onboarding.rs`
+
+**Interfaces:**
+- Consumes: H10's `knowlu-engine coursework-discover`; `scheduler::engine_exe()`; `credentials::target_for`.
+- Produces: `scaffold::{BookMapping, SectionMapping, suggest_course}` — and **no `slugify`**: the engine's `knowlu_engine::ingest::slugify` is the one this plan calls, everywhere; `scaffold::VaultPlan`'s
+  `zybooks_courses: Vec<BookMapping>`, `vhl_sections: Vec<SectionMapping>` and
+  `course_map: Vec<(String, String)>`; a real `coursework:` block out of `ingest_yaml`; and
+  `onboarding::discover_coursework`. Task 17's logins panel calls the command and fills the three
+  `WizardPlan` fields.
+
+- [ ] **Step 1: Write the failing tests** — append to `app/tests/scaffold.rs`:
+
+```rust
+#[test]
+fn a_zybook_code_suggests_the_course_it_obviously_is() {
+    use knowlu::scaffold::suggest_course;
+    use knowlu_engine::ingest::slugify;
+    // The real one, from Quinn's own account: an institution prefix, a code, a term.
+    assert_eq!(suggest_course("UACS100Fall2026").as_deref(), Some("CS 100"));
+    assert_eq!(suggest_course("CS200Spring2027").as_deref(), Some("CS 200"));
+    assert_eq!(suggest_course("UAMATH125Fall2026").as_deref(), Some("MATH 125"));
+    // No code in it at all: the panel shows the raw name and the student types the course.
+    assert_eq!(suggest_course("HowToUseZyBooks2"), None);
+    assert_eq!(suggest_course(""), None);
+    // The engine's, not a twin: this is the function that decides the note's stem and the key
+    // `judge::Heuristics::knows_course` matches, and a second one would diverge in silence.
+    assert_eq!(slugify("CS 100"), "cs-100");
+    assert_eq!(slugify("GN 103 Hausaufgaben"), "gn-103-hausaufgaben");
+    // …including the two behaviours a naive twin gets wrong: the 60-character cap, and a fallback
+    // that is never the empty string (which would write `courses/.md`).
+    assert_eq!(slugify("!!!"), "item");
+    assert_eq!(slugify(&"x".repeat(80)).len(), 60);
+}
+
+#[test]
+fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
+    use knowlu::scaffold::{ingest_yaml, BookMapping, SectionMapping, VaultPlan};
+    let mut p = VaultPlan {
+        profile_id: "profile_0123456789".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        zybooks: true,
+        vhl: true,
+        zybooks_courses: vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }],
+        vhl_sections: vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103 Hausaufgaben".into() }],
+        course_map: vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())],
+        courses: Vec::new(),
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+
+    // The three things the engine actually reads, in the shape `route_zybook` and
+    // `vhl::parse_dashboard` expect — a non-empty mapping under the code, with `course` and `label`.
+    assert!(text.contains("    courses:\n      'UACS100Fall2026':\n        course: 'cs-100'\n        label: 'CS 100'\n"), "{text}");
+    assert!(text.contains("    sections:\n      '2102121':\n        course: 'gn-103'\n        label: 'GN 103 Hausaufgaben'\n"), "{text}");
+    // zyBooks' own onboarding book has zero assignments and is never coursework. In `ignore:` it is
+    // skipped silently; out of it, it is a WARN on every healthy run forever.
+    assert!(text.contains("    ignore:\n      - 'HowToUseZyBooks2'\n"), "{text}");
+    // …and the blocks `parse_assignments` needs, or every zyBooks item is uncategorised.
+    for needed in ["    categories:\n      HW: hw\n", "      minutes_per_section: 6\n", "    importance:\n      hw: 2\n"] {
+        assert!(text.contains(needed), "missing {needed:?} in {text}");
+    }
+    // The course map the ICS ingest and tier-1 judgment both read.
+    assert!(text.contains("course_map:\n  'CS 100': 'cs-100'\n  'GN 103': 'gn-103'\n"), "{text}");
+
+    // An empty mapping is an EMPTY block, not `courses: {}` with nothing under it — `route_zybook`
+    // treats a falsy mapping as unmapped either way, but a config that lies about what it maps is
+    // what produced the first slot this task exists because of.
+    p.zybooks_courses.clear();
+    p.vhl_sections.clear();
+    p.course_map.clear();
+    let bare = ingest_yaml(&p).expect("ingest.yaml");
+    assert!(bare.contains("    courses: {}\n") && bare.contains("    sections: {}\n"), "{bare}");
+    assert!(bare.contains("course_map: {}\n"), "{bare}");
+}
+```
+
+…and to `app/tests/onboarding.rs`:
+
+```rust
+/// The discovery reply the panel renders, parsed and suggested — driven directly, because spawning
+/// the engine needs a credential this test must not have.
+#[test]
+fn discovery_output_becomes_rows_with_a_suggestion_each() {
+    use knowlu::onboarding::rows_from_discovery;
+    let json = r#"{"errors": [], "vhl": [{"course_id": "1623220", "mapped": false, "section": "2102121"}], "zybooks": [{"code": "UACS100Fall2026", "ignored": false, "mapped": false}, {"code": "HowToUseZyBooks2", "ignored": true, "mapped": false}]}"#;
+    let rows = rows_from_discovery(json);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let zy = &rows[0];
+    assert_eq!(zy.source, "zybooks");
+    assert_eq!(zy.key, "UACS100Fall2026");
+    assert_eq!(zy.suggested.as_deref(), Some("CS 100"));
+    assert!(!zy.ignored);
+    // zyBooks' onboarding book comes back flagged, so the panel can pre-tick "ignore" rather than
+    // asking a student what course "HowToUseZyBooks2" is.
+    assert!(rows[1].ignored);
+    assert_eq!(rows[1].suggested, None);
+    let vhl = &rows[2];
+    assert_eq!(vhl.source, "vhl");
+    assert_eq!(vhl.key, "2102121");
+    // The dashboard names no course text at all — only ids — so there is nothing to suggest and the
+    // panel asks. Inventing one here would be a guess wearing a suggestion's clothes.
+    assert_eq!(vhl.suggested, None);
+    assert_eq!(vhl.detail.as_deref(), Some("course 1623220"));
+
+    // A source that could not be reached is rows we do not have, not an error the panel dies on —
+    // and the reason survives, because "your VHL password is wrong" and "try again" are different
+    // instructions.
+    use knowlu::onboarding::errors_from_discovery;
+    let payload = r#"{"errors": ["vhl: fetch failed (…)"], "vhl": [], "zybooks": [{"code": "UACS100Fall2026", "ignored": false, "mapped": false}]}"#;
+    assert_eq!(rows_from_discovery(payload).len(), 1, "zyBooks still worked");
+    assert_eq!(errors_from_discovery(payload), vec!["vhl: fetch failed (…)".to_string()]);
+    let failed = rows_from_discovery(r#"{"errors": ["zybooks: fetch failed (…)"], "vhl": [], "zybooks": []}"#);
+    assert!(failed.is_empty());
+    // …and garbage is empty too: the panel's own copy tells the student to type the mapping.
+    assert!(rows_from_discovery("not json").is_empty());
+}
+```
+
+- [ ] **Step 1a: One `VaultPlan` literal, not five.** Four tests in `app/tests/scaffold.rs` now build the same eighteen-field struct, and the next field added would touch all of them. Extract the helper first, and rewrite the existing literals to use it:
+
+```rust
+/// The plan every scaffold test starts from: no feeds, no mappings, no courses — each test sets the
+/// one or two fields it is about. `dest` decides the profile id, exactly as `create_vault_in` does.
+fn plan_for(dest: &std::path::Path) -> knowlu::scaffold::VaultPlan {
+    knowlu::scaffold::VaultPlan {
+        profile_id: knowlu::profiles::id_for(dest),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    }
+}
+```
+
+- [ ] **Step 2: Run and watch them fail.** `cargo test -p knowlu --test scaffold --test onboarding` → unresolved imports `suggest_course`, `BookMapping`, `rows_from_discovery`; `VaultPlan` missing four fields. (`slugify` resolves already — it is `knowlu_engine::ingest::slugify`, and there is no second one to write.)
+
+- [ ] **Step 3: `app/src/scaffold.rs`.** Two structs, two helpers, four `VaultPlan` fields, and a real `coursework:` block.
+
+```rust
+/// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
+/// (`UACS100Fall2026`); `course` is the slug that lands in every task's `course:` field; `label` is
+/// what a human reads in the title. The engine's `route_zybook` needs a **non-empty** mapping under
+/// the code, and `parse_assignments` reads exactly these two keys out of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookMapping {
+    pub code: String,
+    pub course: String,
+    pub label: String,
+}
+
+/// One VHL section, likewise. `section` is the id out of the dashboard's `detail_url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionMapping {
+    pub section: String,
+    pub course: String,
+    pub label: String,
+}
+
+// **There is no `slugify` here, and there must not be.** `knowlu_engine::ingest::slugify` is `pub`,
+// this crate already depends on the engine, and that function is the one that decides the
+// `courses/<slug>.md` stem `judge::Heuristics::load` reads and the key `knows_course` matches — and
+// the one `zybooks::parse_assignments` uses for `tasks/<slug>.md`. A second implementation would
+// diverge silently: the note would be written, the task would be written, and the match would simply
+// never happen. It also caps at 60 characters and falls back to `item`, where a naive twin returns an
+// empty string and writes `courses/.md`. Call the engine's.
+
+/// `UACS100Fall2026` → `CS 100`. A **suggestion**, not a decision: the student confirms or edits it,
+/// and `None` means the panel shows the raw name and asks.
+///
+/// The rule is the smallest one that fits every code this product has met: find the first run of two
+/// to four capitals followed by exactly three digits, and read that as `<LETTERS> <DIGITS>`. It reads
+/// past an institution prefix (`UA`) because the letters immediately before the digits are the
+/// subject, and it declines `HowToUseZyBooks2` because there is no three-digit number in it — which
+/// is the case that matters, since that book is zyBooks' own and is never a course.
+pub fn suggest_course(code: &str) -> Option<String> {
+    let bytes: Vec<char> = code.chars().collect();
+    for start in 0..bytes.len() {
+        let letters: String = bytes[start..].iter().take_while(|c| c.is_ascii_uppercase()).collect();
+        if letters.len() < 2 || letters.len() > 4 {
+            continue;
+        }
+        let after = start + letters.len();
+        let digits: String = bytes[after..].iter().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.len() != 3 {
+            continue;
+        }
+        // The LAST two-to-four capitals before the digits, so `UACS100` reads `CS 100` and not
+        // `UACS 100`: a four-letter run that ends at the digits is preferred only when nothing
+        // shorter also ends there, which the loop's forward order gives for free by trying the
+        // earliest start first and then continuing — so take the longest suffix of `letters`
+        // that is still 2..=4 long and ends where the digits begin.
+        let subject: String = letters.chars().rev().take(letters.len().min(4)).collect::<Vec<_>>().into_iter().rev().collect();
+        let subject = if subject.len() > 4 { subject[subject.len() - 4..].to_string() } else { subject };
+        return Some(format!("{} {}", trim_prefix(&subject), digits));
+    }
+    None
+}
+
+/// `UACS` → `CS` when a two-letter institution prefix is glued to a two-letter subject. Only the
+/// prefixes this product has actually met, and never a guess: a four-letter subject like `MATH` is
+/// left alone because it is in the list of things that are subjects.
+fn trim_prefix(subject: &str) -> String {
+    const SUBJECTS: [&str; 12] = ["MATH", "CHEM", "PHYS", "BIOL", "ECON", "HIST", "ENGL", "SPAN", "STAT", "PSYC", "ANTH", "GEOG"];
+    if subject.len() == 4 && !SUBJECTS.contains(&subject) && subject.starts_with("UA") {
+        return subject[2..].to_string();
+    }
+    subject.to_string()
+}
+```
+
+`VaultPlan` gains four fields:
+
+```rust
+    /// R-OB-1: what the student confirmed on the logins panel. Empty is honest — a wizard run with no
+    /// coursework logins has nothing to map — and it is what `ingest_yaml` writes as `{}`.
+    pub zybooks_courses: Vec<BookMapping>,
+    pub vhl_sections: Vec<SectionMapping>,
+    /// R-OB-1 and R-OB-2: `<code fragment> -> <slug>`, read by `ingest::match_course_fields` and by
+    /// `judge::Heuristics`. Every confirmed mapping contributes one, and so does every course the
+    /// sign-in window found (Task 14b).
+    pub course_map: Vec<(String, String)>,
+    /// R-OB-2: the enrolled courses, seeded as `courses/<slug>.md` notes (Task 14b).
+    pub courses: Vec<CourseSeed>,
+```
+
+…and `ingest_yaml`'s `course_map` and `coursework` halves are replaced. The `course_map: {}` line becomes:
+
+```rust
+    if p.course_map.is_empty() {
+        s.push_str("course_map: {}\n");
+    } else {
+        s.push_str("course_map:\n");
+        for (fragment, slug) in &p.course_map {
+            s.push_str(&format!("  {}: {}\n", yaml_scalar("course code", fragment)?, yaml_scalar("course slug", slug)?));
+        }
+    }
+```
+
+…and the `coursework:` block gains, inside the `if p.zybooks` arm, everything the engine reads:
+
+```rust
+        if p.zybooks {
+            let target = yaml_scalar("zybooks credential target", &crate::credentials::target_for(&p.profile_id, "zybooks"))?;
+            s.push_str(&format!("  zybooks:\n    enabled: true\n    credential_target: {target}\n"));
+            // `HowToUseZyBooks2` is zyBooks' own onboarding book: zero assignments, never coursework,
+            // and out of `ignore:` it is one WARN per healthy run forever (`route_zybook`'s own doc).
+            s.push_str("    ignore:\n      - 'HowToUseZyBooks2'\n");
+            // What `parse_assignments` reads. Without these three blocks every item is uncategorised
+            // and takes the default effort, which is the second half of the first-slot failure.
+            s.push_str("    categories:\n      HW: hw\n      Lab: lab\n      Project: project\n");
+            s.push_str("    effort:\n      minutes_per_section: 6\n      floors:\n        hw: 0.25\n        lab: 0.5\n        project: 1.0\n");
+            s.push_str("    importance:\n      hw: 2\n      lab: 2\n      project: 2\n");
+            if p.zybooks_courses.is_empty() {
+                s.push_str("    courses: {}\n");
+            } else {
+                s.push_str("    courses:\n");
+                for b in &p.zybooks_courses {
+                    s.push_str(&format!(
+                        "      {}:\n        course: {}\n        label: {}\n",
+                        yaml_scalar("zybook code", &b.code)?,
+                        yaml_scalar("zybook course", &b.course)?,
+                        yaml_scalar("zybook label", &b.label)?
+                    ));
+                }
+            }
+        }
+        if p.vhl {
+            let target = yaml_scalar("vhl credential target", &crate::credentials::target_for(&p.profile_id, "vhl"))?;
+            s.push_str(&format!("  vhl:\n    enabled: true\n    credential_target: {target}\n"));
+            s.push_str("    importance: 3\n");
+            if p.vhl_sections.is_empty() {
+                s.push_str("    sections: {}\n");
+            } else {
+                s.push_str("    sections:\n");
+                for v in &p.vhl_sections {
+                    s.push_str(&format!(
+                        "      {}:\n        course: {}\n        label: {}\n",
+                        yaml_scalar("vhl section", &v.section)?,
+                        yaml_scalar("vhl course", &v.course)?,
+                        yaml_scalar("vhl label", &v.label)?
+                    ));
+                }
+            }
+        }
+```
+
+- [ ] **Step 4: `app/src/onboarding.rs` — the discovery command and its parser.**
+
+```rust
+/// One row of the mapping panel: a thing the account can reach, and what we think it is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoveredRow {
+    /// `zybooks` or `vhl`.
+    pub source: String,
+    /// The vendor's own key: a zyBook code, or a VHL section id.
+    pub key: String,
+    /// Something to show beside the key when the key alone means nothing to a human.
+    pub detail: Option<String>,
+    /// What we think the course is. `None` means we do not know and the panel asks.
+    pub suggested: Option<String>,
+    /// Already placed by this vault's config — the adopt path shows these ticked and quiet.
+    pub mapped: bool,
+    /// zyBooks' own onboarding book. The panel pre-ticks *ignore* rather than asking.
+    pub ignored: bool,
+}
+
+/// H10's JSON → rows. **Never fails**: a source that could not be reached, an error list, a truncated
+/// reply and outright garbage all come back as "no rows", because the panel's answer to all four is
+/// the same — show the student the fields and let them type it.
+pub fn rows_from_discovery(json: &str) -> Vec<DiscoveredRow> {
+    let Ok(v) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    let mut out = Vec::new();
+    for b in v.get("zybooks").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(code) = b.get("code").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "zybooks".into(),
+            key: code.to_string(),
+            detail: None,
+            suggested: crate::scaffold::suggest_course(code),
+            mapped: b.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: b.get("ignored").and_then(|m| m.as_bool()).unwrap_or(false),
+        });
+    }
+    for sec in v.get("vhl").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(id) = sec.get("section").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "vhl".into(),
+            key: id.to_string(),
+            // The dashboard names no course text — only ids — so this is all there is to show.
+            detail: sec.get("course_id").and_then(|c| c.as_str()).map(|c| format!("course {c}")),
+            suggested: None,
+            mapped: sec.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: false,
+        });
+    }
+    out
+}
+
+/// H10's `errors` array, as sentences. Empty for anything unparseable — the caller already has a
+/// sentence for "we got nothing at all", and two of them would be worse than one.
+pub fn errors_from_discovery(json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(json)
+        .ok()
+        .and_then(|v| v.get("errors").and_then(|e| e.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Run H10's subcommand and turn its answer into rows. The credential targets are derived from the
+/// path the wizard is about to create — the same derivation `store_credentials` used a panel ago, so
+/// discovery reads the entries that panel just wrote.
+///
+/// `(async)` and **never fatal**: two vendor logins over a student's wifi is the slowest thing in the
+/// wizard, and every failure is an empty list plus a sentence, because the panel can always be typed
+/// into. A missing engine is that same empty list.
+#[tauri::command(async)]
+pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
+    let id = profiles::id_for(Path::new(&vault));
+    let mut args: Vec<String> = vec!["coursework-discover".into()];
+    if zybooks {
+        args.push("--zybooks-target".into());
+        args.push(crate::credentials::target_for(&id, "zybooks"));
+    }
+    if vhl {
+        args.push("--vhl-target".into());
+        args.push(crate::credentials::target_for(&id, "vhl"));
+    }
+    let exe = match crate::scheduler::engine_exe() {
+        Ok(e) => e,
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    use knowlu_engine::childproc::NoConsole;
+    let out = std::process::Command::new(exe).no_console().args(&args).output();
+    let stdout = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    let rows = rows_from_discovery(&stdout);
+    // The per-source reason, not just "something went wrong": a student whose zyBooks worked and whose
+    // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry.
+    let reasons = errors_from_discovery(&stdout);
+    let note = match (rows.is_empty(), reasons.is_empty()) {
+        (_, false) => json!(format!("{} — fill those in below.", reasons.join("; "))),
+        (true, true) => json!("we could not reach your coursework sites — fill them in below"),
+        (false, true) => Value::Null,
+    };
+    json!({ "ok": true, "error": Value::Null, "rows": rows, "note": note })
+}
+```
+
+`WizardPlan` gains the three fields the panel fills, all `#[serde(default)]` so an older page is not a refusal:
+
+```rust
+    #[serde(default)]
+    pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
+    #[serde(default)]
+    pub vhl_sections: Vec<crate::scaffold::SectionMapping>,
+    #[serde(default)]
+    pub course_map: Vec<(String, String)>,
+    #[serde(default)]
+    pub courses: Vec<crate::scaffold::CourseSeed>,
+```
+
+…with `serde::Deserialize` added to `BookMapping` and `SectionMapping`'s derives, and `create_vault_in` passing all three straight into `VaultPlan` (plus `courses`, from Task 14b).
+
+- [ ] **Step 5: Run the tests.** `cargo test -p knowlu --test scaffold --test onboarding` — the two new scaffold tests and the new onboarding one pass; every existing test in both files still passes with the four new `VaultPlan` fields added to its literal (`Vec::new()` in each).
+
+- [ ] **Step 6: Prove it against Quinn's own account, once, by hand.** With the scratch profile's credentials stored, run the subcommand directly and read what comes back:
+
+```powershell
+target\debug\knowlu-engine.exe coursework-discover --zybooks-target "knowlu/<the scratch profile id>/zybooks" --vhl-target "knowlu/<the scratch profile id>/vhl"
+```
+
+  Expect one JSON object naming `UACS100Fall2026`, `HowToUseZyBooks2` with `"ignored": false` (nothing
+  is in `ignore:` yet — the wizard is what puts it there) and the VHL section. Record the codes it
+  actually returned above step 1: they are the evidence that `suggest_course` was written against real
+  input rather than a guess. **Never against Quinn's live vault** — the scratch profile only.
+
+- [ ] **Step 7: Commit.** `app: onboarding maps the discovered zyBooks and VHL sources to courses — the config the engine reads, instead of courses: {} (C1 Task 14a, R-OB-1)`.
+
+---
+
+### Task 14b: The enrolled courses, out of the sign-in window (R-OB-2)
+
+The second half of the same failure: with no `courses/` notes and no `course_map`, every ICS task is
+`course: null`, effort 1.0, `needs_enrichment: true`. The judgment gap is accepted; being unable to
+name a course the student is *enrolled in* is not.
+
+**The ruled fallback, before anything else in this task.** Task 13 step 4a records a `Courses:` answer
+that is **separate** from the calendar's outcome, and one of its possible values is *no method got a
+JSON body out of the window*. That is **outcome C for the course list only**: `capture_courses` returns
+an empty list, the panel shows its typed-codes field, and **this task is not blocked** — everything
+below still ships, and the calendar capture that already worked is untouched. Nothing in this task
+depends on the capture succeeding; the capture is the fast path and the typing is the guarantee.
+
+**Files:**
+- Modify: `app/src/lms_link.rs`, `app/src/scaffold.rs`
+- Test: `app/tests/lms_link.rs`, `app/tests/scaffold.rs`
+
+**Interfaces:**
+- Consumes: Task 13's window scaffolding and its **second** go/no-go answer; `write::create` and `console_ctx()`.
+- Produces: `lms_link::{Course, courses_from_json, capture_courses}`; `scaffold::CourseSeed` and the
+  course notes `seed_writes` creates. Task 14a's `course_map` carries one entry per course.
+
+- [ ] **Step 1: Write the failing tests** — append to `app/tests/lms_link.rs`:
+
+```rust
+/// Both LMSs answer with a list of objects; the two shapes differ only in field names, and neither is
+/// ours to choose. Blackboard Ultra: `/learn/api/public/v1/users/me/courses` → `{"results":[{"courseId":
+/// "UACS100Fall2026","course":{"name":"CS 100 Intro"}}]}`. Canvas: `/api/v1/courses` →
+/// `[{"course_code":"CS100","name":"Intro to CS"}]`. One reader, both shapes, and anything else is an
+/// empty list rather than a panic.
+#[test]
+fn an_enrolled_course_list_is_read_from_either_lms_shape() {
+    use knowlu::lms_link::courses_from_json;
+    let blackboard = r#"{"results":[{"courseId":"UACS100Fall2026","course":{"name":"CS 100 Intro to Computer Science"}},{"courseId":"UAGN103Fall2026","course":{"name":"GN 103 German"}}]}"#;
+    let got = courses_from_json(blackboard);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].code, "UACS100Fall2026");
+    assert_eq!(got[0].name, "CS 100 Intro to Computer Science");
+    // The slug is what a task's `course:` field and the note's filename both carry, and it comes from
+    // the SUGGESTED code, not from the vendor's key — `ua-cs-100-fall-2026` would be nobody's idea of
+    // a course.
+    assert_eq!(got[0].slug, "cs-100");
+    let canvas = r#"[{"course_code":"CS100","name":"Intro to CS","id":42}]"#;
+    let got = courses_from_json(canvas);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].code, "CS100");
+    assert_eq!(got[0].slug, "cs-100");
+    // A course with no code we can read keeps its name and slugs from that, rather than being dropped.
+    let odd = r#"[{"name":"Independent Study"}]"#;
+    assert_eq!(courses_from_json(odd)[0].slug, "independent-study");
+    for junk in ["", "null", "{}", "not json", r#"{"results":"nope"}"#] {
+        assert!(courses_from_json(junk).is_empty(), "{junk}");
+    }
+}
+```
+
+…and to `app/tests/scaffold.rs`:
+
+```rust
+/// R-OB-2: one note per enrolled course, in the shape `judge::Heuristics::load` reads — the stem is
+/// the slug, the frontmatter carries `title` and `slug`, and the `## Grade weights` heading is there
+/// and empty, because the weights are the student's to write and the model's to read.
+#[test]
+fn every_enrolled_course_becomes_a_note_the_engine_can_find() {
+    use knowlu::scaffold::{create_vault, CourseSeed, VaultPlan};
+    let root = std::env::temp_dir().join(format!("knowlu-courses-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);          // the helper the other scaffold tests already use
+    p.courses = vec![
+        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+    ];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    for (slug, title) in [("cs-100", "CS 100 Intro to Computer Science"), ("gn-103", "GN 103 German")] {
+        let note = dest.join("courses").join(format!("{slug}.md"));
+        let text = knowlu_engine::pystr::read_text(&note).unwrap_or_else(|e| panic!("{}: {e}", note.display()));
+        assert!(text.contains(&format!("title: {title}")), "{text}");
+        assert!(text.contains(&format!("slug: {slug}")), "{text}");
+        assert!(text.contains("## Grade weights"), "{text}");
+        // Every note has an opaque id, like every other note this app writes.
+        assert!(text.contains("id: course_"), "{text}");
+    }
+    // …and the engine agrees it knows them: this is the predicate tier-1 judgment uses.
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    assert!(h.knows_course("cs-100") && h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+```
+
+- [ ] **Step 2: Run and watch them fail.**
+
+- [ ] **Step 3: `app/src/lms_link.rs` — the reader and the capture.**
+
+```rust
+/// One course the student is enrolled in, as the LMS names it and as the vault will.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Course {
+    /// The LMS's own key — Blackboard's `courseId`, Canvas's `course_code`.
+    pub code: String,
+    /// What the student sees in their LMS.
+    pub name: String,
+    /// `cs-100`. The vault's own name for it: the note's stem, and every task's `course:` field.
+    pub slug: String,
+}
+
+/// Both shapes, one reader (spec §11a R-OB-2). Blackboard Ultra answers
+/// `{"results":[{"courseId":…,"course":{"name":…}}]}`; Canvas answers a bare array of
+/// `{"course_code":…,"name":…}`. **Never panics and never guesses**: a body it does not recognise is
+/// an empty list, and an empty list is what puts the typed-codes fallback on screen.
+pub fn courses_from_json(body: &str) -> Vec<Course> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return Vec::new() };
+    let items: Vec<&serde_json::Value> = match (&v, v.get("results")) {
+        (serde_json::Value::Array(a), _) => a.iter().collect(),
+        (_, Some(serde_json::Value::Array(a))) => a.iter().collect(),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for it in items {
+        let code = it
+            .get("courseId")
+            .or_else(|| it.get("course_code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = it
+            .get("course")
+            .and_then(|c| c.get("name"))
+            .or_else(|| it.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if code.is_empty() && name.is_empty() {
+            continue;
+        }
+        // The slug comes from the SUGGESTED code where there is one — `ua-cs-100-fall-2026` is
+        // nobody's idea of a course — and from the name otherwise.
+        let slug = crate::scaffold::suggest_course(&code)
+            .map(|c| knowlu_engine::ingest::slugify(&c))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| knowlu_engine::ingest::slugify(if name.is_empty() { &code } else { &name }));
+        out.push(Course { code, name, slug });
+    }
+    out
+}
+
+/// The window's second job (Task 13's second go/no-go). It navigates the signed-in window to the
+/// campus's own course endpoint and reads what comes back — **the student's own enrolment, from the
+/// student's own session**, and nothing else. Empty is the honest answer whenever the spike's outcome
+/// was C, whenever the campus is not one we have walked, and whenever the page returns anything this
+/// reader does not recognise; the panel then shows the typed-codes fallback.
+#[tauri::command(async)]
+pub fn capture_courses(app: tauri::AppHandle, campus: String) -> Value {
+    let Some(url) = course_list_url(&campus) else {
+        return json!({ "ok": true, "error": Value::Null, "courses": [], "typed": true });
+    };
+    if navigate(&app, url).is_err() {
+        return json!({ "ok": true, "error": Value::Null, "courses": [], "typed": true });
+    }
+    let body = read_current_document(&app, url);
+    let courses = courses_from_json(&body);
+    json!({ "ok": true, "error": Value::Null, "courses": courses, "typed": courses.is_empty() })
+}
+
+/// The window is on a JSON document now, and **an address is not a body** — so Task 13's calendar
+/// outcome does not settle this one on its own. Keep exactly one of the three below, per step 4a's
+/// `Courses:` line, and delete the other two.
+///
+/// **Outcome B — cookie handover.** The window's cookies for the LMS host, handed to one `ureq` GET
+/// from Rust. The cookies live in this function's stack and nowhere else.
+fn read_current_document(app: &tauri::AppHandle, url: &str) -> String {
+    let Some(w) = app.get_webview_window(WINDOW) else { return String::new() };
+    let Ok(parsed) = url.parse::<tauri::Url>() else { return String::new() };
+    let Ok(cookies) = w.cookies_for_url(parsed) else { return String::new() };
+    let jar: String = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .into();
+    agent
+        .get(url)
+        .header("cookie", &jar)
+        .header("accept", "application/json")
+        .call()
+        .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
+        .unwrap_or_default()
+}
+
+/// **Outcome A' — read it out of the document.** Only if the pinned Tauri's `eval` can return a
+/// value, or the window can post one back; Task 13 step 4a records whether it can.
+#[allow(dead_code)]
+fn read_current_document_by_eval(app: &tauri::AppHandle, _url: &str) -> String {
+    let Some(_w) = app.get_webview_window(WINDOW) else { return String::new() };
+    // <Task 13 step 4a: the exact call that returned the body, verbatim>
+    String::new()
+}
+
+/// **Outcome C — no method got a body out.** This is the ruled fallback, and it is not a failure of
+/// this task: `capture_courses` returns an empty list, the panel shows the typed-codes field, and
+/// **Task 14b ships**. Nothing else changes — the calendar link can prove out while the course list
+/// does not, which is exactly why step 4a records a separate `Courses:` answer.
+#[allow(dead_code)]
+fn read_current_document_empty(_app: &tauri::AppHandle, _url: &str) -> String {
+    String::new()
+}
+
+/// The campus's own course endpoint, recorded verbatim by Task 13's spike — Blackboard Ultra's
+/// `/learn/api/public/v1/users/me/courses`, Canvas's `/api/v1/courses`. `None` for a campus nobody has
+/// walked, which is what makes the panel ask instead of pretending.
+fn course_list_url(campus: &str) -> Option<&'static str> {
+    match campus {
+        // <Task 13 Outcome: the UA course-list URL, verbatim>
+        "university-of-alabama" => Some("https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses"),
+        _ => None,
+    }
+}
+```
+
+- [ ] **Step 4: `app/src/scaffold.rs` — the seed notes.**
+
+```rust
+/// One course to seed. `code` is what a task's title says (`CS 100`), `slug` what its `course:` field
+/// carries, `name` what the student sees.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CourseSeed {
+    pub code: String,
+    pub name: String,
+    pub slug: String,
+}
+```
+
+…and `seed_writes` gains, after the first task and before it returns:
+
+```rust
+    // R-OB-2: one note per enrolled course, so tier-1 judgment can place a task and the model has a
+    // slug it is allowed to use (`judge::Heuristics::knows_course` tests exactly this).
+    // `## Grade weights` is present and empty on purpose: the weights are the student's to write and
+    // the judgment's to read, and an invented weight would be a number nobody chose.
+    for c in &plan.courses {
+        let front = Node::map(vec![
+            ("title", Node::text(&c.name)),
+            ("slug", Node::text(&c.slug)),
+            ("code", Node::text(&c.code)),
+            ("status", Node::text("active")),
+        ]);
+        let body = format!(
+            "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
+            safe_dump_block(&front)
+        );
+        write::create(vault, &format!("courses/{}.md", c.slug), &body, &crate::commands::console_ctx(), &mut journal, None)
+            .map_err(|e| e.to_string())?;
+    }
+```
+
+…and `build_into`'s folder list gains `"courses"` if it is not already there (it is — `create_vault`
+already makes `courses/`; check before adding).
+
+- [ ] **Step 4a: One more scaffold test — every mapped course is a course the vault knows.** The
+  mapping block and the captured course list are filled on two different panels and can name the same
+  course two ways (`CS 100` typed on one, `CS100` captured on the other), and nothing so far would say
+  so: the config would be written, the notes would be written, and `route_zybook` would place a task
+  under a slug `judge::Heuristics::knows_course` does not match. The exit gate catches it on a real
+  run; this catches it before one.
+
+```rust
+/// Every `course:` a coursework mapping names must be a slug the vault knows — a seeded course note,
+/// or a `course_map` target. Two panels fill these, and a slug that matches nothing is a task filed
+/// under a course that does not exist.
+#[test]
+fn every_mapped_course_is_a_slug_the_vault_knows() {
+    use knowlu::scaffold::{create_vault, BookMapping, CourseSeed, SectionMapping};
+    let root = std::env::temp_dir().join(format!("knowlu-mapped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);
+    p.zybooks = true;
+    p.vhl = true;
+    p.zybooks_courses = vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }];
+    p.vhl_sections = vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103".into() }];
+    p.courses = vec![CourseSeed { code: "CS 100".into(), name: "CS 100 Intro".into(), slug: "cs-100".into() }];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    for slug in p.zybooks_courses.iter().map(|b| &b.course).chain(p.vhl_sections.iter().map(|v| &v.course)) {
+        assert!(h.knows_course(slug), "{slug} is mapped and the vault does not know it");
+    }
+    // …and `gn-103` is known by the map alone, with no note behind it — which is the whole reason
+    // `knows_course` tests both. A student who has a VHL section and no Blackboard course for it is
+    // not a broken vault.
+    assert!(!dest.join("courses").join("gn-103.md").exists());
+    assert!(h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+```
+
+- [ ] **Step 5: Run the tests.** `cargo test -p knowlu --test lms_link --test scaffold` → the three new tests pass, `lms_link` at 10 and `scaffold` with four more than before Task 14a.
+
+- [ ] **Step 6: Commit.** `app: the sign-in window seeds the enrolled courses — a note and a course_map line each, so the first ingest is not 28 tasks with no course (C1 Task 14b, R-OB-2)`.
+
+---
+
+### Task 14c: The school, chosen from every US institution (R-OB-4)
+
+Two radio buttons was a placeholder that read like a decision. §11a, ruled 2026-09-09: the school is
+picked from **every active two- and four-year US institution** — 6,072 of them — by typing part of the
+name. The curated layer does not go away; it stops being the *whole* list and becomes what a curated
+school gets **on top** of it: event feeds, a known LMS, a known sign-in URL.
+
+**Precondition: hand-off H11** has been applied and `app/campuses.json` is committed. Ask the
+controller for it at step 1 — it is a script run, not a decision, and it takes one minute.
+
+**Files:**
+- Create: `app/campuses.json` (by H11's script; committed — the controller's file, read here)
+- Modify: `app/src/scaffold.rs`, `app/src/onboarding.rs`, `app/src/lms_link.rs`
+- Test: `app/tests/scaffold.rs`, `app/tests/static_assets.rs`
+
+**Interfaces:**
+- Consumes: H11's asset.
+- Produces: `scaffold::{Curated, CAMPUSES, curated, STATE_TZ, state_timezone, CampusChoice, campus_config_yaml}`;
+  `VaultPlan.campus_choice`; `config/campus.yaml` in every new vault. Task 17's panel is the typeahead;
+  Task 14's `capture_steps` and Task 14b's `course_list_url` key on the **unitid**.
+
+**Why `config/campus.yaml` and not a block in `ingest.yaml`.** Three reasons, in order of weight.
+`config/ingest.yaml` is the *engine's* ingest configuration — `calfeed`, `coursework` and
+`judge::Heuristics` all parse it — and the school's identity is not ingest configuration; putting it
+there would mean the engine parsing a key no engine code reads. `config/events.yaml` is already the
+campus *feeds* file and is a copied preset, not a place to write per-install values. And C2 needs to
+read the LMS kind server-side, which is easier from a file whose whole content is the answer. One file,
+one purpose, the same shape `config/cloud.yaml` established:
+
+```yaml
+unitid: '100751'
+name: 'The University of Alabama'
+state: 'AL'
+lms: 'blackboard'
+curated: true
+```
+
+- [ ] **Step 1: Ask the controller for H11**, then check what landed: `app/campuses.json` exists, its first line reads `{"source":"NCES IPEDS HD2024.csv","retrieved":…,"count":…`, and `(Get-Item app\campuses.json).Length / 1KB` is under 600.
+
+- [ ] **Step 2: Write the failing tests.** The asset's own tests live in `app/tests/onboarding.rs`, not `static_assets.rs`: `campuses.json` is not a static asset any more — the page never loads it — and `static_assets.rs`'s `read()` helper only reaches `static/`. First, in `app/tests/onboarding.rs`:
+
+```rust
+/// R-OB-4: the school list is a committed asset, because a typeahead that needs a network call to
+/// show a school does not work in a dorm on move-in day — which is most first runs.
+#[test]
+fn the_campus_list_is_bundled_headed_and_small() {
+    let raw = std::fs::read_to_string("campuses.json").expect("app/campuses.json");
+    // The header is the first line, and it is what makes "is this current?" answerable without
+    // re-downloading a federal zip.
+    let head = raw.lines().next().expect("a first line");
+    assert!(head.starts_with("{\"source\":\"NCES IPEDS HD"), "the header names its source file: {head}");
+    assert!(head.contains("\"retrieved\":\"20"), "…and when it was taken: {head}");
+    assert!(head.contains("\"count\":"), "…and how many schools it holds: {head}");
+
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("campuses.json is one JSON object");
+    let rows = v["campuses"].as_array().expect("campuses is an array");
+    assert_eq!(rows.len() as u64, v["count"].as_u64().expect("count is a number"), "the header's count is the array's length");
+    // 6,072 active two- and four-year institutions in HD2024. A file that suddenly holds 40 of them is
+    // a script that half-ran, and a bundle that holds 40,000 is one that stopped filtering.
+    assert!(rows.len() > 5_000 && rows.len() < 8_000, "{} schools is not a US institution list", rows.len());
+
+    // `[unitid, name, city, state, host]`, and the host is a HOST: `app/static/` carries no
+    // `http(s)://` literal, and this file lives there.
+    let first = rows[0].as_array().expect("a row is an array");
+    assert_eq!(first.len(), 5, "a row is [unitid, name, city, state, host]");
+    assert!(first[0].is_number() && first[1].is_string() && first[3].is_string());
+    assert!(!raw.contains("http://") && !raw.contains("https://"), "the list carries hosts, never URLs");
+
+    // The size guard the installer cares about. H11's script refuses to write past this too.
+    let kb = raw.len() / 1024;
+    assert!(kb < 600, "campuses.json is {kb} KB");
+}
+
+/// Every curated school must be **in** the bundled list, or picking it from the typeahead and then
+/// looking it up in `CAMPUSES` would answer with two different schools.
+#[test]
+fn every_curated_campus_is_in_the_bundled_list() {
+    let raw = std::fs::read_to_string("campuses.json").expect("app/campuses.json");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("campuses.json");
+    let rows = v["campuses"].as_array().expect("campuses");
+    for c in knowlu::scaffold::CAMPUSES {
+        let want: u64 = c.unitid.parse().expect("a unitid is a number");
+        let found = rows.iter().find(|r| r[0].as_u64() == Some(want)).unwrap_or_else(|| panic!("{} ({}) is not in campuses.json", c.label, c.unitid));
+        // …and it is the school we think it is. A curated row that named the wrong unitid would send
+        // a student's sign-in window to another university's LMS.
+        let name = found[1].as_str().unwrap_or_default();
+        assert!(name.to_lowercase().contains(&c.label.to_lowercase()) || c.label.to_lowercase().contains(&name.to_lowercase()),
+            "{} is unitid {} in our table and {name:?} in IPEDS", c.label, c.unitid);
+    }
+}
+```
+
+…and `app/tests/scaffold.rs`:
+
+```rust
+#[test]
+fn a_chosen_school_becomes_campus_yaml_and_a_timezone_suggestion() {
+    use knowlu::scaffold::{campus_config_yaml, curated, state_timezone, CampusChoice};
+    let ua = CampusChoice { unitid: "100751".into(), name: "The University of Alabama".into(), state: "AL".into(), lms: "blackboard".into() };
+    let text = campus_config_yaml(&ua).expect("campus.yaml");
+    assert_eq!(
+        text,
+        "unitid: '100751'\nname: 'The University of Alabama'\nstate: 'AL'\nlms: 'blackboard'\ncurated: true\n"
+    );
+    // A school nobody has curated is still a school: it gets a file, no event feeds, and an LMS the
+    // sign-in window (or the student) names.
+    let other = CampusChoice { unitid: "999999".into(), name: "Somewhere Community College".into(), state: "OR".into(), lms: String::new() };
+    let text = campus_config_yaml(&other).expect("campus.yaml");
+    assert!(text.contains("curated: false\n") && text.contains("lms: ''\n"), "{text}");
+    // …and a name with an apostrophe does not break the file, like every other wizard value.
+    let odd = CampusChoice { unitid: "1".into(), name: "St. Mary's College".into(), state: "MD".into(), lms: String::new() };
+    assert!(campus_config_yaml(&odd).expect("campus.yaml").contains("name: 'St. Mary''s College'\n"));
+
+    assert_eq!(curated("100751").map(|c| c.key), Some("university-of-alabama"));
+    assert_eq!(curated("157085").map(|c| c.key), Some("university-of-kentucky"));
+    assert!(curated("999999").is_none());
+
+    // The timezone the wizard suggests, from the state — the OS zone stays the default and the
+    // student can always type over it.
+    assert_eq!(state_timezone("AL"), Some("America/Chicago"));
+    assert_eq!(state_timezone("KY"), Some("America/New_York"));
+    assert_eq!(state_timezone("AZ"), Some("America/Phoenix"));
+    assert_eq!(state_timezone("HI"), Some("Pacific/Honolulu"));
+    assert_eq!(state_timezone("zz"), None);
+    // Fifty states, DC and the five inhabited territories — IPEDS keeps Puerto Rico's hundred-odd
+    // institutions, and a student in Mayagüez is not a special case any more than one in Wyoming.
+    assert_eq!(knowlu::scaffold::STATE_TZ.len(), 56);
+    assert_eq!(state_timezone("PR"), Some("America/Puerto_Rico"));
+    assert_eq!(state_timezone("GU"), Some("Pacific/Guam"));
+    for (st, tz) in knowlu::scaffold::STATE_TZ {
+        assert!(jiff::tz::TimeZone::get(tz).is_ok(), "{st} maps to {tz}, which the tz database does not have");
+    }
+}
+```
+
+- [ ] **Step 3: Run and watch them fail.**
+
+- [ ] **Step 4: `app/src/scaffold.rs` — the curated layer, the state table, the file.**
+
+```rust
+/// What a **curated** school gets on top of being in the list: event feeds, a known LMS, and a
+/// sign-in URL the window can be pointed at. Keyed by IPEDS `UNITID`, which is the one identifier
+/// that is stable across years and unambiguous across the four "University of ——" in a state.
+///
+/// **Adding a campus is adding a row here** — plus, if it is to have event feeds, one preset file
+/// under `app/assets/campus/`. A school that is not in this table is still perfectly usable: it has
+/// no event feeds, and its LMS comes from the sign-in window or from the student.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Curated {
+    pub unitid: &'static str,
+    /// The preset key `campus_yaml` maps to an `app/assets/campus/*.yaml` file.
+    pub key: &'static str,
+    pub label: &'static str,
+    /// **This school's own LMS host**, no scheme and no path — `ualearn.blackboard.com`. Every URL the
+    /// sign-in window is driven to is built from it, so a third curated Blackboard school does not send
+    /// its student to Alabama's LMS. The paths are the same across every tenant of a kind; only the
+    /// host differs, which is exactly what this field is.
+    pub lms_host: &'static str,
+    /// `blackboard` or `canvas`. With `lms_host`, it is enough to build every endpoint either LMS has.
+    pub lms_kind: &'static str,
+}
+
+pub const CAMPUSES: [Curated; 2] = [
+    Curated {
+        unitid: "100751",
+        key: "university-of-alabama",
+        label: "The University of Alabama",
+        lms_host: "ualearn.blackboard.com",
+        lms_kind: "blackboard",
+    },
+    Curated {
+        unitid: "157085",
+        key: "university-of-kentucky",
+        label: "University of Kentucky",
+        lms_host: "uk.instructure.com",
+        lms_kind: "canvas",
+    },
+];
+
+/// The curated row for a unitid, if there is one.
+pub fn curated(unitid: &str) -> Option<&'static Curated> {
+    CAMPUSES.iter().find(|c| c.unitid == unitid)
+}
+
+/// The preset key whose `app/assets/campus/*.yaml` becomes this vault's `config/events.yaml`.
+/// **`none` for anything uncurated, and for `university-of-kentucky` until someone writes its preset**
+/// — `app/assets/campus/` is not this stream's to add a file to, and a preset key with no file behind
+/// it is a vault that will not scaffold. Adding UK's feeds is one asset file and one line here.
+pub fn events_preset_for(unitid: &str) -> &'static str {
+    match curated(unitid).map(|c| c.key) {
+        Some("university-of-alabama") => "university-of-alabama",
+        _ => "none",
+    }
+}
+
+/// The school the student picked. `lms` is empty for a school whose kind nothing has established yet;
+/// Task 14's sign-in window fills it from where it lands, or the panel asks.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CampusChoice {
+    pub unitid: String,
+    pub name: String,
+    pub state: String,
+    pub lms: String,
+}
+
+/// `config/campus.yaml`. Five single-line scalars, through the same `yaml_scalar` every other wizard
+/// value goes through — a school name is free text and `St. Mary's College` is a real one.
+pub fn campus_config_yaml(c: &CampusChoice) -> Result<String, String> {
+    Ok(format!(
+        "unitid: {}\nname: {}\nstate: {}\nlms: {}\ncurated: {}\n",
+        yaml_scalar("school id", &c.unitid)?,
+        yaml_scalar("school name", &c.name)?,
+        yaml_scalar("school state", &c.state)?,
+        yaml_scalar("school LMS", &c.lms)?,
+        curated(&c.unitid).is_some(),
+    ))
+}
+
+/// A US state's IANA zone, for the wizard's timezone **suggestion** — the OS zone stays the default
+/// and the field stays editable, because a student in El Paso is in Texas and on Mountain time.
+///
+/// **Split states take their majority zone**, which is the honest simplification: Florida (Eastern,
+/// bar the western panhandle), Idaho (Mountain, bar the north), Indiana (Eastern, bar the corners),
+/// Kansas, Kentucky (Eastern, bar the west), Michigan (Eastern, bar four counties), Nebraska, North
+/// Dakota, Oregon (Pacific, bar Malheur), South Dakota, Tennessee (Central, bar the east) and Texas.
+/// The panel says the suggestion came from the state, so a student who is in the minority half can see
+/// why it is wrong and change it.
+pub const STATE_TZ: [(&str, &str); 56] = [
+    ("AL", "America/Chicago"), ("AK", "America/Anchorage"), ("AZ", "America/Phoenix"),
+    ("AR", "America/Chicago"), ("CA", "America/Los_Angeles"), ("CO", "America/Denver"),
+    ("CT", "America/New_York"), ("DC", "America/New_York"), ("DE", "America/New_York"),
+    ("FL", "America/New_York"), ("GA", "America/New_York"), ("HI", "Pacific/Honolulu"),
+    ("IA", "America/Chicago"), ("ID", "America/Boise"), ("IL", "America/Chicago"),
+    ("IN", "America/Indiana/Indianapolis"), ("KS", "America/Chicago"), ("KY", "America/New_York"),
+    ("LA", "America/Chicago"), ("MA", "America/New_York"), ("MD", "America/New_York"),
+    ("ME", "America/New_York"), ("MI", "America/Detroit"), ("MN", "America/Chicago"),
+    ("MO", "America/Chicago"), ("MS", "America/Chicago"), ("MT", "America/Denver"),
+    ("NC", "America/New_York"), ("ND", "America/Chicago"), ("NE", "America/Chicago"),
+    ("NH", "America/New_York"), ("NJ", "America/New_York"), ("NM", "America/Denver"),
+    ("NV", "America/Los_Angeles"), ("NY", "America/New_York"), ("OH", "America/New_York"),
+    ("OK", "America/Chicago"), ("OR", "America/Los_Angeles"), ("PA", "America/New_York"),
+    ("RI", "America/New_York"), ("SC", "America/New_York"), ("SD", "America/Chicago"),
+    ("TN", "America/Chicago"), ("TX", "America/Chicago"), ("UT", "America/Denver"),
+    ("VA", "America/New_York"), ("VT", "America/New_York"), ("WA", "America/Los_Angeles"),
+    ("WI", "America/Chicago"), ("WV", "America/New_York"), ("WY", "America/Denver"),
+    // The territories, because `CYACTIVE = 1` and `ICLEVEL ∈ {1,2}` keep them: Puerto Rico alone has
+    // about a hundred institutions, the UPR system among them, and a student there getting no
+    // suggestion at all would be a degradation nobody chose.
+    ("PR", "America/Puerto_Rico"), ("VI", "America/Puerto_Rico"), ("GU", "Pacific/Guam"),
+    ("MP", "Pacific/Guam"), ("AS", "Pacific/Pago_Pago"),
+];
+
+pub fn state_timezone(state: &str) -> Option<&'static str> {
+    let up = state.trim().to_ascii_uppercase();
+    STATE_TZ.iter().find(|(s, _)| *s == up).map(|(_, tz)| *tz)
+}
+```
+
+`VaultPlan.campus: String` **stays** — it is the events preset key `campus_yaml` maps to an asset —
+and is filled in Rust by `events_preset_for`, not by the page. One field is added beside it:
+
+```rust
+    /// R-OB-4: the school itself, out of the bundled list. `campus` above is only which preset of
+    /// event feeds it gets.
+    pub campus_choice: CampusChoice,
+```
+
+…and `build_into` gains one line, after `config/events.yaml`:
+
+```rust
+    write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
+```
+
+- [ ] **Step 4a: The search itself, in Rust — the page never holds the list.**
+
+  **Why a command and not a bundled asset the page reads.** Two reasons, and the first is decisive:
+  `app/tauri.conf.json`'s CSP is `default-src 'self'; connect-src ipc: http://ipc.localhost; …`, and
+  `connect-src` is what governs `fetch` — it names no `'self'`, so a `fetch("campuses.json")` is
+  refused before it reaches the asset protocol. Widening it would mean editing `tauri.conf.json`,
+  which is the controller's outside C0's three keys, for a thing that needs no edit. The second reason
+  outlives the first: a typeahead wants ten rows, not six thousand, and a command that answers with ten
+  keeps the page's memory flat and puts the ranking rule somewhere a test can reach it.
+
+  The file is **`app/campuses.json`**, beside `tauri.conf.json` and **not** under `app/static/`: the
+  page never loads it, and a 400 KB asset in `frontendDist` would ship twice — once in the bundle and
+  once in the binary that `include_str!`s it. It is written there by hand-off **H11** and read here.
+
+```rust
+/// Every US institution, parsed once. `include_str!` puts the bytes in the binary — they are needed
+/// on a first run with no network, which is most first runs — and `OnceLock` parses them the first
+/// time somebody types, not at launch.
+static CAMPUS_LIST: std::sync::OnceLock<Vec<(u64, String, String, String)>> = std::sync::OnceLock::new();
+
+fn campus_list() -> &'static [(u64, String, String, String)] {
+    CAMPUS_LIST.get_or_init(|| {
+        let raw = include_str!("../campuses.json");
+        let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        v.get("campuses")
+            .and_then(|c| c.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        let a = r.as_array()?;
+                        Some((
+                            a.first()?.as_u64()?,
+                            a.get(1)?.as_str()?.to_string(),
+                            a.get(2)?.as_str()?.to_string(),
+                            a.get(3)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The ten best matches for what has been typed, in list order. Name, city and state all match, so
+/// `tuscaloosa` and `AL` both find it — a student who cannot spell their own university's official
+/// name (it is *The* University of Alabama) still gets there. Under two characters is no answer at
+/// all: one letter matches a thousand schools and none of them usefully.
+///
+/// Returns `[unitid, name, city, state]` per hit — the host is in the asset and is not shown, so it
+/// does not cross the IPC either.
+#[tauri::command]
+pub fn campus_search(query: String) -> Value {
+    let needle = query.trim().to_lowercase();
+    if needle.len() < 2 {
+        return json!({ "ok": true, "error": Value::Null, "hits": [] });
+    }
+    let hits: Vec<Value> = campus_list()
+        .iter()
+        .filter(|(_, name, city, state)| {
+            format!("{name} {city} {state}").to_lowercase().contains(&needle)
+        })
+        .take(10)
+        .map(|(id, name, city, state)| json!([id, name, city, state]))
+        .collect();
+    json!({ "ok": true, "error": Value::Null, "hits": hits })
+}
+```
+
+  …and a test beside the others in `app/tests/onboarding.rs`:
+
+```rust
+/// R-OB-4: the search is Rust's, because the page cannot fetch the list (the app's CSP names no
+/// `'self'` in `connect-src`) and should not hold six thousand rows to answer a keystroke.
+#[test]
+fn typing_a_school_name_finds_it_and_typing_one_letter_finds_nothing() {
+    use knowlu::onboarding::campus_search;
+    let one = campus_search("a".into());
+    assert_eq!(one["hits"].as_array().map(Vec::len), Some(0), "one letter is not a search");
+    let hits = campus_search("university of alabama".into());
+    let rows = hits["hits"].as_array().expect("hits");
+    assert!(!rows.is_empty() && rows.len() <= 10, "{} hits", rows.len());
+    assert!(rows.iter().any(|r| r[0].as_u64() == Some(100751)), "{rows:?}");
+    // A row is [unitid, name, city, state] — the web host stays in the asset, unshown and uncrossed.
+    assert_eq!(rows[0].as_array().map(Vec::len), Some(4));
+    // City and state match too, or a student who knows where they go and not what it is called is stuck.
+    assert!(campus_search("tuscaloosa".into())["hits"].as_array().map(|r| !r.is_empty()).unwrap_or(false));
+}
+```
+
+- [ ] **Step 4b: One more command — the timezone the state suggests.** The table is Rust's, and the
+  page asks for one string. It never overwrites a field the student has typed into (`WIZ.tzTouched`),
+  and `None` leaves the OS zone alone, which is what `launch_state` already supplies.
+
+```rust
+/// R-OB-4: the timezone a state suggests. A **suggestion** — the page only applies it to a field the
+/// student has not touched, and a state we do not know leaves the OS zone where it was.
+#[tauri::command]
+pub fn timezone_for_state(state: String) -> Value {
+    json!({ "ok": true, "error": Value::Null, "timezone": crate::scaffold::state_timezone(&state) })
+}
+```
+
+- [ ] **Step 5: `app/src/onboarding.rs` — the choice reaches the plan, and the preset is derived.**
+  `WizardPlan` gains `#[serde(default)] pub campus_choice: crate::scaffold::CampusChoice;` and
+  `create_vault_in` sets both fields from it — the page sends the school, Rust decides which preset
+  that means:
+
+```rust
+        campus: crate::scaffold::events_preset_for(&plan.campus_choice.unitid).to_string(),
+        campus_choice: plan.campus_choice.clone(),
+```
+
+  `launch_state`'s `campuses` key is **removed**: the radio list it fed does not exist any more, and the
+  page reads `campuses.json` itself. Delete the key and the `CAMPUSES.iter().map(…)` expression with it.
+
+- [ ] **Step 6: `app/src/lms_link.rs` — key on the unitid, and ask when nobody knows.**
+  `capture_steps` and `course_list_url` take a **unitid** instead of a campus key, and both consult
+  `scaffold::curated`:
+
+```rust
+/// The campus's capture path, recorded verbatim by Task 13's spike. `None` for a school nobody has
+/// curated — which is most of the 6,072 — and that is what makes the panel show its paste field
+/// instead of pretending.
+/// Where the sign-in window opens for a curated school: **that school's own host**, never a constant.
+pub fn lms_home(unitid: &str) -> Option<String> {
+    crate::scaffold::curated(unitid).map(|c| format!("https://{}/", c.lms_host))
+}
+
+/// The calendar-share path Task 13's spike recorded, on **this** school's host. A constant host per
+/// LMS kind would send the third curated Blackboard school's student to the first one's LMS — which is
+/// the assumption this whole task exists to stop making (`CLAUDE.md`'s first rule).
+fn capture_steps(unitid: &str) -> Option<Vec<String>> {
+    let c = crate::scaffold::curated(unitid)?;
+    // <Task 13 Outcome: the PATHS, verbatim — the host comes from the row>
+    let paths: &[&str] = match c.lms_kind {
+        "blackboard" => &["/ultra/calendar"],
+        "canvas" => &["/calendar"],
+        _ => return None,
+    };
+    Some(paths.iter().map(|path| format!("https://{}{path}", c.lms_host)).collect())
+}
+
+/// Likewise for the enrolled-course endpoint: one path per LMS kind, this school's host.
+fn course_list_url(unitid: &str) -> Option<String> {
+    let c = crate::scaffold::curated(unitid)?;
+    // <Task 13 step 4a: the PATHS that answered, verbatim>
+    let path = match c.lms_kind {
+        "blackboard" => "/learn/api/public/v1/users/me/courses",
+        "canvas" => "/api/v1/courses",
+        _ => return None,
+    };
+    Some(format!("https://{}{path}", c.lms_host))
+}
+
+/// Which LMS a school runs, when nobody curated it. **Guessed from where the sign-in window landed**,
+/// never from the school's name: `blackboard.com` and `instructure.com` are in the URL of every one of
+/// their tenants, and a guess from a hostname is a fact. `None` means the panel's two-button question.
+pub fn lms_kind_from_url(url: &str) -> Option<&'static str> {
+    let u = url.to_ascii_lowercase();
+    if u.contains("blackboard.com") || u.contains("/ultra/") { return Some("blackboard"); }
+    if u.contains("instructure.com") || u.contains("/api/v1/courses") { return Some("canvas"); }
+    None
+}
+```
+
+  …and `open_lms_window` takes the unitid, opening `lms_home(unitid)` when there is one and answering
+  `{"ok": false, "error": "we do not know your school's sign-in page yet — paste your calendar link
+  below", "opened": false}` when there is not. `capture_steps` now yields `Vec<String>`, so the two
+  loops that walk it become `for step in steps.iter().map(String::as_str)`, and `capture_courses` takes
+  `let Some(url) = course_list_url(&unitid) else { … }` and passes `&url`.
+
+  One test goes with it, in `app/tests/lms_link.rs` — the assumption this task removes is worth an
+  assertion, not just a comment:
+
+```rust
+/// R-OB-4: every endpoint is built from the school's **own** host. A constant host per LMS kind was
+/// accidentally correct with two curated schools and would send the third one's student to the first
+/// one's LMS.
+#[test]
+fn every_curated_endpoint_is_built_from_that_schools_own_host() {
+    use knowlu::lms_link::lms_home;
+    for c in knowlu::scaffold::CAMPUSES {
+        let home = lms_home(c.unitid).unwrap_or_else(|| panic!("{} has no home", c.label));
+        assert!(home.contains(c.lms_host), "{} opens {home}, which is not its own host", c.label);
+        // …and no other curated school's host appears in it.
+        for other in knowlu::scaffold::CAMPUSES {
+            if other.unitid != c.unitid {
+                assert!(!home.contains(other.lms_host), "{} opens {}'s LMS", c.label, other.label);
+            }
+        }
+    }
+    assert!(lms_home("999999").is_none(), "an uncurated school has no sign-in page we know");
+}
+```
+
+- [ ] **Step 7: Run the tests.** `cargo test -p knowlu --test scaffold --test static_assets` → the three new tests pass; every existing `VaultPlan` literal gains `campus_choice: Default::default()` (or the `plan_for` helper does it once).
+
+- [ ] **Step 8: Commit.** `app: the school comes from every US institution, not two radios — the IPEDS list bundled, the curated layer keyed by unitid, config/campus.yaml, and a timezone from the state (C1 Task 14c, R-OB-4)`.
+
+---
+
 ### Task 15: `app/src/telemetry.rs` — (a) from the ledger, (b) from the journal, and a watermark
 
 Spec §6 and D5. Both classes are computed **on the device**, and neither carries a title, a course name or a note body. The slot posts them; a slot that cannot post is not a failed slot.
@@ -7148,7 +8786,18 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-lms-open\"") && panel.contains("id=\"wiz-ics\""), "sign-in button and paste fallback");
     // The campus is asked HERE, on the panel that uses it — not two panels later, where it used to be
     // and where it made every sign-in answer "no sign-in page is known for that school yet".
-    assert!(panel.contains("id=\"wiz-campus\""), "the campus radios belong on the calendar panel");
+    // R-OB-4: a search over every US institution, not two radios. The radios are gone from the whole
+    // page — a list of two schools was a placeholder that read like a decision.
+    assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
+    assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
+    assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
+    assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
+    assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
+    assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
+    // **The page must not fetch the list.** `app/tauri.conf.json`'s CSP is
+    // `connect-src ipc: http://ipc.localhost` with no `'self'`, so a `fetch` of a bundled asset is
+    // refused — and that file is the controller's. The search is a command; the page holds ten rows.
+    assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
     // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
     // personal one is what makes today's page know the day is already half full.
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
@@ -7157,10 +8806,34 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     // C2's Google sign-in has a labelled place and does nothing yet — a button that lied would be
     // worse than a button that says when it arrives.
     assert!(panel.contains("id=\"wiz-google\"") && panel.contains("disabled"), "the Google placeholder is present and inert");
+    // R-OB-2: the enrolled classes are confirmed on this panel — captured from the sign-in window if
+    // the campus lets us, typed if it does not. Without them a first ingest is 28 tasks with no
+    // course, which is the run this section of the plan exists because of.
+    assert!(panel.contains("id=\"wiz-courses\"") && panel.contains("id=\"wiz-course-rows\""), "the class list");
+    assert!(panel.contains("id=\"wiz-course-add\""), "…and the typed fallback beside it");
+    assert!(js.contains("\"capture_courses\"") && js.contains("function renderCourses("), "the capture and its rows");
     let js_all = read("console.js");
     assert!(!js_all.contains("\"connect_google\"") && !js_all.contains("gmail.readonly"), "no Google connect in C1");
     let slots = html.split("id=\"wiz-slots\"").nth(1).and_then(|s| s.split("id=\"wiz-finish\"").next()).expect("the slots panel");
-    assert!(!slots.contains("id=\"wiz-campus\""), "the campus must not also be on the slots panel");
+    assert!(!slots.contains("id=\"wiz-school\""), "the school must not also be on the slots panel");
+}
+
+/// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
+/// first slot had both logins stored and `courses: {}` in the config, so the engine answered
+/// `zybook UACS100Fall2026 not in config; skipped` and then `0 assignments parsed; treating as
+/// failure` — three warnings for one missing sentence.
+#[test]
+fn the_logins_panel_maps_what_it_finds_to_a_course() {
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
+    assert!(panel.contains("id=\"wiz-map\"") && panel.contains("id=\"wiz-map-rows\""), "the mapping block");
+    let js = read("console.js");
+    assert!(js.contains("\"discover_coursework\""), "discovery runs after the credentials are stored");
+    assert!(js.contains("function renderMapping("), "renderMapping");
+    // The mapping travels in the plan, and the SLUGS are made in Rust from the codes — a page that
+    // invented vault identifiers would be a page deciding what the engine may know.
+    assert!(js.contains("zybooks_courses:") && js.contains("vhl_sections:") && js.contains("course_map:"), "the plan carries the mapping");
+    assert!(!js.contains("slugify"), "slugs are `knowlu_engine::ingest::slugify`'s, never the page's");
 }
 
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
@@ -7283,12 +8956,23 @@ fn the_wizard_never_offers_a_local_model() {
   <div class="wiz-panel" id="wiz-calendars" hidden><h2>Connect your calendars</h2>
     <p class="lede">Two things, and Knowlu needs both before it can tell you what to do today: what your school says is due, and what your week already looks like.</p>
     <h3>Your school</h3>
+    <p class="meta">Start typing its name. Every US college and university is in this list.</p>
+    <div class="wiz-row"><input type="text" id="wiz-school" placeholder="Search for your school" autocomplete="off"><span class="meta" id="wiz-school-picked"></span></div>
+    <div id="wiz-school-hits" class="wiz-hits"></div>
+    <p class="meta"><button class="b" id="wiz-school-none">My school isn&rsquo;t listed</button></p>
+    <div class="wiz-row" id="wiz-school-free" hidden><input type="text" id="wiz-school-name" placeholder="Your school&rsquo;s name"><input type="text" id="wiz-school-state" placeholder="State, e.g. AL"></div>
     <p class="meta">Sign in the way you always do. Knowlu opens your school&rsquo;s own page in a window, you sign in there, and Knowlu keeps only the calendar link &mdash; never what you type into it.</p>
-    <div class="wiz-row" id="wiz-campus"></div>
+    <div class="wiz-row" id="wiz-lms-kind" hidden><span class="meta">Which does your school use?</span><button class="b" data-lms="blackboard">Blackboard</button><button class="b" data-lms="canvas">Canvas</button></div>
     <div class="wiz-row"><button class="b pri y" id="wiz-lms-open">Sign in to my school</button><span class="meta" id="wiz-lms-state"></span></div>
     <p class="meta">Or paste the link yourself: Blackboard &rarr; Calendar &rarr; Calendar Settings &rarr; Share Calendar. Canvas &rarr; Calendar &rarr; Calendar Feed.</p>
     <input type="text" id="wiz-ics" placeholder="Paste the school feed link (it ends in .ics)">
     <p class="meta" id="wiz-ics-note"></p>
+    <div id="wiz-courses" hidden>
+      <h3>Your classes</h3>
+      <p class="meta" id="wiz-courses-note"></p>
+      <div id="wiz-course-rows"></div>
+      <div class="wiz-row"><input type="text" id="wiz-course-add" placeholder="Add a course code, e.g. CS 100"><button class="b" id="wiz-course-add-go">Add</button></div>
+    </div>
     <h3>Your own calendar</h3>
     <p class="meta">This is what makes today&rsquo;s page know your day is already half full. In Google Calendar: <b>Settings</b> &rarr; click your calendar under <b>Settings for my calendars</b> &rarr; <b>Integrate calendar</b> &rarr; copy the <b>Secret address in iCal format</b>. Press <b>Reset</b> beside it first if that address has ever been shared with anyone &mdash; whoever holds it can read your calendar.</p>
     <input type="text" id="wiz-cal-ics" placeholder="Paste the secret iCal address">
@@ -7299,6 +8983,11 @@ fn the_wizard_never_offers_a_local_model() {
     <p class="lede">Optional. Stored in Windows Credential Manager on this machine &mdash; never in the vault, never in a backup, and never sent to us.</p>
     <div class="wiz-row"><input type="text" id="wiz-zy-user" placeholder="zyBooks email"><input type="password" id="wiz-zy-pass" placeholder="zyBooks password"></div>
     <div class="wiz-row"><input type="text" id="wiz-vhl-user" placeholder="VHL email"><input type="password" id="wiz-vhl-pass" placeholder="VHL password"></div>
+    <div id="wiz-map" hidden>
+      <h3>Which class is which?</h3>
+      <p class="meta" id="wiz-map-note">Knowlu found these on your accounts. Confirm the course each one belongs to &mdash; without this, Knowlu can see the work but not what it is for.</p>
+      <div id="wiz-map-rows"></div>
+    </div>
   </div>
   <div class="wiz-panel" id="wiz-gmail" hidden><h2>Gmail</h2>
     <p class="lede">Knowlu can read your inbox for things you have to do, and propose them.</p>
@@ -7337,17 +9026,9 @@ fn the_wizard_never_offers_a_local_model() {
 - [ ] **Step 4: `app/static/console.js` — the wizard.** Replace `PANELS`, `WIZ`, `dest`, `startWizard`, `renderWizard`, `wizValid`, `wizGo`, `wizRegister` and `wizFinish`; delete the backup-folder helpers (`within` is used by nothing else now, so it goes too) and `readSlotsPanel`'s backup lines. Three smaller edits go with them:
 
   * **`readSlotsPanel` loses its campus read.** Its last two lines (`var picked = document.querySelector('input[name="campus"]:checked'); WIZ.campus = picked ? picked.value : "none";`) are deleted. The campus is the question *which school?*, it belongs on the calendar panel where it is used, and reading it here — two panels **after** `open_lms_window` needs it — is why every sign-in would have answered "no sign-in page is known for that school yet".
-  * **`WIZ.campus` is read where it is chosen.** The existing `EL("wiz-campus").addEventListener("change", function () { readSlotsPanel(); renderWizard(); });` becomes:
+  * **The campus radios and their listener are deleted outright** (R-OB-4). `EL("wiz-campus")` does not exist any more: the school is a typeahead over `campuses.json`, and its handlers are in the block below. Delete the old `EL("wiz-campus").addEventListener("change", …)` and do not replace it.
 
-    ```js
-    EL("wiz-campus").addEventListener("change", function () {
-      var picked = document.querySelector('input[name="campus"]:checked');
-      WIZ.campus = picked ? picked.value : "none";
-      WIZ.icsNote = "";
-      renderWizard();
-    });
-    ```
-
+  * **The timezone the student types wins.** Add, beside the slots panel's existing `input` listeners, `EL("wiz-tz").addEventListener("input", function () { WIZ.tzTouched = true; });` — the school's state suggests a zone into that field, and a suggestion must never overwrite an answer.
   * **`credentialsStranded` sends the user to panel 5, not panel 4.** The logins panel moved: `WIZ.step = 4;` becomes `WIZ.step = 5;`. Panel 4 is now the calendar, and stranding a credential there would ask the user to re-enter a coursework password on a panel that has no field for one.
 
   Then the replacements themselves:
@@ -7360,6 +9041,15 @@ fn the_wizard_never_offers_a_local_model() {
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
               ics: "", icsNote: "", cal: "", calNote: "",
+              // R-OB-4: the school the student picked — a unitid, a name, a state and (once
+              // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
+              // command, and the page holds only the ten rows it is showing.
+              campus: { unitid: "", name: "", state: "", lms: "" },
+              // R-OB-1 and R-OB-2. `map` is one row per discovered book/section, each with the
+              // student's confirmed course; `courses` is the enrolment, captured or typed. Both end
+              // up in the plan, and both are allowed to be empty — a student with no coursework
+              // logins has nothing to map, and a campus whose API we cannot read is typed in.
+              map: [], courses: [],
               sessionDir: "", tz: "", slots: ["12:00", "18:00"], autostart: true, campus: "none",
               zy: false, vhl: false, campuses: [], credVault: "", error: "" };
 
@@ -7373,16 +9063,12 @@ fn the_wizard_never_offers_a_local_model() {
     EL("picker").hidden = true;
     document.querySelector(".app").hidden = true;
     WIZ.tz = l.tz || "";
-    WIZ.campuses = l.campuses || [];
     WIZ.parent = l.default_parent || "";
     EL("wiz-name").value = WIZ.name;
     EL("wiz-privacy").textContent = PRIVACY;
     EL("wiz-tz").value = WIZ.tz;
     EL("wiz-slot1").value = WIZ.slots[0];
     EL("wiz-slot2").value = WIZ.slots[1];
-    EL("wiz-campus").innerHTML = WIZ.campuses.map(function (c, i) {
-      return '<label><input type="radio" name="campus" value="' + c.key + '"' + (i === 0 ? " checked" : "") + "> " + c.label + "</label>";
-    }).join("");
     renderWizard();
   }
 
@@ -7435,8 +9121,24 @@ fn the_wizard_never_offers_a_local_model() {
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
       return storeCredentials().then(function (ok) {
-        if (!ok) { WIZ.step = leaving; }
+        if (!ok) { WIZ.step = leaving; renderWizard(); return; }
+        // R-OB-1: the credentials are in Credential Manager now, so this is the first moment discovery
+        // can run. Stay on the panel while it does — the mapping is the whole point of having asked
+        // for the logins — and let Next work again the moment the rows are on screen.
+        if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
+        if (WIZ.map.length) { renderWizard(); return; }
+        WIZ.step = leaving;
+        EL("wiz-map").hidden = false;
+        EL("wiz-map-note").textContent = "Looking up your books and sections…";
         renderWizard();
+        return invoke("discover_coursework", { vault: dest(), zybooks: WIZ.zy, vhl: WIZ.vhl }).then(function (d) {
+          WIZ.map = ((d && d.rows) || []).map(function (r) {
+            return { source: r.source, key: r.key, detail: r.detail, suggested: r.suggested, course: r.suggested || "", ignore: !!r.ignored };
+          });
+          EL("wiz-map-note").textContent = (d && d.note)
+            || "Knowlu found these on your accounts. Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for.";
+          renderMapping();
+        });
       });
     }
     renderWizard();
@@ -7449,9 +9151,22 @@ fn the_wizard_never_offers_a_local_model() {
 
   function wizFinish() {
     readSlotsPanel();
+    // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
+    // An ignored row contributes nothing but its place in `ignore:`; a row with no course contributes
+    // nothing at all, which leaves that source unmapped and is the student's choice to have made.
+    var zyRows = WIZ.map.filter(function (r) { return r.source === "zybooks" && !r.ignore && r.course; });
+    var vhlRows = WIZ.map.filter(function (r) { return r.source === "vhl" && !r.ignore && r.course; });
+    var codes = {};
+    zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
+    WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
     var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
-                 timezone: WIZ.tz, slots: WIZ.slots, campus: WIZ.campus,
-                 zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart };
+                 timezone: WIZ.tz, slots: WIZ.slots,
+                 zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
+                 campus_choice: WIZ.campus,
+                 zybooks_courses: zyRows.map(function (r) { return { code: r.key, course: "", label: r.course }; }),
+                 vhl_sections: vhlRows.map(function (r) { return { section: r.key, course: "", label: r.course }; }),
+                 course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
+                 courses: WIZ.courses };
     EL("wiz-next").disabled = true;
     var moved = (WIZ.credVault && WIZ.credVault !== dest())
       ? invoke("retarget_credentials", { from_vault: WIZ.credVault, to_vault: dest() })
@@ -7529,12 +9244,19 @@ fn the_wizard_never_offers_a_local_model() {
     if (e.target.closest("#wiz-lms-open")) {
       WIZ.icsNote = "Opening your school’s sign-in page…";
       renderWizard();
-      invoke("open_lms_window", { campus: WIZ.campus }).then(function (r) {
-        if (!r.ok) { WIZ.icsNote = r.error; renderWizard(); return; }
+      invoke("open_lms_window", { unitid: WIZ.campus.unitid }).then(function (r) {
+        if (!r.ok) {
+          WIZ.icsNote = r.error;
+          // Nobody has curated this school, so nobody knows which LMS it runs. Ask, once — the answer
+          // is what C2's server-side fetch will need too.
+          EL("wiz-lms-kind").hidden = !!WIZ.campus.lms;
+          renderWizard();
+          return;
+        }
         WIZ.sessionDir = r.session_dir;
         WIZ.icsNote = "Sign in there, then come back — Knowlu will find your calendar link.";
         renderWizard();
-        return invoke("capture_calendar_link", { campus: WIZ.campus }).then(function (c) {
+        return invoke("capture_calendar_link", { unitid: WIZ.campus.unitid }).then(function (c) {
           if (c.ok && c.link) {
             WIZ.ics = c.link.url;
             WIZ.icsNote = "Found " + c.link.events + " assignments across " + c.link.courses + " courses.";
@@ -7545,6 +9267,17 @@ fn the_wizard_never_offers_a_local_model() {
             WIZ.icsNote = (c.error || "No link found") + " — paste it below instead.";
           }
           renderWizard();
+          // R-OB-2, in the same sitting and the same window: the enrolled course list. Its own
+          // outcome — a campus can give the calendar and not the courses — so a failure here shows
+          // the typed field and says nothing about the link that just worked.
+          return invoke("capture_courses", { unitid: WIZ.campus.unitid }).then(function (cl) {
+            WIZ.courses = (cl && cl.courses) || [];
+            EL("wiz-courses").hidden = false;
+            EL("wiz-courses-note").textContent = WIZ.courses.length
+              ? "These are the classes Knowlu found. Remove any you are not taking."
+              : "Knowlu could not read your class list — type the codes yourself, e.g. CS 100.";
+            renderCourses();
+          });
         });
       }).catch(function () { WIZ.icsNote = "That did not work — paste the link below instead."; renderWizard(); });
       return;
@@ -7582,6 +9315,46 @@ fn the_wizard_never_offers_a_local_model() {
       renderWizard();
     }).catch(function () {});
   });
+  /// One row per enrolled course, removable, plus whatever the student typed. Slugs are made in Rust
+  /// (`knowlu_engine::ingest::slugify`) at Finish, from the code — the page never invents a vault identifier.
+  function renderCourses() {
+    EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.code || c.name) +
+             (c.name && c.name !== c.code ? " &middot; " + h(c.name) : "") +
+             '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
+    }).join("");
+  }
+  EL("wiz-courses").addEventListener("click", function (e) {
+    var drop = e.target.closest("[data-drop]");
+    if (drop) { WIZ.courses.splice(Number(drop.getAttribute("data-drop")), 1); renderCourses(); return; }
+    if (e.target.closest("#wiz-course-add-go")) {
+      var code = EL("wiz-course-add").value.trim();
+      if (code) { WIZ.courses.push({ code: code, name: code, slug: "" }); EL("wiz-course-add").value = ""; renderCourses(); }
+    }
+  });
+
+  /// R-OB-1. One row per discovered book or section: what it is, what we think it is, and a field the
+  /// student corrects. A row left blank is a source that stays unmapped — which is a choice, and is
+  /// why the panel says what the consequence is rather than refusing Next.
+  function renderMapping() {
+    EL("wiz-map").hidden = WIZ.map.length === 0;
+    EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
+      return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
+             (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +
+             '<input type="text" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
+             '" placeholder="Course code, e.g. CS 100">' +
+             '<label><input type="checkbox" data-ignore-for="' + i + '"' + (r.ignore ? " checked" : "") + '> Ignore</label></div>';
+    }).join("");
+  }
+  EL("wiz-map").addEventListener("input", function (e) {
+    var f = e.target.getAttribute("data-course-for");
+    if (f !== null) { WIZ.map[Number(f)].course = e.target.value.trim(); }
+  });
+  EL("wiz-map").addEventListener("change", function (e) {
+    var g = e.target.getAttribute("data-ignore-for");
+    if (g !== null) { WIZ.map[Number(g)].ignore = e.target.checked; renderMapping(); }
+  });
+
   // The personal calendar: same command, same validation, a different kind — and a different sentence,
   // because "courses" means nothing about somebody's own week.
   EL("wiz-cal-ics").addEventListener("change", function () {
@@ -7595,6 +9368,80 @@ fn the_wizard_never_offers_a_local_model() {
       if (r.ok && r.note) { WIZ.calNote += " " + r.note; }
       renderWizard();
     }).catch(function () {});
+  });
+
+  // ---- R-OB-4: the school typeahead.
+  //
+  // **The page never holds the list and never fetches it.** `app/tauri.conf.json`'s CSP is
+  // `connect-src ipc: http://ipc.localhost` with no `'self'`, so a `fetch` of a bundled asset is
+  // refused before it reaches the asset protocol — and that file is the controller's outside C0's
+  // three keys, so widening it would be a hand-off for a thing that needs none. `campus_search` is
+  // Rust's, answers with ten rows, and the page holds ten rows however long the list gets.
+  function schoolHits(q) {
+    return invoke("campus_search", { query: q }).then(function (r) { return (r && r.hits) || []; }).catch(function () { return []; });
+  }
+
+  function renderSchoolHits(hits) {
+    EL("wiz-school-hits").innerHTML = hits.map(function (r, i) {
+      // [unitid, name, city, state]
+      return '<div class="hit" data-school="' + i + '" tabindex="0">' + h(r[1]) +
+             '<span class="meta"> &middot; ' + h(r[2]) + ", " + h(r[3]) + "</span></div>";
+    }).join("");
+    EL("wiz-school-hits").__hits = hits;
+  }
+
+  function pickSchool(r) {
+    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: "" };
+    EL("wiz-school").value = r[1];
+    EL("wiz-school-hits").innerHTML = "";
+    EL("wiz-school-free").hidden = true;
+    EL("wiz-school-picked").textContent = r[2] + ", " + r[3];
+    WIZ.icsNote = "";
+    // The timezone is a SUGGESTION from the state, and only into a field the student has not touched:
+    // a typed value wins, and a state we do not know leaves the OS zone alone. Rust owns the table
+    // (`scaffold::state_timezone`); the page only asks.
+    invoke("timezone_for_state", { state: r[3] }).then(function (t) {
+      if (t && t.ok && t.timezone && !WIZ.tzTouched) { WIZ.tz = t.timezone; EL("wiz-tz").value = t.timezone; }
+    }).catch(function () {});
+    renderWizard();
+  }
+
+  EL("wiz-school").addEventListener("input", function () {
+    schoolHits(EL("wiz-school").value).then(renderSchoolHits);
+  });
+  EL("wiz-school-hits").addEventListener("click", function (e) {
+    var hit = e.target.closest("[data-school]");
+    if (hit) { pickSchool(EL("wiz-school-hits").__hits[Number(hit.getAttribute("data-school"))]); }
+  });
+  // Keyboard-selectable: a typeahead you can only click is a typeahead that fails the person typing.
+  EL("wiz-school-hits").addEventListener("keydown", function (e) {
+    var hit = e.target.closest("[data-school]");
+    if (hit && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      pickSchool(EL("wiz-school-hits").__hits[Number(hit.getAttribute("data-school"))]);
+    }
+  });
+  EL("wiz-school").addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") {
+      var first = EL("wiz-school-hits").querySelector("[data-school]");
+      if (first) { e.preventDefault(); first.focus(); }
+    }
+  });
+  // 6,072 schools is not all of them: a new campus, a satellite, somewhere abroad. A name and a state
+  // is enough to make a vault, and that school simply has no curated feeds.
+  EL("wiz-school-none").addEventListener("click", function () {
+    EL("wiz-school-free").hidden = false;
+    EL("wiz-school-hits").innerHTML = "";
+  });
+  EL("wiz-school-free").addEventListener("input", function () {
+    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: "" };
+    EL("wiz-school-picked").textContent = "";
+  });
+  // The two-button fallback for a school whose LMS nothing established — shown by the sign-in handler
+  // when `open_lms_window` says it does not know where to go.
+  EL("wiz-lms-kind").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-lms]");
+    if (b) { WIZ.campus.lms = b.getAttribute("data-lms"); EL("wiz-lms-kind").hidden = true; renderWizard(); }
   });
 ```
 
@@ -7642,6 +9489,11 @@ fn the_wizard_never_offers_a_local_model() {
 - [ ] **Step 6: `app/static/console.css`.** One rule for the textarea and one for the new nav width; nothing else changes:
 
 ```css
+/* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is 6,072 schools and the panel shows ten. */
+.wiz-hits { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair); }
+.wiz-hits:empty { display: none; }
+.wiz-hits .hit { padding: 6px 8px; cursor: pointer; }
+.wiz-hits .hit:hover, .wiz-hits .hit:focus { background: var(--s2c); outline: none; }
 #report-text { width: 100%; font: 12px/1.5 var(--mono); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }
 ```
 
@@ -7670,7 +9522,7 @@ fn the_wizard_never_offers_a_local_model() {
 
 - [ ] **Step 8: Run everything.** `cargo test -p knowlu` at 0 warnings.
 
-- [ ] **Step 8a: Confirm the first slot runs at Finish — and do not re-invent it.** §4.2 step 7 and §11a both say the wizard's last click ends with today's page on screen, and **`main` already does it**: `scheduler::needs_first_run(vault)` is `!vault.join("today.md").exists()`, and `scheduler::spawn` fires one slot at console launch when that is true, under the tick's own guards (`scheduler: app` **and** this device). `finish_onboarding` relaunches into the console over the vault the wizard just created, `spawn` runs, `today.md` is absent, the slot fires on its own thread and `run_slot` serialises it against anything else. **Nothing in this task starts a run**, and adding one would double-fire.
+- [ ] **Step 8a: Confirm the first slot runs at Finish — and do not re-invent it.** §4.2 step 7 and §11a both say the wizard's last click ends with today's page on screen, and **`main` already does it**: `scheduler::needs_first_run(vault)` is `!vault.join("state").join("today.md").exists()` — `state/today.md` is the page `rank` writes (`engine/src/cli.rs`); there is no root `today.md` — and `scheduler::spawn` fires one slot at console launch when that is true, under the tick's own guards (`scheduler: app` **and** this device). `finish_onboarding` relaunches into the console over the vault the wizard just created, `spawn` runs, `state/today.md` is absent, the slot fires on its own thread and `run_slot` serialises it against anything else. **Nothing in this task starts a run**, and adding one would double-fire.
 
   Assert the seam instead — append to `app/tests/scheduler.rs`:
 
@@ -7682,18 +9534,23 @@ fn the_wizard_never_offers_a_local_model() {
 fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
     use knowlu::scheduler::needs_first_run;
     let v = scratch("firstrun");
-    let today = v.join("today.md");
+    // `rank` writes `state/today.md` (cli.rs); a root `today.md` is nobody's file and must not count.
+    let state = v.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let today = state.join("today.md");
     let _ = std::fs::remove_file(&today);
-    assert!(needs_first_run(&v), "a vault with no today.md is owed its first slot");
+    assert!(needs_first_run(&v), "a vault with no state/today.md is owed its first slot");
+    std::fs::write(v.join("today.md"), b"# not the engine's file\n").unwrap();
+    assert!(needs_first_run(&v), "a root today.md is not the ranked page");
     std::fs::write(&today, b"# Today\n").unwrap();
-    assert!(!needs_first_run(&v), "an adopted vault already has today.md and must not run again");
+    assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
     let _ = std::fs::remove_dir_all(&v);
 }
 ```
 
   Then `cargo test -p knowlu --test scheduler` → one more test than before this task, all green.
 
-- [ ] **Step 9: Check H6's replacement against what you actually built.** `scripts/` is the controller's, so **do not edit the file** — but H6 carries the whole replacement (the two constants, the `FAKE` recorder, `check()`), and it was written against this task's markup and handlers. Read it beside `index.html` and `console.js` and confirm every id it drives exists and every command it fakes is one you invoke: `wiz-welcome`, `wiz-account`, `wiz-email`, `wiz-pw`, `wiz-18`, `wiz-terms`, `wiz-create`, `wiz-signin`, `wiz-sub-month`, `wiz-name`, `wiz-vault-path`, `wiz-calendars`, `wiz-campus`, `wiz-lms-open`, `wiz-lms-state`, `wiz-cal-ics`, `wiz-cal-note`, `wiz-google`, `wiz-zy-user`, `wiz-zy-pass`, `wiz-gmail`, `wiz-slot1`, `wiz-summary`, `wiz-back`, `wiz-next`, `wiz-step`, `wiz-error`. Report any drift **as a correction to H6**, with the replacement line, in the stream's report; the controller applies H6 at merge and runs it once (`.wv\Scripts\python scripts/wizard-check.py` → `ok`, exit 0).
+- [ ] **Step 9: Check H6's replacement against what you actually built.** `scripts/` is the controller's, so **do not edit the file** — but H6 carries the whole replacement (the two constants, the `FAKE` recorder, `check()`), and it was written against this task's markup and handlers. Read it beside `index.html` and `console.js` and confirm every id it drives exists and every command it fakes is one you invoke: `wiz-welcome`, `wiz-account`, `wiz-email`, `wiz-pw`, `wiz-18`, `wiz-terms`, `wiz-create`, `wiz-signin`, `wiz-sub-month`, `wiz-name`, `wiz-vault-path`, `wiz-calendars`, `wiz-school`, `wiz-school-hits`, `wiz-school-none`, `wiz-lms-kind`, `wiz-lms-open`, `wiz-lms-state`, `wiz-cal-ics`, `wiz-cal-note`, `wiz-google`, `wiz-courses`, `wiz-course-rows`, `wiz-course-add`, `wiz-zy-user`, `wiz-zy-pass`, `wiz-map`, `wiz-map-rows`, `wiz-gmail`, `wiz-slot1`, `wiz-summary`, `wiz-back`, `wiz-next`, `wiz-step`, `wiz-error`. Report any drift **as a correction to H6**, with the replacement line, in the stream's report; the controller applies H6 at merge and runs it once (`.wv\Scripts\python scripts/wizard-check.py` → `ok`, exit 0).
 
 - [ ] **Step 10: Commit.** `app: the wizard of §4.2 — account, subscription, a name instead of a folder, a school sign-in instead of a paste, an honest Gmail step, and the issue-report preview (C1 Task 17)`.
 
@@ -8151,7 +10008,7 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
 
 - [ ] **Step 5: Run everything.** `cargo test -p knowlu` at 0 warnings; `static_assets` green, `account` at 12 passed (10 from Task 11, plus this task's adopt-in-place and shared-backups-root tests).
 
-- [ ] **Step 6: A real upgrade, on a scratch vault.** `.\scripts\scratch-vault.ps1 -Source engine\tests\fixtures\vault-full`, launch against it, and confirm: the overlay appears; sign-in works against staging (`KNOWLU_API_BASE` set to the staging functions URL); after Checkout in test mode the overlay closes; `config/cloud.yaml` now exists in the scratch vault and nothing else in it changed (`git status` in a scratch copy, or a before/after directory listing with sizes); and — §11a — **no slot fires on top of the work that is already there**, because the adopted vault has a `today.md` and `scheduler::needs_first_run` is false. Record the result in this task. **Never against a real vault.**
+- [ ] **Step 6: A real upgrade, on a scratch vault.** `.\scripts\scratch-vault.ps1 -Source engine\tests\fixtures\vault-full`, launch against it, and confirm: the overlay appears; sign-in works against staging (`KNOWLU_API_BASE` set to the staging functions URL); after Checkout in test mode the overlay closes; `config/cloud.yaml` now exists in the scratch vault and nothing else in it changed (`git status` in a scratch copy, or a before/after directory listing with sizes); and — §11a — **no slot fires on top of the work that is already there** — write one line into the scratch copy's `state\today.md` before launching (the fixture vault carries no ranked page at either path, and without one the first-slot rule fires, correctly), so `scheduler::needs_first_run` is false. Record the result in this task. **Never against a real vault.**
 
 - [ ] **Step 7: Commit.** `app: an install from before C1 is adopted in place — sign in, subscribe, and config/cloud.yaml lands beside the config files that were already there (C1 Task 18)`.
 
@@ -8285,7 +10142,7 @@ git ls-files --eol cloud site app | Select-String -Pattern "i/lf" -NotMatch
 
 Expected: the workspace green at **0 warnings** with only the `.rsrc merge failure: multiple non-default manifests` line; every `.ts`, `.sql`, `.rs`, `.html`, `.css`, `.js` and `.md` this stream added reported as `i/lf`; the Deno suite green.
 
-- [ ] **Step 2: Recount the commands, by hand, from `main.rs`.** After the controller applies H3 the two `generate_handler!` lists must contain **23** and **43** names, **55** distinct (26 `commands.rs` + 11 `onboarding.rs` + 12 `account.rs` + 4 `lms_link.rs` + 2 `report.rs`; the overlap between the two lists is 11). Count them; do not trust this plan's arithmetic. Whatever the real numbers are, they are what H5 and H8 must say.
+- [ ] **Step 2: Recount the commands, by hand, from `main.rs`.** After the controller applies H3 the two `generate_handler!` lists must contain **27** and **43** names, **59** distinct (26 `commands.rs` + 14 `onboarding.rs` + 12 `account.rs` + 5 `lms_link.rs` + 2 `report.rs`; the overlap between the two lists is 11). Count them; do not trust this plan's arithmetic. Whatever the real numbers are, they are what H5 and H8 must say.
 
 - [ ] **Step 3: Prove the disjointness the merge depends on.** `git diff --name-only main...c1-accounts` and check every path against the ownership list in *Global Constraints*. **An overlap with C0's or C2's files is a stop, not a rebase.** Expected: only `cloud/supabase/**`, `app/src/{onboarding,scaffold,scheduler,account,lms_link,telemetry,report}.rs`, `app/static/**`, `app/tests/**`, `site/**`, and this plan.
 
@@ -8319,20 +10176,23 @@ the Task 13 spike (<one sentence>).
 4. **Both calendar links reach the account.** After a wizard run against staging, `select kind, added_at from sources` has one row per calendar the user connected — `lms_ics`, `calendar_ics`, or both — and `select url_ciphertext from sources` is not the URL. An adopted vault (item 3) back-fills the same rows out of `config/ingest.yaml` on its first upgrade. Without this, C2's `/ingest/ics` has nothing to read.
 5. **The upgrade overlay can be dismissed and never traps a user.** *Not now* hides it and the console under it works; a sign-in attempt that cannot reach the service stands it down for the session; it returns on the next launch.
 6. **The wizard's sign-in window can actually open.** The campus is chosen on the calendar panel, so pressing *Sign in to my school* opens the campus's own page rather than answering "no sign-in page is known for that school yet"; `scripts/wizard-check.py` (H6) exits 0.
-7. `GET /entitlement` answers `{status, current_period_end, plan, checked_at}`; the device caches it; **72 hours** of no network still ranks the day, and past the grace the slot records `judge (skipped: no entitlement)` with exit code 0 and a green tray. (Spec §5.1.)
-8. The **Stripe webhook is the only writer of `entitlements`** — provable on staging: `select count(*) from pg_policies where schemaname='public' and cmd<>'SELECT'` is `0`, and every table has `relrowsecurity = true`.
-9. `DELETE /account` cancels at period end, purges every row, leaves a 90-day tombstone and deletes the login last; `GET /account/export` returns every table for the caller. Both are reachable from the app.
-10. `POST /telemetry` accepts (a) and (b), refuses an unknown action and any free text, and stores nothing that is a title or a course name; `telemetry_daily` and `correction_rates` return nothing below ten accounts.
-11. `POST /issues` stores a report that was **shown to the user, scrubbed, and editable** before it was sent, and scrubs it again on arrival.
-12. The privacy policy and the terms are live at `knowlu.com/privacy.html` and `knowlu.com/terms.html`, Quinn has read both, and the wizard's one-sentence promise is the same string as the site's.
-13. Google's restricted-scope verification is **submitted**, with the justification and the video.
-14. `cargo test --workspace` green at 0 warnings; `deno test`, `deno lint` and `deno fmt --check` green; `git ls-files --eol` unchanged for everything this stream did not add.
-15. `git diff --name-only main...c1-accounts` touches nothing outside this stream's ownership.
+7. **The first slot after onboarding lands a usable page** (§11a R-OB-1, R-OB-2). On the scratch profile: `state/runner-log.md` carries **no** `not in config; skipped` and no `0 assignments parsed`; `config/ingest.yaml` names every confirmed book and section under `courses:`/`sections:` with `HowToUseZyBooks2` in `ignore:`; `courses/` holds one note per enrolled course and `course_map:` one line each; and the tasks the first `rank` orders carry a `course:` rather than `null`. What remains uncoursed is what enrichment is for — and what is already past due is R-OB-3's, which is not this stream's.
+8. **A student at any US college can finish the wizard** (§11a R-OB-4). Typing three letters of a school's name finds it through `campus_search` over `app/campuses.json`; picking it writes `config/campus.yaml` with its `unitid`, name and state and suggests a timezone from that state; a curated school additionally gets its event feeds and opens its own LMS sign-in page, and an uncurated one is asked which LMS it runs and is otherwise complete. "My school isn't listed" still produces a working vault.
+9. `GET /entitlement` answers `{status, current_period_end, plan, checked_at}`; the device caches it; **72 hours** of no network still ranks the day, and past the grace the slot records `judge (skipped: no entitlement)` with exit code 0 and a green tray. (Spec §5.1.)
+10. The **Stripe webhook is the only writer of `entitlements`** — provable on staging: `select count(*) from pg_policies where schemaname='public' and cmd<>'SELECT'` is `0`, and every table has `relrowsecurity = true`.
+11. `DELETE /account` cancels at period end, purges every row, leaves a 90-day tombstone and deletes the login last; `GET /account/export` returns every table for the caller. Both are reachable from the app.
+12. `POST /telemetry` accepts (a) and (b), refuses an unknown action and any free text, and stores nothing that is a title or a course name; `telemetry_daily` and `correction_rates` return nothing below ten accounts.
+13. `POST /issues` stores a report that was **shown to the user, scrubbed, and editable** before it was sent, and scrubs it again on arrival.
+14. The privacy policy and the terms are live at `knowlu.com/privacy.html` and `knowlu.com/terms.html`, Quinn has read both, and the wizard's one-sentence promise is the same string as the site's.
+15. Google's restricted-scope verification is **submitted**, with the justification and the video.
+16. `cargo test --workspace` green at 0 warnings; `deno test`, `deno lint` and `deno fmt --check` green; `git ls-files --eol` unchanged for everything this stream did not add.
+17. `git diff --name-only main...c1-accounts` touches nothing outside this stream's ownership.
 
 ## What is NOT in this plan
 
 - **C2's endpoints.** `/judge/{task,event,email}`, `/ingest/ics`, `/ingest/coursework`, `/events`, `/gmail/*`, `CloudModel` in the engine, the rule table, the eval suite. C1 writes `_shared/entitlement.ts` and stops. The wizard's Gmail panel is an honest stub with no endpoint behind it, and **§4.2 step 4's "a first fetch runs on the device and its payload goes to `/ingest/coursework` to prove the round trip" is not built either** — that endpoint is C2's, so C1's coursework panel stores the logins and says so, exactly as today. The proof of the round trip arrives with the endpoint.
 - **Google sign-in on the calendars panel.** C2's, and deliberately: one Google connect that asks for `calendar.readonly` first — a *sensitive* scope, so lighter verification and no CASA — and `gmail.readonly` incrementally after it, with the calendar fetch server-side beside `/ingest/ics` (spec §11a). C1 leaves a labelled, **disabled** button and a sentence saying when it arrives; until then the secret iCal address is the path, and it is not a stopgap so much as the thing that works without an OAuth review.
+- **R-OB-3, the past-due guard on a first ingest.** Ruled the same day and **not C1's**: it belongs to `engine/src/ingest.rs` and to C2's `/ingest-ics`, and `engine/**` is not this stream's to edit. Until it lands, a first ingest still creates items whose due date is behind the vault's birth, and the first page shows them. Named here so its absence is a decision rather than an oversight.
 - **C3's sync.** `/sync/push`, `/sync/pull`, journal replay, restore-from-cloud, second-device support, and removing `history.rs`'s git.
 - **C4's removal.** `inference.rs`, `SUPPORTED_RUNTIMES`, the settings panel's *Local judgment* row and the engine's `--runtime`/`--model` arguments all stay exactly as they are. Task 17 removes only the **wizard's** offer of them, because §4.2's step list has no such step.
 - **Three of spec §6's (b) cases.** Class (b) here is **field overrides**: a human, at the console, setting a field an agent had set. §6 also names *amend-card decisions, snoozes of proposals and declined events* as corrections, and none of the three is derived. They are a different shape — a verdict on a card rather than a value on a field — and they need the approvals ledger, not the journal's `set` records. The `corrections` table already fits them (`item_id`, `field`, `ours`, `theirs`, `kind`), so adding them later is a reader, not a migration. Until then the eval suite sees overrides only, and this line is what stops that from reading as an oversight.
@@ -8385,3 +10245,32 @@ The four extractions that do this are `the_source_kind_vocabulary_is_one_list_in
 `the_action_vocabulary_is_the_engines_on_both_sides_of_the_wire`,
 `the_unreachable_clause_is_one_string_on_both_sides` and
 `the_wizards_privacy_sentence_is_the_sites_privacy_sentence`.
+
+**Amendment (2026-09-09, after Quinn's first run on the fresh vault):** spec §11a gained the
+first-run row and rulings R-OB-1, R-OB-2, R-OB-3. This plan gained **Task 14a** (the coursework
+mapping, with hand-off **H10**'s read-only `coursework-discover` subcommand), **Task 14b** (the
+enrolled courses out of the sign-in window, seeded as `courses/` notes and `course_map` lines), a
+second go/no-go question in Task 13's spike, two inline blocks and their pins in Task 17, two ledger
+rows, one exit-gate item and an entry under *What is NOT in this plan* for R-OB-3 — which belongs to
+`engine/` and to C2, not to this stream. Nothing was deferred.
+
+**Amendment 2 (2026-09-09, R-OB-4):** the school stopped being two radio buttons. Hand-off **H11**
+generates `app/campuses.json` from the federal IPEDS *Institutional Characteristics* file
+(6,072 active two- and four-year institutions, public domain, header-stamped with its source and
+date); **Task 14c** turns `scaffold::CAMPUSES` into a curated layer keyed by `UNITID`, adds
+`config/campus.yaml`, a state-to-timezone table and `onboarding::timezone_for_state`; Task 17's
+calendars panel became a typeahead with a free-text fallback and a two-button LMS question; Task 14
+and 14b key on the unitid. Counts moved to **26 / 43 / 58**. The same round closed the amendment
+re-review's two Importants — the ruled outcome-C branch for the course list is written out and
+`read_current_document` has all three bodies, and `scaffold::slugify` is gone in favour of the
+engine's `knowlu_engine::ingest::slugify`, which is the function `judge::Heuristics` reads back —
+and both its Minors. Nothing was deferred.
+
+**Amendment 2, fix round (2026-09-09):** the R-OB-4 re-review's three Importants and three Minors, plus
+the Part-A residual, all fixed in place; nothing deferred. The largest: **the page never fetches the
+school list** — `app/tauri.conf.json`'s `connect-src ipc: http://ipc.localhost` names no `'self'`, and
+that file is the controller's, so the search became `onboarding::campus_search` over an
+`include_str!`'d `app/campuses.json` and the page holds ten rows instead of six thousand. H11's header
+lost its URL (the whole-file no-URL assertion holds again), and every LMS endpoint is now built from
+the curated row's **own** `lms_host` rather than one tenant per kind — with a test that no curated
+school's URL contains another's host. Counts moved to **27 / 43 / 59**.

@@ -1095,3 +1095,399 @@ Critical or Important remains open; the three items above are bookkeeping.
 - Four rounds; the final re-review found no open item. Three out-of-scope one-liners, handled by the controller directly in the plan text (index lines, not requirements): the `20260910000100_accounts.sql` entry now says five tables and names `webhook_events`; `cloud/supabase/templates/magic_link.html` is in the global *File structure*; and the "Step 3a" labels in Tasks 10 and 19 are **parked — Ruling:** no change, the steps live in different tasks and every reference carries its task number.
 - **R-X-13** (from the C2 re-review's second round): C1's *Interfaces with C2* item 8 said "its nine functions"; C2 ships eleven (`judge-rules` and `ingest-calendar` joined later). Edited to "eleven" by the controller, since C2 may not touch this file. **R-X-14:** C2's hand-off H9 part (d) — what invokes `set_google_calendar(vault, true)` when the Google consent completes — is a small `google_connected` command polled by the wizard's calendar panel, self-contained in H9, not C1's LMS-link poll; the merge-time controller applies it as written in H9.
 - The plan is final and is committed with this review.
+
+---
+
+## Re-review of the R-OB amendment (2026-09-09)
+
+Scope: the amendment as a unit — fidelity to §11a's first-run row and to D11, the ownership list, the
+YAML shape against what the engine actually reads, the testing rules, the counts, the ruled open item,
+and new breakage in the amended text only. Plan re-read at 9,434 lines. I read the spec's new row
+first, then checked every engine symbol H10 leans on and every config key the new `coursework:` block
+writes against `engine/src/{coursework,zybooks,vhl,judge,ingest,yaml,write,yamlemit}.rs` and
+`engine/tests/fixtures/vault-full/config/ingest.yaml`.
+
+**Verdict: the amendment is sound and mostly excellent — the discovery runs on the device with the
+device's credentials, the engine change is a proper hand-off with compiling code, and the YAML it
+writes is the shape the engine reads, asymmetries included. Two Importants: the ruled fallback for the
+course list is not in the text and the function it depends on is never defined, and `scaffold::slugify`
+is a divergent twin of a `pub` engine function on the one path whose drift is silent.**
+
+### Fidelity to §11a's first-run row and to D11
+
+**R-OB-1 — honoured.** The diagnosis is carried verbatim into the ledger, including the two log lines
+Quinn's run produced (`plan.md:83`), and Task 14a is the fix: after the logins panel stores the
+credentials, the wizard runs discovery, shows every book and section with a *suggested* course, and
+writes what the student confirms. The ruling's other half — "an unknown book on a later run is a
+proposal, never a silent skip" — is correctly assigned to C2 in the same row rather than half-built here.
+
+**R-OB-2 — honoured.** Asked as the spike's second go/no-go (Task 13 step 4a, `plan.md:6108`), captured
+in Task 14b, and seeded as one `courses/<slug>.md` per course plus a `course_map:` line each
+(`plan.md:7241-7258`). The seed goes through `write::create(vault, …, &crate::commands::console_ctx(),
+&mut journal, None)` — the same call the existing `seed_writes` makes at `app/src/scaffold.rs:196` — so
+the "every vault write is journaled, through the engine's `write`" invariant holds and `journal::VIAS`
+does not grow. `Node::map` / `safe_dump_block` are already imported in that file
+(`app/src/scaffold.rs:16`), so the block compiles as written.
+
+**R-OB-3 — correctly refused.** Named in the ledger as *not C1's* (`plan.md:85`), given its own entry
+under *What is NOT in this plan* with the ownership reason — `engine/src/ingest.rs` and C2's
+`/ingest-ics`, and `engine/**` is not this stream's (`plan.md:9374`) — and referenced in the exit gate
+so its absence reads as a decision (`plan.md:9359`). That is exactly the right handling.
+
+**D11 — honoured, and this was the thing to check.** Discovery never sends a portal credential
+anywhere. `onboarding::discover_coursework` (`plan.md:6992-7014`) spawns the sibling engine with only
+**credential target names** on the argv, and H10's `discover_json` reads Credential Manager on the
+device (`crate::wincred::read_credential`, `plan.md:780`, `:812`) and fetches from the device with
+`zybooks::signin` / `vhl::login_and_fetch_dashboard`. No payload, no password and no cookie leaves the
+machine; the server is not in this path at all. A target *name* on a command line is not a secret — it
+already sits in plaintext in `config/ingest.yaml` as `credential_target` — so the earlier rule ("an
+account on a command line is an account in a process list") is not strained. And every failure is a
+`note` and an empty row set, never an error: "we could not reach your coursework sites — fill them in
+below" (`plan.md:7014`).
+
+### Ownership — H10 is the only engine change, and it is a real hand-off
+
+Nothing engine-shaped is hidden in a task: I grepped the whole of Tasks 14a and 14b for `engine/src`
+and found nothing; their **Files** lists name only `app/src/{scaffold,onboarding,lms_link}.rs` and
+`app/tests/**` (`plan.md:6633`, `:7057`). H10 carries the engine change with exact code for all three
+files it touches and the sentence that nothing else in `engine/` moves, no run record, no journal
+record, no write path, and no frozen reference (`plan.md:849-851`).
+
+**The hand-off compiles against the real crate.** I checked every symbol it uses:
+`coursework::{load_coursework_config, cfg_str, route_zybook, BookRouting, SourceError}` (`:134`, `:430`,
+`:454`, `:443`, `:63`), `zybooks::{signin, fetch_zybook_codes}` (`:568`, `:597`),
+`vhl::login_and_fetch_dashboard` (`:505`), `yaml::get` (`:19`), `ledger::dumps_value` (`:356`), and
+`yaml_str` — which `coursework.rs` already imports at line 21 and already uses in the identical
+`Some(Yaml::Sequence(items)) => items.iter().map(yaml_str).collect()` idiom at line 481. The new
+`vhl::discover_sections` sits beside four existing `LazyLock<Regex>` statics and its test calls
+`dashboard_html()`, the committed fixture already in that module's tests (`engine/src/vhl.rs:570`) — so
+the discovery test reads a file, not a network. Both `cfg(windows)` arms are present, and the
+non-Windows arm reports the missing credential store rather than an empty semester, which is the rule
+`fetch_zybooks` already follows.
+
+### The YAML shape — checked key by key against the engine
+
+`engine/tests/fixtures/vault-full/config/ingest.yaml` has no `coursework:` block at all, so the fixture
+could not settle this; I read the readers instead. Every key Task 14a writes is one the engine reads,
+in the shape it reads it:
+
+| What Task 14a writes | What reads it | Verdict |
+|---|---|---|
+| `coursework.zybooks.courses.<code>.{course,label}` (`plan.md:6901-6906`) | `route_zybook` → `cfg_str(&mapping, "course"/"label")` (`coursework.rs:454`, `:500-501`) | ✓ and an **empty** mapping is falsy there, which is why writing `courses: {}` for the empty case (`plan.md:6899`) is right |
+| `coursework.zybooks.ignore: ['HowToUseZyBooks2']` (`plan.md:6892`) | `ignore` sequence in `fetch_zybooks` (`coursework.rs:480`), `BookRouting::Ignored` | ✓ — and the engine's own doc says a WARN here would fire on every healthy run, which is the reason the plan gives |
+| `coursework.zybooks.categories` as a **mapping** (`plan.md:6895`) | `mapping_field(cfg, "categories")` → `category_of(&title, &categories)` (`zybooks.rs:152`, `:245`) | ✓ |
+| `coursework.zybooks.effort.{minutes_per_section, floors}` (`plan.md:6896`) | `python_float(…, "minutes_per_section")`, `mapping_field(&effort_cfg, "floors")` (`zybooks.rs:154-158`) | ✓ including `floors` keyed by the category *value* |
+| `coursework.zybooks.importance` as a **mapping** (`plan.md:6897`) | `mapping_field(cfg, "importance")` → `table_lookup` (`zybooks.rs:159`, `:249`) | ✓ |
+| `coursework.vhl.importance: 3` as an **int** (`plan.md:6915`) | `yaml::i64_of(value)`, "importance is not an int" (`vhl.rs:179-181`) | ✓ — **the asymmetry is right.** zyBooks wants a table and VHL wants a scalar; writing one shape into both is exactly the kind of thing that produces "0 assignments parsed" |
+| `coursework.vhl.sections.'<id>'.{course,label}` with the id **quoted** (`plan.md:6922`) | `yaml::get(&sections, &section_id)` (`vhl.rs:203`), and `yaml::get` builds a `Value::String` key (`yaml.rs:19`) | ✓ — **load-bearing.** Unquoted, `2102121` parses as a YAML integer key and a string lookup never matches it. The quoting is not decoration |
+
+The `courses:` / `sections:` block-vs-`{}` distinction is pinned by its own assertions
+(`plan.md:6685-6704`), and `scaffold::ingest_yaml`'s existing `timezone` / `course_map` / `calendars`
+keys are untouched.
+
+### Testing rules — held
+
+No test in the amendment reaches a network. `rows_from_discovery` is a pure string parser driven with
+literal JSON, including a malformed input and an all-errors payload (`plan.md:6716-6741`);
+`discover_sections`' test runs against the committed dashboard fixture; `courses_from_json` is driven
+with both LMS shapes as literals (`plan.md:7066-7075`); `suggest_course` and `slugify` are pure. The
+one impure function, `discover_coursework`, spawns a child process and is exercised by hand in Task 14a
+step 6, not by a test — which is right, since the alternative would be a test that logs in to zyBooks.
+Task 14b's seed is asserted against `judge::Heuristics::load` / `knows_course`, which is the correct
+oracle: that is the code that decides whether the seeding worked.
+
+### The counts — confirmed by counting
+
+I counted both `generate_handler!` lists rather than trusting the arithmetic. Shell (`plan.md:323`):
+12 `onboarding` + 8 `account` + 5 `lms_link` = **25**. Console (`plan.md:329`): 26 `commands` + 3
+`onboarding` + 12 `account` + 2 `report` = **43**. Overlap 3 + 8 = 11, so **57 distinct**. The
+per-module split (26 + 12 + 12 + 5 + 2 = 57) is right, and H3 (`plan.md:320`, `:326`, `:340`), H5
+(`plan.md:384-397`) and H8 (`plan.md:649`) and Task 21 step 2 (`plan.md:9325`) all say the same three
+numbers. `PANELS` is still nine (`plan.md:8309`) because `#wiz-courses` and `#wiz-map` are blocks
+*inside* `wiz-calendars` and `wiz-logins` (`plan.md:8234`, `:8250`), not new panels — so H6's "seven
+panels to nine" stays true and the panel-set pin does not move. The Deno totals are untouched; this
+amendment is app-side and engine-side only.
+
+### New breakage in the amended text
+
+- **Important — `plan.md:7210`: `read_current_document` is called and never defined, and the ruling
+  that covers its absence is not in the plan.** `capture_courses` reads the JSON body with
+  `let body = read_current_document(&app);`, and the only guidance is a comment saying "keep the
+  body-reading half of whichever outcome Task 13 recorded, and delete the other" (`plan.md:7206-7209`)
+  — but neither half is written anywhere, and there is no third branch. The controller's ruling is that
+  **no body-reading method means outcome C for the course list only, the typed-codes fallback stands,
+  and Task 14b is not blocked**; the plan does not say that, and an implementer who reaches Task 14b
+  with a Task 13 answer of "no method got the body out" has an undefined function and no instruction.
+  The behaviour would in fact be correct — every other path already returns `typed: true`
+  (`plan.md:7201`, `:7204`, `:7212`) — which is what makes the omission cheap to fix and easy to miss.
+  **Fix:** give `read_current_document` all three bodies the way Task 14 gives `capture_calendar_link`
+  all three (A: read the address after the navigate; B: cookie handover and a `ureq` fetch; C:
+  `fn read_current_document(_: &tauri::AppHandle) -> String { String::new() }`, with a comment that an
+  empty body is the typed-codes path and that this is the ruled outcome when neither A nor B can read
+  a document), and add the ruling sentence to Task 14b's intro.
+- **Important — `plan.md:6797-6810`: `scaffold::slugify` is a divergent twin of the engine's `pub`
+  `ingest::slugify`.** The engine already exports one (`engine/src/ingest.rs:209-220`) and the app crate
+  already depends on the engine and calls into six of its modules. The two differ in two ways that
+  matter on this exact path: the engine caps the slug at **60 characters** and trims again; the plan's
+  does not — and the engine falls back to `"item"` when nothing survives; the plan's returns an empty
+  string, which would write `courses/.md`. The slug is the filename stem `judge::Heuristics::load`
+  reads (`engine/src/judge.rs:285-292`) and the key `knows_course` matches (`:319`), and it is also
+  what `zybooks::parse_assignments` slugifies for `tasks/<slug>.md` (`engine/src/zybooks.rs:151`) — so a
+  divergence is silent: the note is written, the task is written, and the match simply never happens.
+  **Fix:** delete the twin and call `knowlu_engine::ingest::slugify`. If a different rule is genuinely
+  wanted, say why in the doc comment and pin the two against each other with a test, the way the plan
+  already pins `ACTIONS` and `SOURCE_KINDS`.
+- **Minor — the H10 `discover_json` `errors` array is built but never surfaced to the student.**
+  `rows_from_discovery` turns an all-errors payload into an empty row set and the panel says "we could
+  not reach your coursework sites" (`plan.md:6738`, `:7014`), which is the right *behaviour* — but the
+  per-source reason (`"zybooks: fetch failed (…)"` versus `"vhl: …"`) is discarded, so a student whose
+  zyBooks worked and whose VHL did not is told nothing about which. One sentence beside the rows would
+  cost nothing and is the difference between "try again" and "fix your VHL password".
+- **Minor — Task 14a's suggested course is derived from the code, and nothing pins the suggestion
+  against `course_map`.** `suggest_course` produces the slug the student confirms, and Task 14b writes
+  `course_map` entries per course; if a student edits the suggestion on the mapping block but the
+  `course_map` line was already written from the captured list, the two can name the same course by
+  different slugs. The exit gate would catch it on a real run (`plan.md:9359`), but a test asserting
+  that every `courses:` / `sections:` `course:` value is either a seeded `CourseSeed.slug` or a
+  `course_map` target would catch it before one.
+
+### Out of scope
+
+Nothing new outside the amendment. The three bookkeeping items parked after round 4 are unchanged.
+
+---
+
+## Re-review of the R-OB-4 amendment (2026-09-09)
+
+Two parts, as scoped. Plan re-read at 10,038 lines. For Part B I re-read the spec's newest row first,
+then checked the one thing the amendment turns on that no test in it can catch: whether the page can
+actually load `campuses.json` inside Tauri.
+
+**Verdict: Part A is 4 of 4 ADDRESSED. Part B honours R-OB-4's shape, its ownership and its counts, and
+its state table is right — but three Importants: the page's `fetch("campuses.json")` is blocked by the
+app's own CSP, H11's header line writes the very `https://` literal Task 14c's test forbids, and
+`course_list_url` hard-codes one tenant's host per LMS kind.**
+
+## Part A — the R-OB amendment's four items: 4 of 4 ADDRESSED
+
+| # | Item | Verdict | Evidence |
+|---|---|---|---|
+| A1 | `read_current_document` undefined; ruled fallback missing | **ADDRESSED** | Three named bodies with "keep exactly one of the three below … and delete the other two" (`plan.md:7365-7405`): **B** the cookie handover through one `ureq` GET (`:7371-7386`), **A′** the eval-returned body (`:7392`), **C** `String::new()` (`:7403`). The ruled sentence is Task 14b's second paragraph, verbatim: "That is **outcome C for the course list only** … the panel shows its typed-codes field, and **this task is not blocked**" (`plan.md:7204-7209`), closing with "the capture is the fast path and the typing is the guarantee". |
+| A2 | `scaffold::slugify` a divergent twin | **ADDRESSED** | The twin is gone and its absence is asserted in prose — "and **no `slugify`**: the engine's `knowlu_engine::ingest::slugify` is the one this plan calls, everywhere" (`plan.md:6762`) — plus a standing comment in `scaffold.rs` saying there must not be one (`plan.md:6934-6936`). Every call site now names the engine's: `:6037`, `:6774`, `:7339`, `:7341`, `:9169`, and a static pin forbids the page from slugging at all (`:8681`). I checked the two new assertions against `engine/src/ingest.rs:209-220`: `slugify("!!!")` → lowered `!!!` → dashed `-` → trimmed `""` → `"item"` ✓ (`plan.md:6788`), and `slugify(&"x".repeat(80)).len() == 60` matches `.chars().take(60)` ✓ (`plan.md:6789`). |
+| A3 | `errors` built but never surfaced | **ADDRESSED** | `errors_from_discovery` (`plan.md:7116`), driven by a test that pins the per-source reason (`plan.md:6872-6875`), and read into the panel's note (`plan.md:7156`). |
+| A4 | Nothing pinned the mapping against the seeds | **ADDRESSED** | A scaffold test walks every mapped `courses:`/`sections:` slug through `judge::Heuristics::knows_course` — "`{slug} is mapped and the vault does not know it`" (`plan.md:7487`) — and covers the VHL-without-Blackboard case explicitly (`plan.md:7490-7493`). |
+
+**One residual (Minor):** Task 14a step 2 still expects `unresolved imports … slugify` when the tests
+are run red (`plan.md:6910`). The test now imports `knowlu_engine::ingest::slugify`, which resolves, so
+that name should come out of the expected-failure line.
+
+## Part B — the R-OB-4 amendment
+
+### Fidelity to R-OB-4 — honoured
+
+Every clause of the ruling is delivered: the IPEDS *Institutional Characteristics* file as the source
+with `UNITID`, name, city, state and web host (H11); a compact committed asset whose header records the
+source file and date (`plan.md:143`, pinned at `:7554-7556`); a typeahead with "my school isn't listed"
+falling back to free text (`plan.md:8640-8645`); `campus:` written into the vault as its own
+`config/campus.yaml` with `unitid`, `name`, `state`, `lms`, `curated`; `scaffold::CAMPUSES` demoted to
+a *curated layer* keyed by unitid that adds event feeds and a known LMS on top; an uncurated school
+getting no feeds and its LMS from where the sign-in window landed or from a two-button question
+(`lms_kind_from_url`, `plan.md:7820-7826`); and a timezone suggested from the state with the typed value
+winning (`WIZ.tzTouched`, `plan.md:8876`). The exit gate states the whole thing as one sentence
+(`plan.md:9951`).
+
+**The writer's open point is in the text and is true by construction.** `course_list_url(unitid)`
+returns `None` for anything `curated()` does not know (`plan.md:7808-7815`), and every `None` path in
+`capture_courses` returns `typed: true`, so an uncurated school types its codes. The exit gate says the
+same in user words: "a curated school additionally gets its event feeds and opens its own LMS sign-in
+page, and an uncurated one is asked which LMS it runs and is otherwise complete" (`plan.md:9951`).
+
+### Ownership, the size guard, the state table, the counts
+
+- **Ownership — correct.** H11 is `scripts/campuses-from-ipeds.ps1`, declared a controller hand-off with
+  the whole script inline, and the plan states the split plainly: "`scripts/` is the controller's. The
+  **output** — `app/static/campuses.json` — is this stream's" (`plan.md:865-867`).
+- **The size guard is in both halves** and they agree: the script throws past 600 KB
+  (`plan.md:968`) and the test asserts `kb < 600` (`plan.md:7574`), with the script's error message
+  naming the test that enforces it. A row-count band (5,000–8,000) catches a half-run script too
+  (`plan.md:7563`).
+- **The state table is right, and carefully so.** 51 entries (50 + DC). I checked every split state
+  against the stated majority-population rule: KY → `America/New_York` (Louisville/Lexington Eastern —
+  and UK, a curated campus, is in that half); TN → `America/Chicago` (Nashville + Memphis outweigh
+  Knoxville/Chattanooga); FL → Eastern (panhandle excepted); TX → Central (El Paso excepted); ND, SD,
+  NE, KS → Central; OR → Pacific (Malheur excepted); NV → Pacific (West Wendover excepted). The three
+  state-specific zones are the right calls rather than a blanket four-zone map: `America/Detroit` for
+  MI (four UP counties are Central), `America/Boise` for ID (the panhandle is Pacific),
+  `America/Indiana/Indianapolis` for IN (the Chicago and Evansville corners are Central), plus
+  `America/Phoenix` and `Pacific/Honolulu` for the two no-DST states.
+- **The counts reconcile.** I recounted both lists: shell (`plan.md:325`) 13 `onboarding` + 8 `account`
+  + 5 `lms_link` = **26**; console (`plan.md:331`) 26 `commands` + 3 `onboarding` + 12 `account` + 2
+  `report` = **43**; overlap 3 + 8 = 11, so **58 distinct**. H3 (`:322`, `:342`), H5 (`:396`), H8
+  (`:658`) all say 26 / 43 / 58.
+
+### New breakage in the amended text
+
+- **Important — `plan.md:8645`: the page cannot `fetch("campuses.json")` inside Tauri.** The static pin
+  requires `js.contains("fetch(\"campuses.json\")")`, and Task 17 deletes the working path that exists
+  today — "the page reads `campuses.json` itself. Delete the key and the `CAMPUSES.iter().map(…)`
+  expression with it" (`plan.md:7790`). But `app/tauri.conf.json:10` sets
+  `"csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; …"`. `connect-src` is what governs
+  `fetch`, it is stated explicitly so `default-src 'self'` does not apply to it, and it does not include
+  `'self'` — so the request is refused before it reaches the asset protocol. There is no counter-example
+  in the codebase: the only `fetch` in `console.js` today is dev-only, guarded by `if (!tauri)`, and
+  runs in `console-shots.py`'s plain browser where no CSP from `tauri.conf.json` applies
+  (`app/static/console.js:16-22`). The plan never mentions the CSP — I grepped for `csp` and
+  `connect-src` and there are no hits. **Fix (and it is the smaller change):** keep the list on the Rust
+  side. `launch_state` already hands the page a campus list; have it hand this one instead, from
+  `include_str!("../static/campuses.json")` or a new `onboarding::campuses()` command, and change the
+  static pin from `fetch("campuses.json")` to the command name. That also keeps the plan's own rule that
+  the page never names an endpoint, and needs no edit to `tauri.conf.json` — which is the controller's
+  file and would otherwise need a hand-off to widen `connect-src` to `'self'`.
+- **Important — `plan.md:952` writes the literal Task 14c's test at `plan.md:7570` forbids.** H11's
+  header line is `'{{"source":"{0}","url":"{1}",…' -f $Csv, $Url, …` with
+  `$Url = "https://nces.ed.gov/ipeds/datacenter/data/HD2024.zip"`, so the first line of the generated
+  file contains `https://`. Task 14c asserts `!raw.contains("http://") && !raw.contains("https://")`
+  over the **whole file**, header included, with the message "the list carries hosts, never URLs". The
+  script's own comment even cites that rule as the reason it strips schemes from `WEBADDR`
+  (`plan.md:926-930`) and then breaks it three dozen lines later. This is the **fifth** instance of the
+  plan's recurring class — a test written against a file the author did not re-read — and the first
+  where the plan generates the file itself. **Fix:** drop `"url"` from the header (`"source":"HD2024.csv"`
+  already names it) or record the host only, `"url":"nces.ed.gov/ipeds/datacenter/data/HD2024.zip"`.
+- **Important — `plan.md:7808-7815`: `course_list_url` hard-codes one tenant's host per LMS kind.** The
+  arms are `Some(c) if c.lms_kind == "blackboard" => Some("https://ualearn.blackboard.com/learn/api/…")`
+  and `… "canvas" => Some("https://uk.instructure.com/api/v1/courses")`. With two curated schools that
+  is accidentally correct; the third curated Blackboard school would send its student's window to
+  Alabama's LMS. `capture_steps` has the same shape (`plan.md:7800-7806`). The path is identical across
+  tenants — only the host differs — and `Curated` already carries `lms_url` (`plan.md:7828`), so the
+  data is right there. In the one task whose purpose is to stop assuming two campuses, a per-kind
+  constant host is the assumption wearing a different hat, and `CLAUDE.md`'s first rule is that anything
+  needing a hand-edit for a second user is a bug. **Fix:** build the URL from `c.lms_url` plus the LMS's
+  known path and return `Option<String>`.
+- **Minor — `plan.md:931`: `$host` collides with PowerShell's automatic `$Host`.** Assigning to it inside
+  the loop creates a scope-local shadow of the PSHost object; it usually works, PSScriptAnalyzer flags
+  it (`PSAvoidAssignmentToAutomaticVariable`), and it is one rename away from not being a question at
+  all. Everything else in the script is 5.1-clean: no `&&`/`??`/ternary, `-f` formatting with `{{`
+  correctly escaped, `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)` for no BOM, an
+  explicit `-replace "`r`n", "`n"` for LF, `$ErrorActionPreference = "Stop"`, and a `finally` that
+  cleans the temp directory. **The BOM handling is right and is the part most scripts get wrong:**
+  `Import-Csv -Encoding Default` reads the ANSI code page (latin-1 on a US install, which is what keeps
+  accented institution names intact), and because that leaves the BOM glued to the first header name,
+  the script binds `UNITID` **by position** — `($rows[0].PSObject.Properties | Select-Object -First 1).Name`
+  — instead of by name. Every other column it reads (`CYACTIVE`, `ICLEVEL`, `INSTNM`, `CITY`, `STABBR`,
+  `WEBADDR`) is unaffected because none of them is first.
+- **Minor — no timezone row for the territories.** `STATE_TZ` is 50 states plus DC, but `CYACTIVE = 1`
+  and `ICLEVEL ∈ {1,2}` keep Puerto Rico's institutions — roughly a hundred of them, the UPR system
+  included — along with GU, VI, MP and AS. A student there gets no suggestion and falls back to the OS
+  zone, which is a safe degradation but not a deliberate one. Five rows (`PR`/`VI` →
+  `America/Puerto_Rico`, `GU`/`MP` → `Pacific/Guam`, `AS` → `Pacific/Pago_Pago`) close it.
+- **Minor — `plan.md:940`: `$campuses += , @(…)` inside a loop over ~6,000 rows** reallocates the array
+  on every iteration. It finishes, and this runs once a year, but a `System.Collections.Generic.List[object]`
+  is one line and removes the only quadratic thing in the script.
+
+### Out of scope
+
+Nothing new outside these two parts. The three bookkeeping items parked after round 4 are unchanged.
+
+---
+
+## Re-review of the R-OB-4 fix round (2026-09-09)
+
+Scope: the three Importants and four Minors from the R-OB-4 review, the three named sub-checks on
+`campus_search`, the `today.md` predicate sweep the controller asked for, breakage from this round
+only, and a closing verdict. Plan re-read at 10,269 lines.
+
+**Verdict: all seven items ADDRESSED, and the three sub-checks pass — `include_str!("../campuses.json")`
+resolves correctly, no result string carries a URL, and the header cannot surface as a hit. Two new
+items, one of them the `today.md` sweep, both for the controller rather than the writer.**
+
+### The seven items — 7 of 7 ADDRESSED
+
+| # | Item | Verdict | Evidence |
+|---|---|---|---|
+| I1 | The page cannot `fetch("campuses.json")` under the CSP | **ADDRESSED** | The page no longer fetches anything: `onboarding::campus_search` (`plan.md:7840-7853`) answers from Rust, registered in the shell list (`plan.md:325`), and the static pin is inverted — `assert!(!js.contains("campuses.json"), "the page never names the asset")` (`plan.md:8798`). The asset moved to `app/campuses.json` beside `tauri.conf.json` with the reason stated in two places (`plan.md:143`, `:7799-7801`), and the plan now names the CSP as the cause rather than discovering it late (`plan.md:7793`). Its two tests moved to `app/tests/onboarding.rs`, which is right — `static_assets.rs`'s `read()` helper only reaches `static/` (`plan.md:7555`). The Rust test drives all three cases: one letter → nothing, "university of alabama" → 100751, and the city (`plan.md:7863-7869`). |
+| I2 | H11's header wrote the `https://` its own test forbids | **ADDRESSED** | The header is now `'{{"source":"NCES IPEDS {0}","retrieved":"{1}","count":{2},"campuses":['` with `$Csv` only — the URL stays in the `param` block (`plan.md:964`). The test follows it: `head.starts_with("{\"source\":\"NCES IPEDS HD")`, `contains("\"count\":")`, and `rows.len() == v["count"]` (`plan.md:7565-7572`), so the whole-file `!raw.contains("https://")` assertion at `plan.md:7582` now holds. |
+| I3 | `course_list_url` hard-coded one tenant's host per LMS kind | **ADDRESSED** | `Curated.lms_host` carries a bare host — `"ualearn.blackboard.com"`, `"uk.instructure.com"` (`plan.md:7673`, `:7683`, `:7690`) — and all three builders compose it: `lms_home` (`:7914`), `capture_steps` (`:7928`), `course_list_url` (`:7940`), each `format!("https://{}{path}", c.lms_host)`. The test asserts both halves and the uncurated case: each school's home contains its own host, **no other curated school's host appears in it**, and `lms_home("999999")` is `None` (`plan.md:7969-7981`). |
+| M1 | `$host` shadows the automatic `$Host` | **ADDRESSED** | `$webhost`, with the reason in a comment naming `$Host` as the PSHost object (`plan.md:936-946`). |
+| M2 | `$campuses += , @(…)` is quadratic | **ADDRESSED** | `New-Object System.Collections.Generic.List[object]` (`plan.md:930`). |
+| M3 | No timezone rows for the territories | **ADDRESSED** | `STATE_TZ.len() == 56` is asserted (`plan.md:7642`), and the five are right: PR and VI → `America/Puerto_Rico`, GU and MP → `Pacific/Guam`, AS → `Pacific/Pago_Pago`. (`America/St_Thomas` and `Pacific/Saipan` are tzdb *links* to those two, same offset and no DST, so the canonical names are the better choice.) |
+| M4 | Task 14a step 2's stale expected failure | **ADDRESSED** | `slugify` is out of the list, with a parenthetical saying why: "(`slugify` resolves already — it is `knowlu_engine::ingest::slugify`, and there is no second one to write.)" (`plan.md:6922`). |
+
+### The three sub-checks
+
+- **`include_str!("../campuses.json")` from `app/src/onboarding.rs` — correct.** `include_str!` resolves
+  relative to the file containing the macro, so the path is `app/src/../campuses.json` = `app/campuses.json`,
+  which is where H11 writes it (`plan.md:901`, `:7527`). Beside `tauri.conf.json`, as claimed.
+- **No result string carries a URL — correct, and twice over.** `campus_list()` parses only indices 0–3
+  into its tuple (`plan.md:7818-7824`), so the host at index 4 never becomes a parsed field at all; and
+  `campus_search` maps each hit to `json!([id, name, city, state])` (`plan.md:7851`), with the doc
+  comment stating the rule — "the host is in the asset and is not shown, so it does not cross the IPC
+  either" (`plan.md:7837-7838`). Nothing that crosses the IPC can carry a scheme or a host.
+- **The header cannot appear as a hit — correct.** The parse reads `v.get("campuses").and_then(|c| c.as_array())`
+  (`plan.md:7815-7816`), so it descends into the `campuses` key; `source`, `retrieved` and `count` are
+  siblings of that key on the same top-level object, not elements of the array. Even if a non-array
+  element ever appeared inside it, `filter_map` with `r.as_array()?` drops it silently (`plan.md:7819`).
+
+### The `today.md` predicate — line numbers for the controller
+
+`engine/src/cli.rs:404` writes `vault.join("state").join("today.md")`, and `main`'s
+`app/src/scheduler.rs:188` tests the **root** path — confirmed, and being corrected tonight. The C1
+plan states or tests that predicate in seven places. **Two carry the root path and must be corrected
+with `main`:**
+
+- **`plan.md:9523`** — Task 17 step 8a's prose quotes the predicate as fact:
+  *"`scheduler::needs_first_run(vault)` is `!vault.join("today.md").exists()`"*. → `!vault.join("state").join("today.md").exists()`.
+- **`plan.md:9535`** — the seam test constructs the path: `let today = v.join("today.md");`, and the
+  line below it writes that file by hand before asserting `!needs_first_run(&v)`. **This is the test
+  that must not stand**: after `main`'s fix it would create a root file the predicate no longer reads,
+  and the second assertion (`plan.md:9539`) would fail. → `let today = v.join("state").join("today.md");`.
+  `scratch()`'s fixture already has a `state/` directory, so no `create_dir_all` is strictly needed —
+  but adding one costs a line and removes the dependency on that.
+
+The other five are path-free prose and stay true either way: `plan.md:87` (the ledger row),
+`plan.md:9528`, `:9537`, `:9539` (the test's doc comment and its two assertion messages) and
+`plan.md:10004` (Task 18 step 6).
+
+**One of those five is wrong for a different reason, and it is worth fixing in the same pass.**
+`plan.md:10004` tells the implementer to adopt a scratch copy of `engine\tests\fixtures\vault-full`
+and confirm "no slot fires … because the adopted vault has a `today.md`". That fixture has **no**
+`today.md` at either path — I listed it: the root holds `approvals config info issues profile state
+tasks`, and `state/` holds `calendar.md events-seen.md events.md journal runs`. So the manual check's
+premise is false and a slot *would* fire. Either write a `state/today.md` into the scratch copy first
+and say so, or change the expectation.
+
+### New breakage in this round
+
+- **Important — `plan.md:7811` makes H11 a second mid-stream pause, and three lines say there is only
+  one.** `include_str!("../campuses.json")` is a **compile-time** dependency: until H11 has been applied,
+  `cargo build -p knowlu` fails for the whole crate, not just a test — a harder stop than H9, which only
+  blocks an invoke. Task 14c states the precondition locally (`plan.md:7523`, `:7553`), but the hand-off
+  preamble still says "Everything from H3 down is applied at merge" (`plan.md:285`), and both H9
+  (`plan.md:667`) and Task 13 step 3 (`plan.md:6236`) still call H9 "the **only** mid-stream pause in
+  the plan". **Fix:** three sentences — mark H11 mid-stream in the preamble and in its own heading, and
+  change H9's two "only" claims to name both.
+- **Minor — `plan.md:7578-7579`: a comment left behind by the move.** The row-shape assertion still
+  explains itself with "`app/static/` carries no `http(s)://` literal, and this file lives there" — the
+  file lives in `app/` now, and the reason the assertion holds is I2's header change, not the
+  static-assets rule. The assertion is right; only its stated reason is stale.
+
+### Closing verdict
+
+**READY TO EXECUTE**, once the controller applies two mechanical corrections that are its own to make,
+not the writer's: the `state/today.md` path at `plan.md:9523` and `:9535` alongside tonight's fix to
+`app/src/scheduler.rs:188` (and the fixture premise at `:10004`), and the three sentences that promote
+H11 to a mid-stream hand-off. Neither touches the plan's logic. Across five review rounds and two
+amendments this plan has taken three Critical and twenty-two Important findings and fixed every one in
+place, refusing only three Minors and each time by choosing an option the review itself offered; its
+one recurring defect class — a test written against a file the author had not re-read — was found five
+times and now carries a standing instruction that should prevent a sixth. What it delivers is unusually
+well evidenced for a plan of this size: every task is TDD with a red step that names its own error, the
+test counts reconcile by hand, the YAML it writes matches the engine's readers key by key including the
+asymmetries, the ownership boundaries are drawn and enforced by a diff check, and the two things a
+plan like this most often gets wrong — a secret on a wire and a promise the code does not keep — are
+the two it is most careful about. I would execute it.
+
+## Controller close-out of the amendments (2026-09-09, late)
+
+- Three amendment rounds after Quinn's first real run (R-OB-1, R-OB-2, R-OB-4) and their fix rounds; the final re-review verdict is READY TO EXECUTE conditional on two controller corrections, both applied: the first-run predicate is `!vault.join("state").join("today.md").exists()` at every site the review named (Task 17 step 8a, the seam test, Task 18 step 6's scratch-vault premise — the fixture carries no ranked page, so the step writes one first), and H11 is promoted to a mid-stream hand-off beside H3's `lms_link` fifth because `include_str!` makes `app/campuses.json` compile-blocking.
+- Rulings carried into the plan today: R-OB-1 (Task 14a, H10), R-OB-2 (Task 14b, Task 13 step 4a; course capture only for curated schools, typed codes for everyone else), R-OB-4 (Task 14c, H11, `campus_search`), and main's corrected `needs_first_run` (`19a1a8d`).
+- The plan is final at 25 tasks and is committed with this review.
