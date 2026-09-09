@@ -17,22 +17,25 @@ older under `docs/` is history or design authority from the previous repository 
   C0 docs. Gates: PR #1's last run 34356994036 on the runner **1021 passed / 0 failed**, `warnings: 1
   accepted (.rsrc), 2 tallies, 0 other`, `eol contract holds over 223 files`; the local workspace
   run on the merged tree is recorded in the C0 ledger.
-- **Cut day is done except the archive step.** Quinn quit the old Knowlu, disabled the cloud
-  routine, and onboarded with the new build into `C:\Users\danie\Knowlu\Vault` (he kept the wizard's
-  default name, so the profile is "Vault", `profile_a95daa1d40`; backups at `%USERPROFILE%\Knowlu\Backups`;
-  Blackboard feed set; zyBooks/VHL credentials at `knowlu/profile_a95daa1d40/{zybooks,vhl}`;
-  `runners.yaml` app-scheduled, slots 12:00/18:00). The installed build is at
-  `%LOCALAPPDATA%\Programs\Knowlu\` (`knowlu.exe`, `knowlu-engine.exe`, `WebView2Loader.dll`) and the
-  Start-menu shortcut points there; the app re-registered its own autostart entry. **A newer build
-  (`f8649d5`, first slot at launch) is built in `target\release\` but not installed** — copy the three
-  files in the next time Knowlu is quit. The old `quinn-ops-local-runner` task is unregistered (its
-  XML, the old autostart value and the two old profiles are in `%LOCALAPPDATA%\knowlu-pre-cut-2026-09-09\`).
-  **`quinn-ops` is not yet archived**: its worktrees are still there and `gh repo archive` has not run
-  — Quinn's go, at the machine.
-- **As of the last check no slot had run in the new vault** (no `today.md`); the page is empty until
-  Quinn presses *Run now* in the tray or 12:00 arrives, and the personal calendar is not connected
-  (`calendars: []` in `config/ingest.yaml`) — the current wizard never asks. He was told how to add
-  the secret iCal address by hand.
+- **Evening additions on `main`, also unpushed:** the C1 plan amendments `39c7a52` and `234c28b`, the
+  review report's execution rulings `823fb83`, this HANDOFF. `main` is ~36 commits ahead of `origin/main`.
+- **Cut day happened, then Quinn asked for a reset.** He quit the old Knowlu, disabled the cloud
+  routine, onboarded with the new build into `C:\Users\danie\Knowlu\Vault` (profile "Vault",
+  `profile_a95daa1d40`), pressed *Run now* — and the first slot exposed the onboarding gaps recorded
+  in spec §11a (R-OB-1…4): coursework skipped as unmapped, every task course-less, four past-due
+  imports. **He asked to reset and re-onboard once C1's wizard carries those rulings.** The reset
+  (move the vault, `profiles.json` and `profiles\` into `%LOCALAPPDATA%\knowlu-pre-cut-2026-09-09\attempt-1\`,
+  delete the two `knowlu/profile_a95daa1d40/*` credentials, remove the autostart entry, copy the
+  `19a1a8d` build over `%LOCALAPPDATA%\Programs\Knowlu\`) **was run on 2026-09-09 after he quit
+  Knowlu: `%LOCALAPPDATA%\knowlu\` is empty, `%USERPROFILE%\Knowlu\` holds only `Backups\`, the
+  installed build is `19a1a8d`, and the next launch opens the wizard.** Nothing is scheduled: the
+  old `quinn-ops-local-runner` task is unregistered (its XML is in the pre-cut folder and can be
+  re-registered as the interim page until C1 — offered to Quinn, not yet answered). **`quinn-ops` is
+  not yet archived** — Quinn's go, at the machine.
+- **A bug of this session, fixed:** the first-run predicate (`scheduler::needs_first_run`) checked a
+  root `today.md`; the engine writes `state/today.md`, so the first draft (`f8649d5`) would have run a
+  slot at every launch. Fixed test-first in `19a1a8d` (the C2 plan review caught it). The installed
+  build predates both commits; install `19a1a8d` with the reset.
 - **The old repo `quinn-ops`** (`C:\Users\danie\GitHub\quinn-ops`) is now inert (no task, no routine,
   no running app) but still Quinn's old vault. **Do not build, run or edit anything there** except the
   archive step.
@@ -90,9 +93,21 @@ calendar URLs stay as the offline fallback until C3/C4).
    keygen block), Task 3's first real run needs P1/P2/secrets, Task 5 (first tag `v0.1.0`, the
    updater proof), Task 6 (branch protection, docs close). CLAUDE.md and `app/README.md` already say
    the CI-only truth.
-3. ~~Plans C1 and C2~~ — written, reviewed, committed.
-4. **Cut day:** the archive step remains (§4). Copy the `f8649d5` build in when Knowlu is next quit.
-5. **Execute C1** (branch from `main`; Task 0 installs Deno + Supabase CLI), then **C2**, merging C1
+3. ~~Plans C1 and C2~~ — written, reviewed, amended for what the first run taught (C1: 25 tasks
+   incl. 14a/14b/14c; C2: 18 tasks incl. 7a/8a), committed.
+4. **Cut day:** the reset (§1) and the archive step remain (§4).
+5. **C1 is executing** on `c1-accounts` (worktree `.claude/worktrees/c1-accounts`, PR #2 draft, CI green
+   on every push so far). The plan is final (`d8fd00d`, amended by `39c7a52` and `234c28b`). **Done,
+   offline halves:** Task 0 (skeleton), 1 (the account tables + RLS), 2 (`_shared` REST / bearer /
+   entitlement — the 402 contract C2 imports), 3 (`GET /entitlement`), 4 (Stripe Checkout, the webhook
+   as the only writer of `entitlements`, the Portal — one fix round), 5 (the billing job, the invoice
+   branch and the idempotency/ordering guard — one fix round, review clean), 6 (`DELETE /account`, export — one fix round: the deleted-account webhook loop, the retryable deletion, the paged export); Task 7 (sources, encryption) in flight at the time of writing.
+   **Every staging step is batched until P1/P2** (ruling R-C1-14): Task 1 steps 7–9, Task 3 step 6,
+   Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…20 are in
+   the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
+   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 7 if it has not landed,
+   7 (sources, encryption), 8 (telemetry), 9 (issues), then hand-off H1 and the app tasks 10–18 (the
+   test counts in the plan are +13 behind the branch after Task 6 — R-C1-16). Then **C2**, merging C1
    first; apply H9 between the two merges.
 6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
    settings-panel Google connect/disconnect; the "source went quiet" surface) get plans after C2.
@@ -103,12 +118,12 @@ calendar URLs stay as the offline fallback until C3/C4).
 |---|---|---|
 | now | **Go to push `main`** | `main` holds the signed spec, the plans, cut-day's app fixes and the C0 merge; pushing makes `ci / test` the gate on every PR and closes PR #1 as merged. Nothing else waits on it except branch protection (C0 Task 6). |
 | now | **Archive `quinn-ops`** (cut day step 6) | with him present: remove its worktrees, leave the checkout on `main`, `gh repo archive quinnhall07/quinn-ops`. The old vault survives in that archive's history. Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
-| now | **Run now + the personal calendar** | tray → *Run now* fills the empty page; the secret iCal address (Reset it first) goes into `config/ingest.yaml`'s `calendars:` list by hand until C1's wizard asks. |
+| now | **The interim page** | re-register the old runner task from its saved XML (`Register-ScheduledTask -Xml (Get-Content …\quinn-ops-local-runner.xml -Raw) -TaskName quinn-ops-local-runner`) so the old vault keeps producing a page until C1's wizard lands — recommended — or go without. |
 | C0 T4 | **Retire the old updater key** (P4) | the exact PowerShell block in the plan's Task 4 generates the new pair, sets the two secrets, prints only the public key; then `cmdkey /delete:knowlu/updater-key{,-password}` and the OneDrive file + its version history. Old key id `C2EC981122E1D2DF`. |
 | C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
 | C0 T3 run | **Cloudflare** (P2, P3) | account, Pages project `knowlu` (direct upload), API token Pages:Edit, account id; `knowlu.com` on Cloudflare DNS → Pages. |
 | C0 T3 run | **Set the secrets himself** | `gh secret set NAME --repo quinnhall07/knowlu < file` for `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `gh variable set` for `TS_ENDPOINT`, `TS_ACCOUNT`, `TS_PROFILE`. You name them, he sets them. |
-| C1 | **Supabase, Stripe, the e-mail provider, Google consent (two scopes), the policy texts** | as the C1 plan's P1–P5 say; the e-mail provider is new (Resend free tier; Supabase Auth's built-in sender is not for production and California's annual reminder needs a sender). |
+| C1 | **Supabase, Stripe, the e-mail provider, Google consent (two scopes), the policy texts** | as the C1 plan's P1–P5 say, plus what Task 4's and Task 5's reviews added: **P2 must also set the Terms of service URL (and the privacy URL) in Stripe's public business details** — Checkout refuses the terms checkbox without it — **and create the webhook endpoint at API version `2025-03-31.basil`**; the four secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `EMAIL_API_KEY`, `SOURCES_ENC_KEY`) by `supabase secrets set`; the billing job's two database settings (Task 5 step 9). The e-mail provider is new (Resend free tier). A legal call is open: whether the annual reminder must name the next charge date (R-C1-18). |
 | C2 | **Anthropic key; Google OAuth client; first test user; the archive read** | as the C2 plan's P0a–P4 say. |
 | soon | **Rotate the Blackboard token and the Google Calendar capability URL** | he regenerated neither yet as far as this session knows; both sat in a OneDrive mirror. |
 | later | The first friend; the lawyer; a co-founder | — |
@@ -129,6 +144,14 @@ calendar URLs stay as the offline fallback until C3/C4).
 - **Commits:** specific `git add`, message via `-F <file>`, trailers with **this session's** model
   name and URL.
 - Line endings are the repo's: LF, `.ps1` CRLF, fixtures bytes.
+- **Suite counts drift from the plan by design:** fix rounds add tests (R-C1-16). Every dispatch states
+  the plan's number and the real one.
+- **Stripe API `2025-03-31.basil` moved fields** — `current_period_end` onto the subscription item, the
+  invoice's subscription under `parent.subscription_details`. Every new read of a Stripe object handles
+  both shapes (R-C1-15, R-C1-17).
+- **Subagent shells may lack Deno on PATH** (installed after the session started) — every dispatch
+  carries the refresh line. `review-package` run from a worktree writes under that worktree's own
+  `.superpowers/`: pass the OUTFILE argument.
 
 ## 6. Quick reference
 
