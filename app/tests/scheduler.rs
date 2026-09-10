@@ -762,11 +762,9 @@ fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
     let today = state.join("today.md");
     let _ = std::fs::remove_file(&today);
     assert!(needs_first_run(&v), "a vault with no state/today.md is owed its first slot");
-    std::fs::write(v.join("today.md"), b"# not the engine's file
-").unwrap();
+    std::fs::write(v.join("today.md"), b"# not the engine's file\n").unwrap();
     assert!(needs_first_run(&v), "a root today.md is not the ranked page");
-    std::fs::write(&today, b"# Today
-").unwrap();
+    std::fs::write(&today, b"# Today\n").unwrap();
     assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
     let _ = std::fs::remove_dir_all(&v);
 }

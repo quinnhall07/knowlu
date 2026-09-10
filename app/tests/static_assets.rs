@@ -357,6 +357,12 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
     assert!(js.contains("clearCredentialFields("), "the fields are cleared by name");
     assert!(js.contains("window.KNOWLU_SHOTS = { startWizard: startWizard, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
     assert!(js.contains("retarget_credentials"), "Finish moves the credentials when the name changed");
+    // R-C1-55, M5: two pins the brief's replacement body dropped, restored — both still matter.
+    // A class `display` beats the UA stylesheet's `[hidden]`, and this rule is the only thing that
+    // actually hides `#wiz-code-row`, `#wiz-school-free`, `#wiz-lms-kind` and `#wiz-google-row`.
+    assert!(read("console.css").contains(".wiz-row[hidden] { display: none; }"), "a hidden .wiz-row must actually hide");
+    // `documents` is the retired launch_state key that named the OneDrive-redirected folder.
+    assert!(!js.contains("l.documents"), "the retired `documents` key is gone from the page");
     // D5: class (c) — raw note bodies for model improvement — is not built and has no UI, and the
     // page is where a toggle for it would appear. The pin predates C1 and is kept for exactly that.
     assert!(!js.to_lowercase().contains("telemetry"), "no telemetry toggle: (c) is not built (D5)");
@@ -392,6 +398,11 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(!panel.contains("password"), "the calendars panel must never carry a password field");
     assert!(!panel.to_lowercase().contains("username"), "…nor a username field");
     assert!(panel.contains("id=\"wiz-lms-open\"") && panel.contains("id=\"wiz-ics\""), "sign-in button and paste fallback");
+    // R-C1-42: the capture is the student's SECOND press, and it is its own button — chained onto the
+    // open it would read the identity provider's page, where nobody has signed in yet.
+    assert!(panel.contains("id=\"wiz-lms-capture\""), "the capture button");
+    assert!(js.contains("\"capture_calendar_link\"") && js.contains("wiz-lms-capture"),
+        "the capture fires on the press, not on the open");
     // The campus is asked HERE, on the panel that uses it — not two panels later, where it used to be
     // and where it made every sign-in answer "no sign-in page is known for that school yet".
     // R-OB-4: a search over every US institution, not two radios. The radios are gone from the whole
@@ -441,6 +452,13 @@ fn the_logins_panel_maps_what_it_finds_to_a_course() {
     // invented vault identifiers would be a page deciding what the engine may know.
     assert!(js.contains("zybooks_courses:") && js.contains("vhl_sections:") && js.contains("course_map:"), "the plan carries the mapping");
     assert!(!js.contains("slugify"), "slugs are `knowlu_engine::ingest::slugify`'s, never the page's");
+    // R-C1-55, I3: `discover_coursework` spawns the engine and logs into both vendors. A second Next
+    // while the first is in flight starts a SECOND child, and the two `WIZ.map` assignments decide the
+    // panel between them. Asserted inside `wizGo` itself, so `wizFinish`'s own disable cannot stand in.
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
+    assert!(go.contains("WIZ.discovering"), "a second Next must not start a second coursework-discover");
+    assert!(go.contains("EL(\"wiz-next\").disabled = true") && go.contains("EL(\"wiz-next\").disabled = false"),
+        "Next is disabled while discovery is in flight and re-enabled when it settles");
 }
 
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
@@ -554,8 +572,15 @@ fn the_settings_panel_has_its_rows_and_one_way_in() {
     assert!(html.contains("id=\"settings\""));
     // D9 reconciled as "five plus Updates" (R-P4a-5) — six rows, and `set-updates` is one of them:
     // the row the updater task wired is as much part of the panel as the five that predate it.
-    for row in ["set-name", "set-vault", "set-backup", "set-autostart", "set-updates", "set-diag"] {
+    for row in ["set-name", "set-vault", "set-backup", "set-autostart", "set-updates",
+                "set-account", "set-report", "set-delete", "set-diag"] {
         assert!(html.contains(&format!("id=\"{row}\"")), "row {row}");
+    }
+    // R-C1-55, I1: every control `console.js` binds BY NAME at IIFE top level. `EL()` answers `null`
+    // for a missing id, so deleting one of these throws before `launch_state` is ever invoked — in
+    // every window, so the console, the picker and the wizard all render as a blank document.
+    for id in ["set-portal", "set-report-go", "set-delete-1", "set-delete-2"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "control {id}");
     }
     let js = read("console.js");
     assert!(js.contains("function openSettings(") && js.contains("function renderSettings("));
@@ -780,4 +805,118 @@ fn the_wizard_takes_its_default_folders_from_the_launch_state() {
     // …but nothing reads a backups root any more. There is no backup panel and no folder picker in
     // the wizard at all; `create_vault` puts `Backups` beside the vault (Task 12, spec §4.1).
     assert!(!js.contains("l.default_backup"), "the wizard must not read a backups root it cannot show");
+}
+
+/// **R-C1-55, C1 — Tauri v2 lower-camel-cases every argument key** (tauri-macros' `ArgumentCase::Camel`)
+/// unless the command opts out with `rename_all = "snake_case"`. `sign_up` does not opt out, so a page
+/// that sends `age_attested` is rejected *before* the command body runs; the handler's `.catch` then
+/// paints `UNREACHABLE` — *the account service could not be reached* — and `wizValid`'s step-1 gate
+/// refuses Next forever. **No new student could ever create an account**, and the sentence they were
+/// shown blamed the network. Nothing else catches it: `static_assets` matches strings, not argument
+/// names, and `wizard-check.py` fakes `invoke` wholesale, so the fake answers whatever key it is handed.
+#[test]
+fn the_sign_up_call_spells_its_argument_the_way_tauri_delivers_it() {
+    let rust = fs::read_to_string("src/account.rs").expect("src/account.rs");
+    // The signature itself, so a renamed or added parameter fails HERE and not in a student's first
+    // five minutes.
+    assert!(rust.contains("pub fn sign_up(email: String, password: String, age_attested: bool)"),
+        "account::sign_up's signature changed — re-derive the keys the page must send");
+    assert!(!rust.contains("rename_all"), "account.rs opts no command out of Tauri's camelCase");
+    let js = read("console.js");
+    assert!(js.contains("args.ageAttested = EL(\"wiz-18\").checked"), "sign_up must carry `ageAttested`");
+    assert!(!js.contains("age_attested"), "the snake_case spelling must not appear on the page at all");
+    // The two consent versions are `account.rs`'s constants and are stamped into the sign-up body
+    // there (spec §9): a page that sent its own could make the consent log wrong.
+    assert!(rust.contains("TOS_VERSION") && rust.contains("PRIVACY_VERSION"), "the versions are Rust's");
+    for own in ["tos_version", "tosVersion", "privacy_version", "privacyVersion"] {
+        assert!(!js.contains(own), "the consent versions are Rust's, never the page's: {own}");
+    }
+}
+
+/// The standing guard behind C1, over **every** command in the crate: read each `#[tauri::command]`
+/// signature, and for every parameter whose name has more than one word, assert the page never sends
+/// the spelling Tauri would NOT deliver. Exactly one command opts out (`retarget_credentials`, whose
+/// own comment says why), and for that one the rule inverts — which is the whole point of deriving
+/// this from the source rather than keeping a list.
+#[test]
+fn no_multi_word_command_argument_is_sent_in_the_wrong_case() {
+    fn camel(s: &str) -> String {
+        let mut out = String::new();
+        for (i, part) in s.split('_').enumerate() {
+            if i == 0 { out.push_str(part); continue; }
+            let mut cs = part.chars();
+            if let Some(c) = cs.next() { out.extend(c.to_uppercase()); }
+            out.push_str(cs.as_str());
+        }
+        out
+    }
+    let js = read("console.js");
+    let mut checked = 0usize;
+    for entry in fs::read_dir("src").expect("app/src") {
+        let path = entry.expect("a dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") { continue; }
+        let rust = fs::read_to_string(&path).expect("a source file");
+        for block in rust.split("#[tauri::command").skip(1) {
+            let Some(close) = block.find(']') else { continue };
+            let opted_out = block[..close].contains("rename_all = \"snake_case\"");
+            // Only a real attribute: the fn must follow it with nothing but whitespace between, which
+            // is what tells a `#[tauri::command]` written inside a doc comment apart from the real one.
+            let after = block[close + 1..].trim_start();
+            let Some(sig) = after.strip_prefix("pub fn ").or_else(|| after.strip_prefix("pub async fn ")) else { continue };
+            let name = sig.split('(').next().unwrap_or("").to_string();
+            let Some(args) = sig.split('(').nth(1).and_then(|a| a.split(')').next()) else { continue };
+            for arg in args.split(',') {
+                let ident = arg.split(':').next().unwrap_or("").trim();
+                if !ident.contains('_') || ident.starts_with('_') { continue; }
+                checked += 1;
+                let camelled = camel(ident);
+                let wrong = if opted_out { camelled.as_str() } else { ident };
+                let right = if opted_out { ident } else { camelled.as_str() };
+                for shape in [format!("{wrong}:"), format!(".{wrong} =")] {
+                    assert!(!js.contains(&shape),
+                        "{}::{name} takes `{ident}`, so Tauri delivers it as `{right}` — console.js sends `{wrong}`",
+                        path.file_name().unwrap_or_default().to_string_lossy());
+                }
+            }
+        }
+    }
+    // A scan that silently stops finding anything is a guard that silently stops guarding.
+    assert!(checked >= 6, "only {checked} multi-word command arguments found — the scan stopped working");
+}
+
+/// **R-C1-55, I1 — every control this task added, in both directions**: present in `index.html`, and
+/// named in `console.js`. Six of them are bound at IIFE top level (`report-cancel`, `set-report-go`,
+/// `report-send`, `set-portal`, `set-delete-1`, `set-delete-2`) and `EL()` answers `null` for a missing
+/// id, so deleting one throws a `TypeError` **before `launch_state` is ever invoked** — in every
+/// window, so the console, the picker and the wizard all render as a blank document, with nothing else
+/// in this file failing. The rest are written to on a path somebody reaches by pressing something.
+#[test]
+fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
+    let html = read("index.html");
+    let js = read("console.js");
+    for id in [
+        // The report overlay (legal note §9) and Task 16's two commands behind it.
+        "report", "report-text", "report-send", "report-cancel", "report-note",
+        // The three new settings rows' controls. The rows themselves are pinned by
+        // `the_settings_panel_has_its_rows_and_one_way_in`, which is where rows belong.
+        "set-account-state", "set-report-go", "set-delete-1", "set-delete-2", "set-delete-note", "set-portal",
+        // R-C1-42's second press, and the panels' own new controls.
+        "wiz-lms-capture", "wiz-code-row", "wiz-code", "wiz-school-picked", "wiz-courses-note",
+        "wiz-course-add-go", "wiz-map-note", "wiz-sub-note", "wiz-account-note",
+    ] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
+        // Either spelling the page uses: `EL("x")` or a `closest("#x")` selector.
+        assert!(js.contains(&format!("\"{id}\"")) || js.contains(&format!("\"#{id}\"")),
+            "console.js never names #{id}");
+    }
+    // …and no id may be shared. The brief gave the Problems row and its button the same `set-report`,
+    // so `getElementById` resolved to the row; the house spelling is `set-updates`/`set-update-check`.
+    let mut ids: Vec<&str> = html
+        .match_indices("id=\"")
+        .map(|(i, _)| html[i + 4..].split('"').next().unwrap_or(""))
+        .collect();
+    ids.sort_unstable();
+    let before = ids.len();
+    ids.dedup();
+    assert_eq!(before, ids.len(), "index.html carries a duplicate id");
 }

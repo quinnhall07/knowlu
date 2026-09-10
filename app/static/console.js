@@ -1130,6 +1130,9 @@
   // Guarded on the panel being open: while it is hidden, Escape stays the in-place editor's
   // (editField binds its own on the input) and this handler must not shadow it.
   document.addEventListener("keydown", function (e) {
+    // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
+    // way out (R-C1-55, M3). Tested first because it opens on top of the settings panel.
+    if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
     if (e.key === "Escape" && !EL("settings").hidden) { EL("settings").hidden = true; }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
@@ -1261,7 +1264,13 @@
               // The bundled list is gone with it: Task 14c takes it out of `launch_state`.
               // R-C1-42: the sign-in window's own state is one boolean — the session directory is the
               // app's and never crosses the IPC, and `close_lms_window` takes no argument.
-              lmsOpen: false, tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
+              // R-C1-55: `discovering` is the in-flight latch on `coursework-discover` (a second
+              // Next would log into both vendors again, concurrently, and the two answers would
+              // decide the mapping panel between them); `checkoutOpened` is what makes the
+              // subscribe panel silent until the browser has actually been sent somewhere;
+              // `schoolSeq` drops a typeahead answer a later keystroke has already overtaken.
+              lmsOpen: false, discovering: false, checkoutOpened: false, schoolSeq: 0,
+              tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "" };
 
   // The trim and the trailing-separator strip are not cosmetic. `dest_for` in onboarding.rs trims
@@ -1305,7 +1314,10 @@
     EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
     EL("wiz-error").textContent = WIZ.error;
     EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : "";
-    EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active." : "Waiting for the payment page in your browser…";
+    // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
+    // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
+    EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
+      : (WIZ.checkoutOpened ? "Waiting for the payment page in your browser…" : "");
     EL("wiz-vault-path").textContent = dest() ? "Your files will be at " + dest() : "";
     EL("wiz-lms-state").textContent = WIZ.icsNote;
     // R-C1-42: the capture is a SECOND press, and it only exists once a window is open. Firing it as
@@ -1401,6 +1413,11 @@
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
+      // R-C1-55, I3: one discovery at a time. `discover_coursework` spawns the engine and logs into
+      // zyBooks and VHL; a second Next while the first is in flight starts a second child, with two
+      // more vendor logins racing the first, and the two `WIZ.map` assignments decide the panel
+      // between them. The latch refuses the re-entry and the disabled button says so on screen.
+      if (WIZ.discovering) { WIZ.step = leaving; renderWizard(); return Promise.resolve(); }
       return storeCredentials().then(function (ok) {
         if (!ok) { WIZ.step = leaving; renderWizard(); return; }
         // R-OB-1: the credentials are in Credential Manager now, so this is the first moment discovery
@@ -1409,6 +1426,8 @@
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
         if (WIZ.map.length) { renderWizard(); return; }
         WIZ.step = leaving;
+        WIZ.discovering = true;
+        EL("wiz-next").disabled = true;
         EL("wiz-map").hidden = false;
         EL("wiz-map-note").textContent = "Looking up your books and sections…";
         renderWizard();
@@ -1419,6 +1438,13 @@
           EL("wiz-map-note").textContent = (d && d.note)
             || "Knowlu found these on your accounts. Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for.";
           renderMapping();
+        }).catch(function () {
+          EL("wiz-map-note").textContent = "We could not look those up — fill them in below.";
+        }).then(function () {
+          // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
+          // comes back.
+          WIZ.discovering = false;
+          EL("wiz-next").disabled = false;
         });
       });
     }
@@ -1524,7 +1550,13 @@
       }
       var cmd = creating ? "sign_up" : "sign_in";
       var args = { email: EL("wiz-email").value.trim(), password: EL("wiz-pw").value };
-      if (creating) { args.age_attested = EL("wiz-18").checked; }
+      // **`ageAttested`, not the Rust spelling** (R-C1-55, C1). Tauri v2 lower-camel-cases every
+      // argument key (tauri-macros' `ArgumentCase::Camel`) unless the command opts out with
+      // `rename_all = "snake_case"` — which exactly one command in this crate does
+      // (`onboarding::retarget_credentials`, and its own comment says why). Sent snake_case, the
+      // invoke is rejected before `sign_up`'s body runs, the `.catch` below paints UNREACHABLE,
+      // and `wizValid`'s step-1 gate then refuses Next forever: no new account, ever.
+      if (creating) { args.ageAttested = EL("wiz-18").checked; }
       invoke(cmd, args).then(function (r) {
         EL("wiz-pw").value = "";                     // the password leaves page memory at once
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
@@ -1569,6 +1601,8 @@
       var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
       invoke("open_checkout", { plan: which }).then(function (r) {
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
+        WIZ.checkoutOpened = true;
+        renderWizard();
         pollEntitlement();
       }).catch(function () {});
       return;
@@ -1699,8 +1733,15 @@
   // reaches the asset protocol, and that file is the controller's outside C0's three keys, so widening
   // it would be a hand-off for a thing that needs none. `campus_search` is Rust's, answers with ten
   // rows, and the page holds ten rows however long the list gets.
+  // R-C1-55, M6: one search per keystroke, and only the newest answer may paint — `renderSchoolHits`
+  // overwrites `__hits`, which is what a click indexes into, so an overtaken answer would hand the
+  // student a row that is not the one they clicked. `null` means "overtaken, do not paint".
+  // `campus_search` is an in-process filter over a `OnceLock`ed list today, so this is insurance.
   function schoolHits(q) {
-    return invoke("campus_search", { query: q }).then(function (r) { return (r && r.hits) || []; }).catch(function () { return []; });
+    var seq = (WIZ.schoolSeq += 1);
+    return invoke("campus_search", { query: q })
+      .then(function (r) { return seq === WIZ.schoolSeq ? ((r && r.hits) || []) : null; })
+      .catch(function () { return seq === WIZ.schoolSeq ? [] : null; });
   }
 
   function renderSchoolHits(hits) {
@@ -1729,7 +1770,7 @@
   }
 
   EL("wiz-school").addEventListener("input", function () {
-    schoolHits(EL("wiz-school").value).then(renderSchoolHits);
+    schoolHits(EL("wiz-school").value).then(function (hits) { if (hits) { renderSchoolHits(hits); } });
   });
   EL("wiz-school-hits").addEventListener("click", function (e) {
     var hit = e.target.closest("[data-school]");
