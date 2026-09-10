@@ -278,12 +278,19 @@ fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_name
 
 /// `sign_out` addresses a real profile's own session target, not just the pending one, and its reply
 /// says whether there was anything to sign out of — a repeated sign-out is a visible no-op, not a
-/// silent "ok" both times. No loopback needed: with `KNOWLU_API_BASE` unset in this test process,
-/// `auth_base` refuses the placeholder default before any network call would be attempted.
+/// silent "ok" both times.
+///
+/// **R-C1-57 (I1): the base is pointed at a closed loopback port for the whole test.** `sign_out`
+/// ends with a best-effort `POST {auth}/logout`, and this comment used to say no loopback was needed
+/// because `auth_base` would refuse the placeholder default — which stopped being true the moment
+/// `DEFAULT_API_BASE` was filled with the real project (Task 10, `7029b6a`). Since then every run of
+/// this suite posted to prod GoTrue. Now nothing does; the revoke fails against a dead port, which is
+/// exactly the "best effort, and second" path `sign_out` documents.
 #[cfg(windows)]
 #[test]
 fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
     use knowlu::account::{save_session, session_target, sign_out, Session};
     let id = format!("test-signout-{}-{}", std::process::id(), line!());
     let target = session_target(&id);
@@ -554,6 +561,23 @@ fn closed_loopback_base() -> String {
     format!("http://127.0.0.1:{port}/functions/v1")
 }
 
+/// Every file under `root`, as (relative path, bytes), sorted — a whole-tree fingerprint, the same
+/// one `app/tests/onboarding.rs` uses to prove a folder was not written to. Content, not mtimes.
+#[cfg(windows)]
+fn fingerprint(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).expect("a readable directory").flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p); }
+            else { out.push((p.strip_prefix(root).expect("under root").to_string_lossy().to_string(), std::fs::read(&p).expect("a readable file"))); }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Spec §11a: an install that already exists is **adopted in place**. Its folder, its settings, its
 /// Credential Manager entries and its profile id all stay exactly where they are, and the account is
 /// added to what is already there — no folder question, no second vault, no rewrite of a single file
@@ -576,7 +600,12 @@ fn a_vault_from_before_c1_needs_an_account_and_gains_one_without_moving() {
     std::fs::create_dir_all(vault.join("tasks")).unwrap();
     std::fs::write(vault.join("config").join("planning.yaml"), "daily_effort_budget: 4.0\n").unwrap();
     std::fs::write(vault.join("config").join("ingest.yaml"), "ics_url: 'https://lms.example.invalid/a.ics'\n").unwrap();
+    std::fs::write(vault.join("config").join("runners.yaml"), "runners:\n  local:\n    device: 'somebody-pc'\n").unwrap();
+    std::fs::write(vault.join("tasks").join("t.md"), "---\nid: task_0000000001\n---\n\nA task.\n").unwrap();
     let before = std::fs::read_to_string(vault.join("config").join("ingest.yaml")).unwrap();
+    // R-C1-57 (M9): the ruling's claim is about the WHOLE tree, so the whole tree is hashed either
+    // side of the call — `app/tests/onboarding.rs` makes the same claim the same way.
+    let tree_before = fingerprint(&vault);
     assert!(needs_account(&vault), "a vault with no cloud.yaml needs one");
 
     // The wizard-less upgrade signs in first, into the pending target, exactly as the wizard does.
@@ -594,6 +623,10 @@ fn a_vault_from_before_c1_needs_an_account_and_gains_one_without_moving() {
     // were. That is the whole ruling.
     assert_eq!(std::fs::read_to_string(vault.join("config").join("ingest.yaml")).unwrap(), before);
     assert_eq!(knowlu::profiles::id_for(&vault), profile_id);
+    // M9: and the tree as a whole — every file, byte for byte — differs by exactly `config/cloud.yaml`.
+    let after: Vec<_> = fingerprint(&vault).into_iter().filter(|(p, _)| p.replace('\\', "/") != "config/cloud.yaml").collect();
+    assert_eq!(after, tree_before, "adopting in place wrote something other than config/cloud.yaml");
+    assert!(vault.join("config").join("cloud.yaml").is_file(), "…and it did write that one");
     // The session moved onto the profile and left the pending target.
     let (id, _) = knowlu::account::load_session(&cfg.session_credential_target).expect("session");
     assert_eq!(id, "acc-9");
@@ -720,5 +753,179 @@ fn deleting_my_data_removes_this_profiles_things_and_nothing_else() {
     assert!(their_data.is_dir(), "another profile's app data was destroyed");
     assert!(knowlu::credentials::exists(&their_login), "another profile's coursework login was destroyed");
     assert!(root.is_dir(), "nothing above the folders named was touched");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **R-C1-57 (I1): no test in this file may reach the compiled-in project.** `DEFAULT_API_BASE` has
+/// been the real Supabase project since Task 10, so any test that calls a function which reads
+/// `api_base()` makes a live request out of `cargo test` unless it has pointed `KNOWLU_API_BASE`
+/// somewhere harmless first — which is what `ApiBase::set(&closed_loopback_base())` is for. One test
+/// had been doing exactly that, silently, for a fortnight.
+///
+/// Derived from the source rather than kept as a list, the way
+/// `static_assets.rs::no_multi_word_command_argument_is_sent_in_the_wrong_case` is: read
+/// `src/account.rs` for every function that reaches `api_base()` — directly, or through another one
+/// that does — then read this file and insist that every test calling one of them sets the seam.
+#[test]
+fn no_test_in_this_file_can_reach_the_compiled_in_project() {
+    /// Top-level `fn` items and the body text under each, comment lines dropped so a name mentioned
+    /// in prose can never stand in for a call. Only a line with no leading whitespace starts one, so
+    /// methods inside an `impl` stay part of their enclosing item.
+    fn items(src: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in src.lines() {
+            let name = ["pub async fn ", "pub fn ", "async fn ", "fn "]
+                .iter()
+                .find_map(|p| line.strip_prefix(p))
+                .map(|r| r.split(['(', '<']).next().unwrap_or("").trim().to_string())
+                .filter(|n| !n.is_empty());
+            if let Some(n) = name {
+                out.push((n, String::new()));
+            }
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if let Some(last) = out.last_mut() {
+                last.1.push_str(line);
+                last.1.push('\n');
+            }
+        }
+        out
+    }
+    /// `name(` with nothing identifier-like in front of it, so `check_api_base(` is not a call to
+    /// `api_base` and `sign_in_at(` is not a call to `sign_in`.
+    fn calls(body: &str, name: &str) -> bool {
+        body.match_indices(&format!("{name}(")).any(|(i, _)| {
+            i == 0 || {
+                let c = body.as_bytes()[i - 1];
+                !(c.is_ascii_alphanumeric() || c == b'_')
+            }
+        })
+    }
+
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let source_items = items(&src);
+    let mut risky: Vec<String> = Vec::new();
+    loop {
+        let before = risky.len();
+        for (name, body) in &source_items {
+            // `api_base` and `anon_key` only read an environment variable. It is their CALLERS that
+            // then send something somewhere with what came back.
+            if risky.contains(name) || name == "api_base" || name == "anon_key" {
+                continue;
+            }
+            if calls(body, "api_base") || risky.iter().any(|r| calls(body, r)) {
+                risky.push(name.clone());
+            }
+        }
+        if risky.len() == before {
+            break;
+        }
+    }
+    // A scan that silently stops finding anything is a guard that silently stops guarding.
+    assert!(risky.len() >= 5, "the scan stopped working: {risky:?}");
+    for expected in ["sign_out", "attach_in", "entitlement_now", "open_checkout"] {
+        assert!(risky.iter().any(|r| r == expected), "{expected} reaches the compiled-in base: {risky:?}");
+    }
+
+    for (name, body) in items(&std::fs::read_to_string("tests/account.rs").expect("tests/account.rs")) {
+        let Some(hit) = risky.iter().find(|r| calls(&body, r)) else { continue };
+        assert!(
+            body.contains("ApiBase::set"),
+            "{name} calls account::{hit}, which reads the compiled-in project — it must set the seam first (ApiBase::set(&closed_loopback_base()), or a loopback base)"
+        );
+    }
+}
+
+/// **R-C1-57 (I3): a profile id names paths, so it is checked before it names one.** `settings.json`
+/// is a plain file a person can edit, `state::Settings` parses `profile_id` as an unchecked `String`,
+/// and `delete_local_data` joins it onto the backups ROOT — `"../.."` there walks out of
+/// `%USERPROFILE%\Knowlu\Backups` and takes the home folder with it.
+#[test]
+fn a_profile_id_that_is_not_one_is_never_used_to_name_a_path() {
+    use knowlu::account::{is_profile_id, profile_id_or_derived};
+    // The shape `ids::derived_id("profile", …)` always produces: the literal prefix and ten hex.
+    let vault = std::path::Path::new("C:\\Users\\somebody\\Knowlu\\Fall 2026");
+    let real = knowlu::profiles::id_for(vault);
+    assert!(is_profile_id(&real), "{real}");
+    assert!(is_profile_id("profile_0123456789"));
+    for bad in ["", "..", "../..", "profile_", "profile_012345678", "profile_01234567890", "profile_zzzzzzzzzz", "profile_../..", "a/b", "profile_0123456789/x", "..\\..", "C:\\Windows"] {
+        assert!(!is_profile_id(bad), "{bad:?} must never name a folder");
+        // …and whatever was stored, what gets used is the id the vault path derives — the same one
+        // `profiles::register` filed the profile under.
+        assert_eq!(profile_id_or_derived(bad, vault), real, "{bad:?}");
+    }
+    assert_eq!(profile_id_or_derived(&real, vault), real, "a real id is used as it stands");
+}
+
+/// The other half of I3, over the filesystem: an id that is not one removes nothing keyed to an id —
+/// not the backups subtree, not the registry row, not a credential — and above all never climbs.
+/// The vault and the app-data folder are paths the CALLER named and are still removed, because those
+/// are the two things *delete my data* is about.
+#[test]
+fn delete_local_data_never_climbs_out_of_the_backups_root() {
+    let root = std::env::temp_dir().join(format!("knowlu-delete-climb-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let backups = home.join("Knowlu").join("Backups");
+    let neighbour = backups.join("profile_2222222222").join("vault");
+    std::fs::create_dir_all(&neighbour).unwrap();
+    std::fs::write(neighbour.join("b.md"), "theirs").unwrap();
+    std::fs::create_dir_all(home.join("Documents")).unwrap();
+    std::fs::write(home.join("Documents").join("thesis.docx"), "years of work").unwrap();
+
+    for bad in ["..", "../..", "..\\..", "profile_2222222222/../profile_2222222222", ""] {
+        let vault = root.join("vault");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // No session target: this call must not reach Credential Manager at all, which is also why
+        // it needs no lock.
+        knowlu::account::delete_local_data(&vault, &data_dir, Some(&backups), bad, None, "");
+        assert!(!vault.exists(), "the vault the caller named is still deleted ({bad:?})");
+        assert!(!data_dir.exists(), "…and so is the app-data folder ({bad:?})");
+        assert!(backups.is_dir(), "the backups root survived {bad:?}");
+        assert!(neighbour.join("b.md").is_file(), "another profile's mirror survived {bad:?}");
+        assert!(home.join("Documents").join("thesis.docx").is_file(), "{bad:?} climbed out of the backups root");
+        assert!(home.is_dir(), "{bad:?} climbed to the home folder");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **R-C1-57 (I4): the two halves really are one operation.** `attach_in`'s doc says a `cloud.yaml`
+/// naming a credential target that holds nothing is the state it exists to prevent — so when the
+/// session cannot be moved, the file it just wrote goes with it. Without that, `needs_account` is
+/// false forever, and the upgrade overlay (the console's only sign-in surface) never comes back.
+///
+/// The move is a seam here for the same reason `lms_link::validate_for`'s fetch is one: a
+/// `CredWriteW` that fails is not something a test can arrange on a healthy machine.
+#[cfg(windows)]
+#[test]
+fn a_session_that_cannot_be_moved_takes_the_cloud_yaml_back_with_it() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    use knowlu::account::{attach_config_and_session, needs_account};
+    let root = std::env::temp_dir().join(format!("knowlu-rollback-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let vault = root.join("Fall 2026");
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("config").join("planning.yaml"), "daily_effort_budget: 4.0\n").unwrap();
+    let profile_id = knowlu::profiles::id_for(&vault);
+
+    let err = attach_config_and_session(&vault, &profile_id, "acc-1", "knowlu/nowhere/pending", &|_, _| {
+        Err("the credential store refused".to_string())
+    })
+    .unwrap_err();
+    assert!(err.contains("the credential store refused"), "{err}");
+    assert!(!vault.join("config").join("cloud.yaml").exists(), "a failed move must leave no cloud.yaml behind");
+    assert!(needs_account(&vault), "…so the next launch raises the overlay again");
+    // config/ itself is left alone: it was already there, and it is full of the student's settings.
+    assert!(vault.join("config").join("planning.yaml").is_file(), "nothing else in config/ was touched");
+
+    // …and the same call with a move that succeeds writes the file and keeps it.
+    attach_config_and_session(&vault, &profile_id, "acc-1", "knowlu/nowhere/pending", &|_, _| Ok(())).expect("attach");
+    assert!(vault.join("config").join("cloud.yaml").is_file());
+    assert!(!needs_account(&vault));
     let _ = std::fs::remove_dir_all(&root);
 }

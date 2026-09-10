@@ -312,7 +312,9 @@ fn backup_mirror_reason(vault: &Path) -> Option<String> {
     let profile = vault.parent()?;
     let ticked = profile.join("status.json").is_file() || profile.join("snapshots").is_dir();
     let id = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let id_shaped = id.strip_prefix("profile_").map(|h| h.len() == 10 && h.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false);
+    // One definition of the shape, in `account.rs`, where the delete path also has to trust it
+    // (R-C1-57, I3) — two copies of "profile_ plus ten hex" would be one copy too many.
+    let id_shaped = crate::account::is_profile_id(&id);
     let under_backups = profile.parent().and_then(|p| p.file_name()).map(|n| n.eq_ignore_ascii_case("Backups")).unwrap_or(false);
     if !(ticked || (id_shaped && under_backups)) { return None; }
     Some(format!(

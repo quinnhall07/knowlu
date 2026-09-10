@@ -1173,7 +1173,14 @@
       if (r.ok) { setTimeout(function () { EL("report").hidden = true; }, 1500); }
     }).catch(function () { EL("report-note").textContent = "could not send"; EL("report-send").disabled = false; });
   });
-  EL("set-portal").addEventListener("click", function () { invoke("open_portal", {}).catch(function () {}); });
+  // R-C1-57 (I2): *Manage subscription* says why nothing opened. `open_portal` refuses with a
+  // sentence whenever there is no live session, no account on this vault, or Stripe answers
+  // anything but a link — and a button that silently does nothing reads as a broken app.
+  EL("set-portal").addEventListener("click", function () {
+    invoke("open_portal", {}).then(function (r) {
+      if (!r.ok) { EL("set-account-state").textContent = r.error; }
+    }).catch(function () { EL("set-account-state").textContent = UNREACHABLE; });
+  });
   // Two presses, because the second one deletes a folder full of somebody's work and their account
   // with it. The first press only reveals the second.
   EL("set-delete-1").addEventListener("click", function () {
@@ -1206,6 +1213,11 @@
   var UPGRADE_DISMISSED = false;
   var UPGRADE_UNREACHABLE = false;
   function maybeUpgrade(s) {
+    // R-C1-57 (M4): never raise it over the settings panel. They are both `.setpanel`s in the same
+    // fixed corner at the same z-index and `#upgrade` is last in the DOM, so it would land on top of
+    // whatever the user had just opened — and `openSettings` calls this on its way in. Nothing is
+    // hidden either: an overlay already up stays up. The next `checkAccount` raises it.
+    if (!EL("settings").hidden) { return; }
     if (UPGRADE_DISMISSED || UPGRADE_UNREACHABLE || !s || !s.needs_account) { EL("upgrade").hidden = true; return; }
     EL("upgrade").hidden = false;
   }
@@ -1254,7 +1266,12 @@
       return;
     }
     if (e.target.closest("#up-subscribe")) {
-      invoke("open_checkout", { plan: "monthly" }).then(function () {
+      invoke("open_checkout", { plan: "monthly" }).then(function (r) {
+        // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
+        // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
+        // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
+        if (!r.ok) { EL("up-error").textContent = r.error; return; }
+        EL("up-error").textContent = "";
         var tries = 0;
         var tick = function () {
           tries += 1;
@@ -1264,7 +1281,7 @@
           }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
         };
         setTimeout(tick, 3000);
-      }).catch(function () {});
+      }).catch(function () { EL("up-error").textContent = UNREACHABLE; });
     }
   });
   // `poll()` is the console's repaint — this file has no `refresh`. The attach wrote

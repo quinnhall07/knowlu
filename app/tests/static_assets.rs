@@ -988,3 +988,65 @@ fn the_console_can_sign_an_existing_install_in_without_re_onboarding_it() {
     // of D4's promise that a dead connection never hides today's page.
     assert!(html.contains("<aside class=\"setpanel\" id=\"upgrade\""), "the overlay is a setpanel, like #settings");
 }
+
+/// **R-C1-57 (I2): a refusal is a sentence, not silence.** Both link commands answer with an
+/// envelope — `{ok:false, error}` for a dead session, a refused `check_api_base`, a non-2xx from
+/// Stripe or a reply with no link in it — and a page that discards it leaves a student pressing a
+/// button that does nothing. *Subscribe* also used to start a two-minute entitlement poll on top of
+/// a Checkout page that had never opened.
+///
+/// **M4/M5, same file, same round:** the overlay is never raised over the settings panel (they share
+/// a corner and a z-index, and `#upgrade` is last in the DOM), and Escape closes the topmost panel
+/// first — the ordering the previous round added without a test.
+#[test]
+fn a_refused_link_is_said_out_loud_and_escape_closes_the_topmost_panel() {
+    let js = read("console.js");
+    // The overlay's Subscribe: read the envelope, paint the sentence, and do not poll on a refusal.
+    let sub = js
+        .split("if (e.target.closest(\"#up-subscribe\"))")
+        .nth(1)
+        .and_then(|s| s.split("function finishUpgrade(").next())
+        .expect("the subscribe branch");
+    let refused = sub.find("if (!r.ok)").expect("Subscribe must read open_checkout's envelope");
+    assert!(sub.contains("EL(\"up-error\").textContent = r.error"), "…and paint the reason on the panel");
+    let polls = sub.find("setTimeout(tick").expect("the entitlement poll");
+    assert!(refused < polls, "the refusal is handled before the poll can start");
+    assert!(sub[refused..polls].contains("return"), "a refusal must return, never fall through into the poll");
+
+    // *Manage subscription*, in the settings panel, which had the same shape from Task 17.
+    let portal = js
+        .split("EL(\"set-portal\").addEventListener")
+        .nth(1)
+        .and_then(|s| s.split("EL(\"set-delete-1\")").next())
+        .expect("the portal listener");
+    assert!(portal.contains("r.ok") && portal.contains("r.error"), "Manage subscription must say why nothing opened");
+
+    // M4: opening Settings must not raise the overlay on top of it.
+    let mu = js.split("function maybeUpgrade(").nth(1).and_then(|s| s.split("EL(\"up-later\")").next()).expect("maybeUpgrade");
+    assert!(mu.contains("EL(\"settings\").hidden"), "the overlay must never be raised over the settings panel");
+
+    // M5: Escape closes the topmost first — `#upgrade`, then `#report`, then `#settings`, which is
+    // DOM order among panels sharing a z-index.
+    let keys = js
+        .split("document.addEventListener(\"keydown\"")
+        .nth(1)
+        .and_then(|s| s.split("function openReport(").next())
+        .expect("the page's keydown handler");
+    let up = keys.find("EL(\"upgrade\").hidden").expect("Escape must reach the upgrade overlay");
+    let report = keys.find("EL(\"report\").hidden").expect("Escape must reach the report overlay");
+    let settings = keys.find("EL(\"settings\").hidden").expect("Escape must reach the settings panel");
+    assert!(up < report && report < settings, "Escape must close the topmost panel first");
+}
+
+/// **R-C1-57 (M6): the upgrade overlay is dressed like the panel it lives in.** It is the first thing
+/// every existing install sees at the C1 cut-over, and without these two rules its password field is
+/// a white browser default on a dark panel and its two consent checkboxes run together inline. The
+/// wizard's panel has had both rules since Task 17 (`.wiz-panel input[type="password"]`,
+/// `.wiz-panel label`); this is the settings-panel half.
+#[test]
+fn the_upgrade_overlays_field_and_labels_are_styled_like_the_rest_of_the_panel() {
+    let css = read("console.css");
+    assert!(css.contains(".set-row input[type=\"text\"], .set-row input[type=\"password\"]"),
+        "a password field in a settings row must look like the text field beside it");
+    assert!(css.contains(".setpanel label {"), "a consent checkbox needs a line of its own");
+}

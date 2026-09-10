@@ -564,6 +564,39 @@ pub fn needs_account(vault: &std::path::Path) -> bool { cloud_config(vault).is_e
 /// nothing is a vault that cannot reach the cloud with nothing anywhere saying why.
 pub fn attach_in(vault: &std::path::Path, profile_id: &str, pending_target: &str) -> Result<(), String> {
     let (account_id, _) = load_session(pending_target)?;
+    attach_config_and_session(vault, profile_id, &account_id, pending_target, &move_session)?;
+
+    // **The back-fill** (Interfaces with C2, item 3). This vault was onboarded before the account
+    // existed, so its LMS feed is in `config/ingest.yaml` and in no `sources` row — and C2's
+    // `/ingest/ics` reads that row. Send it once, now that there is an account to send it to.
+    //
+    // **Best effort, and never fatal**: the adoption has already succeeded, the vault copy is what
+    // `ingest` reads until C2 ships, and an unsubscribed or offline account must not leave a
+    // half-adopted install behind. A failure is one logged line.
+    for (kind, url) in feeds_in(vault) {
+        if let Err(e) = crate::lms_link::store_source(&api_base(), &session_target(profile_id), kind, &url) {
+            eprintln!("Knowlu: the {kind} link could not be saved to your account ({e})");
+        }
+    }
+    Ok(())
+}
+
+/// The two halves that have to land together: `config/cloud.yaml`, then the session onto the
+/// profile. **If the move fails the file goes back** (R-C1-57, I4) — otherwise `needs_account` is
+/// false forever over a vault whose credential target holds nothing, and the upgrade overlay, which
+/// is the console's only sign-in surface, never comes back to offer a retry. That is precisely the
+/// state [`attach_in`]'s own doc says this design prevents; this is what makes it true.
+///
+/// **The move is a parameter** for the same reason `lms_link::validate_for`'s fetch is one: a
+/// `CredWriteW` that fails is not something a test can arrange on a healthy machine, and the
+/// rollback is the half worth proving.
+pub fn attach_config_and_session(
+    vault: &std::path::Path,
+    profile_id: &str,
+    account_id: &str,
+    pending_target: &str,
+    move_it: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
     // **Every field, because `VaultPlan` has grown**: Tasks 14a and 14b added `zybooks_courses`,
     // `vhl_sections`, `zybooks_ignore`, `course_map` and `courses`, and Task 14c added
     // `campus_choice`. An adopted vault gains `config/cloud.yaml` and nothing else — its feeds, its
@@ -588,23 +621,15 @@ pub fn attach_in(vault: &std::path::Path, profile_id: &str, pending_target: &str
         vhl: false,
         api_base: api_base(),
         anon_key: anon_key(),
-        account_id,
+        account_id: account_id.to_string(),
     };
     // Only `config/cloud.yaml` is written. Nothing else in this vault is read, rewritten or moved.
     crate::scaffold::write_cloud_yaml_if_absent(vault, &plan)?;
-    move_session(pending_target, &session_target(profile_id))?;
-
-    // **The back-fill** (Interfaces with C2, item 3). This vault was onboarded before the account
-    // existed, so its LMS feed is in `config/ingest.yaml` and in no `sources` row — and C2's
-    // `/ingest/ics` reads that row. Send it once, now that there is an account to send it to.
-    //
-    // **Best effort, and never fatal**: the adoption has already succeeded, the vault copy is what
-    // `ingest` reads until C2 ships, and an unsubscribed or offline account must not leave a
-    // half-adopted install behind. A failure is one logged line.
-    for (kind, url) in feeds_in(vault) {
-        if let Err(e) = crate::lms_link::store_source(&api_base(), &session_target(profile_id), kind, &url) {
-            eprintln!("Knowlu: the {kind} link could not be saved to your account ({e})");
-        }
+    if let Err(e) = move_it(pending_target, &session_target(profile_id)) {
+        // The file this call just wrote, and only that file — `config/` and everything else in it
+        // was the student's before this ran.
+        let _ = std::fs::remove_file(vault.join("config").join("cloud.yaml"));
+        return Err(e);
     }
     Ok(())
 }
@@ -627,14 +652,30 @@ fn feeds_in(vault: &std::path::Path) -> Vec<(&'static str, String)> {
     out
 }
 
-/// The profile id the two vault-owning commands below key everything to: the settings file's, and —
-/// if that is somehow empty (a hand-edited `settings.json`, or a poisoned lock; `Settings::load`'s
-/// own default is this very derivation) — the one derived from the vault path, which is what
-/// `profiles::register` filed the profile under. **Never an empty string**: an empty id writes
-/// `knowlu//session` into a vault's `cloud.yaml` and names the backups ROOT in a delete.
+/// The shape `profiles::id_for` — `knowlu_engine::ids::derived_id("profile", …)` — always produces:
+/// the literal `profile_` and exactly ten hex characters, the first ten of a SHA-1. **A profile id
+/// names folders and Credential Manager entries**, so anything else is not a "different id", it is a
+/// path fragment somebody typed: `"../.."` under a backups root climbs out of it (R-C1-57, I3).
+pub fn is_profile_id(id: &str) -> bool {
+    id.strip_prefix("profile_")
+        .map(|hex| hex.len() == 10 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or(false)
+}
+
+/// The id to use: the stored one when it is really one, and otherwise the id the vault path derives
+/// — which is what `profiles::register` filed the profile under and what `Settings::load` defaults
+/// to anyway. `settings.json` is a plain file a person can edit and `state::Settings` parses this
+/// field as an unchecked `String`, so "stored" and "trustworthy" are not the same thing.
+///
+/// Pure, and taking the stored value rather than reading it, so `app/tests/account.rs` can drive the
+/// refusal without a `ConsoleState` (the shape `scheduler::slot_argv` and `relaunch_args` use).
+pub fn profile_id_or_derived(stored: &str, vault: &std::path::Path) -> String {
+    if is_profile_id(stored) { stored.to_string() } else { crate::profiles::id_for(vault) }
+}
+
 fn profile_id_of(cs: &crate::state::ConsoleState) -> String {
-    let from_settings = cs.settings.lock().map(|s| s.profile_id.clone()).unwrap_or_default();
-    if from_settings.is_empty() { crate::profiles::id_for(&cs.vault) } else { from_settings }
+    let stored = cs.settings.lock().map(|s| s.profile_id.clone()).unwrap_or_default();
+    profile_id_or_derived(&stored, &cs.vault)
 }
 
 #[tauri::command(async)]
@@ -657,7 +698,11 @@ pub fn attach_account(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value
 
 /// What the settings panel and the upgrade overlay both read. `needs_account` is what puts the
 /// overlay on screen at all.
-#[tauri::command]
+///
+/// `(async)` (R-C1-57, M10): it reads a credential (`CredReadW`) and a file, and every other
+/// credential-touching command in this file is off the UI thread for that reason. The brief spelled
+/// it as a plain `#[tauri::command]`; the page awaits a promise either way.
+#[tauri::command(async)]
 pub fn account_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
     let cfg = cloud_config(&cs.vault).ok();
     let cache = load_cache(&cs.data_dir);
@@ -759,8 +804,14 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// **`backup_root` is the ROOT** — `%USERPROFILE%\Knowlu\Backups` for every profile on the machine —
 /// and `backup::tick` writes `<root>\<profile_id>\` inside it. Removing the root would destroy a
 /// housemate's or a second profile's only other copy of their work, which is not what *delete MY
-/// data* says. An empty `profile_id` removes nothing under either root, for the same reason: it
-/// would name the root itself.
+/// data* says.
+///
+/// **So the id is checked before it names anything** (R-C1-57, I3): an id that is not
+/// [`is_profile_id`]-shaped — empty, `"../.."`, anything with a separator in it — removes nothing
+/// keyed to an id. Not the backups subtree, not the registry row, not a credential. The vault and
+/// the app-data folder are paths the CALLER named and are still removed, because those two are what
+/// *delete my data* is about; `delete_my_data` gets its id from `profile_id_of`, which has already
+/// fallen back to the vault's own derivation, so in the real flow this guard never fires.
 ///
 /// Best effort throughout: a file held open by another process must not stop the rest of the wipe,
 /// and there is nothing a user could do with the error anyway — the account is already deleted by
@@ -774,27 +825,31 @@ pub fn delete_local_data(
     session_credential_target: &str,
 ) {
     let _ = std::fs::remove_dir_all(vault);
-    if let (Some(b), false) = (backup_root, profile_id.is_empty()) {
+    let _ = std::fs::remove_dir_all(data_dir);
+    if !session_credential_target.is_empty() {
+        let _ = crate::credentials::delete(session_credential_target);
+    }
+    if !is_profile_id(profile_id) {
+        eprintln!("Knowlu: {profile_id:?} is not a profile id, so nothing keyed to one was removed");
+        return;
+    }
+    if let Some(b) = backup_root {
         let _ = std::fs::remove_dir_all(b.join(profile_id));
     }
-    let _ = std::fs::remove_dir_all(data_dir);
     // …and forget the profile, or the picker goes on offering a vault that is not there. A registry
     // that cannot be READ is left alone rather than rewritten — `profiles::load`'s own rule, and the
     // reason it distinguishes absent from unreadable.
-    if let (Some(root), false) = (app_root, profile_id.is_empty()) {
+    if let Some(root) = app_root {
         if let Ok(all) = crate::profiles::load(root) {
             let left: Vec<_> = all.into_iter().filter(|pr| pr.id != profile_id).collect();
             let _ = crate::profiles::save(root, &left);
         }
     }
-    let _ = crate::credentials::delete(session_credential_target);
     // The coursework logins are keyed to the PROFILE, not the account (`credentials::target_for`),
     // and they are this machine's — deleting the account does not delete them, so this does.
-    if !profile_id.is_empty() {
-        for source in ["zybooks", "vhl"] {
-            let t = crate::credentials::target_for(profile_id, source);
-            if crate::credentials::exists(&t) { let _ = crate::credentials::delete(&t); }
-        }
+    for source in ["zybooks", "vhl"] {
+        let t = crate::credentials::target_for(profile_id, source);
+        if crate::credentials::exists(&t) { let _ = crate::credentials::delete(&t); }
     }
 }
 
@@ -805,7 +860,10 @@ pub fn delete_local_data(
 /// **A refusal is also a stop**, not only a transport failure: the agent is built with
 /// `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`, and wiping the machine on one
 /// would destroy the vault while the account it was supposed to delete is still there. Nothing local
-/// is touched unless the server said `deleted`.
+/// is touched unless the server answered 2xx — `cloud/…/account/handler.ts` answers
+/// `200 {deleted:true}` — **or 404** (R-C1-57, M1): an account that is already gone is the one
+/// refusal that must not lock a user out of deleting their own machine's copy, which is otherwise
+/// exactly what a half-finished first attempt would do.
 #[tauri::command(async)]
 pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
     let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
@@ -821,7 +879,7 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
         Err(e) => return json!({ "ok": false, "error": format!("your account could not be deleted ({e}) — {untouched}") }),
     };
     let status = res.status().as_u16();
-    if !(200..300).contains(&status) {
+    if !(200..300).contains(&status) && status != 404 {
         let text = res.body_mut().with_config().limit(1 << 16).read_to_string().unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         return json!({ "ok": false, "error": format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)) });

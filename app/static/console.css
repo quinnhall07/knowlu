@@ -470,7 +470,13 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .set-row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
 .set-row .k { min-width: 13ch; color: var(--t3); }
 .set-row .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); flex: 1 1 12ch; overflow-wrap: anywhere; }
-.set-row input[type="text"] { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; flex: 1 1 14ch; }
+/* The password field is the upgrade overlay's (C1 Task 18) and gets the text field's look — without
+   it a `type="password"` inside a settings row is the browser default, a white box on a dark panel,
+   on the one panel every install that predates C1 sees first. Same pairing `.wiz-panel` already has. */
+.set-row input[type="text"], .set-row input[type="password"] { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; flex: 1 1 14ch; }
+/* …and the two consent checkboxes get a line each, exactly as `.wiz-panel label` does. Inline, they
+   ran together into one sentence a reader could tick without seeing the second one. */
+.setpanel label { display: block; padding: var(--s1) 0; color: var(--t2); }
 /* A disabled button in a settings row has to LOOK disabled — the only other [disabled] rule in the
    sheet is .flagpop's. (Written for the Updates row while it was a placeholder; Task 8 wired that
    row, and the rule stands for any row control a command turns off.) */
