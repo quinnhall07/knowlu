@@ -78,13 +78,18 @@ enum Command {
     /// VHL sections this account reaches, and — with `--vault` — whether that vault's
     /// `config/ingest.yaml` already places each one. One JSON object on stdout; always exit 0.
     CourseworkDiscover {
-        /// Optional: with it, the credential targets and `enabled` flags come from the vault's
-        /// own config and `mapped` is computed. Without it (the wizard, whose vault does not
-        /// exist yet) the targets come from the two flags and `mapped` is always false.
+        /// Optional: with it, the credential targets come from the vault's own config and
+        /// `mapped` is computed (`enabled` is not read: discovery cares what an account can see,
+        /// not whether the vault currently syncs it). Without it (the wizard, whose vault does
+        /// not exist yet) the targets come from the two flags and `mapped` is always false.
         #[arg(long)]
         vault: Option<PathBuf>,
+        /// The Windows Credential Manager target to sign in to zyBooks with; overrides the
+        /// vault's `coursework.zybooks.credential_target`.
         #[arg(long = "zybooks-target")]
         zybooks_target: Option<String>,
+        /// The Windows Credential Manager target to sign in to VHL with; overrides the vault's
+        /// `coursework.vhl.credential_target`.
         #[arg(long = "vhl-target")]
         vhl_target: Option<String>,
     },

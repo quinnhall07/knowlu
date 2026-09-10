@@ -200,9 +200,9 @@ pub fn parse_dashboard(
                 continue;
             }
         };
-        let mapping = match crate::yaml::get(&sections, &section_id) {
-            Some(Yaml::Mapping(inner)) if !inner.is_empty() => inner.clone(),
-            _ => {
+        let mapping = match section_mapping(&sections, &section_id) {
+            Some(inner) => inner.clone(),
+            None => {
                 warnings.push(format!("section {section_id} not in config; skipped"));
                 continue;
             }
@@ -285,6 +285,19 @@ pub fn parse_dashboard(
     Ok(out)
 }
 
+/// Whether `sections[section_id]` in a `coursework.vhl` config block names a real mapping, and
+/// the mapping itself when it does.
+///
+/// The **one** predicate for "is this section mapped" — [`parse_dashboard`] and discovery both
+/// call it, rather than each keeping its own copy of "an empty mapping is falsy" to drift apart
+/// later. Mirrors [`crate::coursework::route_zybook`]'s role on the zyBooks side.
+pub fn section_mapping<'a>(sections: &'a Mapping, section_id: &str) -> Option<&'a Mapping> {
+    match crate::yaml::get(sections, section_id) {
+        Some(Yaml::Mapping(inner)) if !inner.is_empty() => Some(inner),
+        _ => None,
+    }
+}
+
 /// `(course_id, section_id)` for every summary the dashboard carries, first-seen order,
 /// deduplicated.
 ///
@@ -292,6 +305,11 @@ pub fn parse_dashboard(
 /// finding out what that config should say is the point. The summaries name no course **title**
 /// — only `/courses/<id>/sections/<id>/` — so onboarding shows the pair and asks the student for
 /// the code and the label rather than inventing one.
+///
+/// The `/courses/<id>/` prefix is required, not just `/sections/<id>/`: the pair is the point,
+/// and VHL is known to also emit course-less section URLs elsewhere on the page (the committed
+/// fixture's own `data-activities-url="/sections/2102121/programs/192"`) that would otherwise
+/// surface a section with no course to pair it with.
 pub fn discover_sections(html: &str) -> Vec<(String, String)> {
     static COURSE_SECTION: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"/courses/(\d+)/sections/(\d+)/").unwrap());
@@ -613,6 +631,17 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), pairs.len(), "a pair was reported twice");
+    }
+
+    #[test]
+    fn discover_sections_is_first_seen_order() {
+        // The fixture carries only one distinct pair, so it can pin dedup but not order.
+        assert_eq!(
+            discover_sections(
+                "/courses/2/sections/9/a /courses/1/sections/3/b /courses/2/sections/9/c"
+            ),
+            vec![("2".to_string(), "9".to_string()), ("1".to_string(), "3".to_string())]
+        );
     }
 
     /// `html.escape(text, quote=True)` for the characters `json.dumps` can produce.
