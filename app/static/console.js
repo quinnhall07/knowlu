@@ -1417,14 +1417,6 @@
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
     if (e.target.closest("#wiz-skip-backup")) { WIZ.bdir = ""; wizGo(WIZ.step + 1); return; }
-    if (e.target.closest("#wiz-spike")) {
-      invoke("open_lms_window", { campus: WIZ.campus }).then(function (env) { EL("wiz-spike-out").textContent = JSON.stringify(env, null, 2); }).catch(function (e) { EL("wiz-spike-out").textContent = String(e.message || e); });
-      return;
-    }
-    if (e.target.closest("#wiz-spike2")) {
-      invoke("capture_calendar_link", { campus: WIZ.campus }).then(function (env) { EL("wiz-spike-out").textContent = JSON.stringify(env, null, 2); }).catch(function (e) { EL("wiz-spike-out").textContent = String(e.message || e); });
-      return;
-    }
     var titles = { vault: "Choose the vault folder", parent: "Choose where the vault should go", backupSrc: "Choose the backup to restore from", bdir: "Choose a backup folder" };
     var which = e.target.closest("#wiz-pick-vault") ? "vault"
       : e.target.closest("#wiz-pick-parent") ? "parent"
