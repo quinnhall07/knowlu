@@ -74,6 +74,20 @@ enum Command {
         #[arg(long = "run-id")]
         run_id: Option<String>,
     },
+    /// What the coursework sources can see, without writing anything: the zyBooks books and the
+    /// VHL sections this account reaches, and — with `--vault` — whether that vault's
+    /// `config/ingest.yaml` already places each one. One JSON object on stdout; always exit 0.
+    CourseworkDiscover {
+        /// Optional: with it, the credential targets and `enabled` flags come from the vault's
+        /// own config and `mapped` is computed. Without it (the wizard, whose vault does not
+        /// exist yet) the targets come from the two flags and `mapped` is always false.
+        #[arg(long)]
+        vault: Option<PathBuf>,
+        #[arg(long = "zybooks-target")]
+        zybooks_target: Option<String>,
+        #[arg(long = "vhl-target")]
+        vhl_target: Option<String>,
+    },
     /// Sync the LMS .ics feed into tasks/. Ports `python -m engine.ingest`.
     Ingest {
         #[arg(long, default_value = ".")]
@@ -323,6 +337,13 @@ fn main() -> ExitCode {
                 0 => ExitCode::SUCCESS,
                 _ => ExitCode::FAILURE,
             }
+        }
+        Command::CourseworkDiscover { vault, zybooks_target, vhl_target } => {
+            println!(
+                "{}",
+                coursework::discover_json(vault.as_deref(), zybooks_target.as_deref(), vhl_target.as_deref())
+            );
+            ExitCode::SUCCESS
         }
         Command::Ingest { vault, via, run_id } => match ingest::run(&vault, &via, run_id.as_deref()) {
             0 => ExitCode::SUCCESS,

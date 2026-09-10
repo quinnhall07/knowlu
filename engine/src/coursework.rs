@@ -550,6 +550,141 @@ pub fn fetch_vhl(
     ))
 }
 
+// ---------------------------------------------------------------------------------------------
+// discovery (C1 H10) — read-only, writes nothing
+// ---------------------------------------------------------------------------------------------
+
+/// Whether `sections[section_id]` in a `coursework.vhl` config block names a real mapping.
+///
+/// The same check `discover_json` uses to fill in `mapped` for each `(course_id, section_id)`
+/// pair [`crate::vhl::discover_sections`] finds. Extracted so it is testable against a config
+/// loaded from a real vault without a live dashboard fetch: an empty mapping is falsy, the same
+/// rule [`route_zybook`] applies to zyBooks courses.
+fn vhl_section_mapped(sections: &Mapping, section_id: &str) -> bool {
+    matches!(
+        crate::yaml::get(sections, section_id),
+        Some(Yaml::Mapping(inner)) if !inner.is_empty()
+    )
+}
+
+/// Everything onboarding needs to build a mapping, and nothing else. **Never writes**, never
+/// starts a run record, and always returns a JSON object — a source that could not be reached is
+/// an `errors` entry, not an exit code, because the wizard's answer to "we could not reach
+/// zyBooks" is to let the student type the mapping, not to stop.
+///
+/// With `vault`, the credential targets and `enabled`-independent `courses`/`sections` mappings
+/// come from that vault's own `config/ingest.yaml` and `mapped` is computed from it. Without a
+/// vault (the wizard, whose vault does not exist yet) the targets come from the two flags alone
+/// and `mapped` is always `false`. A missing target — no flag and, with a vault, no
+/// `credential_target` in its config — means that source is simply skipped, not an error.
+#[cfg(windows)]
+pub fn discover_json(
+    vault: Option<&Path>,
+    zybooks_target: Option<&str>,
+    vhl_target: Option<&str>,
+) -> String {
+    use serde_json::json;
+    let config: Mapping = vault
+        .and_then(|v| load_coursework_config(v).ok())
+        .map(|(cfg, _)| cfg)
+        .unwrap_or_default();
+    let block = match crate::yaml::get(&config, "coursework") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    let source = |name: &str| -> Mapping {
+        match crate::yaml::get(&block, name) {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => Mapping::new(),
+        }
+    };
+    let mut errors: Vec<String> = Vec::new();
+
+    // ---- zyBooks
+    let zycfg = source("zybooks");
+    let zytarget = zybooks_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&zycfg, "credential_target", ""));
+    let mut zybooks: Vec<serde_json::Value> = Vec::new();
+    if !zytarget.is_empty() {
+        let courses = match crate::yaml::get(&zycfg, "courses") {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => Mapping::new(),
+        };
+        let ignore: Vec<String> = match crate::yaml::get(&zycfg, "ignore") {
+            Some(Yaml::Sequence(items)) => items.iter().map(yaml_str).collect(),
+            _ => Vec::new(),
+        };
+        match (|| -> Result<Vec<String>, SourceError> {
+            let cred = crate::wincred::read_credential(&zytarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            let (token, user_id) =
+                crate::zybooks::signin(&cred.username, cred.password.expose(), None)?;
+            crate::zybooks::fetch_zybook_codes(&token, user_id, None)
+        })() {
+            Ok(codes) => {
+                for code in codes {
+                    let routing = route_zybook(&code, &courses, &ignore);
+                    zybooks.push(json!({
+                        "code": code,
+                        "mapped": matches!(routing, BookRouting::Mapped(_)),
+                        "ignored": matches!(routing, BookRouting::Ignored),
+                    }));
+                }
+            }
+            Err(err) => errors.push(format!("zybooks: {err}")),
+        }
+    }
+
+    // ---- VHL
+    let vhlcfg = source("vhl");
+    let vhltarget = vhl_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&vhlcfg, "credential_target", ""));
+    let mut vhl: Vec<serde_json::Value> = Vec::new();
+    if !vhltarget.is_empty() {
+        let sections = match crate::yaml::get(&vhlcfg, "sections") {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => Mapping::new(),
+        };
+        match (|| -> Result<String, SourceError> {
+            let cred = crate::wincred::read_credential(&vhltarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            crate::vhl::login_and_fetch_dashboard(
+                &cred.username,
+                cred.password.expose(),
+                &cfg_str(&vhlcfg, "base_url", "https://www.vhlcentral.com"),
+                None,
+            )
+        })() {
+            Ok(html) => {
+                for (course_id, section_id) in crate::vhl::discover_sections(&html) {
+                    let mapped = vhl_section_mapped(&sections, &section_id);
+                    vhl.push(json!({ "course_id": course_id, "section": section_id, "mapped": mapped }));
+                }
+            }
+            Err(err) => errors.push(format!("vhl: {err}")),
+        }
+    }
+
+    crate::ledger::dumps_value(&json!({ "zybooks": zybooks, "vhl": vhl, "errors": errors }))
+}
+
+/// The credential store is Windows-only, so discovery is too — and it says so rather than
+/// reporting an empty semester, which is the same rule [`fetch_zybooks`] follows.
+#[cfg(not(windows))]
+pub fn discover_json(
+    _vault: Option<&Path>,
+    _zybooks_target: Option<&str>,
+    _vhl_target: Option<&str>,
+) -> String {
+    use serde_json::json;
+    crate::ledger::dumps_value(&json!({
+        "zybooks": [], "vhl": [],
+        "errors": ["credential store unavailable on this platform"],
+    }))
+}
+
 /// Run every enabled source. **One source's failure never stops another.**
 ///
 /// And the rule this function exists for: *an empty parse is failure, never an empty semester.*
@@ -2096,5 +2231,55 @@ mod tests {
             SourceError::Failed("transport blew up".to_string()).to_string(),
             "transport blew up"
         );
+    }
+
+    // --- discover_json (C1 H10) ----------------------------------------------------------------
+    //
+    // Neither test touches the network or the real Credential Manager: with no vault and no
+    // target flags, both sources are skipped before any fetch is attempted; the mapping test
+    // drives `vhl_section_mapped` directly against a config loaded from a real temp vault plus
+    // the committed VHL dashboard fixture, rather than going through a live dashboard fetch.
+
+    const VHL_DASHBOARD_FIXTURE: &str = "tests/fixtures/vhl-dashboard.html";
+
+    fn dashboard_html() -> String {
+        std::fs::read_to_string(VHL_DASHBOARD_FIXTURE)
+            .expect("the captured VHL dashboard is committed")
+    }
+
+    #[test]
+    fn discover_json_with_no_vault_and_no_targets_is_the_empty_shape() {
+        let json = discover_json(None, None, None);
+        assert_eq!(json, "{\"errors\": [], \"vhl\": [], \"zybooks\": []}");
+    }
+
+    #[test]
+    fn vhl_mapped_is_computed_from_a_vaults_ingest_config() {
+        let vault = scratch("discover-vhl");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        write_note(
+            &vault.join("config").join("ingest.yaml"),
+            "coursework:\n  vhl:\n    sections:\n      \"2102121\":\n        course: gn-103\n        label: GN 103 Hausaufgaben\n",
+        );
+        let (config, warnings) = load_coursework_config(&vault).unwrap();
+        assert!(warnings.is_empty());
+        let coursework = crate::yaml::get(&config, "coursework")
+            .and_then(|v| v.as_mapping().cloned())
+            .unwrap();
+        let vhlcfg = crate::yaml::get(&coursework, "vhl")
+            .and_then(|v| v.as_mapping().cloned())
+            .unwrap();
+        let sections = crate::yaml::get(&vhlcfg, "sections")
+            .and_then(|v| v.as_mapping().cloned())
+            .unwrap();
+
+        let pairs = crate::vhl::discover_sections(&dashboard_html());
+        assert!(
+            pairs.contains(&("1623220".to_string(), "2102121".to_string())),
+            "{pairs:?}"
+        );
+        assert!(vhl_section_mapped(&sections, "2102121"));
+        assert!(!vhl_section_mapped(&sections, "9999999"));
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

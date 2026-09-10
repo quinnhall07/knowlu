@@ -285,6 +285,26 @@ pub fn parse_dashboard(
     Ok(out)
 }
 
+/// `(course_id, section_id)` for every summary the dashboard carries, first-seen order,
+/// deduplicated.
+///
+/// This is the discovery half of [`parse_dashboard`], and it needs no `sections:` config because
+/// finding out what that config should say is the point. The summaries name no course **title**
+/// — only `/courses/<id>/sections/<id>/` — so onboarding shows the pair and asks the student for
+/// the code and the label rather than inventing one.
+pub fn discover_sections(html: &str) -> Vec<(String, String)> {
+    static COURSE_SECTION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"/courses/(\d+)/sections/(\d+)/").unwrap());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for caps in COURSE_SECTION.captures_iter(html) {
+        let pair = (caps[1].to_string(), caps[2].to_string());
+        if !out.contains(&pair) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------------------
 // the network layer
 // ---------------------------------------------------------------------------------------------
@@ -583,6 +603,16 @@ mod tests {
             .iter()
             .find(|a| a.uid.ends_with(suffix))
             .unwrap_or_else(|| panic!("no bucket for {suffix}"))
+    }
+
+    #[test]
+    fn discover_sections_finds_every_course_and_section_once() {
+        let pairs = discover_sections(&dashboard_html());
+        assert!(pairs.contains(&("1623220".to_string(), "2102121".to_string())), "{pairs:?}");
+        let mut sorted = pairs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), pairs.len(), "a pair was reported twice");
     }
 
     /// `html.escape(text, quote=True)` for the characters `json.dumps` can produce.
