@@ -9,16 +9,15 @@ older under `docs/` is history or design authority from the previous repository 
 
 ## 1. State, in facts
 
-- **This repo:** `quinnhall07/knowlu`, private. `main` is ahead of `origin/main` (`0aaa771`) by the
-  commits of 2026-09-09 — **not pushed; Quinn's go is the first ask below.** They are: the signed
+- **This repo:** `quinnhall07/knowlu`, private. `main` was pushed on 2026-09-09 night (`ce1f9ee`; it had been 49 commits ahead). The day.s commits were: the signed
   spec + VISION §10 + CLAUDE direction (`48b83dc`), spec §11a rulings (`f7f1816`, `b569fc9`), the
   wizard defaults (`18cadd2`), the first slot at launch (`f8649d5`), plans C1 (`58954ef`, `c6a18ca`,
   `c95a6d1`) and C2 (`ede9b70`), the C0 merge (`d67bafa`, `--no-ff`, first parent `ede9b70`), and the
   C0 docs. Gates: PR #1's last run 34356994036 on the runner **1021 passed / 0 failed**, `warnings: 1
   accepted (.rsrc), 2 tallies, 0 other`, `eol contract holds over 223 files`; the local workspace
   run on the merged tree is recorded in the C0 ledger.
-- **Evening additions on `main`, also unpushed:** the C1 plan amendments `39c7a52` and `234c28b`, the
-  review report's execution rulings `823fb83`, this HANDOFF. `main` is ~36 commits ahead of `origin/main`.
+- **Evening additions on `main` (pushed with the rest):** the C1 plan amendments `39c7a52` and `234c28b`, the
+  review report's execution rulings `823fb83`, this HANDOFF. `main` and `origin/main` agree.
 - **Cut day happened, then Quinn asked for a reset.** He quit the old Knowlu, disabled the cloud
   routine, onboarded with the new build into `C:\Users\danie\Knowlu\Vault` (profile "Vault",
   `profile_a95daa1d40`), pressed *Run now* — and the first slot exposed the onboarding gaps recorded
@@ -30,8 +29,7 @@ older under `docs/` is history or design authority from the previous repository 
   Knowlu: `%LOCALAPPDATA%\knowlu\` is empty, `%USERPROFILE%\Knowlu\` holds only `Backups\`, the
   installed build is `19a1a8d`, and the next launch opens the wizard.** Nothing is scheduled: the
   old `quinn-ops-local-runner` task is unregistered (its XML is in the pre-cut folder and can be
-  re-registered as the interim page until C1 — offered to Quinn, not yet answered). **`quinn-ops` is
-  not yet archived** — Quinn's go, at the machine.
+  re-registered as the interim page until C1 — offered to Quinn, not yet answered). **`quinn-ops` is archived** (2026-09-09 night; its `main` was in sync with origin).
 - **A bug of this session, fixed:** the first-run predicate (`scheduler::needs_first_run`) checked a
   root `today.md`; the engine writes `state/today.md`, so the first draft (`f8649d5`) would have run a
   slot at every launch. Fixed test-first in `19a1a8d` (the C2 plan review caught it). The installed
@@ -117,8 +115,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 
 | When | Ask | Context to give him |
 |---|---|---|
-| now | **Go to push `main`** | `main` holds the signed spec, the plans, cut-day's app fixes and the C0 merge; pushing makes `ci / test` the gate on every PR and closes PR #1 as merged. Nothing else waits on it except branch protection (C0 Task 6). |
-| now | **Archive `quinn-ops`** (cut day step 6) | with him present: remove its worktrees, leave the checkout on `main`, `gh repo archive quinnhall07/quinn-ops`. The old vault survives in that archive's history. Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
+| done | ~~Push `main`~~ — pushed 2026-09-09 night (`ce1f9ee`). ~~Archive `quinn-ops`~~ — archived the same night; 17 worktrees removed. | Left: Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
 | now | **The interim page** | re-register the old runner task from its saved XML (`Register-ScheduledTask -Xml (Get-Content …\quinn-ops-local-runner.xml -Raw) -TaskName quinn-ops-local-runner`) so the old vault keeps producing a page until C1's wizard lands — recommended — or go without. |
 | C0 T4 | **Retire the old updater key** (P4) | the exact PowerShell block in the plan's Task 4 generates the new pair, sets the two secrets, prints only the public key; then `cmdkey /delete:knowlu/updater-key{,-password}` and the OneDrive file + its version history. Old key id `C2EC981122E1D2DF`. |
 | C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
