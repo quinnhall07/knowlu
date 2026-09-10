@@ -47,9 +47,13 @@ Deno.serve(async (req) => {
       },
       stripe: stripePostFrom(stripeKey, globalThis.fetch),
       purge: async (id) => {
-        // The consent log survives, with its account_id nulled: California's ARL wants the record
-        // for three years, and `subject_hash` is what keeps it meaningful without identifying.
-        await restPatch(rest, "consents", eq(id), { account_id: null });
+        // The consent log survives, with its account_id and its ip nulled: California's ARL wants
+        // the record for at least three years, and `subject_hash` is what keeps it meaningful
+        // without identifying. **`ip` goes with the account id** (R-C1-56, C2): an IP address is
+        // personal data, it is no part of "what did the seller show that day", and the privacy
+        // policy tells the reader that what survives a deletion is the hash, the price, the terms
+        // version and the date — which is only true if this PATCH nulls both.
+        await restPatch(rest, "consents", eq(id), { account_id: null, ip: null });
         for (
           const table of [
             "sources",

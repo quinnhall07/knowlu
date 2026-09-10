@@ -352,3 +352,25 @@ Deno.test("every read of the sources table selects kind and added_at, and never 
     assert(!query.includes("url_iv"), `a sources read selected the IV column: ${query}`);
   }
 });
+
+// The same guard, for the one row a deletion deliberately leaves behind (R-C1-56, C2). The purge
+// lives in `index.ts`, which `deno test` never loads, so nothing would have failed when the PATCH
+// nulled `account_id` alone and left `ip` — the address recorded at checkout — attached to a
+// surviving consent row for at least three years. The privacy policy says what is left is the hash,
+// the price, the terms version and the date; this is what makes that sentence true.
+Deno.test("the purge strips both the account id and the IP from every consent row it leaves behind", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const match = text.match(/restPatch\(rest,\s*"consents",[\s\S]*?\);/);
+  assert(match, "could not find the PATCH that strips the surviving consent rows");
+  const call = match[0];
+  assert(call.includes("account_id: null"), "a surviving consent row must lose its account id");
+  assert(call.includes("ip: null"), "a surviving consent row must lose its IP address");
+  // `consents` is never deleted from — that is the point of the PATCH — so a `restDelete` naming it
+  // would be a different bug than this test is about, and a PATCH that set anything else on the row
+  // would be rewriting evidence California requires us to keep.
+  assert(!/restDelete\(rest,\s*"consents"/.test(text), "consent rows are stripped, never deleted");
+  assert(
+    !/subject_hash|price_cents|version|accepted_at/.test(call),
+    "the PATCH must leave the hash, the price, the terms version and the date exactly as they were",
+  );
+});
