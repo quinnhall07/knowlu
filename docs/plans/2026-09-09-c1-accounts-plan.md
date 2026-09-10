@@ -1388,6 +1388,8 @@ Message: `cloud: the Supabase codebase's skeleton and its one shared response mo
 - Consumes: nothing.
 - Produces: the tables `public.accounts`, `public.entitlements`, `public.consents`, `public.sources`, `public.webhook_events` and the trigger `on_auth_user_created`. Every later cloud task reads or writes these through PostgREST with the service role.
 
+Applied to staging 2026-09-10 (`knowlu-staging`, `brvhgbihxevrudqpulcm`, us-east-1) in one push with Tasks 5–9's migrations: ten tables, ten RLS, zero non-SELECT policies — this task's five plus `billing_reminders`, `deleted_accounts`, `corrections`, `telemetry_events`, `issues`. Migration 000200 needed its column adds moved ahead of its view first (R-C1-34).
+
 - [ ] **Step 1: Write the failing test** — `cloud/supabase/migrations_test.ts`:
 
 ```ts
@@ -3147,6 +3149,8 @@ R3, ruled: **both** the academic-year price and the summer pause. A pause that h
 **Interfaces:**
 - Consumes: `_shared/{http,db,stripe}.ts`.
 - Produces: `shouldBePaused(d: Date): boolean`, `pauseDecision(d: Date, paused: boolean): "pause" | "resume" | "none"`, `reminderDue(a: { lastSentAt: string | null; startedAt: string; now: Date }): boolean`, `handle(req, deps)`. The table `public.billing_reminders`.
+
+Applied to staging 2026-09-10. Step 1's migration needed its column adds ahead of its view (R-C1-34), and **step 9 as written cannot run**: Supabase refuses `alter database postgres set` to the `postgres` role (42501). Migration `20260910000600_billing_jobs_vault.sql` re-issues the cron job reading `vault.decrypted_secrets` instead (R-C1-36); Quinn's step is `select vault.create_secret('<the token>', 'billing_jobs_token');` per project, the same value as the function secret `BILLING_JOBS_TOKEN`. `pg_net with schema extensions` works.
 
 - [ ] **Step 1: Write the failing test** — `cloud/supabase/functions/billing-jobs/handler_test.ts`:
 
@@ -4935,6 +4939,9 @@ Expected: `401 {"error":"no bearer token"}`. Then `select jobname from cron.job 
 **Interfaces:**
 - Consumes: `crate::credentials::{target_for, write, exists, delete}`, `knowlu_engine::wincred::read_credential`, `crate::profiles::id_for`.
 - Produces: `PENDING_TARGET`, `TOS_VERSION`, `PRIVACY_VERSION`, `api_base()`, `anon_key()`, `check_api_base()`, `auth_base()`, `struct Session`, `save_session()`, `load_session()`, `move_session()`, `sign_up_at()`, `sign_in_at()`, `magic_link_at()`, `verify_email_code_at()`, `refresh_at()`, `valid_access_token_at()`, `open_in_browser()`, and **six** commands (`sign_up`, `sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`, `open_policy`) — `entitlement_now` and `open_checkout` are written in Task 18, beside the rest of the console-side surface. Tasks 11, 12, 14, 17 and 18 all build on these.
+
+GoTrue /verify type: magiclink, settled 2026-09-10 against staging (`403 otp_expired` — the token was looked up; `email` is accepted by this GoTrue too).
+Prod api_base pinned 2026-09-10 (`https://jxthohvwrijwtuwlglan.supabase.co/functions/v1`); verified by a 404 — nothing is deployed to prod yet, so the 401 check is re-run at the first prod deploy.
 
 - [ ] **Step 1: The loopback harness and the first failing test** — `app/tests/account.rs`:
 
