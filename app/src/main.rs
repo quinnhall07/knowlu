@@ -90,11 +90,26 @@ fn run_shell(root: std::path::PathBuf, mode: &'static str, ps: Vec<profiles::Pro
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
             app.manage(onboarding::Onboarding { root, mode, profiles: std::sync::Mutex::new(ps) });
+            // R-C1-40 (I1b): the app holds the sign-in window's session directory, so wiping it does
+            // not depend on the page remembering to ask. Nothing else reads this state.
+            app.manage(lms_link::LmsSession::default());
             Ok(())
         })
+        // …and the window's own close button ends a capture just as `close_lms_window` does.
+        // `Destroyed`, not `CloseRequested`: the wipe wants the webview gone before it starts.
+        // Scoped to the sign-in window's label — every other window this builder makes is the
+        // wizard's own and is not a campus session.
+        .on_window_event(|w, e| {
+            if w.label() == lms_link::WINDOW && matches!(e, tauri::WindowEvent::Destroyed) {
+                lms_link::wipe_session(w.app_handle());
+            }
+        })
         .invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::close_lms_window])
-        .run(tauri::generate_context!())
-        .expect("Knowlu: failed to start the Tauri runtime");
+        .build(tauri::generate_context!())
+        .expect("Knowlu: failed to start the Tauri runtime")
+        // A session still open when the shell exits goes with it (R-C1-40, I1b). Anything this
+        // cannot finish in time is swept by the next launch's `open_lms_window`.
+        .run(|app, event| { if matches!(event, tauri::RunEvent::Exit) { lms_link::wipe_session_on_exit(app); } });
     std::process::exit(0)
 }
 
