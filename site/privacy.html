@@ -3,28 +3,116 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Knowlu — what is stored, and where</title>
+<title>Knowlu — privacy policy</title>
 <link rel="stylesheet" href="site.css">
 </head>
 <body>
-<main>
-  <h1>What is stored, and where</h1>
+<main class="doc">
+  <h1>Privacy policy</h1>
+  <p class="date">Effective 2026-09-10. This page is version <strong>2026-09-10</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
   <p>Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.</p>
-  <h2>On your machine</h2>
+  <p>That is the whole policy in one line. The rest of this page is the same promise said slowly, so you can check it.</p>
+
+  <h2>Who we are, and how to reach us</h2>
+  <p>Knowlu is an independent business in Alabama, run by its founder — one person, who also writes the code. There is no support department and no ticket queue: write to <a href="mailto:support@knowlu.com">support@knowlu.com</a> and a person reads it. Questions about this policy, a request to see or correct or delete what we hold, and anything you think we got wrong all go to that address. Security problems go to <a href="mailto:security@knowlu.com">security@knowlu.com</a>. If you would rather write on paper, ask and we will send you a postal address.</p>
+
+  <h2>What stays on your machine</h2>
+  <p>Knowlu is a desktop app first. These four things live on your PC and are yours; we hold no copy of any of them.</p>
   <ul>
-    <li><strong>Your vault</strong> — the folder you chose. Plain Markdown files with a short header, one per task, plus a record of every change under <code>state\journal\</code>. You can read all of it in any text editor.</li>
+    <li><strong>Your vault</strong> — the folder Knowlu makes at <code>%USERPROFILE%\Knowlu\</code>. Plain Markdown files with a short header, one per task, plus a record of every change under <code>state\journal\</code>. You can read all of it in any text editor, and you can walk away with it.</li>
     <li><strong>App data</strong> — <code>%LOCALAPPDATA%\knowlu\</code>: which profiles exist, your settings, when you last looked, and the last sixty run logs.</li>
-    <li><strong>Coursework logins</strong> — Windows Credential Manager, under <code>knowlu/&lt;profile&gt;/&lt;source&gt;</code>. Never in the vault, never in a backup, never in a log.</li>
+    <li><strong>Coursework logins</strong> — Windows Credential Manager, under <code>knowlu/&lt;profile&gt;/&lt;source&gt;</code>. Never in the vault, never in a backup, never in a log, and never on our servers.</li>
     <li><strong>Your backup folder</strong>, if you set one — a mirror of the vault and one dated snapshot a day, in a folder you chose and control.</li>
   </ul>
-  <h2>What leaves the machine</h2>
+
+  <h2>What we collect, and why</h2>
+  <p>By category, with the reason it exists. If a category is not on this list, we are not collecting it.</p>
+  <dl>
+    <dt>Your account</dt>
+    <dd>The email address you sign up with; your password, which Supabase holds as a hash and which we never see; the fact that you attested you are 18 or older, as a yes and a timestamp; and which version of these two policies you accepted, and when. Without it there is nobody for a subscription or a judgment to belong to.</dd>
+    <dt>Your subscription</dt>
+    <dd>Stripe takes the payment and holds the card. <strong>We never see a card number.</strong> What we keep is a Stripe customer id, which plan you are on, whether it is active, and when the current period ends. We also keep a record of the agreement itself — the price, the version of the terms, the moment, and the IP address it came from — because California requires a subscription seller to be able to show what the customer agreed to.</dd>
+    <dt>Your calendar links</dt>
+    <dd>The link to your school's assignment feed, and the secret address of your own calendar if you add one. They are what let Knowlu read what is due and what your day already has in it. A calendar link is a password in disguise — anyone holding one can read that calendar — so both are stored encrypted (see <em>Security</em>) and neither is ever written to a log.</dd>
+    <dt>Your coursework logins</dt>
+    <dd><strong>On your machine only, in Windows Credential Manager, never on our servers.</strong> Knowlu signs in to zyBooks and VHL from your PC, with your credentials, and reads the assignment list that comes back; that list — never the password — may be read on our servers so that one parser can serve everyone. The password stays on the machine, and there is no column in our database for one.</dd>
+    <dt>What you do in Knowlu</dt>
+    <dd>Interaction events: which view you opened, what you ticked, snoozed, approved or declined, and how long a card was on screen. There is no free text in an event and never a course name or a title. The named use is a short list of questions — is the ranking agreed with, where do the judgments go wrong, does anyone actually open Knowlu in the morning — and nothing else.</dd>
+    <dt>Your corrections</dt>
+    <dd>When you change a field a judgment set — how long something will take, how much it matters, which course it belongs to — we keep the old value, the new value, the item's id and what kind of item it was. A correction to a <em>course</em> keeps the fact that it changed and drops both names; a correction to a <em>title</em> is not recorded at all. This is the one thing that makes next month's judgments better than this month's, and it is why it is collected under the terms rather than behind a switch.</dd>
+    <dt>Diagnostic logs</dt>
+    <dd>Only when you send an issue report. It carries the last 200 lines of the app's and the engine's logs, the build versions, your Windows build, the profile id, and counts of what is in your vault — never the names of things in it. You see the exact text before it is sent, with email addresses, links and anything shaped like a key already replaced, and you can edit it or cancel.</dd>
+    <dt>Gmail, if you connect it</dt>
+    <dd>Message metadata and text, <strong>held in memory for the length of one judgment and then discarded</strong>. What survives is the message id, what we decided it was, and the fields that ended up on the card you saw. Its own section is below.</dd>
+  </dl>
+
+  <h2>What we do not collect</h2>
   <ul>
-    <li>Requests to the sources <em>you</em> connected: your LMS calendar feed, your coursework sites, and any campus event feeds you turned on.</li>
-    <li>One request a day to check whether a new version of Knowlu exists. It carries the version you are running and nothing else.</li>
+    <li><strong>No birthdate.</strong> The 18+ gate is an attestation — a yes and a timestamp. There is no date-of-birth column in our database and there is not going to be one.</li>
+    <li><strong>No card number.</strong> Stripe's payment page is Stripe's; the card never touches Knowlu.</li>
+    <li><strong>No campus password.</strong> Knowlu never asks for your university sign-in, and there is nowhere in the app to type one. When you sign in to your school, it happens on your school's own page, in a window Knowlu opens and does not read; all Knowlu keeps is the calendar link that comes out the other side — never what you typed into it.</li>
+    <li><strong>No note bodies.</strong> The text of your tasks and notes stays in the folder on your machine. If that ever changes it will be a separate switch, off by default, with its own screen explaining what and why — and no such switch exists today.</li>
   </ul>
-  <p>That is the whole list. There is no analytics, no crash reporting and no account — and so there is no switch to turn any of it off.</p>
-  <p><em>Copy diagnostics</em> in the tray menu puts the version, the last three runs, the last error and your slot times on the clipboard. It never includes the text of a note, and nothing is sent until you paste it somewhere yourself.</p>
-  <footer><a href="index.html">Back to Knowlu</a></footer>
+
+  <h2>Who else touches it</h2>
+  <p>Four companies, each doing one job, and one of them is the only place any content of yours is ever sent.</p>
+  <ul>
+    <li><strong>Supabase</strong> — hosting, the database and the sign-in system. Your account row, your password hash and every row above live there.</li>
+    <li><strong>Stripe</strong> — payments and the subscription. Stripe sees your card; we do not.</li>
+    <li><strong>Cloudflare</strong> — this website and the downloads.</li>
+    <li><strong>Anthropic</strong> — the API that makes the judgments, and <strong>the only place any content of yours is ever sent</strong>: one item at a time, to answer one question about that item, and only while a judgment is being made. Anthropic's commercial API terms say they do not train their models on what is sent through it. We hold the text for the length of the call and then let it go; what we write down is the answer.</li>
+  </ul>
+  <p>One more, doing nothing with your data but delivering it: the provider that sends our account and billing email sees the address a message is going to. Nobody else gets anything. There is no advertising network, no data broker and no analytics company anywhere on this list.</p>
+
+  <h2>We do not sell or share your personal information</h2>
+  <p>We do not sell it, we do not rent it, and we do not share it for anyone's advertising — not for money and not for anything else of value. There is no opt-out link on this site because there is nothing to opt out of, and a Global Privacy Control signal has nothing to switch off. If that ever changed it would be a new version of this policy and a question asked in the app, not a quiet edit to this paragraph.</p>
+
+  <h2>Gmail</h2>
+  <p>Connecting Gmail is optional, it is off until you turn it on, and you can disconnect it in Settings at any time — which revokes our access at Google and deletes the stored connection.</p>
+  <p>Knowlu's use and transfer of information received from Google APIs to any other app will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. In plain words:</p>
+  <ul>
+    <li>Gmail data is used for <strong>one thing</strong>: finding the obligations in your own inbox and proposing them as tasks inside Knowlu, where you approve or decline each one.</li>
+    <li>It is transferred to <strong>one place</strong>: Anthropic's API, to make that judgment for you. Nowhere else, and never for advertising, credit, lending or resale.</li>
+    <li><strong>No human at Knowlu reads your mail without your explicit consent.</strong> There is no support tool that opens an inbox. The one path by which a message could reach a person is the issue-report screen, where you choose to include it, see exactly what will be sent, and send it yourself — message by message, one decision at a time.</li>
+    <li>It is <strong>never used to train or improve a model</strong> beyond the rules Knowlu learns for your own account. Rows that came from Gmail are flagged as such and are excluded from anything that would pool them with another person's.</li>
+    <li><strong>Attachments are never fetched.</strong> Knowlu reads the headers and the text of a message and stops there.</li>
+    <li>Message text is <strong>discarded when the judgment is done</strong>. What is kept is the message id, so the same email is not proposed to you twice, the decision, and the fields on the card.</li>
+  </ul>
+  <p>Today the Gmail connection is in Google's <em>testing</em> mode, because the review that opens it to everyone takes weeks and has not finished. That has two consequences, and the app says both of them where you would meet them: it works for at most 100 people, each named in advance as a test user, and each of those connections expires after seven days and has to be made again. When Google's review is done, this paragraph changes.</p>
+
+  <h2>How long we keep it</h2>
+  <ul>
+    <li><strong>Account data</strong> — until you delete it. Deleting is immediate, and it is a purge rather than a flag.</li>
+    <li><strong>A tombstone</strong> — after an account is deleted, a hash of the email address and the date stay for <strong>90 days</strong>, so that deleting cannot be used to start the free trial over and over. It cannot be turned back into an address, and after 90 days it is gone too.</li>
+    <li><strong>Issue reports</strong> — <strong>90 days</strong>, then deleted automatically.</li>
+    <li><strong>The subscription consent record</strong> — <strong>three years</strong>, because California's subscription law requires a seller to keep proof of what the customer agreed to. When you delete your account that record loses your account id and keeps only the hash, the price and the date: enough to answer "what did the seller show that day", not enough to say who you were.</li>
+    <li><strong>Events and corrections</strong> — deleted with the account. While the account exists they stay, because the corrections are what the judgments learn from.</li>
+  </ul>
+
+  <h2>Your rights, wherever you live</h2>
+  <p>Four rights, built for everyone who uses Knowlu. There is no threshold to meet, no state you have to live in, and nothing to prove.</p>
+  <ul>
+    <li><strong>Know and access</strong> — this page is the list, and the export below is the contents.</li>
+    <li><strong>Export</strong> — everything our servers hold about you comes back as one file: the account, the subscription, the consent records, which calendar links exist, your events, your corrections and your issue reports. Ask at <a href="mailto:support@knowlu.com">support@knowlu.com</a> and we will send it. Your notes are not in it because they were never here — they are the plain files in your own folder, which is the best export there is.</li>
+    <li><strong>Correct</strong> — most of what we hold about you is a judgment about your own work, and correcting one is a normal Tuesday: change the field in Knowlu and the correction stands. If something we hold is wrong and you cannot reach it from the app, write to us and we will fix it.</li>
+    <li><strong>Delete</strong> — <strong>Settings → Delete my data</strong>. It removes the vault, its snapshots in your backup folder, the app's data on this machine, and the account and everything under it on our servers. The subscription stops at the end of the period you have already paid for. What is left afterwards is the 90-day tombstone and the consent record described above, and nothing else.</li>
+  </ul>
+
+  <h2>Knowlu is for people 18 or older</h2>
+  <p>An account requires you to attest that you are 18 or older, because a subscription is a contract and at 17 it is not one that binds. If you tell us you are under 18 the sign-up is declined, we say why, and nothing you typed is kept. We do not ask for a birthdate, we do not estimate your age from your face or your files, and Knowlu is neither built for nor sold to anyone in primary or secondary school. If you are 17 and this is the wrong answer for you, write to us — the honest reason it is the answer is that the alternative is collecting a birthdate from everybody.</p>
+
+  <h2>Security, and what happens if it fails</h2>
+  <p>Everything between the app and our servers goes over HTTPS. What our database stores is encrypted at rest, and your calendar links are encrypted a second time before they are written, with a key the database does not hold and only the code that fetches your feeds can use. Portal passwords are the clearest case of all: they are never sent to us, so there is no server anywhere holding one. Sessions live in Windows Credential Manager, not in a file.</p>
+  <p><strong>One person is responsible for security at Knowlu</strong> — its founder, the same person who answers support — and <a href="mailto:security@knowlu.com">security@knowlu.com</a> reaches them directly. If you find a way in, that is the address, and you will get an answer from a person.</p>
+  <p>No system is perfectly safe, and this page is not going to pretend otherwise. If we determine that a breach has reached information about you, <strong>we will tell you as fast as we can and in no case later than 45 days</strong> after we determine it, with what happened, what was in it, and what to do about it. Alabama's breach law sets that deadline for people who live in Alabama; we are making the same promise to everyone.</p>
+
+  <h2>Do Not Track</h2>
+  <p>Knowlu is a desktop app, and this is a static website. Neither one follows you across other websites or over time, and no third party collects anything about you through either of them: there are no advertising pixels, no analytics scripts, and no cookies dropped by anyone else. So there is nothing for a Do Not Track signal to switch off, and Knowlu does not change its behaviour when it sees one — its behaviour is already the one that signal asks for.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>Every version of this page carries a date, and that date is the version Knowlu records when you accept it. If we change something that matters — a new category collected, a new company on the list, a new use for what we already hold — we will email the address on your account, and Knowlu will show you the change and ask, before the new use begins. <strong>Carrying on using Knowlu is not how we take consent for a materially different use of your data</strong>; a yes is. Smaller changes — a clearer sentence, a corrected address — get a new date on this page and nothing more.</p>
+
+  <footer><a href="index.html">Back to Knowlu</a> &middot; <a href="terms.html">Terms</a></footer>
 </main>
 </body>
 </html>

@@ -15,3 +15,17 @@ p { color: var(--t2); }
 .meta, footer { color: var(--t3); font-size: 13px; }
 footer { border-top: 1px solid var(--hair); margin-top: var(--s7); padding-top: var(--s4); }
 ul { color: var(--t2); }
+
+/* The two policies and the two pages Checkout and sign-in land on (Task 19). Every rule here is
+   scoped to `main.doc`, which only those four pages carry, so `index.html` renders as it always did. */
+main.doc { max-width: 720px; }
+main.doc a { color: var(--acc); }
+main.doc h2 { border-top: 1px solid var(--hair); margin: var(--s7) 0 0; padding-top: var(--s4); }
+main.doc h2 + p, main.doc h2 + ul, main.doc h2 + dl { margin-top: var(--s3); }
+main.doc .lede { color: var(--t1); font-size: 17px; }
+main.doc .date { color: var(--t3); font-size: 13px; }
+main.doc li { margin-bottom: var(--s2); }
+main.doc dl { margin: 0; }
+main.doc dt { color: var(--t1); font-weight: 700; margin-top: var(--s4); }
+main.doc dd { color: var(--t2); margin: var(--s2) 0 0; }
+main.doc code { background: var(--s2c); border-radius: 4px; padding: 1px 4px; }
