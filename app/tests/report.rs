@@ -85,6 +85,29 @@ fn fix_round_1_the_reviews_divergent_shapes_are_pinned() {
     assert_eq!(scrub("authorization: Bearer "), "authorization=<secret> ");
 }
 
+/// Fix round 2 (N1, ruling R-C1-49): round 1's ASCII-restricted `\s` (positive, in `CREDENTIAL`)
+/// and Unicode-default `\S` (negated, in `URL_RE` and `CREDENTIAL`) each disagreed with the cloud's
+/// actual JavaScript `\s`/`\S` in a different direction. A non-breaking space (U+00A0) next to a
+/// credential keyword made the whole match fail to fire — the password or bearer token survived
+/// **completely unredacted** — and NEL (U+0085) inside a URL's tail ended the match one character
+/// early, leaving the rest of the value on the wire. All three cases pinned here with the cloud's
+/// own computed output (run under Deno, not reasoned by hand); the same three are added to
+/// `cloud/supabase/functions/_shared/scrub_test.ts`.
+#[test]
+fn fix_round_2_a_non_breaking_space_and_nel_are_javascripts_whitespace_not_rusts() {
+    // A non-breaking space before the `:` separator — routine in text pasted from a web page or a
+    // Word document — must not let the password through.
+    assert_eq!(scrub("password\u{a0}: hunter2"), "password=<secret>");
+    // A non-breaking space inside the `Bearer ` prefix — the whole header is still claimed whole.
+    assert_eq!(
+        scrub("authorization:\u{a0}Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdef"),
+        "authorization=<secret>"
+    );
+    // NEL (U+0085) inside a URL's tail: JavaScript's `\s` does not include it, so the whole
+    // capability URL — NEL and all — is claimed, not just the part before it.
+    assert_eq!(scrub("see https://x.invalid/secret\u{85}tail more"), "see <url> more");
+}
+
 #[test]
 fn the_two_ends_of_the_scrub_are_written_against_the_same_cases() {
     // There is no way to run TypeScript from here, so the pin is that the cloud's twin exists, names
@@ -168,6 +191,45 @@ fn preview_text_stays_under_the_clouds_body_cap_even_with_a_flood_of_logs() {
     // The newest line is what a reader wants kept — the oldest lines are what get dropped.
     assert!(text.contains("line 499"), "the newest log line did not survive the trim");
     assert!(!text.contains("line 0 "), "an oldest log line survived when it should have been dropped");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// N2, fix round 2: `runs_panel`'s `recent` is most-recent-first, so `run_lines[0]` (built by
+/// `preview_text` from it) is the *newest* of the up-to-three rows taken. The run-row trim loop
+/// must drop from the **end** of `run_lines` (the oldest), matching the log-line trim right above
+/// it and this function's own doc comment — dropping from the front would keep stale rows and
+/// throw away the one a reader most wants.
+///
+/// No log files at all (so the first trim loop has nothing to do and never fires) and three real
+/// run records — written through `knowlu_engine::runs::{start_run, end_run}`, not hand-built — each
+/// with a long, ordinary summary and its own marker, so the header-plus-three-rows total alone
+/// clears the cloud's cap and the second trim loop has to run.
+#[test]
+fn preview_text_trims_the_oldest_run_row_first_not_the_newest() {
+    let vault = std::env::temp_dir().join(format!("knowlu-report-runtrim-vault-{}", std::process::id()));
+    let data = std::env::temp_dir().join(format!("knowlu-report-runtrim-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::create_dir_all(&data).unwrap(); // deliberately no `logs/` subdirectory
+
+    let now = jiff::Timestamp::now();
+    let filler = "the quick brown fox jumps over the lazy dog and back again ".repeat(60);
+    let make_run = |minutes_ago: i64, marker: &str| {
+        let ts = now - jiff::SignedDuration::from_secs(minutes_ago * 60);
+        let id = knowlu_engine::runs::start_run(&vault, "local", Some(ts), Some("d"), None);
+        let summary = format!("{filler}{marker}");
+        knowlu_engine::runs::end_run(&vault, &id, "ok", &summary, 0, Some(ts), None, &[], Some("local"));
+    };
+    make_run(3, "MARKER-OLDEST-RUN");
+    make_run(2, "MARKER-MIDDLE-RUN");
+    make_run(1, "MARKER-NEWEST-RUN");
+
+    let cs = ConsoleState::open(vault.clone(), data.clone());
+    let text = preview_text(&cs, "today");
+    assert!(text.contains("MARKER-NEWEST-RUN"), "the newest run row should survive trimming:\n{text}");
+    assert!(!text.contains("MARKER-OLDEST-RUN"), "the oldest run row should be trimmed first:\n{text}");
+    let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data);
 }
 

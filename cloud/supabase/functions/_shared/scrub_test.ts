@@ -124,3 +124,26 @@ Deno.test("the eight inputs that exposed the Rust twin's round-1 scanner diverge
   // claiming the header but leaving the trailing space outside the match.
   assertEquals(scrub("authorization: Bearer "), "authorization=<secret> ");
 });
+
+// Task 16 fix round 2, ruling R-C1-49 (N1): the Rust twin's round-2 rewrite picked a different
+// (wrong) approximation of `\s`/`\S` at each of the four places this file uses them — ASCII-only
+// for the two positive `\s*` occurrences here in CREDENTIAL (missing NBSP and the rest of Unicode
+// `Zs`, so a non-breaking space next to the keyword made the whole match fail to fire, the password
+// surviving unredacted) and Rust's own Unicode default for the negated `\S+` occurrences (which
+// admits U+0085/NEL, which this file's `\s` — ECMA-262's `WhiteSpace`/`LineTerminator`, independent
+// of the `u` flag — does not, so a match ended one character early and left the rest on the wire).
+// These three inputs are the ones that exposed both directions; pinned here with this file's own
+// output as the source of truth, exactly as the eight above were.
+Deno.test("a non-breaking space and NEL are this file's whitespace, in both directions", () => {
+  // A non-breaking space (U+00A0) before the `:` separator — routine in text pasted from a web
+  // page or a Word document — must not let the password through.
+  assertEquals(scrub("password : hunter2"), "password=<secret>");
+  // A non-breaking space inside the `Bearer ` prefix — the whole header is still claimed whole.
+  assertEquals(
+    scrub("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdef"),
+    "authorization=<secret>",
+  );
+  // NEL (U+0085) inside a URL's tail: this file's `\s` does not include it, so the whole
+  // capability URL — NEL and all — is claimed, not just the part before it.
+  assertEquals(scrub("see https://x.invalid/secrettail more"), "see <url> more");
+});

@@ -20,19 +20,38 @@ use crate::state::ConsoleState;
 static EMAIL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap());
 
+/// JavaScript's `\s` class, character for character (ECMA-262's `WhiteSpace` and `LineTerminator`
+/// productions, which apply independent of the `u` flag) — **the class body only**, so it is used
+/// as `[{JS_SPACE}]` for `\s` or `[^{JS_SPACE}]` for `\S`, never on its own.
+///
+/// Fix round 2, ruling R-C1-49 (N1): neither Rust `regex` default is this class, in either
+/// direction, and round 1 picked a different (wrong) one at each of the four places `scrub.ts` uses
+/// `\s`/`\S`. ASCII `(?-u:\s)` is missing NBSP (U+00A0) and the rest of Unicode `Zs` — so on
+/// `"password\u{a0}: hunter2"` (a non-breaking space, routine in text pasted from a web page or
+/// Word document), `CREDENTIAL`'s `(?-u:\s)*` could not consume it, the whole alternative failed to
+/// match at that position, and — `hunter2` being only 7 characters, far under `TOKEN`'s 20-floor —
+/// the password survived **completely unredacted**. Rust's Unicode `\s` goes the other, safer-but-
+/// still-wrong direction: it admits U+0085 (NEL), which JS's `\s` excludes, so `URL_RE`'s and
+/// `CREDENTIAL`'s trailing `\S+` (round 1's compromise for the same reason `(?-u:\S)` refuses to
+/// compile — see `URL_RE`'s history in `git log` — was the same idea, applied to the wrong class)
+/// stopped one character early on that one code point and left the rest of the value **on the
+/// wire**. Both directions are real, verified against the actual `scrub.ts` under Deno, not
+/// reasoned on paper: `docs` at the task's own review has both differential cases. This constant
+/// closes both gaps at once, built once, by hand, from every character ECMA-262 actually names.
+///
+/// `NOTE`'s `\w` and `TOKEN`'s explicit `[A-Za-z0-9_.-]` are unaffected and stay ASCII exactly as
+/// they were — JS's `\w` has no such Unicode carve-out the way `\s` does, so `(?-u:\w)` already
+/// matched exactly.
+const JS_SPACE: &str =
+    "\t\n\x0B\x0C\r \u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
+
 /// `URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi` — any scheme, `webcal://` included (fix round 1, item
 /// 1 on the cloud side). `(?-u:\b)` matches JavaScript's ASCII-only `\b` (this pattern carries no
-/// `u` flag on the cloud side either) rather than Rust's Unicode-aware default. `\S` stays at Rust's
-/// Unicode default rather than `(?-u:\S)`: the string-mode `Regex` refuses to compile a *negated*
-/// ASCII class (`(?-u:\S)`, `(?-u:\W)`, `(?-u:\D)`) — a lone UTF-8 continuation byte would match it,
-/// which is not a valid match boundary in `&str` — so an ASCII-restricted `\S` would need
-/// `regex::bytes::Regex` and a byte-slice API throughout this module. The gap this leaves is narrow
-/// and the wrong direction to worry about: Rust's Unicode `\S` treats *more* characters as
-/// whitespace than ASCII does (the extra ones are Unicode space separators, which JavaScript's own
-/// `\s` — never ASCII-only either — already treats as whitespace too), so it can only stop a match
-/// slightly earlier than the cloud does on an input with Unicode whitespace in it, never leave more
-/// text unredacted.
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?-u:\b)[a-z][a-z0-9+.-]*://\S+").unwrap());
+/// `u` flag on the cloud side either) rather than Rust's Unicode-aware default. `\S+` is
+/// `[^{JS_SPACE}]+` (fix round 2, N1) — see [`JS_SPACE`]'s own doc for why neither Rust default is
+/// this class.
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"(?i)(?-u:\b)[a-z][a-z0-9+.-]*://[^{JS_SPACE}]+")).unwrap());
 
 /// `WINUSER = /([:\\\/]Users[\\\/])[^\\\/"']+/gi` — fix round 1, item 2 on the cloud side: the
 /// excluded set is only `\`, `/`, `"` and `'`, **not whitespace**, so a two-word account name is
@@ -48,12 +67,19 @@ static NOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(?-u:[\w.-]
 /// and claims the whole span: the keyword, the separator, an optional leading `Bearer `, and the
 /// value up to the next whitespace. `bearer` is itself a keyword, so `Authorization: Bearer
 /// <anything>` is claimed whole and the scheme name never stands next to an unredacted value.
-/// `\S` here is Rust's Unicode default too, for the same reason `URL_RE`'s is: `(?-u:\S)` is a
-/// negated ASCII class and the string-mode `Regex` refuses to compile one.
+///
+/// **Every `\s`/`\S` here is `[{JS_SPACE}]`/`[^{JS_SPACE}]` (fix round 2, N1)** — see
+/// [`JS_SPACE`]'s own doc. The two *positive* `\s*` occurrences (the separator, and the whitespace
+/// after `bearer`) were briefly `(?-u:\s)` in round 1, which **compiles** (positive ASCII classes
+/// are fine under `-u`; only negated ones refuse, which is how `\S`'s round-1 gap got caught at
+/// build time and this one did not) — but silently narrowed the class, so a non-breaking space next
+/// to the keyword or inside the `Bearer ` prefix made the whole `CREDENTIAL` alternative fail to
+/// match, leaving the secret completely unredacted rather than merely shortening the match the way
+/// `\S`'s gap did.
 static CREDENTIAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)(?-u:\b)(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)(?-u:\s)*[:=](?-u:\s)*(?:bearer(?-u:\s)+)?\S+",
-    )
+    Regex::new(&format!(
+        r"(?i)(?-u:\b)(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)[{JS_SPACE}]*[:=][{JS_SPACE}]*(?:bearer[{JS_SPACE}]+)?[^{JS_SPACE}]+"
+    ))
     .unwrap()
 });
 
@@ -245,8 +271,13 @@ pub fn preview_text(cs: &ConsoleState, view: &str) -> String {
         log_lines.remove(0);
         dropped_logs += 1;
     }
+    // N2, fix round 2: `runs_panel`'s `recent` is most-recent-first (`engine/src/surface.rs`,
+    // `recent.sort_by(|a, b| b.started.cmp(&a.started))`), so `run_lines[0]` is the *newest* of the
+    // (up to three) rows taken from it. Trimming the oldest first — matching the log-line trim
+    // above and this function's own doc comment — means dropping from the **end** of `run_lines`
+    // (`pop()`), not the front (`remove(0)`, which would drop the newest and keep stale rows).
     while assemble_preview(&header, &run_lines, &log_lines, dropped_logs, trailer).len() > budget && !run_lines.is_empty() {
-        run_lines.remove(0);
+        run_lines.pop();
     }
     assemble_preview(&header, &run_lines, &log_lines, dropped_logs, trailer)
 }
