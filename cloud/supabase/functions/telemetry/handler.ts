@@ -72,6 +72,24 @@ function isMs(n: unknown): boolean {
   return Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= 86_400_000;
 }
 
+/** A number-like string — what `scalar` on the device turns a JSON number into (`"2.0"`, `"0.5"`,
+ * never exponent notation in practice), checked loosely rather than re-parsed as JSON: the device
+ * already produced this string, and this is a belt, not the primary guard. */
+function isNumberLike(s: unknown): boolean {
+  return typeof s === "string" && s.trim() !== "" && Number.isFinite(Number(s));
+}
+
+/** Fix round 1 (C1, ruling R-C1-39), the belt to `is_wire_value`'s brace on the device: `domain`,
+ * `effort_confidence` and `status` are free-text inputs in the console with no vocabulary check
+ * anywhere in the write path, so a `VALUED_FIELDS` correction's `ours`/`theirs` can be a sentence
+ * even though the device is supposed to have dropped it already. This mirrors the device's own rule
+ * — a numeric literal, or a short closed-vocabulary-shaped token — and never 400s on it: a value that
+ * fails both is nulled and the row is kept, the same "it changed" treatment a FLAGGED field already
+ * gets below. */
+function isWireValue(s: unknown): boolean {
+  return isNumberLike(s) || isToken(s);
+}
+
 export interface EventIn {
   ts: string;
   session: string;
@@ -154,13 +172,17 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     const valued = VALUED_FIELDS.includes(c.field);
     const flagged = FLAGGED_FIELDS.includes(c.field);
     if (!valued && !flagged) throw fail(400, `field ${JSON.stringify(c.field)} is not a judged field`);
+    // Fix round 1 (C1): a value that is neither number-like nor a token is free text and is nulled,
+    // never 400ed — the row survives (a correction happened is still the signal), the sentence does
+    // not travel.
+    const keep = (v: string | null | undefined) => (isWireValue(v) ? v as string : null);
     return {
       account_id: user.id,
       ts: c.ts,
       item_id: c.item_id,
       field: c.field,
-      ours: valued ? (c.ours ?? null) : null,
-      theirs: valued ? (c.theirs ?? null) : null,
+      ours: valued ? keep(c.ours) : null,
+      theirs: valued ? keep(c.theirs) : null,
       kind: c.kind,
       // R-X-3, and the ruling that closed it: C1 has no opt-in to consult, so this is always null.
       request: null,

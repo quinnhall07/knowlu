@@ -137,6 +137,43 @@ Deno.test("a correction on a content field carries no value — spec §6's rule,
   assert(!VALUED_FIELDS.includes("title"));
 });
 
+// Fix round 1 (C1, ruling R-C1-39): `domain`, `effort_confidence` and `status` are VALUED_FIELDS
+// but free-text inputs in the console with no vocabulary check anywhere in the write path — so
+// `ours`/`theirs` can be a sentence even though the device is supposed to drop it first. The server
+// mirrors, never 400s: the row survives, the sentence is nulled.
+Deno.test("a free-text value on a VALUED field is nulled, not refused — the row still saves", async () => {
+  let saved: Record<string, unknown>[] = [];
+  const res = await handle(
+    req({
+      events: [],
+      corrections: [
+        {
+          ts: "2026-09-10T12:00:00.000Z",
+          item_id: "task_0123456789",
+          field: "effort_confidence",
+          ours: "low",
+          theirs: "I honestly have no idea how long this will take",
+          kind: "task",
+        },
+      ],
+    }),
+    {
+      ...base,
+      saveCorrections: (rows) => {
+        saved = rows as Record<string, unknown>[];
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { events: 0, corrections: 1 });
+  // A closed-vocabulary value still travels…
+  assertEquals(saved[0].ours, "low");
+  // …a sentence never does, even on a field the client-side EventIn/CorrectionIn contract calls
+  // VALUED rather than FLAGGED.
+  assertEquals(saved[0].theirs, null);
+});
+
 Deno.test("a correction on a field that is neither valued nor flagged is refused", async () => {
   const res = await handle(
     req({

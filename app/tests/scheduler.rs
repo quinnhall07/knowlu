@@ -69,6 +69,27 @@ impl Drop for EnvSeam {
     }
 }
 
+/// Fix round 1 (I1): making the offline-telemetry test send for real means it reaches
+/// `valid_access_token_at`, which reads the real Windows Credential Manager. `CLAUDE.md` and
+/// `app/tests/account.rs:204` require every test that touches the store to take a file-scoped lock —
+/// this file's own, since `account.rs`'s is private to that crate. Windows races parallel
+/// `CredWriteW`/`CredReadW` calls (spurious `ERROR_NOT_FOUND`), so this serialises every test in this
+/// file that writes, reads or deletes a real credential, the same way it already serialises
+/// `KNOWLU_ENGINE_EXE` above.
+#[cfg(windows)]
+static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Deletes the named Credential Manager target when the test ends, on any exit path — a passing
+/// assertion, a failing one, or a panic. The same shape as `app/tests/account.rs`'s `Cleanup`.
+#[cfg(windows)]
+struct CredCleanup(String);
+#[cfg(windows)]
+impl Drop for CredCleanup {
+    fn drop(&mut self) {
+        let _ = knowlu::credentials::delete(&self.0);
+    }
+}
+
 #[test]
 fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configured() {
     let v = scratch("argv");
@@ -673,10 +694,23 @@ fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
 /// points at a port nothing is listening on) and therefore an offline send — and the slot is green.
 #[test]
 fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
+    // Fix round 1 (I1): a real send reaches `valid_access_token_at`, which reads the real
+    // Credential Manager for the session this test writes below — held for the whole test.
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let v = scratch("teleoffline");
     std::fs::write(
         v.join("config").join("runners.yaml"),
         format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Fix round 1 (I1): `vault-full` carries no `state/events-ui/` directory at all, so `send`
+    // returned `(0, 0)` before ever reaching `valid_access_token_at` or `post_batch_at` — the step
+    // read "nothing new" and the test never exercised the offline branch it is named for. One row
+    // (the brief's own `app/tests/telemetry.rs` fixture line) is enough to make `send` reach the
+    // network.
+    std::fs::create_dir_all(v.join("state").join("events-ui")).unwrap();
+    std::fs::write(
+        v.join("state").join("events-ui").join("2026-09-09.jsonl"),
+        format!("{}\n", r#"{"action": "view_opened", "device": "M", "ms": null, "object_id": null, "object_kind": null, "session": "sess_1", "ts": "2026-09-09T12:00:00.000Z", "view": "today"}"#),
     ).unwrap();
     // Port 9 is `discard`: nothing on this machine answers it, so the send fails fast and locally.
     std::fs::write(
@@ -687,6 +721,17 @@ fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
     knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
         status: "active".into(), current_period_end: None, plan: None, checked_at: knowlu_engine::journal::now_ts(None),
     }).unwrap();
+    // A real session, far from expiry, so `valid_access_token_at` reads it straight off the store
+    // with no refresh call — the only network reach this test exercises is `post_batch_at` itself,
+    // against port 9.
+    let target = "knowlu/profile_x/session";
+    let _cred_cleanup = CredCleanup(target.to_string());
+    knowlu::account::save_session(target, "acc-1", &knowlu::account::Session {
+        access_token: "test-access-token".into(),
+        refresh_token: "test-refresh-token".into(),
+        expires_at: jiff::Timestamp::now().as_second() + 3600,
+        email: "a@example.invalid".into(),
+    }).unwrap();
     let sch = Scheduler::default();
     let fake = std::env::temp_dir().join(format!("qo-sched-tele-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fake);
@@ -695,7 +740,9 @@ fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
     let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
     let s = run_slot_inner(&cs, &sch, None, false);
     let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
-    assert!(named.iter().any(|n| n.starts_with("telemetry (")), "{named:?}");
+    // The exact name, not merely a prefix that "nothing new" and "no account" would also match
+    // (I1) — this is the one assertion that would catch the offline branch being changed to fail.
+    assert!(named.contains(&"telemetry (skipped: offline)".to_string()), "{named:?}");
     assert!(s.steps.iter().filter(|(n, _)| n.starts_with("telemetry")).all(|(_, c)| *c == 0));
     assert!(s.engine_ok, "telemetry must never paint the tray amber: {:?}", s.steps);
     let _ = std::fs::remove_dir_all(&fake);

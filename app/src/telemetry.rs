@@ -8,6 +8,13 @@
 use std::path::{Path, PathBuf};
 
 /// Judged fields whose correction may carry its values: numbers and closed vocabularies only.
+///
+/// **Fix round 1 (C1, ruling R-C1-39):** three of these five — `domain`, `effort_confidence` and
+/// `status` — are free-text inputs in the console today (`commands.rs`'s `QUOTED` list, and
+/// `console.js` puts them in plain text boxes) with no vocabulary check anywhere in the write path.
+/// This constant still names them, matching the brief and the already-shipped `handler.ts` list, but
+/// `is_wire_value` below is the belt that keeps a sentence typed into one of those three from ever
+/// reaching `ours`/`theirs` — the list alone is not the guarantee.
 pub const VALUED_FIELDS: [&str; 5] = ["effort_hours", "importance", "domain", "effort_confidence", "status"];
 /// Judged fields recorded as "it changed" and nothing more. A course name is somebody's timetable.
 pub const FLAGGED_FIELDS: [&str; 1] = ["course"];
@@ -82,6 +89,22 @@ fn kind_of(path: &str) -> String {
     top.strip_suffix('s').unwrap_or(top).to_string()
 }
 
+/// `engine/src/uievents.rs`'s `is_token` character class, mirrored rather than imported: that
+/// function is private to the engine crate, and this is the same property this crate needs on the
+/// device side of the wire — alphanumeric, `_-:`, at most 64 characters, never empty.
+fn is_token(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+}
+
+/// **Fix round 1 (C1, ruling R-C1-39).** The one guard between a `VALUED_FIELDS` correction and free
+/// text on the wire: a numeric literal (so `2.0`, `-1`, `0.5` all pass, whatever `scalar` produced
+/// from the journal's `new`), or a short closed-vocabulary-shaped token. A field like `domain` typed
+/// as a sentence in the console fails both and is treated exactly like `course` — the row survives,
+/// the value does not.
+fn is_wire_value(s: &str) -> bool {
+    s.parse::<f64>().is_ok() || is_token(s)
+}
+
 /// (a). `since` is **exclusive** — the watermark is the last `ts` that was accepted, so re-running a
 /// slot after a network failure sends the same rows again and the server's unique constraint absorbs
 /// them; re-running after a success sends nothing.
@@ -109,11 +132,17 @@ pub fn read_events(vault: &Path, since: Option<&str>) -> Vec<EventRow> {
 /// (b). Spec §6: "every human override of a judged field — journal records with `via: dashboard` on a
 /// field the agent set". Walks the journal in order, remembering who last set each `(id, field)`; a
 /// dashboard write over an `agent:` write is a correction, and nothing else is.
+///
+/// **Fix round 1 (M5):** only `op == "set"` records are read at all — neither to learn "who set this
+/// last" nor to emit a row. Today every record carrying a `field` is a `set`, so this changes no
+/// existing fixture's result; it keeps a future `op` (an unset, a revert) from being silently read as
+/// "the agent set this".
 pub fn read_corrections(vault: &Path, since: Option<&str>) -> Vec<CorrectionRow> {
     let mut last: std::collections::BTreeMap<(String, String), (String, Option<String>)> = std::collections::BTreeMap::new();
     let mut out = Vec::new();
     for m in read_ledger(&vault.join("state").join("journal")) {
         let (Some(ts), Some(id), Some(field), Some(actor)) = (s(&m, "ts"), s(&m, "id"), s(&m, "field"), s(&m, "actor")) else { continue };
+        if s(&m, "op").as_deref() != Some("set") { continue; }
         let key = (id.clone(), field.clone());
         let value = scalar(m.get("new"));
         let via = s(&m, "via").unwrap_or_default();
@@ -125,13 +154,16 @@ pub fn read_corrections(vault: &Path, since: Option<&str>) -> Vec<CorrectionRow>
                     let flagged = FLAGGED_FIELDS.contains(&field.as_str());
                     let fresh = since.map(|w| ts.as_str() > w).unwrap_or(true);
                     if (valued || flagged) && fresh {
+                        // Fix round 1 (C1): `is_wire_value` bounds what actually reaches `ours`/
+                        // `theirs` — a sentence typed into a free-text VALUED field drops out here,
+                        // the same "it changed" treatment `course` (a FLAGGED field) already gets.
+                        let keep = |v: &Option<String>| v.as_deref().filter(|s| is_wire_value(s)).map(str::to_string);
                         out.push(CorrectionRow {
                             ts: ts.clone(),
                             item_id: id.clone(),
                             field: field.clone(),
-                            // The whole of the content rule, in two lines.
-                            ours: if valued { prior_value.clone() } else { None },
-                            theirs: if valued { value.clone() } else { None },
+                            ours: if valued { keep(prior_value) } else { None },
+                            theirs: if valued { keep(&value) } else { None },
                             kind: kind_of(&s(&m, "path").unwrap_or_default()),
                         });
                     }
@@ -156,8 +188,27 @@ pub fn save_watermark(data_dir: &Path, ts: &str) -> Result<(), String> {
     std::fs::write(watermark_path(data_dir), ts).map_err(|e| e.to_string())
 }
 
-pub fn post_batch_at(api_base: &str, token: &str, batch: &Batch) -> Result<(usize, usize), String> {
-    crate::account::check_api_base(api_base)?;
+/// A failed `POST /telemetry`, split the way `send` needs to tell the outcomes apart (fix round 1,
+/// I2): a status the server actually answered with, or a transport failure before one ever arrived.
+/// Neither variant carries a response body or the token — a server's own message is not this crate's
+/// business to relay, and nothing about the token belongs in an error at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostError {
+    Status(u16),
+    Transport(String),
+}
+
+impl std::fmt::Display for PostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostError::Status(status) => write!(f, "telemetry: refused ({status})"),
+            PostError::Transport(e) => write!(f, "telemetry: {e}"),
+        }
+    }
+}
+
+pub fn post_batch_at(api_base: &str, token: &str, batch: &Batch) -> Result<(usize, usize), PostError> {
+    crate::account::check_api_base(api_base).map_err(PostError::Transport)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .http_status_as_error(false)
@@ -165,16 +216,16 @@ pub fn post_batch_at(api_base: &str, token: &str, batch: &Batch) -> Result<(usiz
         .into();
     // Compact, not `send_json`: `app/Cargo.toml` does not enable ureq's `json` feature, exactly the
     // reason `account::post_json` gives for the same choice.
-    let body = serde_json::to_string(batch).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(batch).map_err(|e| PostError::Transport(e.to_string()))?;
     let mut res = agent
         .post(&format!("{}/telemetry", api_base.trim_end_matches('/')))
         .header("authorization", &format!("Bearer {token}"))
         .header("content-type", "application/json")
         .send(body)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| PostError::Transport(e.to_string()))?;
     let status = res.status().as_u16();
-    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
-    if !(200..300).contains(&status) { return Err(format!("telemetry: {status} {text}")); }
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| PostError::Transport(e.to_string()))?;
+    if !(200..300).contains(&status) { return Err(PostError::Status(status)); }
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     Ok((
         v.get("events").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
@@ -195,27 +246,87 @@ pub fn watermark(last_event: Option<&str>, last_correction: Option<&str>, capped
     if capped { ends.min() } else { ends.max() }.unwrap_or_default().to_string()
 }
 
-/// One send: read since the watermark, post, advance the watermark only on success. **At most 500 of
-/// each** — the server's cap — so a vault with a long history catches up over several slots instead
-/// of being refused forever.
-pub fn send(vault: &Path, data_dir: &Path) -> Result<(usize, usize), String> {
+/// **Fix round 1 (M2).** A capped page must never end on a `ts` it shares with a row that got cut:
+/// `watermark` takes the kept page's last `ts` as the new floor, and `since` is exclusive, so a
+/// watermark landing mid-tie would skip that tie's other rows on every later read, forever — the
+/// same silent-loss shape the cap itself exists to avoid. If the row that would be the first one
+/// dropped (`rows[cap]`) shares its `ts` with the last row the naive truncation would keep, the whole
+/// trailing run sharing that `ts` is dropped from the kept side too, deferring the tie whole to the
+/// next read. At least one row is always kept when `rows.len() > cap` on entry, however tied the
+/// page is — `send` must never read an untruncated, non-empty page as "nothing new".
+///
+/// Public for the same reason `watermark` is: the one piece of arithmetic here that is wrong
+/// silently, and a test needs to reach it directly rather than through `send`'s network call.
+pub fn truncate_on_ts_boundary<T>(rows: &mut Vec<T>, cap: usize, ts_of: impl Fn(&T) -> &str) {
+    if rows.len() <= cap { return; }
+    let boundary_ts = ts_of(&rows[cap]).to_string();
+    let mut keep = cap;
+    while keep > 1 && ts_of(&rows[keep - 1]) == boundary_ts {
+        keep -= 1;
+    }
+    rows.truncate(keep);
+}
+
+/// A completed `send`: nothing pending, or a batch the server actually took a position on.
+///
+/// **Fix round 1 (I2).** A refusal still advances the watermark past the batch — see `send` — because
+/// a status in [`is_permanently_refused`]'s set means the batch is malformed and will never become
+/// well-formed by being sent again unchanged. `Sent` and `Refused` are both success outcomes from
+/// `send`'s own point of view: the watermark moved either way. A transport failure, a rate limit, an
+/// auth hiccup or a 5xx is not this type at all — those stay `Err(String)` on `send`, keep the batch,
+/// and are retried at the next slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    Sent(usize, usize),
+    Refused(u16),
+}
+
+/// The three statuses a malformed batch can wear that will never resolve themselves by retrying:
+/// bad request, payload too large, unprocessable. Everything else — an auth failure, a rate limit,
+/// any 5xx — is a reason to try again later, not a reason to give up on the batch.
+fn is_permanently_refused(status: u16) -> bool {
+    matches!(status, 400 | 413 | 422)
+}
+
+/// One send: read since the watermark, post, advance the watermark on any outcome the server took a
+/// position on. **At most 500 of each** — the server's cap — so a vault with a long history catches
+/// up over several slots instead of being refused forever.
+pub fn send(vault: &Path, data_dir: &Path, vault_io: &std::sync::Mutex<()>) -> Result<SendOutcome, String> {
     let cfg = crate::account::cloud_config(vault)?;
     let since = load_watermark(data_dir);
-    let mut events = read_events(vault, since.as_deref());
-    let mut corrections = read_corrections(vault, since.as_deref());
+    // Fix round 1 (M4): read-only, but still vault I/O, so it takes `vault_io` the way the `backup`
+    // step does (F11) — a console-initiated sync rewriting the working tree mid-read must not be able
+    // to make `read_ledger` silently skip a day file and advance the watermark past it. Released
+    // before the network call: a POST may take up to 30s and must never hold a lock a sync is
+    // waiting on, the same reason `vault_io` is never held across the engine child processes either.
+    let (mut events, mut corrections) = {
+        let _io = vault_io.lock().unwrap_or_else(|e| e.into_inner());
+        (read_events(vault, since.as_deref()), read_corrections(vault, since.as_deref()))
+    };
     // **The watermark can only advance as far as the SLOWER stream got** — `watermark` above is that
     // rule, and the reason it is a rule. This is what makes "catches up over several slots" true.
     let capped = events.len() > 500 || corrections.len() > 500;
-    events.truncate(500);
-    corrections.truncate(500);
-    if events.is_empty() && corrections.is_empty() { return Ok((0, 0)); }
+    truncate_on_ts_boundary(&mut events, 500, |e| e.ts.as_str());
+    truncate_on_ts_boundary(&mut corrections, 500, |c| c.ts.as_str());
+    if events.is_empty() && corrections.is_empty() { return Ok(SendOutcome::Sent(0, 0)); }
     let last_event = events.last().map(|e| e.ts.clone());
     let last_correction = corrections.last().map(|c| c.ts.clone());
     let high = watermark(last_event.as_deref(), last_correction.as_deref(), capped);
-    if high.is_empty() { return Ok((0, 0)); }
+    if high.is_empty() { return Ok(SendOutcome::Sent(0, 0)); }
     let auth = crate::account::auth_base(&cfg.api_base)?;
     let token = crate::account::valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, jiff::Timestamp::now().as_second())?;
-    let sent = post_batch_at(&cfg.api_base, &token, &Batch { events, corrections })?;
-    save_watermark(data_dir, &high)?;
-    Ok(sent)
+    match post_batch_at(&cfg.api_base, &token, &Batch { events, corrections }) {
+        Ok((e, c)) => {
+            save_watermark(data_dir, &high)?;
+            Ok(SendOutcome::Sent(e, c))
+        }
+        // Fix round 1 (I2): the server has taken a position — this batch is malformed and will never
+        // become well-formed — so it is consumed exactly as a successful send would be, rather than
+        // rebuilt and re-sent at every slot forever.
+        Err(PostError::Status(status)) if is_permanently_refused(status) => {
+            save_watermark(data_dir, &high)?;
+            Ok(SendOutcome::Refused(status))
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }

@@ -280,7 +280,16 @@ pub enum JudgePlan {
 }
 
 pub fn judge_plan(cs: &ConsoleState) -> JudgePlan {
-    match entitlement_state(cs) {
+    judge_plan_for(entitlement_state(cs), cs)
+}
+
+/// `judge_plan`'s body, taking the entitlement state as a parameter rather than reading it itself —
+/// fix round 1 (M3): `run_slot_inner` computes `entitlement_state(cs)` once and passes the same value
+/// in here and to the telemetry step below, instead of two reads of `config/cloud.yaml` and the
+/// entitlement cache per slot. `judge_plan(cs)` above is the public, one-read-per-call shape every
+/// existing caller and test still uses.
+fn judge_plan_for(state: crate::account::EntitlementState, cs: &ConsoleState) -> JudgePlan {
+    match state {
         crate::account::EntitlementState::NotEntitled => JudgePlan::Skip("judge (skipped: no entitlement)"),
         // The same directory the local arm uses — `inference::judgments_dir(&cs.data_dir)`, which is
         // `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments`. C4 removes the runtime, not this folder.
@@ -558,7 +567,12 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // Every arm records a step with exit code **0** and a sentence — never a non-zero code, which
     // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a
     // day for someone who has simply not paid, or not connected.
-    let judge = judge_plan(cs);
+    //
+    // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
+    // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
+    // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
+    let est = entitlement_state(cs);
+    let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
         steps.push(((*note).to_string(), 0));
     }
@@ -590,11 +604,19 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // Spec §6: batched to `/telemetry` at each slot. **Never a failure** — a student on a train has
     // nothing to apologise for, and an analytics upload has no business turning a slot amber. Every
     // outcome is a named step with exit code 0, the same shape the ingest and judge skips use.
-    let telemetry = match entitlement_state(cs) {
+    //
+    // Fix round 1 (M1): an unreadable `cloud.yaml` is its own named skip, distinct from "offline" —
+    // the sibling `judge` step makes the same distinction and for the same reason: a broken config
+    // file is a different problem from a network. (I2): a batch the server refuses outright (400,
+    // 413, 422 — malformed and will never become well-formed) is *consumed*, not retried forever;
+    // `telemetry::send` already advanced the watermark past it, so this only has to name the step.
+    let telemetry = match est {
         crate::account::EntitlementState::NoAccount => ("telemetry (skipped: no account)".to_string(), 0),
-        _ => match crate::telemetry::send(&cs.vault, &cs.data_dir) {
-            Ok((0, 0)) => ("telemetry (nothing new)".to_string(), 0),
-            Ok((e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
+        crate::account::EntitlementState::Unreadable => ("telemetry (skipped: cloud.yaml unreadable)".to_string(), 0),
+        _ => match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
+            Ok(crate::telemetry::SendOutcome::Sent(0, 0)) => ("telemetry (nothing new)".to_string(), 0),
+            Ok(crate::telemetry::SendOutcome::Sent(e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
+            Ok(crate::telemetry::SendOutcome::Refused(status)) => (format!("telemetry (refused: {status})"), 0),
             Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
         },
     };

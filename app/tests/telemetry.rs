@@ -2,6 +2,7 @@
 //! content**. An id is not content; a number is not content; a title, a course name and a note body
 //! are.
 use knowlu::telemetry::{read_corrections, read_events, Batch, VALUED_FIELDS, FLAGGED_FIELDS};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 fn vault(tag: &str) -> PathBuf {
@@ -133,4 +134,180 @@ fn the_action_vocabulary_is_the_engines_on_both_sides_of_the_wire() {
         .and_then(|s| s.split(']').next())
         .expect("the ACTIONS array");
     assert_eq!(listed.matches('"').count() / 2, knowlu_engine::uievents::ACTIONS.len(), "{listed}");
+}
+
+/// Fix round 1 (C1, ruling R-C1-39): `domain`, `effort_confidence` and `status` are free-text inputs
+/// in the console with no vocabulary check anywhere in the write path — so a `VALUED_FIELDS`
+/// correction's `theirs` can be a sentence, and D5 forbids free text on the wire. The row must
+/// survive (the fact of a correction is still the eval suite's signal); the sentence must not.
+#[test]
+fn a_free_text_correction_on_a_valued_field_keeps_the_row_and_drops_only_the_sentence() {
+    let v = vault("freetext");
+    write(&v.join("state/journal/2026-09-10.jsonl"), &[
+        // The agent judged it with a closed-vocabulary value…
+        r#"{"actor": "agent:knowlu.enrich", "device": "M", "evidence": null, "field": "effort_confidence", "id": "task_0000000005", "new": "low", "old": null, "op": "set", "path": "tasks/e.md", "run_id": null, "ts": "2026-09-10T08:30:00.000Z", "via": "local-runner"}"#,
+        // …and the human retyped the chip as a sentence. Nothing stops that in the console today.
+        r#"{"actor": "quinn", "device": "M", "evidence": null, "field": "effort_confidence", "id": "task_0000000005", "new": "I honestly have no idea how long this will take", "old": "low", "op": "set", "path": "tasks/e.md", "run_id": null, "ts": "2026-09-10T09:30:00.000Z", "via": "dashboard"}"#,
+    ]);
+    let cs = read_corrections(&v, None);
+    assert_eq!(cs.len(), 1, "{cs:?}");
+    assert_eq!(cs[0].field, "effort_confidence");
+    assert_eq!(cs[0].ours.as_deref(), Some("low"), "a closed-vocabulary value still travels");
+    assert_eq!(cs[0].theirs, None, "a sentence must never reach theirs");
+    let batch = Batch { events: vec![], corrections: cs };
+    let wire = serde_json::to_string(&batch).unwrap();
+    assert!(!wire.contains("I honestly have no idea"), "{wire}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Fix round 1 (M2): a capped page must never end on a `ts` it shares with a row that got cut — the
+/// watermark, taken from the kept page's last `ts`, would otherwise land mid-tie and strand the
+/// untransmitted twin on every later read (`since` is exclusive). 501 rows, with row #500 (index 499)
+/// and row #501 (index 500) sharing a `ts` — exactly what one `IntersectionObserver` callback firing
+/// twice in the same millisecond would produce.
+#[test]
+fn a_tied_timestamp_at_the_cap_boundary_never_splits_the_watermark_mid_tie() {
+    use knowlu::telemetry::{truncate_on_ts_boundary, EventRow};
+    let mut rows: Vec<EventRow> = (0..499)
+        .map(|i| EventRow {
+            ts: format!("2026-09-09T{:02}:{:02}:{:02}.000Z", i / 3600, (i / 60) % 60, i % 60),
+            session: "sess_1".into(),
+            view: "today".into(),
+            action: "view_opened".into(),
+            object_id: None,
+            object_kind: None,
+            ms: None,
+        })
+        .collect();
+    let tied_ts = "2026-09-09T23:59:59.000Z".to_string();
+    for _ in 0..2 {
+        rows.push(EventRow {
+            ts: tied_ts.clone(),
+            session: "sess_1".into(),
+            view: "today".into(),
+            action: "view_opened".into(),
+            object_id: None,
+            object_kind: None,
+            ms: None,
+        });
+    }
+    assert_eq!(rows.len(), 501);
+    assert_eq!(rows[499].ts, rows[500].ts, "the fixture's own property: #500 and #501 tie");
+    truncate_on_ts_boundary(&mut rows, 500, |r| r.ts.as_str());
+    // The tie is deferred whole: neither tied row is in the kept page, and the kept page's last `ts`
+    // is strictly earlier than the tie — so a watermark taken from it can never land mid-tie.
+    assert_eq!(rows.len(), 499, "{}", rows.len());
+    assert!(rows.last().unwrap().ts < tied_ts, "{}", rows.last().unwrap().ts);
+}
+
+/// `account.rs`'s own loopback harness, copied rather than shared — each `tests/*.rs` file is its
+/// own crate. Serves exactly `responses.len()` requests on `127.0.0.1:0`, then stops. Returns the
+/// base URL and a handle whose `join()` yields the raw request text of each one, bounded on both
+/// ends so a test that forgets to send a request fails loudly in seconds instead of hanging the
+/// suite.
+fn loopback(responses: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (status, body) in responses {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!("loopback: no client connected within 10s");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("loopback: accept failed: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .expect("read timeout");
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let head_end = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break buf.len();
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let want: usize = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + want {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            seen.push(String::from_utf8_lossy(&buf).to_string());
+            let reason = if (200..300).contains(&status) { "OK" } else { "Bad Request" };
+            let resp = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (format!("http://127.0.0.1:{port}"), handle)
+}
+
+fn sample_batch() -> Batch {
+    use knowlu::telemetry::CorrectionRow;
+    Batch {
+        events: vec![],
+        corrections: vec![CorrectionRow {
+            ts: "2026-09-10T09:00:00.000Z".into(),
+            item_id: "task_0123456789".into(),
+            field: "effort_hours".into(),
+            ours: Some("2.0".into()),
+            theirs: Some("0.5".into()),
+            kind: "task".into(),
+        }],
+    }
+}
+
+/// Fix round 1 (I3): `post_batch_at` had no test at all. One compact JSON body line, the bearer in
+/// `authorization`, `content-type: application/json` — and the reply's counts come back as the tuple.
+#[test]
+fn post_batch_at_sends_one_compact_json_line_with_the_bearer_and_reads_the_reply() {
+    let (base, handle) = loopback(vec![(200, r#"{"events":1,"corrections":0}"#.to_string())]);
+    let out = knowlu::telemetry::post_batch_at(&format!("{base}/functions/v1"), "test-bearer-token", &sample_batch());
+    let seen = handle.join().expect("server thread");
+    let (events, corrections) = out.expect("post ok");
+    assert_eq!((events, corrections), (1, 0));
+    let req = &seen[0];
+    assert!(req.starts_with("POST /functions/v1/telemetry "), "{req}");
+    assert!(req.to_ascii_lowercase().contains("content-type: application/json"), "{req}");
+    assert!(req.to_ascii_lowercase().contains("authorization: bearer test-bearer-token"), "{req}");
+    let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+    assert!(!body.contains('\n'), "the body must be one compact line: {body}");
+    assert!(body.contains("\"item_id\":"), "{body}");
+}
+
+/// Fix round 1 (I2, I3): a 400 is a status refusal, never a transport error — `send` tells the two
+/// apart to decide whether the batch is consumed or kept for the next slot.
+#[test]
+fn post_batch_at_treats_a_400_as_a_status_refusal_not_a_transport_error() {
+    use knowlu::telemetry::PostError;
+    let (base, handle) = loopback(vec![(400, r#"{"error":"bad request"}"#.to_string())]);
+    let out = knowlu::telemetry::post_batch_at(&format!("{base}/functions/v1"), "t", &sample_batch());
+    let _seen = handle.join().expect("server thread");
+    assert_eq!(out, Err(PostError::Status(400)));
 }
