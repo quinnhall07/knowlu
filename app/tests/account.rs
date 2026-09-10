@@ -5,14 +5,34 @@ use std::io::{Read, Write};
 
 /// Serves exactly `responses.len()` requests on `127.0.0.1:0`, then stops. Returns the base URL and
 /// a handle whose `join()` yields the raw request text of each one — so a test can assert what went
-/// on the wire without ever leaving the machine.
+/// on the wire without ever leaving the machine. Bounded on both ends: `accept` polls a nonblocking
+/// listener against a 10-second deadline and panics past it, and the accepted stream carries its own
+/// read timeout — so a test that forgets to send a request fails loudly in seconds instead of hanging
+/// the suite.
 fn loopback(responses: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
     let port = listener.local_addr().expect("addr").port();
     let handle = std::thread::spawn(move || {
         let mut seen = Vec::new();
         for (status, body) in responses {
-            let (mut stream, _) = listener.accept().expect("accept");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!("loopback: no client connected within 10s");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("loopback: accept failed: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .expect("read timeout");
             // Read the head, then exactly as many body bytes as Content-Length promised: a request
             // can arrive split across packets, and a single `read` would truncate it at random.
             let mut buf: Vec<u8> = Vec::new();
@@ -72,6 +92,10 @@ fn only_https_and_the_loopback_test_seam_are_accepted_as_an_api_base() {
     assert!(check_api_base("http://127.0.0.1:5051/functions/v1").is_ok());
     assert!(check_api_base("http://abc.supabase.co/functions/v1").is_err());
     assert!(check_api_base("ftp://abc/functions/v1").is_err());
+    // A loopback-looking prefix with an `@` in the authority is a different host after the `@` —
+    // the classic userinfo trick — and must be refused even though the string starts with the
+    // literal allowed prefix.
+    assert!(check_api_base("http://127.0.0.1:x@evil.com/functions/v1").is_err());
 }
 
 #[test]
@@ -89,6 +113,7 @@ fn a_successful_sign_in_returns_a_session_and_sends_the_anon_key() {
     let req = &seen[0];
     assert!(req.starts_with("POST /auth/v1/token?grant_type=password "), "{req}");
     assert!(req.to_lowercase().contains("apikey: anon-key"), "{req}");
+    assert!(req.to_lowercase().contains("content-type: application/json"), "{req}");
     // The password is on the wire because that is what signing in is — but it is never in a log,
     // a message or this assertion. Only the field NAME is checked.
     assert!(req.contains("\"password\""), "{req}");
@@ -136,6 +161,37 @@ fn signing_up_sends_the_attestation_and_both_policy_versions_as_user_metadata() 
     assert!(req.contains("\"privacy_version\":\"2026-09-10\""), "{req}");
 }
 
+#[test]
+fn a_sessions_debug_output_redacts_both_tokens() {
+    let s = Session {
+        access_token: "super-secret-access-token".into(),
+        refresh_token: "super-secret-refresh-token".into(),
+        expires_at: 42,
+        email: "a@example.invalid".into(),
+    };
+    let out = format!("{s:?}");
+    assert!(!out.contains("super-secret-access-token"), "{out}");
+    assert!(!out.contains("super-secret-refresh-token"), "{out}");
+    assert!(out.contains("<redacted>"), "{out}");
+    assert!(out.contains("a@example.invalid"), "{out}");
+    assert!(out.contains("42"), "{out}");
+}
+
+/// Deletes every named Credential Manager target when the test ends, on any exit path — a passing
+/// assertion, a failing one, or a panic. Constructed before the first credential a test writes, so
+/// nothing written can outlive the test that wrote it.
+#[cfg(windows)]
+struct Cleanup(Vec<String>);
+
+#[cfg(windows)]
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for target in &self.0 {
+            let _ = knowlu::credentials::delete(target);
+        }
+    }
+}
+
 /// Credential Manager is real on this machine, so this test uses two targets of its own naming and
 /// removes them itself. No secret is asserted on: only the account id and the fact of the move.
 #[cfg(windows)]
@@ -144,6 +200,7 @@ fn a_session_moves_from_the_pending_target_to_the_profiles_own() {
     use knowlu::account::{load_session, move_session, save_session, Session};
     let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
     let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
+    let _cleanup = Cleanup(vec![from.clone(), to.clone()]);
     let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 42, email: "a@example.invalid".into() };
     save_session(&from, "acc-1", &s).expect("write the pending session");
     move_session(&from, &to).expect("move");
@@ -151,5 +208,113 @@ fn a_session_moves_from_the_pending_target_to_the_profiles_own() {
     assert_eq!(id, "acc-1");
     assert_eq!(back, s);
     assert!(load_session(&from).is_err(), "the pending entry must be gone");
-    let _ = knowlu::credentials::delete(&to);
+}
+
+/// A `move_session` retried after it already succeeded — `from` gone, `to` already holding the
+/// session — must not fail: the caller could not tell "already moved" from "never existed" any other
+/// way, and treating it as an error would turn a harmless retry into a lost session.
+#[cfg(windows)]
+#[test]
+fn moving_an_already_moved_session_is_a_no_op_not_an_error() {
+    use knowlu::account::{load_session, move_session, save_session, Session};
+    let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
+    let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
+    let _cleanup = Cleanup(vec![from.clone(), to.clone()]);
+    let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 1, email: "a@example.invalid".into() };
+    save_session(&to, "acc-1", &s).expect("write directly to the destination, as if an earlier call already moved it");
+    move_session(&from, &to).expect("a missing source with an already-populated destination is not an error");
+    let (id, back) = load_session(&to).expect("the destination is untouched");
+    assert_eq!(id, "acc-1");
+    assert_eq!(back, s);
+}
+
+/// A destination that already holds a (stale) session loses to the one being moved — the moved
+/// session always wins, never the one it is replacing.
+#[cfg(windows)]
+#[test]
+fn moving_into_an_existing_destination_overwrites_it_with_the_moved_session() {
+    use knowlu::account::{load_session, move_session, save_session, Session};
+    let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
+    let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
+    let _cleanup = Cleanup(vec![from.clone(), to.clone()]);
+    let stale = Session { access_token: "stale-at".into(), refresh_token: "stale-rt".into(), expires_at: 1, email: "old@example.invalid".into() };
+    save_session(&to, "acc-old", &stale).expect("an old session already sits at the destination");
+    let fresh = Session { access_token: "fresh-at".into(), refresh_token: "fresh-rt".into(), expires_at: 2, email: "new@example.invalid".into() };
+    save_session(&from, "acc-new", &fresh).expect("the session actually being moved");
+    move_session(&from, &to).expect("move");
+    let (id, back) = load_session(&to).expect("read the destination");
+    assert_eq!(id, "acc-new");
+    assert_eq!(back, fresh);
+    assert!(load_session(&from).is_err());
+}
+
+/// Only when there is nothing anywhere — no source, no destination — is `move_session` a real
+/// failure, and the message names the source so whoever reads it knows what was being looked for.
+#[cfg(windows)]
+#[test]
+fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_names_the_source() {
+    use knowlu::account::move_session;
+    let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
+    let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
+    let _cleanup = Cleanup(vec![from.clone(), to.clone()]);
+    let err = move_session(&from, &to).unwrap_err();
+    assert!(err.contains(&from), "{err}");
+}
+
+/// `sign_out` addresses a real profile's own session target, not just the pending one, and its reply
+/// says whether there was anything to sign out of — a repeated sign-out is a visible no-op, not a
+/// silent "ok" both times. No loopback needed: with `KNOWLU_API_BASE` unset in this test process,
+/// `auth_base` refuses the placeholder default before any network call would be attempted.
+#[cfg(windows)]
+#[test]
+fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
+    use knowlu::account::{save_session, session_target, sign_out, Session};
+    let id = format!("test-signout-{}-{}", std::process::id(), line!());
+    let target = session_target(&id);
+    let _cleanup = Cleanup(vec![target.clone()]);
+
+    let out = sign_out(Some(id.clone())).expect("sign out with nothing to sign out of");
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["had_session"], false);
+
+    let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 99, email: "a@example.invalid".into() };
+    save_session(&target, "acc-1", &s).expect("write a session to sign out of");
+    let out = sign_out(Some(id)).expect("sign out with a real session");
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["had_session"], true);
+    assert!(!knowlu::credentials::exists(&target), "the credential must be gone after sign-out");
+}
+
+/// Credential Manager's blob is UTF-16 and Windows caps it well below what a 1,300-character token
+/// would need; `save_session` must refuse before ever calling into Credential Manager, and nothing
+/// must land there.
+#[cfg(windows)]
+#[test]
+fn a_session_too_large_for_the_credential_blob_is_refused_before_anything_is_written() {
+    use knowlu::account::{save_session, Session};
+    let target = format!("knowlu/test-toolarge-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let s = Session {
+        access_token: "x".repeat(1_300),
+        refresh_token: "rt".into(),
+        expires_at: 1,
+        email: "a@example.invalid".into(),
+    };
+    let err = save_session(&target, "acc-1", &s).unwrap_err();
+    assert!(err.contains("too large"), "{err}");
+    assert!(!knowlu::credentials::exists(&target), "nothing should have been written");
+}
+
+/// A blob that Credential Manager holds but this process did not write as a `Session` (corrupted, or
+/// from a future version) must not leak serde's own parse error to a user — `load_session` reports
+/// one fixed, actionable sentence.
+#[cfg(windows)]
+#[test]
+fn a_corrupt_session_blob_reads_back_as_a_fixed_sentence_not_serdes_own_message() {
+    use knowlu::account::load_session;
+    let target = format!("knowlu/test-corrupt-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    knowlu::credentials::write(&target, "acc-x", "not json").expect("write a raw, non-session blob");
+    let err = load_session(&target).unwrap_err();
+    assert_eq!(err, "the stored session is unreadable; sign in again");
 }

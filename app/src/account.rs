@@ -52,7 +52,13 @@ pub fn anon_key() -> String {
 /// stand a real server up on a real socket without a `#[cfg(test)]` branch inside the production
 /// path. Nothing else — an `http://` host on a campus wifi is a session token in the clear.
 pub fn check_api_base(api_base: &str) -> Result<(), String> {
-    if api_base.starts_with("https://") || api_base.starts_with("http://127.0.0.1:") {
+    let scheme_ok = api_base.starts_with("https://") || api_base.starts_with("http://127.0.0.1:");
+    // `http://127.0.0.1:x@evil.com/...` starts with the literal loopback prefix above, but an `@`
+    // in the authority means everything before it is userinfo and the real host is whatever
+    // follows — `evil.com` here. Refusing any `@` in the authority closes that off rather than
+    // trusting a prefix match a crafted URL can still wear.
+    let authority = api_base.split("://").nth(1).and_then(|rest| rest.split('/').next()).unwrap_or("");
+    if scheme_ok && !authority.contains('@') {
         Ok(())
     } else {
         Err(format!("{api_base}: an api_base must be https://"))
@@ -77,7 +83,7 @@ pub fn auth_base(api_base: &str) -> Result<String, String> {
 /// What Credential Manager holds at `knowlu/<profile_id>/session`. `UserName` is the account id — not
 /// a secret, and the one field C2 reads without decoding anything — and the blob is this struct as
 /// JSON. `expires_at` is Unix seconds, so a clock comparison needs no date library at the call site.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub access_token: String,
     pub refresh_token: String,
@@ -85,24 +91,67 @@ pub struct Session {
     pub email: String,
 }
 
+/// Hand-written, the way `wincred::Secret` is: a `Session` is two live credentials, and a derived
+/// `Debug` is one `{:?}` — a `dbg!`, an `unwrap()` panic, a stray log line — away from putting both
+/// of them somewhere that is not Credential Manager.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("email", &self.email)
+            .finish()
+    }
+}
+
 pub fn session_target(profile_id: &str) -> String { crate::credentials::target_for(profile_id, "session") }
+
+/// Credential Manager's generic blob is UTF-16 and Windows caps `CredentialBlobSize` at 2,560 bytes
+/// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`) — 1,280 UTF-16 code units. A `Session` this size never comes
+/// from GoTrue; refusing it here, before the Win32 call, turns a silent truncation into a message
+/// that names what happened.
+const MAX_SESSION_CHARS: usize = 1_280;
 
 pub fn save_session(target: &str, account_id: &str, s: &Session) -> Result<(), String> {
     let blob = serde_json::to_string(s).map_err(|e| e.to_string())?;
+    if blob.chars().count() > MAX_SESSION_CHARS {
+        return Err("the sign-in reply is too large to keep on this device — please report this".to_string());
+    }
     crate::credentials::write(target, account_id, &blob)
 }
 
+/// A fixed sentence rather than serde's own message: whatever is stored under `target` is not this
+/// process's concern to describe — it is a signed-in state that failed to read back, and "sign in
+/// again" is the one thing a user can act on.
+const UNREADABLE_SESSION: &str = "the stored session is unreadable; sign in again";
+
 pub fn load_session(target: &str) -> Result<(String, Session), String> {
     let cred = knowlu_engine::wincred::read_credential(target).map_err(|e| e.to_string())?;
-    let s: Session = serde_json::from_str(cred.password.expose()).map_err(|e| format!("{target}: not a session ({e})"))?;
+    let s: Session = serde_json::from_str(cred.password.expose()).map_err(|_| UNREADABLE_SESSION.to_string())?;
     Ok((cred.username, s))
 }
 
 /// Read, write the new one, delete the old — in that order, never delete-then-write: a failure in
 /// between would leave the user signed out with no way back but retyping a password they may have
 /// generated. `retarget_credentials` makes the same argument about the coursework logins.
+///
+/// Idempotent both ways: a `from` that is already gone with a `to` that already holds a session is
+/// **not** an error — the move already happened, most likely on an earlier call this one is
+/// retrying — and `to`'s prior contents are always overwritten by `from`'s, so the moved session
+/// wins. Only a `from` and `to` that are **both** empty is a real failure, and the message names the
+/// source so the caller knows what it was looking for.
 pub fn move_session(from: &str, to: &str) -> Result<(), String> {
-    if from == to { return Ok(()); }
+    if from == to {
+        return Ok(());
+    }
+    if !crate::credentials::exists(from) {
+        return if crate::credentials::exists(to) {
+            Ok(())
+        } else {
+            Err(format!("no session at {from} to move"))
+        };
+    }
     let (account_id, s) = load_session(from)?;
     save_session(to, &account_id, &s)?;
     crate::credentials::delete(from)
@@ -118,18 +167,22 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// One GoTrue POST. Returns the parsed body and the status; the caller decides what a status means.
-/// **The transport failure has a stable first clause**, `the account service could not be reached`,
-/// because the page has to tell "your password is wrong" from "there is no network" — the first is
-/// something a user can fix on the panel, the second is what stands the upgrade overlay down instead
-/// of trapping someone behind it. Everything else is the provider's own sentence.
 pub const UNREACHABLE: &str = "the account service could not be reached";
 
+/// One GoTrue POST. Returns the parsed body and the status; the caller decides what a status means.
+/// **The transport failure has a stable first clause**, [`UNREACHABLE`], because the page has to
+/// tell "your password is wrong" from "there is no network" — the first is something a user can fix
+/// on the panel, the second is what stands the upgrade overlay down instead of trapping someone
+/// behind it. Everything else is the provider's own sentence.
+///
+/// **The body is sent compact, not through `send_json`.** `send_json` needs ureq's `json` feature,
+/// which `app/Cargo.toml` does not enable (it carries the engine's `cookies` feature and no other) —
+/// but the choice is not free of behaviour either way: `RequestBuilder::send_json` pretty-prints
+/// with embedded newlines, and this crate's own loopback tests assert exact substrings like
+/// `"type":"magiclink"` and `"password"` against the raw request text, which a pretty-printed body
+/// would break. Serializing with `serde_json::to_string` — already a dependency — and sending the
+/// compact result as a plain string is **required**, not merely equivalent.
 fn post_json(url: &str, anon: &str, body: &Value) -> Result<(u16, Value), String> {
-    // `send_json` needs ureq's `json` feature, which `app/Cargo.toml` does not enable (it carries
-    // the engine's `cookies` feature and no other); serializing here with `serde_json` — already a
-    // dependency — and sending the string produces the identical wire body and content-type without
-    // asking for a feature this crate does not have.
     let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
     let mut res = agent()
         .post(url)
@@ -184,7 +237,10 @@ pub fn sign_up_at(
     let (status, v) = post_json(&format!("{auth_base}/signup"), anon, &body)?;
     if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
     // With email confirmation on, a sign-up returns the user and NO session until the link is
-    // clicked. That is not an error — the wizard says so and waits.
+    // clicked. GoTrue did not refuse anything — this `Err` is not reporting a fault, it is the one
+    // channel this function has for handing the wizard a sentence to show while it waits; the
+    // caller reads the string, not the variant, so "check your email" travels the same path a real
+    // failure would without being one.
     if v.get("access_token").is_none() {
         return Err("check your email and click the link, then sign in".to_string());
     }
@@ -330,16 +386,23 @@ pub fn open_policy(which: String) -> Value {
     }
 }
 
-/// Forget the pending session, and revoke it (spec §5.1, "sign-out revokes"). The revoke is **best
-/// effort and second**: a network that is down must not leave a token on this machine that the user
-/// believes they signed out of, so the local delete is what the envelope reports on.
+/// Sign a profile out: forget its session locally, then revoke it (spec §5.1, "sign-out revokes").
+/// `profile_id: None` addresses the pending session — the wizard's, before Finish has adopted it
+/// into a profile; `Some(id)` addresses that profile's own `knowlu/<id>/session`. The revoke is
+/// **best effort and second**: a network that is down must not leave a token on this machine that
+/// the user believes they signed out of. `had_session` is the local delete's own answer — `false`
+/// for a target that never held one — so a repeated sign-out reports honestly as a no-op instead of
+/// a silent "ok".
 #[tauri::command(async)]
-pub fn sign_out() -> Value {
-    let token = load_session(PENDING_TARGET).ok().map(|(_, s)| s.access_token);
-    if crate::credentials::exists(PENDING_TARGET) {
-        if let Err(e) = crate::credentials::delete(PENDING_TARGET) {
-            return json!({ "ok": false, "error": e });
-        }
+pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
+    let target = match &profile_id {
+        Some(id) => session_target(id),
+        None => PENDING_TARGET.to_string(),
+    };
+    let token = load_session(&target).ok().map(|(_, s)| s.access_token);
+    let had_session = crate::credentials::exists(&target);
+    if had_session {
+        crate::credentials::delete(&target)?;
     }
     if let (Some(t), Ok(auth)) = (token, auth_base(&api_base())) {
         let _ = agent()
@@ -348,5 +411,5 @@ pub fn sign_out() -> Value {
             .header("authorization", &format!("Bearer {t}"))
             .send_empty();
     }
-    json!({ "ok": true, "error": Value::Null })
+    Ok(json!({ "ok": true, "had_session": had_session }))
 }
