@@ -3,6 +3,7 @@
  * pure part is exported so the tests can drive it without a key and without a request.
  */
 import { fail } from "./http.ts";
+import { toHex } from "./crypto.ts";
 
 export function formEncode(params: Record<string, string | number | boolean | undefined | null>): string {
   const p = new URLSearchParams();
@@ -22,7 +23,7 @@ export async function hmacHex(secret: string, message: string): Promise<string> 
     ["sign"],
   );
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
-  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return toHex(sig);
 }
 
 export function parseStripeSignature(header: string): { t: number; v1: string[] } | null {
@@ -41,8 +42,10 @@ export function parseStripeSignature(header: string): { t: number; v1: string[] 
   return t !== null && v1.length > 0 ? { t, v1 } : null;
 }
 
-/** Length-independent compare over the hex digests: neither string is a secret, but the habit is. */
-function equalHex(a: string, b: string): boolean {
+/** Constant-time-ish compare (length first, then XOR every character): neither string here is a
+ * secret, but the habit is, and `billing-jobs/handler.ts`'s job-token check (R-C1-59 M9) reuses it
+ * for exactly that reason — the same shape works for any same-length string, hex or not. */
+export function equalHex(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);

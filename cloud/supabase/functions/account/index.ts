@@ -8,18 +8,13 @@ import {
   restSelectAll,
   restUpsert,
 } from "../_shared/db.ts";
-import { encryptString, importAesKey } from "../_shared/crypto.ts";
+import { encryptString, importAesKey, sha256Hex } from "../_shared/crypto.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
 import { handle } from "./handler.ts";
 
 const eq = (id: string) => `account_id=eq.${encodeURIComponent(id)}`;
-
-async function sha256Hex(s: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s.toLowerCase()));
-  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 Deno.serve(async (req) => {
   try {

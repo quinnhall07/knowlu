@@ -965,6 +965,9 @@ fn adopting_a_backup_mirror_is_refused_and_registers_nothing() {
     assert_eq!(out["ok"], false, "a backup mirror is not a vault to open: {out}");
     let err = out["error"].as_str().unwrap();
     assert!(err.contains("backup"), "the sentence the picker shows must say what it is: {err}");
+    // R-C1-59 (I2): with no restore panel yet, the refusal is the only route a student has today —
+    // it must say what to do instead, not just what is wrong.
+    assert!(err.contains("Copy this folder"), "the refusal must say what to do instead: {err}");
     assert!(knowlu::profiles::load(&app_data).unwrap().is_empty(), "nothing may be registered");
     assert_eq!(fingerprint(&backups), before, "the backup folder was written to");
 

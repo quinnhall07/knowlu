@@ -13,7 +13,7 @@ supabase db push                                # applies cloud/supabase/migrati
 supabase functions deploy <name> --project-ref <the STAGING ref>
 ```
 
-Secrets are set by Quinn, from a value he produces, and are never printed:
+Secrets are set by Quinn, from a value they produce, and are never printed:
 
 ```powershell
 supabase secrets set STRIPE_SECRET_KEY --project-ref <ref>

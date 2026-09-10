@@ -29,7 +29,10 @@ fn plan_for(dest: &Path) -> VaultPlan {
         zybooks_ignore: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
-        api_base: "https://example.supabase.co/functions/v1".into(),
+        // The real `api_base()`, not a fixture host: `create_vault_writes_cloud_yaml_beside_the_other_config_files`
+        // reads the file back through `cloud_config`, whose R-C1-59 I1 host check now refuses
+        // anything else — and this is exactly what `create_vault_in` itself passes in production.
+        api_base: knowlu::account::api_base(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
     }

@@ -28,7 +28,11 @@ function headers(rest: Rest, extra: Record<string, string> = {}): Record<string,
 
 async function ok(res: Response, what: string): Promise<void> {
   if (res.ok) return;
-  // The upstream body can name a column, a constraint or a row; it never reaches the caller.
+  // R-C1-59 (M8): the upstream body can echo an offending value (a caller's IP-ish header on a
+  // `consents` constraint failure, an object id on a `telemetry_events` one) — it never reaches the
+  // CALLER, which is the promise this makes and keeps (`fail(502, …)` below carries no body of its
+  // own). It is kept in the function LOG on purpose: nothing here is another user's data, and a 502
+  // with no detail anywhere is not one this on-call can debug.
   console.error(`${what}: ${res.status} ${await res.text()}`);
   throw fail(502, `${what} failed`);
 }

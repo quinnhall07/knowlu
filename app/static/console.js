@@ -1064,6 +1064,12 @@
     EL("set-account-state").textContent = (!a || !a.ok) ? "" : (a.needs_account
       ? "not attached to an account yet"
       : [a.email || "", a.status || "", a.plan || ""].filter(function (x) { return x; }).join(" · "));
+    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime — `judge_plan` (scheduler.rs)
+    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists — so offering to download a
+    // multi-gigabyte model there is dead weight the student would act on for nothing. Hidden only
+    // once the account status is KNOWN to have an account: a missing or failed reply (the vault-less
+    // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
+    EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers

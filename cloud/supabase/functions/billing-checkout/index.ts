@@ -1,4 +1,5 @@
 import { authGetUser, restFromEnv, restPatch, restSelect, restUpsert } from "../_shared/db.ts";
+import { sha256Hex } from "../_shared/crypto.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
 import { handle, Plan } from "./handler.ts";
@@ -30,11 +31,7 @@ Deno.serve(async (req) => {
       saveCustomerId: (id, cid) =>
         restPatch(rest, "accounts", `id=eq.${encodeURIComponent(id)}`, { stripe_customer_id: cid }),
       recordConsent: async (c) => {
-        const digest = await crypto.subtle.digest(
-          "SHA-256",
-          new TextEncoder().encode(c.subject_email.toLowerCase()),
-        );
-        const hash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+        const hash = await sha256Hex(c.subject_email);
         await restUpsert(rest, "consents", [{
           account_id: c.account_id,
           subject_hash: hash,

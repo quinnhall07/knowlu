@@ -15,7 +15,7 @@
  * by account id only (never an email address or a token), and counted in `failed`.
  */
 import { fail, json, methodNotAllowed } from "../_shared/http.ts";
-import { StripePost } from "../_shared/stripe.ts";
+import { equalHex, StripePost } from "../_shared/stripe.ts";
 
 export interface Subscriber {
   account_id: string;
@@ -83,7 +83,7 @@ function annualReminder(s: Subscriber, price: string): Mail {
       "",
       `Knowlu, ${price}, renewing automatically until you cancel.`,
       "",
-      "To cancel, open Knowlu, click the gear, and choose Cancel subscription — or",
+      "To cancel, open Knowlu, click the gear, and choose Manage subscription — or",
       "reply to this message and we will cancel it for you.",
     ].join("\n"),
   };
@@ -99,14 +99,17 @@ function resumeNotice(s: Subscriber, price: string): Mail {
       `Your subscription starts charging again: ${price}.`,
       "",
       "If you do not want it back, cancel before your next charge: open Knowlu,",
-      "click the gear, and choose Cancel subscription.",
+      "click the gear, and choose Manage subscription.",
     ].join("\n"),
   };
 }
 
 export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (req.method !== "POST") return methodNotAllowed(["POST"]);
-  if (req.headers.get("x-knowlu-job-token") !== deps.token) return fail(401, "not a job caller");
+  // R-C1-59 (M9): the same length-then-XOR compare `_shared/stripe.ts` uses for a webhook signature.
+  if (!equalHex(req.headers.get("x-knowlu-job-token") ?? "", deps.token)) {
+    return fail(401, "not a job caller");
+  }
 
   const now = deps.now();
   let paused = 0, resumed = 0, reminded = 0, failed = 0;

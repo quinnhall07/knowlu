@@ -64,10 +64,19 @@ export function checkoutForm(a: {
   };
 }
 
-/** The caller's address for the consent log. The first hop is the client; the rest are proxies. */
+/** IPv4, or IPv6 (bare, or a `[…]` literal a proxy may wrap it in) — loose on purpose, since all
+ * this decides is whether Postgres's `inet` cast can take the value, not whether it is well-formed
+ * by RFC. */
+const IP_SHAPED = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[?[0-9a-fA-F:]+\]?)$/;
+
+/** The caller's address for the consent log. The first hop is the client; the rest are proxies.
+ * R-C1-59 (M4): a malformed header must not 502 a checkout — Postgres's `inet` column would reject
+ * it, and a consent row with a null IP is still a consent row. */
 function clientIp(req: Request): string | null {
   const fwd = req.headers.get("x-forwarded-for");
-  return fwd ? fwd.split(",")[0].trim() : null;
+  if (!fwd) return null;
+  const first = fwd.split(",")[0].trim();
+  return IP_SHAPED.test(first) ? first : null;
 }
 
 export async function handle(req: Request, deps: Deps): Promise<Response> {

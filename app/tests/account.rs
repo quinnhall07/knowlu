@@ -409,9 +409,9 @@ fn a_cache_round_trips_through_the_profile_folder() {
 
 /// Fix round 1, item 5a: a profile with no session credential at all — the ordinary state for a
 /// signed-out or never-signed-in install — must fail the refresh outright and leave no
-/// `entitlement.json` behind. No loopback needed: `valid_access_token_at` refuses before any
-/// network call would be attempted, exactly as `signing_out_a_profile_reports_whether_it_had_a_session`
-/// relies on above.
+/// `entitlement.json` behind. No loopback server needed — nothing here ever answers a request — but
+/// `cloud_config`'s host check (R-C1-59 I1) now runs before the session lookup does, so the vault's
+/// `api_base` must still name the seam's own base, never the compiled-in project.
 #[cfg(windows)]
 #[test]
 fn refresh_entitlement_with_no_session_fails_and_writes_no_cache() {
@@ -420,13 +420,15 @@ fn refresh_entitlement_with_no_session_fails_and_writes_no_cache() {
     let target = format!("knowlu/test-refresh-nosession-{}-{}", std::process::id(), line!());
     let _cleanup = Cleanup(vec![target.clone()]);
     assert!(!knowlu::credentials::exists(&target), "nothing must be there to begin with");
+    let base = closed_loopback_base();
+    let _api = ApiBase::set(&base);
 
     let vault = std::env::temp_dir().join(format!("knowlu-refresh-nosession-{}-{}", std::process::id(), line!()));
     let _ = std::fs::remove_dir_all(&vault);
     std::fs::create_dir_all(vault.join("config")).unwrap();
     std::fs::write(
         vault.join("config").join("cloud.yaml"),
-        format!("api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+        format!("api_base: '{base}'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
     ).unwrap();
     let data_dir = std::env::temp_dir().join(format!("knowlu-refresh-nosession-data-{}-{}", std::process::id(), line!()));
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -473,9 +475,11 @@ fn refresh_entitlement_saves_the_cache_from_a_live_reply() {
         200,
         r#"{"status":"active","current_period_end":"2026-10-01T00:00:00+00:00","plan":"monthly","checked_at":"2026-09-10T12:00:00.000Z"}"#.to_string(),
     )]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
     std::fs::write(
         vault.join("config").join("cloud.yaml"),
-        format!("api_base: '{base}/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+        format!("api_base: '{api_base}'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
     ).unwrap();
 
     let got = refresh_entitlement(&vault, &data_dir);

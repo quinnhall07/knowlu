@@ -148,6 +148,10 @@ Deno.test("on 1 September everything resumes and every resumed student is told b
   assert(mails[0].subject.includes("Knowlu"));
   assert(mails[0].text.includes("$9.99"), "the amount is in the resume notice");
   assert(mails[0].text.includes("cancel"), "and so is how to cancel");
+  // R-C1-59 (I3): the mail must name the button the app actually has (`app/static/index.html`,
+  // `site/terms.html`), never the one it does not.
+  assert(mails[0].text.includes("Manage subscription"), "the resume notice must name the real button");
+  assert(!mails[0].text.includes("Cancel subscription"), "and never the button the app does not have");
 });
 
 Deno.test("if the resume notice fails to send, Stripe is never called and the run continues to the next subscriber", async () => {
@@ -319,6 +323,10 @@ Deno.test("the annual reminder is driven through handle for a subscriber over a 
   assert(mails[0].text.includes("Knowlu"), "the product name is in the annual reminder");
   assert(mails[0].text.includes("$69.99 per academic year"), "the amount is in the annual reminder");
   assert(mails[0].text.includes("cancel"), "and so is how to cancel");
+  // R-C1-59 (I3): California's ARL notice must name the button the app actually has, never one it
+  // does not — the same pin `handler_test.ts`'s resume-notice test carries.
+  assert(mails[0].text.includes("Manage subscription"), "the annual reminder must name the real button");
+  assert(!mails[0].text.includes("Cancel subscription"), "and never the button the app does not have");
 });
 
 Deno.test("a subscriber with no recognized plan is never mailed a guessed price", async () => {

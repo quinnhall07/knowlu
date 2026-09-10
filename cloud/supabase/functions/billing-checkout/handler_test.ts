@@ -100,6 +100,35 @@ Deno.test("the auto-renew consent is logged with its version and the price, befo
   });
 });
 
+Deno.test("R-C1-59 (M4): a malformed x-forwarded-for never 502s a checkout — the consent row just carries no ip", async () => {
+  const consents: unknown[] = [];
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      // Not an IP at all — the shape a hostile or misconfigured proxy could hand the function.
+      headers: { authorization: "Bearer good", "x-forwarded-for": "definitely not an ip" },
+      body: JSON.stringify({ plan: "monthly", terms_version: "2026-09-10" }),
+    }),
+    {
+      verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
+      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: "cus_1" }),
+      saveCustomerId: () => Promise.resolve(),
+      recordConsent: (c) => {
+        consents.push(c);
+        return Promise.resolve();
+      },
+      stripe: () => Promise.resolve({ id: "cs_3", url: "https://checkout.stripe.com/c/cs_3" }),
+      priceFor: () => "price_monthly",
+      priceCentsFor: () => 999,
+      successUrl: "https://knowlu.com/subscribed.html",
+      cancelUrl: "https://knowlu.com/index.html",
+    },
+  );
+  assertEquals(res.status, 200);
+  assertEquals(consents.length, 1);
+  assertEquals((consents[0] as { ip: string | null }).ip, null);
+});
+
 Deno.test("an unknown plan is 400 and never reaches Stripe", async () => {
   let touched = false;
   const res = await handle(

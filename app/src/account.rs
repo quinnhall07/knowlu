@@ -421,8 +421,25 @@ pub struct CloudConfig {
     pub account_id: String,
 }
 
+/// `scheme://host` (lower-cased), for comparing two `api_base`-shaped strings without caring about
+/// path or case. Not a general URL parser — `check_api_base` has already ruled out userinfo by the
+/// time this runs against a trusted value, and a value that fails to parse here compares unequal to
+/// everything, which is the safe direction.
+fn scheme_and_host(u: &str) -> Option<String> {
+    let (scheme, rest) = u.split_once("://")?;
+    let host = rest.split('/').next().unwrap_or("");
+    Some(format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
+}
+
 /// Read through `pystr` and `serde_yaml_ng`, never by comparing bytes: a vault's files are whatever
 /// Windows made them, and the engine translates line endings on every read for that reason.
+///
+/// **The vault's `api_base` may not redirect the session (R-C1-59 I1).** A vault the app already
+/// owns is still a file on disk, and every caller here hands this `api_base` a live access or
+/// refresh token as a bearer credential. Without this check, a planted `config/cloud.yaml` naming
+/// another host turns the next housekeeping tick into an exfiltration of both tokens. The compiled-in
+/// `api_base()` (which itself honours `KNOWLU_API_BASE` for a scratch profile) is the only host this
+/// build is allowed to talk to, so a mismatch is refused here, once, before any caller sees the value.
 pub fn cloud_config(vault: &std::path::Path) -> Result<CloudConfig, String> {
     let path = vault.join("config").join("cloud.yaml");
     let text = knowlu_engine::pystr::read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -436,6 +453,13 @@ pub fn cloud_config(vault: &std::path::Path) -> Result<CloudConfig, String> {
     };
     if cfg.api_base.is_empty() || cfg.account_id.is_empty() {
         return Err(format!("{}: api_base and account_id are required", path.display()));
+    }
+    check_api_base(&cfg.api_base).map_err(|e| format!("{}: {e}", path.display()))?;
+    if scheme_and_host(&cfg.api_base) != scheme_and_host(&api_base()) {
+        return Err(format!(
+            "{}: api_base names a different service than this build talks to",
+            path.display()
+        ));
     }
     Ok(cfg)
 }

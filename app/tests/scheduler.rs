@@ -546,10 +546,14 @@ fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_g
         v.join("config").join("runners.yaml"),
         format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
     ).unwrap();
-    // A vault that HAS an account: the four keys the C2 contract fixes.
+    // A vault that HAS an account: the four keys the C2 contract fixes. The host is the closed
+    // loopback shape `an_offline_telemetry_send…` already uses (M7) — nothing is listening on it —
+    // rather than a real host `cloud_config`'s R-C1-59 I1 check would now refuse outright; the
+    // `KNOWLU_API_BASE` seam below points this build's own `api_base()` at the same value so the two
+    // agree, exactly as a real vault's does by construction.
     std::fs::write(
         v.join("config").join("cloud.yaml"),
-        "api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
     ).unwrap();
     let cs = open(&v, "noentitlement");
     // …and no entitlement cache at all, which is a fresh install that has not reached the cloud yet.
@@ -558,7 +562,11 @@ fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_g
     let _ = std::fs::remove_dir_all(&fake);
     std::fs::create_dir_all(&fake).unwrap();
     let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
     let s = run_slot_inner(&cs, &sch, None, false);
     let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
     assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
@@ -587,10 +595,14 @@ fn a_vault_with_no_cloud_config_says_no_account_rather_than_no_entitlement() {
 fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_line() {
     use knowlu::account::{save_cache, EntitlementCache};
     let v = scratch("cloudjudge");
+    // The closed-loopback host (M7), with `KNOWLU_API_BASE` pointed at the same value so
+    // `cloud_config`'s R-C1-59 I1 host check accepts it — nothing here reaches a socket either way.
     std::fs::write(
         v.join("config").join("cloud.yaml"),
-        "api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
     ).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1"))]);
     let cs = open(&v, "cloudjudge");
     save_cache(&cs.data_dir, &EntitlementCache {
         status: "active".into(),
@@ -628,9 +640,11 @@ fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() 
         v.join("config").join("runners.yaml"),
         format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
     ).unwrap();
+    // The closed-loopback host (M7), with `KNOWLU_API_BASE` pointed at the same value below so
+    // `cloud_config`'s R-C1-59 I1 host check accepts it — nothing here reaches a socket either way.
     std::fs::write(
         v.join("config").join("cloud.yaml"),
-        "api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
     ).unwrap();
     let cs = open(&v, "pastgrace");
     let four_days_ago = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(96)).to_string();
@@ -640,14 +654,18 @@ fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() 
         plan: Some("monthly".into()),
         checked_at: four_days_ago,
     }).unwrap();
-    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: no entitlement)"));
 
     let sch = Scheduler::default();
     let fake = std::env::temp_dir().join(format!("qo-sched-pastgrace-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fake);
     std::fs::create_dir_all(&fake).unwrap();
     let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: no entitlement)"));
     let s = run_slot_inner(&cs, &sch, None, false);
     let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
     assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
@@ -737,7 +755,13 @@ fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
     let _ = std::fs::remove_dir_all(&fake);
     std::fs::create_dir_all(&fake).unwrap();
     let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        // `cloud_config`'s R-C1-59 I1 host check needs this build's own `api_base()` to name the
+        // same port-9 host the vault's `cloud.yaml` does, above.
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
     let s = run_slot_inner(&cs, &sch, None, false);
     let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
     // The exact name, not merely a prefix that "nothing new" and "no account" would also match

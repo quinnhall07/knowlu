@@ -20,6 +20,19 @@ function bytesToB64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
+/** The one hex encoder (R-C1-59 M3): `_shared/stripe.ts`, `account/index.ts` and
+ * `billing-checkout/index.ts` each wrote this out separately before it lived here. */
+export function toHex(bytes: ArrayBuffer | Uint8Array): string {
+  return Array.from(new Uint8Array(bytes)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Case-folded before hashing: the subject of a consent row and an account's email are matched
+ * without regard to case everywhere else in this system, so the hash must be too. */
+export async function sha256Hex(s: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s.toLowerCase()));
+  return toHex(digest);
+}
+
 export async function importAesKey(base64Key: string): Promise<CryptoKey> {
   const raw = b64ToBytes(base64Key);
   if (raw.length !== 32) throw new Error("SOURCES_ENC_KEY must be 32 bytes, base64");

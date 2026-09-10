@@ -45,8 +45,8 @@ create table public.consents (
 );
 comment on table public.consents is
   'Kept three years (California ARL as amended by AB 2863; ROSCA has no term). DELETE /account nulls
-   account_id and leaves the row: subject_hash keeps the record meaningful without identifying
-   anyone, which is how a legal-retention duty and a deletion right are both honoured.';
+   both account_id and ip and leaves the row: subject_hash keeps the record meaningful without
+   identifying anyone, which is how a legal-retention duty and a deletion right are both honoured.';
 
 create table public.sources (
   account_id     uuid not null references public.accounts (id) on delete cascade,

@@ -582,6 +582,9 @@ fn the_settings_panel_has_its_rows_and_one_way_in() {
     for id in ["set-portal", "set-report-go", "set-delete-1", "set-delete-2"] {
         assert!(html.contains(&format!("id=\"{id}\"")), "control {id}");
     }
+    // R-C1-59 (I3): the button's own label, pinned — `site/terms.html` and the billing-jobs cancel
+    // mails all tell the student to click this exact control by this exact name.
+    assert!(html.contains("id=\"set-portal\">Manage subscription<"), "the settings button must say Manage subscription, word for word");
     let js = read("console.js");
     assert!(js.contains("function openSettings(") && js.contains("function renderSettings("));
     assert!(js.contains("window.KNOWLU_OPEN_SETTINGS"), "the tray's one way in");
@@ -791,6 +794,10 @@ fn the_local_judgment_row_has_a_state_for_every_outcome() {
     // Global constraint: no http:// or https:// under app/static/ — the endpoint is Rust's.
     assert!(!js.contains("manifest.json"), "the manifest URL is inference.rs's, never the page's");
     assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
+    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime (`scheduler::judge_plan`
+    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists), so `renderAccountRow`
+    // hides the row rather than offering a multi-gigabyte download that cannot affect anything.
+    assert!(js.contains("EL(\"set-judge\").hidden"), "the row must be gated on the account status");
 }
 
 /// The wizard's default folders come from `launch_state` — the page never builds a path, and the

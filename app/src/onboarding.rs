@@ -317,8 +317,11 @@ fn backup_mirror_reason(vault: &Path) -> Option<String> {
     let id_shaped = crate::account::is_profile_id(&id);
     let under_backups = profile.parent().and_then(|p| p.file_name()).map(|n| n.eq_ignore_ascii_case("Backups")).unwrap_or(false);
     if !(ticked || (id_shaped && under_backups)) { return None; }
+    // R-C1-59 (I2): restore-from-a-backup has no panel of its own yet (Quinn to rule), so a student
+    // whose own vault folder is gone needs a route today — copy this folder out from under `Backups`
+    // and adopt the copy, exactly what `restore_vault_in` would do for them once it has a caller.
     Some(format!(
-        "{}: that is Knowlu's backup copy of a vault, not the vault itself — opening it here would make the backup the live vault, and the next backup would write over it. Choose the folder you actually work in.",
+        "{}: that is Knowlu's backup copy of a vault, not the vault itself — opening it here would make the backup the live vault, and the next backup would write over it. Copy this folder somewhere of your own, outside Backups, and choose that copy instead.",
         vault.display()
     ))
 }
