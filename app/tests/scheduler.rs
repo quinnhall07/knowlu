@@ -668,3 +668,36 @@ fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
+
+/// The telemetry step never fails a slot. This vault has an account, no reachable cloud (the api_base
+/// points at a port nothing is listening on) and therefore an offline send — and the slot is green.
+#[test]
+fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
+    let v = scratch("teleoffline");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Port 9 is `discard`: nothing on this machine answers it, so the send fails fast and locally.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "teleoffline");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: None, checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-tele-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.iter().any(|n| n.starts_with("telemetry (")), "{named:?}");
+    assert!(s.steps.iter().filter(|(n, _)| n.starts_with("telemetry")).all(|(_, c)| *c == 0));
+    assert!(s.engine_ok, "telemetry must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}

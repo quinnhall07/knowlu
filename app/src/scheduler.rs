@@ -587,6 +587,18 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     if let Ok(st) = backed {
         steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 }));
     }
+    // Spec §6: batched to `/telemetry` at each slot. **Never a failure** — a student on a train has
+    // nothing to apologise for, and an analytics upload has no business turning a slot amber. Every
+    // outcome is a named step with exit code 0, the same shape the ingest and judge skips use.
+    let telemetry = match entitlement_state(cs) {
+        crate::account::EntitlementState::NoAccount => ("telemetry (skipped: no account)".to_string(), 0),
+        _ => match crate::telemetry::send(&cs.vault, &cs.data_dir) {
+            Ok((0, 0)) => ("telemetry (nothing new)".to_string(), 0),
+            Ok((e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
+            Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
+        },
+    };
+    steps.push(telemetry);
     state::refresh_head(cs);
     state::refresh_history(cs);
     let ok = steps.iter().all(|(_, c)| *c == 0);
