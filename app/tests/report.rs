@@ -1,16 +1,21 @@
 //! `report.rs` against a fixed set of scrub cases, a real vault shape, real log files, and a
 //! loopback `POST /issues` — never the network (the 3a rule: `127.0.0.1` only).
-use knowlu::report::{log_tail, scrub, vault_shape};
+use knowlu::report::{log_tail, preview_text, scrub, vault_shape};
+use knowlu::state::ConsoleState;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 #[test]
 fn the_seven_things_a_report_must_never_carry() {
-    // The same six the cloud's `_shared/scrub.ts` refuses, in the same order, producing the same
-    // text — the two ends are a pair and this test and its TypeScript twin are how they stay one.
-    // (R-C1-45: the cloud wins where the brief's literal expectation differs — see the two cases
-    // called out below, both changed from `<token>` to `<secret>` to match `_shared/scrub.ts`'s
-    // `CREDENTIAL` rule, which claims the whole `keyword[:=]value` (and an optional `Bearer `)
-    // as one redaction before the bare-token rule ever runs.)
+    // The name is the brief's, and the cloud's own `Deno.test` carries the same name over the same
+    // eight assertions (M5, fix round 1: the name stays as the brief wrote it; a comment claiming
+    // "the same six" alongside eight assertions was the thing worth fixing, not the name) — in the
+    // same order, producing the same text: the two ends are a pair and this test and its
+    // TypeScript twin are how they stay one. (R-C1-45: the cloud wins where the brief's literal
+    // expectation differs — see the two cases called out below, both changed from `<token>` to
+    // `<secret>` to match `_shared/scrub.ts`'s `CREDENTIAL` rule, which claims the whole
+    // `keyword[:=]value` (and an optional `Bearer `) as one redaction before the bare-token rule
+    // ever runs.)
     assert_eq!(scrub("mailed a.student@crimson.ua.edu twice"), "mailed <email> twice");
     assert_eq!(scrub("fetching https://lms.example.invalid/feed/abc123.ics failed"), "fetching <url> failed");
     assert_eq!(scrub("http://10.0.0.1/x"), "<url>");
@@ -50,6 +55,34 @@ fn the_r_c1_26_shapes_are_claimed_whole() {
     // `Authorization: Bearer <short>` is claimed whole by CREDENTIAL, even though the token itself
     // is far short of TOKEN's 20-character floor — TOKEN never gets a look at it.
     assert_eq!(scrub("Authorization: Bearer abc"), "Authorization=<secret>");
+}
+
+/// Fix round 1 (C1, I1; R-C1-46): the hand-written scanners committed in round 1 disagreed with the
+/// cloud on these exact eight inputs — every one pinned here with the cloud's own output (computed
+/// by running its actual `scrub()` under Deno, per the ruling; the same eight are added to
+/// `cloud/supabase/functions/_shared/scrub_test.ts` so the two ends are pinned against the same
+/// cases, not just re-implemented against the same intent).
+#[test]
+fn fix_round_1_the_reviews_divergent_shapes_are_pinned() {
+    // C1: a capability URL right after a punctuation character that is a scheme-continuation
+    // character (`+`, `.`, `-`) but not a `\w` — a `\b` holds one character later than a
+    // single-backtrack scanner ever looked, so the URL was left on the wire entirely unredacted.
+    assert_eq!(scrub("-https://lms.example.invalid/feed"), "-<url>");
+    assert_eq!(scrub(".https://lms.example.invalid/feed"), ".<url>");
+    assert_eq!(scrub("+https://x/y"), "+<url>");
+    assert_eq!(scrub("2026-https://x/y"), "2026-<url>");
+    // I1.1: `\S+` needs at least one character — a scheme with nothing after `://` is not a URL.
+    assert_eq!(scrub("x://"), "x://");
+    // I1.1: this also changes which rule wins — CREDENTIAL claims `token://` before URL_RE's
+    // (fixed) empty-`\S+` check would ever let URL_RE match nothing here.
+    assert_eq!(scrub("token://"), "token=<secret>");
+    // I1.2: `NOTE`'s `\b` sits at the first `\w`, not at the start of the `[\w.-]` run — a run that
+    // opens on `-` or `.` keeps that leading punctuation outside the match.
+    assert_eq!(scrub("-a.md"), "-<note>");
+    // I1.3: `(?:bearer\s+)?` backtracks when the value after it would be empty — the trailing space
+    // here leaves nothing for `\S+`, so JS drops the optional group and matches `\S+` = `Bearer`
+    // instead, claiming the header but leaving the trailing space outside the match.
+    assert_eq!(scrub("authorization: Bearer "), "authorization=<secret> ");
 }
 
 #[test]
@@ -104,6 +137,38 @@ fn the_log_tail_is_the_last_lines_of_the_newest_logs_and_is_scrubbed() {
     assert!(tail.iter().all(|l| !l.contains("https://")), "a capability URL survived into the tail");
     assert!(tail.last().unwrap().contains("line 299"));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// I2, fix round 1: the cloud refuses a `body` over 8,192 characters
+/// (`cloud/supabase/functions/issues/handler.ts`), and 200 real log lines routinely add up to more
+/// than that on a busy install. `preview_text` has to fit under that cap on its own, leaving room
+/// for the sentence the student is about to type, or every report is refused before a human ever
+/// reads it.
+#[test]
+fn preview_text_stays_under_the_clouds_body_cap_even_with_a_flood_of_logs() {
+    let vault = PathBuf::from("../engine/tests/fixtures/vault-full");
+    let data = std::env::temp_dir().join(format!("knowlu-report-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(data.join("logs")).unwrap();
+    // On its own, several times over the cloud's cap — a slot that ran into trouble and logged a
+    // long, ordinary sentence on every line gets here easily. Prose, not one long opaque run: a
+    // run of 20+ token characters would be scrubbed down to `<token>` before length is ever
+    // measured, which would defeat the point of this fixture.
+    let filler = "the quick brown fox jumps over the lazy dog and back again ".repeat(4);
+    let many: String = (0..500).map(|i| format!("{filler}line {i}\n")).collect();
+    std::fs::write(data.join("logs").join("slot-1-0-rank.txt"), many).unwrap();
+    let cs = ConsoleState::open(vault, data.clone());
+    let text = preview_text(&cs, "today");
+    // The cloud's own MAX_BODY (`cloud/supabase/functions/issues/handler.ts:5`) — not imported
+    // (nothing in `app/` reaches into `cloud/`), the same number `report.rs`'s own `MAX_BODY`
+    // mirrors by hand.
+    const CLOUD_MAX_BODY: usize = 8192;
+    assert!(text.len() < CLOUD_MAX_BODY, "the preview exceeded the cloud's own cap: {} bytes", text.len());
+    assert!(text.contains("earlier log lines dropped"), "no trim marker in:\n{text}");
+    // The newest line is what a reader wants kept — the oldest lines are what get dropped.
+    assert!(text.contains("line 499"), "the newest log line did not survive the trim");
+    assert!(!text.contains("line 0 "), "an oldest log line survived when it should have been dropped");
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// Serves exactly one request on `127.0.0.1:0`, then stops — the small helper from
@@ -188,9 +253,21 @@ fn send_at_posts_compact_json_with_the_bearer_and_reads_the_id_back() {
 
 #[test]
 fn send_at_reports_a_non_2xx_status_as_a_named_refusal() {
+    // I3, fix round 1: the cloud's own sentence comes back, not just the status digits — every
+    // error body in `cloud/supabase/functions/_shared/http.ts` is `{"error":"<one sentence>"}` and
+    // the four sentences a student can actually hit are all actionable.
     let (base, handle) = loopback_once(400, r#"{"error":"bad"}"#);
     let err = knowlu::report::send_at(&base, "tok-abc", "hello", "profile-1").unwrap_err();
-    assert!(err.contains("400"), "{err}");
+    assert!(err.contains("bad"), "{err}");
+    assert!(err.contains("not accepted"), "{err}");
+    let _ = handle.join();
+}
+
+#[test]
+fn send_at_falls_back_to_the_status_when_the_reply_carries_no_error_sentence() {
+    let (base, handle) = loopback_once(500, "not json");
+    let err = knowlu::report::send_at(&base, "tok-abc", "hello", "profile-1").unwrap_err();
+    assert!(err.contains("500"), "{err}");
     let _ = handle.join();
 }
 
@@ -198,4 +275,16 @@ fn send_at_reports_a_non_2xx_status_as_a_named_refusal() {
 fn send_at_refuses_a_non_https_non_loopback_api_base() {
     let err = knowlu::report::send_at("http://example.com", "tok-abc", "hello", "profile-1").unwrap_err();
     assert!(err.contains("https://"), "{err}");
+}
+
+/// I2, fix round 1: `send_at` refuses an over-cap edited text itself, before it ever reaches the
+/// network — `preview_text` already trims to fit, but the student can still edit the textarea back
+/// over the cloud's line. No loopback server is stood up at all: the refusal has to happen before
+/// any connection is attempted, and this proves it does not need one.
+#[test]
+fn send_at_refuses_an_over_cap_text_without_ever_touching_the_network() {
+    let oversized = "x ".repeat(5000); // well past the cloud's 8,192-character MAX_BODY
+    let err = knowlu::report::send_at("https://127.0.0.1:1", "tok-abc", &oversized, "profile-1").unwrap_err();
+    assert!(err.contains("8192"), "{err}");
+    assert!(err.to_ascii_lowercase().contains("shorten"), "{err}");
 }

@@ -7,317 +7,95 @@
 //!
 //! `tray::diagnostics_text` is a different thing and stays as it is: it goes to the clipboard, it is
 //! three lines long, and nobody transmits it.
+use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tauri::State;
 
 use crate::state::ConsoleState;
 
-/// `scrub` is the Rust twin of the cloud's `cloud/supabase/functions/_shared/scrub.ts`, transcribed
-/// rule for rule (ruling R-C1-45). **Six classes, in the cloud's own order** — email, then any-scheme
-/// URL, then the Windows account name, then a note's `.md` filename, then a named credential, then a
-/// bare 20+ character token — each pass a hand-written scanner rather than a `regex::Regex`: `regex`
-/// is a dependency of `knowlu-engine`, not of this crate (`app/Cargo.toml` carries no direct `regex`
-/// line), and adding one is not this task's to do.
-///
-/// Order is load-bearing exactly as the cloud's own comment says: URLs before the bare-token rule,
-/// or a URL's path reads as a token and the sentence loses its shape; the Windows account name and a
-/// note's filename both go before the bare-token rule for the same reason. The credential rule goes
-/// **before** the bare-token rule too — `key=sk_live_…` and `Authorization: Bearer <anything>` are a
-/// credential shape regardless of the value's own length, and claiming the whole `keyword[:=]value`
-/// span (with the cloud's `$1=<secret>` replacement, keeping the keyword's own spelling) is what lets
-/// a short bearer token be redacted even though it would never clear the bare-token rule's 20-char
-/// floor on its own.
-pub fn scrub(text: &str) -> String {
-    let s = scrub_email(text);
-    let s = scrub_url(&s);
-    let s = scrub_winuser(&s);
-    let s = scrub_note(&s);
-    let s = scrub_credential(&s);
-    scrub_token(&s)
-}
-
-fn is_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}
-
-/// `EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g` — no `\b`, so a match can start
-/// anywhere; the local part is whatever local-charset run sits immediately before an `@`, and the
-/// domain is the rightmost `.`-plus-2-or-more-letters tail inside the domain-charset run after it
-/// (the same backtrack a real match would settle on).
-fn scrub_email(text: &str) -> String {
-    let cs: Vec<char> = text.chars().collect();
-    let is_local = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-');
-    let is_domain = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i < cs.len() {
-        if cs[i] == '@' {
-            let mut ls = i;
-            while ls > last && is_local(cs[ls - 1]) {
-                ls -= 1;
-            }
-            if ls < i {
-                let mut de = i + 1;
-                while de < cs.len() && is_domain(cs[de]) {
-                    de += 1;
-                }
-                let mut k = de;
-                let mut matched: Option<usize> = None;
-                while k > i + 2 {
-                    k -= 1;
-                    if cs[k] == '.' {
-                        let mut le = k + 1;
-                        while le < de && cs[le].is_ascii_alphabetic() {
-                            le += 1;
-                        }
-                        if le - (k + 1) >= 2 {
-                            matched = Some(le);
-                            break;
-                        }
-                    }
-                }
-                if let Some(end) = matched {
-                    out.push_str(&cs[last..ls].iter().collect::<String>());
-                    out.push_str("<email>");
-                    last = end;
-                    i = end;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
-}
+/// `EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g` — the cloud's pattern, verbatim. No
+/// `\b`, no case-insensitivity: both character classes already spell out both cases.
+static EMAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap());
 
 /// `URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi` — any scheme, `webcal://` included (fix round 1, item
-/// 1 on the cloud side): a letter, then scheme characters, then a literal `://`, then every
-/// non-whitespace character to the end of the token.
-fn scrub_url(text: &str) -> String {
-    let cs: Vec<char> = text.chars().collect();
-    let is_scheme_cont = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-');
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i + 2 < cs.len() {
-        if cs[i] == ':' && cs[i + 1] == '/' && cs[i + 2] == '/' {
-            let mut s = i;
-            while s > 0 && is_scheme_cont(cs[s - 1]) {
-                s -= 1;
-            }
-            let boundary_ok = s == 0 || !is_word(cs[s - 1]);
-            if s < i && cs[s].is_ascii_alphabetic() && boundary_ok {
-                let mut e = i + 3;
-                while e < cs.len() && !cs[e].is_whitespace() {
-                    e += 1;
-                }
-                out.push_str(&cs[last..s].iter().collect::<String>());
-                out.push_str("<url>");
-                last = e;
-                i = e;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
-}
+/// 1 on the cloud side). `(?-u:\b)` matches JavaScript's ASCII-only `\b` (this pattern carries no
+/// `u` flag on the cloud side either) rather than Rust's Unicode-aware default. `\S` stays at Rust's
+/// Unicode default rather than `(?-u:\S)`: the string-mode `Regex` refuses to compile a *negated*
+/// ASCII class (`(?-u:\S)`, `(?-u:\W)`, `(?-u:\D)`) — a lone UTF-8 continuation byte would match it,
+/// which is not a valid match boundary in `&str` — so an ASCII-restricted `\S` would need
+/// `regex::bytes::Regex` and a byte-slice API throughout this module. The gap this leaves is narrow
+/// and the wrong direction to worry about: Rust's Unicode `\S` treats *more* characters as
+/// whitespace than ASCII does (the extra ones are Unicode space separators, which JavaScript's own
+/// `\s` — never ASCII-only either — already treats as whitespace too), so it can only stop a match
+/// slightly earlier than the cloud does on an input with Unicode whitespace in it, never leave more
+/// text unredacted.
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?-u:\b)[a-z][a-z0-9+.-]*://\S+").unwrap());
 
 /// `WINUSER = /([:\\\/]Users[\\\/])[^\\\/"']+/gi` — fix round 1, item 2 on the cloud side: the
 /// excluded set is only `\`, `/`, `"` and `'`, **not whitespace**, so a two-word account name is
-/// consumed whole rather than truncated at its first word. The captured prefix (`:\Users\` or
-/// `/Users/`, case-insensitively) is kept; only the name itself becomes `<user>`.
-fn scrub_winuser(text: &str) -> String {
-    let cs: Vec<char> = text.chars().collect();
-    let lower: Vec<char> = text.to_ascii_lowercase().chars().collect();
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i < cs.len() {
-        if matches!(lower[i], ':' | '\\' | '/') && i + 6 < cs.len() {
-            let seg: String = lower[i + 1..i + 6].iter().collect();
-            if seg == "users" && matches!(lower[i + 6], '\\' | '/') {
-                let mut e = i + 7;
-                while e < cs.len() && !matches!(cs[e], '\\' | '/' | '"' | '\'') {
-                    e += 1;
-                }
-                if e > i + 7 {
-                    out.push_str(&cs[last..i + 7].iter().collect::<String>());
-                    out.push_str("<user>");
-                    last = e;
-                    i = e;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
-}
+/// consumed whole rather than truncated at its first word.
+static WINUSER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)([:\\/]Users[\\/])[^\\/"']+"#).unwrap());
 
 /// `NOTE = /\b[\w.-]+\.md\b/g` — a note's filename, before the bare-token rule: a filename is the
 /// more specific fact, and dots stay in the token class so a JWT is one token, not three.
-fn scrub_note(text: &str) -> String {
-    let cs: Vec<char> = text.chars().collect();
-    let is_class = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-';
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i < cs.len() {
-        if is_class(cs[i]) && (i == 0 || !is_class(cs[i - 1])) {
-            let rs = i;
-            let mut re = i;
-            while re < cs.len() && is_class(cs[re]) {
-                re += 1;
-            }
-            if re >= rs + 4 {
-                let mut found: Option<usize> = None;
-                let mut p = re as isize - 3;
-                while p >= rs as isize + 1 {
-                    let pu = p as usize;
-                    if cs[pu] == '.' && cs[pu + 1] == 'm' && cs[pu + 2] == 'd' {
-                        let boundary_ok = pu + 3 >= cs.len() || !is_word(cs[pu + 3]);
-                        if boundary_ok {
-                            found = Some(pu);
-                            break;
-                        }
-                    }
-                    p -= 1;
-                }
-                if let Some(p) = found {
-                    out.push_str(&cs[last..rs].iter().collect::<String>());
-                    out.push_str("<note>");
-                    last = p + 3;
-                    i = p + 3;
-                    continue;
-                }
-            }
-            i = re;
-            continue;
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
-}
+static NOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(?-u:[\w.-])+\.md(?-u:\b)").unwrap());
 
-/// `CREDENTIAL = /\b(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi`,
-/// replaced as `$1=<secret>` — a named credential is a secret whatever its length, so this goes
-/// before the bare-token rule and claims the whole span: the keyword, the separator, an optional
-/// leading `Bearer `, and the value up to the next whitespace. `bearer` is itself a keyword, so
-/// `Authorization: Bearer <anything>` is claimed whole and the scheme name never stands next to an
-/// unredacted value.
-fn scrub_credential(text: &str) -> String {
-    const KEYWORDS: [&str; 11] = [
-        "password", "passwd", "pwd", "token", "secret", "api_key", "api-key", "apikey", "key", "authorization",
-        "bearer",
-    ];
-    let cs: Vec<char> = text.chars().collect();
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i < cs.len() {
-        if i == 0 || !is_word(cs[i - 1]) {
-            let mut matched: Option<(usize, String)> = None;
-            for kw in KEYWORDS.iter() {
-                let klen = kw.chars().count();
-                if i + klen <= cs.len() {
-                    let seg: String = cs[i..i + klen].iter().collect();
-                    if seg.eq_ignore_ascii_case(kw) {
-                        matched = Some((i + klen, seg));
-                        break;
-                    }
-                }
-            }
-            if let Some((kend, kw_text)) = matched {
-                let mut j = kend;
-                while j < cs.len() && cs[j].is_whitespace() {
-                    j += 1;
-                }
-                if j < cs.len() && (cs[j] == ':' || cs[j] == '=') {
-                    j += 1;
-                    while j < cs.len() && cs[j].is_whitespace() {
-                        j += 1;
-                    }
-                    const BEARER_LEN: usize = 6;
-                    if j + BEARER_LEN <= cs.len() {
-                        let seg: String = cs[j..j + BEARER_LEN].iter().collect();
-                        if seg.eq_ignore_ascii_case("bearer") {
-                            let ws_start = j + BEARER_LEN;
-                            let mut k = ws_start;
-                            while k < cs.len() && cs[k].is_whitespace() {
-                                k += 1;
-                            }
-                            if k > ws_start {
-                                j = k;
-                            }
-                        }
-                    }
-                    let val_start = j;
-                    let mut e = j;
-                    while e < cs.len() && !cs[e].is_whitespace() {
-                        e += 1;
-                    }
-                    if e > val_start {
-                        out.push_str(&cs[last..i].iter().collect::<String>());
-                        out.push_str(&kw_text);
-                        out.push_str("=<secret>");
-                        last = e;
-                        i = e;
-                        continue;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
-}
+/// `CREDENTIAL = /\b(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi`
+/// — a named credential is a secret whatever its length, so this goes before the bare-token rule
+/// and claims the whole span: the keyword, the separator, an optional leading `Bearer `, and the
+/// value up to the next whitespace. `bearer` is itself a keyword, so `Authorization: Bearer
+/// <anything>` is claimed whole and the scheme name never stands next to an unredacted value.
+/// `\S` here is Rust's Unicode default too, for the same reason `URL_RE`'s is: `(?-u:\S)` is a
+/// negated ASCII class and the string-mode `Regex` refuses to compile one.
+static CREDENTIAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?-u:\b)(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)(?-u:\s)*[:=](?-u:\s)*(?:bearer(?-u:\s)+)?\S+",
+    )
+    .unwrap()
+});
 
-/// `TOKEN = /\b[A-Za-z0-9_.-]{20,}\b/g` — a bare run of 20 or more token characters, the class's
-/// leading and trailing `.`/`-` trimmed off (they are not `\w`, so a `\b` can't land on them) before
-/// the length floor is checked.
-fn scrub_token(text: &str) -> String {
-    let cs: Vec<char> = text.chars().collect();
-    let is_class = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-';
-    let mut out = String::new();
-    let mut i = 0usize;
-    let mut last = 0usize;
-    while i < cs.len() {
-        if is_class(cs[i]) && (i == 0 || !is_class(cs[i - 1])) {
-            let rs = i;
-            let mut re = i;
-            while re < cs.len() && is_class(cs[re]) {
-                re += 1;
-            }
-            let ts = (rs..re).find(|&k| is_word(cs[k]));
-            if let Some(ts) = ts {
-                let te = (rs..re).rev().find(|&k| is_word(cs[k])).map(|k| k + 1).unwrap_or(ts);
-                if te - ts >= 20 {
-                    out.push_str(&cs[last..ts].iter().collect::<String>());
-                    out.push_str("<token>");
-                    last = te;
-                    i = te;
-                    continue;
-                }
-            }
-            i = re;
-            continue;
-        }
-        i += 1;
-    }
-    out.push_str(&cs[last..].iter().collect::<String>());
-    out
+/// `TOKEN = /\b[A-Za-z0-9_.-]{20,}\b/g` — a bare run of 20 or more token characters.
+static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)[A-Za-z0-9_.-]{20,}(?-u:\b)").unwrap());
+
+/// `scrub` is the Rust twin of the cloud's `cloud/supabase/functions/_shared/scrub.ts`, transcribed
+/// pattern for pattern (ruling R-C1-46, tightening R-C1-45): **six regexes, in the cloud's own
+/// order** — email, then any-scheme URL, then the Windows account name, then a note's `.md`
+/// filename, then a named credential, then a bare 20+ character token, each a literal `regex` crate
+/// transcription of the corresponding line in `scrub.ts`, not a hand-written scanner.
+///
+/// **Why the switch:** a hand-written scanner is an attempt to reproduce a backtracking regex
+/// engine's leftmost-first semantics by hand, and round 1's scanners got it wrong on real inputs —
+/// `-https://…` left the URL on the wire because the scanner's single backtrack step gave up where
+/// the `+`/`.`/`-` scheme-continuation characters aren't `\w`, so a `\b` (and the earliest valid
+/// match) sits one character later than the scanner ever looked. The `regex` crate's default
+/// `Regex` type matches with the same leftmost-first priority a backtracking engine produces (Thompson
+/// NFA simulation with alternation priority, not actual backtracking, but the same *result*), so a
+/// faithful pattern transcription reproduces the cloud's output rather than approximating it.
+/// `regex = "1.13.1"` is the same version `engine/Cargo.toml` already pins and was already compiled
+/// into this workspace's one `target/` — see `app/Cargo.toml`'s comment on the line.
+///
+/// Order is load-bearing exactly as the cloud's own comment says: URLs before the bare-token rule,
+/// or a URL's path reads as a token and the sentence loses its shape; the Windows account name and a
+/// note's filename both go before the bare-token rule for the same reason; the credential rule goes
+/// before the bare-token rule too, so a short bearer token is still claimed even though it would
+/// never clear the bare-token rule's 20-character floor on its own.
+pub fn scrub(text: &str) -> String {
+    let s = EMAIL.replace_all(text, "<email>");
+    let s = URL_RE.replace_all(&s, "<url>");
+    let s = WINUSER.replace_all(&s, "${1}<user>");
+    let s = NOTE.replace_all(&s, "<note>");
+    let s = CREDENTIAL.replace_all(&s, "${1}=<secret>");
+    let s = TOKEN.replace_all(&s, "<token>");
+    s.into_owned()
 }
 
 /// How many notes are in each folder. **Counts, never names** (spec §6): a filename is a slugified
 /// title, and a unique course schedule is not depersonalised by dropping a name off the front of it.
+/// A decision, not an oversight (M4): the extension check matches a directory literally named
+/// `x.md` the same as a file — nobody makes one, and treating them alike keeps this one expression.
 pub fn vault_shape(vault: &Path) -> Vec<(String, usize)> {
     ["tasks", "approvals", "archive", "courses", "info", "issues"]
         .iter()
@@ -355,10 +133,61 @@ pub fn log_tail(data_dir: &Path, lines: usize) -> Vec<String> {
     all
 }
 
+/// The cloud's own cap on the `body` field (`cloud/supabase/functions/issues/handler.ts:5`) —
+/// mirrored by hand, not imported: a JS constant and a Rust one cannot share a definition across
+/// the language boundary this repo draws (`tauri` never enters the engine, and nothing in `app/`
+/// reaches into `cloud/` either). If the server's cap ever moves, this one has to move with it.
+const MAX_BODY: usize = 8192;
+
+/// Left over, under [`MAX_BODY`], for the sentence the student is about to type in the "write here"
+/// section. `preview_text` trims the auto-generated part of the report — log lines first, then run
+/// rows — so what is left of the budget after assembling everything else is at least this much,
+/// and a short "it broke when I clicked X" never bumps into the cap on its own.
+const STUDENT_MARGIN: usize = 512;
+
+/// The real Windows build, `major.minor.build` (M2, fix round 1): `%OS%` is `Windows_NT` on every
+/// Windows machine ever — a constant that identifies no build — so this reads the actual version
+/// through `RtlGetVersion`, which (unlike `GetVersionExW`) is not subject to the application
+/// manifest's compatibility lie. `windows` is already a direct dependency of this crate
+/// (`credentials.rs`'s credential store, `main.rs`'s message boxes, `profiles.rs`'s process wait);
+/// this uses two more of its own feature flags (`app/Cargo.toml`), not a new crate. Falls back to
+/// `%OS%` only if the call itself fails, which nothing on record ever does on real Windows.
 fn os_build() -> String {
-    // No new dependency for one line: the same value `ver` reports, read from the environment Windows
-    // already exports. Absent on a machine that has neither, which is honest.
-    std::env::var("OS").unwrap_or_else(|_| "unknown".to_string())
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info =
+        OSVERSIONINFOW { dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32, ..Default::default() };
+    let status = unsafe { RtlGetVersion(&mut info) };
+    if status.0 >= 0 {
+        format!("{}.{}.{}", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber)
+    } else {
+        std::env::var("OS").unwrap_or_else(|_| "unknown".to_string())
+    }
+}
+
+/// The fixed pieces of `preview_text` assembled back into one string: the header (never trimmed —
+/// it is a handful of short lines and cutting it would hide the facts a reader needs most), the run
+/// rows still standing, a marker naming how many of the oldest log lines were dropped to fit (only
+/// present once something was), the log lines still standing, and the trailer. `.len()` here counts
+/// UTF-8 bytes, which is always at least the cloud's UTF-16 `.length` for the same text — a
+/// conservative estimate that only ever trims a little more than the server strictly requires,
+/// never a little less.
+fn assemble_preview(header: &str, run_lines: &[String], log_lines: &[String], dropped_logs: usize, trailer: &str) -> String {
+    let mut out = String::from(header);
+    for r in run_lines {
+        out.push_str(r);
+        out.push('\n');
+    }
+    out.push_str("--- the last 200 log lines ---\n");
+    if dropped_logs > 0 {
+        out.push_str(&format!("… {dropped_logs} earlier log lines dropped to fit the report size limit\n"));
+    }
+    for l in log_lines {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out.push_str(trailer);
+    out
 }
 
 /// Everything the report carries, as the text the user is about to read. Spec §6: the last 200 lines
@@ -366,48 +195,76 @@ fn os_build() -> String {
 /// **name** of the view the user was looking at — never that view's contents, and never its keys
 /// either: a view's key set is a fact about the read model, not about this install, and the name is
 /// the only part a reader of the report can act on (ruling R-C1-5).
+///
+/// **Bounded against the cloud's [`MAX_BODY`] (I2, fix round 1):** two hundred log lines, on a busy
+/// install, routinely add up to more than the server accepts — and every report would then be
+/// refused with nothing more than a status code (see [`send_at`]'s I3 fix) instead of ever reaching
+/// a human. So this trims: the oldest log lines first (the newest is what a reader wants), then —
+/// only if that alone is not enough — the run rows, leaving a one-line marker naming what was
+/// dropped, so what the student reads is still exactly what fits and exactly what is sent.
 pub fn preview_text(cs: &ConsoleState, view: &str) -> String {
-    let mut out = String::new();
-    out.push_str("--- Knowlu issue report ---\n");
-    out.push_str(&format!(
+    let mut header = String::new();
+    header.push_str("--- Knowlu issue report ---\n");
+    header.push_str(&format!(
         "app {} build {}\n",
         env!("CARGO_PKG_VERSION"),
         crate::commands::CONSOLE_BUILD.unwrap_or("unknown")
     ));
-    out.push_str(&format!("os {}\n", os_build()));
-    out.push_str(&format!("profile {}\n", cs.settings.lock().map(|s| s.profile_id.clone()).unwrap_or_default()));
-    out.push_str(&format!("view {view}\n"));
+    header.push_str(&format!("os {}\n", os_build()));
+    header.push_str(&format!("profile {}\n", cs.settings.lock().map(|s| s.profile_id.clone()).unwrap_or_default()));
+    header.push_str(&format!("view {view}\n"));
     let shape: Vec<String> = vault_shape(&cs.vault).into_iter().map(|(k, n)| format!("{k}={n}")).collect();
-    out.push_str(&format!("vault {}\n", shape.join(" ")));
+    header.push_str(&format!("vault {}\n", shape.join(" ")));
     if let Some(e) = &cs.settings_error {
-        out.push_str(&format!("settings error: {}\n", scrub(e)));
+        header.push_str(&format!("settings error: {}\n", scrub(e)));
     }
     if let Some(e) = &crate::scheduler::lock(&cs.history).last_error {
-        out.push_str(&format!("sync error: {}\n", scrub(e)));
+        header.push_str(&format!("sync error: {}\n", scrub(e)));
     }
     if let Some(e) = &crate::scheduler::lock(&cs.backup).last_error {
-        out.push_str(&format!("backup error: {}\n", scrub(e)));
+        header.push_str(&format!("backup error: {}\n", scrub(e)));
     }
+
     let runs = knowlu_engine::surface::runs_panel(&cs.vault, jiff::Timestamp::now());
-    for r in runs.recent.iter().take(3) {
-        out.push_str(&scrub(&format!("run {} {} {} {}", r.runner, r.started.clone().unwrap_or_default(), r.result, r.summary)));
-        out.push('\n');
+    let mut run_lines: Vec<String> = runs
+        .recent
+        .iter()
+        .take(3)
+        // `engine_build` on the wire (`send_at`) is this same console build's own sha (M3): one repo,
+        // one sha per CI build, so the value is not wrong — only the field name says something the
+        // console side doesn't. The run rows here are a different fact (the engine's own run history)
+        // and unrelated to that field.
+        .map(|r| scrub(&format!("run {} {} {} {}", r.runner, r.started.clone().unwrap_or_default(), r.result, r.summary)))
+        .collect();
+    let mut log_lines = log_tail(&cs.data_dir, 200);
+    let trailer = "--- what went wrong (write here) ---\n\n";
+    let budget = MAX_BODY.saturating_sub(STUDENT_MARGIN);
+
+    let mut dropped_logs = 0usize;
+    while assemble_preview(&header, &run_lines, &log_lines, dropped_logs, trailer).len() > budget && !log_lines.is_empty() {
+        log_lines.remove(0);
+        dropped_logs += 1;
     }
-    out.push_str("--- the last 200 log lines ---\n");
-    for l in log_tail(&cs.data_dir, 200) {
-        out.push_str(&l);
-        out.push('\n');
+    while assemble_preview(&header, &run_lines, &log_lines, dropped_logs, trailer).len() > budget && !run_lines.is_empty() {
+        run_lines.remove(0);
     }
-    out.push_str("--- what went wrong (write here) ---\n\n");
-    out
+    assemble_preview(&header, &run_lines, &log_lines, dropped_logs, trailer)
 }
 
 /// One `POST /issues`, compact JSON, never `send_json` — R-C1-27, the same reason
 /// `account::post_json` gives: `app/Cargo.toml` does not carry ureq's `json` feature, and
 /// `send_json` pretty-prints besides, which would put a newline inside a body a test (and a real
 /// server) reads as one line.
+///
+/// **Refuses an over-[`MAX_BODY`] `text` before it ever reaches the network (I2, fix round 1).**
+/// `preview_text` already trims what it builds to fit, but the student may still edit the textarea
+/// back over the line — and the one thing this task exists to prevent is sending bytes the student
+/// never read, so the fix belongs here, as a refusal, and not as a second silent truncation.
 pub fn send_at(api_base: &str, token: &str, text: &str, profile_id: &str) -> Result<String, String> {
     crate::account::check_api_base(api_base)?;
+    if text.trim().len() > MAX_BODY {
+        return Err(format!("the report is longer than {MAX_BODY} characters — please shorten it before sending"));
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .http_status_as_error(false)
@@ -429,10 +286,17 @@ pub fn send_at(api_base: &str, token: &str, text: &str, profile_id: &str) -> Res
         .map_err(|e| e.to_string())?;
     let status = res.status().as_u16();
     let reply = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
-    if !(200..300).contains(&status) {
-        return Err(format!("the report was not accepted ({status})"));
-    }
     let v: Value = serde_json::from_str(&reply).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        // I3, fix round 1: the cloud's own sentence, whichever one this reply carried
+        // (`{"error":"<one sentence>"}`, `_shared/http.ts`) — never a bare status code on a panel,
+        // the same rule `account.rs`'s `provider_error` states for GoTrue.
+        let said = v.get("error").and_then(|x| x.as_str()).filter(|s| !s.is_empty());
+        return Err(match said {
+            Some(s) => format!("the report was not accepted: {s}"),
+            None => format!("the report was not accepted ({status})"),
+        });
+    }
     Ok(v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string())
 }
 

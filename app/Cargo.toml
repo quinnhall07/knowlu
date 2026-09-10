@@ -77,9 +77,23 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10.0"
 jiff = "0.2"
+# `report.rs`'s `scrub` (Task 16, ruling R-C1-46/C1+I1): a hand-written scanner cannot reproduce a
+# backtracking regex engine's leftmost-first semantics exactly, and the differential fuzz run that
+# found the gap (`docs/…/task-16-review.md`) proves it in the tens of thousands. The `regex` crate's
+# default `Regex` matches with the same leftmost-first priority a backtracking engine would use, so
+# transcribing `cloud/supabase/functions/_shared/scrub.ts`'s six patterns literally is what actually
+# keeps the two ends identical. Pinned to the same version the engine already carries
+# (`engine/Cargo.toml`) — already compiled into this workspace's one `target/`, so this adds no new
+# crate to the dependency graph, only a direct edge to one already resolved.
+regex = "1.13.1"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials"] }
+# `Wdk_System_SystemServices` + `Win32_System_SystemInformation` (Task 16 fix round 1, M2): what
+# `report.rs`'s `os_build` needs for `RtlGetVersion` — the real `major.minor.build`, not `%OS%`
+# (which is `Windows_NT` on every Windows machine ever). `windows` is already a direct dependency
+# for the credential store, the tray's message boxes and the child-process wait; this adds two more
+# of its own feature flags, not a new crate.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
 
 # The release profile (rewrite spec §5: compiled size is a product budget line) is the workspace
 # root's — Cargo ignores [profile.*] in a member crate, and a copy here would only earn a warning.

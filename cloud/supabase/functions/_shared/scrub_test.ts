@@ -94,3 +94,33 @@ Deno.test("a named credential is redacted whatever its length", () => {
 Deno.test("scrubJson scrubs object keys, not only their values", () => {
   assertEquals(scrubJson({ "ada@x.invalid": "v" }), { "<email>": "v" });
 });
+
+// Task 16 (`app/src/report.rs`) fix round 1, ruling R-C1-46: the Rust twin's first round was a
+// hand-written scanner, and a differential fuzz run against a faithful JS port of these same six
+// patterns found 1,109 / 40,000 adversarial and 2,673 / 30,000 log-shaped disagreements, one of
+// them an under-redaction (a capability URL left unscrubbed on the wire). Round 2 rewrote the Rust
+// side as a literal `regex` crate transcription of these same patterns, so the fix belongs on that
+// end — but the eight inputs that exposed it are pinned here too, so both ends are tested against
+// the same cases rather than merely re-implemented against the same intent (M1, a shared
+// input→expected fixture read by both ends, is a follow-up for the close, not this round).
+Deno.test("the eight inputs that exposed the Rust twin's round-1 scanner divergences", () => {
+  // A capability URL right after a punctuation character that is a scheme-continuation character
+  // (`+`, `.`, `-`) but not a `\w` — a single-backtrack hand scanner gave up one character early
+  // and left the whole URL on the wire.
+  assertEquals(scrub("-https://lms.example.invalid/feed"), "-<url>");
+  assertEquals(scrub(".https://lms.example.invalid/feed"), ".<url>");
+  assertEquals(scrub("+https://x/y"), "+<url>");
+  assertEquals(scrub("2026-https://x/y"), "2026-<url>");
+  // `\S+` needs at least one character — a scheme with nothing after `://` is not a URL.
+  assertEquals(scrub("x://"), "x://");
+  // CREDENTIAL claims `token://` (its own keyword, `:` separator, `//` as the opaque value) before
+  // URL_RE's own (correctly empty) attempt ever gets a look at it.
+  assertEquals(scrub("token://"), "token=<secret>");
+  // NOTE's `\b` sits at the first `\w` inside the `[\w.-]` run, not at the run's own start — a run
+  // that opens on `-` keeps that leading punctuation outside the match.
+  assertEquals(scrub("-a.md"), "-<note>");
+  // `(?:bearer\s+)?` backtracks when the value after it would be empty: the trailing space here
+  // leaves nothing for `\S+`, so the optional group is dropped and `\S+` matches `Bearer` itself,
+  // claiming the header but leaving the trailing space outside the match.
+  assertEquals(scrub("authorization: Bearer "), "authorization=<secret> ");
+});
