@@ -252,8 +252,20 @@ pub fn watermark(last_event: Option<&str>, last_correction: Option<&str>, capped
 /// same silent-loss shape the cap itself exists to avoid. If the row that would be the first one
 /// dropped (`rows[cap]`) shares its `ts` with the last row the naive truncation would keep, the whole
 /// trailing run sharing that `ts` is dropped from the kept side too, deferring the tie whole to the
-/// next read. At least one row is always kept when `rows.len() > cap` on entry, however tied the
-/// page is — `send` must never read an untruncated, non-empty page as "nothing new".
+/// next read.
+///
+/// **Fix round 2.** The tie-cut above has its own edge, when the tie is not a boundary pair but the
+/// *entire* page: if every one of `rows[0..cap]` shares `rows[cap]`'s `ts` (an unrealistic burst —
+/// 500+ rows in one millisecond is a corrupt or hand-edited ledger, not a real cap boundary),
+/// stopping at `keep == 1` would still set the watermark to that shared `ts` and silently strand the
+/// other ~499 rows carrying it forever — M2's own failure, just at a wider tie. Cutting all the way
+/// to an *empty* page would fix that but trade it for a worse one: an empty batch on every slot,
+/// forever, for a vault whose ledger keeps producing this — `send` would defer this same page and
+/// never make progress. So this case keeps the **whole original page** instead (all `cap` rows,
+/// ignoring the tie): it delivers the most of the page in one slot, and the watermark then advances
+/// past the tie exactly as it does today — only the rows past `cap` that share the tie are lost, not
+/// the whole page. Once the vault stops producing runs this long, `rows.len() <= cap` and the whole
+/// page sends normally with no loss at all.
 ///
 /// Public for the same reason `watermark` is: the one piece of arithmetic here that is wrong
 /// silently, and a test needs to reach it directly rather than through `send`'s network call.
@@ -263,6 +275,11 @@ pub fn truncate_on_ts_boundary<T>(rows: &mut Vec<T>, cap: usize, ts_of: impl Fn(
     let mut keep = cap;
     while keep > 1 && ts_of(&rows[keep - 1]) == boundary_ts {
         keep -= 1;
+    }
+    // Fix round 2: the tie reaches all the way to index 0 — the entire page is one tie, with no
+    // non-tied prefix to cut at. Keep the whole page rather than the one row `keep == 1` would leave.
+    if keep == 1 && ts_of(&rows[0]) == boundary_ts {
+        keep = cap;
     }
     rows.truncate(keep);
 }

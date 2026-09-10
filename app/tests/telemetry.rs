@@ -200,6 +200,32 @@ fn a_tied_timestamp_at_the_cap_boundary_never_splits_the_watermark_mid_tie() {
     assert!(rows.last().unwrap().ts < tied_ts, "{}", rows.last().unwrap().ts);
 }
 
+/// Fix round 2: the boundary-pair cut above has its own edge when the tie is not a pair but the
+/// *entire* overflow page — 501 rows, all sharing one `ts` (the more extreme version of the same
+/// "several UI events in one millisecond" scenario, an unrealistic burst that reads as a corrupt or
+/// hand-edited ledger). Cutting to empty would defer this same page every slot forever and never make
+/// progress; the ruled fix keeps the whole page instead, losing only the one row past the cap — no
+/// panic, no empty batch, and the watermark still advances past the tie.
+#[test]
+fn a_fully_tied_overflow_page_sends_the_whole_page_rather_than_going_empty() {
+    use knowlu::telemetry::{truncate_on_ts_boundary, EventRow};
+    let tied_ts = "2026-09-09T23:59:59.000Z".to_string();
+    let mut rows: Vec<EventRow> = (0..501)
+        .map(|_| EventRow {
+            ts: tied_ts.clone(),
+            session: "sess_1".into(),
+            view: "today".into(),
+            action: "view_opened".into(),
+            object_id: None,
+            object_kind: None,
+            ms: None,
+        })
+        .collect();
+    truncate_on_ts_boundary(&mut rows, 500, |r| r.ts.as_str());
+    assert_eq!(rows.len(), 500, "the whole page sends rather than dropping to one row or to empty");
+    assert!(rows.iter().all(|r| r.ts == tied_ts));
+}
+
 /// `account.rs`'s own loopback harness, copied rather than shared — each `tests/*.rs` file is its
 /// own crate. Serves exactly `responses.len()` requests on `127.0.0.1:0`, then stops. Returns the
 /// base URL and a handle whose `join()` yields the raw request text of each one, bounded on both
