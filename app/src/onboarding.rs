@@ -9,6 +9,106 @@ use serde_json::{json, Value};
 use tauri::Manager;
 use crate::profiles::{self, Profile};
 
+/// One row of the mapping panel: a thing the account can reach, and what we think it is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoveredRow {
+    /// `zybooks` or `vhl`.
+    pub source: String,
+    /// The vendor's own key: a zyBook code, or a VHL section id.
+    pub key: String,
+    /// Something to show beside the key when the key alone means nothing to a human.
+    pub detail: Option<String>,
+    /// What we think the course is. `None` means we do not know and the panel asks.
+    pub suggested: Option<String>,
+    /// Already placed by this vault's config — the adopt path shows these ticked and quiet.
+    pub mapped: bool,
+    /// zyBooks' own onboarding book. The panel pre-ticks *ignore* rather than asking.
+    pub ignored: bool,
+}
+
+/// H10's JSON → rows. **Never fails**: a source that could not be reached, an error list, a truncated
+/// reply and outright garbage all come back as "no rows", because the panel's answer to all four is
+/// the same — show the student the fields and let them type it.
+pub fn rows_from_discovery(json: &str) -> Vec<DiscoveredRow> {
+    let Ok(v) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    let mut out = Vec::new();
+    for b in v.get("zybooks").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(code) = b.get("code").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "zybooks".into(),
+            key: code.to_string(),
+            detail: None,
+            suggested: crate::scaffold::suggest_course(code),
+            mapped: b.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: b.get("ignored").and_then(|m| m.as_bool()).unwrap_or(false),
+        });
+    }
+    for sec in v.get("vhl").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(id) = sec.get("section").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "vhl".into(),
+            key: id.to_string(),
+            // The dashboard names no course text — only ids — so this is all there is to show.
+            detail: sec.get("course_id").and_then(|c| c.as_str()).map(|c| format!("course {c}")),
+            suggested: None,
+            mapped: sec.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: false,
+        });
+    }
+    out
+}
+
+/// H10's `errors` array, as sentences. Empty for anything unparseable — the caller already has a
+/// sentence for "we got nothing at all", and two of them would be worse than one.
+pub fn errors_from_discovery(json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(json)
+        .ok()
+        .and_then(|v| v.get("errors").and_then(|e| e.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Run H10's subcommand and turn its answer into rows. The credential targets are derived from the
+/// path the wizard is about to create — the same derivation `store_credentials` used a panel ago, so
+/// discovery reads the entries that panel just wrote.
+///
+/// `(async)` and **never fatal**: two vendor logins over a student's wifi is the slowest thing in the
+/// wizard, and every failure is an empty list plus a sentence, because the panel can always be typed
+/// into. A missing engine is that same empty list.
+#[tauri::command(async)]
+pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
+    let id = profiles::id_for(Path::new(&vault));
+    let mut args: Vec<String> = vec!["coursework-discover".into()];
+    if zybooks {
+        args.push("--zybooks-target".into());
+        args.push(crate::credentials::target_for(&id, "zybooks"));
+    }
+    if vhl {
+        args.push("--vhl-target".into());
+        args.push(crate::credentials::target_for(&id, "vhl"));
+    }
+    let exe = match crate::scheduler::engine_exe() {
+        Ok(e) => e,
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    use knowlu_engine::childproc::NoConsole;
+    let out = std::process::Command::new(exe).no_console().args(&args).output();
+    let stdout = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    let rows = rows_from_discovery(&stdout);
+    // The per-source reason, not just "something went wrong": a student whose zyBooks worked and whose
+    // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry.
+    let reasons = errors_from_discovery(&stdout);
+    let note = match (rows.is_empty(), reasons.is_empty()) {
+        (_, false) => json!(format!("{} — fill those in below.", reasons.join("; "))),
+        (true, true) => json!("we could not reach your coursework sites — fill them in below"),
+        (false, true) => Value::Null,
+    };
+    json!({ "ok": true, "error": Value::Null, "rows": rows, "note": note })
+}
+
 pub struct Onboarding {
     pub root: PathBuf,
     /// `"wizard"` (no profiles) or `"picker"` (more than one).
@@ -226,6 +326,14 @@ pub struct WizardPlan {
     /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
+    #[serde(default)]
+    pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
+    #[serde(default)]
+    pub vhl_sections: Vec<crate::scaffold::SectionMapping>,
+    #[serde(default)]
+    pub course_map: Vec<(String, String)>,
+    #[serde(default)]
+    pub courses: Vec<crate::scaffold::CourseSeed>,
 }
 
 /// Every name Windows would REWRITE or refuse (review round 1, R-P4a-23). The device names are
@@ -333,10 +441,42 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
     };
+    // **The page sends course CODES; the slugs are made here.** `CS 100` is what a student types and
+    // what a title says; `cs-100` is the vault's own name for it — the note's stem, every task's
+    // `course:` field, and the value `judge::Heuristics::knows_course` tests. A page that invented
+    // vault identifiers would be a page deciding what the engine may know (R-OB-1, R-OB-2).
+    // The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in `scaffold.rs`).
+    let slug = knowlu_engine::ingest::slugify;
+    let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
+        .filter(|b| !b.label.trim().is_empty())
+        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.label), label: b.label.clone() })
+        .collect();
+    let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
+        .filter(|v| !v.label.trim().is_empty())
+        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.label), label: v.label.clone() })
+        .collect();
+    let course_map: Vec<(String, String)> = plan.course_map.iter()
+        .map(|(code, _)| (code.clone(), slug(code)))
+        .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
+        .collect();
+    // `courses` is empty until Task 14b's capture fills it, and empty is a correct answer: a student
+    // whose campus we cannot read types the list on the panel instead.
+    let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
+        .map(|c| crate::scaffold::CourseSeed {
+            code: c.code.clone(),
+            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
+            slug: if c.slug.trim().is_empty() { slug(&c.code) } else { c.slug.clone() },
+        })
+        .filter(|c| !c.slug.is_empty())
+        .collect();
     let vp = crate::scaffold::VaultPlan {
         profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
         personal_calendar,
+        zybooks_courses,
+        vhl_sections,
+        course_map,
+        courses,
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),

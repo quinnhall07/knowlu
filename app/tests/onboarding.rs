@@ -155,6 +155,10 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         vhl: false,
         autostart: true,
         offer_inference: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
     };
     // A vault, scaffolded directly through `scaffold::create_vault` — this test is about
     // `finish_or_roll_back`'s own backup-folder check now that the folder is a parameter of
@@ -170,6 +174,10 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         campus: "none".into(),
         zybooks: false,
         vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
@@ -336,6 +344,10 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
         campus: "none".to_string(),
         zybooks: false,
         vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
         autostart: true,
         offer_inference,
     }
@@ -592,4 +604,42 @@ fn the_vault_goes_under_knowlu_and_nobody_picks_a_folder() {
     std::fs::create_dir_all(home.join("Knowlu").join("Taken")).unwrap();
     assert!(vault_dest_in(&home, "Taken").is_err());
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The discovery reply the panel renders, parsed and suggested — driven directly, because spawning
+/// the engine needs a credential this test must not have.
+#[test]
+fn discovery_output_becomes_rows_with_a_suggestion_each() {
+    use knowlu::onboarding::rows_from_discovery;
+    let json = r#"{"errors": [], "vhl": [{"course_id": "1623220", "mapped": false, "section": "2102121"}], "zybooks": [{"code": "UACS100Fall2026", "ignored": false, "mapped": false}, {"code": "HowToUseZyBooks2", "ignored": true, "mapped": false}]}"#;
+    let rows = rows_from_discovery(json);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let zy = &rows[0];
+    assert_eq!(zy.source, "zybooks");
+    assert_eq!(zy.key, "UACS100Fall2026");
+    assert_eq!(zy.suggested.as_deref(), Some("CS 100"));
+    assert!(!zy.ignored);
+    // zyBooks' onboarding book comes back flagged, so the panel can pre-tick "ignore" rather than
+    // asking a student what course "HowToUseZyBooks2" is.
+    assert!(rows[1].ignored);
+    assert_eq!(rows[1].suggested, None);
+    let vhl = &rows[2];
+    assert_eq!(vhl.source, "vhl");
+    assert_eq!(vhl.key, "2102121");
+    // The dashboard names no course text at all — only ids — so there is nothing to suggest and the
+    // panel asks. Inventing one here would be a guess wearing a suggestion's clothes.
+    assert_eq!(vhl.suggested, None);
+    assert_eq!(vhl.detail.as_deref(), Some("course 1623220"));
+
+    // A source that could not be reached is rows we do not have, not an error the panel dies on —
+    // and the reason survives, because "your VHL password is wrong" and "try again" are different
+    // instructions.
+    use knowlu::onboarding::errors_from_discovery;
+    let payload = r#"{"errors": ["vhl: fetch failed (…)"], "vhl": [], "zybooks": [{"code": "UACS100Fall2026", "ignored": false, "mapped": false}]}"#;
+    assert_eq!(rows_from_discovery(payload).len(), 1, "zyBooks still worked");
+    assert_eq!(errors_from_discovery(payload), vec!["vhl: fetch failed (…)".to_string()]);
+    let failed = rows_from_discovery(r#"{"errors": ["zybooks: fetch failed (…)"], "vhl": [], "zybooks": []}"#);
+    assert!(failed.is_empty());
+    // …and garbage is empty too: the panel's own copy tells the student to type the mapping.
+    assert!(rows_from_discovery("not json").is_empty());
 }

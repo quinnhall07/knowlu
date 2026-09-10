@@ -48,12 +48,101 @@ pub struct VaultPlan {
     pub campus: String,
     pub zybooks: bool,
     pub vhl: bool,
+    /// R-OB-1: what the student confirmed on the logins panel. Empty is honest — a wizard run with no
+    /// coursework logins has nothing to map — and it is what `ingest_yaml` writes as `{}`.
+    pub zybooks_courses: Vec<BookMapping>,
+    pub vhl_sections: Vec<SectionMapping>,
+    /// R-OB-1 and R-OB-2: `<code fragment> -> <slug>`, read by `ingest::match_course_fields` and by
+    /// `judge::Heuristics`. Every confirmed mapping contributes one, and so does every course the
+    /// sign-in window found (Task 14b).
+    pub course_map: Vec<(String, String)>,
+    /// R-OB-2: the enrolled courses, seeded as `courses/<slug>.md` notes (Task 14b).
+    pub courses: Vec<CourseSeed>,
     /// The three cloud values (C1). `api_base` and `anon_key` are Rust's — the page never sees a URL
     /// (`static_assets.rs` forbids one) — and `account_id` comes from the session the wizard signed
     /// in with, read from Credential Manager, never from the page.
     pub api_base: String,
     pub anon_key: String,
     pub account_id: String,
+}
+
+/// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
+/// (`UACS100Fall2026`); `course` is the slug that lands in every task's `course:` field; `label` is
+/// what a human reads in the title. The engine's `route_zybook` needs a **non-empty** mapping under
+/// the code, and `parse_assignments` reads exactly these two keys out of it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct BookMapping {
+    pub code: String,
+    pub course: String,
+    pub label: String,
+}
+
+/// One VHL section, likewise. `section` is the id out of the dashboard's `detail_url`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct SectionMapping {
+    pub section: String,
+    pub course: String,
+    pub label: String,
+}
+
+// **There is no `slugify` here, and there must not be.** `knowlu_engine::ingest::slugify` is `pub`,
+// this crate already depends on the engine, and that function is the one that decides the
+// `courses/<slug>.md` stem `judge::Heuristics::load` reads and the key `knows_course` matches — and
+// the one `zybooks::parse_assignments` uses for `tasks/<slug>.md`. A second implementation would
+// diverge silently: the note would be written, the task would be written, and the match would simply
+// never happen. It also caps at 60 characters and falls back to `item`, where a naive twin returns an
+// empty string and writes `courses/.md`. Call the engine's.
+
+/// `UACS100Fall2026` → `CS 100`. A **suggestion**, not a decision: the student confirms or edits it,
+/// and `None` means the panel shows the raw name and asks.
+///
+/// The rule is the smallest one that fits every code this product has met: find the first run of two
+/// to four capitals followed by exactly three digits, and read that as `<LETTERS> <DIGITS>`. It reads
+/// past an institution prefix (`UA`) because the letters immediately before the digits are the
+/// subject, and it declines `HowToUseZyBooks2` because there is no three-digit number in it — which
+/// is the case that matters, since that book is zyBooks' own and is never a course.
+pub fn suggest_course(code: &str) -> Option<String> {
+    let bytes: Vec<char> = code.chars().collect();
+    for start in 0..bytes.len() {
+        let letters: String = bytes[start..].iter().take_while(|c| c.is_ascii_uppercase()).collect();
+        if letters.len() < 2 || letters.len() > 4 {
+            continue;
+        }
+        let after = start + letters.len();
+        let digits: String = bytes[after..].iter().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.len() != 3 {
+            continue;
+        }
+        // The LAST two-to-four capitals before the digits, so `UACS100` reads `CS 100` and not
+        // `UACS 100`: a four-letter run that ends at the digits is preferred only when nothing
+        // shorter also ends there, which the loop's forward order gives for free by trying the
+        // earliest start first and then continuing — so take the longest suffix of `letters`
+        // that is still 2..=4 long and ends where the digits begin.
+        let subject: String = letters.chars().rev().take(letters.len().min(4)).collect::<Vec<_>>().into_iter().rev().collect();
+        let subject = if subject.len() > 4 { subject[subject.len() - 4..].to_string() } else { subject };
+        return Some(format!("{} {}", trim_prefix(&subject), digits));
+    }
+    None
+}
+
+/// `UACS` → `CS` when a two-letter institution prefix is glued to a two-letter subject. Only the
+/// prefixes this product has actually met, and never a guess: a four-letter subject like `MATH` is
+/// left alone because it is in the list of things that are subjects.
+fn trim_prefix(subject: &str) -> String {
+    const SUBJECTS: [&str; 12] = ["MATH", "CHEM", "PHYS", "BIOL", "ECON", "HIST", "ENGL", "SPAN", "STAT", "PSYC", "ANTH", "GEOG"];
+    if subject.len() == 4 && !SUBJECTS.contains(&subject) && subject.starts_with("UA") {
+        return subject[2..].to_string();
+    }
+    subject.to_string()
+}
+
+/// One course to seed. `code` is what a task's title says (`CS 100`), `slug` what its `course:` field
+/// carries, `name` what the student sees. Filled by Task 14b's capture; empty until then.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CourseSeed {
+    pub code: String,
+    pub name: String,
+    pub slug: String,
 }
 
 /// **Every** wizard-supplied value goes through this before it reaches a YAML file, so a typed
@@ -85,7 +174,14 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     let mut s = String::new();
     if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
-    s.push_str("course_map: {}\n");
+    if p.course_map.is_empty() {
+        s.push_str("course_map: {}\n");
+    } else {
+        s.push_str("course_map:\n");
+        for (fragment, slug) in &p.course_map {
+            s.push_str(&format!("  {}: {}\n", yaml_scalar("course code", fragment)?, yaml_scalar("course slug", slug)?));
+        }
+    }
     // The engine reads `calendars:` as a list of `{name, ics_url}` mappings (`calfeed.rs`), and an
     // empty list is why the first page of a fresh install used to show a day with no busy time in it
     // at all. A block list, through the same `yaml_scalar` every other wizard value goes through.
@@ -101,11 +197,46 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         s.push_str("# credential_target names below.\ncoursework:\n");
         if p.zybooks {
             let target = yaml_scalar("zybooks credential target", &crate::credentials::target_for(&p.profile_id, "zybooks"))?;
-            s.push_str(&format!("  zybooks:\n    enabled: true\n    credential_target: {target}\n    courses: {{}}\n"));
+            s.push_str(&format!("  zybooks:\n    enabled: true\n    credential_target: {target}\n"));
+            // `HowToUseZyBooks2` is zyBooks' own onboarding book: zero assignments, never coursework,
+            // and out of `ignore:` it is one WARN per healthy run forever (`route_zybook`'s own doc).
+            s.push_str("    ignore:\n      - 'HowToUseZyBooks2'\n");
+            // What `parse_assignments` reads. Without these three blocks every item is uncategorised
+            // and takes the default effort, which is the second half of the first-slot failure.
+            s.push_str("    categories:\n      HW: hw\n      Lab: lab\n      Project: project\n");
+            s.push_str("    effort:\n      minutes_per_section: 6\n      floors:\n        hw: 0.25\n        lab: 0.5\n        project: 1.0\n");
+            s.push_str("    importance:\n      hw: 2\n      lab: 2\n      project: 2\n");
+            if p.zybooks_courses.is_empty() {
+                s.push_str("    courses: {}\n");
+            } else {
+                s.push_str("    courses:\n");
+                for b in &p.zybooks_courses {
+                    s.push_str(&format!(
+                        "      {}:\n        course: {}\n        label: {}\n",
+                        yaml_scalar("zybook code", &b.code)?,
+                        yaml_scalar("zybook course", &b.course)?,
+                        yaml_scalar("zybook label", &b.label)?
+                    ));
+                }
+            }
         }
         if p.vhl {
             let target = yaml_scalar("vhl credential target", &crate::credentials::target_for(&p.profile_id, "vhl"))?;
-            s.push_str(&format!("  vhl:\n    enabled: true\n    credential_target: {target}\n    sections: {{}}\n"));
+            s.push_str(&format!("  vhl:\n    enabled: true\n    credential_target: {target}\n"));
+            s.push_str("    importance: 3\n");
+            if p.vhl_sections.is_empty() {
+                s.push_str("    sections: {}\n");
+            } else {
+                s.push_str("    sections:\n");
+                for v in &p.vhl_sections {
+                    s.push_str(&format!(
+                        "      {}:\n        course: {}\n        label: {}\n",
+                        yaml_scalar("vhl section", &v.section)?,
+                        yaml_scalar("vhl course", &v.course)?,
+                        yaml_scalar("vhl label", &v.label)?
+                    ));
+                }
+            }
         }
     }
     Ok(s)
