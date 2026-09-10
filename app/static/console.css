@@ -476,3 +476,9 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    row, and the rule stands for any row control a command turns off.) */
 .set-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
 .set-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
+/* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is every US institution and the panel shows ten. */
+.wiz-hits { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair); }
+.wiz-hits:empty { display: none; }
+.wiz-hits .hit { padding: 6px 8px; cursor: pointer; }
+.wiz-hits .hit:hover, .wiz-hits .hit:focus { background: var(--s2c); outline: none; }
+#report-text { width: 100%; font: 12px/1.5 var(--mono); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }

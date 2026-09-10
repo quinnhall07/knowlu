@@ -748,3 +748,25 @@ fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
+
+/// §4.2 step 7, §11a: a vault the wizard just made has no `today.md`, so the console's own launch is
+/// what fires the first slot — and a vault **adopted in place** (Task 18) already has one, so nothing
+/// fires a second time on top of the work that is already there.
+#[test]
+fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
+    use knowlu::scheduler::needs_first_run;
+    let v = scratch("firstrun");
+    // `rank` writes `state/today.md` (cli.rs); a root `today.md` is nobody's file and must not count.
+    let state = v.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let today = state.join("today.md");
+    let _ = std::fs::remove_file(&today);
+    assert!(needs_first_run(&v), "a vault with no state/today.md is owed its first slot");
+    std::fs::write(v.join("today.md"), b"# not the engine's file
+").unwrap();
+    assert!(needs_first_run(&v), "a root today.md is not the ranked page");
+    std::fs::write(&today, b"# Today
+").unwrap();
+    assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
+    let _ = std::fs::remove_dir_all(&v);
+}

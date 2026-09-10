@@ -12,7 +12,7 @@ use std::fs;
 /// `site/` sits at the workspace root, one level above this crate.
 fn site(rel: &str) -> std::path::PathBuf { std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("site").join(rel) }
 
-const PRIVACY: &str = "Everything stays on this machine. Knowlu has no account and sends nothing anywhere; the only network calls are to the sources you connect and to check for updates.";
+const PRIVACY: &str = "Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.";
 
 #[test]
 fn the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages() {
