@@ -7,6 +7,13 @@ alter table public.billing_reminders enable row level security;
 create policy billing_reminders_select_own on public.billing_reminders
   for select to authenticated using (account_id = auth.uid());
 
+-- The webhook learns these from the subscription object; adding them here rather than in the first
+-- migration keeps Task 1's table exactly the shape §5.1 names. They come before the view below
+-- because the view reads them (R-C1-34).
+alter table public.entitlements add column stripe_subscription_id text;
+alter table public.entitlements add column paused boolean not null default false;
+alter table public.entitlements add column started_at timestamptz;
+
 -- Everything the job needs about one subscriber, in one read. A view rather than a join written
 -- inside the function: the shape belongs with the tables, and PostgREST reads a view like a table.
 create view public.billing_subscribers
@@ -27,15 +34,9 @@ left join public.billing_reminders r on r.account_id = a.id
 where e.status in ('active', 'trialing')
   and e.stripe_subscription_id is not null;
 
--- The webhook learns these from the subscription object; adding them here rather than in the first
--- migration keeps Task 1's table exactly the shape §5.1 names.
-alter table public.entitlements add column stripe_subscription_id text;
-alter table public.entitlements add column paused boolean not null default false;
-alter table public.entitlements add column started_at timestamptz;
-
 -- The daily tick. `app.billing_jobs_url` and `app.billing_jobs_token` are set once, by Quinn:
 --   alter database postgres set app.billing_jobs_url   = 'https://<ref>.supabase.co/functions/v1/billing-jobs';
---   alter database postgres set app.billing_jobs_token = '<a random token he generates>';
+--   alter database postgres set app.billing_jobs_token = '<a random token they generate>';
 -- A dedicated job token, deliberately, and not the service-role key: a database's configuration is
 -- readable by anything with the database, and the worst a job token can do is run this one function.
 -- pg_cron is **not relocatable** and Supabase installs it into its own fixed schema, so a
