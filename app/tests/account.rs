@@ -484,3 +484,33 @@ fn refresh_entitlement_saves_the_cache_from_a_live_reply() {
     let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+/// Base64url without padding, as a JWT segment is — a dozen lines here rather than a `base64`
+/// dependency the app does not otherwise need.
+fn decode_b64url(s: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let (mut bits, mut n, mut out) = (0u32, 0u32, Vec::new());
+    for c in s.bytes() {
+        let v = T.iter().position(|&t| t == c).expect("a base64url character") as u32;
+        bits = (bits << 6) | v;
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push(((bits >> n) & 0xff) as u8);
+            bits &= (1u32 << n) - 1;
+        }
+    }
+    String::from_utf8(out).expect("a UTF-8 payload")
+}
+
+/// The one catastrophic version of filling the P1 constants is pasting the service-role key into a
+/// constant that ships in every installer. Pinned statically, like the updater's flag ⇔ plugin test.
+#[test]
+fn the_compiled_in_project_is_a_prod_functions_base_and_an_anon_key() {
+    assert!(check_api_base(knowlu::account::DEFAULT_API_BASE).is_ok());
+    assert!(auth_base(knowlu::account::DEFAULT_API_BASE).is_ok());
+    let payload = decode_b64url(knowlu::account::DEFAULT_ANON_KEY.split('.').nth(1).expect("a JWT has three segments"));
+    assert!(payload.contains(r#""role":"anon""#), "the compiled-in key is not an anon key");
+    let r = payload.split(r#""ref":""#).nth(1).expect("a ref claim").split('"').next().expect("a ref value");
+    assert!(knowlu::account::DEFAULT_API_BASE.contains(r), "key and URL name different projects");
+}

@@ -106,3 +106,20 @@ Deno.test("no reporting view may be read below the minimum cohort", async () => 
     );
   }
 });
+
+Deno.test("a view is defined after the columns it reads (R-C1-34)", async () => {
+  // The defect the staging batch found: `billing_subscribers` read three `entitlements` columns that
+  // the same file added further down. Reviewed, never applied — so the order was never exercised.
+  for (const m of await migrations()) {
+    const sql = m.sql.toLowerCase();
+    const views = [...sql.matchAll(/create\s+(?:or\s+replace\s+)?view\s+public\.(\w+)[\s\S]*?;/g)];
+    for (const add of sql.matchAll(/alter\s+table\s+public\.(\w+)\s+add\s+column\s+(\w+)/g)) {
+      const [, table, col] = add;
+      for (const v of views) {
+        if (v.index! < add.index! && v[0].includes(`.${col}`)) {
+          assert(false, `${m.name}: view public.${v[1]} reads ${table}.${col} before it is added`);
+        }
+      }
+    }
+  }
+});

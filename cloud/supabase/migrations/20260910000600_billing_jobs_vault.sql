@@ -14,9 +14,10 @@
 --   select vault.create_secret('<the token>', 'billing_jobs_token');
 --
 -- `cron.schedule` with an existing job name replaces that job's command in place, so this is the same
--- `knowlu-billing-jobs` row 000200 created, at the same minute, reading Vault instead of settings. A
--- missing secret makes the subselect null, and `net.http_post` refuses a null url — the run fails in
--- `cron.job_run_details` instead of calling nowhere, exactly as the old `current_setting(..., true)` did.
+-- `knowlu-billing-jobs` row 000200 created, at the same minute, reading Vault instead of settings.
+-- **000700 replaces this command again** (R-C1-38): as written here a missing *token* is not a failed
+-- run — the request goes out with a null header and the 401 lands only in `net._http_response` — so
+-- 000700 wraps the call in a guard that raises, and adds the timeout. This one stays as it was applied.
 select cron.schedule(
   'knowlu-billing-jobs',
   '17 7 * * *',
