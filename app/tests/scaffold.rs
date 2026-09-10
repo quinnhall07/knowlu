@@ -14,12 +14,16 @@ fn plan(id: &str) -> VaultPlan {
     VaultPlan {
         profile_id: id.to_string(),
         ics_url: Some("https://lms.example.invalid/feed/learn.ics".to_string()),
+        personal_calendar: None,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
         device: "TEST-MACHINE".to_string(),
         campus: "university-of-alabama".to_string(),
         zybooks: true,
         vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".to_string(),
+        anon_key: "anon".to_string(),
+        account_id: "acc-1".to_string(),
     }
 }
 
@@ -184,12 +188,16 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
     let p = VaultPlan {
         profile_id: "profile_8888888888".into(),
         ics_url: Some(url.to_string()),
+        personal_calendar: None,
         timezone: nasty.to_string(),
         slots: vec!["12:00: x #c 'q'".into(), "18:00 {b} \"d\"".into()],
         device: "DESK: TOP #1 'q' \"d\" {z}".into(),
         campus: "university-of-alabama".into(),
         zybooks: true,
         vhl: true,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
     };
     create_vault(&v, &p).unwrap();
     let cfg = v.join("config").join("runners.yaml");
@@ -258,7 +266,7 @@ fn the_campus_preset_is_the_shape_the_engine_already_reads() {
     assert!(campus_yaml("not-a-campus").is_none());
     // Every key of the radio list resolves to a file — a label with no preset behind it would be a
     // wizard that fails at Finish.
-    for (key, label) in CAMPUSES { assert!(campus_yaml(key).is_some(), "{key} ({label}) has no preset file"); }
+    for (key, label, _lms) in CAMPUSES { assert!(campus_yaml(key).is_some(), "{key} ({label}) has no preset file"); }
     assert!(campus_yaml("university-of-alabama").unwrap().contains("timezone:"), "the preset tells a copier to set its own timezone");
 
     let none = temp("campus-none").join("Vault");
@@ -368,4 +376,104 @@ fn no_embedded_asset_carries_a_live_feed_or_a_secret() {
             assert!(!text.contains(needle), "{} carries {needle:?}", f.display());
         }
     }
+}
+
+#[test]
+fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
+    use knowlu::scaffold::{cloud_yaml, VaultPlan};
+    let p = VaultPlan {
+        profile_id: "profile_0123456789".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "MACHINE".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "a-public-anon-key".into(),
+        account_id: "11111111-2222-3333-4444-555555555555".into(),
+    };
+    let text = cloud_yaml(&p).expect("cloud.yaml");
+    // The C2 contract, in its order, single-line single-quoted scalars.
+    assert_eq!(
+        text,
+        "api_base: 'https://example.supabase.co/functions/v1'\n\
+         anon_key: 'a-public-anon-key'\n\
+         session_credential_target: 'knowlu/profile_0123456789/session'\n\
+         account_id: '11111111-2222-3333-4444-555555555555'\n"
+    );
+    // The session is NAMED, never carried — the same promise `ingest.yaml` makes about a password.
+    assert!(!text.contains("access_token") && !text.contains("refresh_token"));
+    // …and a value that would change the file's SHAPE is refused by field name, as everywhere else.
+    let mut bad = p.clone();
+    bad.account_id = "acc\nid".into();
+    assert!(cloud_yaml(&bad).unwrap_err().contains("account_id"));
+}
+
+#[test]
+fn a_personal_calendar_becomes_the_engines_calendars_list() {
+    use knowlu::scaffold::{ingest_yaml, VaultPlan};
+    let base = VaultPlan {
+        profile_id: "profile_0123456789".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    // No calendar: the list the engine has always read, empty.
+    assert!(ingest_yaml(&base).unwrap().contains("calendars: []\n"));
+    // One: the shape `calfeed::load_calendar_events` parses — a list of {name, ics_url} mappings.
+    let mut with = base.clone();
+    with.personal_calendar = Some("https://calendar.google.com/calendar/ical/x/private-def/basic.ics".into());
+    let text = ingest_yaml(&with).unwrap();
+    assert!(
+        text.contains("calendars:\n  - name: personal\n    ics_url: 'https://calendar.google.com/calendar/ical/x/private-def/basic.ics'\n"),
+        "{text}"
+    );
+    // …and a value that would change the file's shape is refused by field name, as everywhere else.
+    let mut bad = base.clone();
+    bad.personal_calendar = Some("https://a\nb".into());
+    assert!(ingest_yaml(&bad).unwrap_err().contains("personal calendar address"));
+}
+
+#[test]
+fn create_vault_writes_cloud_yaml_beside_the_other_config_files() {
+    use knowlu::scaffold::{create_vault, VaultPlan};
+    let root = std::env::temp_dir().join(format!("knowlu-scaffold-cloud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let p = VaultPlan {
+        profile_id: knowlu::profiles::id_for(&dest),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "MACHINE".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    create_vault(&dest, &p).expect("create");
+    let text = knowlu_engine::pystr::read_text(&dest.join("config").join("cloud.yaml")).expect("read");
+    assert!(text.contains("account_id: 'acc-1'"), "{text}");
+    // …and the account is readable through the same door C2 will use, not by string matching.
+    let cfg = knowlu::account::cloud_config(&dest).expect("cloud_config");
+    assert_eq!(cfg.account_id, "acc-1");
+    assert_eq!(cfg.session_credential_target, format!("knowlu/{}/session", p.profile_id));
+    // A second write is refused rather than silently repointing the vault at another account.
+    assert!(knowlu::scaffold::write_cloud_yaml_if_absent(&dest, &p).is_err());
+    let _ = std::fs::remove_dir_all(&root);
 }

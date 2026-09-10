@@ -15,9 +15,14 @@ use knowlu_engine::journal::Journal;
 use knowlu_engine::write::{self, WriteContext};
 use knowlu_engine::yamlemit::{safe_dump_block, Node};
 
-/// `(key, label)` — the wizard's radio list. **Adding a campus is adding a file** and one line
-/// here; nothing else in the app knows a campus exists.
-pub const CAMPUSES: [(&str, &str); 2] = [("none", "None"), ("university-of-alabama", "University of Alabama")];
+/// `(key, label, LMS base URL)` — the wizard's radio list, and where Task 14's sign-in window points
+/// for that campus. **Adding a campus is adding a file and one line here**; nothing else in the app
+/// knows a campus exists. The URL is empty for `none`, which is what makes `lms_link::capture` take
+/// its paste-a-link path for a student whose school is not listed yet.
+pub const CAMPUSES: [(&str, &str, &str); 2] = [
+    ("none", "None", ""),
+    ("university-of-alabama", "University of Alabama", "https://ualearn.blackboard.com/"),
+];
 
 const CAMPUS_NONE: &str = include_str!("../assets/campus/none.yaml");
 const CAMPUS_UA: &str = include_str!("../assets/campus/university-of-alabama.yaml");
@@ -33,12 +38,22 @@ pub fn campus_yaml(key: &str) -> Option<&'static str> {
 pub struct VaultPlan {
     pub profile_id: String,
     pub ics_url: Option<String>,
+    /// The student's own busy-time calendar, by its secret iCal address (spec §11a). Written into
+    /// `config/ingest.yaml`'s `calendars:` list, which is what makes today's page know the day is
+    /// already half full — the reason this ruling exists at all.
+    pub personal_calendar: Option<String>,
     pub timezone: String,
     pub slots: Vec<String>,
     pub device: String,
     pub campus: String,
     pub zybooks: bool,
     pub vhl: bool,
+    /// The three cloud values (C1). `api_base` and `anon_key` are Rust's — the page never sees a URL
+    /// (`static_assets.rs` forbids one) — and `account_id` comes from the session the wizard signed
+    /// in with, read from Credential Manager, never from the page.
+    pub api_base: String,
+    pub anon_key: String,
+    pub account_id: String,
 }
 
 /// **Every** wizard-supplied value goes through this before it reaches a YAML file, so a typed
@@ -71,7 +86,16 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
     s.push_str("course_map: {}\n");
-    s.push_str("calendars: []\n");
+    // The engine reads `calendars:` as a list of `{name, ics_url}` mappings (`calfeed.rs`), and an
+    // empty list is why the first page of a fresh install used to show a day with no busy time in it
+    // at all. A block list, through the same `yaml_scalar` every other wizard value goes through.
+    match &p.personal_calendar {
+        None => s.push_str("calendars: []\n"),
+        Some(u) => s.push_str(&format!(
+            "calendars:\n  - name: personal\n    ics_url: {}\n",
+            yaml_scalar("personal calendar address", u)?
+        )),
+    }
     if p.zybooks || p.vhl {
         s.push_str("\n# Passwords are NOT here. They live in Windows Credential Manager under the\n");
         s.push_str("# credential_target names below.\ncoursework:\n");
@@ -103,6 +127,35 @@ pub fn runners_yaml(p: &VaultPlan) -> Result<String, String> {
         yaml_scalar("timezone", &p.timezone)?,
         yaml_scalar("device name", &p.device)?,
     ))
+}
+
+/// `config/cloud.yaml` — the four keys the C2 contract fixes, in that order, through the same
+/// `yaml_scalar` every other wizard value goes through, so a typed value can never change the file's
+/// shape.
+///
+/// **No secret is here.** `anon_key` is published in every Supabase client and grants nothing on its
+/// own; the session JWT is *named*, not carried — `session_credential_target` is a Credential Manager
+/// target, exactly as `credential_target` is for the coursework logins.
+pub fn cloud_yaml(p: &VaultPlan) -> Result<String, String> {
+    Ok(format!(
+        "api_base: {}\nanon_key: {}\nsession_credential_target: {}\naccount_id: {}\n",
+        yaml_scalar("api_base", &p.api_base)?,
+        yaml_scalar("anon_key", &p.anon_key)?,
+        yaml_scalar("session_credential_target", &crate::credentials::target_for(&p.profile_id, "session"))?,
+        yaml_scalar("account_id", &p.account_id)?,
+    ))
+}
+
+/// Task 18's half: a vault that already exists gains `config/cloud.yaml` and nothing else — no
+/// scaffold, no seed note, no rewrite of anything. **Refuses to overwrite one**: an install adopted
+/// twice must not silently repoint at a second account, and a user who signed in with the wrong
+/// address needs to hear that rather than to lose the first one.
+pub fn write_cloud_yaml_if_absent(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
+    let path = vault.join("config").join("cloud.yaml");
+    if path.exists() {
+        return Err(format!("{}: this vault already has an account", path.display()));
+    }
+    write_file(vault, "config/cloud.yaml", &cloud_yaml(plan)?)
 }
 
 /// Materialise **everything** — files and the two seed notes — into a sibling staging folder, then
@@ -149,6 +202,7 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     write_file(root, "config/events.yaml", campus)?;
     write_file(root, "config/ingest.yaml", &ingest_yaml(plan)?)?;
     write_file(root, "config/runners.yaml", &runners_yaml(plan)?)?;
+    write_file(root, "config/cloud.yaml", &cloud_yaml(plan)?)?;
     Ok(())
 }
 

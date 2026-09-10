@@ -33,7 +33,7 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
             "default_backup": default_folders().map(|(_, b)| b),
             // The wizard's campus radios (Task 6): adding a campus is adding a file and a line in
             // `scaffold::CAMPUSES`, never a string in the page.
-            "campuses": crate::scaffold::CAMPUSES.iter().map(|(k, l)| json!({ "key": k, "label": l })).collect::<Vec<_>>(),
+            "campuses": crate::scaffold::CAMPUSES.iter().map(|(k, l, _)| json!({ "key": k, "label": l })).collect::<Vec<_>>(),
         }),
         None => json!({ "ok": true, "error": Value::Null, "mode": "console" }),
     }
@@ -202,21 +202,25 @@ pub fn refresh(app: &tauri::AppHandle, root: &Path) {
     }
 }
 
-/// Everything the panels collected. A serde struct rather than a loose map, so a missing field is
-/// a refusal at the boundary and not a default nobody chose.
+/// Everything the panels collected. A serde struct rather than a loose map, so a missing field is a
+/// refusal at the boundary and not a default nobody chose.
+///
+/// **C1: there is no `backup_dir` and no parent.** Spec §4.1 — the app creates
+/// `%USERPROFILE%\Knowlu\<name>` and `%USERPROFILE%\Knowlu\Backups`, and the wizard has no folder
+/// panel to carry an answer from. `offer_inference` stays with a `serde(default)` so an older page
+/// that still sends it is not a refusal; the C1 wizard never sets it (the local runtime leaves in C4).
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardPlan {
     pub ics_url: Option<String>,
+    /// The personal calendar's secret iCal address (spec §11a). Same panel as the school feed, and
+    /// the same treatment: validated on the device, stored on the account, written into the vault.
+    pub personal_calendar: Option<String>,
     pub timezone: String,
     pub slots: Vec<String>,
     pub campus: String,
     pub zybooks: bool,
     pub vhl: bool,
-    pub backup_dir: Option<String>,
     pub autostart: bool,
-    /// The finish panel's *Set up local judgment after setup* checkbox. The wizard NEVER installs
-    /// anything (spec §5.3, "never automatic", and the wizard's own "Nothing is fetched now"); this
-    /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
 }
@@ -263,34 +267,71 @@ pub fn dest_for(parent: &str, name: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// *Finish* for a new vault (decision 3 — this is the first moment anything reaches the vault's
-/// folder). Scaffold+seed (one atomic `create_vault`) → settings → register.
+/// `<home>\Knowlu\<name>`, with the parent and the backups root created if they are not there — the
+/// whole of the folder question, answered by the app (spec §4.1, §11a). Returns the vault path and
+/// the backup ROOT: `backup::tick` writes `<root>\<profile_id>\vault`, so the setting is the root and
+/// the per-profile folder is the engine's, unchanged.
 ///
-/// `scaffold::create_vault` refuses a control character in any wizard value, naming the field
-/// (Task 4 review round 1) — that sentence comes back as `error` and the finish panel prints it,
-/// which is the only way the user learns which field to fix.
+/// Handle-free so `app/tests/onboarding.rs` can drive it with any home directory.
+pub fn vault_dest_in(home: &Path, name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let (parent, backups) = default_folders_in(home);
+    std::fs::create_dir_all(&parent).map_err(|e| format!("{parent}: {e}"))?;
+    std::fs::create_dir_all(&backups).map_err(|e| format!("{backups}: {e}"))?;
+    let dest = dest_for(&parent, name)?;
+    Ok((dest, PathBuf::from(backups)))
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("USERPROFILE").map(PathBuf::from).map_err(|_| "no USERPROFILE: Knowlu cannot decide where your vault goes".to_string())
+}
+
+/// *Finish* for a new vault. Scaffold+seed (one atomic `create_vault`) → the session moves onto this
+/// profile → settings → register.
 ///
-/// Handle-free, like `adopt_vault_in`, so `app/tests/onboarding.rs` can drive the rollback.
-pub fn create_vault_in(root: &Path, parent: &str, name: &str, plan: &WizardPlan) -> Value {
-    let dest = match dest_for(parent, name) { Ok(d) => d, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+/// **The session move is here, and before the settings write**, for the reason `retarget_credentials`
+/// exists (R-P4a-23): the wizard signed in seven panels ago, under `account::PENDING_TARGET`, because
+/// the profile id is derived from a vault path that did not exist yet. A vault whose `cloud.yaml`
+/// names `knowlu/<profile_id>/session` while the token still sits under `knowlu/pending/session` is a
+/// vault that cannot reach the cloud, with nothing anywhere saying why.
+pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) -> Value {
+    let (dest, backups) = match vault_dest_in(home, name) {
+        Ok(d) => d,
+        Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }),
+    };
+    let profile_id = profiles::id_for(&dest);
+    let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
+        Ok((id, _)) => id,
+        Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
+    };
     let vp = crate::scaffold::VaultPlan {
-        profile_id: profiles::id_for(&dest),
+        profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
+        personal_calendar: plan.personal_calendar.clone().filter(|u| !u.trim().is_empty()),
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
         campus: plan.campus.clone(),
         zybooks: plan.zybooks,
         vhl: plan.vhl,
+        api_base: crate::account::api_base(),
+        anon_key: crate::account::anon_key(),
+        account_id,
     };
-    if let Err(e) = crate::scaffold::create_vault(&dest, &vp) { return json!({ "ok": false, "error": e, "profile": Value::Null }); }
-    finish_or_roll_back(root, &dest, Some(name.to_string()), plan)
+    if let Err(e) = crate::scaffold::create_vault(&dest, &vp) {
+        return json!({ "ok": false, "error": e, "profile": Value::Null });
+    }
+    if let Err(e) = crate::account::move_session(crate::account::PENDING_TARGET, &crate::account::session_target(&profile_id)) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return json!({ "ok": false, "error": format!("the sign-in could not be attached to this vault ({e}) — the new vault was removed, so nothing is half-made"), "profile": Value::Null });
+    }
+    finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups))
 }
 
 #[tauri::command(async)]
-pub fn create_vault(app: tauri::AppHandle, parent: String, name: String, plan: WizardPlan) -> Value {
+pub fn create_vault(app: tauri::AppHandle, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
-    let out = create_vault_in(&root, &parent, &name, &plan);
+    let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+    let out = create_vault_in(&root, &home, &name, &plan);
     if out["ok"] == true { refresh(&app, &root); }
     out
 }
@@ -314,10 +355,13 @@ pub fn restore_vault_in(backup: &str, parent: &str, name: &str) -> Result<PathBu
 #[tauri::command(async)]
 pub fn restore_vault(app: tauri::AppHandle, backup: String, parent: String, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
+    let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
     let out = match restore_vault_in(&backup, &parent, &name) {
         // The restored copy is rolled back the same way a created vault is: the backup it came
-        // from is untouched, so a failed finish costs nothing but the copy.
-        Ok(dest) => finish_or_roll_back(&root, &dest, Some(name), &plan),
+        // from is untouched, so a failed finish costs nothing but the copy. There is no `WizardPlan`
+        // folder answer any more (spec §4.1) — the restored vault's mirror is the same default
+        // `Backups` sibling a created vault gets.
+        Ok(dest) => finish_or_roll_back(&root, &dest, Some(name), &plan, Some(PathBuf::from(default_folders_in(&home).1))),
         Err(e) => json!({ "ok": false, "error": e, "profile": Value::Null }),
     };
     if out["ok"] == true { refresh(&app, &root); }
@@ -332,16 +376,16 @@ pub fn restore_vault(app: tauri::AppHandle, backup: String, parent: String, name
 /// Split into a handle-free core (Task 10 review, M1) so `app/tests/onboarding.rs` can drive the
 /// adopt path's `offer_inference` marker directly, the same way `create_vault_in` and
 /// `restore_vault_in` already let it drive theirs.
-pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan) -> Value {
+pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
     // The adopted vault's own path, so the backup folder is checked against it here too and not
     // only in the page (review round 1, minor).
     let vault = profiles::load(root).ok().and_then(|v| v.into_iter().find(|p| p.id == id)).map(|p| p.vault);
     if let Some(v) = &vault {
-        if let Err(e) = check_backup_dir(v, plan.backup_dir.as_deref()) { return json!({ "ok": false, "error": e }); }
+        if let Err(e) = check_backup_dir(v, backup_dir.as_deref()) { return json!({ "ok": false, "error": e }); }
     }
     let settings = crate::state::Settings {
         profile_id: id.to_string(),
-        backup_dir: plan.backup_dir.clone().filter(|b| !b.is_empty()).map(PathBuf::from),
+        backup_dir,
         autostart: plan.autostart,
         quit_at: None,
     };
@@ -358,7 +402,9 @@ pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan) -> Va
 #[tauri::command(async)]
 pub fn apply_profile_settings(app: tauri::AppHandle, id: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding" }) };
-    apply_profile_settings_in(&root, &id, &plan)
+    // An adopted vault keeps whatever backup folder it already had — there is no folder panel to
+    // carry a new answer from (spec §4.1).
+    apply_profile_settings_in(&root, &id, &plan, None)
 }
 
 /// `<backup>` is either the profile folder itself or the folder holding profile folders.
@@ -387,9 +433,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 ///
 /// Compared the way Windows compares paths — case-insensitively, separators normalised — and only
 /// at a separator, so `…\Fall` is never "inside" `…\Fall 2026`.
-fn check_backup_dir(vault: &Path, backup: Option<&str>) -> Result<(), String> {
+fn check_backup_dir(vault: &Path, backup: Option<&Path>) -> Result<(), String> {
     let norm = |s: &str| s.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase();
-    let b = match backup.map(norm).filter(|b| !b.is_empty()) { Some(b) => b, None => return Ok(()) };
+    let b = match backup.map(|p| norm(&p.to_string_lossy())).filter(|b| !b.is_empty()) { Some(b) => b, None => return Ok(()) };
     let v = norm(&vault.to_string_lossy());
     if v.is_empty() { return Ok(()); }
     if v == b || b.starts_with(&format!("{v}\\")) {
@@ -404,13 +450,13 @@ fn check_backup_dir(vault: &Path, backup: Option<&str>) -> Result<(), String> {
 /// Now the error is the envelope's, and doing the fallible-but-unregistered half first means a
 /// failure leaves no profile in the registry to clean up — the id is derived from the vault path,
 /// exactly as `profiles::register` derives it, so the file lands in the same place either way.
-fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &WizardPlan) -> Value {
-    if let Err(e) = check_backup_dir(vault, plan.backup_dir.as_deref()) {
+fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
+    if let Err(e) = check_backup_dir(vault, backup_dir.as_deref()) {
         return json!({ "ok": false, "error": e, "profile": Value::Null });
     }
     let settings = crate::state::Settings {
         profile_id: profiles::id_for(vault),
-        backup_dir: plan.backup_dir.clone().filter(|b| !b.is_empty()).map(PathBuf::from),
+        backup_dir,
         autostart: plan.autostart,
         quit_at: None,
     };
@@ -436,8 +482,8 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
 /// directly** (Task 10 review, M1): `restore_vault_in` alone only copies the mirror out and never
 /// sees a `WizardPlan` — this is the other half, exactly as the live `restore_vault` command
 /// calls it.
-pub fn finish_or_roll_back(root: &Path, dest: &Path, name: Option<String>, plan: &WizardPlan) -> Value {
-    let out = finish_profile_in(root, dest, name, plan);
+pub fn finish_or_roll_back(root: &Path, dest: &Path, name: Option<String>, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
+    let out = finish_profile_in(root, dest, name, plan, backup_dir);
     if out["ok"] == true { return out; }
     let why = out["error"].as_str().unwrap_or("the profile could not be finished").to_string();
     let tail = match std::fs::remove_dir_all(dest) {

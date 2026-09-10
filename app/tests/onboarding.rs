@@ -138,22 +138,40 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
     let parent = root.join("vaults");
     std::fs::create_dir_all(&parent).unwrap();
     let app_data = root.join("appdata");
-    let plan_with = |bdir: String| WizardPlan {
+    let plan = WizardPlan {
         ics_url: None,
+        personal_calendar: None,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
         campus: "none".to_string(),
         zybooks: false,
         vhl: false,
-        backup_dir: Some(bdir),
         autostart: true,
         offer_inference: false,
+    };
+    // A vault, scaffolded directly through `scaffold::create_vault` — this test is about
+    // `finish_or_roll_back`'s own backup-folder check now that the folder is a parameter of
+    // `finish_or_roll_back` rather than a field of `WizardPlan` (spec §4.1 removed the panel), so it
+    // never needs a signed-in session the way `create_vault_in` does.
+    let scaffold_at = |dest: &std::path::Path| knowlu::scaffold::VaultPlan {
+        profile_id: knowlu::profiles::id_for(dest),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "MACHINE".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
     };
     let vault = parent.join("Fall 2026");
     // (a) The backup folder INSIDE the vault: the one case the rule refuses, checked after the
     // vault has already been scaffolded — which is what makes this the rollback path too.
-    let inside = plan_with(vault.join("backups").to_string_lossy().to_string());
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Fall 2026", &inside);
+    knowlu::scaffold::create_vault(&vault, &scaffold_at(&vault)).unwrap();
+    let out = finish_or_roll_back(&app_data, &vault, Some("Fall 2026".to_string()), &plan, Some(vault.join("backups")));
     assert_eq!(out["ok"], false, "{out}");
     let err = out["error"].as_str().unwrap();
     assert!(err.contains("cannot be the vault, or inside it"), "{err}");
@@ -161,19 +179,20 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
     assert!(!vault.exists(), "the half-made vault is gone");
     assert!(!knowlu::profiles::registry_path(&app_data).exists(), "and nothing was registered");
     // (b) The backup folder that IS the vault.
-    let same = plan_with(vault.to_string_lossy().to_string());
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Fall 2026", &same);
+    knowlu::scaffold::create_vault(&vault, &scaffold_at(&vault)).unwrap();
+    let out = finish_or_roll_back(&app_data, &vault, Some("Fall 2026".to_string()), &plan, Some(vault.clone()));
     assert_eq!(out["ok"], false, "{out}");
     assert!(out["error"].as_str().unwrap().contains("cannot be the vault, or inside it"), "{out}");
     assert!(!vault.exists());
     // (c) R-P4a-25: the vault INSIDE the backup folder — here its own parent — goes through.
-    let above = plan_with(parent.to_string_lossy().to_string());
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Fall 2026", &above);
+    knowlu::scaffold::create_vault(&vault, &scaffold_at(&vault)).unwrap();
+    let out = finish_or_roll_back(&app_data, &vault, Some("Fall 2026".to_string()), &plan, Some(parent.clone()));
     assert_eq!(out["ok"], true, "a vault inside the backup folder must be allowed: {out}");
     assert!(vault.join("config").join("runners.yaml").is_file());
     // …and so does a backup folder with nothing to do with the vault at all.
-    let elsewhere = plan_with(root.join("mirror").to_string_lossy().to_string());
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Spring 2027", &elsewhere);
+    let vault2 = parent.join("Spring 2027");
+    knowlu::scaffold::create_vault(&vault2, &scaffold_at(&vault2)).unwrap();
+    let out = finish_or_roll_back(&app_data, &vault2, Some("Spring 2027".to_string()), &plan, Some(root.join("mirror")));
     assert_eq!(out["ok"], true, "{out}");
     assert!(parent.join("Spring 2027").join("config").join("runners.yaml").is_file());
     let _ = std::fs::remove_dir_all(&root);
@@ -187,6 +206,50 @@ struct Cleanup(String);
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = knowlu::credentials::delete(&self.0);
+    }
+}
+
+/// Every test below that drives `create_vault_in`/`finish_or_roll_back`'s session move needs a real
+/// pending session in Credential Manager under `account::PENDING_TARGET` — a fixed, shared name, so
+/// this holds `CREDMAN_LOCK` for its whole life (the same reason `app/tests/account.rs` does) and
+/// deletes every credential it touched on drop, including on a panicking assertion: the pending
+/// entry itself, and the profile's own copy `move_session` leaves behind on success.
+#[cfg(windows)]
+static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+struct PendingSession {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    moved_to: Vec<String>,
+}
+#[cfg(windows)]
+impl PendingSession {
+    /// Writes a throwaway session under `PENDING_TARGET` for `account_id` — never a real one.
+    fn new(account_id: &str) -> Self {
+        let guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s = knowlu::account::Session {
+            access_token: "test-at".into(),
+            refresh_token: "test-rt".into(),
+            expires_at: jiff::Timestamp::now().as_second() + 3600,
+            email: "knowlu-test@example.invalid".into(),
+        };
+        knowlu::account::save_session(knowlu::account::PENDING_TARGET, account_id, &s)
+            .expect("write the pending session this wizard test signs in with");
+        Self { _guard: guard, moved_to: Vec::new() }
+    }
+    /// The profile-keyed target the session moves onto once a vault named `profile_id` exists,
+    /// tracked for cleanup regardless of whether the move actually happened.
+    fn expect_move_to(&mut self, profile_id: &str) {
+        self.moved_to.push(knowlu::account::session_target(profile_id));
+    }
+}
+#[cfg(windows)]
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        let _ = knowlu::credentials::delete(knowlu::account::PENDING_TARGET);
+        for t in &self.moved_to {
+            let _ = knowlu::credentials::delete(t);
+        }
     }
 }
 
@@ -236,12 +299,12 @@ fn a_rename_after_panel_five_moves_the_login_and_leaves_nothing_behind() {
 fn base_plan(offer_inference: bool) -> WizardPlan {
     WizardPlan {
         ics_url: None,
+        personal_calendar: None,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
         campus: "none".to_string(),
         zybooks: false,
         vhl: false,
-        backup_dir: None,
         autostart: true,
         offer_inference,
     }
@@ -255,28 +318,36 @@ fn marker_for(app_data: &Path, id: &str) -> PathBuf {
 /// Task 10 review, M1: the CREATE path (`create_vault_in` → `finish_profile_in`) drops the marker
 /// when the finish panel's checkbox was checked, and only then. This is the path the brief's own
 /// code actually wired the marker into, so this pair is the regression guard for it.
+///
+/// `create_vault_in` reads the account it signed in with off `account::PENDING_TARGET` (C1 Task
+/// 12), so this needs a real pending session — `PendingSession` mints one and cleans it (and the
+/// moved copy) up on drop.
+#[cfg(windows)]
 #[test]
 fn create_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
     let root = tmp("create-offer-on");
-    let parent = root.join("vaults");
-    std::fs::create_dir_all(&parent).unwrap();
+    let home = root.join("home");
     let app_data = root.join("appdata");
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Fall 2026", &base_plan(true));
+    let mut session = PendingSession::new("acc-marker-create-on");
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(true));
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
     assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(windows)]
 #[test]
 fn create_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     let root = tmp("create-offer-off");
-    let parent = root.join("vaults");
-    std::fs::create_dir_all(&parent).unwrap();
+    let home = root.join("home");
     let app_data = root.join("appdata");
-    let out = create_vault_in(&app_data, parent.to_str().unwrap(), "Fall 2026", &base_plan(false));
+    let mut session = PendingSession::new("acc-marker-create-off");
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
     assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -294,7 +365,7 @@ fn restore_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
     std::fs::create_dir_all(&parent).unwrap();
     let app_data = root.join("appdata");
     let dest = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026").expect("restore");
-    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(true));
+    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(true), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
@@ -310,7 +381,7 @@ fn restore_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     std::fs::create_dir_all(&parent).unwrap();
     let app_data = root.join("appdata");
     let dest = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026").expect("restore");
-    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(false));
+    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(false), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
@@ -330,7 +401,7 @@ fn adopt_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
     let out = adopt_vault_in(&app_data, vault.to_str().unwrap(), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(true));
+    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(true), None);
     assert_eq!(out2["ok"], true, "{out2}");
     assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
     let _ = std::fs::remove_dir_all(&root);
@@ -345,7 +416,7 @@ fn adopt_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     let out = adopt_vault_in(&app_data, vault.to_str().unwrap(), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(false));
+    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(false), None);
     assert_eq!(out2["ok"], true, "{out2}");
     assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
     let _ = std::fs::remove_dir_all(&root);
@@ -361,4 +432,27 @@ fn the_default_folders_are_knowlu_under_home_and_its_backups_sibling() {
     assert_eq!(parent, r"C:\Users\someone\Knowlu");
     assert_eq!(backup, r"C:\Users\someone\Knowlu\Backups");
     assert!(!parent.contains("Documents") && !backup.contains("Documents"), "never the redirected folder");
+}
+
+#[test]
+fn the_vault_goes_under_knowlu_and_nobody_picks_a_folder() {
+    use knowlu::onboarding::{default_folders_in, vault_dest_in};
+    let home = tmp("home");
+    // The parent does not exist yet — the app makes it, which is the whole of §4.1.
+    let (parent, backups) = default_folders_in(&home);
+    assert!(!std::path::Path::new(&parent).exists());
+    let (vault, backup) = vault_dest_in(&home, "Fall 2026").expect("dest");
+    assert_eq!(vault, home.join("Knowlu").join("Fall 2026"));
+    assert_eq!(backup, std::path::PathBuf::from(&backups));
+    assert!(std::path::Path::new(&parent).is_dir(), "the parent was created");
+    assert!(std::path::Path::new(&backups).is_dir(), "the backups root was created");
+    assert!(!vault.exists(), "the vault itself is created by create_vault, not by this");
+    // The same refusals `dest_for` makes, because this is `dest_for` with the parent decided.
+    assert!(vault_dest_in(&home, "CON").is_err());
+    assert!(vault_dest_in(&home, "a/b").is_err());
+    assert!(vault_dest_in(&home, "  ").is_err());
+    // …and a name that is already there is refused, not silently reused.
+    std::fs::create_dir_all(home.join("Knowlu").join("Taken")).unwrap();
+    assert!(vault_dest_in(&home, "Taken").is_err());
+    let _ = std::fs::remove_dir_all(&home);
 }
