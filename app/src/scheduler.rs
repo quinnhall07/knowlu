@@ -238,9 +238,20 @@ pub fn judge_state(cs: &ConsoleState) -> JudgeState {
 /// profile's cached entitlement, and decides with `account::decide` — which owns the 72-hour grace so
 /// that a later cloud step (C2's `/judge/*`, `/ingest/*`, `/events`) asks the same question in one
 /// place rather than four.
+///
+/// **A missing file and an unreadable one are different states** (fix round 1, item 2): `decide`'s
+/// own `cloud_configured` flag cannot tell them apart, so the file's existence is checked here,
+/// first — a vault with no `config/cloud.yaml` at all is `NoAccount` (falls through to the local
+/// runtime/model gate, unchanged); a file that IS there but does not parse, or is missing a required
+/// key, is `Unreadable` and never reaches `decide` at all.
 pub fn entitlement_state(cs: &ConsoleState) -> crate::account::EntitlementState {
-    let configured = crate::account::cloud_config(&cs.vault).is_ok();
-    crate::account::decide(configured, crate::account::load_cache(&cs.data_dir).as_ref(), jiff::Timestamp::now())
+    if !cs.vault.join("config").join("cloud.yaml").exists() {
+        return crate::account::EntitlementState::NoAccount;
+    }
+    match crate::account::cloud_config(&cs.vault) {
+        Ok(_) => crate::account::decide(true, crate::account::load_cache(&cs.data_dir).as_ref(), jiff::Timestamp::now()),
+        Err(_) => crate::account::EntitlementState::Unreadable,
+    }
 }
 
 /// How this slot runs `judge` — or does not. **Three states, and the order between them matters**
@@ -274,6 +285,9 @@ pub fn judge_plan(cs: &ConsoleState) -> JudgePlan {
         // The same directory the local arm uses — `inference::judgments_dir(&cs.data_dir)`, which is
         // `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments`. C4 removes the runtime, not this folder.
         crate::account::EntitlementState::Entitled => JudgePlan::Cloud { log_dir: crate::inference::judgments_dir(&cs.data_dir) },
+        // Fix round 1, item 2: named distinctly from "no entitlement" — a broken config file is a
+        // different problem from a lapsed subscription, and must never fall through to the local arm.
+        crate::account::EntitlementState::Unreadable => JudgePlan::Skip("judge (skipped: cloud.yaml unreadable)"),
         crate::account::EntitlementState::NoAccount => match judge_state(cs) {
             JudgeState::Ready(a) => JudgePlan::Local(a),
             JudgeState::NoRuntime => JudgePlan::Skip("judge (skipped: no runtime)"),

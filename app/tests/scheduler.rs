@@ -596,10 +596,17 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
 
 /// Case (c): entitled once, but not for four days. The grace is over, the cloud step stands down as a
 /// named step, and the day is still ranked.
+///
+/// Fix round 1, item 4: driven through `run_slot_inner`, exactly as its `…no_entitlement…` sibling
+/// above, so the name is true of the whole slot — not just of `judge_plan` in isolation.
 #[test]
 fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() {
     use knowlu::account::{save_cache, EntitlementCache};
     let v = scratch("pastgrace");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
     std::fs::write(
         v.join("config").join("cloud.yaml"),
         "api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
@@ -613,5 +620,51 @@ fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() 
         checked_at: four_days_ago,
     }).unwrap();
     assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: no entitlement)"));
+
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-pastgrace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
+    assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
+    assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Fix round 1, item 2: `config/cloud.yaml` exists but does not parse — a corrupted file, or one
+/// edited by hand and left broken. This must NOT collapse into `NoAccount` (which would fall through
+/// to the local runtime/model gate and run `judge` with no account at all): it is named as its own
+/// skip, distinct from "no entitlement" and from "no runtime"/"no model".
+#[test]
+fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
+    use knowlu::account::EntitlementState;
+    let v = scratch("unreadablecloud");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Garbage: present, but neither valid YAML nor a mapping with the required keys.
+    std::fs::write(v.join("config").join("cloud.yaml"), "not: [valid\n").unwrap();
+    let cs = open(&v, "unreadablecloud");
+    assert_eq!(entitlement_state(&cs), EntitlementState::Unreadable);
+    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: cloud.yaml unreadable)"));
+
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-unreadablecloud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.contains(&"judge (skipped: cloud.yaml unreadable)".to_string()), "{named:?}");
+    assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
+    assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }

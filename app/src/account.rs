@@ -442,8 +442,9 @@ pub fn cloud_config(vault: &std::path::Path) -> Result<CloudConfig, String> {
     Ok(cfg)
 }
 
-/// `GET /entitlement`'s reply, cached verbatim. The four keys are the C2 contract; nothing here adds
-/// a fifth, so a reply this app does not understand still round-trips through the file unchanged.
+/// `GET /entitlement`'s reply, cached. The four keys are the C2 contract; a reply carrying a fifth
+/// key this app does not know is read past on the way in and simply not there on the way back out —
+/// `save_cache` always serialises exactly these four fields, never the raw bytes it received.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EntitlementCache {
     pub status: String,
@@ -466,22 +467,43 @@ pub fn load_cache(data_dir: &std::path::Path) -> Option<EntitlementCache> {
     serde_json::from_str(&text).ok()
 }
 
+/// Written atomically: the fresh bytes land in a sibling `.tmp` file first, and `fs::rename` — which
+/// on Windows calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` — swaps it into place in one step,
+/// so a reader (this process's own next `load_cache`, or a crash mid-write) never observes a
+/// half-written file. The remove-then-rename fallback below is a second attempt for the rare case
+/// where the direct rename itself fails (fix round 1, item 6).
 pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<(), String> {
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let v = serde_json::to_value(c).map_err(|e| e.to_string())?;
     // `ledger::dumps_value`, like every other JSON this app writes: a file the app wrote and a file
     // the engine wrote never differ by whitespace.
-    std::fs::write(cache_path(data_dir), knowlu_engine::ledger::dumps_value(&v)).map_err(|e| e.to_string())
+    let bytes = knowlu_engine::ledger::dumps_value(&v);
+    let path = cache_path(data_dir);
+    let tmp = data_dir.join("entitlement.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        // Fallback, and say so: remove the stale target and retry the rename rather than leaving
+        // both the old cache and the fresh `.tmp` sitting on disk.
+        let _ = std::fs::remove_file(&path);
+        std::fs::rename(&tmp, &path).map_err(|e2| format!("entitlement cache rename failed ({e}); fallback also failed: {e2}"))?;
+    }
+    Ok(())
 }
 
-/// Three answers, and the difference between the last two is the sentence a user reads in the Runs
-/// view (`no account` vs `no entitlement`) — the same distinction `IcsState` draws between "no feed"
-/// and "unreadable", for the same reason.
+/// Four answers. `Unreadable` is `NoAccount`'s sibling, not its replacement (fix round 1, item 2):
+/// **`NoAccount`** is a vault with no `config/cloud.yaml` at all — a pre-C1 install, or one that has
+/// never onboarded into the cloud — and falls through to the local runtime/model gate exactly as
+/// before. **`Unreadable`** is a file that IS there but does not parse, or is missing a required key:
+/// a broken file must never be silently treated as "no account", which would run `judge` with no
+/// account in play at all. The other two states are the sentence a user reads in the Runs view (`no
+/// entitlement` vs `entitled`) — the same shape `IcsState` uses between "no feed" and "unreadable",
+/// for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntitlementState {
     Entitled,
     NotEntitled,
     NoAccount,
+    Unreadable,
 }
 
 pub fn decide(cloud_configured: bool, cache: Option<&EntitlementCache>, now: jiff::Timestamp) -> EntitlementState {
@@ -489,8 +511,12 @@ pub fn decide(cloud_configured: bool, cache: Option<&EntitlementCache>, now: jif
     let Some(c) = cache else { return EntitlementState::NotEntitled };
     if c.status != "active" && c.status != "trialing" { return EntitlementState::NotEntitled; }
     let Ok(checked) = c.checked_at.parse::<jiff::Timestamp>() else { return EntitlementState::NotEntitled };
-    // A stamp in the future is a clock that moved, not a licence.
-    let age = now.as_second() - checked.as_second();
+    let mut age = now.as_second() - checked.as_second();
+    // Fix round 1, item 1: a clock a few minutes fast must not disentitle someone forever — each
+    // refresh would otherwise write another "future" `checked_at` and the state would never recover
+    // on its own. Up to an hour ahead is treated as "just checked"; beyond that it is still a clock
+    // that moved, not a licence, and stays a sanity check rather than a licence.
+    if age < 0 && -age <= 3600 { age = 0; }
     if age < 0 || age > GRACE.as_secs() as i64 { return EntitlementState::NotEntitled; }
     EntitlementState::Entitled
 }

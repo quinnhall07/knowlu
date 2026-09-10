@@ -192,11 +192,23 @@ impl Drop for Cleanup {
     }
 }
 
+/// Fix round 1 stabilization: Windows Credential Manager is one shared, machine-wide store, and
+/// this file's tests hit it from several threads at once (`cargo test` runs a binary's tests in
+/// parallel by default). Under enough concurrent `CredWriteW`/`CredReadW`/`CredDeleteW` traffic —
+/// crossing a threshold this file's two new `refresh_entitlement` tests (fix round 1, item 5) pushed
+/// it over — a read for one target has been observed to spuriously report `ERROR_NOT_FOUND` for a
+/// target no other thread ever touched, surfacing minutes later as an unrelated 10-second loopback
+/// timeout. This serializes every test that reads, writes or deletes a real credential, the same way
+/// `ENGINE_ENV_LOCK` in `tests/scheduler.rs` serializes process-global env var access.
+#[cfg(windows)]
+static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Credential Manager is real on this machine, so this test uses two targets of its own naming and
 /// removes them itself. No secret is asserted on: only the account id and the fact of the move.
 #[cfg(windows)]
 #[test]
 fn a_session_moves_from_the_pending_target_to_the_profiles_own() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{load_session, move_session, save_session, Session};
     let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
     let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
@@ -216,6 +228,7 @@ fn a_session_moves_from_the_pending_target_to_the_profiles_own() {
 #[cfg(windows)]
 #[test]
 fn moving_an_already_moved_session_is_a_no_op_not_an_error() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{load_session, move_session, save_session, Session};
     let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
     let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
@@ -233,6 +246,7 @@ fn moving_an_already_moved_session_is_a_no_op_not_an_error() {
 #[cfg(windows)]
 #[test]
 fn moving_into_an_existing_destination_overwrites_it_with_the_moved_session() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{load_session, move_session, save_session, Session};
     let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
     let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
@@ -253,6 +267,7 @@ fn moving_into_an_existing_destination_overwrites_it_with_the_moved_session() {
 #[cfg(windows)]
 #[test]
 fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_names_the_source() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::move_session;
     let tag = format!("knowlu/test-{}-{}", std::process::id(), line!());
     let (from, to) = (format!("{tag}/pending"), format!("{tag}/profile_1"));
@@ -268,6 +283,7 @@ fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_name
 #[cfg(windows)]
 #[test]
 fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{save_session, session_target, sign_out, Session};
     let id = format!("test-signout-{}-{}", std::process::id(), line!());
     let target = session_target(&id);
@@ -291,6 +307,7 @@ fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
 #[cfg(windows)]
 #[test]
 fn a_session_too_large_for_the_credential_blob_is_refused_before_anything_is_written() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{save_session, Session};
     let target = format!("knowlu/test-toolarge-{}-{}", std::process::id(), line!());
     let _cleanup = Cleanup(vec![target.clone()]);
@@ -311,6 +328,7 @@ fn a_session_too_large_for_the_credential_blob_is_refused_before_anything_is_wri
 #[cfg(windows)]
 #[test]
 fn a_corrupt_session_blob_reads_back_as_a_fixed_sentence_not_serdes_own_message() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::load_session;
     let target = format!("knowlu/test-corrupt-{}-{}", std::process::id(), line!());
     let _cleanup = Cleanup(vec![target.clone()]);
@@ -341,7 +359,12 @@ fn the_grace_is_seventy_two_hours_and_a_missing_cache_is_never_entitled() {
     for bad in ["past_due", "canceled", "none", "whatever"] {
         assert_eq!(decide(true, Some(&at(bad)), now("2026-09-10T12:00:01Z")), EntitlementState::NotEntitled, "{bad}");
     }
-    // A clock that went backwards is not a licence: an unparsable or future stamp is not entitled.
+    // Fix round 1, item 1: a clock a few minutes fast is not a reason to disentitle someone forever
+    // — each refresh would otherwise write another "future" `checked_at` and the student never
+    // recovers. A future stamp up to an hour ahead is treated as age 0.
+    assert_eq!(decide(true, Some(&at("active")), now("2026-09-10T11:55:00Z")), EntitlementState::Entitled);
+    // …but a clock that is materially wrong is still not a licence: 24 hours ahead stays NotEntitled,
+    // exactly as before this fix.
     assert_eq!(decide(true, Some(&at("active")), now("2026-09-09T12:00:00Z")), EntitlementState::NotEntitled);
 }
 
@@ -373,6 +396,91 @@ fn a_cache_round_trips_through_the_profile_folder() {
     assert_eq!(cache_path(&dir), dir.join("entitlement.json"));
     // A hand-mangled cache is "not entitled", never a panic and never a default that grants access.
     std::fs::write(cache_path(&dir), b"{").unwrap();
-    assert!(load_cache(&dir).is_none());
+    assert!(load_cache(&dir).is_none(), "a corrupt cache file must never parse as Some");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fix round 1, item 5a: a profile with no session credential at all — the ordinary state for a
+/// signed-out or never-signed-in install — must fail the refresh outright and leave no
+/// `entitlement.json` behind. No loopback needed: `valid_access_token_at` refuses before any
+/// network call would be attempted, exactly as `signing_out_a_profile_reports_whether_it_had_a_session`
+/// relies on above.
+#[cfg(windows)]
+#[test]
+fn refresh_entitlement_with_no_session_fails_and_writes_no_cache() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{load_cache, refresh_entitlement};
+    let target = format!("knowlu/test-refresh-nosession-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    assert!(!knowlu::credentials::exists(&target), "nothing must be there to begin with");
+
+    let vault = std::env::temp_dir().join(format!("knowlu-refresh-nosession-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: 'https://example.supabase.co/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    ).unwrap();
+    let data_dir = std::env::temp_dir().join(format!("knowlu-refresh-nosession-data-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let err = refresh_entitlement(&vault, &data_dir);
+    assert!(err.is_err(), "no session credential means no refresh: {err:?}");
+    assert!(load_cache(&data_dir).is_none(), "a failed refresh must write no cache");
+    assert!(!data_dir.join("entitlement.json").exists(), "nothing was written at all");
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Fix round 1, item 5b: a live (loopback) `/entitlement` reply is cached with exactly the four
+/// values it carried — the round trip `refresh_entitlement` exists for. The session already has
+/// plenty of life left, so `valid_access_token_at` never needs to refresh it and the loopback server
+/// only ever has to answer the one `/entitlement` request.
+#[cfg(windows)]
+#[test]
+fn refresh_entitlement_saves_the_cache_from_a_live_reply() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{load_cache, refresh_entitlement, save_session, Session};
+    let target = format!("knowlu/test-refresh-ok-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let s = Session {
+        access_token: "tok".into(),
+        refresh_token: "rt".into(),
+        expires_at: jiff::Timestamp::now().as_second() + 3600,
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a live session for the refresh to find");
+
+    let vault = std::env::temp_dir().join(format!("knowlu-refresh-ok-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    let data_dir = std::env::temp_dir().join(format!("knowlu-refresh-ok-data-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    // Started LAST, immediately before the one call that reaches it: everything above is Credential
+    // Manager and filesystem setup that can be slow under a loaded parallel test run, and the
+    // loopback server's `accept()` carries a fixed 10s deadline that must not have to survive that
+    // setup too — starting it first (as the loop's own doc suggests at a glance) intermittently let
+    // the deadline expire before the client ever connected.
+    let (base, handle) = loopback(vec![(
+        200,
+        r#"{"status":"active","current_period_end":"2026-10-01T00:00:00+00:00","plan":"monthly","checked_at":"2026-09-10T12:00:00.000Z"}"#.to_string(),
+    )]);
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: '{base}/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    ).unwrap();
+
+    let got = refresh_entitlement(&vault, &data_dir);
+    let seen = handle.join().expect("server thread");
+    let c = got.expect("refresh");
+    assert_eq!(c.status, "active");
+    assert!(seen[0].starts_with("GET /functions/v1/entitlement "), "{}", seen[0]);
+    let cached = load_cache(&data_dir).expect("the cache was written");
+    assert_eq!(cached.status, "active");
+    assert_eq!(cached.current_period_end.as_deref(), Some("2026-10-01T00:00:00+00:00"));
+    assert_eq!(cached.plan.as_deref(), Some("monthly"));
+    assert_eq!(cached.checked_at, "2026-09-10T12:00:00.000Z");
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
