@@ -36,13 +36,18 @@ double_confirm_changes = true
 # **Commented out until Task 4 step 1 fills it.** The first command that parses this file is Task 1
 # step 7's `supabase db push`, and four `<P2: …>` placeholders in a block the CLI validates would fail
 # there — at the exact moment P1 is being wired, for a reason that has nothing to do with P1.
-# [auth.email.smtp]
-# host = "<P2: the provider's SMTP host>"
-# port = 587
-# user = "<P2: the provider's SMTP username>"
-# pass = "env(SMTP_PASSWORD)"
-# admin_email = "<P2: EMAIL_FROM>"
-# sender_name = "Knowlu"
+# Filled 2026-09-10 (P2): Resend's SMTP relay; the password is the Resend API key, set as the function
+# secret `SMTP_PASSWORD` and never written here. `onboarding@resend.dev` is Resend's sandbox sender —
+# it delivers only to the account owner's address until `knowlu.com` is verified in Resend, which
+# needs DNS records at Cloudflare (C0); swap `admin_email` to a knowlu.com address then.
+[auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 465
+user = "resend"
+pass = "env(SMTP_PASSWORD)"
+admin_email = "onboarding@resend.dev"
+sender_name = "Knowlu"
 
 # The magic link's mail carries a **six-digit code as well as a link**, because a desktop app cannot
 # receive the link's redirect: `site/signed-in.html` says so, and the wizard asks for the code
