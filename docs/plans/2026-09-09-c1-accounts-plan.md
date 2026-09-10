@@ -6962,6 +6962,8 @@ pub fn paste_calendar_link(kind: String, url: String) -> Value {
 ---
 ### Task 14a: The coursework mapping — the wizard turns a discovered book into a course (R-OB-1)
 
+Discovered 2026-09-10 — step 6 run ahead of the task, H10 (`d81842c`) against Quinn's own accounts through two throwaway Credential Manager entries deleted in the same step: `zybooks` → `UACS100Fall2026` and `HowToUseZyBooks2` (both `ignored: false`, `mapped: false`); `vhl` → course `1623220`, section `2102121` (`mapped: false`); `errors: []`; exit 0. With no targets the command answers the empty shape; with a missing credential it answers an `errors` entry, exit 0 both times. `suggest_course` is written against these codes.
+
 **Precondition: hand-off H10** (the engine's `coursework-discover`) applied on the branch's base.
 **Ask the controller for it at step 6**, where it is first needed — the Rust in this task compiles
 without it, because the spawn is by name at run time — the same way Task 13 step 3 asks for **H9a**.
