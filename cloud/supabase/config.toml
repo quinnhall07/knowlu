@@ -49,7 +49,7 @@ double_confirm_changes = true
 # (`account::verify_email_code`). `{{ .Token }}` is GoTrue's own placeholder for it.
 [auth.email.template.magic_link]
 subject = "Your Knowlu sign-in code"
-content_path = "./templates/magic_link.html"
+content_path = "./supabase/templates/magic_link.html"
 
 # `verify_jwt = false` on every function, and it is not laxity. Each handler verifies the bearer
 # token itself and answers 401 or 402 in OUR shape — the shape `_shared/entitlement.ts` promises C2
