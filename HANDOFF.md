@@ -82,7 +82,9 @@ calendar URLs stay as the offline fallback until C3/C4).
 - **Never `cd` in the controller's shell**: the working directory persists and a `cd` into a worktree
   re-homes the whole session. Use `git -C <path>` and absolute paths.
 - Stop only for an irreversible action, a secret, a spend, a push to a shared branch, or anything
-  touching `quinn-ops`. Everything else: rule, ledger, continue.
+  touching `quinn-ops` (archived). Everything else: rule, ledger, continue. **Standing rule (Quinn,
+  2026-09-09 night): `main` may be pushed without asking when it holds only docs commits** (plans,
+  reports, HANDOFF, CLAUDE.md); a push carrying code — a hand-off, a merge — still needs the go.
 
 ## 3. Sequence
 
@@ -116,7 +118,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 | When | Ask | Context to give him |
 |---|---|---|
 | done | ~~Push `main`~~ — pushed 2026-09-09 night (`ce1f9ee`). ~~Archive `quinn-ops`~~ — archived the same night; 17 worktrees removed. | Left: Delete `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors after two clean slots. |
-| now | **The interim page** | re-register the old runner task from its saved XML (`Register-ScheduledTask -Xml (Get-Content …\quinn-ops-local-runner.xml -Raw) -TaskName quinn-ops-local-runner`) so the old vault keeps producing a page until C1's wizard lands — recommended — or go without. |
+| done | ~~The interim page~~ — Quinn ruled 2026-09-09 night: **no re-registration**; he goes without a daily page until C1's wizard lands. |
 | C0 T4 | **Retire the old updater key** (P4) | the exact PowerShell block in the plan's Task 4 generates the new pair, sets the two secrets, prints only the public key; then `cmdkey /delete:knowlu/updater-key{,-password}` and the OneDrive file + its version history. Old key id `C2EC981122E1D2DF`. |
 | C0 T3 run | **Azure** (P1) | Trusted Signing account + certificate profile; an Entra app registration with a federated credential of **entity type Environment, value `release`** (subject `repo:quinnhall07/knowlu:environment:release`, issuer `https://token.actions.githubusercontent.com`) — **not** the tag pattern the plan first said; role *Trusted Signing Certificate Profile Signer*; then tenant/client/subscription ids, endpoint, account and profile names (none secret). |
 | C0 T3 run | **Cloudflare** (P2, P3) | account, Pages project `knowlu` (direct upload), API token Pages:Edit, account id; `knowlu.com` on Cloudflare DNS → Pages. |
