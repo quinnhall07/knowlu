@@ -413,3 +413,111 @@ pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
     }
     Ok(json!({ "ok": true, "had_session": had_session }))
 }
+
+/// The four keys `config/cloud.yaml` carries — the contract with C2, in this order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudConfig {
+    pub api_base: String,
+    pub anon_key: String,
+    pub session_credential_target: String,
+    pub account_id: String,
+}
+
+/// Read through `pystr` and `serde_yaml_ng`, never by comparing bytes: a vault's files are whatever
+/// Windows made them, and the engine translates line endings on every read for that reason.
+pub fn cloud_config(vault: &std::path::Path) -> Result<CloudConfig, String> {
+    let path = vault.join("config").join("cloud.yaml");
+    let text = knowlu_engine::pystr::read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let cfg = CloudConfig {
+        api_base: s("api_base"),
+        anon_key: s("anon_key"),
+        session_credential_target: s("session_credential_target"),
+        account_id: s("account_id"),
+    };
+    if cfg.api_base.is_empty() || cfg.account_id.is_empty() {
+        return Err(format!("{}: api_base and account_id are required", path.display()));
+    }
+    Ok(cfg)
+}
+
+/// `GET /entitlement`'s reply, cached verbatim. The four keys are the C2 contract; nothing here adds
+/// a fifth, so a reply this app does not understand still round-trips through the file unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EntitlementCache {
+    pub status: String,
+    pub current_period_end: Option<String>,
+    pub plan: Option<String>,
+    pub checked_at: String,
+}
+
+/// Spec §5.1. Seventy-two hours, so a weekend of bad wifi never blanks today's page.
+pub const GRACE: std::time::Duration = std::time::Duration::from_secs(72 * 60 * 60);
+
+/// **A file beside `settings.json`, not a field in it.** `state::Settings` has no `#[serde(default)]`
+/// on any field and `Settings::load` falls back to defaults on a parse failure, so adding a field
+/// would silently reset a user's backup folder and autostart choice on their first launch after an
+/// update. `onboarding::offer_marker` already makes this argument, and this follows its precedent.
+pub fn cache_path(data_dir: &std::path::Path) -> std::path::PathBuf { data_dir.join("entitlement.json") }
+
+pub fn load_cache(data_dir: &std::path::Path) -> Option<EntitlementCache> {
+    let text = std::fs::read_to_string(cache_path(data_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<(), String> {
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    let v = serde_json::to_value(c).map_err(|e| e.to_string())?;
+    // `ledger::dumps_value`, like every other JSON this app writes: a file the app wrote and a file
+    // the engine wrote never differ by whitespace.
+    std::fs::write(cache_path(data_dir), knowlu_engine::ledger::dumps_value(&v)).map_err(|e| e.to_string())
+}
+
+/// Three answers, and the difference between the last two is the sentence a user reads in the Runs
+/// view (`no account` vs `no entitlement`) — the same distinction `IcsState` draws between "no feed"
+/// and "unreadable", for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntitlementState {
+    Entitled,
+    NotEntitled,
+    NoAccount,
+}
+
+pub fn decide(cloud_configured: bool, cache: Option<&EntitlementCache>, now: jiff::Timestamp) -> EntitlementState {
+    if !cloud_configured { return EntitlementState::NoAccount; }
+    let Some(c) = cache else { return EntitlementState::NotEntitled };
+    if c.status != "active" && c.status != "trialing" { return EntitlementState::NotEntitled; }
+    let Ok(checked) = c.checked_at.parse::<jiff::Timestamp>() else { return EntitlementState::NotEntitled };
+    // A stamp in the future is a clock that moved, not a licence.
+    let age = now.as_second() - checked.as_second();
+    if age < 0 || age > GRACE.as_secs() as i64 { return EntitlementState::NotEntitled; }
+    EntitlementState::Entitled
+}
+
+pub fn fetch_entitlement_at(api_base: &str, access_token: &str) -> Result<EntitlementCache, String> {
+    check_api_base(api_base)?;
+    let mut res = agent()
+        .get(&format!("{}/entitlement", api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {access_token}"))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let status = res.status().as_u16();
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
+    if !(200..300).contains(&status) {
+        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        return Err(provider_error(status, &v));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("the entitlement reply could not be read ({e})"))
+}
+
+/// One refresh: token, call, cache. Every failure leaves the previous cache exactly where it was —
+/// which is what makes the grace a grace and not a countdown that a bad network can restart.
+pub fn refresh_entitlement(vault: &std::path::Path, data_dir: &std::path::Path) -> Result<EntitlementCache, String> {
+    let cfg = cloud_config(vault)?;
+    let auth = auth_base(&cfg.api_base)?;
+    let token = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())?;
+    let c = fetch_entitlement_at(&cfg.api_base, &token)?;
+    save_cache(data_dir, &c)?;
+    Ok(c)
+}

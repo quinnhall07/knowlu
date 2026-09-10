@@ -234,6 +234,54 @@ pub fn judge_state(cs: &ConsoleState) -> JudgeState {
     judge_state_in(&root, cs)
 }
 
+/// Is this install allowed to run a cloud step? Reads the vault's own `config/cloud.yaml` and the
+/// profile's cached entitlement, and decides with `account::decide` — which owns the 72-hour grace so
+/// that a later cloud step (C2's `/judge/*`, `/ingest/*`, `/events`) asks the same question in one
+/// place rather than four.
+pub fn entitlement_state(cs: &ConsoleState) -> crate::account::EntitlementState {
+    let configured = crate::account::cloud_config(&cs.vault).is_ok();
+    crate::account::decide(configured, crate::account::load_cache(&cs.data_dir).as_ref(), jiff::Timestamp::now())
+}
+
+/// How this slot runs `judge` — or does not. **Three states, and the order between them matters**
+/// (agreed with C2, 2026-09-09):
+///
+/// 1. **Entitlement outranks everything.** Past the 72-hour grace the step is a named skip, whatever
+///    is installed locally, because from C2 on `judge` *is* a cloud call.
+/// 2. **A vault with `config/cloud.yaml` runs `judge`, full stop.** No `--runtime`, no `--model`, and
+///    nothing about the account on the command line: the engine reads `config/cloud.yaml` itself and
+///    decides everything else, and it still always exits 0. A runtime-based skip here would leave
+///    C2's whole judgment service inert on every machine that never installed llama.cpp.
+/// 3. **Only a vault with no `config/cloud.yaml`** — a pre-C1 install, until Task 18's overlay adopts
+///    it — falls through to the local runtime and model, which is exactly plan 3a's behaviour and
+///    leaves in C4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JudgePlan {
+    /// `judge --vault <v> --via local-runner --log-dir <d>`. The engine reads the account out of the
+    /// vault; the only thing it cannot know is where this profile's judgment logs go, and **judgment
+    /// logs never enter the vault** (`CLAUDE.md`), so `--log-dir` is in this arm as well as the local
+    /// one (R-X-4).
+    Cloud { log_dir: PathBuf },
+    /// The local runtime and model this profile installed (plan 3a; removed in C4).
+    Local(JudgeArgs),
+    /// Not this slot, and why. A named step with exit code **0** — never a failure.
+    Skip(&'static str),
+}
+
+pub fn judge_plan(cs: &ConsoleState) -> JudgePlan {
+    match entitlement_state(cs) {
+        crate::account::EntitlementState::NotEntitled => JudgePlan::Skip("judge (skipped: no entitlement)"),
+        // The same directory the local arm uses — `inference::judgments_dir(&cs.data_dir)`, which is
+        // `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments`. C4 removes the runtime, not this folder.
+        crate::account::EntitlementState::Entitled => JudgePlan::Cloud { log_dir: crate::inference::judgments_dir(&cs.data_dir) },
+        crate::account::EntitlementState::NoAccount => match judge_state(cs) {
+            JudgeState::Ready(a) => JudgePlan::Local(a),
+            JudgeState::NoRuntime => JudgePlan::Skip("judge (skipped: no runtime)"),
+            JudgeState::NoModel => JudgePlan::Skip("judge (skipped: no model)"),
+        },
+    }
+}
+
 /// coursework → **ingest** → **judge** → rank, as child processes of the sibling engine exe.
 /// `ingest` is included only when the vault has a feed; `judge` only when a runtime and a model are
 /// both installed, which is what `judge_state` decides.
@@ -243,19 +291,30 @@ pub fn judge_state(cs: &ConsoleState) -> JudgeState {
 /// enrichment would be a slot late, forever.
 ///
 /// Never build; never write to the vault directly.
-pub fn slot_argv(vault: &Path, exe: &Path, judge: Option<&JudgeArgs>) -> Vec<(PathBuf, Vec<String>)> {
+pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan) -> Vec<(PathBuf, Vec<String>)> {
     let v = vault.to_string_lossy().to_string();
     let mut steps = vec![(exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
     if has_ics_url(vault) {
         steps.push((exe.to_path_buf(), vec!["ingest".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
     }
-    if let Some(j) = judge {
-        steps.push((exe.to_path_buf(), vec![
-            "judge".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
-            "--runtime".into(), j.runtime.to_string_lossy().into_owned(),
-            "--model".into(), j.model.to_string_lossy().into_owned(),
-            "--log-dir".into(), j.log_dir.to_string_lossy().into_owned(),
-        ]));
+    match judge {
+        JudgePlan::Cloud { log_dir } => {
+            // The vault and the log directory, and nothing else: `config/cloud.yaml` is in the vault,
+            // and an account id on a command line is an account id in a process list.
+            steps.push((exe.to_path_buf(), vec![
+                "judge".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
+                "--log-dir".into(), log_dir.to_string_lossy().into_owned(),
+            ]));
+        }
+        JudgePlan::Local(j) => {
+            steps.push((exe.to_path_buf(), vec![
+                "judge".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
+                "--runtime".into(), j.runtime.to_string_lossy().into_owned(),
+                "--model".into(), j.model.to_string_lossy().into_owned(),
+                "--log-dir".into(), j.log_dir.to_string_lossy().into_owned(),
+            ]));
+        }
+        JudgePlan::Skip(_) => {}
     }
     steps.push((exe.to_path_buf(), vec!["rank".into(), "--vault".into(), v, "--runner".into(), "local".into()]));
     steps
@@ -482,23 +541,16 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         IcsState::NoUrl => steps.push(("ingest (skipped: no ics_url)".to_string(), 0)),
         IcsState::Unreadable => steps.push(("ingest (skipped: config unreadable)".to_string(), 0)),
     }
-    // The same rule for the judge (Knowlu spec §5.3, decision 12): a machine with no runtime and no
-    // model runs everything else and says which half is missing. NEVER a non-zero code — that would
-    // set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a day
-    // for a friend who has simply not downloaded a model.
-    let judge = judge_state(cs);
-    match &judge {
-        JudgeState::Ready(_) => {}
-        JudgeState::NoRuntime => steps.push(("judge (skipped: no runtime)".to_string(), 0)),
-        JudgeState::NoModel => steps.push(("judge (skipped: no model)".to_string(), 0)),
+    // Every arm records a step with exit code **0** and a sentence — never a non-zero code, which
+    // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a
+    // day for someone who has simply not paid, or not connected.
+    let judge = judge_plan(cs);
+    if let JudgePlan::Skip(note) = &judge {
+        steps.push(((*note).to_string(), 0));
     }
-    let judge_args = match &judge {
-        JudgeState::Ready(a) => Some(a),
-        _ => None,
-    };
     match engine_exe() {
         Ok(exe) => {
-            for (i, (e, args)) in slot_argv(&cs.vault, &exe, judge_args).into_iter().enumerate() {
+            for (i, (e, args)) in slot_argv(&cs.vault, &exe, &judge).into_iter().enumerate() {
                 let log = log_dir(cs).join(format!("slot-{}-{}-{}.txt", started.replace(':', ""), i, args[0]));
                 let code = run_child(&e, &args, &log, CHILD_TIMEOUT);
                 if code != 0 {
@@ -672,6 +724,15 @@ pub fn spawn(app: AppHandle) {
                     .unwrap_or(true);
                 let last_bad = lock(&sch.last).as_ref().map(|l| l.engine_failed()).unwrap_or(false);
                 tray::set_state(&house, if warn || last_bad { TrayState::Warn } else { TrayState::Ok });
+            }
+            // Spec §5.1: at launch and every six hours. On its own thread for the reason the update
+            // check is (R-P4a-24): one HTTPS round trip on a captive-portal wifi must not hold the
+            // debounced sync, the backup, the log prune and the tray colour behind it. A failure is
+            // silence — the previous cache stands, and the grace is what it is for.
+            if n == 1 || n % 2160 == 0 {
+                let vault = cs.vault.clone();
+                let data = cs.data_dir.clone();
+                std::thread::spawn(move || { let _ = crate::account::refresh_entitlement(&vault, &data); });
             }
             // Plan 4a Task 8: once a day while resident, and once at launch (n == 1) — Knowlu
             // spec §6. A failure is one recorded line and nothing else: until the site exists the

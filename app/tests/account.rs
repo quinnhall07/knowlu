@@ -318,3 +318,61 @@ fn a_corrupt_session_blob_reads_back_as_a_fixed_sentence_not_serdes_own_message(
     let err = load_session(&target).unwrap_err();
     assert_eq!(err, "the stored session is unreadable; sign in again");
 }
+
+#[test]
+fn the_grace_is_seventy_two_hours_and_a_missing_cache_is_never_entitled() {
+    use knowlu::account::{decide, EntitlementCache, EntitlementState};
+    let at = |s: &str| EntitlementCache {
+        status: s.to_string(),
+        current_period_end: None,
+        plan: Some("monthly".into()),
+        checked_at: "2026-09-10T12:00:00.000Z".to_string(),
+    };
+    let now = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
+    // No account at all — a vault with no config/cloud.yaml. Not a failure: a named skipped step.
+    assert_eq!(decide(false, Some(&at("active")), now("2026-09-10T12:00:00Z")), EntitlementState::NoAccount);
+    // Never checked. The page still ranks; the cloud steps stand down.
+    assert_eq!(decide(true, None, now("2026-09-10T12:00:00Z")), EntitlementState::NotEntitled);
+    assert_eq!(decide(true, Some(&at("active")), now("2026-09-10T12:00:01Z")), EntitlementState::Entitled);
+    assert_eq!(decide(true, Some(&at("trialing")), now("2026-09-10T12:00:01Z")), EntitlementState::Entitled);
+    // Spec §5.1: a dead hotel wifi must never blank today's page. Seventy-two hours, to the second.
+    assert_eq!(decide(true, Some(&at("active")), now("2026-09-13T11:59:59Z")), EntitlementState::Entitled);
+    assert_eq!(decide(true, Some(&at("active")), now("2026-09-13T12:00:01Z")), EntitlementState::NotEntitled);
+    for bad in ["past_due", "canceled", "none", "whatever"] {
+        assert_eq!(decide(true, Some(&at(bad)), now("2026-09-10T12:00:01Z")), EntitlementState::NotEntitled, "{bad}");
+    }
+    // A clock that went backwards is not a licence: an unparsable or future stamp is not entitled.
+    assert_eq!(decide(true, Some(&at("active")), now("2026-09-09T12:00:00Z")), EntitlementState::NotEntitled);
+}
+
+#[test]
+fn fetching_the_entitlement_parses_the_four_keys_and_sends_the_bearer_token() {
+    use knowlu::account::fetch_entitlement_at;
+    let body = r#"{"status":"trialing","current_period_end":"2026-09-17T00:00:00+00:00","plan":"monthly","checked_at":"2026-09-10T12:00:00.000Z"}"#;
+    let (base, handle) = loopback(vec![(200, body.to_string())]);
+    let got = fetch_entitlement_at(&format!("{base}/functions/v1"), "the-access-token");
+    let seen = handle.join().expect("server thread");
+    let c = got.expect("entitlement");
+    assert_eq!(c.status, "trialing");
+    assert_eq!(c.plan.as_deref(), Some("monthly"));
+    assert_eq!(c.checked_at, "2026-09-10T12:00:00.000Z");
+    assert!(seen[0].starts_with("GET /functions/v1/entitlement "), "{}", seen[0]);
+    assert!(seen[0].to_lowercase().contains("authorization: bearer the-access-token"), "{}", seen[0]);
+}
+
+#[test]
+fn a_cache_round_trips_through_the_profile_folder() {
+    use knowlu::account::{cache_path, load_cache, save_cache, EntitlementCache};
+    let dir = std::env::temp_dir().join(format!("knowlu-ent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(load_cache(&dir).is_none(), "a fresh profile has no cache");
+    let c = EntitlementCache { status: "active".into(), current_period_end: None, plan: None, checked_at: "2026-09-10T12:00:00.000Z".into() };
+    save_cache(&dir, &c).expect("save");
+    assert_eq!(load_cache(&dir).as_ref(), Some(&c));
+    assert_eq!(cache_path(&dir), dir.join("entitlement.json"));
+    // A hand-mangled cache is "not entitled", never a panic and never a default that grants access.
+    std::fs::write(cache_path(&dir), b"{").unwrap();
+    assert!(load_cache(&dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
