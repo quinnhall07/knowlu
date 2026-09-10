@@ -3484,11 +3484,12 @@ alter table public.entitlements add column stripe_subscription_id text;
 alter table public.entitlements add column paused boolean not null default false;
 alter table public.entitlements add column started_at timestamptz;
 
--- The daily tick. `app.billing_jobs_url` and `app.billing_jobs_token` are set once, by Quinn:
---   alter database postgres set app.billing_jobs_url   = 'https://<ref>.supabase.co/functions/v1/billing-jobs';
---   alter database postgres set app.billing_jobs_token = '<a random token he generates>';
--- A dedicated job token, deliberately, and not the service-role key: a database's configuration is
--- readable by anything with the database, and the worst a job token can do is run this one function.
+-- The daily tick. As written here it reads `app.billing_jobs_url` and `app.billing_jobs_token` from
+-- database settings; **000600 and 000700 replace this job's command with one that reads Vault**
+-- (R-C1-36, R-C1-38), because the `postgres` role cannot `alter database ... set` on Supabase — see
+-- those migrations for the two `vault.create_secret` calls Quinn runs once per project.
+-- A dedicated job token, deliberately, and not the service-role key: the worst a job token can do is
+-- run this one function.
 -- pg_cron is **not relocatable** and Supabase installs it into its own fixed schema, so a
 -- `with schema` clause here fails the migration outright. pg_net is relocatable and lives in
 -- `extensions`, which is where Supabase puts it.
@@ -3630,7 +3631,22 @@ curl.exe -i -X POST "https://<ref>.supabase.co/functions/v1/billing-jobs"
 
 Expected: `Applying migration 20260910000200_billing_jobs.sql...`, then `HTTP/2 401` and `{"error":"not a job caller"}` — the job token is not on the wire, so the refusal is the proof.
 
-- [ ] **Step 9: Ask Quinn to set the two database settings**, with the exact block from the migration's comment and a token he generates the same way as `SOURCES_ENC_KEY`. Then, in the SQL editor: `select jobname, schedule from cron.job;` → one row, `knowlu-billing-jobs`, `17 7 * * *`.
+- [ ] **Step 9 (amended by R-C1-36 and R-C1-38 — `alter database … set` is refused to the `postgres` role on Supabase): ask Quinn to put the job token into Vault**, the same random string they set as the function secret `BILLING_JOBS_TOKEN` (generated the way `SOURCES_ENC_KEY` is), in the project's SQL editor:
+
+```sql
+select vault.create_secret('https://<ref>.supabase.co/functions/v1/billing-jobs', 'billing_jobs_url');
+select vault.create_secret('<the token>', 'billing_jobs_token');
+```
+
+  (Rotation is `vault.update_secret((select id from vault.secrets where name = 'billing_jobs_token'), '<new>')` plus `supabase secrets set` in the same sitting.) Then prove the tick, not just its row:
+
+```sql
+select jobname, schedule, command from cron.job where jobname = 'knowlu-billing-jobs';
+select status, return_message, start_time from cron.job_run_details where jobname = 'knowlu-billing-jobs' order by start_time desc limit 3;
+select status_code, error_msg from net._http_response order by created desc limit 3;
+```
+
+  → one job row whose command reads `vault.decrypted_secrets` and carries `raise exception` and `timeout_milliseconds := 60000`; after the next 07:17 UTC tick, a `succeeded` run and a `200` response. With a secret missing, the run is `failed` with `… billing_jobs_url or billing_jobs_token is missing` in `return_message` — proven on staging 2026-09-10.
 
 - [ ] **Step 10: Commit.**
 
