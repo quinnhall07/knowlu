@@ -81,6 +81,13 @@ fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
     let v = root.join("Vault");
     let mut p = plan_for(&v);
     p.campus = "university-of-alabama".into();
+    // …carrying a seeded course (R-OB-2). A `courses/` note is note-folder content every pass
+    // walks, so it has to be as quiet on a fresh vault's first run as the first task is.
+    p.courses = vec![knowlu::scaffold::CourseSeed {
+        code: "UACS100Fall2026".into(),
+        name: "CS 100 Intro to Computer Science".into(),
+        slug: "cs-100".into(),
+    }];
     create_vault(&v, &p).unwrap();
 
     let no_net = |_: &str| -> Result<String, String> { Err("no network in tests".to_string()) };
@@ -610,4 +617,125 @@ fn a_duplicate_zybook_key_is_refused_rather_than_written_unparsable() {
     let err = create_vault(&v, &p).unwrap_err();
     assert!(err.contains("would not parse"), "{err}");
     assert!(!v.exists(), "no half-made vault is left behind");
+}
+
+/// R-OB-2: one note per enrolled course, in the shape `judge::Heuristics::load` reads — the stem is
+/// the slug, the frontmatter carries `title` and `slug`, and the `## Grade weights` heading is there
+/// and empty, because the weights are the student's to write and the model's to read.
+#[test]
+fn every_enrolled_course_becomes_a_note_the_engine_can_find() {
+    use knowlu::scaffold::{create_vault, CourseSeed};
+    let root = std::env::temp_dir().join(format!("knowlu-courses-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);          // the helper the other scaffold tests already use
+    p.courses = vec![
+        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+    ];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    for (slug, title) in [("cs-100", "CS 100 Intro to Computer Science"), ("gn-103", "GN 103 German")] {
+        let note = dest.join("courses").join(format!("{slug}.md"));
+        let text = knowlu_engine::pystr::read_text(&note).unwrap_or_else(|e| panic!("{}: {e}", note.display()));
+        assert!(text.contains(&format!("title: {title}")), "{text}");
+        assert!(text.contains(&format!("slug: {slug}")), "{text}");
+        assert!(text.contains("## Grade weights"), "{text}");
+        // Every note has an opaque id, like every other note this app writes.
+        assert!(text.contains("id: course_"), "{text}");
+    }
+    // …and the engine agrees it knows them: this is the predicate tier-1 judgment uses.
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    assert!(h.knows_course("cs-100") && h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **R-C1-48: two fragments per captured course, pointing at the same slug.** `course_map` is matched
+/// literally — a case-sensitive substring of the UID, then a case-insensitively bounded run in the
+/// SUMMARY (`ingest::contains_bounded`) — and the UA feed's summaries do not lead with a `CS 100`
+/// code the way its UIDs carry the LMS's own course id. So a captured course contributes **both**
+/// spellings: the id the feed pins by, and the human code a summary might say. A fragment the feed
+/// never carries simply never matches; a fragment nobody wrote is 28 tasks with no course.
+#[test]
+fn a_captured_course_maps_by_its_lms_id_and_by_the_code_a_summary_spells() {
+    use knowlu::scaffold::CourseSeed;
+    use knowlu_engine::ingest::match_course_fields;
+    let dest = temp("captured-courses").join("Fall 2026");
+    let mut p = plan_for(&dest);
+    p.courses = vec![
+        CourseSeed { code: "UACS100Fall2026".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        // The lab section of the same course: a second LMS id under the SAME slug. Both ids become
+        // fragments, and the note is written once — a student enrolled in a lecture and its lab must
+        // not be a wizard that refuses to make a vault.
+        CourseSeed { code: "UACS100LFall2026".into(), name: "CS 100 Lab".into(), slug: "cs-100".into() },
+        // …and a course whose id carries no readable code at all: the human half comes off the name.
+        CourseSeed { code: "202610-GN-103-001".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+    ];
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+    for line in [
+        "  'UACS100Fall2026': 'cs-100'\n",
+        "  'UACS100LFall2026': 'cs-100'\n",
+        "  'CS 100': 'cs-100'\n",
+        "  '202610-GN-103-001': 'gn-103'\n",
+        "  'GN 103': 'gn-103'\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in {text}");
+    }
+    // Two courses whose human code is the same spelling write ONE key: a duplicate key is a config
+    // `serde_yaml_ng` refuses whole, which is every book and section "not in config; skipped".
+    assert_eq!(text.matches("'CS 100':").count(), 1, "{text}");
+
+    // …and a mapping the student confirmed on the panel is the same key, still written once — first
+    // wins, so what they typed decides the slug and the capture never overwrites it.
+    p.course_map = vec![("CS 100".into(), "cs-100".into())];
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+    assert_eq!(text.matches("'CS 100':").count(), 1, "{text}");
+
+    create_vault(&dest, &p).expect("create");
+    assert!(dest.join("courses").join("cs-100.md").is_file());
+    assert!(dest.join("courses").join("gn-103.md").is_file());
+    assert_eq!(std::fs::read_dir(dest.join("courses")).unwrap().count(), 2, "one note per slug");
+
+    // The proof is the engine's own matcher, over the two things a feed actually carries.
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    assert_eq!(match_course_fields("UACS100Fall2026-abc-123", "Homework 4", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("UACS100LFall2026-lab-1", "Lab 2", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("nothing-in-here", "CS 100 Homework 4 is due", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("nothing-in-here", "GN 103 Hausaufgaben", &h.course_map).as_deref(), Some("gn-103"));
+    // …and nothing it does not name: `STATISTICS-100` is not `CS 100`.
+    assert_eq!(match_course_fields("nothing-in-here", "STATISTICS 100 reading", &h.course_map), None);
+    let _ = std::fs::remove_dir_all(dest.parent().expect("the scratch folder"));
+}
+
+/// **Step 4a: every `course:` a coursework mapping names must be a slug the vault knows** — a seeded
+/// course note, or a `course_map` target. Two panels fill these, and a slug that matches nothing is a
+/// task filed under a course that does not exist.
+#[test]
+fn every_mapped_course_is_a_slug_the_vault_knows() {
+    use knowlu::scaffold::{create_vault, BookMapping, CourseSeed, SectionMapping};
+    let root = std::env::temp_dir().join(format!("knowlu-mapped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);
+    p.zybooks = true;
+    p.vhl = true;
+    p.zybooks_courses = vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }];
+    p.vhl_sections = vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103".into() }];
+    p.courses = vec![CourseSeed { code: "CS 100".into(), name: "CS 100 Intro".into(), slug: "cs-100".into() }];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    for slug in p.zybooks_courses.iter().map(|b| &b.course).chain(p.vhl_sections.iter().map(|v| &v.course)) {
+        assert!(h.knows_course(slug), "{slug} is mapped and the vault does not know it");
+    }
+    // …and `gn-103` is known by the map alone, with no note behind it — which is the whole reason
+    // `knows_course` tests both. A student who has a VHL section and no Blackboard course for it is
+    // not a broken vault.
+    assert!(!dest.join("courses").join("gn-103.md").exists());
+    assert!(h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
 }

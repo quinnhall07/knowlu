@@ -163,6 +163,82 @@ pub struct CourseSeed {
     pub slug: String,
 }
 
+/// `CS 100 Intro to Computer Science` → `CS 100`: the course code a **display name** leads with, when
+/// it leads with one. This is the half of R-C1-48's pair that a feed's `SUMMARY` can carry, and the
+/// shape is the only one this product has met — two to four capitals, then three digits, which is
+/// exactly how `lms_link::summarise` counts the courses in a feed. `None` for a name without one, and
+/// never a guess: an invented fragment matches somebody else's course.
+fn code_in_name(name: &str) -> Option<String> {
+    let mut words = name.split_whitespace();
+    let (a, b) = (words.next()?, words.next()?);
+    let alpha = a.len() >= 2 && a.len() <= 4 && a.chars().all(|c| c.is_ascii_uppercase());
+    let digits = b.len() == 3 && b.chars().all(|c| c.is_ascii_digit());
+    (alpha && digits).then(|| format!("{a} {b}"))
+}
+
+/// **R-C1-48: the two `course_map` fragments one enrolled course contributes**, both pointing at its
+/// own slug.
+///
+/// `ingest::match_course_fields` matches a fragment literally — a case-sensitive substring of the
+/// event's UID first, then a case-insensitive run in its SUMMARY bounded by non-alphanumerics — and
+/// the two carry different spellings: the UA feed's UIDs hold the LMS's own course id
+/// (`UACS100Fall2026`) while its summaries, when they name the course at all, say `CS 100`. So both
+/// are written. A fragment the feed never carries simply never matches; a fragment nobody wrote is
+/// 28 tasks with no course, which is the failure R-OB-2 exists to remove.
+///
+/// Never invented: a course whose id and whose name both carry no readable code contributes its id
+/// alone.
+fn course_fragments(c: &CourseSeed) -> Vec<String> {
+    let code = c.code.trim();
+    let mut out = vec![code.to_string()];
+    if let Some(human) = suggest_course(code).or_else(|| code_in_name(&c.name)) {
+        out.push(human);
+    }
+    out.retain(|f| !f.is_empty());
+    out.dedup();
+    out
+}
+
+/// The enrolled courses a vault is seeded a note for: **one per slug, first wins**. Two enrolments
+/// can share a course — a lecture and its lab section are both `CS 100` — and `courses/cs-100.md` is
+/// one file, so a second `write::create` for it would be `already exists` and the whole vault would
+/// refuse to be made over something that is not a student's mistake. Their fragments are kept
+/// regardless (`course_map_lines` reads `plan.courses` whole): the lab section's own LMS id should
+/// still point at the course.
+fn seeded_courses(plan: &VaultPlan) -> Vec<&CourseSeed> {
+    let mut seen = std::collections::HashSet::new();
+    plan.courses
+        .iter()
+        .filter(|c| !c.slug.trim().is_empty())
+        .filter(|c| seen.insert(c.slug.clone()))
+        .collect()
+}
+
+/// Every `course_map` line the vault will carry: the mappings the student confirmed on the coursework
+/// panel, then the fragments each enrolled course contributes (R-C1-48) — **first wins by key**.
+///
+/// First wins twice over. A duplicate key is a `config/ingest.yaml` that `serde_yaml_ng` refuses
+/// whole, which is every book and section "not in config; skipped" (review round 1, I1). And where
+/// the two panels name the same course, what the student typed outranks what the window guessed.
+fn course_map_lines(plan: &VaultPlan) -> Vec<(String, String)> {
+    let derived = plan
+        .courses
+        .iter()
+        .filter(|c| !c.slug.trim().is_empty())
+        .flat_map(|c| course_fragments(c).into_iter().map(|f| (f, c.slug.clone())));
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (fragment, slug) in plan.course_map.iter().cloned().chain(derived) {
+        if fragment.trim().is_empty() || slug.trim().is_empty() {
+            continue;
+        }
+        if seen.insert(fragment.clone()) {
+            out.push((fragment, slug));
+        }
+    }
+    out
+}
+
 /// **Every** wizard-supplied value goes through this before it reaches a YAML file, so a typed
 /// value can never change the file's SHAPE (review round 1, Important 1).
 ///
@@ -205,11 +281,13 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     let mut s = String::new();
     if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
-    if p.course_map.is_empty() {
+    // R-OB-2 and R-C1-48: what the student confirmed, plus two fragments per enrolled course.
+    let course_map = course_map_lines(p);
+    if course_map.is_empty() {
         s.push_str("course_map: {}\n");
     } else {
         s.push_str("course_map:\n");
-        for (fragment, slug) in &p.course_map {
+        for (fragment, slug) in &course_map {
             s.push_str(&format!("  {}: {}\n", yaml_scalar("course code", fragment)?, yaml_scalar("course slug", slug)?));
         }
     }
@@ -409,7 +487,7 @@ it off when you have had a look — Today will fill up as your courses do.";
 /// the staging folder before the rename, so a second call — against a vault that already holds
 /// `archive/_migrated.md` — could only ever be an error arriving after the vault is already on
 /// disk, which is the stranded vault this design removes.
-fn seed_writes(vault: &Path, _plan: &VaultPlan) -> Result<(), String> {
+fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     let mut journal = Journal::new(vault);
 
     // Decision 5: `passes::detect_external` refuses to attribute edits unless the journal holds a
@@ -439,5 +517,24 @@ fn seed_writes(vault: &Path, _plan: &VaultPlan) -> Result<(), String> {
     let text = format!("---\n{}---\n\n{FIRST_TASK_BODY}\n", safe_dump_block(&front));
     write::create(vault, "tasks/get-to-know-knowlu.md", &text, &crate::commands::console_ctx(), &mut journal, None)
         .map_err(|e| e.to_string())?;
+
+    // R-OB-2: one note per enrolled course, so tier-1 judgment can place a task and the model has a
+    // slug it is allowed to use (`judge::Heuristics::knows_course` tests exactly this).
+    // `## Grade weights` is present and empty on purpose: the weights are the student's to write and
+    // the judgment's to read, and an invented weight would be a number nobody chose.
+    for c in seeded_courses(plan) {
+        let front = Node::map(vec![
+            ("title", Node::text(&c.name)),
+            ("slug", Node::text(&c.slug)),
+            ("code", Node::text(&c.code)),
+            ("status", Node::text("active")),
+        ]);
+        let body = format!(
+            "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
+            safe_dump_block(&front)
+        );
+        write::create(vault, &format!("courses/{}.md", c.slug), &body, &crate::commands::console_ctx(), &mut journal, None)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }

@@ -393,3 +393,80 @@ fn the_exit_pass_takes_this_processs_own_sessions_and_nothing_else() {
     assert!(stranger.exists());
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// Both LMSs answer with a list of objects; the two shapes differ only in field names, and neither is
+/// ours to choose. Blackboard Ultra: `/learn/api/public/v1/users/me/courses` → `{"results":[{"courseId":
+/// "UACS100Fall2026","course":{"name":"CS 100 Intro"}}]}`. Canvas: `/api/v1/courses` →
+/// `[{"course_code":"CS100","name":"Intro to CS"}]`. One reader, both shapes, and anything else is an
+/// empty list rather than a panic.
+#[test]
+fn an_enrolled_course_list_is_read_from_either_lms_shape() {
+    use knowlu::lms_link::courses_from_json;
+    let blackboard = r#"{"results":[{"courseId":"UACS100Fall2026","course":{"name":"CS 100 Intro to Computer Science"}},{"courseId":"UAGN103Fall2026","course":{"name":"GN 103 German"}}]}"#;
+    let got = courses_from_json(blackboard);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].code, "UACS100Fall2026");
+    assert_eq!(got[0].name, "CS 100 Intro to Computer Science");
+    // The slug is what a task's `course:` field and the note's filename both carry, and it comes from
+    // the SUGGESTED code, not from the vendor's key — `ua-cs-100-fall-2026` would be nobody's idea of
+    // a course.
+    assert_eq!(got[0].slug, "cs-100");
+    let canvas = r#"[{"course_code":"CS100","name":"Intro to CS","id":42}]"#;
+    let got = courses_from_json(canvas);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].code, "CS100");
+    assert_eq!(got[0].slug, "cs-100");
+    // A course with no code we can read keeps its name and slugs from that, rather than being dropped.
+    let odd = r#"[{"name":"Independent Study"}]"#;
+    assert_eq!(courses_from_json(odd)[0].slug, "independent-study");
+    for junk in ["", "null", "{}", "not json", r#"{"results":"nope"}"#] {
+        assert!(courses_from_json(junk).is_empty(), "{junk}");
+    }
+}
+
+/// **The endpoint Task 13's second answer recorded, verbatim** — `?expand=course` included, because
+/// the `course` object, and so every course's `name`, is in the body only when it is asked for.
+///
+/// And it is read the way Task 14 reads the feed: the window's own cookies, handed to one request
+/// this app makes. **The capture never navigates the window** — the student may still be part-way
+/// through Duo when the panel asks, and taking their page away mid-sign-in would lose the session
+/// this whole flow is built around. Asserted against the source because there is no way to drive a
+/// `#[tauri::command]` without a live WebView2; the reader below is the half that can be driven.
+#[test]
+fn the_course_list_is_read_from_the_endpoint_the_spike_recorded_and_never_by_navigating() {
+    let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
+    assert!(
+        src.contains("https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses?expand=course"),
+        "the course-list endpoint must be the one the spike ran, ?expand=course included"
+    );
+    let at = src.find("pub fn capture_courses").expect("capture_courses");
+    let tail = &src[at..];
+    let body = &tail[..tail.find("\n}\n").map(|e| e + 2).unwrap_or(tail.len())];
+    assert!(!body.contains("navigate"), "the course capture must never navigate the sign-in window:\n{body}");
+    assert!(body.contains("cookie_url("), "the jar rule is Task 14's, not a second one:\n{body}");
+    // The cookies live on this function's stack: never written, never logged, never formatted into
+    // anything that leaves it. The envelope carries courses and a flag, and nothing else.
+    for leak in ["println!", "eprintln!", "log::", "write_text", "store_source"] {
+        assert!(!body.contains(leak), "{leak} in the course capture:\n{body}");
+    }
+}
+
+/// **What `capture_courses` hands the page is what the wizard plan takes back.** The panel sends the
+/// captured list straight into `create_vault`'s plan as `courses:`, so `Course` and
+/// `scaffold::CourseSeed` are one shape in two crates' worth of code — three fields, the same names,
+/// and nothing else riding along. A fourth field here (a cookie, a session, an internal id) would go
+/// out to a page and come back into a vault.
+#[test]
+fn a_captured_course_is_exactly_what_the_wizard_plan_takes_back() {
+    use knowlu::lms_link::courses_from_json;
+    let body = r#"{"results":[{"courseId":"UACS100Fall2026","courseRoleId":"Student","course":{"name":"CS 100 Intro to Computer Science","externalId":"ignored","ultraStatus":"Ultra"}}]}"#;
+    let course = courses_from_json(body).remove(0);
+    let v = serde_json::to_value(&course).expect("serialize");
+    let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["code", "name", "slug"], "{v}");
+    let seed: knowlu::scaffold::CourseSeed = serde_json::from_value(v).expect("the wizard plan's own struct");
+    assert_eq!(seed.code, "UACS100Fall2026");
+    assert_eq!(seed.name, "CS 100 Intro to Computer Science");
+    assert_eq!(seed.slug, "cs-100");
+}

@@ -368,6 +368,18 @@ fn capture_failed(error: impl std::fmt::Display) -> Value {
     json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null })
 }
 
+/// **One agent, one shape, for both captures** (the calendar link, and Task 14b's course list).
+/// Thirty seconds global, because a campus behind SSO is slow and a student is watching; no jar of
+/// its own, because the only cookies either capture sends are the ones the window hands it for that
+/// one call. `put_source_at` builds its own on purpose — it talks to our API, not to a campus, and
+/// it reads a status code rather than treating one as an error.
+fn session_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into()
+}
+
 /// **Outcome B — cookie handover** (Task 13's spike, recorded and reviewed). The window is never
 /// navigated: the endpoint below, fetched once with the student's own session cookies, answers 200
 /// with the feed URL as the entire body.
@@ -396,10 +408,7 @@ pub fn capture_calendar_link(app: tauri::AppHandle, campus: String) -> Value {
         Ok(cs) => cs.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "),
         Err(e) => return capture_failed(format!("the sign-in could not be read ({e})")),
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = session_agent();
     let body = agent.get(feed.as_str()).header("cookie", &jar).call()
         .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
         .map_err(|e| e.to_string());
@@ -455,6 +464,128 @@ fn steps_for(campus: &str) -> Option<Vec<String>> {
     capture_steps(campus)
         .map(|steps| steps.iter().map(|u| (*u).to_string()).collect())
         .or_else(|| canvas_steps(campus))
+}
+
+/// One course the student is enrolled in, as the LMS names it and as the vault will.
+///
+/// **The three fields `scaffold::CourseSeed` carries, by the same names.** The panel hands what
+/// `capture_courses` returned straight back as the wizard plan's `courses:`, so these two structs are
+/// one shape; `a_captured_course_is_exactly_what_the_wizard_plan_takes_back` pins the round trip, and
+/// that nothing else rides along on it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Course {
+    /// The LMS's own key — Blackboard's `courseId`, Canvas's `course_code`.
+    pub code: String,
+    /// What the student sees in their LMS.
+    pub name: String,
+    /// `cs-100`. The vault's own name for it: the note's stem, and every task's `course:` field.
+    pub slug: String,
+}
+
+/// Both shapes, one reader (spec §11a R-OB-2). Blackboard Ultra answers
+/// `{"results":[{"courseId":…,"course":{"name":…}}]}` — Task 13's second answer, run against a real
+/// enrolment. **Canvas is unverified**: no Canvas login existed to spike against, so its bare array of
+/// `{"course_code":…,"name":…}` is written from Canvas's documented API and has never been run, exactly
+/// as `canvas_steps` is. **Never panics and never guesses**: a body it does not recognise is an empty
+/// list, and an empty list is what puts the typed-codes fallback on screen.
+pub fn courses_from_json(body: &str) -> Vec<Course> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return Vec::new() };
+    let items: Vec<&serde_json::Value> = match (&v, v.get("results")) {
+        (serde_json::Value::Array(a), _) => a.iter().collect(),
+        (_, Some(serde_json::Value::Array(a))) => a.iter().collect(),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for it in items {
+        let code = it
+            .get("courseId")
+            .or_else(|| it.get("course_code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = it
+            .get("course")
+            .and_then(|c| c.get("name"))
+            .or_else(|| it.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if code.is_empty() && name.is_empty() {
+            continue;
+        }
+        // The slug comes from the SUGGESTED code where there is one — `ua-cs-100-fall-2026` is
+        // nobody's idea of a course — and from the name otherwise.
+        let slug = crate::scaffold::suggest_course(&code)
+            .map(|c| knowlu_engine::ingest::slugify(&c))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| knowlu_engine::ingest::slugify(if name.is_empty() { &code } else { &name }));
+        out.push(Course { code, name, slug });
+    }
+    out
+}
+
+/// The campus's own course endpoint, recorded verbatim by Task 13's second answer: 200, with
+/// `{"results":[…]}` as the body. **`?expand=course` is load-bearing** — without it a membership
+/// carries a `courseId` and no `course` object at all, so every course would arrive nameless.
+///
+/// `None` for a campus nobody has walked, which is what makes the panel ask instead of pretending.
+/// Canvas's endpoint is `/api/v1/courses`, and it is deliberately NOT derived from `CAMPUSES` here
+/// the way `canvas_steps` derives the calendar's: the spike had no Canvas login, and the first Canvas
+/// campus added to `scaffold::CAMPUSES` is the change that adds its row here beside it.
+fn course_list_url(campus: &str) -> Option<&'static str> {
+    match campus {
+        "university-of-alabama" => {
+            Some("https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses?expand=course")
+        }
+        _ => None,
+    }
+}
+
+/// The one answer a course capture that could not read a list gives — the **ruled outcome C, for the
+/// course list only**: an empty list, and the panel showing its typed-codes field. Never an `error`,
+/// because there is nothing here for a student to act on, and never anything to do with the calendar
+/// link, which proves out or fails on its own.
+fn no_courses() -> Value {
+    json!({ "ok": true, "error": Value::Null, "courses": [], "typed": true })
+}
+
+/// The window's second job (Task 13's second go/no-go, answered **GO**), and the same cookie handover
+/// the calendar capture uses: the signed-in window's own cookies, handed to one request this app
+/// makes — **the student's own enrolment, out of the student's own session**.
+///
+/// **The window is never navigated.** The student may still be part-way through Duo when the panel
+/// asks, and taking their page out from under them would lose the session the whole flow depends on.
+///
+/// Every failure is the same quiet answer: a campus nobody has walked, a window that is not open, a
+/// non-2xx, a body this reader does not recognise, and an enrolment of none all end at
+/// [`no_courses`], and the student types their course codes instead.
+#[tauri::command(async)]
+pub fn capture_courses(app: tauri::AppHandle, campus: String) -> Value {
+    let Some(endpoint) = course_list_url(&campus) else { return no_courses() };
+    let Some(w) = app.get_webview_window(WINDOW) else { return no_courses() };
+    // The jar rule is Task 14's, not a second one (R-C1-41, I1): the window's own URL only while it
+    // is on the endpoint's host, and the endpoint's otherwise — one host's live session is never
+    // handed to another. The cookies live on this function's stack: never written, never logged,
+    // never formatted into an error, and gone when it returns.
+    let here = w.url().ok();
+    let Ok(jar_url) = cookie_url(here.as_ref().map(|u| u.as_str()), endpoint).parse::<tauri::Url>() else {
+        return no_courses();
+    };
+    let Ok(cookies) = w.cookies_for_url(jar_url) else { return no_courses() };
+    let jar: String = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
+    let agent = session_agent();
+    let read = agent
+        .get(endpoint)
+        .header("cookie", &jar)
+        .header("accept", "application/json")
+        .call()
+        .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string());
+    let Ok(body) = read else { return no_courses() };
+    let courses = courses_from_json(&body);
+    if courses.is_empty() {
+        return no_courses();
+    }
+    json!({ "ok": true, "error": Value::Null, "courses": courses, "typed": false })
 }
 
 /// **The link is stored twice, and this is the half that is easy to forget** (Interfaces with C2,
