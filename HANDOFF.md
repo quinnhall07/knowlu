@@ -105,8 +105,7 @@ calendar URLs stay as the offline fallback until C3/C4).
    **Every staging step is batched until P1/P2** (ruling R-C1-14): Task 1 steps 7–9, Task 3 step 6,
    Task 4 steps 1/13/14, Task 5 steps 8–9, and their like through Task 9. Rulings R-C1-13…30 are in
    the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
-   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 12 if it has not landed, then 13–18 (the vault location and
-   `config/cloud.yaml`), 13–18 (the sign-in spike, `lms_link`, the three R-OB tasks, device-side telemetry and
+   ledger under `.superpowers/` is git-ignored scratch. **Next:** Task 12 if it has not landed, then 13–18 (the sign-in spike, `lms_link`, the three R-OB tasks, device-side telemetry and
    reports, the wizard, adopt-in-place), 19–21 (the policies, the download page, the close). The test counts
    in the plan are +38 behind the branch after Task 9 (R-C1-16). Then **C2**, merging C1
    first; apply H9 between the two merges.
