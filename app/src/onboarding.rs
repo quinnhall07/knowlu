@@ -68,6 +68,22 @@ pub fn errors_from_discovery(json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `coursework-discover`'s argv, pure and therefore testable on its own (review round 1, m4): which
+/// flags appear when, and — the constraint that actually matters — that no argument is ever a
+/// secret, only a credential TARGET name (`credentials::target_for`, never a username or password).
+pub fn discovery_argv(id: &str, zybooks: bool, vhl: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec!["coursework-discover".into()];
+    if zybooks {
+        args.push("--zybooks-target".into());
+        args.push(crate::credentials::target_for(id, "zybooks"));
+    }
+    if vhl {
+        args.push("--vhl-target".into());
+        args.push(crate::credentials::target_for(id, "vhl"));
+    }
+    args
+}
+
 /// Run H10's subcommand and turn its answer into rows. The credential targets are derived from the
 /// path the wizard is about to create — the same derivation `store_credentials` used a panel ago, so
 /// discovery reads the entries that panel just wrote.
@@ -78,25 +94,17 @@ pub fn errors_from_discovery(json: &str) -> Vec<String> {
 #[tauri::command(async)]
 pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
     let id = profiles::id_for(Path::new(&vault));
-    let mut args: Vec<String> = vec!["coursework-discover".into()];
-    if zybooks {
-        args.push("--zybooks-target".into());
-        args.push(crate::credentials::target_for(&id, "zybooks"));
-    }
-    if vhl {
-        args.push("--vhl-target".into());
-        args.push(crate::credentials::target_for(&id, "vhl"));
-    }
+    let args = discovery_argv(&id, zybooks, vhl);
     let exe = match crate::scheduler::engine_exe() {
         Ok(e) => e,
         Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
     };
     use knowlu_engine::childproc::NoConsole;
-    let out = std::process::Command::new(exe).no_console().args(&args).output();
-    let stdout = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+    let out = match std::process::Command::new(exe).no_console().args(&args).output() {
+        Ok(o) => o,
         Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
     };
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let rows = rows_from_discovery(&stdout);
     // The per-source reason, not just "something went wrong": a student whose zyBooks worked and whose
     // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry.
@@ -106,7 +114,25 @@ pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
         (true, true) => json!("we could not reach your coursework sites — fill them in below"),
         (false, true) => Value::Null,
     };
-    json!({ "ok": true, "error": Value::Null, "rows": rows, "note": note })
+    // Review round 1, m5: the child's own exit status and stderr, surfaced rather than discarded.
+    // `coursework-discover` always exits 0 by its own contract (CLAUDE.md), so a non-zero status
+    // here is the process failing OUTSIDE that contract — a crash, a wrong `KNOWLU_ENGINE_EXE` —
+    // and the operator diagnosing it needs the code and the message, not silence. No credential can
+    // be in it: every argument this call ever passes is a target NAME (`discovery_argv`), never a
+    // username or password, so whatever the child wrote to stderr about its own failure is safe to
+    // surface whole.
+    let error = if out.status.success() {
+        Value::Null
+    } else {
+        let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        json!(if stderr.is_empty() {
+            format!("coursework-discover exited with status {code}")
+        } else {
+            format!("coursework-discover exited with status {code}: {stderr}")
+        })
+    };
+    json!({ "ok": true, "error": error, "rows": rows, "note": note })
 }
 
 pub struct Onboarding {
@@ -334,6 +360,12 @@ pub struct WizardPlan {
     pub course_map: Vec<(String, String)>,
     #[serde(default)]
     pub courses: Vec<crate::scaffold::CourseSeed>,
+    /// Review round 1, I2: every discovered zyBook code the student left unmapped or ticked
+    /// *ignore*. `create_vault_in` adds zyBooks' own `HowToUseZyBooks2` to this regardless of what
+    /// the page sends, so an older page that omits the field still gets the one entry that matters
+    /// on every install.
+    #[serde(default)]
+    pub zybooks_ignore: Vec<String>,
 }
 
 /// Every name Windows would REWRITE or refuse (review round 1, R-P4a-23). The device names are
@@ -441,23 +473,46 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
     };
-    // **The page sends course CODES; the slugs are made here.** `CS 100` is what a student types and
-    // what a title says; `cs-100` is the vault's own name for it — the note's stem, every task's
-    // `course:` field, and the value `judge::Heuristics::knows_course` tests. A page that invented
-    // vault identifiers would be a page deciding what the engine may know (R-OB-1, R-OB-2).
-    // The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in `scaffold.rs`).
+    // **The page sends a course CODE and a label; the slug is made here, from the code — never the
+    // label** (review round 1, I3). `CS 100` is what `suggest_course` proposed and the student
+    // confirmed or edited; `cs-100` is the vault's own name for it — the note's stem, every task's
+    // `course:` field, and the value `judge::Heuristics::knows_course` tests. `label` is a SEPARATE,
+    // display-only string (`GN 103` vs. `GN 103 Hausaufgaben`): slugging it instead would be a page
+    // deciding what the engine may know by way of a string nobody chose as an identifier (R-OB-1,
+    // R-OB-2). The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in
+    // `scaffold.rs`).
     let slug = knowlu_engine::ingest::slugify;
+    // Review round 1, I1: first wins. Two rows confirming the same book/section/course-map code —
+    // a two-part book, a lecture-and-lab pair, a course the sign-in window will also find (Task
+    // 14b) — must become ONE key, or `ingest_yaml` writes the same key twice and `serde_yaml_ng`'s
+    // `Mapping` deserializer refuses the whole file (`build_into`'s own parse-back check now catches
+    // this too, but a plan that never produces the duplicate is the better fix).
+    let mut seen_zybooks = std::collections::HashSet::new();
     let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
-        .filter(|b| !b.label.trim().is_empty())
-        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.label), label: b.label.clone() })
+        .filter(|b| !b.course.trim().is_empty())
+        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.course), label: b.label.clone() })
+        .filter(|b| seen_zybooks.insert(b.code.clone()))
         .collect();
+    let mut seen_vhl = std::collections::HashSet::new();
     let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
-        .filter(|v| !v.label.trim().is_empty())
-        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.label), label: v.label.clone() })
+        .filter(|v| !v.course.trim().is_empty())
+        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.course), label: v.label.clone() })
+        .filter(|v| seen_vhl.insert(v.section.clone()))
         .collect();
+    let mut seen_course_map = std::collections::HashSet::new();
     let course_map: Vec<(String, String)> = plan.course_map.iter()
         .map(|(code, _)| (code.clone(), slug(code)))
         .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
+        .filter(|(code, _)| seen_course_map.insert(code.clone()))
+        .collect();
+    // Review round 1, I2: `HowToUseZyBooks2` unconditionally — zyBooks' own onboarding book, zero
+    // assignments, never coursework — plus every code the page says the student declined to map,
+    // deduplicated the same way (first wins; order otherwise preserved).
+    let mut seen_ignore = std::collections::HashSet::new();
+    let zybooks_ignore: Vec<String> = std::iter::once("HowToUseZyBooks2".to_string())
+        .chain(plan.zybooks_ignore.iter().map(|c| c.trim().to_string()))
+        .filter(|c| !c.is_empty())
+        .filter(|c| seen_ignore.insert(c.clone()))
         .collect();
     // `courses` is empty until Task 14b's capture fills it, and empty is a correct answer: a student
     // whose campus we cannot read types the list on the panel instead.
@@ -475,6 +530,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         personal_calendar,
         zybooks_courses,
         vhl_sections,
+        zybooks_ignore,
         course_map,
         courses,
         timezone: plan.timezone.clone(),

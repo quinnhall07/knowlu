@@ -159,6 +159,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         vhl_sections: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
+        zybooks_ignore: Vec::new(),
     };
     // A vault, scaffolded directly through `scaffold::create_vault` — this test is about
     // `finish_or_roll_back`'s own backup-folder check now that the folder is a parameter of
@@ -176,6 +177,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         vhl: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
@@ -348,6 +350,7 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
         vhl_sections: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
+        zybooks_ignore: Vec::new(),
         autostart: true,
         offer_inference,
     }
@@ -503,6 +506,73 @@ fn a_padded_personal_calendar_is_trimmed() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Review round 1, I4: the task's headline sentence, actually executed — discovered rows →
+/// `WizardPlan` → `create_vault_in` → the `config/ingest.yaml` the engine reads, read back through
+/// the engine's OWN loader (I1) rather than only by substring, so this closes the YAML trace in a
+/// test instead of in a review. Folds in the other three Important findings this same code path
+/// carries:
+/// - **I1**: two rows mapping the SAME zyBook code collapse to one key, and the written file still
+///   parses — through `create_vault_in`'s de-duplication, not `build_into`'s defensive parse-back
+///   (that is `a_duplicate_zybook_key_is_refused_rather_than_written_unparsable`, `scaffold.rs`).
+/// - **I2**: a zyBook the student declined to map lands in `ignore:` alongside the permanent
+///   `HowToUseZyBooks2`.
+/// - **I3**: the real `GN 103` / `GN 103 Hausaufgaben` pair — the slug comes from the page-sent
+///   `course` ("GN 103" → `gn-103`), never from `label` (which would have produced
+///   `gn-103-hausaufgaben` and silently missed `courses/gn-103.md`, Task 14b's seed).
+#[cfg(windows)]
+#[test]
+fn discovered_rows_route_through_create_vault_in_to_the_config_the_engine_reads() {
+    use knowlu::scaffold::{BookMapping, SectionMapping};
+    let root = tmp("coursework-mapping");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-coursework-mapping");
+    let mut plan = base_plan(false);
+    plan.zybooks = true;
+    plan.vhl = true;
+    plan.zybooks_courses = vec![
+        BookMapping { code: "UACS100Fall2026".into(), course: "CS 100".into(), label: "CS 100".into() },
+        // I1: a second row confirming the SAME book — a two-part book, a lecture+lab pair — must
+        // collapse to one key, first wins, not two (which `ingest_yaml` would write as a duplicate
+        // YAML key and `serde_yaml_ng` would then refuse to parse at all).
+        BookMapping { code: "UACS100Fall2026".into(), course: "CS 100 (again)".into(), label: "CS 100, again".into() },
+    ];
+    // I3: `course` and `label` genuinely differ — Quinn's own real pair. The slug MUST come from
+    // `course` ("GN 103" → `gn-103`), never from `label` ("GN 103 Hausaufgaben" → would-be
+    // `gn-103-hausaufgaben`).
+    plan.vhl_sections = vec![SectionMapping { section: "2102121".into(), course: "GN 103".into(), label: "GN 103 Hausaufgaben".into() }];
+    plan.course_map = vec![("CS 100".into(), String::new())];
+    // I2: a book the student left unmapped or ticked *ignore*.
+    plan.zybooks_ignore = vec!["SomeOtherBook".into()];
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let vault = home.join("Knowlu").join("Fall 2026");
+    let text = knowlu_engine::pystr::read_text(&vault.join("config").join("ingest.yaml")).unwrap();
+
+    // The engine's OWN loader reads it back without complaint (I1) — the same door
+    // `coursework-discover`/`coursework`/`judge` walk through on the first real slot.
+    let (cfg, warnings) = knowlu_engine::coursework::load_coursework_config(&vault).expect("parses");
+    assert!(warnings.is_empty(), "{warnings:?}: {text}");
+    assert!(cfg.get(serde_yaml_ng::Value::String("coursework".into())).is_some(), "the block is really there: {text}");
+
+    // I1: one key, first wins — the second row's "CS 100 (again)"/"CS 100, again" never appears.
+    assert_eq!(text.matches("'UACS100Fall2026':").count(), 1, "{text}");
+    assert!(text.contains("      'UACS100Fall2026':\n        course: 'cs-100'\n        label: 'CS 100'\n"), "{text}");
+    assert!(!text.contains("again"), "the first mapping won, the second was dropped: {text}");
+
+    // I3: the section's slug is `gn-103`, derived from `course` — never `gn-103-hausaufgaben`.
+    assert!(text.contains("      '2102121':\n        course: 'gn-103'\n        label: 'GN 103 Hausaufgaben'\n"), "{text}");
+    assert!(!text.contains("gn-103-hausaufgaben"), "{text}");
+
+    // I2: the onboarding book is always ignored, and so is a declined discovery.
+    assert!(text.contains("      - 'HowToUseZyBooks2'\n"), "{text}");
+    assert!(text.contains("      - 'SomeOtherBook'\n"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Task 10 review, M1: the RESTORE path. `restore_vault_in` alone only copies the backup mirror
 /// out — it takes no `WizardPlan` — so the marker is `finish_or_roll_back`'s doing, exactly as the
 /// live `restore_vault` command calls it. This is the pair the brief's own code silently missed:
@@ -642,4 +712,99 @@ fn discovery_output_becomes_rows_with_a_suggestion_each() {
     assert!(failed.is_empty());
     // …and garbage is empty too: the panel's own copy tells the student to type the mapping.
     assert!(rows_from_discovery("not json").is_empty());
+}
+
+/// `KNOWLU_ENGINE_EXE` is process-wide state; this file's own lock (mirroring
+/// `app/tests/scheduler.rs`'s `ENGINE_ENV_LOCK`) keeps the tests below from racing each other or
+/// any future test in this binary that sets it.
+static ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An RAII seam for `KNOWLU_ENGINE_EXE`, the same shape as `scheduler.rs`'s `EnvSeam`: the restore
+/// runs on drop, so a panicking assertion never leaves the override set for the rest of the binary.
+struct EngineExeSeam(Option<std::ffi::OsString>);
+impl EngineExeSeam {
+    fn set(exe: &std::ffi::OsStr) -> Self {
+        let prev = std::env::var_os("KNOWLU_ENGINE_EXE");
+        unsafe { std::env::set_var("KNOWLU_ENGINE_EXE", exe) };
+        EngineExeSeam(prev)
+    }
+}
+impl Drop for EngineExeSeam {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(p) => unsafe { std::env::set_var("KNOWLU_ENGINE_EXE", p) },
+            None => unsafe { std::env::remove_var("KNOWLU_ENGINE_EXE") },
+        }
+    }
+}
+
+/// Review round 1, m4: `discovery_argv` pinned directly — which flags appear when, and that no
+/// argument is ever anything but a credential TARGET name.
+#[test]
+fn discovery_argv_omits_a_missing_source_and_never_carries_a_secret() {
+    use knowlu::onboarding::discovery_argv;
+    assert_eq!(
+        discovery_argv("profile_x", true, true),
+        vec![
+            "coursework-discover".to_string(),
+            "--zybooks-target".to_string(), "knowlu/profile_x/zybooks".to_string(),
+            "--vhl-target".to_string(), "knowlu/profile_x/vhl".to_string(),
+        ]
+    );
+    let zybooks_only = discovery_argv("profile_x", true, false);
+    assert_eq!(zybooks_only, vec!["coursework-discover".to_string(), "--zybooks-target".to_string(), "knowlu/profile_x/zybooks".to_string()]);
+    assert!(!zybooks_only.iter().any(|a| a.contains("vhl")), "a false flag omits its pair entirely: {zybooks_only:?}");
+    let vhl_only = discovery_argv("profile_x", false, true);
+    assert_eq!(vhl_only, vec!["coursework-discover".to_string(), "--vhl-target".to_string(), "knowlu/profile_x/vhl".to_string()]);
+    assert_eq!(discovery_argv("profile_x", false, false), vec!["coursework-discover".to_string()]);
+    // The constraint that actually matters: every argument is the subcommand name or a target
+    // NAME built by `credentials::target_for` — never a username or a password.
+    for a in discovery_argv("profile_x", true, true) {
+        assert!(!a.to_lowercase().contains("password"));
+    }
+}
+
+/// Review round 1, m5 (required this round): the child's exit status and stderr are surfaced in
+/// the envelope's `error`, never discarded. A throwaway batch file stands in for a broken engine —
+/// exits 7, writes to stderr, never touches Credential Manager or any real vault.
+#[test]
+fn a_child_that_fails_outright_surfaces_its_exit_status_and_stderr_in_error() {
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp("discover-fail");
+    let fake_exe = root.join("fake-engine.bat");
+    std::fs::write(&fake_exe, "@echo off\r\necho boom-from-fake-engine 1>&2\r\nexit /b 7\r\n").unwrap();
+    let _seam = EngineExeSeam::set(fake_exe.as_os_str());
+    let out = knowlu::onboarding::discover_coursework(root.join("Vault").to_string_lossy().to_string(), true, true);
+    assert_eq!(out["ok"], true, "{out}");
+    let err = out["error"].as_str().expect("the child's own failure is named, not discarded: {out}");
+    assert!(err.contains('7'), "the exit status is in it: {err}");
+    assert!(err.contains("boom-from-fake-engine"), "the stderr is in it: {err}");
+    // stdout was empty (no valid discovery JSON), so rows are empty and the note is the generic one.
+    assert!(out["rows"].as_array().unwrap().is_empty());
+    assert_eq!(out["note"].as_str(), Some("we could not reach your coursework sites — fill them in below"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review round 1, m4 (required this round): `discover_coursework` against the REAL engine binary,
+/// with credential targets that have never had a login stored for them —
+/// `coursework-discover`'s own contract exercised for real (always exits 0; an unreachable source
+/// is an `errors` entry), not only through `rows_from_discovery`'s hand-built JSON. No secret
+/// anywhere: the vault path is a throwaway temp folder nothing has ever signed into.
+#[test]
+fn discover_coursework_against_the_real_engine_names_the_missing_credential() {
+    let exe = std::path::Path::new("../target/debug/knowlu-engine.exe");
+    assert!(exe.is_file(), "{}: build it first (`cargo build -p knowlu-engine`)", exe.display());
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _seam = EngineExeSeam::set(exe.as_os_str());
+    let vault = tmp("discover-real").join("Vault");
+    let out = knowlu::onboarding::discover_coursework(vault.to_string_lossy().to_string(), true, true);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["error"], serde_json::Value::Null, "the real engine exits 0, so there is no child failure to surface: {out}");
+    let rows = out["rows"].as_array().expect("rows array");
+    assert!(rows.is_empty(), "a target that has never had a login stored finds nothing: {out}");
+    let note = out["note"].as_str().expect("a note names why: {out}");
+    assert!(note.to_lowercase().contains("zybooks") || note.to_lowercase().contains("vhl"), "{note}");
+    // No credential anywhere in the envelope.
+    let text = out.to_string();
+    assert!(!text.to_lowercase().contains("password"));
 }

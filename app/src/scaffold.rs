@@ -52,6 +52,11 @@ pub struct VaultPlan {
     /// coursework logins has nothing to map — and it is what `ingest_yaml` writes as `{}`.
     pub zybooks_courses: Vec<BookMapping>,
     pub vhl_sections: Vec<SectionMapping>,
+    /// R-OB-1, review round 1 I2: every zyBook code the student declined to map, plus zyBooks' own
+    /// `HowToUseZyBooks2`. Out of `ignore:`, an unmapped book is `zybook <code> not in config;
+    /// skipped` on **every healthy run, forever** — `route_zybook`'s `Unmapped` arm — so a declined
+    /// book has to land somewhere, and this is where.
+    pub zybooks_ignore: Vec<String>,
     /// R-OB-1 and R-OB-2: `<code fragment> -> <slug>`, read by `ingest::match_course_fields` and by
     /// `judge::Heuristics`. Every confirmed mapping contributes one, and so does every course the
     /// sign-in window found (Task 14b).
@@ -67,21 +72,31 @@ pub struct VaultPlan {
 }
 
 /// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
-/// (`UACS100Fall2026`); `course` is the slug that lands in every task's `course:` field; `label` is
-/// what a human reads in the title. The engine's `route_zybook` needs a **non-empty** mapping under
-/// the code, and `parse_assignments` reads exactly these two keys out of it.
+/// (`UACS100Fall2026`). **`course` is the course code the student confirmed on the panel — it is
+/// the ONLY thing the vault's slug is ever derived from** (review round 1, I3): `suggest_course`
+/// proposes it, the student can edit it, and by the time this struct is inside a `VaultPlan`
+/// (`create_vault_in`'s work) `course` already holds the slug itself, since that is the one place
+/// the engine's `slugify` runs. `label` is a separate string — what a human reads in the task
+/// title — and is never slugged; a book's course text and its display title can differ (`GN 103` /
+/// `GN 103 Hausaufgaben`) and only the first one may ever decide a vault identifier. The engine's
+/// `route_zybook` needs a **non-empty** mapping under the code, and `parse_assignments` reads
+/// exactly `course` and `label` out of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct BookMapping {
     pub code: String,
     pub course: String,
+    #[serde(default)]
     pub label: String,
 }
 
-/// One VHL section, likewise. `section` is the id out of the dashboard's `detail_url`.
+/// One VHL section, likewise. `section` is the id out of the dashboard's `detail_url`; `course` is
+/// the course code the student confirmed (never `label` — see `BookMapping`'s doc, I3) and `label`
+/// is display-only.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct SectionMapping {
     pub section: String,
     pub course: String,
+    #[serde(default)]
     pub label: String,
 }
 
@@ -113,13 +128,12 @@ pub fn suggest_course(code: &str) -> Option<String> {
         if digits.len() != 3 {
             continue;
         }
-        // The LAST two-to-four capitals before the digits, so `UACS100` reads `CS 100` and not
-        // `UACS 100`: a four-letter run that ends at the digits is preferred only when nothing
-        // shorter also ends there, which the loop's forward order gives for free by trying the
-        // earliest start first and then continuing — so take the longest suffix of `letters`
-        // that is still 2..=4 long and ends where the digits begin.
-        let subject: String = letters.chars().rev().take(letters.len().min(4)).collect::<Vec<_>>().into_iter().rev().collect();
-        let subject = if subject.len() > 4 { subject[subject.len() - 4..].to_string() } else { subject };
+        // `letters` is already 2..=4 chars long (the guard above refuses anything else), so it IS
+        // the subject — no further trimming needed. The loop's forward order (trying the earliest
+        // `start` first, then advancing) is what makes `UACS100` read `CS 100` and not `UACS 100`:
+        // `trim_prefix` peels the two-letter institution prefix off a four-letter run (m1, review
+        // round 1 — the review's own trace confirmed the behaviour; this just says the true thing).
+        let subject = letters;
         return Some(format!("{} {}", trim_prefix(&subject), digits));
     }
     None
@@ -141,7 +155,11 @@ fn trim_prefix(subject: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CourseSeed {
     pub code: String,
+    // m3: `create_vault_in` explicitly invents both when they are blank
+    // (`c.code.clone()` / `slug(&c.code)`), so a page that omits either is not a refusal.
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub slug: String,
 }
 
@@ -171,6 +189,19 @@ fn yaml_scalar(field: &str, value: &str) -> Result<String, String> {
 /// `ics_url` is written verbatim (quoted, never rewritten): the engine fetches exactly the string
 /// the friend pasted, so any mangling here would be a feed that 404s for a reason nothing explains.
 pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
+    // m8: a plan carrying confirmed mappings with the source's own flag off would drop them in
+    // silence below (they are only emitted inside the `if p.zybooks`/`if p.vhl` arms) — unreachable
+    // through today's wizard, since the flag comes off the same login panel that fills the
+    // mappings, but an early, loud refusal keeps it unreachable on purpose rather than by accident.
+    // `zybooks_ignore` is deliberately NOT part of this guard: `create_vault_in` seeds it with
+    // `HowToUseZyBooks2` unconditionally (I2), so it is routinely non-empty even with zyBooks off,
+    // and nothing is lost when it is — the whole `if p.zybooks` arm that would write it is skipped.
+    if !p.zybooks && !p.zybooks_courses.is_empty() {
+        return Err("zybooks_courses is set but zybooks is not enabled — a plan bug, not a student's".to_string());
+    }
+    if !p.vhl && !p.vhl_sections.is_empty() {
+        return Err("vhl_sections is set but vhl is not enabled — a plan bug, not a student's".to_string());
+    }
     let mut s = String::new();
     if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
@@ -198,9 +229,18 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         if p.zybooks {
             let target = yaml_scalar("zybooks credential target", &crate::credentials::target_for(&p.profile_id, "zybooks"))?;
             s.push_str(&format!("  zybooks:\n    enabled: true\n    credential_target: {target}\n"));
-            // `HowToUseZyBooks2` is zyBooks' own onboarding book: zero assignments, never coursework,
-            // and out of `ignore:` it is one WARN per healthy run forever (`route_zybook`'s own doc).
-            s.push_str("    ignore:\n      - 'HowToUseZyBooks2'\n");
+            // Review round 1, I2: every code the student declined to map, plus zyBooks' own
+            // `HowToUseZyBooks2` (zero assignments, never coursework) — `create_vault_in` is the one
+            // that seeds both; this just writes whatever `p.zybooks_ignore` holds. Out of `ignore:`,
+            // an unmapped book is one WARN per healthy run forever (`route_zybook`'s own doc).
+            if p.zybooks_ignore.is_empty() {
+                s.push_str("    ignore: []\n");
+            } else {
+                s.push_str("    ignore:\n");
+                for code in &p.zybooks_ignore {
+                    s.push_str(&format!("      - {}\n", yaml_scalar("zybook ignore", code)?));
+                }
+            }
             // What `parse_assignments` reads. Without these three blocks every item is uncategorised
             // and takes the default effort, which is the second half of the first-slot failure.
             s.push_str("    categories:\n      HW: hw\n      Lab: lab\n      Project: project\n");
@@ -337,6 +377,20 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
     write_file(root, "config/events.yaml", campus)?;
     write_file(root, "config/ingest.yaml", &ingest_yaml(plan)?)?;
+    // Review round 1, I1: make the emitter unable to produce an unreadable file at all — a
+    // duplicate `course_map`/`courses`/`sections` key (`ingest_yaml` walks a `Vec`; two rows
+    // mapping the same book would otherwise write the same key twice) makes `serde_yaml_ng`'s
+    // `Mapping` deserializer refuse the whole file, which is `config unreadable: …` and every book
+    // and section "not in config; skipped" — the first-slot failure this task exists to remove,
+    // arrived at from the write side instead of the read side. The engine's OWN loader decides —
+    // not a second, hand-rolled parse call — so this fails exactly where `coursework-discover`/
+    // `coursework`/`judge` would fail, and `create_vault` is already all-or-nothing, so a plan bug
+    // refuses the wizard loudly instead of handing a student a vault that never syncs.
+    let (_, ingest_warnings) = knowlu_engine::coursework::load_coursework_config(root)
+        .map_err(|e| format!("config/ingest.yaml would not parse: {e}"))?;
+    if !ingest_warnings.is_empty() {
+        return Err(format!("config/ingest.yaml would not parse: {}", ingest_warnings.join("; ")));
+    }
     write_file(root, "config/runners.yaml", &runners_yaml(plan)?)?;
     write_file(root, "config/cloud.yaml", &cloud_yaml(plan)?)?;
     Ok(())

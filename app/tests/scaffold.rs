@@ -25,6 +25,7 @@ fn plan_for(dest: &Path) -> VaultPlan {
         vhl: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
@@ -194,6 +195,10 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
     // never even be diagnosed.
     let nasty = "Odd/Zone: x #c 'q' \"d\" {e} [f], g";
     let url = "https://lms.example.invalid/f?a=1&b={x}#frag: 'q' \"d\"";
+    // m2 (review round 1): the six new value sites go through the same `yaml_scalar`, so they get
+    // the same nasty treatment as every other wizard-typed field — a course-map fragment as a KEY
+    // (`course_map` writes `fragment: slug`) and a course/label as VALUES.
+    let nasty_fragment = "CS 100: x #c 'q'";
     let p = VaultPlan {
         profile_id: "profile_8888888888".into(),
         ics_url: Some(url.to_string()),
@@ -204,9 +209,18 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         campus: "university-of-alabama".into(),
         zybooks: true,
         vhl: true,
-        zybooks_courses: Vec::new(),
-        vhl_sections: Vec::new(),
-        course_map: Vec::new(),
+        zybooks_courses: vec![knowlu::scaffold::BookMapping {
+            code: "UACS100Fall2026".into(),
+            course: "cs-100: x #c 'q'".into(),
+            label: "CS 100: x #c 'q' \"d\" {e} [f], g".into(),
+        }],
+        vhl_sections: vec![knowlu::scaffold::SectionMapping {
+            section: "2102121".into(),
+            course: "gn-103: x #c 'q'".into(),
+            label: "GN 103 Hausaufgaben: x #c 'q' \"d\" {e} [f], g".into(),
+        }],
+        zybooks_ignore: vec!["HowToUseZyBooks2".into(), "Odd: Book #c 'q'".into()],
+        course_map: vec![(nasty_fragment.into(), "cs-100: x #c 'q'".into())],
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
@@ -242,6 +256,20 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
     let cw = parsed.get("coursework").expect("the coursework block survives");
     assert_eq!(cw.get("zybooks").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/zybooks"));
     assert_eq!(cw.get("vhl").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/vhl"));
+
+    // m2: a student-typed label carrying YAML metacharacters round-trips through the parsed-back
+    // mapping unchanged — key AND value, for all six new value sites.
+    let zy_course = cw.get("zybooks").and_then(|z| z.get("courses")).and_then(|c| c.get("UACS100Fall2026")).expect("the nasty zybook entry parses");
+    assert_eq!(zy_course.get("course").and_then(|c| c.as_str()), Some("cs-100: x #c 'q'"));
+    assert_eq!(zy_course.get("label").and_then(|c| c.as_str()), Some(p.zybooks_courses[0].label.as_str()));
+    let vhl_section = cw.get("vhl").and_then(|z| z.get("sections")).and_then(|s| s.get("2102121")).expect("the nasty section parses");
+    assert_eq!(vhl_section.get("course").and_then(|c| c.as_str()), Some("gn-103: x #c 'q'"));
+    assert_eq!(vhl_section.get("label").and_then(|c| c.as_str()), Some(p.vhl_sections[0].label.as_str()));
+    let ignore: Vec<&str> = cw.get("zybooks").and_then(|z| z.get("ignore")).and_then(|i| i.as_sequence()).expect("ignore parses")
+        .iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(ignore, vec!["HowToUseZyBooks2", "Odd: Book #c 'q'"]);
+    let course_map = parsed.get("course_map").and_then(|m| m.get(nasty_fragment)).and_then(|s| s.as_str());
+    assert_eq!(course_map, Some("cs-100: x #c 'q'"));
 
     // A control character cannot be quoted onto one line, so it is refused by field name rather
     // than written out and silently breaking the file.
@@ -410,6 +438,7 @@ fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
         vhl: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
         course_map: Vec::new(),
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
@@ -436,7 +465,9 @@ fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
 #[test]
 fn a_personal_calendar_becomes_the_engines_calendars_list() {
     use knowlu::scaffold::ingest_yaml;
-    let base = plan_for(Path::new("Personal Calendar Vault"));
+    // m7: a real temp path, not a bare relative one — this test never reads the derived id, but a
+    // throwaway path under `temp_dir()` reads as deliberate rather than a stray.
+    let base = plan_for(&std::env::temp_dir().join("knowlu-personal-calendar-vault"));
     // No calendar: the list the engine has always read, empty.
     assert!(ingest_yaml(&base).unwrap().contains("calendars: []\n"));
     // One: the shape `calfeed::load_calendar_events` parses — a list of {name, ics_url} mappings.
@@ -526,6 +557,7 @@ fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
         vhl: true,
         zybooks_courses: vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }],
         vhl_sections: vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103 Hausaufgaben".into() }],
+        zybooks_ignore: vec!["HowToUseZyBooks2".into()],
         course_map: vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())],
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
@@ -557,4 +589,25 @@ fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
     let bare = ingest_yaml(&p).expect("ingest.yaml");
     assert!(bare.contains("    courses: {}\n") && bare.contains("    sections: {}\n"), "{bare}");
     assert!(bare.contains("course_map: {}\n"), "{bare}");
+}
+
+/// Review round 1, I1 (part 2): the emitter is unable to produce an unreadable file. This builds a
+/// `VaultPlan` directly with two mappings for the SAME zyBook code — bypassing `create_vault_in`'s
+/// de-duplication on purpose, to prove the OTHER half of the fix: `build_into` now parses its own
+/// `config/ingest.yaml` back through the engine's own loader before the wizard is allowed to
+/// finish, so a duplicate key (which `serde_yaml_ng`'s `Mapping` deserializer refuses) is a loud
+/// refusal here rather than a vault that silently never syncs.
+#[test]
+fn a_duplicate_zybook_key_is_refused_rather_than_written_unparsable() {
+    let v = temp("dup-key").join("Vault");
+    let mut p = plan_for(&v);
+    p.zybooks = true;
+    p.zybooks_ignore = vec!["HowToUseZyBooks2".into()];
+    p.zybooks_courses = vec![
+        knowlu::scaffold::BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() },
+        knowlu::scaffold::BookMapping { code: "UACS100Fall2026".into(), course: "cs-100-again".into(), label: "CS 100, again".into() },
+    ];
+    let err = create_vault(&v, &p).unwrap_err();
+    assert!(err.contains("would not parse"), "{err}");
+    assert!(!v.exists(), "no half-made vault is left behind");
 }
