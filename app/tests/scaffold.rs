@@ -477,3 +477,33 @@ fn create_vault_writes_cloud_yaml_beside_the_other_config_files() {
     assert!(knowlu::scaffold::write_cloud_yaml_if_absent(&dest, &p).is_err());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Fix round 1, item 5: Task 18 adopts a vault that may never have had a `config/` folder at all
+/// (an old, pre-`cloud.yaml` layout is still just a folder with `tasks/` and `planning.yaml` — the
+/// console's own predicate never required `config/` to hold anything else). `write_cloud_yaml_if_absent`
+/// must make the folder itself rather than fail with a raw "the system cannot find the path".
+#[test]
+fn write_cloud_yaml_if_absent_creates_the_config_folder_first() {
+    use knowlu::scaffold::{write_cloud_yaml_if_absent, VaultPlan};
+    let vault = std::env::temp_dir().join(format!("knowlu-cloud-yaml-noconfig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(&vault).unwrap();
+    assert!(!vault.join("config").exists(), "the vault has no config/ folder yet");
+    let p = VaultPlan {
+        profile_id: "profile_noconfig".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "MACHINE".into(),
+        campus: "none".into(),
+        zybooks: false,
+        vhl: false,
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    write_cloud_yaml_if_absent(&vault, &p).expect("creates config/ and the file");
+    assert!(vault.join("config").join("cloud.yaml").is_file());
+    let _ = std::fs::remove_dir_all(&vault);
+}

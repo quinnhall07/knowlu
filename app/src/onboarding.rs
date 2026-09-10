@@ -221,6 +221,9 @@ pub struct WizardPlan {
     pub zybooks: bool,
     pub vhl: bool,
     pub autostart: bool,
+    /// The finish panel's *Set up local judgment after setup* checkbox. The wizard NEVER installs
+    /// anything (spec §5.3, "never automatic", and the wizard's own "Nothing is fetched now"); this
+    /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
 }
@@ -285,6 +288,28 @@ fn home_dir() -> Result<PathBuf, String> {
     std::env::var("USERPROFILE").map(PathBuf::from).map_err(|_| "no USERPROFILE: Knowlu cannot decide where your vault goes".to_string())
 }
 
+/// The personal calendar's address, validated on the device before it ever reaches a `VaultPlan`
+/// (fix round 1, item 2). Blank → `None` — a friend who never pasted one gets `calendars: []`
+/// exactly as before. `webcal://` is rewritten to `https://` (R-C1-22): it is the same feed over the
+/// same scheme underneath, and every calendar app that accepts a `webcal://` link already does this
+/// rewrite silently — refusing it here would be a wizard failing on the one link format Google and
+/// Outlook actually hand out "Copy public URL" as. Anything else that is not `https://` after that
+/// rewrite is refused by name, the same way a control character is refused by field name elsewhere.
+fn normalize_personal_calendar(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let rewritten = match trimmed.strip_prefix("webcal://") {
+        Some(rest) => format!("https://{rest}"),
+        None => trimmed.to_string(),
+    };
+    if !rewritten.starts_with("https://") {
+        return Err("the calendar address must start with https:// (or webcal://)".to_string());
+    }
+    Ok(Some(rewritten))
+}
+
 /// *Finish* for a new vault. Scaffold+seed (one atomic `create_vault`) → the session moves onto this
 /// profile → settings → register.
 ///
@@ -294,6 +319,13 @@ fn home_dir() -> Result<PathBuf, String> {
 /// names `knowlu/<profile_id>/session` while the token still sits under `knowlu/pending/session` is a
 /// vault that cannot reach the cloud, with nothing anywhere saying why.
 pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) -> Value {
+    let personal_calendar = match &plan.personal_calendar {
+        None => None,
+        Some(raw) => match normalize_personal_calendar(raw) {
+            Ok(v) => v,
+            Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }),
+        },
+    };
     let (dest, backups) = match vault_dest_in(home, name) {
         Ok(d) => d,
         Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }),
@@ -306,7 +338,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     let vp = crate::scaffold::VaultPlan {
         profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
-        personal_calendar: plan.personal_calendar.clone().filter(|u| !u.trim().is_empty()),
+        personal_calendar,
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
@@ -337,14 +369,20 @@ pub fn create_vault(app: tauri::AppHandle, name: String, plan: WizardPlan) -> Va
 }
 
 /// *Restore from a backup* (spec §3 panel 2): `<backup>\<profile>\vault\` is **copied** to
-/// `<parent>\<name>` and used there — never used in place, so the backup folder is never written
-/// to and never becomes the live vault by accident.
+/// `<home>\Knowlu\<name>` and used there — never used in place, so the backup folder is never
+/// written to and never becomes the live vault by accident.
+///
+/// **Fix round 1, item 1: decides the folder exactly as `create_vault_in` does**, through
+/// `vault_dest_in` — not a page-supplied `parent`. Before this, a fresh machine (no
+/// `%USERPROFILE%\Knowlu` yet) could not restore at all, because `dest_for` refuses a parent that
+/// does not exist and nothing here created it; `vault_dest_in` does.
+///
 /// The handle-free core, so `app/tests/onboarding.rs` can hash the BACKUP folder either side of a
 /// restore and prove it is only ever read (spec §8; S7). Returns the created vault path on success.
-pub fn restore_vault_in(backup: &str, parent: &str, name: &str) -> Result<PathBuf, String> {
+pub fn restore_vault_in(backup: &str, home: &Path, name: &str) -> Result<PathBuf, String> {
     let src = PathBuf::from(backup);
     let mirror = find_mirror(&src).ok_or_else(|| format!("{backup}: no <profile>\\vault\\ mirror in there"))?;
-    let dest = dest_for(parent, name)?;
+    let (dest, _backups) = vault_dest_in(home, name)?;
     let staging = dest.parent().unwrap_or(Path::new(".")).join(format!(".knowlu-restore-{}", knowlu_engine::ids::new_id("stage")));
     match copy_tree(&mirror, &staging).and_then(|()| std::fs::rename(&staging, &dest).map_err(|e| e.to_string())) {
         Ok(()) => Ok(dest),
@@ -352,11 +390,15 @@ pub fn restore_vault_in(backup: &str, parent: &str, name: &str) -> Result<PathBu
     }
 }
 
+/// **`parent` is gone** (fix round 1, item 1) — the page may keep sending it until Task 17 removes
+/// the folder panel entirely; Tauri's argument matching ignores a key that names no parameter of
+/// this command, so the extra field is inert rather than a refusal (confirmed by reading
+/// `console.js`'s `invoke("restore_vault", …)` call, which still sends `parent`).
 #[tauri::command(async)]
-pub fn restore_vault(app: tauri::AppHandle, backup: String, parent: String, name: String, plan: WizardPlan) -> Value {
+pub fn restore_vault(app: tauri::AppHandle, backup: String, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
     let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
-    let out = match restore_vault_in(&backup, &parent, &name) {
+    let out = match restore_vault_in(&backup, &home, &name) {
         // The restored copy is rolled back the same way a created vault is: the backup it came
         // from is untouched, so a failed finish costs nothing but the copy. There is no `WizardPlan`
         // folder answer any more (spec §4.1) — the restored vault's mirror is the same default

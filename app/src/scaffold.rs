@@ -155,6 +155,11 @@ pub fn write_cloud_yaml_if_absent(vault: &Path, plan: &VaultPlan) -> Result<(), 
     if path.exists() {
         return Err(format!("{}: this vault already has an account", path.display()));
     }
+    // An adopted vault's `config/` already exists, but Task 18 does not promise that — this is the
+    // only writer of `config/cloud.yaml` outside `build_into`, which makes the folder itself.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
     write_file(vault, "config/cloud.yaml", &cloud_yaml(plan)?)
 }
 

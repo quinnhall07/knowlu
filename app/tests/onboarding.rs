@@ -67,23 +67,30 @@ fn adopting_a_vault_writes_nothing_into_it() {
 
 /// Spec §8: restore COPIES the mirror out and never writes into the backup folder — the one place
 /// a user's only other copy of their vault lives.
+///
+/// Fix round 1, item 1: restore decides the folder the way create does — `<home>\Knowlu\<name>`,
+/// with the mirror at `<home>\Knowlu\Backups` — rather than a page-supplied `parent`. This is also
+/// why a restore on a fresh machine (no `%USERPROFILE%\Knowlu` yet) now works: `vault_dest_in`
+/// creates the parent, where the old `dest_for(parent, …)` would have refused a missing one.
 #[test]
 fn restoring_copies_the_mirror_and_never_writes_into_the_backup() {
     let root = tmp("restore");
     let backup = root.join("backup").join("profile_1111111111").join("vault");
     copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
     let before = fingerprint(&root.join("backup"));
-    let parent = root.join("restored-into");
-    std::fs::create_dir_all(&parent).unwrap();
-    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026").expect("restore");
-    assert_eq!(dest, parent.join("Fall 2026"));
+    let home = root.join("home");
+    assert!(!home.join("Knowlu").exists(), "a fresh machine — the parent does not exist yet");
+    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026").expect("restore");
+    assert_eq!(dest, home.join("Knowlu").join("Fall 2026"), "restore decides the folder the way create does");
+    let (_, backups) = default_folders_in(&home);
+    assert_eq!(PathBuf::from(backups), home.join("Knowlu").join("Backups"), "the mirror is the same default sibling a created vault gets");
     assert_eq!(fingerprint(&root.join("backup")), before, "the backup folder was written to");
     assert_eq!(fingerprint(&dest), before.iter().map(|(p, b)| (p.trim_start_matches("profile_1111111111\\").trim_start_matches("vault\\").to_string(), b.clone())).collect::<Vec<_>>(), "the mirror arrived whole");
     // A second restore to the same name is refused, and still writes nothing to the backup.
-    let again = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026");
+    let again = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026");
     assert!(again.unwrap_err().contains("already exists"));
     assert_eq!(fingerprint(&root.join("backup")), before);
-    let strays: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten()
+    let strays: Vec<_> = std::fs::read_dir(home.join("Knowlu")).unwrap().flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with(".knowlu-restore-")).collect();
     assert!(strays.is_empty(), "a refused restore leaves no staging folder");
     let _ = std::fs::remove_dir_all(&root);
@@ -220,13 +227,25 @@ static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(windows)]
 struct PendingSession {
     _guard: std::sync::MutexGuard<'static, ()>,
+    /// Whatever was already at `PENDING_TARGET` before this guard wrote over it — `(username,
+    /// secret)`, read raw rather than through `load_session` so a session this process cannot even
+    /// parse is still put back byte for byte. `None` means there was nothing there.
+    had_previous: Option<(String, String)>,
     moved_to: Vec<String>,
 }
 #[cfg(windows)]
 impl PendingSession {
     /// Writes a throwaway session under `PENDING_TARGET` for `account_id` — never a real one.
+    ///
+    /// Fix round 1, item 3: `PENDING_TARGET` is one fixed, shared name — a real wizard signed in on
+    /// this same machine, mid-flow, would have its session sitting right there. This reads whatever
+    /// is already at the target FIRST, so `drop` can put it back rather than delete a live sign-in
+    /// this test process never owned.
     fn new(account_id: &str) -> Self {
         let guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let had_previous = knowlu_engine::wincred::read_credential(knowlu::account::PENDING_TARGET)
+            .ok()
+            .map(|c| (c.username, c.password.expose().to_string()));
         let s = knowlu::account::Session {
             access_token: "test-at".into(),
             refresh_token: "test-rt".into(),
@@ -235,7 +254,7 @@ impl PendingSession {
         };
         knowlu::account::save_session(knowlu::account::PENDING_TARGET, account_id, &s)
             .expect("write the pending session this wizard test signs in with");
-        Self { _guard: guard, moved_to: Vec::new() }
+        Self { _guard: guard, had_previous, moved_to: Vec::new() }
     }
     /// The profile-keyed target the session moves onto once a vault named `profile_id` exists,
     /// tracked for cleanup regardless of whether the move actually happened.
@@ -246,7 +265,12 @@ impl PendingSession {
 #[cfg(windows)]
 impl Drop for PendingSession {
     fn drop(&mut self) {
-        let _ = knowlu::credentials::delete(knowlu::account::PENDING_TARGET);
+        match &self.had_previous {
+            // Restore it exactly, rather than delete — this run is not the only thing that might
+            // have been signed in at `PENDING_TARGET`.
+            Some((user, secret)) => { let _ = knowlu::credentials::write(knowlu::account::PENDING_TARGET, user, secret); }
+            None => { let _ = knowlu::credentials::delete(knowlu::account::PENDING_TARGET); }
+        }
         for t in &self.moved_to {
             let _ = knowlu::credentials::delete(t);
         }
@@ -263,6 +287,13 @@ impl Drop for PendingSession {
 #[cfg(windows)]
 #[test]
 fn a_rename_after_panel_five_moves_the_login_and_leaves_nothing_behind() {
+    // Fix round 1: this file's other tests now put real, heavy Credential Manager traffic through
+    // `PendingSession`/`CREDMAN_LOCK` — the same threshold `app/tests/account.rs` documents crossing
+    // (a read for one target spuriously reporting `ERROR_NOT_FOUND` under concurrent CredMan I/O,
+    // even for a target no other thread touched). This test predates that traffic and never took the
+    // lock; now it does, so every real-credential test in this file is serialized against every
+    // other, not only the ones sharing a target.
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::credentials::{exists, target_for, write};
     use knowlu::onboarding::retarget_credentials;
     let from = std::env::temp_dir().join(format!("knowlu-retarget-from-{}", std::process::id()));
@@ -352,6 +383,114 @@ fn create_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Fix round 1, item 4: with nothing at the pending target, `create_vault_in` refuses — naming the
+/// sentence a friend actually sees — and creates no vault directory at all. Not a `PendingSession`
+/// test (there is deliberately no session here), but it still touches the real, shared pending
+/// target, so it takes `CREDMAN_LOCK` itself and puts back whatever it found there, the same way
+/// `PendingSession` does.
+#[cfg(windows)]
+#[test]
+fn create_vault_without_a_pending_session_refuses_and_creates_nothing() {
+    let _guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let had_previous = knowlu_engine::wincred::read_credential(knowlu::account::PENDING_TARGET)
+        .ok()
+        .map(|c| (c.username, c.password.expose().to_string()));
+    let _ = knowlu::credentials::delete(knowlu::account::PENDING_TARGET);
+
+    let root = tmp("no-pending-session");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(out["error"].as_str().unwrap().contains("sign in again"), "{out}");
+    assert!(!home.join("Knowlu").join("Fall 2026").exists(), "no vault directory was created");
+
+    match had_previous {
+        Some((user, secret)) => { knowlu::credentials::write(knowlu::account::PENDING_TARGET, &user, &secret).unwrap(); }
+        None => {}
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Fix round 1, item 2: `personal_calendar` is validated on the device before it ever reaches a
+/// `VaultPlan` — trimmed, `webcal://` rewritten to `https://` (R-C1-22), anything else that is not
+/// `https://` refused. Four cases, each its own test so a failure names exactly one behaviour.
+#[cfg(windows)]
+#[test]
+fn a_blank_personal_calendar_writes_no_calendars_entry() {
+    let root = tmp("cal-blank");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-cal-blank");
+    let mut plan = base_plan(false);
+    plan.personal_calendar = Some("   ".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(ingest.contains("calendars: []\n"), "{ingest}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_webcal_personal_calendar_is_rewritten_to_https() {
+    let root = tmp("cal-webcal");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-cal-webcal");
+    let mut plan = base_plan(false);
+    plan.personal_calendar = Some("webcal://x.invalid/y.ics".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
+        "{ingest}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_non_https_personal_calendar_is_refused_and_creates_no_vault() {
+    let root = tmp("cal-http");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let _session = PendingSession::new("acc-cal-http");
+    let mut plan = base_plan(false);
+    plan.personal_calendar = Some("http://x.invalid/y.ics".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(out["error"].as_str().unwrap().contains("must start with https://"), "{out}");
+    assert!(!home.join("Knowlu").join("Fall 2026").exists(), "no vault was created");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_padded_personal_calendar_is_trimmed() {
+    let root = tmp("cal-padded");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-cal-padded");
+    let mut plan = base_plan(false);
+    plan.personal_calendar = Some("  https://x.invalid/y.ics  ".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
+        "{ingest}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Task 10 review, M1: the RESTORE path. `restore_vault_in` alone only copies the backup mirror
 /// out — it takes no `WizardPlan` — so the marker is `finish_or_roll_back`'s doing, exactly as the
 /// live `restore_vault` command calls it. This is the pair the brief's own code silently missed:
@@ -361,10 +500,9 @@ fn restore_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
     let root = tmp("restore-offer-on");
     let backup = root.join("backup").join("profile_2222222222").join("vault");
     copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
-    let parent = root.join("restored-into");
-    std::fs::create_dir_all(&parent).unwrap();
+    let home = root.join("home");
     let app_data = root.join("appdata");
-    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026").expect("restore");
+    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026").expect("restore");
     let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(true), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
@@ -377,10 +515,9 @@ fn restore_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     let root = tmp("restore-offer-off");
     let backup = root.join("backup").join("profile_3333333333").join("vault");
     copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
-    let parent = root.join("restored-into");
-    std::fs::create_dir_all(&parent).unwrap();
+    let home = root.join("home");
     let app_data = root.join("appdata");
-    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), parent.to_str().unwrap(), "Fall 2026").expect("restore");
+    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026").expect("restore");
     let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(false), None);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
