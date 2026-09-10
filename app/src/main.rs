@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tauri::Manager;
-use knowlu::{commands, lms_link, onboarding, profiles, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray};
+use knowlu::{account, commands, lms_link, onboarding, profiles, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
 /// other than a console that may not be attached (the exe carries `windows_subsystem = "windows"`
@@ -104,7 +104,7 @@ fn run_shell(root: std::path::PathBuf, mode: &'static str, ps: Vec<profiles::Pro
                 lms_link::wipe_session(w.app_handle());
             }
         })
-        .invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::close_lms_window, lms_link::paste_calendar_link, lms_link::capture_courses])
+        .invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, account::sign_up, account::sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::open_policy, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::capture_courses, lms_link::paste_calendar_link, lms_link::close_lms_window, onboarding::discover_coursework, onboarding::timezone_for_state, onboarding::campus_search])
         .build(tauri::generate_context!())
         .expect("Knowlu: failed to start the Tauri runtime")
         // A session still open when the shell exits goes with it (R-C1-40, I1b). Anything this
@@ -183,7 +183,7 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
         // Closing the window hides it to the tray instead of ending the process — Knowlu keeps
         // running so the scheduler (Task 12) can still fire. Quit is the tray's job.
         .on_window_event(|w, e| { if let tauri::WindowEvent::CloseRequested { api, .. } = e { api.prevent_close(); let _ = w.hide(); } })
-        .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::decide, commands::close_info, commands::open_issue, commands::resolve_issue, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, commands::inference_status, commands::install_inference_file, commands::install_inference_download, commands::remove_inference_model, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file])
+        .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::decide, commands::close_info, commands::open_issue, commands::resolve_issue, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, commands::inference_status, commands::install_inference_file, commands::install_inference_download, commands::remove_inference_model, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, account::sign_up, account::sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::open_policy, report::report_preview, report::report_send])
         .run(tauri::generate_context!())
         .expect("Knowlu: failed to start the Tauri runtime");
     std::process::exit(0)
