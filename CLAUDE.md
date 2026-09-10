@@ -143,6 +143,7 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 - `cargo-bloat` needs a non-LTO audit build (`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_LTO=false
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo bloat --release --crates`) or everything lands in
   `[Unknown]` — and it replaces `target/release`; `cargo build --release` again before quoting a size.
+- **Tests that touch the real Credential Manager are serialised.** Windows races parallel `CredWriteW`/`CredReadW`  calls (spurious `ERROR_NOT_FOUND`), so `app/tests/account.rs` holds a file-scoped `CREDMAN_LOCK` mutex and  every test that writes, reads or deletes a real credential takes it, under a generated test id with a  `Drop` guard that deletes what it wrote. A new test file that touches the store carries its own lock.
 - **Line endings: LF everywhere in this repo** (`.gitattributes`: `* text=auto eol=lf`; `*.ps1` are
   CRLF). `engine/tests/fixtures/**` is `-text`: those bytes are the contract — several are compared
   byte for byte and they are CRLF because vaults are — **never re-encode them**. The engine still
