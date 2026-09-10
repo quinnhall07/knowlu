@@ -12,11 +12,11 @@ use serde_json::{json, Value};
 /// — row-level security and the edge functions decide what a caller may do. The service-role key,
 /// which does bypass all of that, is a function secret Quinn sets and appears nowhere in this repo.
 ///
-/// Filled from precondition P1 in step 4 below. `KNOWLU_API_BASE` / `KNOWLU_ANON_KEY` override them
-/// at run time, which is how a scratch profile is pointed at `knowlu-staging` (§11 R6) without a
-/// second build — the same shape `KNOWLU_ENGINE_EXE` already uses.
-pub const DEFAULT_API_BASE: &str = "<P1: the knowlu-prod project's functions URL>";
-pub const DEFAULT_ANON_KEY: &str = "<P1: the knowlu-prod project's anon key>";
+/// Filled from precondition P1 (the `knowlu-prod` project, 2026-09-10). `KNOWLU_API_BASE` /
+/// `KNOWLU_ANON_KEY` override them at run time, which is how a scratch profile is pointed at
+/// `knowlu-staging` (§11 R6) without a second build — the same shape `KNOWLU_ENGINE_EXE` already uses.
+pub const DEFAULT_API_BASE: &str = "https://jxthohvwrijwtuwlglan.supabase.co/functions/v1";
+pub const DEFAULT_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp4dGhvaHZ3cmlqd3R1d2xnbGFuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwMTczMDEsImV4cCI6MjEwNDU5MzMwMX0.hBNxOo94M9rF1_IEm93d7s64fmdg6RV8qy5kcJcuYNU";
 
 /// The policy versions a sign-up records. Dates, not numbers, because the pages carry a date too and
 /// a reader comparing the two should not have to hold a mapping in their head. Bump BOTH the constant
@@ -31,11 +31,10 @@ pub const PRIVACY_VERSION: &str = "2026-09-10";
 /// the same reason: a credential filed under a path nothing will look at is worse than no credential.
 pub const PENDING_TARGET: &str = "knowlu/pending/session";
 
-/// GoTrue's `/verify` request body names a `type`. Ruling R-C1-25: precondition P1 (the staging
-/// project) does not exist yet, so step 3a — one `curl` against staging to settle whether the pinned
-/// GoTrue version wants `"magiclink"` or `"email"` — has not run. `"magiclink"` is written here
-/// provisionally, behind this one named constant, so the eventual settle is a one-line change.
-// P1: settled by Task 10 step 3a (magiclink | email)
+/// GoTrue's `/verify` request body names a `type`. Settled against staging on 2026-09-10 (Task 10
+/// step 3a, closing ruling R-C1-25): a `POST /auth/v1/verify` with `"magiclink"` and a made-up code
+/// answers `403 otp_expired` — it got as far as looking the token up, so the type is accepted.
+/// (`"email"` is accepted by this GoTrue too; `"magiclink"` stays because it is what the plan named.)
 const VERIFY_TYPE: &str = "magiclink";
 
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -268,9 +267,8 @@ pub fn magic_link_at(auth_base: &str, anon: &str, email: &str) -> Result<(), Str
 /// No deep-link scheme, no URI registration, no new dependency — and the button on the panel does
 /// what its label says, which is the whole point of keeping it (spec §5.1 names magic link as one of
 /// the two identity paths).
-/// The `type` is the one thing here that is not certain across GoTrue versions — [`VERIFY_TYPE`]
-/// records why it is provisional; if step 3a's eventual answer differs, that constant is the only
-/// line that changes.
+/// The `type` is the one thing here that varies across GoTrue versions — [`VERIFY_TYPE`] records
+/// how it was settled against staging, and is the only line that changes if a GoTrue upgrade moves it.
 pub fn verify_email_code_at(auth_base: &str, anon: &str, email: &str, code: &str, now_unix: i64) -> Result<(String, Session), String> {
     let (status, v) = post_json(&format!("{auth_base}/verify"), anon, &json!({ "type": VERIFY_TYPE, "email": email, "token": code.trim() }))?;
     if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
