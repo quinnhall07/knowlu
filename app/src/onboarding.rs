@@ -290,20 +290,18 @@ fn home_dir() -> Result<PathBuf, String> {
 
 /// The personal calendar's address, validated on the device before it ever reaches a `VaultPlan`
 /// (fix round 1, item 2). Blank → `None` — a friend who never pasted one gets `calendars: []`
-/// exactly as before. `webcal://` is rewritten to `https://` (R-C1-22): it is the same feed over the
-/// same scheme underneath, and every calendar app that accepts a `webcal://` link already does this
-/// rewrite silently — refusing it here would be a wizard failing on the one link format Google and
-/// Outlook actually hand out "Copy public URL" as. Anything else that is not `https://` after that
-/// rewrite is refused by name, the same way a control character is refused by field name elsewhere.
+/// exactly as before. `webcal://` is rewritten to `https://` (R-C1-22) by
+/// `lms_link::https_from_webcal`, which is the **one** implementation of that rule on the device
+/// (R-C1-41, I2): the panel's pasted LMS link goes through the same line, so the two device paths to
+/// the same `calendar_ics` value cannot disagree about what a student may paste. Anything else that
+/// is not `https://` after that rewrite is refused by name, the same way a control character is
+/// refused by field name elsewhere.
 fn normalize_personal_calendar(raw: &str) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let rewritten = match trimmed.strip_prefix("webcal://") {
-        Some(rest) => format!("https://{rest}"),
-        None => trimmed.to_string(),
-    };
+    let rewritten = crate::lms_link::https_from_webcal(trimmed);
     if !rewritten.starts_with("https://") {
         return Err("the calendar address must start with https:// (or webcal://)".to_string());
     }

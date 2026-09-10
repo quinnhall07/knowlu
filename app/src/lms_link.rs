@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-/// The window's label. One at a time, by construction: `open` closes any previous one first.
+/// The window's label. One at a time, by construction: `open_window_at` shows the window already
+/// carrying this label rather than building a second (R-C1-41, M5).
 pub const WINDOW: &str = "lms-signin";
 
 /// Every session directory this module makes starts with this, and nothing else it deletes does.
@@ -94,21 +95,44 @@ pub fn wipe_session(app: &tauri::AppHandle) {
 
 /// The same wipe on the way out, inline and on a short leash: after `RunEvent::Exit` a detached
 /// thread dies with the process. Whatever this cannot finish, the next launch's sweep takes.
+///
+/// **The second pass is not belt and braces** (R-C1-41, M2). When `Destroyed` is delivered before
+/// `RunEvent::Exit` — which is the `app.exit(0)` path the wizard's relaunch takes — the handler has
+/// already emptied the slot and handed the path to a thread the process is about to kill, so
+/// `take_session` finds nothing here and the directory would survive until some later launch
+/// happened to sweep it. Sweeping **this process's own** prefix at zero age closes that race: by the
+/// time the event loop is exiting, every session directory named for this pid is finished with.
 pub fn wipe_session_on_exit(app: &tauri::AppHandle) {
     if let Some(dir) = take_session(app) { wipe_dir(&dir, EXIT_TRIES); }
+    sweep_stale_sessions_in(&std::env::temp_dir(), &mine_prefix(), None, SystemTime::now(), Duration::ZERO);
 }
 
-/// The sweep's testable core: `mine_prefix` is the run of the name that marks this process's own
-/// directories, and `now`/`older_than` are the clock, so a test drives it without a second process
-/// and without waiting an hour. Returns how many it removed. The only production caller passes the
-/// system temp folder.
-pub fn sweep_stale_sessions_in(temp: &Path, mine_prefix: &str, now: SystemTime, older_than: Duration) -> usize {
+/// The run of a session directory's name that marks it as this process's.
+fn mine_prefix() -> String {
+    format!("{SESSION_PREFIX}{}-", std::process::id())
+}
+
+/// The sweep's testable core. `take` is the name prefix to consider and `skip` the one to leave
+/// alone; `now` and `older_than` are the clock, so a test drives it without a second process and
+/// without waiting an hour. Returns how many it removed. `take` must itself begin with
+/// [`SESSION_PREFIX`] — the guard that keeps this from ever being pointed at the rest of the temp
+/// folder — and the only production callers pass the system temp folder.
+///
+/// **Two edges, left as they are on purpose** (R-C1-41, M6). (a) The age test reads the *directory's
+/// own* mtime, which on Windows does not move when files inside its subdirectories are written, so a
+/// second Knowlu whose student has been on an SSO page for over an hour looks stale to the crash
+/// sweep; deleting a live WebView2 profile mostly fails on open handles, and the cost of getting it
+/// wrong is a capture that has to be restarted, not lost data. (b) `skip` is keyed on the pid, so a
+/// leftover from a dead process that happened to hold this pid is never swept — it waits for the
+/// next launch with a different pid. Both are cheaper to name than to fix.
+pub fn sweep_stale_sessions_in(temp: &Path, take: &str, skip: Option<&str>, now: SystemTime, older_than: Duration) -> usize {
+    if !take.starts_with(SESSION_PREFIX) { return 0; }
     let Ok(entries) = std::fs::read_dir(temp) else { return 0 };
     let mut swept = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !name.starts_with(SESSION_PREFIX) || name.starts_with(mine_prefix) { continue; }
+        if !name.starts_with(take) || skip.is_some_and(|s| name.starts_with(s)) { continue; }
         let stale = entry
             .metadata()
             .ok()
@@ -124,12 +148,25 @@ pub fn sweep_stale_sessions_in(temp: &Path, mine_prefix: &str, now: SystemTime, 
 /// died with a sign-in window open (R-C1-40, I1c). Not this process's own, and only ones that have
 /// been sitting there for [`STALE_AFTER`]: another Knowlu, mid-capture, is not ours to delete.
 fn sweep_stale_sessions() {
-    let mine = format!("{SESSION_PREFIX}{}-", std::process::id());
-    sweep_stale_sessions_in(&std::env::temp_dir(), &mine, SystemTime::now(), STALE_AFTER);
+    let mine = mine_prefix();
+    sweep_stale_sessions_in(&std::env::temp_dir(), SESSION_PREFIX, Some(&mine), SystemTime::now(), STALE_AFTER);
 }
 
+/// Open the sign-in window, or show the one that is already open.
+///
+/// **The second *Sign in* click used to surface a Tauri internal string** (R-C1-41, M5): a close is
+/// posted asynchronously while `build` refuses the still-registered label on this thread, so the page
+/// got "a webview with label `lms-signin` already exists". The window the student already has is the
+/// right answer, so it is shown and focused — and *not* closed on the way, which would have handed
+/// them a window that vanished a moment after being told it was open. That also keeps the "one at a
+/// time" guarantee: this is the only thing that builds the window, and it never builds a second.
 pub fn open_window_at(app: &tauri::AppHandle, url: &str, data_dir: &Path) -> Result<(), String> {
-    close_window(app);
+    if let Some(w) = app.get_webview_window(WINDOW) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("{url}: {e}"))?;
     let _ = std::fs::create_dir_all(data_dir);
     WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(parsed))
@@ -233,6 +270,23 @@ impl std::fmt::Display for CaptureError {
     }
 }
 
+/// `webcal://` → `https://`, trimmed; everything else is handed back as it came (R-C1-22, and
+/// R-C1-41's I2). It is the same feed over the same scheme underneath, and every calendar app that
+/// accepts a `webcal://` link already does this rewrite silently — refusing it would be a wizard
+/// failing on the one format Google and Outlook actually hand out *Copy public URL* as.
+///
+/// **One rule, one implementation**: `onboarding::normalize_personal_calendar` calls this rather than
+/// keeping its own copy, so the two device paths to the same `calendar_ics` value cannot disagree.
+/// The judgement about what to do with the result differs and stays where it is — a blank personal
+/// calendar is `None` there, while a blank link here is refused by name by `looks_like_ics`.
+pub fn https_from_webcal(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.strip_prefix("webcal://") {
+        Some(rest) => format!("https://{rest}"),
+        None => trimmed.to_string(),
+    }
+}
+
 /// https, and either an `.ics` path or a query that says so. `http://` is refused outright: a feed
 /// URL is a capability — anyone holding it reads the student's schedule — and sending one in the
 /// clear on a campus network is not a thing to do once.
@@ -290,32 +344,57 @@ pub fn validate(url: &str, fetch: &dyn Fn(&str) -> Result<String, String>) -> Re
     Ok(IcsLink { url: url.to_string(), events, courses })
 }
 
+/// **Which URL the sign-in window's cookies are read for** (R-C1-41, I1). The window is a full
+/// browser on a campus SSO chain: when the panel asks for a capture the student may still be sitting
+/// on the identity provider, on Duo, or anywhere else they wandered — and `cookies_for_url` answers
+/// for whatever origin it is handed. Sending that jar to the LMS would hand one party's live session
+/// to another, which is not a thing to do once, so **the window's own URL is used only when it is on
+/// the feed endpoint's host**, and the feed URL itself otherwise: a completed SSO leaves the LMS
+/// host's cookies at path `/`, which is exactly what the request needs.
+///
+/// Strings in and out, so the rule is pinned by a test with no window and no URL type at the call
+/// site. A window URL that will not parse, or that has no host, chooses the feed.
+pub fn cookie_url(window_url: Option<&str>, feed: &str) -> String {
+    let host = |u: &str| u.parse::<tauri::Url>().ok().and_then(|p| p.host_str().map(str::to_lowercase));
+    let Some(here) = window_url else { return feed.to_string() };
+    let (Some(a), Some(b)) = (host(here), host(feed)) else { return feed.to_string() };
+    if a == b { here.to_string() } else { feed.to_string() }
+}
+
+/// A capture that did not produce a link, in the **same keys `finish` uses** (R-C1-41, M4): a panel
+/// reading `kind` or `note` must never find `undefined` on the paths where it is telling the student
+/// something went wrong. A capture is always a school feed, so the kind is not in doubt.
+fn capture_failed(error: impl std::fmt::Display) -> Value {
+    json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null })
+}
+
 /// **Outcome B — cookie handover** (Task 13's spike, recorded and reviewed). The window is never
 /// navigated: the endpoint below, fetched once with the student's own session cookies, answers 200
 /// with the feed URL as the entire body.
 #[tauri::command(async)]
 pub fn capture_calendar_link(app: tauri::AppHandle, campus: String) -> Value {
     let Some(steps) = steps_for(&campus) else {
-        return json!({ "ok": false, "error": "no capture is known for that school yet — paste the link instead", "link": Value::Null });
+        return capture_failed("no capture is known for that school yet — paste the link instead");
     };
     let Some(w) = app.get_webview_window(WINDOW) else {
-        return json!({ "ok": false, "error": "the sign-in window is not open", "link": Value::Null });
+        return capture_failed("the sign-in window is not open");
     };
     // The feed endpoint Task 13 recorded, fetched ONCE with the student's own session cookies. The
     // cookies live in this function's stack and nowhere else: never written, never logged, and gone
     // when it returns.
     let feed = &steps[steps.len() - 1];
     let Ok(url) = feed.parse::<tauri::Url>() else {
-        return json!({ "ok": false, "error": "the campus feed URL is not a URL", "link": Value::Null });
+        return capture_failed("the campus feed URL is not a URL");
     };
-    // **The window's own current URL**, which is where the spike read them from — it had landed on
-    // the campus's institution page after SSO and the read worked there. Whether the host root alone
-    // is sufficient scope was never tested, so the feed URL is only the fallback for a window that
-    // cannot say where it is.
-    let jar_url = w.url().unwrap_or(url);
+    // The spike read them for the window's own current URL, having landed on the campus's
+    // institution page after SSO; `cookie_url` keeps that read and adds the one rule it was missing.
+    let here = w.url().ok();
+    // Either the feed URL, which parsed above, or a window URL `cookie_url` only chose after parsing
+    // it — so the fallback here is unreachable rather than load-bearing.
+    let jar_url = cookie_url(here.as_ref().map(|u| u.as_str()), feed).parse::<tauri::Url>().unwrap_or(url);
     let jar: String = match w.cookies_for_url(jar_url) {
         Ok(cs) => cs.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "),
-        Err(e) => return json!({ "ok": false, "error": format!("the sign-in could not be read ({e})"), "link": Value::Null }),
+        Err(e) => return capture_failed(format!("the sign-in could not be read ({e})")),
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
@@ -327,17 +406,25 @@ pub fn capture_calendar_link(app: tauri::AppHandle, campus: String) -> Value {
     match body {
         Ok(text) => match first_ics_link(&text) {
             Some(found) => finish("lms_ics", &found),
-            None => json!({ "ok": false, "error": CaptureError::NotFound.to_string(), "link": Value::Null }),
+            // The commonest reason for a 200 with no link in it is a jar that does not authenticate
+            // the feed — the student is still part-way through signing in — so say that rather than
+            // "no calendar link was found", which reads as *your school has none*.
+            None => capture_failed("finish signing in to your school first, then try again — or paste the link below"),
         },
-        Err(e) => json!({ "ok": false, "error": CaptureError::Unreachable(e).to_string(), "link": Value::Null }),
+        Err(e) => capture_failed(CaptureError::Unreachable(e)),
     }
 }
 
-/// The campus's capture path, recorded verbatim by Task 13's spike: the calendar page, then the
-/// endpoint the share link comes out of. **Outcome B reads only the last one and never navigates the
-/// window**, so the calendar page is here for the record rather than for the code. The POST form of
-/// that endpoint answers 500 and `/learn/api/v1/calendars/feed/url` is a 404 — both were tried, and
-/// neither is to be tried again. `None` for a campus nobody has walked yet, which is what makes the
+/// The campus's capture path: a calendar page, then the endpoint the share link comes out of.
+///
+/// **Only the last element is Task 13's** (R-C1-41, M3). The spike recorded the feed endpoint and
+/// nothing else — outcome B never navigates the window, so the Outcome says in terms that the
+/// calendar page and share-control URLs are moot. `…/ultra/calendar` is therefore *not recorded by
+/// the spike and unused by the code*: it is where a person would go to do this by hand, kept as
+/// orientation for whoever adds the next campus. The capture reads `steps[len - 1]`, always.
+///
+/// The POST form of that endpoint answers 500 and `/learn/api/v1/calendars/feed/url` is a 404 — both
+/// were tried, and neither is to be tried again. `None` for a campus nobody has walked yet, which is what makes the
 /// panel show the paste field instead of pretending.
 fn capture_steps(campus: &str) -> Option<&'static [&'static str]> {
     match campus {
@@ -451,7 +538,11 @@ pub fn validate_for(
     }
 }
 
+/// **The rewrite belongs here, not only in the paste command** (R-C1-41, I2): a capture that ever
+/// returns a `webcal://` link is covered by the same line, and the link that reaches the vault and
+/// `PUT /account/sources` is the `https://` one either way.
 fn finish(kind: &str, url: &str) -> Value {
+    let url = &https_from_webcal(url);
     match validate_for(kind, url, &|u| knowlu_engine::calfeed::fetch_ics(u)) {
         Ok(link) => {
             // The account copy. A failure is a `note`, never an `error`: the panel goes on.
@@ -471,5 +562,5 @@ fn finish(kind: &str, url: &str) -> Value {
 /// sentence and the same failure.
 #[tauri::command(async)]
 pub fn paste_calendar_link(kind: String, url: String) -> Value {
-    finish(&kind, url.trim())
+    finish(&kind, &url)
 }

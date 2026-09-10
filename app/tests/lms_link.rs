@@ -153,6 +153,55 @@ fn an_empty_personal_calendar_connects_and_an_empty_school_feed_does_not() {
     assert!(matches!(validate_for("nonsense", url, &one), Err(CaptureError::NotACalendarLink(_))));
 }
 
+/// **A pasted `webcal://` link is the one format Google and Outlook actually hand out** (R-C1-22,
+/// and R-C1-41's I2). The wizard's personal-calendar field has rewritten it since Task 12; the panel's
+/// paste field reaches the same `calendar_ics` value by a different route, and the two must not
+/// disagree about what a student may paste. One rule, one implementation — `https_from_webcal`, which
+/// `onboarding::normalize_personal_calendar` now calls too.
+#[test]
+fn a_pasted_webcal_link_becomes_https_before_it_is_validated() {
+    use knowlu::lms_link::{https_from_webcal, validate_for};
+    assert_eq!(https_from_webcal("webcal://lms.example.invalid/feed/a/learn.ics"), "https://lms.example.invalid/feed/a/learn.ics");
+    assert_eq!(https_from_webcal("  webcal://x.invalid/y.ics  "), "https://x.invalid/y.ics");
+    assert_eq!(https_from_webcal("  https://x.invalid/y.ics  "), "https://x.invalid/y.ics", "trimmed, and otherwise left alone");
+    assert_eq!(https_from_webcal("not a url"), "not a url", "the rewrite judges nothing — `looks_like_ics` does that");
+    // …and the whole path: rewritten, then validated and stored as `https://`.
+    let good = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:MATH 125 Homework 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let pasted = "webcal://lms.example.invalid/feed/a/learn.ics";
+    let link = validate_for("lms_ics", &https_from_webcal(pasted), &|_| Ok(good.to_string())).expect("a webcal link validates");
+    assert_eq!(link.url, "https://lms.example.invalid/feed/a/learn.ics");
+    assert_eq!((link.events, link.courses), (1, 1));
+    // The unrewritten form is exactly what used to be refused, which is why the rewrite is not optional.
+    assert!(matches!(validate_for("lms_ics", pasted, &|_| Ok(good.to_string())), Err(CaptureError::NotACalendarLink(_))));
+}
+
+/// **One host's jar is never handed to another** (R-C1-41, I1). The sign-in window is a full browser
+/// on a campus SSO chain, so when the panel asks for a capture the student may still be on the
+/// identity provider or on Duo — and `cookies_for_url` answers for whatever origin it is given. The
+/// window's own URL is used only when it is on the feed endpoint's host; otherwise the cookies are
+/// read for the feed URL itself, which is where a completed SSO leaves the LMS host's own session.
+#[test]
+fn the_cookies_are_read_for_the_feed_host_and_never_for_a_stranger() {
+    use knowlu::lms_link::cookie_url;
+    let feed = "https://ualearn.blackboard.com/webapps/calendar/calendarFeed/url";
+    // Signed in and landed on the LMS: the window's own URL, exactly as the spike read it.
+    let here = "https://ualearn.blackboard.com/ultra/institution-page";
+    assert_eq!(cookie_url(Some(here), feed), here);
+    assert_eq!(cookie_url(Some("https://UALearn.Blackboard.COM/ultra/calendar"), feed), "https://UALearn.Blackboard.COM/ultra/calendar", "the host compare is case-insensitive");
+    // Still on the identity provider, on Duo, or somewhere else entirely: the feed URL, never theirs.
+    for elsewhere in [
+        "https://idp.example.invalid/idp/profile/SAML2/Redirect/SSO",
+        "https://api-abc123.duosecurity.com/frame/prompt",
+        "https://ualearn.blackboard.com.example.invalid/phish",
+        "about:blank",
+        "",
+    ] {
+        assert_eq!(cookie_url(Some(elsewhere), feed), feed, "{elsewhere} is not the feed's host");
+    }
+    // A window that cannot say where it is falls back to the feed too.
+    assert_eq!(cookie_url(None, feed), feed);
+}
+
 /// The account copy of the link, on the wire (Interfaces with C2, item 3). Loopback only: the server
 /// is a real socket on `127.0.0.1` and its thread is joined before this returns.
 #[test]
@@ -239,6 +288,12 @@ fn the_sign_in_window_keeps_nothing_and_lives_nowhere_near_the_app_data() {
 /// urls block on any capability at all — `tauri 2.11.5` gates a non-local origin on exactly those
 /// two (`webview/mod.rs`'s ACL extension for remote origins, and `ipc/authority.rs`'s
 /// `origin.matches(&cmd.context)`). Neither exists, and this is what keeps it that way.
+///
+/// **The entries are globs, so the pin is an allow-list** (R-C1-41, M1). `tauri-utils`'s
+/// `acl/capability.rs` documents each entry as a possible glob pattern and `ipc/authority.rs`
+/// matches with `w.matches(label)`, so `"*"` or `"lms-*"` would grant the sign-in window while
+/// passing any test that merely compares against its label. The console window is the only window
+/// this app grants anything to, so every entry must be exactly `"main"` — a glob included.
 #[test]
 fn no_capability_names_the_sign_in_window() {
     let dir = std::path::Path::new("capabilities");
@@ -252,11 +307,12 @@ fn no_capability_names_the_sign_in_window() {
         for key in ["windows", "webviews"] {
             let labels = v.get(key).and_then(|x| x.as_array()).cloned().unwrap_or_default();
             for label in labels {
-                assert_ne!(
+                assert_eq!(
                     label.as_str().unwrap_or_default(),
-                    knowlu::lms_link::WINDOW,
-                    "{} grants capabilities to the sign-in window through `{key}`",
-                    path.display()
+                    "main",
+                    "{} names a window other than the console through `{key}` — and `{}` must never be reachable from a capability",
+                    path.display(),
+                    knowlu::lms_link::WINDOW
                 );
             }
         }
@@ -294,17 +350,46 @@ fn the_sweep_takes_only_stale_sessions_that_are_not_ours() {
     let stranger = scratch.join("some-other-folder");
     for d in [&ours, &theirs, &stranger] { std::fs::create_dir_all(d).expect("scratch dirs"); }
     std::fs::write(theirs.join("cookies.db"), b"x").expect("a file inside the profile");
+    let hour = std::time::Duration::from_secs(3600);
 
     // An hour has not passed, so nothing is old enough yet.
     let now = std::time::SystemTime::now();
-    assert_eq!(sweep_stale_sessions_in(&scratch, mine, now, std::time::Duration::from_secs(3600)), 0);
+    assert_eq!(sweep_stale_sessions_in(&scratch, "knowlu-lms-session-", Some(mine), now, hour), 0);
     assert!(theirs.exists());
 
     // …and once it has, the stranger's session goes and ours does not.
     let later = now + std::time::Duration::from_secs(7200);
-    assert_eq!(sweep_stale_sessions_in(&scratch, mine, later, std::time::Duration::from_secs(3600)), 1);
+    assert_eq!(sweep_stale_sessions_in(&scratch, "knowlu-lms-session-", Some(mine), later, hour), 1);
     assert!(!theirs.exists(), "a stale session directory from a dead process must be swept");
     assert!(ours.exists(), "this process's own open session must never be swept");
     assert!(stranger.exists(), "the sweep must not touch anything that is not a session directory");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The **exit** pass (R-C1-41, M2): `Destroyed` may empty the state slot and hand the path to a
+/// thread the process then kills, so at exit the sweep takes this process's *own* prefix at zero age.
+/// Nobody else's directory may go with it, whatever its age, and `take` outside the session prefix is
+/// refused outright — the guard that keeps a recursive delete from being pointed at the temp folder.
+#[test]
+fn the_exit_pass_takes_this_processs_own_sessions_and_nothing_else() {
+    use knowlu::lms_link::sweep_stale_sessions_in;
+    let scratch = std::env::temp_dir().join(format!("knowlu-sweep-test-{}-{}", std::process::id(), knowlu_engine::ids::new_id("sw")));
+    let mine = "knowlu-lms-session-4242-";
+    let ours = scratch.join("knowlu-lms-session-4242-capA");
+    let theirs = scratch.join("knowlu-lms-session-9999-capB");
+    let stranger = scratch.join("some-other-folder");
+    for d in [&ours, &theirs, &stranger] { std::fs::create_dir_all(d).expect("scratch dirs"); }
+    let now = std::time::SystemTime::now();
+
+    // A `take` that is not a session prefix deletes nothing at all, zero age or not.
+    assert_eq!(sweep_stale_sessions_in(&scratch, "", None, now, std::time::Duration::ZERO), 0);
+    assert_eq!(sweep_stale_sessions_in(&scratch, "some-other", None, now, std::time::Duration::ZERO), 0);
+    assert!(stranger.exists() && ours.exists() && theirs.exists());
+
+    // The exit pass: ours goes the moment the window is finished with, however new it is.
+    assert_eq!(sweep_stale_sessions_in(&scratch, mine, None, now, std::time::Duration::ZERO), 1);
+    assert!(!ours.exists(), "a session this process opened must not outlive it");
+    assert!(theirs.exists(), "another Knowlu's live session must survive our exit");
+    assert!(stranger.exists());
     let _ = std::fs::remove_dir_all(&scratch);
 }
