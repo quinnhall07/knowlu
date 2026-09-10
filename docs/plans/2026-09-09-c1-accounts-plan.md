@@ -83,7 +83,7 @@ Every decision this plan carries, and the task that carries it.
 | §11a R-OB-1 | **Onboarding maps the coursework sources to courses.** Quinn's first slot: the wizard had stored the zyBooks and VHL logins and written `courses: {}` / `sections: {}`, so `coursework` answered `zybook UACS100Fall2026 not in config; skipped`, `section 2102121 not in config; skipped`, then `0 assignments parsed; treating as failure` | spec §11a, ruled 2026-09-09 | **Task 14a.** After the logins panel stores the credentials the wizard runs the engine's discovery (hand-off **H10**'s `coursework-discover`), shows every book and section with a **suggested** course derived from its code, and writes what the student confirms into `config/ingest.yaml` — `courses:` with `course:`/`label:`, `sections:` for VHL, the `ignore:` entry for zyBooks' own `HowToUseZyBooks2`, and the engine's `categories`/`effort`/`importance` blocks. C2 owns the other half of the ruling (an unknown book on a **later** run is a proposal, not a silent skip) |
 | §11a R-OB-2 | **The sign-in window also captures the enrolled course list**, seeding `courses/` and `course_map` — so a first ingest is not 28 tasks with `course: null` | spec §11a, ruled 2026-09-09 | **Task 13** asks it as the spike's second go/no-go question; **Task 14b** captures the list, seeds one `courses/<slug>.md` note per course through the same `write::create` the seed task uses, and writes a `course_map:` line per course; the fallback when the window cannot read them is the same panel with the codes typed in |
 | §11a R-OB-3 | A first ingest never creates a task already past due | spec §11a, ruled 2026-09-09 | **Not C1's.** C2's `/ingest-ics`, and the device's `ingest` until then — both are `engine/`, which this stream does not own. Named under *What is NOT in this plan* so nobody reads its absence as an oversight |
-| §11a R-OB-4 | **The school is chosen from a searchable list of every US institution**, not from two radios; the chosen school writes `campus:` into the vault, `CAMPUSES` becomes the *curated* layer on top, and the timezone is suggested from the state | spec §11a, ruled 2026-09-09 | **Task 14c**, on hand-off **H11**'s generated `app/campuses.json` (federal IPEDS, public domain, 6,072 schools, ~400 KB, header-stamped, read by `onboarding::campus_search` — the page cannot fetch it and does not hold it). `config/campus.yaml` carries `unitid`, `name`, `state`, `lms`, `curated`; `scaffold::CAMPUSES` is keyed by `UNITID` and adds event feeds and a known LMS; an uncurated school gets no feeds and an LMS from where the sign-in window lands, or a two-button question. Task 17 is the typeahead |
+| §11a R-OB-4 | **The school is chosen from a searchable list of every US institution**, not from two radios; the chosen school writes `campus:` into the vault, `CAMPUSES` becomes the *curated* layer on top, and the timezone is suggested from the state | spec §11a, ruled 2026-09-09 | **Task 14c**, on hand-off **H11**'s generated `app/campuses.json` (federal IPEDS, public domain, 4,319 schools, ~312 KB, header-stamped, read by `onboarding::campus_search` — the page cannot fetch it and does not hold it). `config/campus.yaml` carries `unitid`, `name`, `state`, `lms`, `curated`; `scaffold::CAMPUSES` is keyed by `UNITID` and adds event feeds and a known LMS; an uncurated school gets no feeds and an LMS from where the sign-in window lands, or a two-button question. Task 17 is the typeahead |
 | §11a | **Every wizard finish runs the first slot at once** (§4.2 step 7) | spec §11a, ruled 2026-09-09 | Nothing new: `scheduler::needs_first_run` and `spawn`'s first-run block are on `main` already. Task 17 step 8a **references** them and pins the seam both ways — a wizard-made vault has no `today.md` and is owed a run; an adopted one (Task 18) has one and is not |
 | VISION 6 | "Adding a source is one action — a URL or a login — and a source that later breaks fails visibly" | `VISION.md`, success criterion 6 | Tasks 13, 14 and 17: one action is *sign in to your school, the way you always do*. The mechanism sits behind `lms_link::capture()` so the spike's outcome can be swapped without the wizard moving |
 | VISION rule | "Never request campus SSO credentials" — **unchanged by §11a** | `VISION.md` standing rules; spec §9 University policies; §11a | Task 14 asks for **nothing**, sees **nothing** and stores **nothing** but the resulting link: the student types their password into the LMS's own page, in a window with no capability grant and its own throwaway data directory that Task 14 deletes. Task 17's static test proves the app's own page has no LMS credential field at all |
@@ -7757,7 +7757,7 @@ fn every_mapped_course_is_a_slug_the_vault_knows() {
 ### Task 14c: The school, chosen from every US institution (R-OB-4)
 
 Two radio buttons was a placeholder that read like a decision. §11a, ruled 2026-09-09: the school is
-picked from **every active two- and four-year US institution** — 6,072 of them — by typing part of the
+picked from **every active two- and four-year US institution** — 4,319 of them (HD2024 has 6,072 rows; the rest are inactive or less-than-two-year, R-C1-37) — by typing part of the
 name. The curated layer does not go away; it stops being the *whole* list and becomes what a curated
 school gets **on top** of it: event feeds, a known LMS, a known sign-in URL.
 
@@ -7811,9 +7811,9 @@ fn the_campus_list_is_bundled_headed_and_small() {
     let v: serde_json::Value = serde_json::from_str(&raw).expect("campuses.json is one JSON object");
     let rows = v["campuses"].as_array().expect("campuses is an array");
     assert_eq!(rows.len() as u64, v["count"].as_u64().expect("count is a number"), "the header's count is the array's length");
-    // 6,072 active two- and four-year institutions in HD2024. A file that suddenly holds 40 of them is
+    // 4,319 active two- and four-year institutions in HD2024 (of 6,072 rows; R-C1-37). A file that suddenly holds 40 of them is
     // a script that half-ran, and a bundle that holds 40,000 is one that stopped filtering.
-    assert!(rows.len() > 5_000 && rows.len() < 8_000, "{} schools is not a US institution list", rows.len());
+    assert!(rows.len() > 4_000 && rows.len() < 8_000, "{} schools is not a US institution list", rows.len());
 
     // `[unitid, name, city, state, host]`, and the host is a HOST: this test is the guard that the
     // bundled list carries no `http(s)://` literal — `static_assets.rs` cannot be, because its
@@ -8151,7 +8151,7 @@ pub fn timezone_for_state(state: String) -> Value {
 
 ```rust
 /// The campus's capture path, recorded verbatim by Task 13's spike. `None` for a school nobody has
-/// curated — which is most of the 6,072 — and that is what makes the panel show its paste field
+/// curated — which is most of the 4,319 — and that is what makes the panel show its paste field
 /// instead of pretending.
 /// Where the sign-in window opens for a curated school: **that school's own host**, never a constant.
 pub fn lms_home(unitid: &str) -> Option<String> {
@@ -9707,7 +9707,7 @@ fn the_wizard_never_offers_a_local_model() {
       if (first) { e.preventDefault(); first.focus(); }
     }
   });
-  // 6,072 schools is not all of them: a new campus, a satellite, somewhere abroad. A name and a state
+  // 4,319 schools is not all of them: a new campus, a satellite, somewhere abroad. A name and a state
   // is enough to make a vault, and that school simply has no curated feeds.
   EL("wiz-school-none").addEventListener("click", function () {
     EL("wiz-school-free").hidden = false;
@@ -9769,7 +9769,7 @@ fn the_wizard_never_offers_a_local_model() {
 - [ ] **Step 6: `app/static/console.css`.** One rule for the textarea and one for the new nav width; nothing else changes:
 
 ```css
-/* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is 6,072 schools and the panel shows ten. */
+/* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is 4,319 schools and the panel shows ten. */
 .wiz-hits { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair); }
 .wiz-hits:empty { display: none; }
 .wiz-hits .hit { padding: 6px 8px; cursor: pointer; }
@@ -10546,7 +10546,7 @@ rows, one exit-gate item and an entry under *What is NOT in this plan* for R-OB-
 
 **Amendment 2 (2026-09-09, R-OB-4):** the school stopped being two radio buttons. Hand-off **H11**
 generates `app/campuses.json` from the federal IPEDS *Institutional Characteristics* file
-(6,072 active two- and four-year institutions, public domain, header-stamped with its source and
+(4,319 active two- and four-year institutions, public domain, header-stamped with its source and
 date); **Task 14c** turns `scaffold::CAMPUSES` into a curated layer keyed by `UNITID`, adds
 `config/campus.yaml`, a state-to-timezone table and `onboarding::timezone_for_state`; Task 17's
 calendars panel became a typeahead with a free-text fallback and a two-button LMS question; Task 14
