@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tauri::Manager;
-use knowlu::{commands, onboarding, profiles, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray};
+use knowlu::{commands, lms_link, onboarding, profiles, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
 /// other than a console that may not be attached (the exe carries `windows_subsystem = "windows"`
@@ -92,7 +92,7 @@ fn run_shell(root: std::path::PathBuf, mode: &'static str, ps: Vec<profiles::Pro
             app.manage(onboarding::Onboarding { root, mode, profiles: std::sync::Mutex::new(ps) });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding])
+        .invoke_handler(tauri::generate_handler![onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, onboarding::adopt_vault, onboarding::open_profile, onboarding::create_vault, onboarding::restore_vault, onboarding::apply_profile_settings, onboarding::store_credentials, onboarding::retarget_credentials, onboarding::finish_onboarding, lms_link::open_lms_window, lms_link::capture_calendar_link, lms_link::close_lms_window])
         .run(tauri::generate_context!())
         .expect("Knowlu: failed to start the Tauri runtime");
     std::process::exit(0)
