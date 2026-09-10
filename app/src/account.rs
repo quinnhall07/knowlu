@@ -545,3 +545,303 @@ pub fn refresh_entitlement(vault: &std::path::Path, data_dir: &std::path::Path) 
     save_cache(data_dir, &c)?;
     Ok(c)
 }
+
+// ---- C1 Task 18: an install that already exists is adopted in place (spec §11a) ----
+
+/// A vault written before C1 has no `config/cloud.yaml`. Spec §11a: it is **adopted in place** — the
+/// folder, the settings, the Credential Manager entries and the profile id all stay exactly where
+/// they are, and the account is added to what is already there.
+///
+/// A cloud.yaml that IS there and does not parse also answers `true` here, and that is deliberate:
+/// the overlay comes up, [`attach_in`] refuses it by name (*this vault already has an account*), and
+/// the student reads a sentence about a broken file. The alternative — treating unreadable as
+/// absent — would silently overwrite the account of a vault that has one. `scheduler`'s
+/// [`EntitlementState::Unreadable`] is where that distinction earns its keep instead.
+pub fn needs_account(vault: &std::path::Path) -> bool { cloud_config(vault).is_err() }
+
+/// Write the account into a vault that already exists, and move the session onto its profile. The
+/// two halves are one operation on purpose: a `cloud.yaml` naming a credential target that holds
+/// nothing is a vault that cannot reach the cloud with nothing anywhere saying why.
+pub fn attach_in(vault: &std::path::Path, profile_id: &str, pending_target: &str) -> Result<(), String> {
+    let (account_id, _) = load_session(pending_target)?;
+    // **Every field, because `VaultPlan` has grown**: Tasks 14a and 14b added `zybooks_courses`,
+    // `vhl_sections`, `zybooks_ignore`, `course_map` and `courses`, and Task 14c added
+    // `campus_choice`. An adopted vault gains `config/cloud.yaml` and nothing else — its feeds, its
+    // mappings, its courses and its campus are already on disk and are not rewritten — so every plan
+    // field but the three cloud ones is empty by construction, and `write_cloud_yaml_if_absent` is
+    // the only writer this calls.
+    let plan = crate::scaffold::VaultPlan {
+        profile_id: profile_id.to_string(),
+        ics_url: None,
+        personal_calendar: None,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        timezone: String::new(),
+        slots: Vec::new(),
+        device: String::new(),
+        campus: "none".to_string(),
+        campus_choice: Default::default(),
+        zybooks: false,
+        vhl: false,
+        api_base: api_base(),
+        anon_key: anon_key(),
+        account_id,
+    };
+    // Only `config/cloud.yaml` is written. Nothing else in this vault is read, rewritten or moved.
+    crate::scaffold::write_cloud_yaml_if_absent(vault, &plan)?;
+    move_session(pending_target, &session_target(profile_id))?;
+
+    // **The back-fill** (Interfaces with C2, item 3). This vault was onboarded before the account
+    // existed, so its LMS feed is in `config/ingest.yaml` and in no `sources` row — and C2's
+    // `/ingest/ics` reads that row. Send it once, now that there is an account to send it to.
+    //
+    // **Best effort, and never fatal**: the adoption has already succeeded, the vault copy is what
+    // `ingest` reads until C2 ships, and an unsubscribed or offline account must not leave a
+    // half-adopted install behind. A failure is one logged line.
+    for (kind, url) in feeds_in(vault) {
+        if let Err(e) = crate::lms_link::store_source(&api_base(), &session_target(profile_id), kind, &url) {
+            eprintln!("Knowlu: the {kind} link could not be saved to your account ({e})");
+        }
+    }
+    Ok(())
+}
+
+/// Both feeds `config/ingest.yaml` may already hold: `ics_url` (the school) and the first entry of
+/// `calendars:` (the personal one). Read the way `scheduler::ics_state` reads the same file —
+/// `serde_yaml_ng` over `pystr`, never a byte compare.
+fn feeds_in(vault: &std::path::Path) -> Vec<(&'static str, String)> {
+    let Ok(text) = knowlu_engine::pystr::read_text(&vault.join("config").join("ingest.yaml")) else { return Vec::new() };
+    let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else { return Vec::new() };
+    let mut out = Vec::new();
+    if let Some(u) = v.get("ics_url").and_then(|u| u.as_str()).filter(|u| !u.trim().is_empty()) {
+        out.push(("lms_ics", u.to_string()));
+    }
+    if let Some(list) = v.get("calendars").and_then(|c| c.as_sequence()) {
+        if let Some(u) = list.iter().find_map(|f| f.get("ics_url").and_then(|u| u.as_str())).filter(|u| !u.trim().is_empty()) {
+            out.push(("calendar_ics", u.to_string()));
+        }
+    }
+    out
+}
+
+/// The profile id the two vault-owning commands below key everything to: the settings file's, and —
+/// if that is somehow empty (a hand-edited `settings.json`, or a poisoned lock; `Settings::load`'s
+/// own default is this very derivation) — the one derived from the vault path, which is what
+/// `profiles::register` filed the profile under. **Never an empty string**: an empty id writes
+/// `knowlu//session` into a vault's `cloud.yaml` and names the backups ROOT in a delete.
+fn profile_id_of(cs: &crate::state::ConsoleState) -> String {
+    let from_settings = cs.settings.lock().map(|s| s.profile_id.clone()).unwrap_or_default();
+    if from_settings.is_empty() { crate::profiles::id_for(&cs.vault) } else { from_settings }
+}
+
+#[tauri::command(async)]
+pub fn attach_account(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let profile_id = profile_id_of(&cs);
+    match attach_in(&cs.vault, &profile_id, PENDING_TARGET) {
+        Ok(()) => {
+            // R-C1-31's argument, on this path: the vault now has an account and the session sits
+            // where the console looks for it, so this is the first moment the entitlement cache can
+            // be written — and without it `judge` is *skipped: no entitlement* until the
+            // housekeeping thread's six-hourly refresh comes round. Best effort: a student who has
+            // just subscribed on a bad network is adopted either way, and the grace clock starts at
+            // the next refresh instead of this one.
+            let _ = refresh_entitlement(&cs.vault, &cs.data_dir);
+            json!({ "ok": true, "error": Value::Null })
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// What the settings panel and the upgrade overlay both read. `needs_account` is what puts the
+/// overlay on screen at all.
+#[tauri::command]
+pub fn account_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let cfg = cloud_config(&cs.vault).ok();
+    let cache = load_cache(&cs.data_dir);
+    let email = cfg
+        .as_ref()
+        .and_then(|c| load_session(&c.session_credential_target).ok())
+        .map(|(_, s)| s.email)
+        .unwrap_or_default();
+    // **No network call here.** `account_status` answers from this machine only — a console that had
+    // to reach the internet before it could decide whether to cover today's page would be the bug the
+    // 72-hour grace exists to prevent (spec §5.1, D4). Whether the service is reachable is a fact the
+    // page learns from an attempt that failed, and it is the page that stands the overlay down.
+    json!({
+        "ok": true, "error": Value::Null,
+        "needs_account": cfg.is_none(),
+        "account_id": cfg.as_ref().map(|c| c.account_id.clone()),
+        "email": email,
+        "status": cache.as_ref().map(|c| c.status.clone()),
+        "plan": cache.as_ref().and_then(|c| c.plan.clone()),
+        "current_period_end": cache.as_ref().and_then(|c| c.current_period_end.clone()),
+        "checked_at": cache.as_ref().map(|c| c.checked_at.clone()),
+    })
+}
+
+/// The wizard's poll (`entitlement_now`) reads the PENDING session, because the wizard has no vault
+/// yet; the upgrade overlay uses the same one for the same reason — it signs in before it attaches,
+/// so until `attach_account` runs there is no profile session either.
+#[tauri::command(async)]
+pub fn entitlement_now() -> Value {
+    let base = api_base();
+    let out = (|| -> Result<EntitlementCache, String> {
+        let auth = auth_base(&base)?;
+        let token = valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, now_unix())?;
+        fetch_entitlement_at(&base, &token)
+    })();
+    match out {
+        Ok(c) => json!({ "ok": true, "error": Value::Null, "status": c.status, "plan": c.plan, "current_period_end": c.current_period_end }),
+        Err(e) => json!({ "ok": false, "error": e, "status": Value::Null }),
+    }
+}
+
+// `open_in_browser` is already in this file — Task 10 added it for `open_policy`, and Checkout and
+// the Portal use the same one rather than a second copy of the same three lines.
+
+/// One POST that answers with a link to open. **The body is serialized and sent as a plain string**,
+/// not through `send_json`: ureq's `json` feature is not enabled in `app/Cargo.toml` (it carries the
+/// engine's `cookies` feature and no other), so `send_json` does not exist on this build —
+/// `post_json` above and `lms_link::put_source_at` both document the same decision.
+fn post_for_url(api_base: &str, path: &str, token: &str, body: &Value) -> Result<String, String> {
+    check_api_base(api_base)?;
+    let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    let mut res = agent()
+        .post(&format!("{}{path}", api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .send(text)
+        .map_err(|e| format!("{UNREACHABLE} ({e})"))?;
+    let status = res.status().as_u16();
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
+    v.get("url").and_then(|x| x.as_str()).map(str::to_string).ok_or_else(|| "no link came back".to_string())
+}
+
+#[tauri::command(async)]
+pub fn open_checkout(plan: String) -> Value {
+    let base = api_base();
+    let out = (|| -> Result<String, String> {
+        let auth = auth_base(&base)?;
+        let token = valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, now_unix())?;
+        let url = post_for_url(&base, "/billing-checkout", &token, &json!({ "plan": plan, "terms_version": TOS_VERSION }))?;
+        open_in_browser(&url)?;
+        Ok(url)
+    })();
+    match out { Ok(_) => json!({ "ok": true, "error": Value::Null }), Err(e) => json!({ "ok": false, "error": e }) }
+}
+
+/// *Manage subscription* — one click to Stripe's portal, one click to cancel there, no survey in
+/// between. That is the whole of the cancel flow the legal note (§8) asks for.
+#[tauri::command(async)]
+pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let out = (|| -> Result<String, String> {
+        let cfg = cloud_config(&cs.vault)?;
+        let auth = auth_base(&cfg.api_base)?;
+        let token = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())?;
+        let url = post_for_url(&cfg.api_base, "/billing-portal", &token, &json!({}))?;
+        open_in_browser(&url)?;
+        Ok(url)
+    })();
+    match out { Ok(_) => json!({ "ok": true, "error": Value::Null }), Err(e) => json!({ "ok": false, "error": e }) }
+}
+
+/// The local half of *Delete my data*, with no `AppHandle` and no network anywhere near it — so
+/// `app/tests/account.rs` can drive it over scratch folders and prove the list is exactly this long.
+/// **Everything it removes is named here and nowhere else**: the vault folder, THIS profile's
+/// subtree of the backups root, this profile's app-data folder, this profile's row in
+/// `profiles.json`, its session credential and its two coursework logins.
+///
+/// **`backup_root` is the ROOT** — `%USERPROFILE%\Knowlu\Backups` for every profile on the machine —
+/// and `backup::tick` writes `<root>\<profile_id>\` inside it. Removing the root would destroy a
+/// housemate's or a second profile's only other copy of their work, which is not what *delete MY
+/// data* says. An empty `profile_id` removes nothing under either root, for the same reason: it
+/// would name the root itself.
+///
+/// Best effort throughout: a file held open by another process must not stop the rest of the wipe,
+/// and there is nothing a user could do with the error anyway — the account is already deleted by
+/// the time this runs.
+pub fn delete_local_data(
+    vault: &std::path::Path,
+    data_dir: &std::path::Path,
+    backup_root: Option<&std::path::Path>,
+    profile_id: &str,
+    app_root: Option<&std::path::Path>,
+    session_credential_target: &str,
+) {
+    let _ = std::fs::remove_dir_all(vault);
+    if let (Some(b), false) = (backup_root, profile_id.is_empty()) {
+        let _ = std::fs::remove_dir_all(b.join(profile_id));
+    }
+    let _ = std::fs::remove_dir_all(data_dir);
+    // …and forget the profile, or the picker goes on offering a vault that is not there. A registry
+    // that cannot be READ is left alone rather than rewritten — `profiles::load`'s own rule, and the
+    // reason it distinguishes absent from unreadable.
+    if let (Some(root), false) = (app_root, profile_id.is_empty()) {
+        if let Ok(all) = crate::profiles::load(root) {
+            let left: Vec<_> = all.into_iter().filter(|pr| pr.id != profile_id).collect();
+            let _ = crate::profiles::save(root, &left);
+        }
+    }
+    let _ = crate::credentials::delete(session_credential_target);
+    // The coursework logins are keyed to the PROFILE, not the account (`credentials::target_for`),
+    // and they are this machine's — deleting the account does not delete them, so this does.
+    if !profile_id.is_empty() {
+        for source in ["zybooks", "vhl"] {
+            let t = crate::credentials::target_for(profile_id, source);
+            if crate::credentials::exists(&t) { let _ = crate::credentials::delete(&t); }
+        }
+    }
+}
+
+/// Spec §4.1: *Delete my data* removes the vault, the snapshots, the app data **and** calls
+/// `DELETE /account`. The server call goes FIRST: a local wipe that ran before it would leave an
+/// account nobody can reach to delete, and the deletion right is the one that matters here.
+///
+/// **A refusal is also a stop**, not only a transport failure: the agent is built with
+/// `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`, and wiping the machine on one
+/// would destroy the vault while the account it was supposed to delete is still there. Nothing local
+/// is touched unless the server said `deleted`.
+#[tauri::command(async)]
+pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
+    let auth = match auth_base(&cfg.api_base) { Ok(a) => a, Err(e) => return json!({ "ok": false, "error": e }) };
+    let token = match valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix()) { Ok(t) => t, Err(e) => return json!({ "ok": false, "error": e }) };
+    let untouched = "nothing on this machine was touched";
+    let res = agent()
+        .delete(&format!("{}/account", cfg.api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {token}"))
+        .call();
+    let mut res = match res {
+        Ok(r) => r,
+        Err(e) => return json!({ "ok": false, "error": format!("your account could not be deleted ({e}) — {untouched}") }),
+    };
+    let status = res.status().as_u16();
+    if !(200..300).contains(&status) {
+        let text = res.body_mut().with_config().limit(1 << 16).read_to_string().unwrap_or_default();
+        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        return json!({ "ok": false, "error": format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)) });
+    }
+    let backup = cs.settings.lock().map(|s| s.backup_dir.clone()).unwrap_or_default();
+    let profile_id = profile_id_of(&cs);
+    delete_local_data(
+        &cs.vault,
+        &cs.data_dir,
+        backup.as_deref(),
+        &profile_id,
+        crate::state::app_data_root().as_deref(),
+        &cfg.session_credential_target,
+    );
+    // The envelope goes back first and the process ends a moment later, on another thread: a page
+    // whose `.then` never runs cannot say "Deleted", and the settings row's own copy promises it will.
+    let h = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        h.exit(0);
+    });
+    json!({ "ok": true, "error": Value::Null })
+}

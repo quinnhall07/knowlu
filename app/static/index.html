@@ -170,6 +170,15 @@
   <textarea id="report-text" rows="20"></textarea>
   <div class="set-row"><span class="meta" id="report-note"></span><button class="b pri y" id="report-send">Send</button></div>
 </aside>
+<aside class="setpanel" id="upgrade" hidden>
+  <div class="set-hd"><h2>Knowlu now needs an account</h2><button class="b" id="up-later">Not now</button></div>
+  <p class="meta">Your work stays exactly where it is. Sign in, or make an account, and Knowlu picks up where it left off. Today&rsquo;s page is underneath and still works &mdash; ranking never needed an account.</p>
+  <div class="set-row"><input type="text" id="up-email" placeholder="Email"><input type="password" id="up-pw" placeholder="Password"></div>
+  <label><input type="checkbox" id="up-18"> I am 18 or older</label>
+  <label><input type="checkbox" id="up-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy">privacy policy</a></label>
+  <div class="set-row"><button class="b pri y" id="up-create">Create account</button><button class="b" id="up-signin">I already have one</button></div>
+  <div class="set-row"><button class="b pri y" id="up-subscribe" hidden>Subscribe</button><span class="crit" id="up-error"></span></div>
+</aside>
 <script src="console.js"></script>
 </body>
 </html>

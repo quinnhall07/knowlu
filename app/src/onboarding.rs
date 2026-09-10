@@ -296,6 +296,31 @@ fn set_offer_marker(dir: &Path, offer: bool) {
     }
 }
 
+/// **R-C1-55 (I2): a backup mirror is not a vault to open.** `knowlu_engine::backup::mirror` writes
+/// `<backups root>\<profile id>\vault\`, and that folder carries `config/planning.yaml` and `tasks/`
+/// — it passes the vault predicate exactly. Adopting it would register the backup AS the live vault,
+/// which [`restore_vault_in`]'s own doc says must never happen: the next backup tick would then
+/// mirror the vault over itself, and the student's only other copy of their work would be gone.
+///
+/// Detected **structurally**, never by the word "backup" in a path (a friend may keep their real
+/// vault in a folder called anything): a folder named `vault` whose parent holds what a backup tick
+/// leaves beside it — `status.json` and `snapshots\` — or, for a mirror whose first tick has not
+/// finished, a `profile_<10 hex>` id folder (`profiles::id_for`) directly under a `Backups` folder,
+/// which is the layout [`default_folders_in`] hands every vault the wizard makes.
+fn backup_mirror_reason(vault: &Path) -> Option<String> {
+    if !vault.file_name().map(|n| n.eq_ignore_ascii_case("vault")).unwrap_or(false) { return None; }
+    let profile = vault.parent()?;
+    let ticked = profile.join("status.json").is_file() || profile.join("snapshots").is_dir();
+    let id = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let id_shaped = id.strip_prefix("profile_").map(|h| h.len() == 10 && h.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false);
+    let under_backups = profile.parent().and_then(|p| p.file_name()).map(|n| n.eq_ignore_ascii_case("Backups")).unwrap_or(false);
+    if !(ticked || (id_shaped && under_backups)) { return None; }
+    Some(format!(
+        "{}: that is Knowlu's backup copy of a vault, not the vault itself — opening it here would make the backup the live vault, and the next backup would write over it. Choose the folder you actually work in.",
+        vault.display()
+    ))
+}
+
 /// *Use an existing vault* (spec §3 panel 2): a folder holding `config/planning.yaml` and `tasks/`
 /// becomes a profile. **Nothing is written into the vault** — no scaffold, no seed note, no first
 /// task.
@@ -304,6 +329,11 @@ fn set_offer_marker(dir: &Path, offer: bool) {
 /// of the call and prove that (spec §8; S7).
 pub fn adopt_vault_in(root: &Path, path: &str, name: Option<String>) -> Value {
     let vault = PathBuf::from(path);
+    // R-C1-55 (I2), before the vault predicate: a mirror passes that predicate, so "it looks like a
+    // vault" is exactly the wrong thing to answer here.
+    if let Some(e) = backup_mirror_reason(&vault) {
+        return json!({ "ok": false, "error": e, "profile": Value::Null });
+    }
     // **The console's own predicate, exactly** (final review, I1): `state::resolve_vault` opens a
     // vault only when `config/planning.yaml` is a file, so adopting on the weaker "there is a
     // `config/` directory" test registered profiles the very next launch would refuse to open.

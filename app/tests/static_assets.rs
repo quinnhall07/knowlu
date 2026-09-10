@@ -903,6 +903,10 @@ fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
         // R-C1-42's second press, and the panels' own new controls.
         "wiz-lms-capture", "wiz-code-row", "wiz-code", "wiz-school-picked", "wiz-courses-note",
         "wiz-course-add-go", "wiz-map-note", "wiz-sub-note", "wiz-account-note",
+        // Task 18's upgrade overlay. `upgrade` and `up-later` are bound at IIFE top level too, so
+        // they carry the same "delete one and every window renders blank" weight the six above do.
+        "upgrade", "up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin",
+        "up-subscribe", "up-later", "up-error",
     ] {
         assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
         // Either spelling the page uses: `EL("x")` or a `closest("#x")` selector.
@@ -919,4 +923,68 @@ fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
     let before = ids.len();
     ids.dedup();
     assert_eq!(before, ids.len(), "index.html carries a duplicate id");
+}
+
+/// I11: *Delete my data* takes **this profile's** snapshots out of the shared backups root, never the
+/// root. Two profiles on one machine share `%USERPROFILE%\Knowlu\Backups`, and the other one's only
+/// other copy of their work is in there.
+#[test]
+fn deleting_my_data_leaves_another_profiles_snapshots_alone() {
+    // The path arithmetic, driven directly: the command itself needs a `ConsoleState`, an `AppHandle`
+    // and a live account, and none of the three is what this is about. The real thing —
+    // `account::delete_local_data` over a scratch vault, its backups subtree, its registry row and
+    // its credentials — is `app/tests/account.rs`'s
+    // `deleting_my_data_removes_this_profiles_things_and_nothing_else`.
+    let root = std::env::temp_dir().join(format!("knowlu-backups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mine = root.join("profile_1111111111").join("vault");
+    let theirs = root.join("profile_2222222222").join("vault");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(mine.join("a.md"), "x").unwrap();
+    std::fs::write(theirs.join("b.md"), "y").unwrap();
+    // What `delete_my_data` does: the root JOINED with this profile's id, and nothing above it.
+    std::fs::remove_dir_all(root.join("profile_1111111111")).unwrap();
+    assert!(!root.join("profile_1111111111").exists());
+    assert!(theirs.join("b.md").is_file(), "another profile's snapshots were destroyed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Spec §11a: an install that predates the account is upgraded **in place**, in the console window,
+/// over its own vault — so the console page carries the same account panels the wizard does, and it
+/// asks no folder question at all.
+#[test]
+fn the_console_can_sign_an_existing_install_in_without_re_onboarding_it() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"upgrade\""), "the upgrade overlay");
+    for id in ["up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin", "up-subscribe", "up-later", "up-error"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "the upgrade overlay needs {id}");
+    }
+    let panel = html.split("id=\"upgrade\"").nth(1).and_then(|s| s.split("</aside>").next()).expect("the upgrade overlay");
+    assert!(!panel.to_lowercase().contains("folder"), "an existing install is never asked about a folder");
+    // **It must be dismissable**, exactly as `#report` is (`report-cancel`): spec §5.1 and D4 both
+    // promise that a dead connection never hides today's page, and this is the first launch after C1
+    // for every install that already exists.
+    assert!(panel.contains("id=\"up-later\""), "the upgrade overlay needs a dismiss control");
+    // …and its policy links must be the browser-opening kind, asserted **over this panel's markup**
+    // rather than over the whole file: the wizard having them is not the same claim.
+    assert_eq!(panel.matches("class=\"policy\"").count(), 2, "both policy links open in the browser");
+    let js = read("console.js");
+    let listener = js.split("EL(\"upgrade\").addEventListener(\"click\"").nth(1).and_then(|s| s.split("function finishUpgrade(").next()).expect("the upgrade listener");
+    assert!(listener.contains("a.policy") && listener.contains("preventDefault()"), "the overlay's own listener must intercept them");
+    assert!(js.contains("function maybeUpgrade("), "maybeUpgrade");
+    assert!(js.contains("\"attach_account\""), "the upgrade ends by attaching the account to this vault");
+    // …it only appears when the vault says it needs one, never on a healthy console…
+    assert!(js.contains("s.needs_account"), "the overlay is gated on the account status's own flag");
+    // …it stays down once dismissed, and stays down when the service cannot be reached at all.
+    assert!(js.contains("UPGRADE_DISMISSED"), "the dismiss must survive the next state poll");
+    assert!(js.contains("UPGRADE_UNREACHABLE") && js.contains("function upgradeUnreachable("),
+        "a sign-in that cannot reach the service must stand the overlay down, not trap the user behind it");
+    // …and the guard tests the clause the Rust side actually emits. It read `indexOf("could not be
+    // reached") === 0` once, against an error whose first twenty characters are "the account service
+    // ", so it could never fire — which is the failure mode a shared literal exists to prevent.
+    assert!(js.contains("indexOf(UNREACHABLE) === 0"), "the guard must test the shared clause, not a fragment of it");
+    // …and it is a side panel, not a modal: the console underneath stays usable, which is the whole
+    // of D4's promise that a dead connection never hides today's page.
+    assert!(html.contains("<aside class=\"setpanel\" id=\"upgrade\""), "the overlay is a setpanel, like #settings");
 }

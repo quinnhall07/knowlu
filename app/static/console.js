@@ -1060,16 +1060,26 @@
       return loadInference();
     }).catch(function () { EL("set-judge-state").textContent = "that did not finish"; });
   }
+  function renderAccountRow(a) {
+    EL("set-account-state").textContent = (!a || !a.ok) ? "" : (a.needs_account
+      ? "not attached to an account yet"
+      : [a.email || "", a.status || "", a.plan || ""].filter(function (x) { return x; }).join(" · "));
+  }
+  // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
+  // this machine only (no network call), and asking twice for the same three fields is two answers
+  // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
+  // stays down and the console is exactly as usable as it was before C1. Best effort in both
+  // directions — the vault-less shell does not register the command, and neither does a build made
+  // before Task 18.
+  function checkAccount() {
+    return invoke("account_status", {}).then(function (s) {
+      renderAccountRow(s);
+      maybeUpgrade(s);
+    }).catch(function () { renderAccountRow(null); EL("upgrade").hidden = true; });
+  }
   function openSettings() {
     EL("settings").hidden = false;
-    // The account row, from this machine only (`account_status` makes no network call). Best effort:
-    // the vault-less shell does not register it, and neither does a build made before Task 18.
-    invoke("account_status", {}).then(function (a) {
-      if (!a || !a.ok) { EL("set-account-state").textContent = ""; return; }
-      EL("set-account-state").textContent = a.needs_account
-        ? "not attached to an account yet"
-        : [a.email || "", a.status || "", a.plan || ""].filter(function (x) { return x; }).join(" · ");
-    }).catch(function () {});
+    checkAccount();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
@@ -1130,8 +1140,13 @@
   // Guarded on the panel being open: while it is hidden, Escape stays the in-place editor's
   // (editField binds its own on the input) and this handler must not shadow it.
   document.addEventListener("keydown", function (e) {
+    // Tested topmost-first, which is DOM order among panels that share a z-index: the upgrade
+    // overlay is the last `.setpanel` in the page, the report is next, and the settings panel is
+    // underneath both. The upgrade overlay's Escape is *Not now*, flag and all — a panel that came
+    // back on the next `checkAccount` would not be dismissed, it would be postponed by a second.
+    if (e.key === "Escape" && !EL("upgrade").hidden) { UPGRADE_DISMISSED = true; EL("upgrade").hidden = true; return; }
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
-    // way out (R-C1-55, M3). Tested first because it opens on top of the settings panel.
+    // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
     if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
     if (e.key === "Escape" && !EL("settings").hidden) { EL("settings").hidden = true; }
   });
@@ -1173,6 +1188,95 @@
     }).catch(function () { EL("set-delete-note").textContent = "could not delete"; EL("set-delete-2").disabled = false; });
   });
 
+  // ---- C1 Task 18: an install made before C1 is upgraded here, in place (spec §11a). It is never
+  // re-onboarded, it is never asked where its folder is, and nothing about it moves — the overlay
+  // ends in `attach_account`, which writes `config/cloud.yaml` beside the config files that are
+  // already there.
+  //
+  // **Two things it must never do**, and both were real: cover today's page with no way past, and
+  // cover it at all when the account service cannot be reached. Spec §5.1 and D4 both promise that a
+  // dead connection never hides today's page — the scheduler's 72-hour grace exists for exactly this
+  // — and an overlay that walks past that promise is worse than no overlay. So: *Not now* dismisses
+  // it for the session, and an unreachable service does not raise it in the first place. It comes
+  // back on the next launch, which is the right cadence for a thing that has to happen once.
+  // `#upgrade` is a `setpanel`, the same side panel `#settings` is — it does not cover the page, and
+  // the console under it keeps ranking, scrolling and being clicked. These two flags are the rest of
+  // the promise: `UPGRADE_DISMISSED` is *Not now*, and `UPGRADE_UNREACHABLE` is what a failed attempt
+  // sets, so a student on a train is asked once and then left alone until the next launch.
+  var UPGRADE_DISMISSED = false;
+  var UPGRADE_UNREACHABLE = false;
+  function maybeUpgrade(s) {
+    if (UPGRADE_DISMISSED || UPGRADE_UNREACHABLE || !s || !s.needs_account) { EL("upgrade").hidden = true; return; }
+    EL("upgrade").hidden = false;
+  }
+  EL("up-later").addEventListener("click", function () {
+    UPGRADE_DISMISSED = true;
+    EL("upgrade").hidden = true;
+  });
+  /** A sign-in that could not reach the service at all stands the overlay down for this session and
+   *  says why once. Not an error dialog: there is nothing the user can do about a dead network, and
+   *  today's page is right there underneath. */
+  function upgradeUnreachable() {
+    UPGRADE_UNREACHABLE = true;
+    EL("up-error").textContent = "";
+    EL("upgrade").hidden = true;
+  }
+  EL("upgrade").addEventListener("click", function (e) {
+    // The same branch the wizard has, and it matters more here: this window has a working console to
+    // lose, and a plain navigation to `terms.html` would lose it while the user is ticking the box
+    // that says they accept it.
+    var policy = e.target.closest("a.policy");
+    if (policy) {
+      e.preventDefault();
+      invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
+      return;
+    }
+    var creating = !!e.target.closest("#up-create");
+    if (creating || e.target.closest("#up-signin")) {
+      if (creating && !(EL("up-18").checked && EL("up-terms").checked)) {
+        EL("up-error").textContent = "Tick both boxes to create an account."; return;
+      }
+      var args = { email: EL("up-email").value.trim(), password: EL("up-pw").value };
+      // `ageAttested`, not the Rust spelling: Tauri v2 lower-camel-cases every argument key, and
+      // `sign_up` opts out of nothing (R-C1-55, C1 — the wizard's own call carries the same comment).
+      if (creating) { args.ageAttested = EL("up-18").checked; }
+      invoke(creating ? "sign_up" : "sign_in", args).then(function (r) {
+        EL("up-pw").value = "";
+        // A dead network is not something to hold someone behind a panel for; a wrong password is.
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        if (!r.ok) { EL("up-error").textContent = r.error; return; }
+        EL("up-error").textContent = "";
+        EL("up-subscribe").hidden = false;
+        return invoke("entitlement_now", {}).then(function (ent) {
+          if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
+        });
+      }).catch(upgradeUnreachable);
+      return;
+    }
+    if (e.target.closest("#up-subscribe")) {
+      invoke("open_checkout", { plan: "monthly" }).then(function () {
+        var tries = 0;
+        var tick = function () {
+          tries += 1;
+          invoke("entitlement_now", {}).then(function (ent) {
+            if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
+            if (tries < 40) { setTimeout(tick, 3000); }
+          }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
+        };
+        setTimeout(tick, 3000);
+      }).catch(function () {});
+    }
+  });
+  // `poll()` is the console's repaint — this file has no `refresh`. The attach wrote
+  // `config/cloud.yaml` and moved the session, so the next paint is the first one with an account.
+  function finishUpgrade() {
+    return invoke("attach_account", {}).then(function (r) {
+      if (!r.ok) { EL("up-error").textContent = r.error; return; }
+      EL("upgrade").hidden = true;
+      poll();
+    });
+  }
+
   // Plan 4a Task 2: the console is one of three things this window can be. `launch_state` says
   // which: a console over a resolved profile, the picker (more than one profile), or the wizard
   // (none). The console's own listeners are bound only on the console path — a picker window has
@@ -1192,6 +1296,10 @@
     // Plan 4a Task 8: one check at launch. The housekeeping thread repeats it once a day; a
     // failure is quiet on both paths — until the release host exists, unreachable IS the answer.
     checkForUpdates();
+    // Spec §11a: and one look at the account, which is what raises the upgrade overlay on the first
+    // launch after C1 for an install that already existed. Once per launch, never on a timer — an
+    // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
+    checkAccount();
   }
 
   function renderPicker(l) {

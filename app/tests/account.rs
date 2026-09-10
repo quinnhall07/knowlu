@@ -514,3 +514,211 @@ fn the_compiled_in_project_is_a_prod_functions_base_and_an_anon_key() {
     let r = payload.split(r#""ref":""#).nth(1).expect("a ref claim").split('"').next().expect("a ref value");
     assert!(knowlu::account::DEFAULT_API_BASE.contains(r), "key and URL name different projects");
 }
+
+/// The process-global `KNOWLU_API_BASE`, set for the length of one test and restored on any exit
+/// path — a panicking assertion included, which a straight-line set-call-restore is not. Every test
+/// that sets it also holds [`CREDMAN_LOCK`]: this file's only other readers of `api_base()` are
+/// credential tests, so the one lock covers both kinds of process-global state, exactly as
+/// `tests/scheduler.rs`'s `EnvSeam` does for `KNOWLU_ENGINE_EXE`.
+#[cfg(windows)]
+struct ApiBase(Option<std::ffi::OsString>);
+
+#[cfg(windows)]
+impl ApiBase {
+    fn set(value: &str) -> Self {
+        let prev = std::env::var_os("KNOWLU_API_BASE");
+        unsafe { std::env::set_var("KNOWLU_API_BASE", value) };
+        ApiBase(prev)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ApiBase {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("KNOWLU_API_BASE", v) },
+            None => unsafe { std::env::remove_var("KNOWLU_API_BASE") },
+        }
+    }
+}
+
+/// A loopback base **nothing is listening on**: a port is bound only long enough to learn that it is
+/// free, then released. A request to it is refused in microseconds instead of waiting out a timeout,
+/// and — the point — it can never leave this machine. Used where a call must not reach the network
+/// and its failure is what the test is about.
+#[cfg(windows)]
+fn closed_loopback_base() -> String {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = l.local_addr().expect("addr").port();
+    drop(l);
+    format!("http://127.0.0.1:{port}/functions/v1")
+}
+
+/// Spec §11a: an install that already exists is **adopted in place**. Its folder, its settings, its
+/// Credential Manager entries and its profile id all stay exactly where they are, and the account is
+/// added to what is already there — no folder question, no second vault, no rewrite of a single file
+/// the student already had.
+///
+/// `KNOWLU_API_BASE` points at a closed port for the whole test: `attach_in` ends by back-filling the
+/// LMS feed to the account, and that attempt must fail here rather than reach anything real. Its
+/// failing is also a claim worth making — the adoption succeeds anyway.
+#[cfg(windows)]
+#[test]
+fn a_vault_from_before_c1_needs_an_account_and_gains_one_without_moving() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    use knowlu::account::{attach_in, needs_account, save_session, Session, PENDING_TARGET};
+    let root = std::env::temp_dir().join(format!("knowlu-adopt-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let vault = root.join("Fall 2026");
+    // A pre-C1 vault: config/planning.yaml, tasks/, runners.yaml — and NO cloud.yaml.
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("config").join("planning.yaml"), "daily_effort_budget: 4.0\n").unwrap();
+    std::fs::write(vault.join("config").join("ingest.yaml"), "ics_url: 'https://lms.example.invalid/a.ics'\n").unwrap();
+    let before = std::fs::read_to_string(vault.join("config").join("ingest.yaml")).unwrap();
+    assert!(needs_account(&vault), "a vault with no cloud.yaml needs one");
+
+    // The wizard-less upgrade signs in first, into the pending target, exactly as the wizard does.
+    let target = format!("knowlu/test-adopt-{}-{}/pending", std::process::id(), line!());
+    let profile_id = knowlu::profiles::id_for(&vault);
+    let _cleanup = Cleanup(vec![target.clone(), knowlu::account::session_target(&profile_id)]);
+    save_session(&target, "acc-9", &Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 9, email: "a@example.invalid".into() }).unwrap();
+    attach_in(&vault, &profile_id, &target).expect("attach");
+
+    assert!(!needs_account(&vault), "…and stops needing one");
+    let cfg = knowlu::account::cloud_config(&vault).expect("cloud_config");
+    assert_eq!(cfg.account_id, "acc-9");
+    assert_eq!(cfg.session_credential_target, format!("knowlu/{profile_id}/session"));
+    // Nothing else in the vault moved: the folder, the feed and the profile id are exactly as they
+    // were. That is the whole ruling.
+    assert_eq!(std::fs::read_to_string(vault.join("config").join("ingest.yaml")).unwrap(), before);
+    assert_eq!(knowlu::profiles::id_for(&vault), profile_id);
+    // The session moved onto the profile and left the pending target.
+    let (id, _) = knowlu::account::load_session(&cfg.session_credential_target).expect("session");
+    assert_eq!(id, "acc-9");
+    assert!(knowlu::account::load_session(&target).is_err());
+    // Adopting twice is refused **for the reason the test is named for** — the vault already has an
+    // account — and not incidentally because the pending session has since been moved away. So the
+    // second attempt is given a live pending session, and the error text is asserted.
+    save_session(&target, "acc-9", &Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 9, email: "a@example.invalid".into() }).unwrap();
+    let again = attach_in(&vault, &profile_id, &target).unwrap_err();
+    assert!(again.contains("already has an account"), "{again}");
+    let _ = PENDING_TARGET;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The back-fill (Interfaces with C2, item 3). A vault onboarded before the account existed carries
+/// its feeds in `config/ingest.yaml` and in no `sources` row — and C2's `/ingest/ics` reads that row.
+/// Adoption sends **both** of them, once each, with this profile's own bearer: the school feed as
+/// `lms_ics` and the first personal calendar as `calendar_ics`.
+#[cfg(windows)]
+#[test]
+fn an_adopted_vaults_two_feeds_are_back_filled_to_the_account() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{attach_in, save_session, Session};
+    let root = std::env::temp_dir().join(format!("knowlu-backfill-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let vault = root.join("Fall 2026");
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("config").join("planning.yaml"), "daily_effort_budget: 4.0\n").unwrap();
+    // The shape `scaffold::ingest_yaml` writes: a school feed, and `calendars:` as a block list of
+    // `{name, ics_url}` mappings.
+    std::fs::write(
+        vault.join("config").join("ingest.yaml"),
+        "ics_url: 'https://lms.example.invalid/a.ics'\ntimezone: 'America/Chicago'\ncalendars:\n  - name: personal\n    ics_url: 'https://cal.example.invalid/b.ics'\n",
+    ).unwrap();
+
+    let profile_id = knowlu::profiles::id_for(&vault);
+    let target = format!("knowlu/test-backfill-{}-{}/pending", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone(), knowlu::account::session_target(&profile_id)]);
+    // Plenty of life left, so `valid_access_token_at` never has to refresh and the loopback only has
+    // to answer the two PUTs the back-fill itself makes.
+    let s = Session {
+        access_token: "tok".into(),
+        refresh_token: "rt".into(),
+        expires_at: jiff::Timestamp::now().as_second() + 3600,
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-7", &s).expect("write the pending session");
+
+    // Started last, immediately before the call that reaches it — the `accept()` deadline must not
+    // have to outlast the Credential Manager setup above (the same ordering
+    // `refresh_entitlement_saves_the_cache_from_a_live_reply` documents).
+    let (base, handle) = loopback(vec![(200, "{\"ok\":true}".to_string()), (200, "{\"ok\":true}".to_string())]);
+    let _api = ApiBase::set(&format!("{base}/functions/v1"));
+    attach_in(&vault, &profile_id, &target).expect("attach");
+    let seen = handle.join().expect("server thread");
+
+    assert_eq!(seen.len(), 2, "one call per feed, and no more");
+    assert!(seen[0].starts_with("PUT /functions/v1/account/sources "), "{}", seen[0]);
+    assert!(seen[0].contains("\"kind\":\"lms_ics\"") && seen[0].contains("a.ics"), "{}", seen[0]);
+    assert!(seen[1].contains("\"kind\":\"calendar_ics\"") && seen[1].contains("b.ics"), "{}", seen[1]);
+    // The bearer is sent; its value is nobody's business, here least of all.
+    assert!(seen[0].to_lowercase().contains("authorization: bearer "), "the request carries a bearer");
+    assert!(knowlu::account::cloud_config(&vault).is_ok(), "the adoption itself still landed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Spec §4.1's *Delete my data*, driven over scratch folders under the temp dir — never a real
+/// profile, and with the server call and the window's exit left out, because neither is what this is
+/// about. **The list is exactly this long**: the vault, THIS profile's subtree of the shared backups
+/// root, this profile's app data, this profile's row in the registry, its session and its two
+/// coursework logins. A second profile on the same machine — its vault, its snapshots, its app data,
+/// its registry row, its logins — comes through untouched, and so does the backups root itself.
+#[cfg(windows)]
+#[test]
+fn deleting_my_data_removes_this_profiles_things_and_nothing_else() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("knowlu-delete-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mine = root.join("Fall 2026");
+    let theirs = root.join("Someone else");
+    std::fs::create_dir_all(mine.join("tasks")).unwrap();
+    std::fs::create_dir_all(theirs.join("tasks")).unwrap();
+    std::fs::write(mine.join("tasks").join("a.md"), "mine").unwrap();
+    std::fs::write(theirs.join("tasks").join("b.md"), "theirs").unwrap();
+    let (my_id, their_id) = (knowlu::profiles::id_for(&mine), knowlu::profiles::id_for(&theirs));
+
+    // One backups ROOT, two profiles inside it — the whole reason this test exists.
+    let backups = root.join("Backups");
+    std::fs::create_dir_all(backups.join(&my_id).join("vault").join("tasks")).unwrap();
+    std::fs::create_dir_all(backups.join(&their_id).join("snapshots")).unwrap();
+    std::fs::write(backups.join(&my_id).join("vault").join("tasks").join("a.md"), "mine").unwrap();
+    std::fs::write(backups.join(&their_id).join("snapshots").join("2026-09-10.zip"), "theirs").unwrap();
+
+    let app_root = root.join("appdata");
+    knowlu::profiles::register(&app_root, "Fall 2026", &mine).expect("register mine");
+    knowlu::profiles::register(&app_root, "Someone else", &theirs).expect("register theirs");
+    let data_dir = knowlu::profiles::profile_dir(&app_root, &my_id);
+    std::fs::write(data_dir.join("settings.json"), "{}").unwrap();
+    let their_data = knowlu::profiles::profile_dir(&app_root, &their_id);
+
+    let session = format!("knowlu/test-delete-{}-{}/session", std::process::id(), line!());
+    let my_login = knowlu::credentials::target_for(&my_id, "zybooks");
+    let their_login = knowlu::credentials::target_for(&their_id, "zybooks");
+    let _cleanup = Cleanup(vec![session.clone(), my_login.clone(), their_login.clone()]);
+    knowlu::credentials::write(&session, "acc-1", "{}").expect("a session to delete");
+    knowlu::credentials::write(&my_login, "me@example.invalid", "pw").expect("my coursework login");
+    knowlu::credentials::write(&their_login, "them@example.invalid", "pw").expect("their coursework login");
+
+    knowlu::account::delete_local_data(&mine, &data_dir, Some(&backups), &my_id, Some(&app_root), &session);
+
+    assert!(!mine.exists(), "the vault is gone");
+    assert!(!backups.join(&my_id).exists(), "my snapshots are gone");
+    assert!(!data_dir.exists(), "my app data is gone");
+    assert!(!knowlu::credentials::exists(&session), "my session is gone");
+    assert!(!knowlu::credentials::exists(&my_login), "my coursework login is gone");
+    let left = knowlu::profiles::load(&app_root).expect("the registry still reads");
+    assert_eq!(left.len(), 1, "only my row left the registry: {left:?}");
+    assert_eq!(left[0].id, their_id);
+
+    assert!(backups.is_dir(), "the backups ROOT is shared and must survive");
+    assert!(backups.join(&their_id).join("snapshots").join("2026-09-10.zip").is_file(), "another profile's snapshots were destroyed");
+    assert!(theirs.join("tasks").join("b.md").is_file(), "another profile's vault was destroyed");
+    assert!(their_data.is_dir(), "another profile's app data was destroyed");
+    assert!(knowlu::credentials::exists(&their_login), "another profile's coursework login was destroyed");
+    assert!(root.is_dir(), "nothing above the folders named was touched");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -938,3 +938,48 @@ fn a_page_supplied_course_slug_is_normalised_before_it_names_a_file() {
     assert_eq!(names, vec!["evil.md".to_string(), "has-spaces.md".to_string()]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **R-C1-55 (I2)**: *Use an existing vault* must refuse a backup mirror. `backup::mirror` writes
+/// `<backups root>\<profile id>\vault\`, which carries `config/planning.yaml` and `tasks/` and so
+/// passes the vault predicate exactly — and adopting it would register the backup AS the live vault,
+/// the one thing `restore_vault_in`'s own doc says must never happen: the next tick would then mirror
+/// the vault over itself, and the student's only other copy of their work would be gone.
+///
+/// Detected structurally, never by the word "backup" in a path: a folder named `vault` whose parent
+/// holds what a backup tick leaves beside it (`status.json`, `snapshots\`), or whose parent is a
+/// `profile_<10 hex>` id under a `Backups` folder — the layout `default_folders_in` hands every
+/// wizard-made vault.
+#[test]
+fn adopting_a_backup_mirror_is_refused_and_registers_nothing() {
+    let root = tmp("adopt-mirror");
+    let app_data = root.join("appdata");
+    let backups = root.join("Knowlu").join("Backups");
+    let mirror = backups.join("profile_1111111111").join("vault");
+    copy(Path::new("../engine/tests/fixtures/vault-s1"), &mirror);
+    // What `backup::tick` leaves beside the mirror on every successful run.
+    std::fs::write(backups.join("profile_1111111111").join("status.json"), "{}").unwrap();
+    std::fs::create_dir_all(backups.join("profile_1111111111").join("snapshots")).unwrap();
+    let before = fingerprint(&backups);
+
+    let out = adopt_vault_in(&app_data, mirror.to_str().unwrap(), None);
+    assert_eq!(out["ok"], false, "a backup mirror is not a vault to open: {out}");
+    let err = out["error"].as_str().unwrap();
+    assert!(err.contains("backup"), "the sentence the picker shows must say what it is: {err}");
+    assert!(knowlu::profiles::load(&app_data).unwrap().is_empty(), "nothing may be registered");
+    assert_eq!(fingerprint(&backups), before, "the backup folder was written to");
+
+    // …and one that has not been ticked yet — no `status.json`, no `snapshots\` — is refused on the
+    // layout alone.
+    let bare = root.join("Knowlu").join("Backups").join("profile_2222222222").join("vault");
+    copy(Path::new("../engine/tests/fixtures/vault-s1"), &bare);
+    let out = adopt_vault_in(&app_data, bare.to_str().unwrap(), None);
+    assert_eq!(out["ok"], false, "the default backups layout is refused before a first tick: {out}");
+
+    // The guard is structural, so a real vault that merely lives near a backup folder is still
+    // adoptable — including one a student happened to name `vault`.
+    let live = root.join("Knowlu").join("vault");
+    copy(Path::new("../engine/tests/fixtures/vault-s1"), &live);
+    let out = adopt_vault_in(&app_data, live.to_str().unwrap(), None);
+    assert_eq!(out["ok"], true, "an ordinary vault must still be adoptable: {out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
