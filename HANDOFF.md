@@ -108,8 +108,7 @@ calendar URLs stay as the offline fallback until C3/C4).
    Task 5 step 8's job call and the token half of step 9, Task 6 step 7, Task 7 step 8 — the five
    secret-bearing functions answer 500 until `supabase secrets set`. Rulings R-C1-13…36 are in
    the review report (`docs/reports/2026-09-09-c1-accounts-plan-review.md`, "Execution rulings") — the
-   ledger under `.superpowers/` is git-ignored scratch. **Next:** H10 (the engine's `coursework-discover`), then Task 14a, 14b (H9b at its step 3a), 14c (H11), 16 (reports),
-   17–18 (the wizard, adopt-in-place), 19–21 (the policies, the download page, the close). The test counts
+   ledger under `.superpowers/` is git-ignored scratch. **H10 is done** (`coursework-discover`, one fix round, proven against Quinn's accounts through throwaway credentials — R-C1-43). **Task 14a** (the coursework mapping) is implemented and in its fix round (R-C1-47); **Task 16** (the report preview and the scrub twin) is implemented in a second worktree on branch `c1-task16` and in its fix round (R-C1-45/46) — the second stream exists because the one-implementer rule is per worktree (R-C1-44); it merges back by rebase before Task 17; Task 20's early steps follow it there on Quinn's instruction. **Next:** 14b (H9b folded into its dispatch), 14c (H11 is generated), then 17–18 (the wizard, adopt-in-place), 19–21 (the policies, the download page, the close). The test counts
    in the plan are +38 behind the branch after Task 9 (R-C1-16). Then **C2**, merging C1
    first; apply H9 between the two merges.
 6. C3 (sync; git out of the product) and C4 (remove the local runtime; the (c) toggle UI; the
