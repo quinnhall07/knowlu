@@ -21,6 +21,7 @@ fn plan_for(dest: &Path) -> VaultPlan {
         slots: vec!["12:00".into(), "18:00".into()],
         device: "M".into(),
         campus: "none".into(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         zybooks_courses: Vec::new(),
@@ -214,6 +215,7 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         slots: vec!["12:00: x #c 'q'".into(), "18:00 {b} \"d\"".into()],
         device: "DESK: TOP #1 'q' \"d\" {z}".into(),
         campus: "university-of-alabama".into(),
+        campus_choice: Default::default(),
         zybooks: true,
         vhl: true,
         zybooks_courses: vec![knowlu::scaffold::BookMapping {
@@ -314,9 +316,13 @@ fn the_campus_preset_is_the_shape_the_engine_already_reads() {
     assert_eq!(CAMPUSES.len(), 2);
     assert!(campus_yaml("none").unwrap().contains("sources: []"));
     assert!(campus_yaml("not-a-campus").is_none());
-    // Every key of the radio list resolves to a file — a label with no preset behind it would be a
-    // wizard that fails at Finish.
-    for (key, label, _lms) in CAMPUSES { assert!(campus_yaml(key).is_some(), "{key} ({label}) has no preset file"); }
+    // Every curated school resolves, through `events_preset_for`, to a preset file — `none` for
+    // `university-of-kentucky` until someone writes its preset, and a preset with no file behind it
+    // would be a wizard that fails at Finish.
+    for c in CAMPUSES {
+        let preset = knowlu::scaffold::events_preset_for(c.unitid);
+        assert!(campus_yaml(preset).is_some(), "{} ({}) resolves to preset {preset:?} with no file", c.key, c.label);
+    }
     assert!(campus_yaml("university-of-alabama").unwrap().contains("timezone:"), "the preset tells a copier to set its own timezone");
 
     let none = temp("campus-none").join("Vault");
@@ -441,6 +447,7 @@ fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
         slots: vec!["12:00".into(), "18:00".into()],
         device: "MACHINE".into(),
         campus: "none".into(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         zybooks_courses: Vec::new(),
@@ -560,6 +567,7 @@ fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
         slots: vec!["12:00".into()],
         device: "M".into(),
         campus: "none".into(),
+        campus_choice: Default::default(),
         zybooks: true,
         vhl: true,
         zybooks_courses: vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }],
@@ -738,4 +746,43 @@ fn every_mapped_course_is_a_slug_the_vault_knows() {
     assert!(!dest.join("courses").join("gn-103.md").exists());
     assert!(h.knows_course("gn-103"));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_chosen_school_becomes_campus_yaml_and_a_timezone_suggestion() {
+    use knowlu::scaffold::{campus_config_yaml, curated, state_timezone, CampusChoice};
+    let ua = CampusChoice { unitid: "100751".into(), name: "The University of Alabama".into(), state: "AL".into(), lms: "blackboard".into() };
+    let text = campus_config_yaml(&ua).expect("campus.yaml");
+    assert_eq!(
+        text,
+        "unitid: '100751'\nname: 'The University of Alabama'\nstate: 'AL'\nlms: 'blackboard'\ncurated: true\n"
+    );
+    // A school nobody has curated is still a school: it gets a file, no event feeds, and an LMS the
+    // sign-in window (or the student) names.
+    let other = CampusChoice { unitid: "999999".into(), name: "Somewhere Community College".into(), state: "OR".into(), lms: String::new() };
+    let text = campus_config_yaml(&other).expect("campus.yaml");
+    assert!(text.contains("curated: false\n") && text.contains("lms: ''\n"), "{text}");
+    // …and a name with an apostrophe does not break the file, like every other wizard value.
+    let odd = CampusChoice { unitid: "1".into(), name: "St. Mary's College".into(), state: "MD".into(), lms: String::new() };
+    assert!(campus_config_yaml(&odd).expect("campus.yaml").contains("name: 'St. Mary''s College'\n"));
+
+    assert_eq!(curated("100751").map(|c| c.key), Some("university-of-alabama"));
+    assert_eq!(curated("157085").map(|c| c.key), Some("university-of-kentucky"));
+    assert!(curated("999999").is_none());
+
+    // The timezone the wizard suggests, from the state — the OS zone stays the default and the
+    // student can always type over it.
+    assert_eq!(state_timezone("AL"), Some("America/Chicago"));
+    assert_eq!(state_timezone("KY"), Some("America/New_York"));
+    assert_eq!(state_timezone("AZ"), Some("America/Phoenix"));
+    assert_eq!(state_timezone("HI"), Some("Pacific/Honolulu"));
+    assert_eq!(state_timezone("zz"), None);
+    // Fifty states, DC and the five inhabited territories — IPEDS keeps Puerto Rico's hundred-odd
+    // institutions, and a student in Mayagüez is not a special case any more than one in Wyoming.
+    assert_eq!(knowlu::scaffold::STATE_TZ.len(), 56);
+    assert_eq!(state_timezone("PR"), Some("America/Puerto_Rico"));
+    assert_eq!(state_timezone("GU"), Some("Pacific/Guam"));
+    for (st, tz) in knowlu::scaffold::STATE_TZ {
+        assert!(jiff::tz::TimeZone::get(tz).is_ok(), "{st} maps to {tz}, which the tz database does not have");
+    }
 }

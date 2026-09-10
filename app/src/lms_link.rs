@@ -215,15 +215,23 @@ fn close_window(app: &tauri::AppHandle) {
     }
 }
 
+/// The campus's capture path, recorded verbatim by Task 13's spike. `None` for a school nobody has
+/// curated — which is most of the 4,319 — and that is what makes the panel show its paste field
+/// instead of pretending.
+/// Where the sign-in window opens for a curated school: **that school's own host**, never a constant.
+pub fn lms_home(unitid: &str) -> Option<String> {
+    crate::scaffold::curated(unitid).map(|c| format!("https://{}/", c.lms_host))
+}
+
 #[tauri::command(async)]
-pub fn open_lms_window(app: tauri::AppHandle, campus: String) -> Value {
+pub fn open_lms_window(app: tauri::AppHandle, unitid: String) -> Value {
     // Before anything else: whatever a crashed run left in the temp folder (R-C1-40, I1c).
     sweep_stale_sessions();
-    let Some(url) = crate::scaffold::CAMPUSES.iter().find(|(k, _, _)| *k == campus).map(|(_, _, u)| *u).filter(|u| !u.is_empty()) else {
-        return json!({ "ok": false, "error": "no sign-in page is known for that school yet", "opened": false });
+    let Some(url) = lms_home(&unitid) else {
+        return json!({ "ok": false, "error": "we do not know your school's sign-in page yet — paste your calendar link below", "opened": false });
     };
     let dir = session_dir();
-    match open_window_at(&app, url, &dir) {
+    match open_window_at(&app, &url, &dir) {
         // **The path is not in the envelope** (R-C1-40, I2): the page has no use for it now that
         // closing takes no argument, and a temp path handed to a page is a temp path that comes back.
         Ok(()) => json!({ "ok": true, "error": Value::Null, "opened": true }),
@@ -384,8 +392,8 @@ fn session_agent() -> ureq::Agent {
 /// navigated: the endpoint below, fetched once with the student's own session cookies, answers 200
 /// with the feed URL as the entire body.
 #[tauri::command(async)]
-pub fn capture_calendar_link(app: tauri::AppHandle, campus: String) -> Value {
-    let Some(steps) = steps_for(&campus) else {
+pub fn capture_calendar_link(app: tauri::AppHandle, unitid: String) -> Value {
+    let Some(steps) = capture_steps(&unitid) else {
         return capture_failed("no capture is known for that school yet — paste the link instead");
     };
     let Some(w) = app.get_webview_window(WINDOW) else {
@@ -424,46 +432,24 @@ pub fn capture_calendar_link(app: tauri::AppHandle, campus: String) -> Value {
     }
 }
 
-/// The campus's capture path: a calendar page, then the endpoint the share link comes out of.
+/// The calendar-share path Task 13's spike recorded, on **this** school's host. A constant host per
+/// LMS kind would send the third curated Blackboard school's student to the first one's LMS — which is
+/// the assumption this whole task exists to stop making (`CLAUDE.md`'s first rule).
 ///
 /// **Only the last element is Task 13's** (R-C1-41, M3). The spike recorded the feed endpoint and
-/// nothing else — outcome B never navigates the window, so the Outcome says in terms that the
-/// calendar page and share-control URLs are moot. `…/ultra/calendar` is therefore *not recorded by
-/// the spike and unused by the code*: it is where a person would go to do this by hand, kept as
-/// orientation for whoever adds the next campus. The capture reads `steps[len - 1]`, always.
-///
-/// The POST form of that endpoint answers 500 and `/learn/api/v1/calendars/feed/url` is a 404 — both
-/// were tried, and neither is to be tried again. `None` for a campus nobody has walked yet, which is what makes the
-/// panel show the paste field instead of pretending.
-fn capture_steps(campus: &str) -> Option<&'static [&'static str]> {
-    match campus {
-        "university-of-alabama" => Some(&[
-            "https://ualearn.blackboard.com/ultra/calendar",
-            "https://ualearn.blackboard.com/webapps/calendar/calendarFeed/url",
-        ]),
-        _ => None,
-    }
-}
-
-/// **Canvas, from its documented API and never yet run.** Task 13 had no Canvas login to spike
-/// against, so this path is *unverified*: the first Canvas campus added to `scaffold::CAMPUSES` is
-/// what proves or disproves it. Canvas's `GET /api/v1/users/self` answers with the user object,
-/// whose `calendar.ics` field is the same secret `/feeds/calendars/user_<id>.ics` address the
-/// *Calendar Feed* button shows — so `first_ics_link` finds it in that JSON exactly as it finds
-/// Blackboard's in a plain-text body, and outcome B needs no second code path. Derived from the
-/// campus's own LMS base URL, so **a Canvas school is one row in `CAMPUSES` and no code at all**.
-fn canvas_steps(campus: &str) -> Option<Vec<String>> {
-    let base = crate::scaffold::CAMPUSES.iter().find(|(k, _, _)| *k == campus).map(|(_, _, u)| *u)?;
-    let base = base.trim_end_matches('/');
-    if !base.starts_with("https://") || !base.contains(".instructure.com") { return None; }
-    Some(vec![format!("{base}/calendar"), format!("{base}/api/v1/users/self")])
-}
-
-/// The curated path if this campus has one, then Canvas by the shape of its own URL.
-fn steps_for(campus: &str) -> Option<Vec<String>> {
-    capture_steps(campus)
-        .map(|steps| steps.iter().map(|u| (*u).to_string()).collect())
-        .or_else(|| canvas_steps(campus))
+/// nothing else — outcome B never navigates the window, so the calendar page URL is moot: it is where
+/// a person would go to do this by hand, kept as orientation. The capture reads `steps[len - 1]`,
+/// always. `None` for a school nobody has curated yet, which is what makes the panel show its paste
+/// field instead of pretending.
+fn capture_steps(unitid: &str) -> Option<Vec<String>> {
+    let c = crate::scaffold::curated(unitid)?;
+    // <Task 13 Outcome: the PATHS, verbatim — the host comes from the row>
+    let paths: &[&str] = match c.lms_kind {
+        "blackboard" => &["/ultra/calendar", "/webapps/calendar/calendarFeed/url"],
+        "canvas" => &["/calendar", "/api/v1/users/self"],
+        _ => return None,
+    };
+    Some(paths.iter().map(|path| format!("https://{}{path}", c.lms_host)).collect())
 }
 
 /// One course the student is enrolled in, as the LMS names it and as the vault will.
@@ -486,8 +472,8 @@ pub struct Course {
 /// `{"results":[{"courseId":…,"course":{"name":…}}]}` — Task 13's second answer, run against a real
 /// enrolment. **Canvas is unverified**: no Canvas login existed to spike against, so its bare array of
 /// `{"course_code":…,"name":…}` is written from Canvas's documented API and has never been run, exactly
-/// as `canvas_steps` is. **Never panics and never guesses**: a body it does not recognise is an empty
-/// list, and an empty list is what puts the typed-codes fallback on screen.
+/// as its curated row's Canvas path is. **Never panics and never guesses**: a body it does not
+/// recognise is an empty list, and an empty list is what puts the typed-codes fallback on screen.
 pub fn courses_from_json(body: &str) -> Vec<Course> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return Vec::new() };
     let items: Vec<&serde_json::Value> = match (&v, v.get("results")) {
@@ -524,21 +510,33 @@ pub fn courses_from_json(body: &str) -> Vec<Course> {
     out
 }
 
-/// The campus's own course endpoint, recorded verbatim by Task 13's second answer: 200, with
-/// `{"results":[…]}` as the body. **`?expand=course` is load-bearing** — without it a membership
-/// carries a `courseId` and no `course` object at all, so every course would arrive nameless.
+/// Likewise for the enrolled-course endpoint: one path per LMS kind, **this school's own host**. A
+/// constant host per LMS kind would send the third curated Blackboard school's student to the first
+/// one's course list.
 ///
-/// `None` for a campus nobody has walked, which is what makes the panel ask instead of pretending.
-/// Canvas's endpoint is `/api/v1/courses`, and it is deliberately NOT derived from `CAMPUSES` here
-/// the way `canvas_steps` derives the calendar's: the spike had no Canvas login, and the first Canvas
-/// campus added to `scaffold::CAMPUSES` is the change that adds its row here beside it.
-fn course_list_url(campus: &str) -> Option<&'static str> {
-    match campus {
-        "university-of-alabama" => {
-            Some("https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses?expand=course")
-        }
-        _ => None,
-    }
+/// `?expand=course` is load-bearing on Blackboard's path — without it a membership carries a
+/// `courseId` and no `course` object at all, so every course would arrive nameless — recorded verbatim
+/// by Task 13's second answer: 200, with `{"results":[…]}` as the body. `None` for a school nobody has
+/// curated, which is what makes the panel ask instead of pretending.
+fn course_list_url(unitid: &str) -> Option<String> {
+    let c = crate::scaffold::curated(unitid)?;
+    // <Task 13 step 4a: the PATHS that answered, verbatim>
+    let path = match c.lms_kind {
+        "blackboard" => "/learn/api/public/v1/users/me/courses?expand=course",
+        "canvas" => "/api/v1/courses",
+        _ => return None,
+    };
+    Some(format!("https://{}{path}", c.lms_host))
+}
+
+/// Which LMS a school runs, when nobody curated it. **Guessed from where the sign-in window landed**,
+/// never from the school's name: `blackboard.com` and `instructure.com` are in the URL of every one of
+/// their tenants, and a guess from a hostname is a fact. `None` means the panel's two-button question.
+pub fn lms_kind_from_url(url: &str) -> Option<&'static str> {
+    let u = url.to_ascii_lowercase();
+    if u.contains("blackboard.com") || u.contains("/ultra/") { return Some("blackboard"); }
+    if u.contains("instructure.com") || u.contains("/api/v1/courses") { return Some("canvas"); }
+    None
 }
 
 /// The one answer a course capture that could not read a list gives — the **ruled outcome C, for the
@@ -560,22 +558,22 @@ fn no_courses() -> Value {
 /// non-2xx, a body this reader does not recognise, and an enrolment of none all end at
 /// [`no_courses`], and the student types their course codes instead.
 #[tauri::command(async)]
-pub fn capture_courses(app: tauri::AppHandle, campus: String) -> Value {
-    let Some(endpoint) = course_list_url(&campus) else { return no_courses() };
+pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
+    let Some(url) = course_list_url(&unitid) else { return no_courses() };
     let Some(w) = app.get_webview_window(WINDOW) else { return no_courses() };
     // The jar rule is Task 14's, not a second one (R-C1-41, I1): the window's own URL only while it
     // is on the endpoint's host, and the endpoint's otherwise — one host's live session is never
     // handed to another. The cookies live on this function's stack: never written, never logged,
     // never formatted into an error, and gone when it returns.
     let here = w.url().ok();
-    let Ok(jar_url) = cookie_url(here.as_ref().map(|u| u.as_str()), endpoint).parse::<tauri::Url>() else {
+    let Ok(jar_url) = cookie_url(here.as_ref().map(|u| u.as_str()), &url).parse::<tauri::Url>() else {
         return no_courses();
     };
     let Ok(cookies) = w.cookies_for_url(jar_url) else { return no_courses() };
     let jar: String = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
     let agent = session_agent();
     let read = agent
-        .get(endpoint)
+        .get(&url)
         .header("cookie", &jar)
         .header("accept", "application/json")
         .call()

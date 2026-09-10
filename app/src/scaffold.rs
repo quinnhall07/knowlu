@@ -15,14 +15,60 @@ use knowlu_engine::journal::Journal;
 use knowlu_engine::write::{self, WriteContext};
 use knowlu_engine::yamlemit::{safe_dump_block, Node};
 
-/// `(key, label, LMS base URL)` — the wizard's radio list, and where Task 14's sign-in window points
-/// for that campus. **Adding a campus is adding a file and one line here**; nothing else in the app
-/// knows a campus exists. The URL is empty for `none`, which is what makes `lms_link::capture` take
-/// its paste-a-link path for a student whose school is not listed yet.
-pub const CAMPUSES: [(&str, &str, &str); 2] = [
-    ("none", "None", ""),
-    ("university-of-alabama", "University of Alabama", "https://ualearn.blackboard.com/"),
+/// What a **curated** school gets on top of being in the list: event feeds, a known LMS, and a
+/// sign-in URL the window can be pointed at. Keyed by IPEDS `UNITID`, which is the one identifier
+/// that is stable across years and unambiguous across the four "University of ——" in a state.
+///
+/// **Adding a campus is adding a row here** — plus, if it is to have event feeds, one preset file
+/// under `app/assets/campus/`. A school that is not in this table is still perfectly usable: it has
+/// no event feeds, and its LMS comes from the sign-in window or from the student.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Curated {
+    pub unitid: &'static str,
+    /// The preset key `campus_yaml` maps to an `app/assets/campus/*.yaml` file.
+    pub key: &'static str,
+    pub label: &'static str,
+    /// **This school's own LMS host**, no scheme and no path — `ualearn.blackboard.com`. Every URL the
+    /// sign-in window is driven to is built from it, so a third curated Blackboard school does not send
+    /// its student to Alabama's LMS. The paths are the same across every tenant of a kind; only the
+    /// host differs, which is exactly what this field is.
+    pub lms_host: &'static str,
+    /// `blackboard` or `canvas`. With `lms_host`, it is enough to build every endpoint either LMS has.
+    pub lms_kind: &'static str,
+}
+
+pub const CAMPUSES: [Curated; 2] = [
+    Curated {
+        unitid: "100751",
+        key: "university-of-alabama",
+        label: "The University of Alabama",
+        lms_host: "ualearn.blackboard.com",
+        lms_kind: "blackboard",
+    },
+    Curated {
+        unitid: "157085",
+        key: "university-of-kentucky",
+        label: "University of Kentucky",
+        lms_host: "uk.instructure.com",
+        lms_kind: "canvas",
+    },
 ];
+
+/// The curated row for a unitid, if there is one.
+pub fn curated(unitid: &str) -> Option<&'static Curated> {
+    CAMPUSES.iter().find(|c| c.unitid == unitid)
+}
+
+/// The preset key whose `app/assets/campus/*.yaml` becomes this vault's `config/events.yaml`.
+/// **`none` for anything uncurated, and for `university-of-kentucky` until someone writes its preset**
+/// — `app/assets/campus/` is not this stream's to add a file to, and a preset key with no file behind
+/// it is a vault that will not scaffold. Adding UK's feeds is one asset file and one line here.
+pub fn events_preset_for(unitid: &str) -> &'static str {
+    match curated(unitid).map(|c| c.key) {
+        Some("university-of-alabama") => "university-of-alabama",
+        _ => "none",
+    }
+}
 
 const CAMPUS_NONE: &str = include_str!("../assets/campus/none.yaml");
 const CAMPUS_UA: &str = include_str!("../assets/campus/university-of-alabama.yaml");
@@ -32,6 +78,68 @@ const GITIGNORE: &str = include_str!("../assets/scaffold/gitignore.txt");
 
 pub fn campus_yaml(key: &str) -> Option<&'static str> {
     match key { "none" => Some(CAMPUS_NONE), "university-of-alabama" => Some(CAMPUS_UA), _ => None }
+}
+
+/// The school the student picked. `lms` is empty for a school whose kind nothing has established yet;
+/// Task 14's sign-in window fills it from where it lands, or the panel asks.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CampusChoice {
+    pub unitid: String,
+    pub name: String,
+    pub state: String,
+    pub lms: String,
+}
+
+/// `config/campus.yaml`. Five single-line scalars, through the same `yaml_scalar` every other wizard
+/// value goes through — a school name is free text and `St. Mary's College` is a real one.
+pub fn campus_config_yaml(c: &CampusChoice) -> Result<String, String> {
+    Ok(format!(
+        "unitid: {}\nname: {}\nstate: {}\nlms: {}\ncurated: {}\n",
+        yaml_scalar("school id", &c.unitid)?,
+        yaml_scalar("school name", &c.name)?,
+        yaml_scalar("school state", &c.state)?,
+        yaml_scalar("school LMS", &c.lms)?,
+        curated(&c.unitid).is_some(),
+    ))
+}
+
+/// A US state's IANA zone, for the wizard's timezone **suggestion** — the OS zone stays the default
+/// and the field stays editable, because a student in El Paso is in Texas and on Mountain time.
+///
+/// **Split states take their majority zone**, which is the honest simplification: Florida (Eastern,
+/// bar the western panhandle), Idaho (Mountain, bar the north), Indiana (Eastern, bar the corners),
+/// Kansas, Kentucky (Eastern, bar the west), Michigan (Eastern, bar four counties), Nebraska, North
+/// Dakota, Oregon (Pacific, bar Malheur), South Dakota, Tennessee (Central, bar the east) and Texas.
+/// The panel says the suggestion came from the state, so a student who is in the minority half can see
+/// why it is wrong and change it.
+pub const STATE_TZ: [(&str, &str); 56] = [
+    ("AL", "America/Chicago"), ("AK", "America/Anchorage"), ("AZ", "America/Phoenix"),
+    ("AR", "America/Chicago"), ("CA", "America/Los_Angeles"), ("CO", "America/Denver"),
+    ("CT", "America/New_York"), ("DC", "America/New_York"), ("DE", "America/New_York"),
+    ("FL", "America/New_York"), ("GA", "America/New_York"), ("HI", "Pacific/Honolulu"),
+    ("IA", "America/Chicago"), ("ID", "America/Boise"), ("IL", "America/Chicago"),
+    ("IN", "America/Indiana/Indianapolis"), ("KS", "America/Chicago"), ("KY", "America/New_York"),
+    ("LA", "America/Chicago"), ("MA", "America/New_York"), ("MD", "America/New_York"),
+    ("ME", "America/New_York"), ("MI", "America/Detroit"), ("MN", "America/Chicago"),
+    ("MO", "America/Chicago"), ("MS", "America/Chicago"), ("MT", "America/Denver"),
+    ("NC", "America/New_York"), ("ND", "America/Chicago"), ("NE", "America/Chicago"),
+    ("NH", "America/New_York"), ("NJ", "America/New_York"), ("NM", "America/Denver"),
+    ("NV", "America/Los_Angeles"), ("NY", "America/New_York"), ("OH", "America/New_York"),
+    ("OK", "America/Chicago"), ("OR", "America/Los_Angeles"), ("PA", "America/New_York"),
+    ("RI", "America/New_York"), ("SC", "America/New_York"), ("SD", "America/Chicago"),
+    ("TN", "America/Chicago"), ("TX", "America/Chicago"), ("UT", "America/Denver"),
+    ("VA", "America/New_York"), ("VT", "America/New_York"), ("WA", "America/Los_Angeles"),
+    ("WI", "America/Chicago"), ("WV", "America/New_York"), ("WY", "America/Denver"),
+    // The territories, because `CYACTIVE = 1` and `ICLEVEL ∈ {1,2}` keep them: Puerto Rico alone has
+    // about a hundred institutions, the UPR system among them, and a student there getting no
+    // suggestion at all would be a degradation nobody chose.
+    ("PR", "America/Puerto_Rico"), ("VI", "America/Puerto_Rico"), ("GU", "Pacific/Guam"),
+    ("MP", "Pacific/Guam"), ("AS", "Pacific/Pago_Pago"),
+];
+
+pub fn state_timezone(state: &str) -> Option<&'static str> {
+    let up = state.trim().to_ascii_uppercase();
+    STATE_TZ.iter().find(|(s, _)| *s == up).map(|(_, tz)| *tz)
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +154,9 @@ pub struct VaultPlan {
     pub slots: Vec<String>,
     pub device: String,
     pub campus: String,
+    /// R-OB-4: the school itself, out of the bundled list. `campus` above is only which preset of
+    /// event feeds it gets.
+    pub campus_choice: CampusChoice,
     pub zybooks: bool,
     pub vhl: bool,
     /// R-OB-1: what the student confirmed on the logins panel. Empty is honest — a wizard run with no
@@ -454,6 +565,7 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     write_file(root, ".gitignore", GITIGNORE)?;
     let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
     write_file(root, "config/events.yaml", campus)?;
+    write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
     write_file(root, "config/ingest.yaml", &ingest_yaml(plan)?)?;
     // Review round 1, I1: make the emitter unable to produce an unreadable file at all — a
     // duplicate `course_map`/`courses`/`sections` key (`ingest_yaml` walks a `Vec`; two rows

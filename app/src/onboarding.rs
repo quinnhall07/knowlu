@@ -157,12 +157,68 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
             // and not OneDrive-redirected the way `Documents` is. The page never builds a path itself.
             "default_parent": default_folders().map(|(p, _)| p),
             "default_backup": default_folders().map(|(_, b)| b),
-            // The wizard's campus radios (Task 6): adding a campus is adding a file and a line in
-            // `scaffold::CAMPUSES`, never a string in the page.
-            "campuses": crate::scaffold::CAMPUSES.iter().map(|(k, l, _)| json!({ "key": k, "label": l })).collect::<Vec<_>>(),
         }),
         None => json!({ "ok": true, "error": Value::Null, "mode": "console" }),
     }
+}
+
+/// Every US institution, parsed once. `include_str!` puts the bytes in the binary — they are needed
+/// on a first run with no network, which is most first runs — and `OnceLock` parses them the first
+/// time somebody types, not at launch.
+static CAMPUS_LIST: std::sync::OnceLock<Vec<(u64, String, String, String)>> = std::sync::OnceLock::new();
+
+fn campus_list() -> &'static [(u64, String, String, String)] {
+    CAMPUS_LIST.get_or_init(|| {
+        let raw = include_str!("../campuses.json");
+        let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        v.get("campuses")
+            .and_then(|c| c.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        let a = r.as_array()?;
+                        Some((
+                            a.first()?.as_u64()?,
+                            a.get(1)?.as_str()?.to_string(),
+                            a.get(2)?.as_str()?.to_string(),
+                            a.get(3)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The ten best matches for what has been typed, in list order. Name, city and state all match, so
+/// `tuscaloosa` and `AL` both find it — a student who cannot spell their own university's official
+/// name (it is *The* University of Alabama) still gets there. Under two characters is no answer at
+/// all: one letter matches a thousand schools and none of them usefully.
+///
+/// Returns `[unitid, name, city, state]` per hit — the host is in the asset and is not shown, so it
+/// does not cross the IPC either.
+#[tauri::command]
+pub fn campus_search(query: String) -> Value {
+    let needle = query.trim().to_lowercase();
+    if needle.len() < 2 {
+        return json!({ "ok": true, "error": Value::Null, "hits": [] });
+    }
+    let hits: Vec<Value> = campus_list()
+        .iter()
+        .filter(|(_, name, city, state)| {
+            format!("{name} {city} {state}").to_lowercase().contains(&needle)
+        })
+        .take(10)
+        .map(|(id, name, city, state)| json!([id, name, city, state]))
+        .collect();
+    json!({ "ok": true, "error": Value::Null, "hits": hits })
+}
+
+/// R-OB-4: the timezone a state suggests. A **suggestion** — the page only applies it to a field the
+/// student has not touched, and a state we do not know leaves the OS zone where it was.
+#[tauri::command]
+pub fn timezone_for_state(state: String) -> Value {
+    json!({ "ok": true, "error": Value::Null, "timezone": crate::scaffold::state_timezone(&state) })
 }
 
 /// The wizard's default vault parent and backup folder under a home directory: `<home>\Knowlu`
@@ -343,7 +399,11 @@ pub struct WizardPlan {
     pub personal_calendar: Option<String>,
     pub timezone: String,
     pub slots: Vec<String>,
-    pub campus: String,
+    /// R-OB-4: the school, chosen from the bundled US institution list (`onboarding::campus_search`)
+    /// rather than the two-radio placeholder. `#[serde(default)]` so an older page that still omits
+    /// it is not a refusal; `create_vault_in` derives the events preset from the unitid.
+    #[serde(default)]
+    pub campus_choice: crate::scaffold::CampusChoice,
     pub zybooks: bool,
     pub vhl: bool,
     pub autostart: bool,
@@ -356,6 +416,9 @@ pub struct WizardPlan {
     pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
     #[serde(default)]
     pub vhl_sections: Vec<crate::scaffold::SectionMapping>,
+    /// `(fragment, slug)`. R-C1-51: an empty slug means the page has none and `create_vault_in`
+    /// derives one from the fragment via `slugify`; a non-empty slug is the page's own choice and is
+    /// honoured verbatim, never recomputed.
     #[serde(default)]
     pub course_map: Vec<(String, String)>,
     #[serde(default)]
@@ -499,9 +562,14 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.course), label: v.label.clone() })
         .filter(|v| seen_vhl.insert(v.section.clone()))
         .collect();
+    // R-C1-51, item 1: the page's own slug is honoured verbatim when it sent one — `slugify(code)`
+    // is a fallback for an empty second element, never a recompute of a slug the page already chose.
     let mut seen_course_map = std::collections::HashSet::new();
     let course_map: Vec<(String, String)> = plan.course_map.iter()
-        .map(|(code, _)| (code.clone(), slug(code)))
+        .map(|(code, page_slug)| {
+            let s = if page_slug.trim().is_empty() { slug(code) } else { page_slug.clone() };
+            (code.clone(), s)
+        })
         .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
         .filter(|(code, _)| seen_course_map.insert(code.clone()))
         .collect();
@@ -516,11 +584,15 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         .collect();
     // `courses` is empty until Task 14b's capture fills it, and empty is a correct answer: a student
     // whose campus we cannot read types the list on the panel instead.
+    //
+    // R-C1-51, item 2: a page-supplied slug reaches `courses/<slug>.md` only after the engine's own
+    // `slugify` — never verbatim. `slugify` never returns an empty string (it falls back to `item`),
+    // which is the refusal: no page-supplied slug can ever name `courses/.md` or escape `courses/`.
     let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
         .map(|c| crate::scaffold::CourseSeed {
             code: c.code.clone(),
             name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
-            slug: if c.slug.trim().is_empty() { slug(&c.code) } else { c.slug.clone() },
+            slug: slug(if c.slug.trim().is_empty() { &c.code } else { &c.slug }),
         })
         .filter(|c| !c.slug.is_empty())
         .collect();
@@ -536,7 +608,8 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
-        campus: plan.campus.clone(),
+        campus: crate::scaffold::events_preset_for(&plan.campus_choice.unitid).to_string(),
+        campus_choice: plan.campus_choice.clone(),
         zybooks: plan.zybooks,
         vhl: plan.vhl,
         api_base: crate::account::api_base(),

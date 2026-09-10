@@ -432,12 +432,21 @@ fn an_enrolled_course_list_is_read_from_either_lms_shape() {
 /// through Duo when the panel asks, and taking their page away mid-sign-in would lose the session
 /// this whole flow is built around. Asserted against the source because there is no way to drive a
 /// `#[tauri::command]` without a live WebView2; the reader below is the half that can be driven.
+///
+/// R-OB-4: the endpoint is no longer one contiguous literal — it is built from this school's own
+/// host (`scaffold::CAMPUSES`'s `lms_host`) plus Task 13's own path, so a constant host would send a
+/// second curated Blackboard school's student to Alabama's course list.
 #[test]
 fn the_course_list_is_read_from_the_endpoint_the_spike_recorded_and_never_by_navigating() {
     let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
     assert!(
-        src.contains("https://ualearn.blackboard.com/learn/api/public/v1/users/me/courses?expand=course"),
+        src.contains("/learn/api/public/v1/users/me/courses?expand=course"),
         "the course-list endpoint must be the one the spike ran, ?expand=course included"
+    );
+    assert_eq!(
+        knowlu::scaffold::curated("100751").map(|c| c.lms_host),
+        Some("ualearn.blackboard.com"),
+        "the path above is built onto this school's own host"
     );
     let at = src.find("pub fn capture_courses").expect("capture_courses");
     let tail = &src[at..];
@@ -469,4 +478,23 @@ fn a_captured_course_is_exactly_what_the_wizard_plan_takes_back() {
     assert_eq!(seed.code, "UACS100Fall2026");
     assert_eq!(seed.name, "CS 100 Intro to Computer Science");
     assert_eq!(seed.slug, "cs-100");
+}
+
+/// R-OB-4: every endpoint is built from the school's **own** host. A constant host per LMS kind was
+/// accidentally correct with two curated schools and would send the third one's student to the first
+/// one's LMS.
+#[test]
+fn every_curated_endpoint_is_built_from_that_schools_own_host() {
+    use knowlu::lms_link::lms_home;
+    for c in knowlu::scaffold::CAMPUSES {
+        let home = lms_home(c.unitid).unwrap_or_else(|| panic!("{} has no home", c.label));
+        assert!(home.contains(c.lms_host), "{} opens {home}, which is not its own host", c.label);
+        // …and no other curated school's host appears in it.
+        for other in knowlu::scaffold::CAMPUSES {
+            if other.unitid != c.unitid {
+                assert!(!home.contains(other.lms_host), "{} opens {}'s LMS", c.label, other.label);
+            }
+        }
+    }
+    assert!(lms_home("999999").is_none(), "an uncurated school has no sign-in page we know");
 }

@@ -150,7 +150,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         personal_calendar: None,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
-        campus: "none".to_string(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         autostart: true,
@@ -173,6 +173,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         slots: vec!["12:00".into()],
         device: "MACHINE".into(),
         campus: "none".into(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         zybooks_courses: Vec::new(),
@@ -343,7 +344,7 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
         personal_calendar: None,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
-        campus: "none".to_string(),
+        campus_choice: Default::default(),
         zybooks: false,
         vhl: false,
         zybooks_courses: Vec::new(),
@@ -807,4 +808,133 @@ fn discover_coursework_against_the_real_engine_names_the_missing_credential() {
     // No credential anywhere in the envelope.
     let text = out.to_string();
     assert!(!text.to_lowercase().contains("password"));
+}
+
+/// R-OB-4: the school list is a committed asset, because a typeahead that needs a network call to
+/// show a school does not work in a dorm on move-in day — which is most first runs.
+#[test]
+fn the_campus_list_is_bundled_headed_and_small() {
+    let raw = std::fs::read_to_string("campuses.json").expect("app/campuses.json");
+    // The header is the first line, and it is what makes "is this current?" answerable without
+    // re-downloading a federal zip.
+    let head = raw.lines().next().expect("a first line");
+    assert!(head.starts_with("{\"source\":\"NCES IPEDS HD"), "the header names its source file: {head}");
+    assert!(head.contains("\"retrieved\":\"20"), "…and when it was taken: {head}");
+    assert!(head.contains("\"count\":"), "…and how many schools it holds: {head}");
+
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("campuses.json is one JSON object");
+    let rows = v["campuses"].as_array().expect("campuses is an array");
+    assert_eq!(rows.len() as u64, v["count"].as_u64().expect("count is a number"), "the header's count is the array's length");
+    // 4,319 active two- and four-year institutions in HD2024 (of 6,072 rows; R-C1-37). A file that suddenly holds 40 of them is
+    // a script that half-ran, and a bundle that holds 40,000 is one that stopped filtering.
+    assert!(rows.len() > 4_000 && rows.len() < 8_000, "{} schools is not a US institution list", rows.len());
+
+    // `[unitid, name, city, state, host]`, and the host is a HOST: this test is the guard that the
+    // bundled list carries no `http(s)://` literal — `static_assets.rs` cannot be, because its
+    // `read()` helper resolves against `app/static/` and this asset is `app/campuses.json`.
+    let first = rows[0].as_array().expect("a row is an array");
+    assert_eq!(first.len(), 5, "a row is [unitid, name, city, state, host]");
+    assert!(first[0].is_number() && first[1].is_string() && first[3].is_string());
+    assert!(!raw.contains("http://") && !raw.contains("https://"), "the list carries hosts, never URLs");
+
+    // The size guard the installer cares about. H11's script refuses to write past this too.
+    let kb = raw.len() / 1024;
+    assert!(kb < 600, "campuses.json is {kb} KB");
+}
+
+/// Every curated school must be **in** the bundled list, or picking it from the typeahead and then
+/// looking it up in `CAMPUSES` would answer with two different schools.
+#[test]
+fn every_curated_campus_is_in_the_bundled_list() {
+    let raw = std::fs::read_to_string("campuses.json").expect("app/campuses.json");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("campuses.json");
+    let rows = v["campuses"].as_array().expect("campuses");
+    for c in knowlu::scaffold::CAMPUSES {
+        let want: u64 = c.unitid.parse().expect("a unitid is a number");
+        let found = rows.iter().find(|r| r[0].as_u64() == Some(want)).unwrap_or_else(|| panic!("{} ({}) is not in campuses.json", c.label, c.unitid));
+        // …and it is the school we think it is. A curated row that named the wrong unitid would send
+        // a student's sign-in window to another university's LMS.
+        let name = found[1].as_str().unwrap_or_default();
+        assert!(name.to_lowercase().contains(&c.label.to_lowercase()) || c.label.to_lowercase().contains(&name.to_lowercase()),
+            "{} is unitid {} in our table and {name:?} in IPEDS", c.label, c.unitid);
+    }
+}
+
+/// R-OB-4: the search is Rust's, because the page cannot fetch the list (the app's CSP names no
+/// `'self'` in `connect-src`) and should not hold six thousand rows to answer a keystroke.
+#[test]
+fn typing_a_school_name_finds_it_and_typing_one_letter_finds_nothing() {
+    use knowlu::onboarding::campus_search;
+    let one = campus_search("a".into());
+    assert_eq!(one["hits"].as_array().map(Vec::len), Some(0), "one letter is not a search");
+    let hits = campus_search("university of alabama".into());
+    let rows = hits["hits"].as_array().expect("hits");
+    assert!(!rows.is_empty() && rows.len() <= 10, "{} hits", rows.len());
+    assert!(rows.iter().any(|r| r[0].as_u64() == Some(100751)), "{rows:?}");
+    // A row is [unitid, name, city, state] — the web host stays in the asset, unshown and uncrossed.
+    assert_eq!(rows[0].as_array().map(Vec::len), Some(4));
+    // City and state match too, or a student who knows where they go and not what it is called is stuck.
+    assert!(campus_search("tuscaloosa".into())["hits"].as_array().map(|r| !r.is_empty()).unwrap_or(false));
+}
+
+/// R-C1-51 item 1: `plan.course_map` is `(fragment, slug)`. When the page sends a non-empty slug,
+/// `create_vault_in` honours it verbatim; when it sends an empty one, the fragment is slugified.
+///
+/// Needs a real pending session, the same as every other `create_vault_in` test in this file
+/// (`PendingSession`'s own doc explains why).
+#[cfg(windows)]
+#[test]
+fn create_vault_in_honours_the_pages_course_map_slug_and_falls_back_when_blank() {
+    let root = tmp("course-map-slug");
+    let home = root.join("home");
+    let mut session = PendingSession::new("acc-course-map-slug");
+    let mut plan = base_plan(false);
+    plan.course_map = vec![
+        ("CS 100".to_string(), "cs-100-custom".to_string()),
+        ("GN 103".to_string(), String::new()),
+    ];
+    let out = create_vault_in(&root, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let vault = home.join("Knowlu").join("Fall 2026");
+    let ingest = std::fs::read_to_string(vault.join("config").join("ingest.yaml")).expect("ingest.yaml");
+    // The page's own slug, unrecomputed.
+    assert!(ingest.contains("'CS 100': 'cs-100-custom'"), "{ingest}");
+    // An empty slug falls back to `slugify(fragment)`.
+    assert!(ingest.contains("'GN 103': 'gn-103'"), "{ingest}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R-C1-51 item 2: a page-supplied `CourseSeed.slug` reaches `courses/<slug>.md` only after
+/// `knowlu_engine::ingest::slugify` — a slug carrying a path separator or spaces must not name a
+/// file outside `courses/` or with spaces in its stem.
+#[cfg(windows)]
+#[test]
+fn a_page_supplied_course_slug_is_normalised_before_it_names_a_file() {
+    let root = tmp("course-slug-normalise");
+    let home = root.join("home");
+    let mut session = PendingSession::new("acc-course-slug-normalise");
+    let mut plan = base_plan(false);
+    plan.courses = vec![
+        knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into() },
+        knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into() },
+    ];
+    let out = create_vault_in(&root, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let vault = home.join("Knowlu").join("Fall 2026");
+    let courses_dir = vault.join("courses");
+    let mut names: Vec<String> = std::fs::read_dir(&courses_dir).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n != "get-to-know-knowlu.md")
+        .collect();
+    names.sort();
+    // Neither slug escaped `courses/` and neither carries a raw space or slash.
+    for n in &names {
+        assert!(!n.contains("..") && !n.contains('/') && !n.contains("  "), "{n}");
+    }
+    assert_eq!(names, vec!["evil.md".to_string(), "has-spaces.md".to_string()]);
+    let _ = std::fs::remove_dir_all(&root);
 }
