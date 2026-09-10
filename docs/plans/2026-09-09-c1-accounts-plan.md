@@ -6460,6 +6460,8 @@ Expected: it compiles. **If `data_directory`, `navigate` or `url` does not exist
 
 ### Task 14: `app/src/lms_link.rs` — the capture, and the fallback that is always there
 
+Live: University of Alabama (Blackboard Ultra), 2026-09-10 — **156 events across 0 courses**, captured by outcome B and validated through the same fetcher `ingest` uses; the cookie read works with the window in incognito mode; the account copy correctly reported itself as pending (the scratch profile had no session). The 0 is `summarise`'s documented answer for a feed whose `SUMMARY:` lines do not lead with an `AAAA 000` code — the count is cosmetic, the engine's `course_map` does the real placing, and Task 17's panel says "156 events" and adds the courses clause only when it is above zero (R-C1-42). Built with one fix round (R-C1-41); the temporary page buttons used for the run never shipped.
+
 **Files:**
 - Modify: `app/src/lms_link.rs`
 - Test: `app/tests/lms_link.rs`
