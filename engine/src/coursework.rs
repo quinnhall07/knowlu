@@ -550,6 +550,161 @@ pub fn fetch_vhl(
     ))
 }
 
+// ---------------------------------------------------------------------------------------------
+// discovery (C1 H10) — read-only, writes nothing
+// ---------------------------------------------------------------------------------------------
+
+/// The zyBooks half of `discover_json`'s shaping, pulled out pure: one row per fetched code,
+/// routed exactly the way [`fetch_zybooks`] routes — same [`route_zybook`], not a second
+/// interpretation. Takes no network and no credential, so it is directly testable against a
+/// `courses`/`ignore` config loaded from a real vault.
+fn zybooks_rows(codes: &[String], zycfg: &Mapping) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let courses = match crate::yaml::get(zycfg, "courses") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    let ignore: Vec<String> = match crate::yaml::get(zycfg, "ignore") {
+        Some(Yaml::Sequence(items)) => items.iter().map(yaml_str).collect(),
+        _ => Vec::new(),
+    };
+    codes
+        .iter()
+        .map(|code| {
+            let routing = route_zybook(code, &courses, &ignore);
+            json!({
+                "code": code,
+                "mapped": matches!(routing, BookRouting::Mapped(_)),
+                "ignored": matches!(routing, BookRouting::Ignored),
+            })
+        })
+        .collect()
+}
+
+/// The VHL half of `discover_json`'s shaping, pulled out pure: one row per `(course_id,
+/// section_id)` pair [`crate::vhl::discover_sections`] found, `mapped` computed the way
+/// [`crate::vhl::parse_dashboard`] routes a section — [`crate::vhl::section_mapping`], the one
+/// predicate both callers share, not a second interpretation. Takes no network and no
+/// credential, so it is directly testable against a `sections` config loaded from a real vault.
+fn vhl_rows(pairs: &[(String, String)], vhlcfg: &Mapping) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let sections = match crate::yaml::get(vhlcfg, "sections") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    pairs
+        .iter()
+        .map(|(course_id, section_id)| {
+            let mapped = crate::vhl::section_mapping(&sections, section_id).is_some();
+            json!({ "course_id": course_id, "section": section_id, "mapped": mapped })
+        })
+        .collect()
+}
+
+/// Everything onboarding needs to build a mapping, and nothing else. **Never writes**, never
+/// starts a run record, and always returns a JSON object — a source that could not be reached is
+/// an `errors` entry, not an exit code, because the wizard's answer to "we could not reach
+/// zyBooks" is to let the student type the mapping, not to stop.
+///
+/// With `vault`, the credential targets and `enabled`-independent `courses`/`sections` mappings
+/// come from that vault's own `config/ingest.yaml` and `mapped` is computed from it. Without a
+/// vault (the wizard, whose vault does not exist yet) the targets come from the two flags alone
+/// and `mapped` is always `false`. A missing target — no flag and, with a vault, no
+/// `credential_target` in its config — means that source is simply skipped, not an error.
+///
+/// **A config that cannot be read is an `errors` entry, never a silent empty config.** A
+/// malformed `config/ingest.yaml` — bad YAML or non-UTF-8 bytes — reports `config: <reason>` and
+/// falls back to an empty config *for shaping only*; it does not stop a source a target flag
+/// still names from being queried, because losing the codes is worse than losing the mapping.
+#[cfg(windows)]
+pub fn discover_json(
+    vault: Option<&Path>,
+    zybooks_target: Option<&str>,
+    vhl_target: Option<&str>,
+) -> String {
+    use serde_json::json;
+    let mut errors: Vec<String> = Vec::new();
+    let config: Mapping = match vault.map(load_coursework_config) {
+        Some(Ok((cfg, warnings))) => {
+            errors.extend(warnings.into_iter().map(|w| format!("config: {w}")));
+            cfg
+        }
+        Some(Err(err)) => {
+            errors.push(format!("config: {err}"));
+            Mapping::new()
+        }
+        None => Mapping::new(),
+    };
+    let block = match crate::yaml::get(&config, "coursework") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    let source = |name: &str| -> Mapping {
+        match crate::yaml::get(&block, name) {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => Mapping::new(),
+        }
+    };
+
+    // ---- zyBooks
+    let zycfg = source("zybooks");
+    let zytarget = zybooks_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&zycfg, "credential_target", ""));
+    let mut zybooks: Vec<serde_json::Value> = Vec::new();
+    if !zytarget.is_empty() {
+        match (|| -> Result<Vec<String>, SourceError> {
+            let cred = crate::wincred::read_credential(&zytarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            let (token, user_id) =
+                crate::zybooks::signin(&cred.username, cred.password.expose(), None)?;
+            crate::zybooks::fetch_zybook_codes(&token, user_id, None)
+        })() {
+            Ok(codes) => zybooks = zybooks_rows(&codes, &zycfg),
+            Err(err) => errors.push(format!("zybooks: {err}")),
+        }
+    }
+
+    // ---- VHL
+    let vhlcfg = source("vhl");
+    let vhltarget = vhl_target
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg_str(&vhlcfg, "credential_target", ""));
+    let mut vhl: Vec<serde_json::Value> = Vec::new();
+    if !vhltarget.is_empty() {
+        match (|| -> Result<String, SourceError> {
+            let cred = crate::wincred::read_credential(&vhltarget)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            crate::vhl::login_and_fetch_dashboard(
+                &cred.username,
+                cred.password.expose(),
+                &cfg_str(&vhlcfg, "base_url", "https://www.vhlcentral.com"),
+                None,
+            )
+        })() {
+            Ok(html) => vhl = vhl_rows(&crate::vhl::discover_sections(&html), &vhlcfg),
+            Err(err) => errors.push(format!("vhl: {err}")),
+        }
+    }
+
+    crate::ledger::dumps_value(&json!({ "zybooks": zybooks, "vhl": vhl, "errors": errors }))
+}
+
+/// The credential store is Windows-only, so discovery is too — and it says so rather than
+/// reporting an empty semester, which is the same rule [`fetch_zybooks`] follows.
+#[cfg(not(windows))]
+pub fn discover_json(
+    _vault: Option<&Path>,
+    _zybooks_target: Option<&str>,
+    _vhl_target: Option<&str>,
+) -> String {
+    use serde_json::json;
+    crate::ledger::dumps_value(&json!({
+        "zybooks": [], "vhl": [],
+        "errors": ["credential store unavailable on this platform"],
+    }))
+}
+
 /// Run every enabled source. **One source's failure never stops another.**
 ///
 /// And the rule this function exists for: *an empty parse is failure, never an empty semester.*
@@ -2096,5 +2251,105 @@ mod tests {
             SourceError::Failed("transport blew up".to_string()).to_string(),
             "transport blew up"
         );
+    }
+
+    // --- discover_json (C1 H10) ----------------------------------------------------------------
+    //
+    // None of these touch the network or the real Credential Manager. With no vault and no target
+    // flags, both sources are skipped before any fetch is attempted. The row-shaping tests drive
+    // `zybooks_rows`/`vhl_rows` directly against a config loaded from a real temp vault by the
+    // real `load_coursework_config`, exercising the same `coursework.<source>.*` key path
+    // `discover_json` reads, with no fetch in the loop at all. The malformed-config test drives
+    // `discover_json` itself, since what changes is the `errors` list a real config-load failure
+    // produces, not anything a row shaper sees.
+
+    fn coursework_block(config: &Mapping, source: &str) -> Mapping {
+        crate::yaml::get(config, "coursework")
+            .and_then(|v| v.as_mapping())
+            .and_then(|block| crate::yaml::get(block, source))
+            .and_then(|v| v.as_mapping().cloned())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn discover_json_with_no_vault_and_no_targets_is_the_empty_shape() {
+        let json = discover_json(None, None, None);
+        assert_eq!(json, "{\"errors\": [], \"vhl\": [], \"zybooks\": []}");
+    }
+
+    #[test]
+    fn zybooks_rows_routes_each_code_the_way_fetch_zybooks_does() {
+        let vault = scratch("discover-zybooks");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        write_note(
+            &vault.join("config").join("ingest.yaml"),
+            "coursework:\n  zybooks:\n    courses:\n      UACS100Fall2026:\n        course: cs-100\n        label: CS 100\n    ignore:\n      - HowToUseZyBooks2\n",
+        );
+        let (config, warnings) = load_coursework_config(&vault).unwrap();
+        assert!(warnings.is_empty());
+        let zycfg = coursework_block(&config, "zybooks");
+
+        let codes = vec![
+            "UACS100Fall2026".to_string(),
+            "HowToUseZyBooks2".to_string(),
+            "SomeNewCourse".to_string(),
+        ];
+        assert_eq!(
+            zybooks_rows(&codes, &zycfg),
+            vec![
+                serde_json::json!({"code": "UACS100Fall2026", "mapped": true, "ignored": false}),
+                serde_json::json!({"code": "HowToUseZyBooks2", "mapped": false, "ignored": true}),
+                serde_json::json!({"code": "SomeNewCourse", "mapped": false, "ignored": false}),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn vhl_rows_are_mapped_the_way_parse_dashboard_routes_a_section() {
+        let vault = scratch("discover-vhl");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        write_note(
+            &vault.join("config").join("ingest.yaml"),
+            "coursework:\n  vhl:\n    sections:\n      \"2102121\":\n        course: gn-103\n        label: GN 103 Hausaufgaben\n",
+        );
+        let (config, warnings) = load_coursework_config(&vault).unwrap();
+        assert!(warnings.is_empty());
+        let vhlcfg = coursework_block(&config, "vhl");
+
+        let pairs = vec![
+            ("1623220".to_string(), "2102121".to_string()),
+            ("1623220".to_string(), "9999999".to_string()),
+        ];
+        assert_eq!(
+            vhl_rows(&pairs, &vhlcfg),
+            vec![
+                serde_json::json!({"course_id": "1623220", "section": "2102121", "mapped": true}),
+                serde_json::json!({"course_id": "1623220", "section": "9999999", "mapped": false}),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_malformed_config_is_an_errors_entry_not_a_silent_empty_config() {
+        // Before this fix, `.ok()` on `load_coursework_config` swallowed both the `Err` arm (a
+        // non-UTF-8 config) and its warnings list (a malformed-YAML config), so a broken
+        // `config/ingest.yaml` read as "no coursework block" instead of "this vault's config is
+        // broken" — worst with a `--*-target` flag present, where the source was queried against
+        // a silently emptied config rather than being skipped or reported (verified against the
+        // built binary rather than here, since exercising it needs a real credential-target
+        // lookup and this test suite does not touch the real Credential Manager).
+        let vault = scratch("discover-badcfg");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        write_note(&vault.join("config").join("ingest.yaml"), "]]]\n");
+        let json = discover_json(Some(&vault), None, None);
+        assert!(
+            json.contains("\"errors\": [\"config: config unreadable"),
+            "{json}"
+        );
+        assert!(json.contains("\"vhl\": []"), "{json}");
+        assert!(json.contains("\"zybooks\": []"), "{json}");
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

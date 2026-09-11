@@ -9,6 +9,132 @@ use serde_json::{json, Value};
 use tauri::Manager;
 use crate::profiles::{self, Profile};
 
+/// One row of the mapping panel: a thing the account can reach, and what we think it is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoveredRow {
+    /// `zybooks` or `vhl`.
+    pub source: String,
+    /// The vendor's own key: a zyBook code, or a VHL section id.
+    pub key: String,
+    /// Something to show beside the key when the key alone means nothing to a human.
+    pub detail: Option<String>,
+    /// What we think the course is. `None` means we do not know and the panel asks.
+    pub suggested: Option<String>,
+    /// Already placed by this vault's config — the adopt path shows these ticked and quiet.
+    pub mapped: bool,
+    /// zyBooks' own onboarding book. The panel pre-ticks *ignore* rather than asking.
+    pub ignored: bool,
+}
+
+/// H10's JSON → rows. **Never fails**: a source that could not be reached, an error list, a truncated
+/// reply and outright garbage all come back as "no rows", because the panel's answer to all four is
+/// the same — show the student the fields and let them type it.
+pub fn rows_from_discovery(json: &str) -> Vec<DiscoveredRow> {
+    let Ok(v) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    let mut out = Vec::new();
+    for b in v.get("zybooks").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(code) = b.get("code").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "zybooks".into(),
+            key: code.to_string(),
+            detail: None,
+            suggested: crate::scaffold::suggest_course(code),
+            mapped: b.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: b.get("ignored").and_then(|m| m.as_bool()).unwrap_or(false),
+        });
+    }
+    for sec in v.get("vhl").and_then(|z| z.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        let Some(id) = sec.get("section").and_then(|c| c.as_str()) else { continue };
+        out.push(DiscoveredRow {
+            source: "vhl".into(),
+            key: id.to_string(),
+            // The dashboard names no course text — only ids — so this is all there is to show.
+            detail: sec.get("course_id").and_then(|c| c.as_str()).map(|c| format!("course {c}")),
+            suggested: None,
+            mapped: sec.get("mapped").and_then(|m| m.as_bool()).unwrap_or(false),
+            ignored: false,
+        });
+    }
+    out
+}
+
+/// H10's `errors` array, as sentences. Empty for anything unparseable — the caller already has a
+/// sentence for "we got nothing at all", and two of them would be worse than one.
+pub fn errors_from_discovery(json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(json)
+        .ok()
+        .and_then(|v| v.get("errors").and_then(|e| e.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// `coursework-discover`'s argv, pure and therefore testable on its own (review round 1, m4): which
+/// flags appear when, and — the constraint that actually matters — that no argument is ever a
+/// secret, only a credential TARGET name (`credentials::target_for`, never a username or password).
+pub fn discovery_argv(id: &str, zybooks: bool, vhl: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec!["coursework-discover".into()];
+    if zybooks {
+        args.push("--zybooks-target".into());
+        args.push(crate::credentials::target_for(id, "zybooks"));
+    }
+    if vhl {
+        args.push("--vhl-target".into());
+        args.push(crate::credentials::target_for(id, "vhl"));
+    }
+    args
+}
+
+/// Run H10's subcommand and turn its answer into rows. The credential targets are derived from the
+/// path the wizard is about to create — the same derivation `store_credentials` used a panel ago, so
+/// discovery reads the entries that panel just wrote.
+///
+/// `(async)` and **never fatal**: two vendor logins over a student's wifi is the slowest thing in the
+/// wizard, and every failure is an empty list plus a sentence, because the panel can always be typed
+/// into. A missing engine is that same empty list.
+#[tauri::command(async)]
+pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
+    let id = profiles::id_for(Path::new(&vault));
+    let args = discovery_argv(&id, zybooks, vhl);
+    let exe = match crate::scheduler::engine_exe() {
+        Ok(e) => e,
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    use knowlu_engine::childproc::NoConsole;
+    let out = match std::process::Command::new(exe).no_console().args(&args).output() {
+        Ok(o) => o,
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let rows = rows_from_discovery(&stdout);
+    // The per-source reason, not just "something went wrong": a student whose zyBooks worked and whose
+    // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry.
+    let reasons = errors_from_discovery(&stdout);
+    let note = match (rows.is_empty(), reasons.is_empty()) {
+        (_, false) => json!(format!("{} — fill those in below.", reasons.join("; "))),
+        (true, true) => json!("we could not reach your coursework sites — fill them in below"),
+        (false, true) => Value::Null,
+    };
+    // Review round 1, m5: the child's own exit status and stderr, surfaced rather than discarded.
+    // `coursework-discover` always exits 0 by its own contract (CLAUDE.md), so a non-zero status
+    // here is the process failing OUTSIDE that contract — a crash, a wrong `KNOWLU_ENGINE_EXE` —
+    // and the operator diagnosing it needs the code and the message, not silence. No credential can
+    // be in it: every argument this call ever passes is a target NAME (`discovery_argv`), never a
+    // username or password, so whatever the child wrote to stderr about its own failure is safe to
+    // surface whole.
+    let error = if out.status.success() {
+        Value::Null
+    } else {
+        let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        json!(if stderr.is_empty() {
+            format!("coursework-discover exited with status {code}")
+        } else {
+            format!("coursework-discover exited with status {code}: {stderr}")
+        })
+    };
+    json!({ "ok": true, "error": error, "rows": rows, "note": note })
+}
+
 pub struct Onboarding {
     pub root: PathBuf,
     /// `"wizard"` (no profiles) or `"picker"` (more than one).
@@ -31,12 +157,68 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
             // and not OneDrive-redirected the way `Documents` is. The page never builds a path itself.
             "default_parent": default_folders().map(|(p, _)| p),
             "default_backup": default_folders().map(|(_, b)| b),
-            // The wizard's campus radios (Task 6): adding a campus is adding a file and a line in
-            // `scaffold::CAMPUSES`, never a string in the page.
-            "campuses": crate::scaffold::CAMPUSES.iter().map(|(k, l)| json!({ "key": k, "label": l })).collect::<Vec<_>>(),
         }),
         None => json!({ "ok": true, "error": Value::Null, "mode": "console" }),
     }
+}
+
+/// Every US institution, parsed once. `include_str!` puts the bytes in the binary — they are needed
+/// on a first run with no network, which is most first runs — and `OnceLock` parses them the first
+/// time somebody types, not at launch.
+static CAMPUS_LIST: std::sync::OnceLock<Vec<(u64, String, String, String)>> = std::sync::OnceLock::new();
+
+fn campus_list() -> &'static [(u64, String, String, String)] {
+    CAMPUS_LIST.get_or_init(|| {
+        let raw = include_str!("../campuses.json");
+        let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        v.get("campuses")
+            .and_then(|c| c.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        let a = r.as_array()?;
+                        Some((
+                            a.first()?.as_u64()?,
+                            a.get(1)?.as_str()?.to_string(),
+                            a.get(2)?.as_str()?.to_string(),
+                            a.get(3)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The ten best matches for what has been typed, in list order. Name, city and state all match, so
+/// `tuscaloosa` and `AL` both find it — a student who cannot spell their own university's official
+/// name (it is *The* University of Alabama) still gets there. Under two characters is no answer at
+/// all: one letter matches a thousand schools and none of them usefully.
+///
+/// Returns `[unitid, name, city, state]` per hit — the host is in the asset and is not shown, so it
+/// does not cross the IPC either.
+#[tauri::command]
+pub fn campus_search(query: String) -> Value {
+    let needle = query.trim().to_lowercase();
+    if needle.len() < 2 {
+        return json!({ "ok": true, "error": Value::Null, "hits": [] });
+    }
+    let hits: Vec<Value> = campus_list()
+        .iter()
+        .filter(|(_, name, city, state)| {
+            format!("{name} {city} {state}").to_lowercase().contains(&needle)
+        })
+        .take(10)
+        .map(|(id, name, city, state)| json!([id, name, city, state]))
+        .collect();
+    json!({ "ok": true, "error": Value::Null, "hits": hits })
+}
+
+/// R-OB-4: the timezone a state suggests. A **suggestion** — the page only applies it to a field the
+/// student has not touched, and a state we do not know leaves the OS zone where it was.
+#[tauri::command]
+pub fn timezone_for_state(state: String) -> Value {
+    json!({ "ok": true, "error": Value::Null, "timezone": crate::scaffold::state_timezone(&state) })
 }
 
 /// The wizard's default vault parent and backup folder under a home directory: `<home>\Knowlu`
@@ -114,6 +296,36 @@ fn set_offer_marker(dir: &Path, offer: bool) {
     }
 }
 
+/// **R-C1-55 (I2): a backup mirror is not a vault to open.** `knowlu_engine::backup::mirror` writes
+/// `<backups root>\<profile id>\vault\`, and that folder carries `config/planning.yaml` and `tasks/`
+/// — it passes the vault predicate exactly. Adopting it would register the backup AS the live vault,
+/// which [`restore_vault_in`]'s own doc says must never happen: the next backup tick would then
+/// mirror the vault over itself, and the student's only other copy of their work would be gone.
+///
+/// Detected **structurally**, never by the word "backup" in a path (a friend may keep their real
+/// vault in a folder called anything): a folder named `vault` whose parent holds what a backup tick
+/// leaves beside it — `status.json` and `snapshots\` — or, for a mirror whose first tick has not
+/// finished, a `profile_<10 hex>` id folder (`profiles::id_for`) directly under a `Backups` folder,
+/// which is the layout [`default_folders_in`] hands every vault the wizard makes.
+fn backup_mirror_reason(vault: &Path) -> Option<String> {
+    if !vault.file_name().map(|n| n.eq_ignore_ascii_case("vault")).unwrap_or(false) { return None; }
+    let profile = vault.parent()?;
+    let ticked = profile.join("status.json").is_file() || profile.join("snapshots").is_dir();
+    let id = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    // One definition of the shape, in `account.rs`, where the delete path also has to trust it
+    // (R-C1-57, I3) — two copies of "profile_ plus ten hex" would be one copy too many.
+    let id_shaped = crate::account::is_profile_id(&id);
+    let under_backups = profile.parent().and_then(|p| p.file_name()).map(|n| n.eq_ignore_ascii_case("Backups")).unwrap_or(false);
+    if !(ticked || (id_shaped && under_backups)) { return None; }
+    // R-C1-59 (I2): restore-from-a-backup has no panel of its own yet (Quinn to rule), so a student
+    // whose own vault folder is gone needs a route today — copy this folder out from under `Backups`
+    // and adopt the copy, exactly what `restore_vault_in` would do for them once it has a caller.
+    Some(format!(
+        "{}: that is Knowlu's backup copy of a vault, not the vault itself — opening it here would make the backup the live vault, and the next backup would write over it. Copy this folder somewhere of your own, outside Backups, and choose that copy instead.",
+        vault.display()
+    ))
+}
+
 /// *Use an existing vault* (spec §3 panel 2): a folder holding `config/planning.yaml` and `tasks/`
 /// becomes a profile. **Nothing is written into the vault** — no scaffold, no seed note, no first
 /// task.
@@ -122,6 +334,11 @@ fn set_offer_marker(dir: &Path, offer: bool) {
 /// of the call and prove that (spec §8; S7).
 pub fn adopt_vault_in(root: &Path, path: &str, name: Option<String>) -> Value {
     let vault = PathBuf::from(path);
+    // R-C1-55 (I2), before the vault predicate: a mirror passes that predicate, so "it looks like a
+    // vault" is exactly the wrong thing to answer here.
+    if let Some(e) = backup_mirror_reason(&vault) {
+        return json!({ "ok": false, "error": e, "profile": Value::Null });
+    }
     // **The console's own predicate, exactly** (final review, I1): `state::resolve_vault` opens a
     // vault only when `config/planning.yaml` is a file, so adopting on the weaker "there is a
     // `config/` directory" test registered profiles the very next launch would refuse to open.
@@ -202,23 +419,51 @@ pub fn refresh(app: &tauri::AppHandle, root: &Path) {
     }
 }
 
-/// Everything the panels collected. A serde struct rather than a loose map, so a missing field is
-/// a refusal at the boundary and not a default nobody chose.
+/// Everything the panels collected. A serde struct rather than a loose map, so a missing field is a
+/// refusal at the boundary and not a default nobody chose.
+///
+/// **C1: there is no `backup_dir` and no parent.** Spec §4.1 — the app creates
+/// `%USERPROFILE%\Knowlu\<name>` and `%USERPROFILE%\Knowlu\Backups`, and the wizard has no folder
+/// panel to carry an answer from. `offer_inference` stays with a `serde(default)` so an older page
+/// that still sends it is not a refusal; the C1 wizard never sets it (the local runtime leaves in C4).
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardPlan {
     pub ics_url: Option<String>,
+    /// The personal calendar's secret iCal address (spec §11a). Same panel as the school feed, and
+    /// the same treatment: validated on the device, stored on the account, written into the vault.
+    pub personal_calendar: Option<String>,
     pub timezone: String,
     pub slots: Vec<String>,
-    pub campus: String,
+    /// R-OB-4: the school, chosen from the bundled US institution list (`onboarding::campus_search`)
+    /// rather than the two-radio placeholder. `#[serde(default)]` so an older page that still omits
+    /// it is not a refusal; `create_vault_in` derives the events preset from the unitid.
+    #[serde(default)]
+    pub campus_choice: crate::scaffold::CampusChoice,
     pub zybooks: bool,
     pub vhl: bool,
-    pub backup_dir: Option<String>,
     pub autostart: bool,
     /// The finish panel's *Set up local judgment after setup* checkbox. The wizard NEVER installs
     /// anything (spec §5.3, "never automatic", and the wizard's own "Nothing is fetched now"); this
     /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
+    #[serde(default)]
+    pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
+    #[serde(default)]
+    pub vhl_sections: Vec<crate::scaffold::SectionMapping>,
+    /// `(fragment, slug)`. R-C1-51: an empty slug means the page has none and `create_vault_in`
+    /// derives one from the fragment via `slugify`; a non-empty slug is the page's own choice and is
+    /// honoured verbatim, never recomputed.
+    #[serde(default)]
+    pub course_map: Vec<(String, String)>,
+    #[serde(default)]
+    pub courses: Vec<crate::scaffold::CourseSeed>,
+    /// Review round 1, I2: every discovered zyBook code the student left unmapped or ticked
+    /// *ignore*. `create_vault_in` adds zyBooks' own `HowToUseZyBooks2` to this regardless of what
+    /// the page sends, so an older page that omits the field still gets the one entry that matters
+    /// on every install.
+    #[serde(default)]
+    pub zybooks_ignore: Vec<String>,
 }
 
 /// Every name Windows would REWRITE or refuse (review round 1, R-P4a-23). The device names are
@@ -263,47 +508,183 @@ pub fn dest_for(parent: &str, name: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// *Finish* for a new vault (decision 3 — this is the first moment anything reaches the vault's
-/// folder). Scaffold+seed (one atomic `create_vault`) → settings → register.
+/// `<home>\Knowlu\<name>`, with the parent and the backups root created if they are not there — the
+/// whole of the folder question, answered by the app (spec §4.1, §11a). Returns the vault path and
+/// the backup ROOT: `backup::tick` writes `<root>\<profile_id>\vault`, so the setting is the root and
+/// the per-profile folder is the engine's, unchanged.
 ///
-/// `scaffold::create_vault` refuses a control character in any wizard value, naming the field
-/// (Task 4 review round 1) — that sentence comes back as `error` and the finish panel prints it,
-/// which is the only way the user learns which field to fix.
+/// Handle-free so `app/tests/onboarding.rs` can drive it with any home directory.
+pub fn vault_dest_in(home: &Path, name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let (parent, backups) = default_folders_in(home);
+    std::fs::create_dir_all(&parent).map_err(|e| format!("{parent}: {e}"))?;
+    std::fs::create_dir_all(&backups).map_err(|e| format!("{backups}: {e}"))?;
+    let dest = dest_for(&parent, name)?;
+    Ok((dest, PathBuf::from(backups)))
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("USERPROFILE").map(PathBuf::from).map_err(|_| "no USERPROFILE: Knowlu cannot decide where your vault goes".to_string())
+}
+
+/// The personal calendar's address, validated on the device before it ever reaches a `VaultPlan`
+/// (fix round 1, item 2). Blank → `None` — a friend who never pasted one gets `calendars: []`
+/// exactly as before. `webcal://` is rewritten to `https://` (R-C1-22) by
+/// `lms_link::https_from_webcal`, which is the **one** implementation of that rule on the device
+/// (R-C1-41, I2): the panel's pasted LMS link goes through the same line, so the two device paths to
+/// the same `calendar_ics` value cannot disagree about what a student may paste. Anything else that
+/// is not `https://` after that rewrite is refused by name, the same way a control character is
+/// refused by field name elsewhere.
+fn normalize_personal_calendar(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let rewritten = crate::lms_link::https_from_webcal(trimmed);
+    if !rewritten.starts_with("https://") {
+        return Err("the calendar address must start with https:// (or webcal://)".to_string());
+    }
+    Ok(Some(rewritten))
+}
+
+/// *Finish* for a new vault. Scaffold+seed (one atomic `create_vault`) → the session moves onto this
+/// profile → settings → register.
 ///
-/// Handle-free, like `adopt_vault_in`, so `app/tests/onboarding.rs` can drive the rollback.
-pub fn create_vault_in(root: &Path, parent: &str, name: &str, plan: &WizardPlan) -> Value {
-    let dest = match dest_for(parent, name) { Ok(d) => d, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+/// **The session move is here, and before the settings write**, for the reason `retarget_credentials`
+/// exists (R-P4a-23): the wizard signed in seven panels ago, under `account::PENDING_TARGET`, because
+/// the profile id is derived from a vault path that did not exist yet. A vault whose `cloud.yaml`
+/// names `knowlu/<profile_id>/session` while the token still sits under `knowlu/pending/session` is a
+/// vault that cannot reach the cloud, with nothing anywhere saying why.
+pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) -> Value {
+    let personal_calendar = match &plan.personal_calendar {
+        None => None,
+        Some(raw) => match normalize_personal_calendar(raw) {
+            Ok(v) => v,
+            Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }),
+        },
+    };
+    let (dest, backups) = match vault_dest_in(home, name) {
+        Ok(d) => d,
+        Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }),
+    };
+    let profile_id = profiles::id_for(&dest);
+    let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
+        Ok((id, _)) => id,
+        Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
+    };
+    // **The page sends a course CODE and a label; the slug is made here, from the code — never the
+    // label** (review round 1, I3). `CS 100` is what `suggest_course` proposed and the student
+    // confirmed or edited; `cs-100` is the vault's own name for it — the note's stem, every task's
+    // `course:` field, and the value `judge::Heuristics::knows_course` tests. `label` is a SEPARATE,
+    // display-only string (`GN 103` vs. `GN 103 Hausaufgaben`): slugging it instead would be a page
+    // deciding what the engine may know by way of a string nobody chose as an identifier (R-OB-1,
+    // R-OB-2). The engine's `slugify` — the one `judge::Heuristics` reads back (see the note in
+    // `scaffold.rs`).
+    let slug = knowlu_engine::ingest::slugify;
+    // Review round 1, I1: first wins. Two rows confirming the same book/section/course-map code —
+    // a two-part book, a lecture-and-lab pair, a course the sign-in window will also find (Task
+    // 14b) — must become ONE key, or `ingest_yaml` writes the same key twice and `serde_yaml_ng`'s
+    // `Mapping` deserializer refuses the whole file (`build_into`'s own parse-back check now catches
+    // this too, but a plan that never produces the duplicate is the better fix).
+    let mut seen_zybooks = std::collections::HashSet::new();
+    let zybooks_courses: Vec<crate::scaffold::BookMapping> = plan.zybooks_courses.iter()
+        .filter(|b| !b.course.trim().is_empty())
+        .map(|b| crate::scaffold::BookMapping { code: b.code.clone(), course: slug(&b.course), label: b.label.clone() })
+        .filter(|b| seen_zybooks.insert(b.code.clone()))
+        .collect();
+    let mut seen_vhl = std::collections::HashSet::new();
+    let vhl_sections: Vec<crate::scaffold::SectionMapping> = plan.vhl_sections.iter()
+        .filter(|v| !v.course.trim().is_empty())
+        .map(|v| crate::scaffold::SectionMapping { section: v.section.clone(), course: slug(&v.course), label: v.label.clone() })
+        .filter(|v| seen_vhl.insert(v.section.clone()))
+        .collect();
+    // R-C1-51, item 1: the page's own slug is honoured verbatim when it sent one — `slugify(code)`
+    // is a fallback for an empty second element, never a recompute of a slug the page already chose.
+    let mut seen_course_map = std::collections::HashSet::new();
+    let course_map: Vec<(String, String)> = plan.course_map.iter()
+        .map(|(code, page_slug)| {
+            let s = if page_slug.trim().is_empty() { slug(code) } else { page_slug.clone() };
+            (code.clone(), s)
+        })
+        .filter(|(code, s)| !code.trim().is_empty() && !s.is_empty())
+        .filter(|(code, _)| seen_course_map.insert(code.clone()))
+        .collect();
+    // Review round 1, I2: `HowToUseZyBooks2` unconditionally — zyBooks' own onboarding book, zero
+    // assignments, never coursework — plus every code the page says the student declined to map,
+    // deduplicated the same way (first wins; order otherwise preserved).
+    let mut seen_ignore = std::collections::HashSet::new();
+    let zybooks_ignore: Vec<String> = std::iter::once("HowToUseZyBooks2".to_string())
+        .chain(plan.zybooks_ignore.iter().map(|c| c.trim().to_string()))
+        .filter(|c| !c.is_empty())
+        .filter(|c| seen_ignore.insert(c.clone()))
+        .collect();
+    // `courses` is empty until Task 14b's capture fills it, and empty is a correct answer: a student
+    // whose campus we cannot read types the list on the panel instead.
+    //
+    // R-C1-51, item 2: a page-supplied slug reaches `courses/<slug>.md` only after the engine's own
+    // `slugify` — never verbatim. `slugify` never returns an empty string (it falls back to `item`),
+    // which is the refusal: no page-supplied slug can ever name `courses/.md` or escape `courses/`.
+    let courses: Vec<crate::scaffold::CourseSeed> = plan.courses.iter()
+        .map(|c| crate::scaffold::CourseSeed {
+            code: c.code.clone(),
+            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
+            slug: slug(if c.slug.trim().is_empty() { &c.code } else { &c.slug }),
+        })
+        .filter(|c| !c.slug.is_empty())
+        .collect();
     let vp = crate::scaffold::VaultPlan {
-        profile_id: profiles::id_for(&dest),
+        profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
+        personal_calendar,
+        zybooks_courses,
+        vhl_sections,
+        zybooks_ignore,
+        course_map,
+        courses,
         timezone: plan.timezone.clone(),
         slots: plan.slots.clone(),
         device: knowlu_engine::journal::device_name(),
-        campus: plan.campus.clone(),
+        campus: crate::scaffold::events_preset_for(&plan.campus_choice.unitid).to_string(),
+        campus_choice: plan.campus_choice.clone(),
         zybooks: plan.zybooks,
         vhl: plan.vhl,
+        api_base: crate::account::api_base(),
+        anon_key: crate::account::anon_key(),
+        account_id,
     };
-    if let Err(e) = crate::scaffold::create_vault(&dest, &vp) { return json!({ "ok": false, "error": e, "profile": Value::Null }); }
-    finish_or_roll_back(root, &dest, Some(name.to_string()), plan)
+    if let Err(e) = crate::scaffold::create_vault(&dest, &vp) {
+        return json!({ "ok": false, "error": e, "profile": Value::Null });
+    }
+    if let Err(e) = crate::account::move_session(crate::account::PENDING_TARGET, &crate::account::session_target(&profile_id)) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return json!({ "ok": false, "error": format!("the sign-in could not be attached to this vault ({e}) — the new vault was removed, so nothing is half-made"), "profile": Value::Null });
+    }
+    finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups))
 }
 
 #[tauri::command(async)]
-pub fn create_vault(app: tauri::AppHandle, parent: String, name: String, plan: WizardPlan) -> Value {
+pub fn create_vault(app: tauri::AppHandle, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
-    let out = create_vault_in(&root, &parent, &name, &plan);
+    let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+    let out = create_vault_in(&root, &home, &name, &plan);
     if out["ok"] == true { refresh(&app, &root); }
     out
 }
 
 /// *Restore from a backup* (spec §3 panel 2): `<backup>\<profile>\vault\` is **copied** to
-/// `<parent>\<name>` and used there — never used in place, so the backup folder is never written
-/// to and never becomes the live vault by accident.
+/// `<home>\Knowlu\<name>` and used there — never used in place, so the backup folder is never
+/// written to and never becomes the live vault by accident.
+///
+/// **Fix round 1, item 1: decides the folder exactly as `create_vault_in` does**, through
+/// `vault_dest_in` — not a page-supplied `parent`. Before this, a fresh machine (no
+/// `%USERPROFILE%\Knowlu` yet) could not restore at all, because `dest_for` refuses a parent that
+/// does not exist and nothing here created it; `vault_dest_in` does.
+///
 /// The handle-free core, so `app/tests/onboarding.rs` can hash the BACKUP folder either side of a
 /// restore and prove it is only ever read (spec §8; S7). Returns the created vault path on success.
-pub fn restore_vault_in(backup: &str, parent: &str, name: &str) -> Result<PathBuf, String> {
+pub fn restore_vault_in(backup: &str, home: &Path, name: &str) -> Result<PathBuf, String> {
     let src = PathBuf::from(backup);
     let mirror = find_mirror(&src).ok_or_else(|| format!("{backup}: no <profile>\\vault\\ mirror in there"))?;
-    let dest = dest_for(parent, name)?;
+    let (dest, _backups) = vault_dest_in(home, name)?;
     let staging = dest.parent().unwrap_or(Path::new(".")).join(format!(".knowlu-restore-{}", knowlu_engine::ids::new_id("stage")));
     match copy_tree(&mirror, &staging).and_then(|()| std::fs::rename(&staging, &dest).map_err(|e| e.to_string())) {
         Ok(()) => Ok(dest),
@@ -311,13 +692,20 @@ pub fn restore_vault_in(backup: &str, parent: &str, name: &str) -> Result<PathBu
     }
 }
 
+/// **`parent` is gone** (fix round 1, item 1) — the page may keep sending it until Task 17 removes
+/// the folder panel entirely; Tauri's argument matching ignores a key that names no parameter of
+/// this command, so the extra field is inert rather than a refusal (confirmed by reading
+/// `console.js`'s `invoke("restore_vault", …)` call, which still sends `parent`).
 #[tauri::command(async)]
-pub fn restore_vault(app: tauri::AppHandle, backup: String, parent: String, name: String, plan: WizardPlan) -> Value {
+pub fn restore_vault(app: tauri::AppHandle, backup: String, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
-    let out = match restore_vault_in(&backup, &parent, &name) {
+    let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+    let out = match restore_vault_in(&backup, &home, &name) {
         // The restored copy is rolled back the same way a created vault is: the backup it came
-        // from is untouched, so a failed finish costs nothing but the copy.
-        Ok(dest) => finish_or_roll_back(&root, &dest, Some(name), &plan),
+        // from is untouched, so a failed finish costs nothing but the copy. There is no `WizardPlan`
+        // folder answer any more (spec §4.1) — the restored vault's mirror is the same default
+        // `Backups` sibling a created vault gets.
+        Ok(dest) => finish_or_roll_back(&root, &dest, Some(name), &plan, Some(PathBuf::from(default_folders_in(&home).1))),
         Err(e) => json!({ "ok": false, "error": e, "profile": Value::Null }),
     };
     if out["ok"] == true { refresh(&app, &root); }
@@ -332,16 +720,16 @@ pub fn restore_vault(app: tauri::AppHandle, backup: String, parent: String, name
 /// Split into a handle-free core (Task 10 review, M1) so `app/tests/onboarding.rs` can drive the
 /// adopt path's `offer_inference` marker directly, the same way `create_vault_in` and
 /// `restore_vault_in` already let it drive theirs.
-pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan) -> Value {
+pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
     // The adopted vault's own path, so the backup folder is checked against it here too and not
     // only in the page (review round 1, minor).
     let vault = profiles::load(root).ok().and_then(|v| v.into_iter().find(|p| p.id == id)).map(|p| p.vault);
     if let Some(v) = &vault {
-        if let Err(e) = check_backup_dir(v, plan.backup_dir.as_deref()) { return json!({ "ok": false, "error": e }); }
+        if let Err(e) = check_backup_dir(v, backup_dir.as_deref()) { return json!({ "ok": false, "error": e }); }
     }
     let settings = crate::state::Settings {
         profile_id: id.to_string(),
-        backup_dir: plan.backup_dir.clone().filter(|b| !b.is_empty()).map(PathBuf::from),
+        backup_dir,
         autostart: plan.autostart,
         quit_at: None,
     };
@@ -358,7 +746,9 @@ pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan) -> Va
 #[tauri::command(async)]
 pub fn apply_profile_settings(app: tauri::AppHandle, id: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding" }) };
-    apply_profile_settings_in(&root, &id, &plan)
+    // An adopted vault keeps whatever backup folder it already had — there is no folder panel to
+    // carry a new answer from (spec §4.1).
+    apply_profile_settings_in(&root, &id, &plan, None)
 }
 
 /// `<backup>` is either the profile folder itself or the folder holding profile folders.
@@ -387,9 +777,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 ///
 /// Compared the way Windows compares paths — case-insensitively, separators normalised — and only
 /// at a separator, so `…\Fall` is never "inside" `…\Fall 2026`.
-fn check_backup_dir(vault: &Path, backup: Option<&str>) -> Result<(), String> {
+fn check_backup_dir(vault: &Path, backup: Option<&Path>) -> Result<(), String> {
     let norm = |s: &str| s.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase();
-    let b = match backup.map(norm).filter(|b| !b.is_empty()) { Some(b) => b, None => return Ok(()) };
+    let b = match backup.map(|p| norm(&p.to_string_lossy())).filter(|b| !b.is_empty()) { Some(b) => b, None => return Ok(()) };
     let v = norm(&vault.to_string_lossy());
     if v.is_empty() { return Ok(()); }
     if v == b || b.starts_with(&format!("{v}\\")) {
@@ -404,13 +794,13 @@ fn check_backup_dir(vault: &Path, backup: Option<&str>) -> Result<(), String> {
 /// Now the error is the envelope's, and doing the fallible-but-unregistered half first means a
 /// failure leaves no profile in the registry to clean up — the id is derived from the vault path,
 /// exactly as `profiles::register` derives it, so the file lands in the same place either way.
-fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &WizardPlan) -> Value {
-    if let Err(e) = check_backup_dir(vault, plan.backup_dir.as_deref()) {
+fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
+    if let Err(e) = check_backup_dir(vault, backup_dir.as_deref()) {
         return json!({ "ok": false, "error": e, "profile": Value::Null });
     }
     let settings = crate::state::Settings {
         profile_id: profiles::id_for(vault),
-        backup_dir: plan.backup_dir.clone().filter(|b| !b.is_empty()).map(PathBuf::from),
+        backup_dir,
         autostart: plan.autostart,
         quit_at: None,
     };
@@ -436,8 +826,8 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
 /// directly** (Task 10 review, M1): `restore_vault_in` alone only copies the mirror out and never
 /// sees a `WizardPlan` — this is the other half, exactly as the live `restore_vault` command
 /// calls it.
-pub fn finish_or_roll_back(root: &Path, dest: &Path, name: Option<String>, plan: &WizardPlan) -> Value {
-    let out = finish_profile_in(root, dest, name, plan);
+pub fn finish_or_roll_back(root: &Path, dest: &Path, name: Option<String>, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
+    let out = finish_profile_in(root, dest, name, plan, backup_dir);
     if out["ok"] == true { return out; }
     let why = out["error"].as_str().unwrap_or("the profile could not be finished").to_string();
     let tail = match std::fs::remove_dir_all(dest) {

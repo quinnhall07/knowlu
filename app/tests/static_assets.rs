@@ -334,42 +334,214 @@ fn the_picker_is_in_the_page_and_carries_no_data_id() {
 }
 
 #[test]
-fn the_wizard_has_seven_panels_the_privacy_words_and_no_live_fetch() {
+fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
     let html = read("index.html");
     assert!(html.contains("id=\"wizard\""));
-    for p in ["wiz-welcome", "wiz-vault", "wiz-backup", "wiz-lms", "wiz-logins", "wiz-slots", "wiz-finish"] {
+    // Spec §4.2, in order. **No `wiz-backup`, and no folder anywhere**: the app creates
+    // `%USERPROFILE%\Knowlu\<name>` and `Backups` beside it (§4.1, §11a).
+    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
         assert!(html.contains(&format!("id=\"{p}\"")), "panel {p}");
     }
+    assert!(!html.contains("id=\"wiz-backup\""), "the backup-folder panel is gone");
+    assert!(!html.contains("id=\"wiz-pick-parent\"") && !html.contains("id=\"wiz-pick-bdir\""), "no folder is picked in the wizard");
     let js = read("console.js");
     for f in ["startWizard", "renderWizard", "wizGo", "wizFinish"] {
         assert!(js.contains(&format!("function {f}(")), "missing {f}");
     }
-    // Decision 10: no telemetry, and no toggle to argue about.
-    assert!(!js.to_lowercase().contains("telemetry"));
-    // The privacy paragraph, exactly, and the same words the site carries (Task 10 pins the pair).
-    assert!(js.contains("Everything stays on this machine. Knowlu has no account and sends nothing anywhere; the only network calls are to the sources you connect and to check for updates."));
-    // No live fetch in onboarding: the ICS URL is matched by shape, never requested. The regex is
-    // escaped so the page still carries no `https://` literal (the network-reference rule).
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+    // No live fetch in onboarding: the ICS shape is matched, never requested, by the PAGE. The
+    // escape keeps the network-reference rule true.
     assert!(js.contains("/^https:\\/\\/"), "the ICS check is an escaped regex");
-    assert!(!js.contains("fetch(\"http"), "onboarding never fetches");
+    assert!(!js.contains("fetch(\"http"), "the page never fetches");
     // Credentials leave page memory the moment the write returns (spec §5).
     assert!(js.contains("clearCredentialFields("), "the fields are cleared by name");
-    // S13: the one seam the headless checks drive the panels through.
-    // All three panels the scripts put on screen without a backend — `console-shots.py` calls each
-    // of these by name, so a rename here is a script that shoots nothing and says nothing.
-    assert!(js.contains("window.KNOWLU_SHOTS = { startWizard: startWizard, renderPicker: renderPicker, openSettings: openSettings }"), "the shots seam, spelled as scripts/console-shots.py calls it");
-    // R-P4a-11: a new vault is <parent>\<name>, and the page says where before Finish.
-    assert!(js.contains("function dest()") && js.contains("wiz-name") && js.contains("wiz-pick-parent"));
-    // The `.app[hidden]` lesson again (Task 2, review round 1): `.wiz-row` is a flex container
-    // and a class rule beats the UA stylesheet's `[hidden]`, so the adopt and restore rows sat
-    // on screen while creating a vault until this rule existed.
+    assert!(js.contains("window.KNOWLU_SHOTS = { startWizard: startWizard, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
+    assert!(js.contains("retarget_credentials"), "Finish moves the credentials when the name changed");
+    // R-C1-55, M5: two pins the brief's replacement body dropped, restored — both still matter.
+    // A class `display` beats the UA stylesheet's `[hidden]`, and this rule is the only thing that
+    // actually hides `#wiz-code-row`, `#wiz-school-free`, `#wiz-lms-kind` and `#wiz-google-row`.
     assert!(read("console.css").contains(".wiz-row[hidden] { display: none; }"), "a hidden .wiz-row must actually hide");
-    // R-P4a-23: a rename after panel 5 MOVES the entries rather than orphaning them — the page
-    // never leaves a login keyed to a path it is not going to create.
-    assert!(js.contains("retarget_credentials"), "Finish moves the credentials when the path changed");
-    // R-T15b's equality still holds: the wizard's own markup carries ids and no data-id at all,
-    // so the page-wide count of data-id against data-kind is untouched by it.
+    // `documents` is the retired launch_state key that named the OneDrive-redirected folder.
+    assert!(!js.contains("l.documents"), "the retired `documents` key is gone from the page");
+    // D5: class (c) — raw note bodies for model improvement — is not built and has no UI, and the
+    // page is where a toggle for it would appear. The pin predates C1 and is kept for exactly that.
+    assert!(!js.to_lowercase().contains("telemetry"), "no telemetry toggle: (c) is not built (D5)");
     assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
+}
+
+/// Spec §11a and VISION's standing rule: **Knowlu never asks for a campus credential.** The student
+/// types into the university's own page, inside a window we opened and then throw away. The page has
+/// exactly three password fields and they are all ours: the account's, and the two coursework logins
+/// the student explicitly chose to store in Credential Manager (D11).
+#[test]
+fn the_page_has_no_lms_credential_field_anywhere() {
+    let html = read("index.html");
+    let js = read("console.js");
+    // Every password field on the page is one of ours, by id: the wizard's account password, the
+    // upgrade overlay's (Task 18), and the two coursework logins the student chose to store (D11).
+    // Counted by allow-list rather than by number, so adding one of ours is fine and adding
+    // anybody else's is not.
+    const OURS: [&str; 4] = ["wiz-pw", "up-pw", "wiz-zy-pass", "wiz-vhl-pass"];
+    let mut seen = 0usize;
+    for (i, _) in html.match_indices("type=\"password\"") {
+        let around = &html[i.saturating_sub(200)..(i + 200).min(html.len())];
+        assert!(OURS.iter().any(|id| around.contains(&format!("id=\"{id}\""))), "an unknown password field near: {around}");
+        seen += 1;
+    }
+    assert!(seen >= 3, "the account password and the two coursework logins are all still there");
+    for id in ["wiz-pw", "wiz-zy-pass", "wiz-vhl-pass"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "password field {id}");
+    }
+    // The LMS panel holds a button, a status line and a paste field — and nothing to type a school
+    // password into. Checked over the panel's own markup, so a field added there fails here.
+    let panel = html.split("id=\"wiz-calendars\"").nth(1).and_then(|s| s.split("id=\"wiz-logins\"").next()).expect("the calendars panel");
+    assert!(!panel.contains("password"), "the calendars panel must never carry a password field");
+    assert!(!panel.to_lowercase().contains("username"), "…nor a username field");
+    assert!(panel.contains("id=\"wiz-lms-open\"") && panel.contains("id=\"wiz-ics\""), "sign-in button and paste fallback");
+    // R-C1-42: the capture is the student's SECOND press, and it is its own button — chained onto the
+    // open it would read the identity provider's page, where nobody has signed in yet.
+    assert!(panel.contains("id=\"wiz-lms-capture\""), "the capture button");
+    assert!(js.contains("\"capture_calendar_link\"") && js.contains("wiz-lms-capture"),
+        "the capture fires on the press, not on the open");
+    // The campus is asked HERE, on the panel that uses it — not two panels later, where it used to be
+    // and where it made every sign-in answer "no sign-in page is known for that school yet".
+    // R-OB-4: a search over every US institution, not two radios. The radios are gone from the whole
+    // page — a list of two schools was a placeholder that read like a decision.
+    assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
+    assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
+    assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
+    assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
+    assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
+    assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
+    // **The page must not fetch the list.** `app/tauri.conf.json`'s CSP names only the IPC origin, so
+    // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
+    // command; the page holds ten rows.
+    assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
+    // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
+    // personal one is what makes today's page know the day is already half full.
+    assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
+    assert!(panel.contains("Secret address in iCal format"), "the panel says where the address is");
+    assert!(panel.contains("Reset"), "…and advises resetting it first");
+    // C2's Google sign-in has a labelled place and does nothing yet — a button that lied would be
+    // worse than a button that says when it arrives.
+    assert!(panel.contains("id=\"wiz-google\"") && panel.contains("disabled"), "the Google placeholder is present and inert");
+    // R-OB-2: the enrolled classes are confirmed on this panel — captured from the sign-in window if
+    // the campus lets us, typed if it does not. Without them a first ingest is 28 tasks with no
+    // course, which is the run this section of the plan exists because of.
+    assert!(panel.contains("id=\"wiz-courses\"") && panel.contains("id=\"wiz-course-rows\""), "the class list");
+    assert!(panel.contains("id=\"wiz-course-add\""), "…and the typed fallback beside it");
+    assert!(js.contains("\"capture_courses\"") && js.contains("function renderCourses("), "the capture and its rows");
+    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Google connect in C1");
+    let slots = html.split("id=\"wiz-slots\"").nth(1).and_then(|s| s.split("id=\"wiz-finish\"").next()).expect("the slots panel");
+    assert!(!slots.contains("id=\"wiz-school\""), "the school must not also be on the slots panel");
+}
+
+/// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
+/// first slot had both logins stored and `courses: {}` in the config, so the engine answered
+/// `zybook UACS100Fall2026 not in config; skipped` and then `0 assignments parsed; treating as
+/// failure` — three warnings for one missing sentence.
+#[test]
+fn the_logins_panel_maps_what_it_finds_to_a_course() {
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
+    assert!(panel.contains("id=\"wiz-map\"") && panel.contains("id=\"wiz-map-rows\""), "the mapping block");
+    let js = read("console.js");
+    assert!(js.contains("\"discover_coursework\""), "discovery runs after the credentials are stored");
+    assert!(js.contains("function renderMapping("), "renderMapping");
+    // The mapping travels in the plan, and the SLUGS are made in Rust from the codes — a page that
+    // invented vault identifiers would be a page deciding what the engine may know.
+    assert!(js.contains("zybooks_courses:") && js.contains("vhl_sections:") && js.contains("course_map:"), "the plan carries the mapping");
+    assert!(!js.contains("slugify"), "slugs are `knowlu_engine::ingest::slugify`'s, never the page's");
+    // R-C1-55, I3: `discover_coursework` spawns the engine and logs into both vendors. A second Next
+    // while the first is in flight starts a SECOND child, and the two `WIZ.map` assignments decide the
+    // panel between them. Asserted inside `wizGo` itself, so `wizFinish`'s own disable cannot stand in.
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
+    assert!(go.contains("WIZ.discovering"), "a second Next must not start a second coursework-discover");
+    assert!(go.contains("EL(\"wiz-next\").disabled = true") && go.contains("EL(\"wiz-next\").disabled = false"),
+        "Next is disabled while discovery is in flight and re-enabled when it settles");
+}
+
+/// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
+#[test]
+fn the_account_panel_gates_on_eighteen_and_links_both_policies() {
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-account\"").nth(1).and_then(|s| s.split("id=\"wiz-subscribe\"").next()).expect("the account panel");
+    assert!(panel.contains("id=\"wiz-18\""), "the 18+ attestation checkbox");
+    assert!(panel.contains("id=\"wiz-terms\""), "the terms + privacy acceptance checkbox");
+    assert!(panel.contains("18 or older"), "the attestation says what it means");
+    // The two policies are named where they are accepted, as relative names — the page still carries
+    // no `http(s)://` literal, and `open_policy` is what turns them into a published URL.
+    assert!(panel.contains("terms.html") && panel.contains("privacy.html"), "both policies are linked");
+    let js = read("console.js");
+    // …and a click on either **must not navigate this window**: `app/static/` has four files, so a
+    // plain navigation would lose the only window the app has, mid-consent.
+    assert!(js.contains("a.policy") && js.contains("preventDefault()") && js.contains("\"open_policy\""),
+        "the policy links must open in the system browser, not in this webview");
+    assert!(js.contains("\"sign_up\"") && js.contains("\"sign_in\"") && js.contains("\"send_magic_link\"") && js.contains("\"verify_email_code\""));
+    // Next is refused until both boxes are ticked — said on the panel, and enforced again in Rust.
+    assert!(js.contains("Tick both boxes"), "the page says why Next is refused");
+}
+
+/// Legal note §9: the report is shown, editable, before anything is sent — and what is sent is what
+/// was shown, not something rebuilt after the user looked away.
+#[test]
+fn the_issue_report_is_previewed_edited_and_sent_verbatim() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"report\""), "the report overlay");
+    assert!(html.contains("id=\"report-text\""), "an editable textarea");
+    assert!(html.contains("id=\"report-send\"") && html.contains("id=\"report-cancel\""));
+    let js = read("console.js");
+    assert!(js.contains("function openReport("), "openReport");
+    assert!(js.contains("window.KNOWLU_OPEN_REPORT = openReport"), "the tray's one way in");
+    assert!(js.contains("\"report_preview\"") && js.contains("\"report_send\""));
+    // The send passes the TEXTAREA's value. A send that passed anything else would be sending
+    // something the user never read.
+    assert!(js.contains("invoke(\"report_send\", { text: EL(\"report-text\").value })"), "send exactly what is on screen");
+}
+
+/// **One string, two languages** — the same pin `PRIVACY` gets, for the same reason. `account.rs`
+/// emits every transport failure as `"{UNREACHABLE} ({e})"`, and the upgrade overlay decides whether
+/// to stand itself down by testing that the error *starts with* it. A silent drift here does not fail
+/// anything: it just quietly stops standing the overlay down, on the one path where a student with no
+/// network would otherwise be stuck behind it.
+#[test]
+fn the_unreachable_clause_is_one_string_on_both_sides() {
+    let rust = fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let clause = rust
+        .split("pub const UNREACHABLE: &str = \"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const UNREACHABLE: &str = \"…\";`");
+    assert!(!clause.is_empty());
+    let js = read("console.js");
+    assert!(
+        js.contains(&format!("var UNREACHABLE = \"{clause}\";")),
+        "console.js's UNREACHABLE must be account.rs's, word for word: {clause:?}"
+    );
+}
+
+/// The local runtime leaves in C4; the wizard stops offering it now, because §4.2's step list has no
+/// such step and a wizard that offers a 2 GB download for a feature that is moving to the cloud is
+/// lying to a new user.
+#[test]
+fn the_wizard_never_offers_a_local_model() {
+    let html = read("index.html");
+    assert!(!html.contains("id=\"wiz-judge\""), "the finish panel's local-judgment offer is gone");
+    assert!(!html.contains("2 GB"), "…and so is its download size");
+    let js = read("console.js");
+    // **Asserted by position, not by slice.** Whether `openSettings` — which legitimately calls these
+    // until C4 — happens to fall inside a text slice is a fact about line ordering, not about the
+    // wizard. Each command appears exactly once, and after `renderInference`, which is the settings
+    // row's own function; anything the wizard called would appear earlier and twice.
+    // The flag the deleted `the_wizard_offers_local_judgment_without_doing_anything` pinned, inverted:
+    // the checkbox is gone from the markup, so the plan field it filled must be gone from the page.
+    assert!(!js.contains("offer_inference"), "the wizard's local-judgment flag is gone with its checkbox");
+    let at = |needle: &str| js.find(needle).unwrap_or_else(|| panic!("{needle} is not in console.js"));
+    let inference = at("function renderInference(");
+    for cmd in ["\"install_inference_download\"", "\"install_inference_file\"", "\"inference_status\""] {
+        assert_eq!(js.matches(cmd).count(), 1, "{cmd} is invoked from more than one place");
+        assert!(at(cmd) > inference, "the wizard has nothing to do with the local runtime: {cmd}");
+    }
 }
 
 /// R-P4a-21: the wizard's privacy paragraph and the site's are ONE sentence, checked against each
@@ -382,7 +554,7 @@ fn the_wizards_privacy_sentence_is_the_sites_privacy_sentence() {
     let sentence = site
         .lines()
         .map(str::trim)
-        .find(|l| l.starts_with("<p>") && l.contains("Everything stays on this machine"))
+        .find(|l| l.starts_with("<p>") && l.contains("Your vault stays on this machine"))
         .map(|l| l.trim_start_matches("<p>").trim_end_matches("</p>").to_string())
         .expect("site/privacy.html must carry the privacy sentence in one <p>");
     let js = read("console.js");
@@ -400,9 +572,19 @@ fn the_settings_panel_has_its_rows_and_one_way_in() {
     assert!(html.contains("id=\"settings\""));
     // D9 reconciled as "five plus Updates" (R-P4a-5) — six rows, and `set-updates` is one of them:
     // the row the updater task wired is as much part of the panel as the five that predate it.
-    for row in ["set-name", "set-vault", "set-backup", "set-autostart", "set-updates", "set-diag"] {
+    for row in ["set-name", "set-vault", "set-backup", "set-autostart", "set-updates",
+                "set-account", "set-report", "set-delete", "set-diag"] {
         assert!(html.contains(&format!("id=\"{row}\"")), "row {row}");
     }
+    // R-C1-55, I1: every control `console.js` binds BY NAME at IIFE top level. `EL()` answers `null`
+    // for a missing id, so deleting one of these throws before `launch_state` is ever invoked — in
+    // every window, so the console, the picker and the wizard all render as a blank document.
+    for id in ["set-portal", "set-report-go", "set-delete-1", "set-delete-2"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "control {id}");
+    }
+    // R-C1-59 (I3): the button's own label, pinned — `site/terms.html` and the billing-jobs cancel
+    // mails all tell the student to click this exact control by this exact name.
+    assert!(html.contains("id=\"set-portal\">Manage subscription<"), "the settings button must say Manage subscription, word for word");
     let js = read("console.js");
     assert!(js.contains("function openSettings(") && js.contains("function renderSettings("));
     assert!(js.contains("window.KNOWLU_OPEN_SETTINGS"), "the tray's one way in");
@@ -612,44 +794,266 @@ fn the_local_judgment_row_has_a_state_for_every_outcome() {
     // Global constraint: no http:// or https:// under app/static/ — the endpoint is Rust's.
     assert!(!js.contains("manifest.json"), "the manifest URL is inference.rs's, never the page's");
     assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
+    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime (`scheduler::judge_plan`
+    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists), so `renderAccountRow`
+    // hides the row rather than offering a multi-gigabyte download that cannot affect anything.
+    assert!(js.contains("EL(\"set-judge\").hidden"), "the row must be gated on the account status");
 }
 
-/// The wizard offers local judgment and never performs it: "Nothing is fetched now" is the wizard's
-/// promise, and a two-gigabyte download during onboarding would break it (spec §5.3, D8).
-#[test]
-fn the_wizard_offers_local_judgment_without_doing_anything() {
-    let html = read("index.html");
-    assert!(html.contains("id=\"wiz-judge\""), "the finish panel's offer");
-    assert!(html.contains("Nothing is fetched now."), "the wizard's promise still stands");
-    assert!(!html.contains("Gmail proposals, event verdicts and enrichment are not here yet"),
-        "enrichment ships in this plan — that sentence is now false");
-    let js = read("console.js");
-    assert!(js.contains("offer_inference"), "the plan carries the checkbox to apply_profile_settings");
-    // D8, asserted where it can actually fail: neither install command may be reachable from the
-    // wizard's own code. **Task 10 review, m1**: `startWizard`'s body alone is init-only —
-    // `wizFinish` and `wizRegister`, where a "helpful" download would actually be added, sit in
-    // later top-level functions the original slice never reached. Widened to span every wizard
-    // function: from `startWizard`'s open brace to the wizard's own click listener, the one
-    // `EL("wizard").addEventListener("click", …)` in the file, which is the line right after
-    // `wizFinish` closes and before which every wizard-only helper (`renderWizard`, `dest`,
-    // `within`, `wizGo`, `wizRegister`, `wizFinish`) is declared.
-    let wizard = js
-        .split("function startWizard(")
-        .nth(1)
-        .and_then(|s| s.split("EL(\"wizard\").addEventListener(\"click\"").next())
-        .expect("startWizard..the wizard's click listener");
-    for cmd in ["install_inference_download", "install_inference_file"] {
-        assert!(!wizard.contains(cmd), "the wizard offers and never installs: {cmd}");
-    }
-}
-
-/// The wizard's default folders come from `launch_state` (`default_parent`, `default_backup`,
-/// cloud design §11a) — the page never builds a path, and the retired `documents` key (which named
-/// the OneDrive-redirected folder) is read nowhere.
+/// The wizard's default folders come from `launch_state` — the page never builds a path, and the
+/// retired `documents` key (which named the OneDrive-redirected folder) is read nowhere. C1: there is
+/// no backups root on the page at all.
 #[test]
 fn the_wizard_takes_its_default_folders_from_the_launch_state() {
     let js = read("console.js");
-    assert!(js.contains("l.default_parent"), "the page reads default_parent from launch_state");
-    assert!(js.contains("l.default_backup"), "the page reads default_backup from launch_state");
-    assert!(!js.contains("l.documents"), "the retired `documents` key is gone from the page");
+    // The vault's parent still comes from `launch_state` (renamed on main 2026-09-09:
+    // `documents` -> `default_parent`).
+    assert!(js.contains("l.default_parent"), "the parent folder still comes from launch_state");
+    // …but nothing reads a backups root any more. There is no backup panel and no folder picker in
+    // the wizard at all; `create_vault` puts `Backups` beside the vault (Task 12, spec §4.1).
+    assert!(!js.contains("l.default_backup"), "the wizard must not read a backups root it cannot show");
+}
+
+/// **R-C1-55, C1 — Tauri v2 lower-camel-cases every argument key** (tauri-macros' `ArgumentCase::Camel`)
+/// unless the command opts out with `rename_all = "snake_case"`. `sign_up` does not opt out, so a page
+/// that sends `age_attested` is rejected *before* the command body runs; the handler's `.catch` then
+/// paints `UNREACHABLE` — *the account service could not be reached* — and `wizValid`'s step-1 gate
+/// refuses Next forever. **No new student could ever create an account**, and the sentence they were
+/// shown blamed the network. Nothing else catches it: `static_assets` matches strings, not argument
+/// names, and `wizard-check.py` fakes `invoke` wholesale, so the fake answers whatever key it is handed.
+#[test]
+fn the_sign_up_call_spells_its_argument_the_way_tauri_delivers_it() {
+    let rust = fs::read_to_string("src/account.rs").expect("src/account.rs");
+    // The signature itself, so a renamed or added parameter fails HERE and not in a student's first
+    // five minutes.
+    assert!(rust.contains("pub fn sign_up(email: String, password: String, age_attested: bool)"),
+        "account::sign_up's signature changed — re-derive the keys the page must send");
+    assert!(!rust.contains("rename_all"), "account.rs opts no command out of Tauri's camelCase");
+    let js = read("console.js");
+    assert!(js.contains("args.ageAttested = EL(\"wiz-18\").checked"), "sign_up must carry `ageAttested`");
+    assert!(!js.contains("age_attested"), "the snake_case spelling must not appear on the page at all");
+    // The two consent versions are `account.rs`'s constants and are stamped into the sign-up body
+    // there (spec §9): a page that sent its own could make the consent log wrong.
+    assert!(rust.contains("TOS_VERSION") && rust.contains("PRIVACY_VERSION"), "the versions are Rust's");
+    for own in ["tos_version", "tosVersion", "privacy_version", "privacyVersion"] {
+        assert!(!js.contains(own), "the consent versions are Rust's, never the page's: {own}");
+    }
+}
+
+/// The standing guard behind C1, over **every** command in the crate: read each `#[tauri::command]`
+/// signature, and for every parameter whose name has more than one word, assert the page never sends
+/// the spelling Tauri would NOT deliver. Exactly one command opts out (`retarget_credentials`, whose
+/// own comment says why), and for that one the rule inverts — which is the whole point of deriving
+/// this from the source rather than keeping a list.
+#[test]
+fn no_multi_word_command_argument_is_sent_in_the_wrong_case() {
+    fn camel(s: &str) -> String {
+        let mut out = String::new();
+        for (i, part) in s.split('_').enumerate() {
+            if i == 0 { out.push_str(part); continue; }
+            let mut cs = part.chars();
+            if let Some(c) = cs.next() { out.extend(c.to_uppercase()); }
+            out.push_str(cs.as_str());
+        }
+        out
+    }
+    let js = read("console.js");
+    let mut checked = 0usize;
+    for entry in fs::read_dir("src").expect("app/src") {
+        let path = entry.expect("a dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") { continue; }
+        let rust = fs::read_to_string(&path).expect("a source file");
+        for block in rust.split("#[tauri::command").skip(1) {
+            let Some(close) = block.find(']') else { continue };
+            let opted_out = block[..close].contains("rename_all = \"snake_case\"");
+            // Only a real attribute: the fn must follow it with nothing but whitespace between, which
+            // is what tells a `#[tauri::command]` written inside a doc comment apart from the real one.
+            let after = block[close + 1..].trim_start();
+            let Some(sig) = after.strip_prefix("pub fn ").or_else(|| after.strip_prefix("pub async fn ")) else { continue };
+            let name = sig.split('(').next().unwrap_or("").to_string();
+            let Some(args) = sig.split('(').nth(1).and_then(|a| a.split(')').next()) else { continue };
+            for arg in args.split(',') {
+                let ident = arg.split(':').next().unwrap_or("").trim();
+                if !ident.contains('_') || ident.starts_with('_') { continue; }
+                checked += 1;
+                let camelled = camel(ident);
+                let wrong = if opted_out { camelled.as_str() } else { ident };
+                let right = if opted_out { ident } else { camelled.as_str() };
+                for shape in [format!("{wrong}:"), format!(".{wrong} =")] {
+                    assert!(!js.contains(&shape),
+                        "{}::{name} takes `{ident}`, so Tauri delivers it as `{right}` — console.js sends `{wrong}`",
+                        path.file_name().unwrap_or_default().to_string_lossy());
+                }
+            }
+        }
+    }
+    // A scan that silently stops finding anything is a guard that silently stops guarding.
+    assert!(checked >= 6, "only {checked} multi-word command arguments found — the scan stopped working");
+}
+
+/// **R-C1-55, I1 — every control this task added, in both directions**: present in `index.html`, and
+/// named in `console.js`. Six of them are bound at IIFE top level (`report-cancel`, `set-report-go`,
+/// `report-send`, `set-portal`, `set-delete-1`, `set-delete-2`) and `EL()` answers `null` for a missing
+/// id, so deleting one throws a `TypeError` **before `launch_state` is ever invoked** — in every
+/// window, so the console, the picker and the wizard all render as a blank document, with nothing else
+/// in this file failing. The rest are written to on a path somebody reaches by pressing something.
+#[test]
+fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
+    let html = read("index.html");
+    let js = read("console.js");
+    for id in [
+        // The report overlay (legal note §9) and Task 16's two commands behind it.
+        "report", "report-text", "report-send", "report-cancel", "report-note",
+        // The three new settings rows' controls. The rows themselves are pinned by
+        // `the_settings_panel_has_its_rows_and_one_way_in`, which is where rows belong.
+        "set-account-state", "set-report-go", "set-delete-1", "set-delete-2", "set-delete-note", "set-portal",
+        // R-C1-42's second press, and the panels' own new controls.
+        "wiz-lms-capture", "wiz-code-row", "wiz-code", "wiz-school-picked", "wiz-courses-note",
+        "wiz-course-add-go", "wiz-map-note", "wiz-sub-note", "wiz-account-note",
+        // Task 18's upgrade overlay. `upgrade` and `up-later` are bound at IIFE top level too, so
+        // they carry the same "delete one and every window renders blank" weight the six above do.
+        "upgrade", "up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin",
+        "up-subscribe", "up-later", "up-error",
+    ] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
+        // Either spelling the page uses: `EL("x")` or a `closest("#x")` selector.
+        assert!(js.contains(&format!("\"{id}\"")) || js.contains(&format!("\"#{id}\"")),
+            "console.js never names #{id}");
+    }
+    // …and no id may be shared. The brief gave the Problems row and its button the same `set-report`,
+    // so `getElementById` resolved to the row; the house spelling is `set-updates`/`set-update-check`.
+    let mut ids: Vec<&str> = html
+        .match_indices("id=\"")
+        .map(|(i, _)| html[i + 4..].split('"').next().unwrap_or(""))
+        .collect();
+    ids.sort_unstable();
+    let before = ids.len();
+    ids.dedup();
+    assert_eq!(before, ids.len(), "index.html carries a duplicate id");
+}
+
+/// I11: *Delete my data* takes **this profile's** snapshots out of the shared backups root, never the
+/// root. Two profiles on one machine share `%USERPROFILE%\Knowlu\Backups`, and the other one's only
+/// other copy of their work is in there.
+#[test]
+fn deleting_my_data_leaves_another_profiles_snapshots_alone() {
+    // The path arithmetic, driven directly: the command itself needs a `ConsoleState`, an `AppHandle`
+    // and a live account, and none of the three is what this is about. The real thing —
+    // `account::delete_local_data` over a scratch vault, its backups subtree, its registry row and
+    // its credentials — is `app/tests/account.rs`'s
+    // `deleting_my_data_removes_this_profiles_things_and_nothing_else`.
+    let root = std::env::temp_dir().join(format!("knowlu-backups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mine = root.join("profile_1111111111").join("vault");
+    let theirs = root.join("profile_2222222222").join("vault");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(mine.join("a.md"), "x").unwrap();
+    std::fs::write(theirs.join("b.md"), "y").unwrap();
+    // What `delete_my_data` does: the root JOINED with this profile's id, and nothing above it.
+    std::fs::remove_dir_all(root.join("profile_1111111111")).unwrap();
+    assert!(!root.join("profile_1111111111").exists());
+    assert!(theirs.join("b.md").is_file(), "another profile's snapshots were destroyed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Spec §11a: an install that predates the account is upgraded **in place**, in the console window,
+/// over its own vault — so the console page carries the same account panels the wizard does, and it
+/// asks no folder question at all.
+#[test]
+fn the_console_can_sign_an_existing_install_in_without_re_onboarding_it() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"upgrade\""), "the upgrade overlay");
+    for id in ["up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin", "up-subscribe", "up-later", "up-error"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "the upgrade overlay needs {id}");
+    }
+    let panel = html.split("id=\"upgrade\"").nth(1).and_then(|s| s.split("</aside>").next()).expect("the upgrade overlay");
+    assert!(!panel.to_lowercase().contains("folder"), "an existing install is never asked about a folder");
+    // **It must be dismissable**, exactly as `#report` is (`report-cancel`): spec §5.1 and D4 both
+    // promise that a dead connection never hides today's page, and this is the first launch after C1
+    // for every install that already exists.
+    assert!(panel.contains("id=\"up-later\""), "the upgrade overlay needs a dismiss control");
+    // …and its policy links must be the browser-opening kind, asserted **over this panel's markup**
+    // rather than over the whole file: the wizard having them is not the same claim.
+    assert_eq!(panel.matches("class=\"policy\"").count(), 2, "both policy links open in the browser");
+    let js = read("console.js");
+    let listener = js.split("EL(\"upgrade\").addEventListener(\"click\"").nth(1).and_then(|s| s.split("function finishUpgrade(").next()).expect("the upgrade listener");
+    assert!(listener.contains("a.policy") && listener.contains("preventDefault()"), "the overlay's own listener must intercept them");
+    assert!(js.contains("function maybeUpgrade("), "maybeUpgrade");
+    assert!(js.contains("\"attach_account\""), "the upgrade ends by attaching the account to this vault");
+    // …it only appears when the vault says it needs one, never on a healthy console…
+    assert!(js.contains("s.needs_account"), "the overlay is gated on the account status's own flag");
+    // …it stays down once dismissed, and stays down when the service cannot be reached at all.
+    assert!(js.contains("UPGRADE_DISMISSED"), "the dismiss must survive the next state poll");
+    assert!(js.contains("UPGRADE_UNREACHABLE") && js.contains("function upgradeUnreachable("),
+        "a sign-in that cannot reach the service must stand the overlay down, not trap the user behind it");
+    // …and the guard tests the clause the Rust side actually emits. It read `indexOf("could not be
+    // reached") === 0` once, against an error whose first twenty characters are "the account service
+    // ", so it could never fire — which is the failure mode a shared literal exists to prevent.
+    assert!(js.contains("indexOf(UNREACHABLE) === 0"), "the guard must test the shared clause, not a fragment of it");
+    // …and it is a side panel, not a modal: the console underneath stays usable, which is the whole
+    // of D4's promise that a dead connection never hides today's page.
+    assert!(html.contains("<aside class=\"setpanel\" id=\"upgrade\""), "the overlay is a setpanel, like #settings");
+}
+
+/// **R-C1-57 (I2): a refusal is a sentence, not silence.** Both link commands answer with an
+/// envelope — `{ok:false, error}` for a dead session, a refused `check_api_base`, a non-2xx from
+/// Stripe or a reply with no link in it — and a page that discards it leaves a student pressing a
+/// button that does nothing. *Subscribe* also used to start a two-minute entitlement poll on top of
+/// a Checkout page that had never opened.
+///
+/// **M4/M5, same file, same round:** the overlay is never raised over the settings panel (they share
+/// a corner and a z-index, and `#upgrade` is last in the DOM), and Escape closes the topmost panel
+/// first — the ordering the previous round added without a test.
+#[test]
+fn a_refused_link_is_said_out_loud_and_escape_closes_the_topmost_panel() {
+    let js = read("console.js");
+    // The overlay's Subscribe: read the envelope, paint the sentence, and do not poll on a refusal.
+    let sub = js
+        .split("if (e.target.closest(\"#up-subscribe\"))")
+        .nth(1)
+        .and_then(|s| s.split("function finishUpgrade(").next())
+        .expect("the subscribe branch");
+    let refused = sub.find("if (!r.ok)").expect("Subscribe must read open_checkout's envelope");
+    assert!(sub.contains("EL(\"up-error\").textContent = r.error"), "…and paint the reason on the panel");
+    let polls = sub.find("setTimeout(tick").expect("the entitlement poll");
+    assert!(refused < polls, "the refusal is handled before the poll can start");
+    assert!(sub[refused..polls].contains("return"), "a refusal must return, never fall through into the poll");
+
+    // *Manage subscription*, in the settings panel, which had the same shape from Task 17.
+    let portal = js
+        .split("EL(\"set-portal\").addEventListener")
+        .nth(1)
+        .and_then(|s| s.split("EL(\"set-delete-1\")").next())
+        .expect("the portal listener");
+    assert!(portal.contains("r.ok") && portal.contains("r.error"), "Manage subscription must say why nothing opened");
+
+    // M4: opening Settings must not raise the overlay on top of it.
+    let mu = js.split("function maybeUpgrade(").nth(1).and_then(|s| s.split("EL(\"up-later\")").next()).expect("maybeUpgrade");
+    assert!(mu.contains("EL(\"settings\").hidden"), "the overlay must never be raised over the settings panel");
+
+    // M5: Escape closes the topmost first — `#upgrade`, then `#report`, then `#settings`, which is
+    // DOM order among panels sharing a z-index.
+    let keys = js
+        .split("document.addEventListener(\"keydown\"")
+        .nth(1)
+        .and_then(|s| s.split("function openReport(").next())
+        .expect("the page's keydown handler");
+    let up = keys.find("EL(\"upgrade\").hidden").expect("Escape must reach the upgrade overlay");
+    let report = keys.find("EL(\"report\").hidden").expect("Escape must reach the report overlay");
+    let settings = keys.find("EL(\"settings\").hidden").expect("Escape must reach the settings panel");
+    assert!(up < report && report < settings, "Escape must close the topmost panel first");
+}
+
+/// **R-C1-57 (M6): the upgrade overlay is dressed like the panel it lives in.** It is the first thing
+/// every existing install sees at the C1 cut-over, and without these two rules its password field is
+/// a white browser default on a dark panel and its two consent checkboxes run together inline. The
+/// wizard's panel has had both rules since Task 17 (`.wiz-panel input[type="password"]`,
+/// `.wiz-panel label`); this is the settings-panel half.
+#[test]
+fn the_upgrade_overlays_field_and_labels_are_styled_like_the_rest_of_the_panel() {
+    let css = read("console.css");
+    assert!(css.contains(".set-row input[type=\"text\"], .set-row input[type=\"password\"]"),
+        "a password field in a settings row must look like the text field beside it");
+    assert!(css.contains(".setpanel label {"), "a consent checkbox needs a line of its own");
 }

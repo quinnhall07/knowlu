@@ -2336,6 +2336,7 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "knowlu-engine",
+ "regex",
  "rfd",
  "serde",
  "serde_json",

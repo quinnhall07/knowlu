@@ -10,16 +10,31 @@ fn temp(tag: &str) -> PathBuf {
     d
 }
 
-fn plan(id: &str) -> VaultPlan {
+/// The plan every scaffold test starts from: no feeds, no mappings, no courses — each test sets the
+/// one or two fields it is about. `dest` decides the profile id, exactly as `create_vault_in` does.
+fn plan_for(dest: &Path) -> VaultPlan {
     VaultPlan {
-        profile_id: id.to_string(),
-        ics_url: Some("https://lms.example.invalid/feed/learn.ics".to_string()),
-        timezone: "America/Chicago".to_string(),
-        slots: vec!["12:00".to_string(), "18:00".to_string()],
-        device: "TEST-MACHINE".to_string(),
-        campus: "university-of-alabama".to_string(),
-        zybooks: true,
+        profile_id: knowlu::profiles::id_for(dest),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        campus_choice: Default::default(),
+        zybooks: false,
         vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        // The real `api_base()`, not a fixture host: `create_vault_writes_cloud_yaml_beside_the_other_config_files`
+        // reads the file back through `cloud_config`, whose R-C1-59 I1 host check now refuses
+        // anything else — and this is exactly what `create_vault_in` itself passes in production.
+        api_base: knowlu::account::api_base(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
     }
 }
 
@@ -68,7 +83,15 @@ fn journal_shape(vault: &Path) -> Vec<serde_json::Value> {
 fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
     let root = temp("ranks");
     let v = root.join("Vault");
-    let p = plan("profile_1111111111");
+    let mut p = plan_for(&v);
+    p.campus = "university-of-alabama".into();
+    // …carrying a seeded course (R-OB-2). A `courses/` note is note-folder content every pass
+    // walks, so it has to be as quiet on a fresh vault's first run as the first task is.
+    p.courses = vec![knowlu::scaffold::CourseSeed {
+        code: "UACS100Fall2026".into(),
+        name: "CS 100 Intro to Computer Science".into(),
+        slug: "cs-100".into(),
+    }];
     create_vault(&v, &p).unwrap();
 
     let no_net = |_: &str| -> Result<String, String> { Err("no network in tests".to_string()) };
@@ -103,7 +126,7 @@ fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
 fn the_scaffold_is_all_or_nothing() {
     let root = temp("atomic");
     let v = root.join("Vault");
-    create_vault(&v, &plan("profile_2222222222")).unwrap();
+    create_vault(&v, &plan_for(&v)).unwrap();
     assert!(v.join("config").join("planning.yaml").is_file());
     // …and the seed is part of the same atomic step, not a second call the caller could skip or
     // fail at (review round 1, Important 2).
@@ -111,7 +134,7 @@ fn the_scaffold_is_all_or_nothing() {
     assert!(v.join("tasks").join("get-to-know-knowlu.md").is_file());
     assert!(strays(&root).is_empty(), "the staging folder is renamed, never left behind");
 
-    let err = create_vault(&v, &plan("profile_2222222222")).unwrap_err();
+    let err = create_vault(&v, &plan_for(&v)).unwrap_err();
     assert!(err.contains("already"), "{err}");
     assert!(strays(&root).is_empty(), "a refused create cleans its staging folder up");
 }
@@ -127,7 +150,7 @@ fn a_failure_part_way_through_leaves_nothing() {
 
     // A control character in a value the engine would read back: caught at `config/ingest.yaml`,
     // by which point planning.yaml, week_template.yaml, .gitignore and events.yaml exist.
-    let mut p = plan("profile_7777777777");
+    let mut p = plan_for(&v);
     p.timezone = "America/Chi\ncago".into();
     let err = create_vault(&v, &p).unwrap_err();
     assert!(err.contains("timezone") && err.contains("control character"), "{err}");
@@ -135,7 +158,7 @@ fn a_failure_part_way_through_leaves_nothing() {
     assert!(strays(&root).is_empty(), "the part-built staging folder is removed: {:?}", strays(&root));
 
     // Same again from the other fallible half of build_into.
-    let mut p = plan("profile_7777777777");
+    let mut p = plan_for(&v);
     p.campus = "not-a-campus".into();
     let err = create_vault(&v, &p).unwrap_err();
     assert!(err.contains("not-a-campus"), "{err}");
@@ -145,7 +168,7 @@ fn a_failure_part_way_through_leaves_nothing() {
     // A real filesystem error, and it carries the path it happened at.
     let blocked = root.join("a-file");
     std::fs::write(&blocked, "not a folder").unwrap();
-    let err = create_vault(&blocked.join("Vault"), &plan("profile_7777777777")).unwrap_err();
+    let err = create_vault(&blocked.join("Vault"), &plan_for(&blocked.join("Vault"))).unwrap_err();
     assert!(err.contains("a-file"), "an fs error names the path it happened at: {err}");
 }
 
@@ -154,7 +177,9 @@ fn a_failure_part_way_through_leaves_nothing() {
 #[test]
 fn a_fresh_vault_is_scheduler_app_on_the_machine_that_made_it() {
     let v = temp("runners").join("Vault");
-    create_vault(&v, &plan("profile_3333333333")).unwrap();
+    let mut p = plan_for(&v);
+    p.device = "TEST-MACHINE".into();
+    create_vault(&v, &p).unwrap();
     let cfg = v.join("config").join("runners.yaml");
     let s = knowlu_engine::runs::runner_settings(&cfg, "local");
     assert_eq!(s.scheduler, knowlu_engine::schedule::SchedulerMode::App);
@@ -181,15 +206,37 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
     // never even be diagnosed.
     let nasty = "Odd/Zone: x #c 'q' \"d\" {e} [f], g";
     let url = "https://lms.example.invalid/f?a=1&b={x}#frag: 'q' \"d\"";
+    // m2 (review round 1): the six new value sites go through the same `yaml_scalar`, so they get
+    // the same nasty treatment as every other wizard-typed field — a course-map fragment as a KEY
+    // (`course_map` writes `fragment: slug`) and a course/label as VALUES.
+    let nasty_fragment = "CS 100: x #c 'q'";
     let p = VaultPlan {
         profile_id: "profile_8888888888".into(),
         ics_url: Some(url.to_string()),
+        personal_calendar: None,
         timezone: nasty.to_string(),
         slots: vec!["12:00: x #c 'q'".into(), "18:00 {b} \"d\"".into()],
         device: "DESK: TOP #1 'q' \"d\" {z}".into(),
         campus: "university-of-alabama".into(),
+        campus_choice: Default::default(),
         zybooks: true,
         vhl: true,
+        zybooks_courses: vec![knowlu::scaffold::BookMapping {
+            code: "UACS100Fall2026".into(),
+            course: "cs-100: x #c 'q'".into(),
+            label: "CS 100: x #c 'q' \"d\" {e} [f], g".into(),
+        }],
+        vhl_sections: vec![knowlu::scaffold::SectionMapping {
+            section: "2102121".into(),
+            course: "gn-103: x #c 'q'".into(),
+            label: "GN 103 Hausaufgaben: x #c 'q' \"d\" {e} [f], g".into(),
+        }],
+        zybooks_ignore: vec!["HowToUseZyBooks2".into(), "Odd: Book #c 'q'".into()],
+        course_map: vec![(nasty_fragment.into(), "cs-100: x #c 'q'".into())],
+        courses: Vec::new(),
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
     };
     create_vault(&v, &p).unwrap();
     let cfg = v.join("config").join("runners.yaml");
@@ -222,13 +269,27 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
     assert_eq!(cw.get("zybooks").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/zybooks"));
     assert_eq!(cw.get("vhl").and_then(|z| z.get("credential_target")).and_then(|t| t.as_str()), Some("knowlu/profile_8888888888/vhl"));
 
+    // m2: a student-typed label carrying YAML metacharacters round-trips through the parsed-back
+    // mapping unchanged — key AND value, for all six new value sites.
+    let zy_course = cw.get("zybooks").and_then(|z| z.get("courses")).and_then(|c| c.get("UACS100Fall2026")).expect("the nasty zybook entry parses");
+    assert_eq!(zy_course.get("course").and_then(|c| c.as_str()), Some("cs-100: x #c 'q'"));
+    assert_eq!(zy_course.get("label").and_then(|c| c.as_str()), Some(p.zybooks_courses[0].label.as_str()));
+    let vhl_section = cw.get("vhl").and_then(|z| z.get("sections")).and_then(|s| s.get("2102121")).expect("the nasty section parses");
+    assert_eq!(vhl_section.get("course").and_then(|c| c.as_str()), Some("gn-103: x #c 'q'"));
+    assert_eq!(vhl_section.get("label").and_then(|c| c.as_str()), Some(p.vhl_sections[0].label.as_str()));
+    let ignore: Vec<&str> = cw.get("zybooks").and_then(|z| z.get("ignore")).and_then(|i| i.as_sequence()).expect("ignore parses")
+        .iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(ignore, vec!["HowToUseZyBooks2", "Odd: Book #c 'q'"]);
+    let course_map = parsed.get("course_map").and_then(|m| m.get(nasty_fragment)).and_then(|s| s.as_str());
+    assert_eq!(course_map, Some("cs-100: x #c 'q'"));
+
     // A control character cannot be quoted onto one line, so it is refused by field name rather
     // than written out and silently breaking the file.
     for (field, mut bad) in [
-        ("timezone", plan("profile_9999999999")),
-        ("device name", plan("profile_9999999999")),
-        ("slot 2", plan("profile_9999999999")),
-        ("LMS feed URL", plan("profile_9999999999")),
+        ("timezone", plan_for(&root.join("V-timezone"))),
+        ("device name", plan_for(&root.join("V-device name"))),
+        ("slot 2", plan_for(&root.join("V-slot 2"))),
+        ("LMS feed URL", plan_for(&root.join("V-LMS feed URL"))),
     ] {
         match field {
             "timezone" => bad.timezone = "America/\u{7}Chicago".into(),
@@ -240,8 +301,8 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         assert!(err.contains(field) && err.contains("control character"), "{field}: {err}");
     }
     // The two generators say the same thing on their own, so a future caller cannot route round it.
-    assert!(ingest_yaml(&{ let mut b = plan("profile_9999999999"); b.timezone = "a\rb".into(); b }).is_err());
-    assert!(runners_yaml(&{ let mut b = plan("profile_9999999999"); b.device = "a\rb".into(); b }).is_err());
+    assert!(ingest_yaml(&{ let mut b = plan_for(&root.join("V-ingest-err")); b.timezone = "a\rb".into(); b }).is_err());
+    assert!(runners_yaml(&{ let mut b = plan_for(&root.join("V-runners-err")); b.device = "a\rb".into(); b }).is_err());
 }
 
 /// The campus preset is a file, and the file is the shape `load_events_config` already reads —
@@ -249,20 +310,26 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
 #[test]
 fn the_campus_preset_is_the_shape_the_engine_already_reads() {
     let v = temp("campus").join("Vault");
-    create_vault(&v, &plan("profile_4444444444")).unwrap();
+    let mut p = plan_for(&v);
+    p.campus = "university-of-alabama".into();
+    create_vault(&v, &p).unwrap();
     let (cfg, warnings) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(cfg.sources.len(), 6, "the six UA sources");
     assert_eq!(CAMPUSES.len(), 2);
     assert!(campus_yaml("none").unwrap().contains("sources: []"));
     assert!(campus_yaml("not-a-campus").is_none());
-    // Every key of the radio list resolves to a file — a label with no preset behind it would be a
-    // wizard that fails at Finish.
-    for (key, label) in CAMPUSES { assert!(campus_yaml(key).is_some(), "{key} ({label}) has no preset file"); }
+    // Every curated school resolves, through `events_preset_for`, to a preset file — `none` for
+    // `university-of-kentucky` until someone writes its preset, and a preset with no file behind it
+    // would be a wizard that fails at Finish.
+    for c in CAMPUSES {
+        let preset = knowlu::scaffold::events_preset_for(c.unitid);
+        assert!(campus_yaml(preset).is_some(), "{} ({}) resolves to preset {preset:?} with no file", c.key, c.label);
+    }
     assert!(campus_yaml("university-of-alabama").unwrap().contains("timezone:"), "the preset tells a copier to set its own timezone");
 
     let none = temp("campus-none").join("Vault");
-    let mut p = plan("profile_5555555555"); p.campus = "none".into();
+    let mut p = plan_for(&none); p.campus = "none".into();
     create_vault(&none, &p).unwrap();
     let (cfg, warnings) = knowlu_engine::events::load_events_config(&none.join("config").join("events.yaml"));
     assert!(warnings.is_empty() && cfg.sources.is_empty());
@@ -280,7 +347,7 @@ fn the_campus_preset_is_the_shape_the_engine_already_reads() {
 fn every_view_answers_over_a_vault_the_wizard_has_just_made() {
     let root = temp("readmodel");
     let v = root.join("Vault");
-    create_vault(&v, &plan("profile_8888888888")).unwrap();
+    create_vault(&v, &plan_for(&v)).unwrap();
     // The things a rank, a slot and a sync leave behind — none of them exist yet.
     assert!(!v.join("state").join("today.md").exists(), "nothing has ranked this vault");
     assert!(!v.join("state").join("runs").exists(), "no run records");
@@ -301,7 +368,8 @@ fn every_view_answers_over_a_vault_the_wizard_has_just_made() {
 #[test]
 fn one_migration_record_and_the_rest_are_dashboard_writes() {
     let v = temp("journal").join("Vault");
-    let p = plan("profile_6666666666");
+    let mut p = plan_for(&v);
+    p.zybooks = true;
     create_vault(&v, &p).unwrap();
     let records = journal_records(&v);
     let migration: Vec<_> = records.iter().filter(|r| r["actor"] == "system:migration").collect();
@@ -315,7 +383,8 @@ fn one_migration_record_and_the_rest_are_dashboard_writes() {
     assert_eq!(others[0]["via"], "dashboard");
     // The credential target the engine will read is named, and holds no secret.
     let ingest = std::fs::read_to_string(v.join("config").join("ingest.yaml")).unwrap();
-    assert!(ingest.contains("credential_target: 'knowlu/profile_6666666666/zybooks'"), "{ingest}");
+    let target = knowlu::credentials::target_for(&knowlu::profiles::id_for(&v), "zybooks");
+    assert!(ingest.contains(&format!("credential_target: '{target}'")), "{ingest}");
     assert!(!ingest.contains("vhl:"), "a friend with no VHL course gets no VHL block");
 }
 
@@ -333,8 +402,8 @@ fn the_move_does_not_leak_the_staging_path_into_the_journal() {
     let root = temp("relocate");
     let a = root.join("One");
     let b = root.join("deeper").join("Two");
-    create_vault(&a, &plan("profile_aaaaaaaaaa")).unwrap();
-    create_vault(&b, &plan("profile_aaaaaaaaaa")).unwrap();
+    create_vault(&a, &plan_for(&a)).unwrap();
+    create_vault(&b, &plan_for(&b)).unwrap();
     assert_eq!(journal_shape(&a), journal_shape(&b), "a record does not depend on where the vault sits");
 
     for v in [&a, &b] {
@@ -367,5 +436,356 @@ fn no_embedded_asset_carries_a_live_feed_or_a_secret() {
         for needle in ["ualearn", "calendarFeed", "calendar.google.com/calendar/ical", "webcal:", "password", "token="] {
             assert!(!text.contains(needle), "{} carries {needle:?}", f.display());
         }
+    }
+}
+
+#[test]
+fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
+    use knowlu::scaffold::{cloud_yaml, VaultPlan};
+    let p = VaultPlan {
+        profile_id: "profile_0123456789".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "MACHINE".into(),
+        campus: "none".into(),
+        campus_choice: Default::default(),
+        zybooks: false,
+        vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "a-public-anon-key".into(),
+        account_id: "11111111-2222-3333-4444-555555555555".into(),
+    };
+    let text = cloud_yaml(&p).expect("cloud.yaml");
+    // The C2 contract, in its order, single-line single-quoted scalars.
+    assert_eq!(
+        text,
+        "api_base: 'https://example.supabase.co/functions/v1'\n\
+         anon_key: 'a-public-anon-key'\n\
+         session_credential_target: 'knowlu/profile_0123456789/session'\n\
+         account_id: '11111111-2222-3333-4444-555555555555'\n"
+    );
+    // The session is NAMED, never carried — the same promise `ingest.yaml` makes about a password.
+    assert!(!text.contains("access_token") && !text.contains("refresh_token"));
+    // …and a value that would change the file's SHAPE is refused by field name, as everywhere else.
+    let mut bad = p.clone();
+    bad.account_id = "acc\nid".into();
+    assert!(cloud_yaml(&bad).unwrap_err().contains("account_id"));
+}
+
+#[test]
+fn a_personal_calendar_becomes_the_engines_calendars_list() {
+    use knowlu::scaffold::ingest_yaml;
+    // m7: a real temp path, not a bare relative one — this test never reads the derived id, but a
+    // throwaway path under `temp_dir()` reads as deliberate rather than a stray.
+    let base = plan_for(&std::env::temp_dir().join("knowlu-personal-calendar-vault"));
+    // No calendar: the list the engine has always read, empty.
+    assert!(ingest_yaml(&base).unwrap().contains("calendars: []\n"));
+    // One: the shape `calfeed::load_calendar_events` parses — a list of {name, ics_url} mappings.
+    let mut with = base.clone();
+    with.personal_calendar = Some("https://calendar.google.com/calendar/ical/x/private-def/basic.ics".into());
+    let text = ingest_yaml(&with).unwrap();
+    assert!(
+        text.contains("calendars:\n  - name: personal\n    ics_url: 'https://calendar.google.com/calendar/ical/x/private-def/basic.ics'\n"),
+        "{text}"
+    );
+    // …and a value that would change the file's shape is refused by field name, as everywhere else.
+    let mut bad = base.clone();
+    bad.personal_calendar = Some("https://a\nb".into());
+    assert!(ingest_yaml(&bad).unwrap_err().contains("personal calendar address"));
+}
+
+#[test]
+fn create_vault_writes_cloud_yaml_beside_the_other_config_files() {
+    use knowlu::scaffold::create_vault;
+    let root = std::env::temp_dir().join(format!("knowlu-scaffold-cloud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let p = plan_for(&dest);
+    create_vault(&dest, &p).expect("create");
+    let text = knowlu_engine::pystr::read_text(&dest.join("config").join("cloud.yaml")).expect("read");
+    assert!(text.contains("account_id: 'acc-1'"), "{text}");
+    // …and the account is readable through the same door C2 will use, not by string matching.
+    let cfg = knowlu::account::cloud_config(&dest).expect("cloud_config");
+    assert_eq!(cfg.account_id, "acc-1");
+    assert_eq!(cfg.session_credential_target, format!("knowlu/{}/session", p.profile_id));
+    // A second write is refused rather than silently repointing the vault at another account.
+    assert!(knowlu::scaffold::write_cloud_yaml_if_absent(&dest, &p).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Fix round 1, item 5: Task 18 adopts a vault that may never have had a `config/` folder at all
+/// (an old, pre-`cloud.yaml` layout is still just a folder with `tasks/` and `planning.yaml` — the
+/// console's own predicate never required `config/` to hold anything else). `write_cloud_yaml_if_absent`
+/// must make the folder itself rather than fail with a raw "the system cannot find the path".
+#[test]
+fn write_cloud_yaml_if_absent_creates_the_config_folder_first() {
+    use knowlu::scaffold::write_cloud_yaml_if_absent;
+    let vault = std::env::temp_dir().join(format!("knowlu-cloud-yaml-noconfig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(&vault).unwrap();
+    assert!(!vault.join("config").exists(), "the vault has no config/ folder yet");
+    let p = plan_for(&vault);
+    write_cloud_yaml_if_absent(&vault, &p).expect("creates config/ and the file");
+    assert!(vault.join("config").join("cloud.yaml").is_file());
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_zybook_code_suggests_the_course_it_obviously_is() {
+    use knowlu::scaffold::suggest_course;
+    use knowlu_engine::ingest::slugify;
+    // The real one, from Quinn's own account: an institution prefix, a code, a term.
+    assert_eq!(suggest_course("UACS100Fall2026").as_deref(), Some("CS 100"));
+    assert_eq!(suggest_course("CS200Spring2027").as_deref(), Some("CS 200"));
+    assert_eq!(suggest_course("UAMATH125Fall2026").as_deref(), Some("MATH 125"));
+    // No code in it at all: the panel shows the raw name and the student types the course.
+    assert_eq!(suggest_course("HowToUseZyBooks2"), None);
+    assert_eq!(suggest_course(""), None);
+    // The engine's, not a twin: this is the function that decides the note's stem and the key
+    // `judge::Heuristics::knows_course` matches, and a second one would diverge in silence.
+    assert_eq!(slugify("CS 100"), "cs-100");
+    assert_eq!(slugify("GN 103 Hausaufgaben"), "gn-103-hausaufgaben");
+    // …including the two behaviours a naive twin gets wrong: the 60-character cap, and a fallback
+    // that is never the empty string (which would write `courses/.md`).
+    assert_eq!(slugify("!!!"), "item");
+    assert_eq!(slugify(&"x".repeat(80)).len(), 60);
+}
+
+#[test]
+fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
+    use knowlu::scaffold::{ingest_yaml, BookMapping, SectionMapping, VaultPlan};
+    let mut p = VaultPlan {
+        profile_id: "profile_0123456789".into(),
+        ics_url: None,
+        personal_calendar: None,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        campus_choice: Default::default(),
+        zybooks: true,
+        vhl: true,
+        zybooks_courses: vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }],
+        vhl_sections: vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103 Hausaufgaben".into() }],
+        zybooks_ignore: vec!["HowToUseZyBooks2".into()],
+        course_map: vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())],
+        courses: Vec::new(),
+        api_base: "https://example.supabase.co/functions/v1".into(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+
+    // The three things the engine actually reads, in the shape `route_zybook` and
+    // `vhl::parse_dashboard` expect — a non-empty mapping under the code, with `course` and `label`.
+    assert!(text.contains("    courses:\n      'UACS100Fall2026':\n        course: 'cs-100'\n        label: 'CS 100'\n"), "{text}");
+    assert!(text.contains("    sections:\n      '2102121':\n        course: 'gn-103'\n        label: 'GN 103 Hausaufgaben'\n"), "{text}");
+    // zyBooks' own onboarding book has zero assignments and is never coursework. In `ignore:` it is
+    // skipped silently; out of it, it is a WARN on every healthy run forever.
+    assert!(text.contains("    ignore:\n      - 'HowToUseZyBooks2'\n"), "{text}");
+    // …and the blocks `parse_assignments` needs, or every zyBooks item is uncategorised.
+    for needed in ["    categories:\n      HW: hw\n", "      minutes_per_section: 6\n", "    importance:\n      hw: 2\n"] {
+        assert!(text.contains(needed), "missing {needed:?} in {text}");
+    }
+    // The course map the ICS ingest and tier-1 judgment both read.
+    assert!(text.contains("course_map:\n  'CS 100': 'cs-100'\n  'GN 103': 'gn-103'\n"), "{text}");
+
+    // An empty mapping is an EMPTY block, not `courses: {}` with nothing under it — `route_zybook`
+    // treats a falsy mapping as unmapped either way, but a config that lies about what it maps is
+    // what produced the first slot this task exists because of.
+    p.zybooks_courses.clear();
+    p.vhl_sections.clear();
+    p.course_map.clear();
+    let bare = ingest_yaml(&p).expect("ingest.yaml");
+    assert!(bare.contains("    courses: {}\n") && bare.contains("    sections: {}\n"), "{bare}");
+    assert!(bare.contains("course_map: {}\n"), "{bare}");
+}
+
+/// Review round 1, I1 (part 2): the emitter is unable to produce an unreadable file. This builds a
+/// `VaultPlan` directly with two mappings for the SAME zyBook code — bypassing `create_vault_in`'s
+/// de-duplication on purpose, to prove the OTHER half of the fix: `build_into` now parses its own
+/// `config/ingest.yaml` back through the engine's own loader before the wizard is allowed to
+/// finish, so a duplicate key (which `serde_yaml_ng`'s `Mapping` deserializer refuses) is a loud
+/// refusal here rather than a vault that silently never syncs.
+#[test]
+fn a_duplicate_zybook_key_is_refused_rather_than_written_unparsable() {
+    let v = temp("dup-key").join("Vault");
+    let mut p = plan_for(&v);
+    p.zybooks = true;
+    p.zybooks_ignore = vec!["HowToUseZyBooks2".into()];
+    p.zybooks_courses = vec![
+        knowlu::scaffold::BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() },
+        knowlu::scaffold::BookMapping { code: "UACS100Fall2026".into(), course: "cs-100-again".into(), label: "CS 100, again".into() },
+    ];
+    let err = create_vault(&v, &p).unwrap_err();
+    assert!(err.contains("would not parse"), "{err}");
+    assert!(!v.exists(), "no half-made vault is left behind");
+}
+
+/// R-OB-2: one note per enrolled course, in the shape `judge::Heuristics::load` reads — the stem is
+/// the slug, the frontmatter carries `title` and `slug`, and the `## Grade weights` heading is there
+/// and empty, because the weights are the student's to write and the model's to read.
+#[test]
+fn every_enrolled_course_becomes_a_note_the_engine_can_find() {
+    use knowlu::scaffold::{create_vault, CourseSeed};
+    let root = std::env::temp_dir().join(format!("knowlu-courses-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);          // the helper the other scaffold tests already use
+    p.courses = vec![
+        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+    ];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    for (slug, title) in [("cs-100", "CS 100 Intro to Computer Science"), ("gn-103", "GN 103 German")] {
+        let note = dest.join("courses").join(format!("{slug}.md"));
+        let text = knowlu_engine::pystr::read_text(&note).unwrap_or_else(|e| panic!("{}: {e}", note.display()));
+        assert!(text.contains(&format!("title: {title}")), "{text}");
+        assert!(text.contains(&format!("slug: {slug}")), "{text}");
+        assert!(text.contains("## Grade weights"), "{text}");
+        // Every note has an opaque id, like every other note this app writes.
+        assert!(text.contains("id: course_"), "{text}");
+    }
+    // …and the engine agrees it knows them: this is the predicate tier-1 judgment uses.
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    assert!(h.knows_course("cs-100") && h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **R-C1-48: two fragments per captured course, pointing at the same slug.** `course_map` is matched
+/// literally — a case-sensitive substring of the UID, then a case-insensitively bounded run in the
+/// SUMMARY (`ingest::contains_bounded`) — and the UA feed's summaries do not lead with a `CS 100`
+/// code the way its UIDs carry the LMS's own course id. So a captured course contributes **both**
+/// spellings: the id the feed pins by, and the human code a summary might say. A fragment the feed
+/// never carries simply never matches; a fragment nobody wrote is 28 tasks with no course.
+#[test]
+fn a_captured_course_maps_by_its_lms_id_and_by_the_code_a_summary_spells() {
+    use knowlu::scaffold::CourseSeed;
+    use knowlu_engine::ingest::match_course_fields;
+    let dest = temp("captured-courses").join("Fall 2026");
+    let mut p = plan_for(&dest);
+    p.courses = vec![
+        CourseSeed { code: "UACS100Fall2026".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        // The lab section of the same course: a second LMS id under the SAME slug. Both ids become
+        // fragments, and the note is written once — a student enrolled in a lecture and its lab must
+        // not be a wizard that refuses to make a vault.
+        CourseSeed { code: "UACS100LFall2026".into(), name: "CS 100 Lab".into(), slug: "cs-100".into() },
+        // …and a course whose id carries no readable code at all: the human half comes off the name.
+        CourseSeed { code: "202610-GN-103-001".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+    ];
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+    for line in [
+        "  'UACS100Fall2026': 'cs-100'\n",
+        "  'UACS100LFall2026': 'cs-100'\n",
+        "  'CS 100': 'cs-100'\n",
+        "  '202610-GN-103-001': 'gn-103'\n",
+        "  'GN 103': 'gn-103'\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in {text}");
+    }
+    // Two courses whose human code is the same spelling write ONE key: a duplicate key is a config
+    // `serde_yaml_ng` refuses whole, which is every book and section "not in config; skipped".
+    assert_eq!(text.matches("'CS 100':").count(), 1, "{text}");
+
+    // …and a mapping the student confirmed on the panel is the same key, still written once — first
+    // wins, so what they typed decides the slug and the capture never overwrites it.
+    p.course_map = vec![("CS 100".into(), "cs-100".into())];
+    let text = ingest_yaml(&p).expect("ingest.yaml");
+    assert_eq!(text.matches("'CS 100':").count(), 1, "{text}");
+
+    create_vault(&dest, &p).expect("create");
+    assert!(dest.join("courses").join("cs-100.md").is_file());
+    assert!(dest.join("courses").join("gn-103.md").is_file());
+    assert_eq!(std::fs::read_dir(dest.join("courses")).unwrap().count(), 2, "one note per slug");
+
+    // The proof is the engine's own matcher, over the two things a feed actually carries.
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    assert_eq!(match_course_fields("UACS100Fall2026-abc-123", "Homework 4", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("UACS100LFall2026-lab-1", "Lab 2", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("nothing-in-here", "CS 100 Homework 4 is due", &h.course_map).as_deref(), Some("cs-100"));
+    assert_eq!(match_course_fields("nothing-in-here", "GN 103 Hausaufgaben", &h.course_map).as_deref(), Some("gn-103"));
+    // …and nothing it does not name: `STATISTICS-100` is not `CS 100`.
+    assert_eq!(match_course_fields("nothing-in-here", "STATISTICS 100 reading", &h.course_map), None);
+    let _ = std::fs::remove_dir_all(dest.parent().expect("the scratch folder"));
+}
+
+/// **Step 4a: every `course:` a coursework mapping names must be a slug the vault knows** — a seeded
+/// course note, or a `course_map` target. Two panels fill these, and a slug that matches nothing is a
+/// task filed under a course that does not exist.
+#[test]
+fn every_mapped_course_is_a_slug_the_vault_knows() {
+    use knowlu::scaffold::{create_vault, BookMapping, CourseSeed, SectionMapping};
+    let root = std::env::temp_dir().join(format!("knowlu-mapped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let dest = root.join("Fall 2026");
+    let mut p = plan_for(&dest);
+    p.zybooks = true;
+    p.vhl = true;
+    p.zybooks_courses = vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }];
+    p.vhl_sections = vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103".into() }];
+    p.courses = vec![CourseSeed { code: "CS 100".into(), name: "CS 100 Intro".into(), slug: "cs-100".into() }];
+    p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
+    create_vault(&dest, &p).expect("create");
+
+    let h = knowlu_engine::judge::Heuristics::load(&dest);
+    for slug in p.zybooks_courses.iter().map(|b| &b.course).chain(p.vhl_sections.iter().map(|v| &v.course)) {
+        assert!(h.knows_course(slug), "{slug} is mapped and the vault does not know it");
+    }
+    // …and `gn-103` is known by the map alone, with no note behind it — which is the whole reason
+    // `knows_course` tests both. A student who has a VHL section and no Blackboard course for it is
+    // not a broken vault.
+    assert!(!dest.join("courses").join("gn-103.md").exists());
+    assert!(h.knows_course("gn-103"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_chosen_school_becomes_campus_yaml_and_a_timezone_suggestion() {
+    use knowlu::scaffold::{campus_config_yaml, curated, state_timezone, CampusChoice};
+    let ua = CampusChoice { unitid: "100751".into(), name: "The University of Alabama".into(), state: "AL".into(), lms: "blackboard".into() };
+    let text = campus_config_yaml(&ua).expect("campus.yaml");
+    assert_eq!(
+        text,
+        "unitid: '100751'\nname: 'The University of Alabama'\nstate: 'AL'\nlms: 'blackboard'\ncurated: true\n"
+    );
+    // A school nobody has curated is still a school: it gets a file, no event feeds, and an LMS the
+    // sign-in window (or the student) names.
+    let other = CampusChoice { unitid: "999999".into(), name: "Somewhere Community College".into(), state: "OR".into(), lms: String::new() };
+    let text = campus_config_yaml(&other).expect("campus.yaml");
+    assert!(text.contains("curated: false\n") && text.contains("lms: ''\n"), "{text}");
+    // …and a name with an apostrophe does not break the file, like every other wizard value.
+    let odd = CampusChoice { unitid: "1".into(), name: "St. Mary's College".into(), state: "MD".into(), lms: String::new() };
+    assert!(campus_config_yaml(&odd).expect("campus.yaml").contains("name: 'St. Mary''s College'\n"));
+
+    assert_eq!(curated("100751").map(|c| c.key), Some("university-of-alabama"));
+    assert_eq!(curated("157085").map(|c| c.key), Some("university-of-kentucky"));
+    assert!(curated("999999").is_none());
+
+    // The timezone the wizard suggests, from the state — the OS zone stays the default and the
+    // student can always type over it.
+    assert_eq!(state_timezone("AL"), Some("America/Chicago"));
+    assert_eq!(state_timezone("KY"), Some("America/New_York"));
+    assert_eq!(state_timezone("AZ"), Some("America/Phoenix"));
+    assert_eq!(state_timezone("HI"), Some("Pacific/Honolulu"));
+    assert_eq!(state_timezone("zz"), None);
+    // Fifty states, DC and the five inhabited territories — IPEDS keeps Puerto Rico's hundred-odd
+    // institutions, and a student in Mayagüez is not a special case any more than one in Wyoming.
+    assert_eq!(knowlu::scaffold::STATE_TZ.len(), 56);
+    assert_eq!(state_timezone("PR"), Some("America/Puerto_Rico"));
+    assert_eq!(state_timezone("GU"), Some("Pacific/Guam"));
+    for (st, tz) in knowlu::scaffold::STATE_TZ {
+        assert!(jiff::tz::TimeZone::get(tz).is_ok(), "{st} maps to {tz}, which the tz database does not have");
     }
 }

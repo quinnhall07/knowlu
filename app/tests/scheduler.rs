@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, has_ics_url, ics_state, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgeState, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, judge_plan, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -69,6 +69,27 @@ impl Drop for EnvSeam {
     }
 }
 
+/// Fix round 1 (I1): making the offline-telemetry test send for real means it reaches
+/// `valid_access_token_at`, which reads the real Windows Credential Manager. `CLAUDE.md` and
+/// `app/tests/account.rs:204` require every test that touches the store to take a file-scoped lock —
+/// this file's own, since `account.rs`'s is private to that crate. Windows races parallel
+/// `CredWriteW`/`CredReadW` calls (spurious `ERROR_NOT_FOUND`), so this serialises every test in this
+/// file that writes, reads or deletes a real credential, the same way it already serialises
+/// `KNOWLU_ENGINE_EXE` above.
+#[cfg(windows)]
+static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Deletes the named Credential Manager target when the test ends, on any exit path — a passing
+/// assertion, a failing one, or a panic. The same shape as `app/tests/account.rs`'s `Cleanup`.
+#[cfg(windows)]
+struct CredCleanup(String);
+#[cfg(windows)]
+impl Drop for CredCleanup {
+    fn drop(&mut self) {
+        let _ = knowlu::credentials::delete(&self.0);
+    }
+}
+
 #[test]
 fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configured() {
     let v = scratch("argv");
@@ -76,7 +97,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
     assert!(!has_ics_url(&v));
     // No judge args: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
-    let argv = slot_argv(&v, exe, None);
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
     assert_eq!(names(&argv), vec!["coursework", "rank"]);
     assert_eq!(argv[0].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert_eq!(argv[1].1, vec!["rank", "--vault", v.to_string_lossy().as_ref(), "--runner", "local"]);
@@ -85,7 +106,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     assert!(has_ics_url(&v));
-    let argv = slot_argv(&v, exe, None);
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
     assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
     assert_eq!(argv[1].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert!(argv.iter().all(|(e, _)| e == exe));
@@ -98,7 +119,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
         model: PathBuf::from(r"C:\rt\model.gguf"),
         log_dir: PathBuf::from(r"C:\data\judgments"),
     };
-    let argv = slot_argv(&v, exe, Some(&ja));
+    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja));
     assert_eq!(names(&argv), vec!["coursework", "ingest", "judge", "rank"]);
     assert_eq!(argv[2].1, vec![
         "judge".to_string(), "--vault".to_string(), v.to_string_lossy().to_string(),
@@ -512,5 +533,262 @@ fn a_vault_that_has_never_been_ranked_is_owed_its_first_run_at_launch() {
     assert!(needs_first_run(&v), "a root today.md is not the engine's page");
     std::fs::write(v.join("state").join("today.md"), "# Today\n").unwrap();
     assert!(!needs_first_run(&v), "once ranked, launch owes nothing until the next slot");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Spec §5.1: past the grace the slots keep ranking and the cloud steps are skipped **as named
+/// steps**, never as failures. The shape is `ingest (skipped: no ics_url)`'s, deliberately — the two
+/// sit side by side in the Runs view and a reader should not have to learn two conventions.
+#[test]
+fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_green() {
+    let v = scratch("noentitlement");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // A vault that HAS an account: the four keys the C2 contract fixes. The host is the closed
+    // loopback shape `an_offline_telemetry_send…` already uses (M7) — nothing is listening on it —
+    // rather than a real host `cloud_config`'s R-C1-59 I1 check would now refuse outright; the
+    // `KNOWLU_API_BASE` seam below points this build's own `api_base()` at the same value so the two
+    // agree, exactly as a real vault's does by construction.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "noentitlement");
+    // …and no entitlement cache at all, which is a fresh install that has not reached the cloud yet.
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-ent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
+    assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
+    assert_eq!(s.steps.iter().find(|(n, _)| n.starts_with("judge (skipped")).unwrap().1, 0, "a skip is not a failure");
+    assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and a vault with no cloud config at all is `NoAccount`, which is what sends it down the local
+/// runtime path rather than to the cloud — case (b), and the reason the two pre-C1 tests still pass.
+#[test]
+fn a_vault_with_no_cloud_config_says_no_account_rather_than_no_entitlement() {
+    use knowlu::account::EntitlementState;
+    let v = scratch("noaccount");
+    let cs = open(&v, "noaccount");
+    assert_eq!(entitlement_state(&cs), EntitlementState::NoAccount);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Case (a), and the one C2 depends on: **an entitled vault runs `judge`, with nothing but the vault
+/// on the command line.** A runtime-based skip here would leave the whole judgment service inert on
+/// every machine that never installed llama.cpp — which, after C4, is every machine.
+#[test]
+fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_line() {
+    use knowlu::account::{save_cache, EntitlementCache};
+    let v = scratch("cloudjudge");
+    // The closed-loopback host (M7), with `KNOWLU_API_BASE` pointed at the same value so
+    // `cloud_config`'s R-C1-59 I1 host check accepts it — nothing here reaches a socket either way.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1"))]);
+    let cs = open(&v, "cloudjudge");
+    save_cache(&cs.data_dir, &EntitlementCache {
+        status: "active".into(),
+        current_period_end: None,
+        plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let plan = judge_plan(&cs);
+    let JudgePlan::Cloud { log_dir } = plan.clone() else { panic!("not the cloud plan: {plan:?}") };
+    // The profile's own judgments folder, never the vault: judgment logs never enter a vault.
+    assert!(log_dir.starts_with(&cs.data_dir), "{log_dir:?} is not under {:?}", cs.data_dir);
+    let argv = slot_argv(&v, Path::new(r"C:\bin\knowlu-engine.exe"), &plan);
+    let judge = argv.iter().find(|(_, a)| a[0] == "judge").expect("the judge step is in the argv");
+    assert_eq!(
+        judge.1,
+        vec!["judge", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner", "--log-dir", log_dir.to_string_lossy().as_ref()]
+    );
+    // Nothing about the account is on a command line — a process list is not a place for one.
+    for (_, args) in &argv {
+        assert!(!args.iter().any(|a| a.contains("acc-1") || a == "--runtime" || a == "--model"), "{args:?}");
+    }
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Case (c): entitled once, but not for four days. The grace is over, the cloud step stands down as a
+/// named step, and the day is still ranked.
+///
+/// Fix round 1, item 4: driven through `run_slot_inner`, exactly as its `…no_entitlement…` sibling
+/// above, so the name is true of the whole slot — not just of `judge_plan` in isolation.
+#[test]
+fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() {
+    use knowlu::account::{save_cache, EntitlementCache};
+    let v = scratch("pastgrace");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // The closed-loopback host (M7), with `KNOWLU_API_BASE` pointed at the same value below so
+    // `cloud_config`'s R-C1-59 I1 host check accepts it — nothing here reaches a socket either way.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "pastgrace");
+    let four_days_ago = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(96)).to_string();
+    save_cache(&cs.data_dir, &EntitlementCache {
+        status: "active".into(),
+        current_period_end: None,
+        plan: Some("monthly".into()),
+        checked_at: four_days_ago,
+    }).unwrap();
+
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-pastgrace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: no entitlement)"));
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
+    assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
+    assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Fix round 1, item 2: `config/cloud.yaml` exists but does not parse — a corrupted file, or one
+/// edited by hand and left broken. This must NOT collapse into `NoAccount` (which would fall through
+/// to the local runtime/model gate and run `judge` with no account at all): it is named as its own
+/// skip, distinct from "no entitlement" and from "no runtime"/"no model".
+#[test]
+fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
+    use knowlu::account::EntitlementState;
+    let v = scratch("unreadablecloud");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Garbage: present, but neither valid YAML nor a mapping with the required keys.
+    std::fs::write(v.join("config").join("cloud.yaml"), "not: [valid\n").unwrap();
+    let cs = open(&v, "unreadablecloud");
+    assert_eq!(entitlement_state(&cs), EntitlementState::Unreadable);
+    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: cloud.yaml unreadable)"));
+
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-unreadablecloud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(named.contains(&"judge (skipped: cloud.yaml unreadable)".to_string()), "{named:?}");
+    assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
+    assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The telemetry step never fails a slot. This vault has an account, no reachable cloud (the api_base
+/// points at a port nothing is listening on) and therefore an offline send — and the slot is green.
+#[test]
+fn an_offline_telemetry_send_is_a_named_step_and_never_a_failure() {
+    // Fix round 1 (I1): a real send reaches `valid_access_token_at`, which reads the real
+    // Credential Manager for the session this test writes below — held for the whole test.
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("teleoffline");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Fix round 1 (I1): `vault-full` carries no `state/events-ui/` directory at all, so `send`
+    // returned `(0, 0)` before ever reaching `valid_access_token_at` or `post_batch_at` — the step
+    // read "nothing new" and the test never exercised the offline branch it is named for. One row
+    // (the brief's own `app/tests/telemetry.rs` fixture line) is enough to make `send` reach the
+    // network.
+    std::fs::create_dir_all(v.join("state").join("events-ui")).unwrap();
+    std::fs::write(
+        v.join("state").join("events-ui").join("2026-09-09.jsonl"),
+        format!("{}\n", r#"{"action": "view_opened", "device": "M", "ms": null, "object_id": null, "object_kind": null, "session": "sess_1", "ts": "2026-09-09T12:00:00.000Z", "view": "today"}"#),
+    ).unwrap();
+    // Port 9 is `discard`: nothing on this machine answers it, so the send fails fast and locally.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "teleoffline");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: None, checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    // A real session, far from expiry, so `valid_access_token_at` reads it straight off the store
+    // with no refresh call — the only network reach this test exercises is `post_batch_at` itself,
+    // against port 9.
+    let target = "knowlu/profile_x/session";
+    let _cred_cleanup = CredCleanup(target.to_string());
+    knowlu::account::save_session(target, "acc-1", &knowlu::account::Session {
+        access_token: "test-access-token".into(),
+        refresh_token: "test-refresh-token".into(),
+        expires_at: jiff::Timestamp::now().as_second() + 3600,
+        email: "a@example.invalid".into(),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-tele-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        // `cloud_config`'s R-C1-59 I1 host check needs this build's own `api_base()` to name the
+        // same port-9 host the vault's `cloud.yaml` does, above.
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    // The exact name, not merely a prefix that "nothing new" and "no account" would also match
+    // (I1) — this is the one assertion that would catch the offline branch being changed to fail.
+    assert!(named.contains(&"telemetry (skipped: offline)".to_string()), "{named:?}");
+    assert!(s.steps.iter().filter(|(n, _)| n.starts_with("telemetry")).all(|(_, c)| *c == 0));
+    assert!(s.engine_ok, "telemetry must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// §4.2 step 7, §11a: a vault the wizard just made has no `today.md`, so the console's own launch is
+/// what fires the first slot — and a vault **adopted in place** (Task 18) already has one, so nothing
+/// fires a second time on top of the work that is already there.
+#[test]
+fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
+    use knowlu::scheduler::needs_first_run;
+    let v = scratch("firstrun");
+    // `rank` writes `state/today.md` (cli.rs); a root `today.md` is nobody's file and must not count.
+    let state = v.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let today = state.join("today.md");
+    let _ = std::fs::remove_file(&today);
+    assert!(needs_first_run(&v), "a vault with no state/today.md is owed its first slot");
+    std::fs::write(v.join("today.md"), b"# not the engine's file\n").unwrap();
+    assert!(needs_first_run(&v), "a root today.md is not the ranked page");
+    std::fs::write(&today, b"# Today\n").unwrap();
+    assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
     let _ = std::fs::remove_dir_all(&v);
 }
