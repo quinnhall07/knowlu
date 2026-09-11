@@ -1,4 +1,4 @@
-//! The tray icon: six menu items, a colour that reflects sync health, and a diagnostics blob a
+//! The tray icon: nine menu items, a colour that reflects sync health, and a diagnostics blob a
 //! friend can paste into a message (Knowlu plan 1, Task 7; *Settings* is plan 4a, Task 7).
 //! `run-now` and `pause` are wired directly to the scheduler (Task 12) — no event round-trip.
 use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, AppHandle, Manager};
@@ -26,9 +26,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     // Plan 4a Task 8: disabled until something is staged AND no slot is running — `check_for_updates`
     // and the housekeeping tick both enable it from `updates::update_offer`, never from a check here.
     let update = MenuItem::with_id(app, "update", "Restart to update", false, None::<&str>)?;
+    let vaultdir = MenuItem::with_id(app, "vault-folder", "Open vault folder", true, None::<&str>)?;
     let diag = MenuItem::with_id(app, "diag", "Copy diagnostics", true, None::<&str>)?;
+    let report = MenuItem::with_id(app, "report", "Report an issue", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &run, &pause, &settings, &update, &diag, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &run, &pause, &vaultdir, &settings, &update, &diag, &report, &quit])?;
     if let Some(sch) = app.try_state::<Scheduler>() {
         *scheduler::lock(&sch.pause_item) = Some(pause.clone());
     }
@@ -117,6 +119,22 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
                     let _ = std::fs::write(logs.join(format!("quit-{stamp}.txt")), format!("synced={} backed_up={} timed_out={}\n", q.synced, q.backed_up, q.timed_out));
                     std::process::exit(0);
                 });
+            }
+            "vault-folder" => {
+                // Spec §4.1: the vault is visible, and the tray points at it. `explorer.exe` with a
+                // path is the whole of it — no shell verb, no `cmd`, and no console window.
+                let cs = app.state::<ConsoleState>();
+                use knowlu_engine::childproc::NoConsole;
+                let _ = std::process::Command::new("explorer.exe").no_console().arg(cs.vault.as_os_str()).spawn();
+            }
+            "report" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                    // One way into the preview screen from both doors — the same shape the
+                    // `settings` arm uses, so the tray still needs no `core:event` grant.
+                    let _ = w.eval("window.KNOWLU_OPEN_REPORT && window.KNOWLU_OPEN_REPORT()");
+                }
             }
             _ => {}
         })

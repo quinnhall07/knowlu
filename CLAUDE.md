@@ -57,6 +57,10 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   Always exits 0. An empty parse is a failure, never an empty semester. Passwords come from Windows
   Credential Manager via the vault's `credential_target`; zyBooks 403s without a `User-Agent`; VHL is
   CAS with a one-time `lt` ticket and a dashboard on `m3a.vhlcentral.com`.
+- `coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — read-only: the
+  zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
+  row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
+  come from it, and it writes nothing.
 - `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. Exits 1 on
   an empty `ics_url`, which is why the app leaves the step out rather than run it.
 - `judge --vault <v> [--via <via>] [--run-id <id>] [--runtime <llama-cli.exe>] [--model <.gguf>]
@@ -72,10 +76,11 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-09** from the two
-  `generate_handler!` lists in `app/src/main.rs`: the console window registers **29** (all 26 of
-  `commands.rs` plus `onboarding::{launch_state, pick_folder, pick_file}`); the vault-less
-  picker/wizard window registers **11**, all from `onboarding.rs` — 37 distinct. Seven mutate notes
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-10** from the two
+  `generate_handler!` lists in `app/src/main.rs`: the console window registers **43**, the vault-less
+  picker/wizard window **27** — 59 distinct. Commands live beside the module they serve
+  (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one
+  file. Seven mutate notes
   (`set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,
   `resolve_issue`); `sync`/`backup_now` move the vault without writing a note; `ui_event` writes the
   `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
@@ -93,6 +98,11 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   wizard-created vault carries both from birth.
 - Credentials the app writes are `knowlu/<profile_id>/<source>` (`app/src/credentials.rs`); the
   engine's `wincred.rs` reads whatever `credential_target` the vault names.
+- The account's session JWT is Credential Manager's `knowlu/<profile_id>/session`
+  (`app/src/account.rs`), moved there at onboarding from a pre-vault `knowlu/pending/session` entry;
+  `config/cloud.yaml` names it alongside the project's `api_base`, its public `anon_key` and the
+  `account_id`. Entitlement is cached at `profiles\<id>\entitlement.json` with a 72-hour grace, and
+  past it every cloud step is a named skipped step, never a failure.
 - The identifier is **`com.knowlu.desktop`**, permanent: uninstall key, autostart entry and window state are keyed by it.
 - The updater is configured: `tauri-plugin-updater`, `plugins.updater` (endpoint + minisign public
   key) and `bundle.createUpdaterArtifacts: true` are one decision — a static test pins flag ⇔ plugin.

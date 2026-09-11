@@ -88,9 +88,10 @@ def main(argv: list[str]) -> int:
                     # Today, and with no backend its rows keep their static markup — the layout is
                     # what this shot is for; scripts/settings-check.py is the one that drives the
                     # rows with answers and shoots them filled in.
-                    for panel, js in [("wizard", "KNOWLU_SHOTS.startWizard({tz:'America/Chicago',documents:'C:/Users/x/Documents/Knowlu',campuses:[{key:'none',label:'None'}]})"),
+                    for panel, js in [("wizard", "KNOWLU_SHOTS.startWizard({tz:'America/Chicago',default_parent:'C:\\\\Users\\\\x\\\\Knowlu'})"),
                                       ("picker", "KNOWLU_SHOTS.renderPicker({profiles:[{id:'p1',name:'Ada',vault:'C:/v'}]})"),
-                                      ("settings", "KNOWLU_SHOTS.openSettings()")]:
+                                      ("settings", "KNOWLU_SHOTS.openSettings()"),
+                                      ("report", "KNOWLU_SHOTS.openReport()")]:
                         page.evaluate(js)
                         page.wait_for_timeout(200)
                         page.screenshot(path=str(out / f"{w}-{panel}.png"), full_page=True)

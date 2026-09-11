@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: WRITTEN 2026-09-09, not started.** Execute on a branch `c0-ci-release` in this repository (`knowlu`). Written against the cloud design's decision **D1** and §5.6 (`docs/specs/2026-09-09-knowlu-cloud-design.md` once it moves here; until then `quinn-ops/docs/superpowers/specs/2026-09-09-knowlu-cloud-design.md`), both *decided*; the rest of that spec is under Quinn's review and nothing here depends on it.
+**Status: Tasks 1–3 EXECUTED and merged 2026-09-09 (`d67bafa`, `--no-ff`, PR #1); Tasks 4–6 NOT STARTED — branch `c0-release-key` from `main` when Quinn's items in HANDOFF §4 are ready.** *(Originally: WRITTEN 2026-09-09, not started.)* Execute on a branch `c0-ci-release` in this repository (`knowlu`). Written against the cloud design's decision **D1** and §5.6 (`docs/specs/2026-09-09-knowlu-cloud-design.md` once it moves here; until then `quinn-ops/docs/superpowers/specs/2026-09-09-knowlu-cloud-design.md`), both *decided*; the rest of that spec is under Quinn's review and nothing here depends on it.
 
 **Goal:** A tag `v*` pushed to `quinnhall07/knowlu` produces, on GitHub's runners and with no laptop involved, a Trusted-Signing-signed NSIS installer, a Tauri updater signature made with a key that exists **only** as a CI secret, and a `latest.json` — published to Cloudflare Pages under `knowlu.com/releases/` and attached to a GitHub Release — and an installed Knowlu offers the next one as an in-app update.
 
