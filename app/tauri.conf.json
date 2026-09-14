@@ -24,7 +24,7 @@
   "plugins": {
     "updater": {
       "endpoints": ["https://knowlu.com/releases/latest.json"],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyRUM5ODExMjJFMUQyREYKUldUZjB1RWlFWmpzd28vZzRRMjNkRFRwZ2VsUG1jRnFsc0s2YlJOZXNrcldGK0gyay9nNkcrWUYK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3RDUyRkY3OTdFNzBBMUIKUldRYkN1ZVg5eS9WbHl3dWZwVisvcVVhcEVwWXZYOEJYanRYZVhSZTU4WFdHYUFQckV2bllCQ3AK"
     }
   }
 }
