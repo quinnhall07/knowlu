@@ -48,10 +48,16 @@ Deno.test("the judgments table has nowhere to put a body", async () => {
 });
 
 Deno.test("no migration in this stream drops or truncates a table", async () => {
+  // Word-boundary, not substring: TRUNCATE's TABLE keyword is optional in Postgres
+  // (`TRUNCATE [TABLE] [ONLY] name`), so the bare word must be caught too — and `\b` is what keeps
+  // that same bare word from also matching the `judgments.cause` enum literal `'truncated'`.
   for (const [name, raw] of await ours()) {
     const sql = raw.toLowerCase();
-    for (const forbidden of ["drop table", "drop column", "truncate table"]) {
-      assert(!sql.includes(forbidden), `${name}: migrations are forward-only (${forbidden})`);
+    for (const forbidden of ["drop table", "drop column", "truncate"]) {
+      assert(
+        !new RegExp(`\\b${forbidden}\\b`).test(sql),
+        `${name}: migrations are forward-only (${forbidden})`,
+      );
     }
   }
 });
