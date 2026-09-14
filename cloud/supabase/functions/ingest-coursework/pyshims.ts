@@ -34,21 +34,19 @@ export function truthy(value: unknown): boolean {
 
 /**
  * Python's `str(x)` over a JSON value — `pystr::json_str`. `None`, `True`, `False` spelled
- * Python's way, and a float that happens to be whole keeps its `.0`: Python's `str(2.0)` is
- * `"2.0"` where JavaScript's `String(2.0)` is `"2"`. Nothing the two captured fixtures contain
- * exercises that branch (every numeric field in them is an integer), but the difference is exactly
- * the class of drift the frozen references exist to catch, so it is written correctly rather than
- * left to the fixture.
+ * Python's way. Python's `str(2.0)` is `"2.0"` — a whole float keeps its `.0` — but `JSON.parse`
+ * collapses a source `2` and a source `2.0` into the same JavaScript `number`, so nothing built on
+ * its output can tell which one a JSON literal was, and this function cannot reproduce that `.0`.
+ * Every numeric field the frozen fixtures route through `pyStr` today is a bare integer; if a
+ * future capture ever carried a whole-number float through a text field, the structural comparison
+ * against the frozen reference is what would catch the drift.
  */
 export function pyStr(value: unknown): string {
   if (value === null || value === undefined) return "None";
   if (value === true) return "True";
   if (value === false) return "False";
   if (typeof value === "string") return value;
-  if (typeof value === "number") {
-    if (Number.isInteger(value)) return String(value);
-    return String(value);
-  }
+  if (typeof value === "number") return String(value);
   if (typeof value === "bigint") return String(value);
   return JSON.stringify(value);
 }

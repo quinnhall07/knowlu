@@ -22,7 +22,7 @@ async function payload(): Promise<unknown> {
   // The capture is a real one and carries a UTF-8 BOM; the device's `decode_json` strips it there,
   // so no BOM ever travels on the wire. Here the file is read directly, so strip it here.
   const text = await Deno.readTextFile(new URL("zybooks-assignments.json", FIXTURES));
-  return JSON.parse(text.replace(/^﻿/, ""));
+  return JSON.parse(text.replace(/^\uFEFF/, ""));
 }
 
 function row(a: Assignment): unknown[] {
