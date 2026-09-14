@@ -643,6 +643,21 @@ pub fn fetch_assignments(
     Ok(data)
 }
 
+/// The fetch half alone: sign in, list the student's zybooks, and fetch each book's raw payload.
+///
+/// **No parsing and no routing** — both moved server-side in C2 (§4.3). What stays here is exactly
+/// what needs the student's own credentials, which never leave the machine (D11).
+#[cfg(windows)]
+pub fn fetch_payloads(email: &str, password: &str) -> Result<Vec<(String, Json)>, SourceError> {
+    let (token, user_id) = signin(email, password, None)?;
+    let mut out = Vec::new();
+    for code in fetch_zybook_codes(&token, user_id, None)? {
+        let payload = fetch_assignments(&token, &code, None)?;
+        out.push((code, payload));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     //! Ported from `tests/test_zybooks.py`, one Rust test per Python test, keeping the Python

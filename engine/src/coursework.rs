@@ -551,6 +551,177 @@ pub fn fetch_vhl(
 }
 
 // ---------------------------------------------------------------------------------------------
+// fetch on device, think in the cloud (C2 Task 7, D11, §4.3)
+// ---------------------------------------------------------------------------------------------
+
+/// The keys the redacted config may carry, per source. **An allowlist, not a denylist** — a config
+/// grows keys and a denylist is a list of things somebody remembered. `credential_target` is the
+/// one that matters (a portal password's address is not the server's business, D11), but so are
+/// `base_url` and `enabled`, which are the device's own operational settings.
+pub const REDACT_ALLOW_ZYBOOKS: [&str; 5] = ["courses", "ignore", "categories", "effort", "importance"];
+pub const REDACT_ALLOW_VHL: [&str; 3] = ["sections", "importance", "importance_reason"];
+
+/// What of a source's config may travel to `/ingest-coursework`.
+pub fn redact(cfg: &Mapping, source: &str) -> Mapping {
+    let allow: &[&str] = match source {
+        "zybooks" => &REDACT_ALLOW_ZYBOOKS,
+        "vhl" => &REDACT_ALLOW_VHL,
+        _ => &[],
+    };
+    let mut out = Mapping::new();
+    for key in allow {
+        if let Some(value) = crate::yaml::get(cfg, key) {
+            out.insert(Yaml::String((*key).to_string()), value.clone());
+        }
+    }
+    out
+}
+
+/// A YAML mapping as the JSON the request body carries. Only the four scalar kinds and the two
+/// containers — a YAML tag, an alias or a date in a coursework config is not something the parser
+/// reads, and dropping it is safer than inventing a JSON spelling for it.
+pub fn yaml_to_json_for_request(value: &Mapping) -> serde_json::Value {
+    fn one(value: &Yaml) -> serde_json::Value {
+        match value {
+            Yaml::Null => serde_json::Value::Null,
+            Yaml::Bool(b) => serde_json::Value::Bool(*b),
+            Yaml::Number(n) => n
+                .as_i64().map(serde_json::Value::from)
+                .or_else(|| n.as_f64().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number))
+                .unwrap_or(serde_json::Value::Null),
+            Yaml::String(s) => serde_json::Value::String(s.clone()),
+            Yaml::Sequence(items) => serde_json::Value::Array(items.iter().map(one).collect()),
+            Yaml::Mapping(map) => serde_json::Value::Object(
+                map.iter()
+                    .filter_map(|(k, v)| Some((crate::pystr::yaml_str(k), one(v))))
+                    .collect(),
+            ),
+            _ => serde_json::Value::Null,
+        }
+    }
+    one(&Yaml::Mapping(value.clone()))
+}
+
+/// One reply row back into an [`Assignment`]. `None` for anything the engine cannot read — a note
+/// written from a half-formed row would rank as though it had no deadline.
+pub fn assignment_from_row(row: &serde_json::Value) -> Option<Assignment> {
+    let text = |key: &str| row.get(key).and_then(serde_json::Value::as_str).map(str::to_string);
+    let due = DateTime::strptime("%Y-%m-%dT%H:%M", text("due")?.as_str()).ok()?;
+    Some(Assignment {
+        uid: text("uid")?,
+        slug: text("slug")?,
+        title: text("title")?,
+        due,
+        course: row.get("course").and_then(serde_json::Value::as_str).map(str::to_string),
+        effort_hours: row.get("effort_hours").and_then(serde_json::Value::as_f64)?,
+        effort_confidence: text("effort_confidence").unwrap_or_default(),
+        effort_source: text("effort_source").unwrap_or_default(),
+        importance: row.get("importance").and_then(serde_json::Value::as_i64)?,
+        importance_reason: text("importance_reason").unwrap_or_default(),
+        progress: row.get("progress").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        created_by: text("created_by").unwrap_or_default(),
+        body: text("body").unwrap_or_default(),
+    })
+}
+
+/// *Fetch on device, think in the cloud* (D11, §4.3). Every credentialed request is made here with
+/// the student's own password out of Credential Manager; the raw payload then goes to
+/// `/ingest-coursework` and the reconciled list comes back.
+///
+/// One source's failure never stops another, and the server applies the same
+/// *an-empty-parse-is-a-failure* rule `collect` applies locally.
+#[cfg(windows)]
+pub fn collect_cloud(
+    config: &Mapping,
+    warnings: &mut Vec<String>,
+    client: &crate::cloudmodel::CloudClient,
+) -> Vec<Assignment> {
+    let block = match crate::yaml::get(config, "coursework") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    let tz_name = match crate::yaml::get(config, "timezone") {
+        Some(value) => crate::yaml::text(value).unwrap_or_else(|| DEFAULT_TZ.to_string()),
+        None => DEFAULT_TZ.to_string(),
+    };
+    let mut sources: Vec<serde_json::Value> = Vec::new();
+
+    for name in ["zybooks", "vhl"] {
+        let cfg = match crate::yaml::get(&block, name) {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => continue,
+        };
+        if !crate::yaml::get(&cfg, "enabled").map(crate::pystr::yaml_truthy).unwrap_or(false) {
+            continue;
+        }
+        let credential = match crate::wincred::read_credential(&cfg_str(&cfg, "credential_target", "")) {
+            Ok(c) => c,
+            Err(err) => {
+                warnings.push(format!("{name}: fetch failed ({err}); nothing changed"));
+                continue;
+            }
+        };
+        let redacted = yaml_to_json_for_request(&redact(&cfg, name));
+        match name {
+            "zybooks" => match crate::zybooks::fetch_payloads(&credential.username, credential.password.expose()) {
+                Ok(books) => sources.push(serde_json::json!({
+                    "name": "zybooks", "config": redacted,
+                    "books": books.into_iter().map(|(code, payload)| serde_json::json!({"code": code, "payload": payload})).collect::<Vec<_>>(),
+                })),
+                Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("zybooks: session invalid ({m}); nothing changed")),
+                Err(SourceError::Failed(m)) => warnings.push(format!("zybooks: fetch failed ({m}); nothing changed")),
+            },
+            _ => {
+                let base = cfg_str(&cfg, "base_url", "https://www.vhlcentral.com");
+                match crate::vhl::login_and_fetch_dashboard(&credential.username, credential.password.expose(), &base, None) {
+                    Ok(html) => sources.push(serde_json::json!({"name": "vhl", "config": redacted, "html": html})),
+                    Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("vhl: session invalid ({m}); nothing changed")),
+                    Err(SourceError::Failed(m)) => warnings.push(format!("vhl: fetch failed ({m}); nothing changed")),
+                }
+            }
+        }
+    }
+
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let body = serde_json::json!({ "timezone": tz_name, "sources": sources });
+    let reply = match client.post("/ingest-coursework", &body) {
+        Ok(reply) => reply,
+        Err(err) => {
+            warnings.push(format!("coursework: the service is unavailable ({err}); nothing changed"));
+            return Vec::new();
+        }
+    };
+    for warning in reply.get("warnings").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            warnings.push(text.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for row in reply.get("assignments").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        match assignment_from_row(row) {
+            Some(item) => out.push(item),
+            None => warnings.push("coursework: a reply row could not be read; skipped".to_string()),
+        }
+    }
+    out
+}
+
+/// The credential store is Windows-only (spec §6.5), so the credentialed fetch is too. A cloud
+/// build still compiles; it simply has no way to authenticate, and says so rather than pretending
+/// the semester is empty — the same shape `fetch_zybooks` and `fetch_vhl` already have.
+#[cfg(not(windows))]
+pub fn collect_cloud(
+    _config: &Mapping,
+    warnings: &mut Vec<String>,
+    _client: &crate::cloudmodel::CloudClient,
+) -> Vec<Assignment> {
+    warnings.push("coursework: credential store unavailable on this platform".to_string());
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------------------------
 // discovery (C1 H10) — read-only, writes nothing
 // ---------------------------------------------------------------------------------------------
 
@@ -853,7 +1024,12 @@ pub fn main_with_fetchers(
     let outcome = (|| -> Result<(), SourceError> {
         let (config, config_warnings) = load_coursework_config(vault)?;
         warnings.extend(config_warnings);
-        assignments = collect(vault, &config, &mut warnings, fetchers);
+        assignments = match (fetchers, crate::cloudmodel::resolve(vault).ok()) {
+            // `fetchers` is the test seam and always wins; a vault with an account parses on the
+            // server (§4.3); everything else is plan-3a's local path, unchanged until C4.
+            (None, Some(client)) => collect_cloud(&config, &mut warnings, &client),
+            _ => collect(vault, &config, &mut warnings, fetchers),
+        };
         if !assignments.is_empty() {
             log = sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?;
         }
@@ -2351,5 +2527,62 @@ mod tests {
         assert!(json.contains("\"vhl\": []"), "{json}");
         assert!(json.contains("\"zybooks\": []"), "{json}");
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- fetch on device, think in the cloud (C2 Task 7) --------------------------------------
+
+    /// D11 and the VISION amendment, at the boundary that now exists: the payload the device posts
+    /// carries the vendor's own bytes and the parser's config, and **no credential of any kind**.
+    /// The device signs in; the server never could.
+    #[test]
+    fn the_coursework_payload_carries_no_credential() {
+        let cfg = crate::yaml::mapping_of(concat!(
+            "enabled: true\n",
+            "credential_target: knowlu/test-profile/zybooks\n",
+            "base_url: https://www.vhlcentral.com\n",
+            "courses:\n  cs-100-2026:\n    course: cs-100\n    label: CS 100\n",
+            "ignore:\n  - HowToUseZyBooks2\n",
+            "categories:\n  HW: hw\n",
+            "effort:\n  minutes_per_section: 6\n  floors:\n    hw: 0.25\n",
+            "importance:\n  hw: 2\n",
+        ));
+        let redacted = redact(&cfg, "zybooks");
+        let rendered = crate::ledger::dumps_value(&serde_json::json!({
+            "timezone": "America/Chicago",
+            "sources": [{ "name": "zybooks", "config": yaml_to_json_for_request(&redacted), "books": [] }],
+        }));
+        for forbidden in ["credential_target", "knowlu/test-profile", "base_url", "enabled", "password"] {
+            assert!(!rendered.contains(forbidden), "the request body carried {forbidden:?}: {rendered}");
+        }
+        // And everything the parser genuinely needs did travel.
+        for needed in ["courses", "cs-100-2026", "categories", "minutes_per_section", "importance", "ignore"] {
+            assert!(rendered.contains(needed), "the request body lost {needed:?}: {rendered}");
+        }
+    }
+
+    /// The reconciled list the service returns is written by the same `sync_coursework` the local
+    /// parse fed, so a cloud run and a local run produce the same notes.
+    #[test]
+    fn a_reply_row_becomes_the_same_assignment_the_local_parser_produced() {
+        let row = serde_json::json!({
+            "uid": "zybooks:1839992", "slug": "cs-100-hw-01", "title": "CS 100 HW 01",
+            "due": "2026-08-26T23:59", "course": "cs-100", "effort_hours": 2.5,
+            "effort_confidence": "low", "effort_source": "inferred", "importance": 2,
+            "importance_reason": "zyBooks hw worth 193 points across 25 sections; per-category importance from config",
+            "progress": 0, "created_by": "zybooks", "body": "25 zyBooks section(s), 193 points.\n\n- 1.1 x"
+        });
+        let got = assignment_from_row(&row).expect("a well-formed row parses");
+        assert_eq!(got.uid, "zybooks:1839992");
+        assert_eq!(got.due, jiff::civil::date(2026, 8, 26).at(23, 59, 0, 0));
+        assert_eq!(got.effort_hours, 2.5);
+        assert_eq!(got.course.as_deref(), Some("cs-100"));
+    }
+
+    /// A row the service sent that the engine cannot read is dropped with a warning, never
+    /// written half-formed: a note with no due date ranks as though it had none.
+    #[test]
+    fn a_malformed_reply_row_is_a_warning_and_not_a_note() {
+        let row = serde_json::json!({ "uid": "zybooks:1", "title": "x", "due": "not a date" });
+        assert!(assignment_from_row(&row).is_none());
     }
 }
