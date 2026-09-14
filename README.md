@@ -48,7 +48,7 @@ deployed to Cloudflare Pages at `knowlu.com`, and a GitHub Release carrying the 
 the `.sig` against the public key in `app/tauri.conf.json`; the private half lives only as the
 GitHub secret `TAURI_SIGNING_PRIVATE_KEY`.
 
-Locally, run only `.\scriptselease.ps1 -DryRun`. It builds and bundles a throwaway installer,
+Locally, run only `.\scripts\release.ps1 -DryRun`. It builds and bundles a throwaway installer,
 prints `UNSIGNED:` for every file because a laptop holds no signing profile and no updater key,
 and publishes nothing. That is the correct local state, not a degraded one.
 
