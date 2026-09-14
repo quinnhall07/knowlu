@@ -40,7 +40,7 @@ against a scratch vault (`scripts\scratch-vault.ps1 -Source <vault>`), never a l
 
 Releases are built, signed and published by CI only. Push a tag `v<version>` that matches the
 workspace `version` in `Cargo.toml` and `app/tauri.conf.json`, and `.github/workflows/release.yml`
-runs `scriptselease.ps1` on a Windows runner: both binaries from that one commit, the engine
+runs `scripts\release.ps1` on a Windows runner: both binaries from that one commit, the engine
 staged as the app's sidecar, every binary Authenticode-signed by Azure Trusted Signing over OIDC
 (no signing secret exists anywhere), the size gate, then `site\` — with `releases/latest.json` —
 deployed to Cloudflare Pages at `knowlu.com`, and a GitHub Release carrying the installer, its
@@ -48,7 +48,7 @@ deployed to Cloudflare Pages at `knowlu.com`, and a GitHub Release carrying the 
 the `.sig` against the public key in `app/tauri.conf.json`; the private half lives only as the
 GitHub secret `TAURI_SIGNING_PRIVATE_KEY`.
 
-Locally, run only `.\scriptselease.ps1 -DryRun`. It builds and bundles a throwaway installer,
+Locally, run only `.\scriptselease.ps1 -DryRun`. It builds and bundles a throwaway installer,
 prints `UNSIGNED:` for every file because a laptop holds no signing profile and no updater key,
 and publishes nothing. That is the correct local state, not a degraded one.
 
