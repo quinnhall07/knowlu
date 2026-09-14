@@ -36,6 +36,22 @@ Toolchain: `stable-x86_64-pc-windows-gnu` (1.98) with mingw-w64 binutils on `PAT
 hand-run `cargo tauri build` skips its gates and can ship a zero-byte engine. Develop and demo
 against a scratch vault (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
 
+## Releases
+
+Releases are built, signed and published by CI only. Push a tag `v<version>` that matches the
+workspace `version` in `Cargo.toml` and `app/tauri.conf.json`, and `.github/workflows/release.yml`
+runs `scriptselease.ps1` on a Windows runner: both binaries from that one commit, the engine
+staged as the app's sidecar, every binary Authenticode-signed by Azure Trusted Signing over OIDC
+(no signing secret exists anywhere), the size gate, then `site\` — with `releases/latest.json` —
+deployed to Cloudflare Pages at `knowlu.com`, and a GitHub Release carrying the installer, its
+`.sig` and `latest.json`. Installed apps poll `https://knowlu.com/releases/latest.json` and verify
+the `.sig` against the public key in `app/tauri.conf.json`; the private half lives only as the
+GitHub secret `TAURI_SIGNING_PRIVATE_KEY`.
+
+Locally, run only `.\scriptselease.ps1 -DryRun`. It builds and bundles a throwaway installer,
+prints `UNSIGNED:` for every file because a laptop holds no signing profile and no updater key,
+and publishes nothing. That is the correct local state, not a degraded one.
+
 ## Where things are
 
 - `CLAUDE.md` — the working rules for this repository.
