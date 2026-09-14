@@ -77,3 +77,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.issues]
 verify_jwt = false
+[functions.judge-task]
+verify_jwt = false
