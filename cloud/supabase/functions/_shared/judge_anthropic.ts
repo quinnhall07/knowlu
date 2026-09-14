@@ -25,7 +25,7 @@
 //     email). It is the right lever if per-account spend ever becomes the binding constraint, and
 //     it is a change to this file plus a queue — not to the pipeline. Recorded in Task 14's budget
 //     work as the first thing to reach for.
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "npm:@anthropic-ai/sdk@0.125.0";
 
 /// One call's wall-clock bound. Deliberately BELOW the device's own 120 s per-call bound is not
 /// possible on an edge function's budget, so it is the same number and the device is the one that
