@@ -345,26 +345,43 @@ pub fn run_lines_with(
         };
     };
     let model = crate::cloudmodel::CloudModel::new(client);
+    // R-C2-E15: the probe is a network round trip, and it must not fire when there is nothing to
+    // judge — reusing `pending`'s own predicate here (not a second scanning routine) is what lets
+    // a job that runs twice a day forever skip both the call and, on a network that black-holes
+    // rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no queue behind it would
+    // otherwise risk. `enrich_with` below re-derives the same list; that second read is the
+    // accepted cost of leaving `enrich_with`'s own signature — and every test that calls it
+    // directly — untouched.
+    if pending(vault).0.is_empty() {
+        return enrich_with(vault, opts, Ok(&model));
+    }
     // A session or entitlement problem answers every item identically, so the FIRST call decides
     // the batch. Asked once before the loop, the whole run then reports one honest outcome
     // (`Missing::Service`, which becomes `Outcome::ServiceUnavailable` and logs as
     // `service unavailable`) instead of fifty `model failed` lines — ruling R-3a-20's point, at
     // the boundary a cloud judge adds. Every other failure (a 429, a 5xx, a dropped connection)
     // stays per-item, because the next item genuinely may succeed.
-    let (code, mut lines) = match model.probe() {
+    match model.probe() {
         Some(reason) => {
+            // Exactly one line: `probe()` already set `model.fatal()` to this same reason, so the
+            // `if let Some(reason) = model.fatal()` line below — which exists for a batch that
+            // turned fatal partway through — must not also fire here, or the run would print two
+            // contradictory summaries ("nothing was sent" and "the rest ... was not sent") for the
+            // one call that was actually made.
             let (code, mut lines) = enrich_with(vault, opts, Err(judge::Missing::Service(reason)));
             lines.insert(0, format!("judge: the service answered {reason}; nothing was sent"));
             (code, lines)
         }
-        None => enrich_with(vault, opts, Ok(&model)),
-    };
-    if let Some(reason) = model.fatal() {
-        lines.push(format!(
-            "judge: the service answered {reason}, so the rest of the batch was not sent"
-        ));
+        None => {
+            let (code, mut lines) = enrich_with(vault, opts, Ok(&model));
+            if let Some(reason) = model.fatal() {
+                lines.push(format!(
+                    "judge: the service answered {reason}, so the rest of the batch was not sent"
+                ));
+            }
+            (code, lines)
+        }
     }
-    (code, lines)
 }
 
 /// [`run_lines`] with the output printed, in the order it was produced.
@@ -883,8 +900,14 @@ mod tests {
     /// The whole `judge` step against a service that is not there: every item still gets tier 1's
     /// answer written, the run says why, and the exit code is 0. This is the case the app actually
     /// meets on a train, and the one a non-zero exit would turn into an amber tray forever.
+    ///
+    /// R-C2-E14: this vault's one note IS flagged `needs_enrichment: true`, so the write really
+    /// happens — `write_literals`/`journal::make_record` both read process-global `device_name()`
+    /// (see the comment above `enrichment_writes_the_five_fields_...`), so this test takes the same
+    /// lock every other note-writing test in this module takes.
     #[test]
     fn a_service_that_cannot_be_reached_still_writes_tier_one_and_exits_zero() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let v = vault("cloud-down");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
@@ -903,6 +926,46 @@ mod tests {
         let (code, lines) = run_lines_with(&v, &opts, Some(&client));
         assert_eq!(code, 0, "the judge step always exits 0");
         assert!(lines.iter().any(|l| l.contains("no network")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E15: an empty queue must never reach the service at all — not even the one-call probe.
+    /// A slot that runs twice a day forever and has nothing to enrich must not spend a round trip
+    /// (and, on a network that black-holes instead of refusing, risk up to `CALL_TIMEOUT` stalling
+    /// the slot) proving what `pending`'s own empty result already answers for free.
+    #[test]
+    fn an_empty_queue_makes_no_request_to_the_service() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("cloud-empty");
+        // The fixture's one note starts flagged; clear it so `pending` finds nothing.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let opts = Options {
+            via: "local-runner", run_id: None, runtime: None, model: None,
+            log_dir: None, limit: 10, budget: BATCH_BUDGET,
+        };
+        let (code, lines) = run_lines_with(&v, &opts, Some(&client));
+        assert_eq!(code, 0);
+        assert_eq!(lines, vec!["judge: nothing to enrich".to_string()], "{lines:?}");
+        // Non-blocking, not a timed wait: `run_lines_with` above already ran to completion on this
+        // thread, so a request — had one been sent to a live loopback listener — would already be
+        // sitting in the accept queue. `Err` here means the probe never dialled out at all.
+        assert!(
+            listener.accept().is_err(),
+            "an empty queue must never reach the judgment service"
+        );
         let _ = std::fs::remove_dir_all(&v);
     }
 }
