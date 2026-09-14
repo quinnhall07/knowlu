@@ -93,10 +93,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 ## 3. Sequence
 
 1. ~~Spec review~~ — done; §11a records the rulings since.
-2. **C0:** Tasks 1–3 merged. **Next:** branch `c0-release-key` from `main`; Task 4 (P4 + Quinn's
-   keygen block), Task 3's first real run needs P1/P2/secrets, Task 5 (first tag `v0.1.0`, the
-   updater proof), Task 6 (branch protection, docs close). CLAUDE.md and `app/README.md` already say
-   the CI-only truth.
+2. **C0:** Tasks 1–3 merged. **Tasks 4–6 in flight (2026-09-14)** on branch `c0-release-key` (worktree `.claude/worktrees/c0-release-key`, PR #3 → `main`, CI green): Task 4 done (updater key id `97D52FF797E70A1B`, `C2EC981122E1D2DF` retired), Task 6's README section and `-DryRun` proof done, Cloudflare complete (Pages project `knowlu`, `knowlu.com` active as its custom domain, the two secrets), Azure half done (app registration `knowlu-release` with the environment-scoped federated credential; `AZURE_CLIENT_ID`/`AZURE_TENANT_ID` set). **The one blocker for `v0.1.0` is Azure Artifact Signing** — no subscription exists yet; Quinn is setting it up in a separate Cowork session and hands back `AZURE_SUBSCRIPTION_ID`, `TS_ENDPOINT`, `TS_ACCOUNT`, `TS_PROFILE`. The step-by-step state and the exact next actions are the C0 ledger's ▶ RESUME HERE block (`.superpowers/sdd/2026-09-09-c0-ci-release-plan/progress.md`, git-ignored on this laptop) and the branch's HANDOFF §4 rows.
 3. ~~Plans C1 and C2~~ — written, reviewed, amended for what the first run taught (C1: 25 tasks
    incl. 14a/14b/14c; C2: 18 tasks incl. 7a/8a), committed.
 4. **Cut day:** the reset (§1) and the archive step remain (§4).
