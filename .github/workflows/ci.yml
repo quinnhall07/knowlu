@@ -67,5 +67,13 @@ jobs:
         run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts
       - name: deno lint
         run: deno lint --config cloud/supabase/deno.json cloud/supabase/
+      # --allow-net=127.0.0.1 is needed from C2 Task 0 on, and only from then: `judge_anthropic_test.ts`
+      # exercises the model client against a listener bound to 127.0.0.1:0 inside the test. No egress,
+      # no name resolution, no listener on a routable interface (CLAUDE.md; plan 3a's loopback rule).
+      # --allow-env is scoped to four names the pinned @anthropic-ai/sdk@0.125.0 constructor reads
+      # unconditionally (ANTHROPIC_WEBHOOK_SIGNING_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_LOG,
+      # ANTHROPIC_CUSTOM_HEADERS) even though this file always passes apiKey/baseURL explicitly and
+      # never reads a secret through it — not anticipated when Task 0's exact CI line was ruled;
+      # flagged in the Task 0 report for review, not a silent change.
       - name: deno test
-        run: deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/
+        run: deno test --allow-read --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/
