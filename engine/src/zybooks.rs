@@ -137,6 +137,12 @@ fn as_object<'a>(
 
 /// Turn one zyBooks assignment payload into [`Assignment`]s. Pure: every field comes from the
 /// payload plus config, which is what keeps this inside the engine's no-inference rule.
+///
+/// **This function is the reference the server-side port is measured against** (cloud design
+/// §4.3): `cloud/supabase/functions/ingest-coursework/parse_zybooks.ts` is a faithful TypeScript
+/// port of it, and both are gated by the same frozen `tests/fixtures/zybooks-parsed-reference.json`.
+/// From C2 on, production parses on the server and this half is what the port is checked against —
+/// change one and the other's test fails, which is the point.
 pub fn parse_assignments(
     payload: &Json,
     course_slug: &str,
