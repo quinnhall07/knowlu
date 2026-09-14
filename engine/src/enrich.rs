@@ -298,22 +298,73 @@ pub fn enrich_with(
     (0, lines)
 }
 
-/// Resolve the runtime and the model, then enrich against a `runtime::PerCall`.
+/// Resolve the service — or, on a vault with no account, plan 3a's local runtime — and enrich.
+///
+/// **The cloud comes first from C2 on** (cloud design D3, §3.2). The local branch below is plan
+/// 3a's and is removed by C4; until then a vault with no `config/cloud.yaml` behaves exactly as it
+/// did. Every arm exits 0: no account, no session, no network and no entitlement are all normal
+/// outcomes reported on stdout.
+pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
+    match crate::cloudmodel::resolve(vault) {
+        Ok(client) => run_lines_with(vault, opts, Some(&client)),
+        Err(crate::cloudmodel::Unavailable::NoConfig) => run_lines_with(vault, opts, None),
+        Err(why) => {
+            // A vault WITH an account whose session is missing or unreadable. Not a fallback to
+            // the local runtime: this is a cloud machine and the answer is "sign in again".
+            let (code, mut lines) =
+                enrich_with(vault, opts, Err(judge::Missing::Service(why.label())));
+            lines.insert(0, format!("judge: skipped ({why})"));
+            (code, lines)
+        }
+    }
+}
+
+/// [`run_lines`] with the service seam exposed, exactly as `ingest::run_with` exposes its fetch and
+/// `coursework::main_with_fetchers` exposes its sources. Production resolves; tests pass a client
+/// aimed at a listener bound to `127.0.0.1:0`, so no test needs a credential or an environment
+/// variable and there is no process-global state to race.
 ///
 /// **No server, no load phase (spec §5.3 as amended 2026-09-07).** The spike found the server's
 /// advantage shrinking as the batch grows, not growing — 2.15x at thirty items, converging to
 /// 2.21x, against a pre-committed 3x bar — so there is no long-lived process here: `judge_task`
 /// spawns one `llama-cli` process per judgment, through `PerCall`, and it is gone before the next
 /// item starts. A missing runtime or model is one line and exit 0 — never a failed slot.
-pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
-    match crate::runtime::resolve(opts.runtime, opts.model) {
-        Err(missing) => enrich_with(vault, opts, Err(missing)),
-        Ok((rt, gguf)) => enrich_with(
-            vault,
-            opts,
-            Ok(&crate::runtime::PerCall::new(&rt, &gguf, crate::runtime::CALL_TIMEOUT)),
-        ),
+pub fn run_lines_with(
+    vault: &Path,
+    opts: &Options<'_>,
+    cloud: Option<&crate::cloudmodel::CloudClient>,
+) -> (i32, Vec<String>) {
+    let Some(client) = cloud else {
+        return match crate::runtime::resolve(opts.runtime, opts.model) {
+            Err(missing) => enrich_with(vault, opts, Err(missing)),
+            Ok((rt, gguf)) => enrich_with(
+                vault,
+                opts,
+                Ok(&crate::runtime::PerCall::new(&rt, &gguf, crate::runtime::CALL_TIMEOUT)),
+            ),
+        };
+    };
+    let model = crate::cloudmodel::CloudModel::new(client);
+    // A session or entitlement problem answers every item identically, so the FIRST call decides
+    // the batch. Asked once before the loop, the whole run then reports one honest outcome
+    // (`Missing::Service`, which becomes `Outcome::ServiceUnavailable` and logs as
+    // `service unavailable`) instead of fifty `model failed` lines — ruling R-3a-20's point, at
+    // the boundary a cloud judge adds. Every other failure (a 429, a 5xx, a dropped connection)
+    // stays per-item, because the next item genuinely may succeed.
+    let (code, mut lines) = match model.probe() {
+        Some(reason) => {
+            let (code, mut lines) = enrich_with(vault, opts, Err(judge::Missing::Service(reason)));
+            lines.insert(0, format!("judge: the service answered {reason}; nothing was sent"));
+            (code, lines)
+        }
+        None => enrich_with(vault, opts, Ok(&model)),
+    };
+    if let Some(reason) = model.fatal() {
+        lines.push(format!(
+            "judge: the service answered {reason}, so the rest of the batch was not sent"
+        ));
     }
+    (code, lines)
 }
 
 /// [`run_lines`] with the output printed, in the order it was produced.
@@ -826,6 +877,32 @@ mod tests {
         assert!(!raw.is_empty(), "the log must have written something to check");
         assert!(!raw.contains("ZQXTITLE"), "the note's title leaked into the judgment log: {raw}");
         assert!(!raw.contains("ZQXBODY"), "the note's body leaked into the judgment log: {raw}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The whole `judge` step against a service that is not there: every item still gets tier 1's
+    /// answer written, the run says why, and the exit code is 0. This is the case the app actually
+    /// meets on a train, and the one a non-zero exit would turn into an amber tray forever.
+    #[test]
+    fn a_service_that_cannot_be_reached_still_writes_tier_one_and_exits_zero() {
+        let v = vault("cloud-down");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let opts = Options {
+            via: "local-runner", run_id: None, runtime: None, model: None,
+            log_dir: None, limit: 10, budget: BATCH_BUDGET,
+        };
+        let (code, lines) = run_lines_with(&v, &opts, Some(&client));
+        assert_eq!(code, 0, "the judge step always exits 0");
+        assert!(lines.iter().any(|l| l.contains("no network")), "{lines:?}");
         let _ = std::fs::remove_dir_all(&v);
     }
 }
