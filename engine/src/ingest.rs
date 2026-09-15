@@ -1146,6 +1146,18 @@ mod tests {
         assert_eq!(seen.len(), 2);
     }
 
+    /// R-C2-E20 fix 1: the predicate `/ingest-ics`'s `first_run` flag is built from, pinned
+    /// directly rather than only through `run_lines`'s cloud arm (which no test machine here can
+    /// reach end to end — see `cloud_contract.rs`'s doc comment on the blank-`ics_url` test).
+    #[test]
+    fn is_first_run_is_true_with_no_today_md_and_false_once_rank_has_written_one() {
+        let v = uid_vault();
+        assert!(is_first_run(&v), "a vault that has never been ranked has no state/today.md yet");
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        std::fs::write(v.join("state").join("today.md"), "# Today\n").unwrap();
+        assert!(!is_first_run(&v), "today.md now exists — this vault has finished at least one slot");
+    }
+
     #[test]
     fn due_changed_detects_a_real_move_and_ignores_an_equal_one() {
         use serde_yaml_ng::Value;

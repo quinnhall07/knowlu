@@ -255,15 +255,37 @@ fn the_ics_fetch_is_a_get_that_sends_no_url_of_its_own() {
     assert!(!sent.contains("ics_url"), "{sent}");
 }
 
-/// A cloud vault whose `ics_url` is blank must reach `/ingest-ics` before it gives up.
+/// R-C2-E20 fix 1: the wire shape R-C2-E8 froze, pinned directly — `first_run` reaches the query
+/// string, and a reply's `past_due_uids` (Task 8a's field) comes back through the tuple whole.
+#[test]
+fn a_first_run_asks_first_run_1_and_gets_back_both_past_due_uids() {
+    let feed = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+    let body = knowlu_engine::ledger::dumps_value(
+        &serde_json::json!({ "ics": feed, "courses": 0, "past_due_uids": ["a", "b"] }),
+    );
+    let mut server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (got, past_due) = knowlu_engine::cloudmodel::fetch_ics(&client, true).expect("the service answered");
+    assert!(got.contains("BEGIN:VCALENDAR"));
+    assert_eq!(past_due, vec!["a".to_string(), "b".to_string()]);
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("GET /functions/v1/ingest-ics?first_run=1 HTTP/1.1"), "{sent}");
+}
+
+/// A cloud vault whose `ics_url` is blank must still refuse by naming `ics_url`, on the one arm
+/// this test can actually reach.
 ///
-/// Without hand-off H3 this exits 1 six lines into `run_lines`, which sets
-/// `RunSummary.engine_ok = false` and paints the tray amber twice a day forever — the exact
-/// failure `judge`'s always-exit-0 rule exists to prevent, on the step beside it.
-///
-/// **F10**: this test spawns no loopback listener. The run never reaches the service because the
-/// test vault has no session credential in Credential Manager — `cloudmodel::resolve` fails before
-/// any HTTP call is made — so a listener thread here would block forever in `accept()`.
+/// **What this proves, and what it does not.** On this machine there is no credential at
+/// `knowlu/c2-test/session`, so `cloudmodel::resolve` fails before any HTTP call is made and the
+/// run falls all the way through to the `(None, None)` fallback arm — the same one this vault hit
+/// before H3, byte for byte. That arm's message and the cloud arm's own blank-url message
+/// (`"ingest: no feed — the service is unavailable (…) and no ics_url is configured"`) both
+/// mention `ics_url`, which is what this test asserts, so it stays green on either arm rather than
+/// pinning the fallback's exact wording. **The cloud arm's end-to-end proof — that a vault with a
+/// real session and an `lms_ics` row reaches `/ingest-ics` and never hits this refusal at all — is
+/// the staging smoke against a real account (Task 8 step 7/13), not a unit test**: per ruling F10,
+/// this test spawns no loopback listener, because with no session `resolve` never attempts a
+/// connection and a listener here would block forever in `accept()`.
 #[test]
 fn a_cloud_vault_reaches_the_service_before_it_refuses_a_blank_ics_url() {
     let dir = std::env::temp_dir().join(format!("knowlu-c2-ics-{}", std::process::id()));
@@ -278,15 +300,8 @@ fn a_cloud_vault_reaches_the_service_before_it_refuses_a_blank_ics_url() {
     .expect("write cloud.yaml");
 
     let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, None);
-    // With H3 applied and a session present this is 0 and the feed came from the service. On this
-    // machine there is no credential at that target, so `resolve` fails and the run falls through
-    // to the blank-url refusal — which is still exit 1, but the LINE must name the whole reason,
-    // not merely "no ics_url configured", or the next reader will not know the service was asked.
     assert_eq!(code, 1);
-    assert!(
-        lines[0].contains("no ics_url configured"),
-        "the refusal must still say what is missing: {lines:?}"
-    );
+    assert!(lines[0].contains("ics_url"), "the refusal must still say what is missing: {lines:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
