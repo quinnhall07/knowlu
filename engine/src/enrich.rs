@@ -815,18 +815,21 @@ pub fn pull_rules(
     for (path, id, decision) in decided_rule_cards(vault) {
         match crate::cloudmodel::decide_rule(client, id, &decision) {
             Ok(()) => {
-                let rel = crate::ids::rel(vault, &path);
-                let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
-                let literals = vec![
-                    ("status".to_string(), "executed".to_string()),
-                    ("executed_at".to_string(), stamped),
-                ];
-                if crate::write::write_literals(vault, &rel, &literals, &ctx, &mut journal, &WriteOpts::default()).is_ok() {
-                    let _ = crate::write::delete(vault, &rel, &ctx, &mut journal);
-                }
+                archive_decided_card(vault, &path, &ctx, &mut journal);
                 lines.push(format!("rules {id}: {decision}"));
             }
-            // NOT archived on failure: an unsent decision must come back next slot.
+            // I4 (R-C2-E47 fix 1): a 404 ("no such undecided proposal") means the service already
+            // settled this exact decision — most likely this same card, sent by a previous run
+            // that died between the POST above and the stamp below. Treated as success, not
+            // failure: stamped and archived exactly as `Ok` is. Without this, a card whose POST
+            // succeeded once but whose stamp never landed would re-POST every slot forever, 404
+            // every time, and — because `rule_decisions_waiting` scans exactly this card — keep the
+            // widened early return (R-C2-E46) from ever firing again for this vault.
+            Err(crate::cloudmodel::CloudError::Status { code: 404, .. }) => {
+                archive_decided_card(vault, &path, &ctx, &mut journal);
+                lines.push(format!("rules {id}: already settled"));
+            }
+            // NOT archived on any other failure: an unsent decision must come back next slot.
             Err(e) => lines.push(format!("rules {id}: not sent ({e})")),
         }
     }
@@ -859,6 +862,22 @@ pub fn pull_rules(
     }
     lines.push(format!("rules: {filed} proposed of {} offered", proposals.len()));
     lines
+}
+
+/// Stamp a decided rule card `executed` and archive it — the shared tail of both `pull_rules`
+/// outcomes that count as settled (the service accepted the decision, or already had it). Best
+/// effort: if the stamp write fails the card is simply left `approved`/`rejected` and comes back
+/// next slot, exactly as it would if this were never called.
+fn archive_decided_card(vault: &Path, path: &std::path::Path, ctx: &WriteContext, journal: &mut Journal) {
+    let rel = crate::ids::rel(vault, path);
+    let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
+    let literals = vec![
+        ("status".to_string(), "executed".to_string()),
+        ("executed_at".to_string(), stamped),
+    ];
+    if crate::write::write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default()).is_ok() {
+        let _ = crate::write::delete(vault, &rel, ctx, journal);
+    }
 }
 
 /// `kind: rule` cards the student has answered, as `(path, rule_id, decision)`. Also what
@@ -2260,21 +2279,107 @@ mod tests {
         .expect("approve");
 
         let empty = crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }));
+        // M7 (R-C2-E47 fix 1): the second pull's proposals reply offers id 41 AGAIN — as the
+        // service legitimately might, since nothing on its side remembers a device has already
+        // filed a card for a proposal — so "still seen in archive, not re-filed" below is a real
+        // assertion about `existing_rule_ids` scanning `archive/`, not a vacuous one about an
+        // empty reply.
+        let offered_again = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{ "id": 41, "kind": "task", "feature": "title_prefix", "value": "CS 100 Lab",
+                            "verdict": {"importance": "2"}, "proposed_at": "2026-09-11" }]
+        }));
         let (client, mut server) = loopback_client(vec![
             (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
-            (200, empty.clone()),
             (200, empty),
+            (200, offered_again),
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
         let lines = pull_rules(&vault, &client, &o);
         assert!(lines.iter().any(|l| l.contains("rules 41: approved")), "{lines:?}");
         assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
-        // A third pull sends nothing: the card is archived and `existing_rule_ids` still sees it.
+        // A third pull re-sends no decision (the card is archived, not `approvals/`), and — even
+        // though the service offers id 41 again — files no new card: `existing_rule_ids` sees
+        // `rule_id: 41` in `archive/` and skips it.
         let again = pull_rules(&vault, &client, &o);
-        assert!(!again.iter().any(|l| l.contains("rules 41:")), "{again:?}");
+        assert!(!again.iter().any(|l| l.contains("rules 41: approved") || l.contains("rules 41: proposed")), "{again:?}");
+        assert!(again.iter().any(|l| l.contains("0 proposed of 1")), "{again:?}");
+        assert!(!vault.join("approvals").join("rule-41.md").exists(), "must not be re-filed");
         let sent = server.requests();
         assert_eq!(sent.iter().filter(|r| r.contains("POST /functions/v1/judge-rules")).count(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M8 (R-C2-E47 fix 1): the `rejected` branch of `decided_rule_cards`, undriven by any
+    /// existing test — a card set `status: rejected` in the file must send `decision: rejected`
+    /// and archive exactly as an approved one archives, no round trip needed for the vault side.
+    #[test]
+    fn a_rejected_card_sends_rejected_and_is_archived() {
+        let vault = vault("rules-reject");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "rejected".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("reject");
+
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "rejected" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(lines.iter().any(|l| l.contains("rules 41: rejected")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must archive");
+
+        let sent = server.requests();
+        let post = sent.iter().find(|r| r.starts_with("POST /functions/v1/judge-rules")).expect("a POST was sent");
+        assert!(post.contains(r#""decision": "rejected""#), "the POST body must carry the rejection: {post}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I4 (R-C2-E47 fix 1): a 404 from `decide_rule` means the service already settled this
+    /// decision — most likely this same card, sent by a previous run that died between the POST
+    /// and the stamp. Without this, the card would stay `approved` and re-POST (and re-404) every
+    /// slot forever, and `rule_decisions_waiting` would keep the widened early return (R-C2-E46)
+    /// from ever firing again for this vault.
+    #[test]
+    fn a_decision_the_service_already_settled_is_archived_not_retried() {
+        let vault = vault("rules-already-settled");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (404, crate::ledger::dumps_value(&serde_json::json!({ "error": "no such undecided proposal" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(lines.iter().any(|l| l.contains("rules 41: already settled")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "a 404 must still archive the card");
+        let _ = server.requests();
         let _ = std::fs::remove_dir_all(&vault);
     }
 
