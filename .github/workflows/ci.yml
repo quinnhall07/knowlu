@@ -91,13 +91,14 @@ jobs:
   #
   # `cloud/eval/seed/` is empty at merge (ruling R-C2-E12, Task 13) and stays empty until cases
   # arrive from consented corrections (a later stream's opt-in), so `run_eval.ts` itself exits 0
-  # printing "0 cases — nothing to score" before it reads ANTHROPIC_API_KEY, EVAL_ACCOUNT_ID, or
+  # printing "0 cases — nothing to score" before it reads ANTHROPIC_API_KEY or
   # SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, or opens a connection (ruling R-C2-E50 (2)) — which is
-  # what lets this job pass green on a PR that sets none of its three secrets.
+  # what lets this job pass green on a PR that sets none of its two secrets.
   eval-gate:
     runs-on: ubuntu-latest
     needs: cloud
     if: github.event_name == 'pull_request'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: { fetch-depth: 0 }
@@ -106,8 +107,12 @@ jobs:
       - name: does this PR touch a prompt, a schema, or the model pins?
         id: touched
         shell: bash
+        env:
+          # C2 Task 14 fix 1 (R-C2-E51, finding 4): named through env: rather than interpolated
+          # straight into the script, so a base branch name can never be read as shell syntax.
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          files=$(git diff --name-only "origin/$BASE_REF"...HEAD)
           run=no
           # The three files that define what is asked and how the answer is checked...
           if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/judge_(prompts|models|validate)\.ts$'; then run=yes; fi
@@ -120,13 +125,21 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
       # `SUPABASE_URL` is not secret (the C1 plan: "each project's reference id, its URL ... none
       # secret" — `app/src/account.rs`'s own `DEFAULT_API_BASE` names prod's the same way), so it
-      # is the literal staging project URL, not a GitHub secret; the three secrets Quinn sets are
-      # named in the C2 Task 14 report, never a value.
+      # is the literal staging project URL, not a GitHub secret; the two secrets Quinn sets are
+      # named in the C2 Task 14 report, never a value. C2 Task 14 fix 1 (R-C2-E51, finding 3)
+      # dropped `EVAL_ACCOUNT_ID`: nothing in the eval path uses an account id for anything real
+      # (every consumer is a stub), so it named a secret that did nothing.
       - name: eval suite
         if: steps.touched.outputs.run == 'yes'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          EVAL_ACCOUNT_ID: ${{ secrets.EVAL_ACCOUNT_ID }}
           SUPABASE_URL: https://brvhgbihxevrudqpulcm.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
-        run: deno run --allow-read --allow-env --allow-net --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
+        # C2 Task 14 fix 1 (R-C2-E51, finding 4): the grants are scoped to exactly what this run
+        # needs while it holds the service-role key — the four names Task 0 ruled the pinned
+        # @anthropic-ai/sdk reads unconditionally (never a secret through them; see the `cloud`
+        # job's own comment) plus the three this script itself reads, and network only to the two
+        # hosts it actually calls. `--allow-read` stays unscoped: npm module downloads at import
+        # time are not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s
+        # absence entirely, and this step needs to read its own source tree and thresholds.json.
+        run: deno run --allow-read --allow-env=ANTHROPIC_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=api.anthropic.com,brvhgbihxevrudqpulcm.supabase.co --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
