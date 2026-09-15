@@ -1,8 +1,8 @@
 // TDD, per CLAUDE.md: this file is written before `schema.ts` or `loader.ts` exist, and fails to
 // even load (RED — the two imports below resolve to nothing) until they do.
 //
-// `cloud/eval/` never reads an archive (ruling R-C2-E12, 2026-09-14: P4 was declined — "nothing is
-// ever read from the quinn-ops archive"). Every fixture in this file is written by hand and is
+// `cloud/eval/` never reads an archive (ruling R-C2-E12, 2026-09-14: P4 was declined — nothing is
+// ever read from an archived vault). Every fixture in this file is written by hand and is
 // obviously synthetic. Nothing here proves a real record is SAFE, only that a record shaped like
 // the ones below is caught or accepted the way its rule says it should be — the eval suite's real
 // cases arrive later, one consented correction at a time (a later stream's opt-in), and go through

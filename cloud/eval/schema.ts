@@ -4,8 +4,8 @@
 // sends to `/judge-<kind>` today (`engine/src/cloudmodel.rs`'s `task_request` / `event_request` /
 // `email_request`) — paired with `theirs`, the human correction the eval suite scores against.
 //
-// `cloud/eval/` never reads an archive (ruling R-C2-E12, 2026-09-14: P4 was declined — "nothing is
-// ever read from the quinn-ops archive"). This file only says what a valid, scrubbed record looks
+// `cloud/eval/` never reads an archive (ruling R-C2-E12, 2026-09-14: P4 was declined — nothing is
+// ever read from an archived vault). This file only says what a valid, scrubbed record looks
 // like; `cloud/eval/seed/` is empty at merge and fills later, one consented correction at a time
 // (a later stream's opt-in) — see `cloud/eval/seed/README.md`.
 import {

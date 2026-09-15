@@ -24,6 +24,9 @@ export async function loadSeed(dir: URL = new URL("./seed/", import.meta.url)): 
   const records: SeedRecord[] = [];
   for (const name of names) {
     const text = await Deno.readTextFile(new URL(name, dir));
+    // Split on "\n" only, deliberately: a CRLF seed line's trailing "\r" then lands inside the
+    // parsed value, so `JSON.parse` fails loud on it rather than a silent width-one difference
+    // slipping past the scrub rules unnoticed.
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];

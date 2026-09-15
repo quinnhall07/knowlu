@@ -46,7 +46,13 @@ export const EVENT_ITEM_FIELDS = [
 ] as const;
 export const EMAIL_ITEM_FIELDS = ["message_id", "subject", "from", "date", "text"] as const;
 
-/** `theirs`'s keys, by kind — the fields a human's correction can label (ruling R-C2-E10). */
+/**
+ * `theirs`'s keys, by kind — the fields a human's correction can label. Task and event are ruling
+ * R-C2-E10's shapes verbatim; R-C2-E10 does not fix an email shape, so `EMAIL_LABELLED_FIELDS`
+ * below is instead derived from `validate()`'s own email verdict fields, minus the two that are
+ * never a label a correction would carry (`why`, a rationale string; `confidence`, the model's own
+ * certainty, not a human's).
+ */
 export const TASK_LABELLED_FIELDS = ["effort_hours", "importance", "course"] as const;
 export const EVENT_LABELLED_FIELDS = ["verdict"] as const;
 export const EMAIL_LABELLED_FIELDS = [
