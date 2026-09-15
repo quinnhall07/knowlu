@@ -681,7 +681,11 @@ pub(crate) fn post_coursework(
     };
     for warning in reply.get("warnings").and_then(serde_json::Value::as_array).into_iter().flatten() {
         if let Some(text) = warning.as_str() {
-            warnings.push(text.to_string());
+            // C2 final review E-4: a server-supplied warning lands in the run record, which the
+            // Runs view renders and `runs` prints — so it goes through the same clip-and-scrub
+            // every other borrowed string does. `one_line` collapses newlines (a multi-line
+            // warning would otherwise forge run-record lines) and bounds the length.
+            warnings.push(crate::judge::one_line(text, 200));
         }
     }
     let mut assignments = Vec::new();
@@ -3340,6 +3344,7 @@ mod tests {
     /// R-OB-1: the reply's proposals become cards in the deck, one per unmapped source.
     #[test]
     fn an_unmapped_book_becomes_a_card_the_deck_can_answer() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-card");
         let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
         let mut journal = Journal::new(&vault);
@@ -3371,6 +3376,7 @@ mod tests {
     /// A card is never minted twice for one key — the next slot fetches the same unmapped book.
     #[test]
     fn a_map_card_is_never_minted_twice_for_one_key() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-once");
         let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
         let mut journal = Journal::new(&vault);
@@ -3391,6 +3397,7 @@ mod tests {
     /// guard only sees `approvals/`, and a rejected card lives in `archive/`.
     #[test]
     fn a_rejected_map_card_is_not_re_asked_until_it_expires() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-rejected");
         let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
         let mut journal = Journal::new(&vault);
@@ -3431,6 +3438,7 @@ mod tests {
     /// Approving one writes the mapping into `config/ingest.yaml` and archives the card.
     #[test]
     fn an_approved_map_card_writes_the_mapping_and_is_archived() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-apply");
         std::fs::write(
             vault.join("config").join("ingest.yaml"),
@@ -3530,6 +3538,7 @@ mod tests {
     /// which would be a YAML load error and would take the whole config down with it.
     #[test]
     fn a_second_apply_of_the_same_key_is_a_no_op() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-again");
         let path = vault.join("config").join("ingest.yaml");
         crate::pystr::write_text(
@@ -3630,6 +3639,7 @@ mod tests {
     /// `course` would make every item from that book `course: ""`, which reads as attributed.
     #[test]
     fn a_map_card_with_no_course_is_refused_and_kept() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-blank");
         std::fs::write(
             vault.join("config").join("ingest.yaml"),
@@ -3676,6 +3686,7 @@ mod tests {
     /// half of this file.
     #[test]
     fn a_dry_run_leaves_config_approvals_archive_and_the_journal_byte_identical() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = scratch_vault("map-dryrun-both");
         std::fs::write(
             vault.join("config").join("ingest.yaml"),

@@ -221,7 +221,6 @@ pub struct CloudClient {
     base: String,
     anon_key: String,
     token: String,
-    account_id: String,
     agent: ureq::Agent,
 }
 
@@ -239,13 +238,8 @@ impl CloudClient {
             base: cfg.api_base.trim_end_matches('/').to_string(),
             anon_key: cfg.anon_key.clone(),
             token: token.to_string(),
-            account_id: cfg.account_id.clone(),
             agent,
         }
-    }
-
-    pub fn account_id(&self) -> &str {
-        &self.account_id
     }
 
     /// Every error string this produces is scrubbed of the bearer first: `state/runner-log.md` is
@@ -356,8 +350,44 @@ impl<'a> CloudModel<'a> {
         self.fatal.get()
     }
 
+    /// The reply's `verdict`, or the error a null one means.
+    ///
+    /// **`outcome` first, `cause` second** (C2 final review E-2). The service answers a null
+    /// verdict for three different situations and the three read nothing alike:
+    ///   * `outcome: "capped"` — the account's daily judgment cap or its monthly ceiling. Nothing
+    ///     failed; the answer was simply not bought, and every remaining item in this batch would
+    ///     answer identically. So it sets `fatal` exactly as a 402 does: the rest of the batch
+    ///     makes no request at all, and `enrich` prints ONE summary line naming the cap instead of
+    ///     fifty `model failed` lines. `judge` still exits 0 — a spent cap is a normal outcome.
+    ///   * `outcome: "low confidence"` with a `cause` — `below floor`, `incomplete`, `refused`,
+    ///     `truncated`, `model failed`. The cause is the word, as before.
+    ///   * anything else — `outcome` itself is the fallback, because a reply that names an outcome
+    ///     this build has never heard of still says more than the old literal `no verdict` did.
+    fn verdict_of<'r>(&self, reply: &'r Value) -> Result<&'r Value, ModelError> {
+        if let Some(verdict) = reply.get("verdict").filter(|v| !v.is_null()) {
+            return Ok(verdict);
+        }
+        let outcome = reply.get("outcome").and_then(Value::as_str).unwrap_or_default();
+        if outcome == "capped" {
+            self.fatal.set(Some(judge::CAPPED_LABEL));
+            return Err(ModelError::Capped);
+        }
+        let cause = reply
+            .get("cause")
+            .and_then(Value::as_str)
+            .or(if outcome.is_empty() { None } else { Some(outcome) })
+            .unwrap_or("no verdict");
+        Err(ModelError::Failed(format!("the judgment service answered {cause}")))
+    }
+
     pub(crate) fn call(&self, path: &str, body: &Value) -> Result<Value, ModelError> {
         if let Some(reason) = self.fatal.get() {
+            // C2 final review E-2: the short-circuit must carry the SAME kind of error the first
+            // reply produced, or the second item onward would log `model failed` for a cap the
+            // first item correctly logged as `capped`.
+            if reason == judge::CAPPED_LABEL {
+                return Err(ModelError::Capped);
+            }
             return Err(ModelError::Failed(format!("the judgment service: {reason}")));
         }
         self.client.post(path, body).map_err(|e| {
@@ -377,10 +407,7 @@ impl judge::Model for CloudModel<'_> {
         seed: &judge::Verdict,
     ) -> Result<judge::Verdict, ModelError> {
         let reply = self.call("/judge-task", &task_request(item, h, seed))?;
-        let verdict = reply.get("verdict").filter(|v| !v.is_null()).ok_or_else(|| {
-            let cause = reply.get("cause").and_then(Value::as_str).unwrap_or("no verdict");
-            ModelError::Failed(format!("the judgment service answered {cause}"))
-        })?;
+        let verdict = self.verdict_of(&reply)?;
         // Through `judge::parse_reply`, deliberately. The clamps, the one-lined reason and the
         // blank-is-None rules are the engine's, and a reply from the service goes through exactly
         // the door a reply from a local process went through — so the service can never widen a
@@ -412,10 +439,7 @@ pub fn event_request(item: &judge::EventItem) -> Value {
 impl judge::EventModel for CloudModel<'_> {
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
-        let verdict = reply.get("verdict").filter(|v| !v.is_null()).ok_or_else(|| {
-            let cause = reply.get("cause").and_then(Value::as_str).unwrap_or("no verdict");
-            ModelError::Failed(format!("the judgment service answered {cause}"))
-        })?;
+        let verdict = self.verdict_of(&reply)?;
         Ok(judge::EventVerdict {
             verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
             why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
@@ -459,10 +483,7 @@ pub fn email_request(item: &judge::EmailItem) -> Value {
 impl judge::EmailModel for CloudModel<'_> {
     fn judge_email(&self, item: &judge::EmailItem) -> Result<judge::EmailVerdict, ModelError> {
         let reply = self.call("/judge-email", &email_request(item))?;
-        let verdict = reply.get("verdict").filter(|v| !v.is_null()).ok_or_else(|| {
-            let cause = reply.get("cause").and_then(Value::as_str).unwrap_or("no verdict");
-            ModelError::Failed(format!("the judgment service answered {cause}"))
-        })?;
+        let verdict = self.verdict_of(&reply)?;
         let text = |key: &str| verdict.get(key).and_then(Value::as_str).map(str::to_string);
         Ok(judge::EmailVerdict {
             tier: text("tier").unwrap_or_else(|| "information".to_string()),
@@ -482,8 +503,12 @@ impl judge::EmailModel for CloudModel<'_> {
 /// **A pull, never a push** — the device asks inside its own slot, so a laptop that is off for a
 /// week simply asks later and gets everything. `ack` is the previous pull's uids: a row is only
 /// marked delivered once the device has actually written it, so a crash between the reply and the
-/// write costs a repeat, not a lost task. The `bool` is the service's `more`: it stopped at its own
-/// wall-clock budget and the device should ask again in this same slot.
+/// write costs a repeat, not a lost task. `more` is the service's own: it stopped at its wall-clock
+/// budget and the device should ask again in this same slot. `deferred` is how many messages the
+/// service read and could not queue — a spent cap, a low-confidence verdict, a model failure. They
+/// are neither queued nor marked seen server-side, so they come back; the count exists so a slot
+/// that wrote nothing can say whether there was nothing to write or the service could not answer
+/// (C2 final review E-4).
 /// The exact `error` text `/gmail-read` answers when P2 (the Google client) was never set on this
 /// deployment (`handler.ts`'s `missing: "config"` branch). Matched exactly (R-C2-E45 (3)) so a
 /// platform 503 — a redeploy, a gateway hiccup, anything that is not THIS situation — stays a
@@ -491,10 +516,13 @@ impl judge::EmailModel for CloudModel<'_> {
 /// the real answer is "try later".
 const GMAIL_NOT_CONFIGURED_DETAIL: &str = "Google sign-in is not configured on this deployment";
 
-pub fn pull_gmail_queue(
-    client: &CloudClient,
-    ack: &[String],
-) -> Result<(Vec<GmailItem>, bool), CloudError> {
+pub struct GmailPull {
+    pub items: Vec<GmailItem>,
+    pub more: bool,
+    pub deferred: u64,
+}
+
+pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPull, CloudError> {
     // R-C2-E41: an unconfigured deployment (no P2) is the one situation `/gmail-read` answers
     // with a real HTTP failure rather than `quiet: true` — there may be no account row to name a
     // reason against at all. Caught here, once, so every caller downstream sees the same closed
@@ -516,6 +544,7 @@ pub fn pull_gmail_queue(
         return Err(CloudError::Quiet(reason));
     }
     let more = reply.get("more").and_then(Value::as_bool).unwrap_or(false);
+    let deferred = reply.get("deferred").and_then(Value::as_u64).unwrap_or(0);
     let mut out = Vec::new();
     for row in reply.get("items").and_then(Value::as_array).into_iter().flatten() {
         let p = row.get("payload").unwrap_or(&Value::Null);
@@ -533,7 +562,7 @@ pub fn pull_gmail_queue(
             confidence: p.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
         });
     }
-    Ok((out, more))
+    Ok(GmailPull { items: out, more, deferred })
 }
 
 impl CloudModel<'_> {

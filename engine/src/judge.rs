@@ -96,6 +96,11 @@ pub enum LowCause {
     Incomplete,
     /// The model did not answer at all: the process failed, timed out, or replied unparseably.
     ModelFailed,
+    /// C2 final review E-2: the judgment service refused because the account has spent its daily
+    /// judgment cap (or its monthly budget ceiling). **Not a model failure** — nothing went wrong
+    /// with the model, the answer simply was not bought — and a log that said `model failed`
+    /// fifty times for one exhausted cap is the reading this variant exists to prevent.
+    Capped,
 }
 
 impl LowCause {
@@ -106,6 +111,7 @@ impl LowCause {
             LowCause::BelowFloor => "below floor",
             LowCause::Incomplete => "incomplete",
             LowCause::ModelFailed => "model failed",
+            LowCause::Capped => "capped",
         }
     }
 }
@@ -169,12 +175,21 @@ pub enum Missing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelError {
     Failed(String),
+    /// C2 final review E-2: the service answered `outcome: "capped"` — the account's daily
+    /// judgment cap or its monthly budget ceiling. Its own variant, not a `Failed` carrying those
+    /// words, because it is the one model error that is not a fault and must not be logged as one.
+    Capped,
 }
+
+/// The one sentence this crate uses for a spent cap, in both the per-item error and the batch's
+/// summary line. A closed-set literal: nothing here came from a server body.
+pub const CAPPED_LABEL: &str = "the daily judgment cap";
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModelError::Failed(m) => write!(f, "{m}"),
+            ModelError::Capped => write!(f, "the judgment service: {CAPPED_LABEL}"),
         }
     }
 }
@@ -470,6 +485,16 @@ pub fn judge_task(
     };
     let mut answer = match model.judge(item, h, &seed) {
         Ok(a) => a,
+        // C2 final review E-2: a spent cap is its own cause. Everything else about the outcome is
+        // the same — tier 1's work is still written, the run still exits 0 — but the log says
+        // `capped`, which is a thing to act on, rather than `model failed`, which is not.
+        Err(ModelError::Capped) => {
+            return Outcome::LowConfidence {
+                seed,
+                why: ModelError::Capped.to_string(),
+                cause: LowCause::Capped,
+            }
+        }
         Err(e) => {
             return Outcome::LowConfidence { seed, why: e.to_string(), cause: LowCause::ModelFailed }
         }

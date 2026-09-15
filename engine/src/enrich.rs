@@ -71,6 +71,9 @@ pub const DEFAULT_LIMIT: usize = 50;
 /// `"{left} left for the next slot"` line; nothing is lost, and no slot is held for an hour.
 pub const BATCH_BUDGET: Duration = Duration::from_secs(15 * 60);
 
+/// `Copy` so the cloud arm can build a variant with one field changed (`..*opts`); every field is
+/// already a shared reference or a plain value, so a copy is what a borrow would have been.
+#[derive(Clone, Copy)]
 pub struct Options<'a> {
     pub via: &'a str,
     pub run_id: Option<&'a str>,
@@ -377,19 +380,27 @@ pub fn run_lines_with(
     // `service unavailable`) instead of fifty `model failed` lines — ruling R-3a-20's point, at
     // the boundary a cloud judge adds. Every other failure (a 429, a 5xx, a dropped connection)
     // stays per-item, because the next item genuinely may succeed.
-    match model.probe() {
+    let probe = model.probe();
+    // C2 final review E-1: `enrich_with` starts its OWN clock (`batch_started`), so before this it
+    // was handed a full `opts.budget` no matter how much of the slot the probe had already spent —
+    // and on a network that black-holes rather than refuses, the probe alone can cost a whole
+    // `CALL_TIMEOUT`. The arm's remaining time is what every pass below gets: the enrichment batch
+    // here, then `judge_roster`, then `pull_gmail`, then `pull_rules`, each subtracting what the
+    // ones before it spent. The sum is what has to fit inside `scheduler::CHILD_TIMEOUT`.
+    let arm_opts = Options { budget: opts.budget.saturating_sub(arm_started.elapsed()), ..*opts };
+    match probe {
         Some(reason) => {
             // Exactly one line: `probe()` already set `model.fatal()` to this same reason, so the
             // `if let Some(reason) = model.fatal()` line below — which exists for a batch that
             // turned fatal partway through — must not also fire here, or the run would print two
             // contradictory summaries ("nothing was sent" and "the rest ... was not sent") for the
             // one call that was actually made.
-            let (code, mut lines) = enrich_with(vault, opts, Err(judge::Missing::Service(reason)));
+            let (code, mut lines) = enrich_with(vault, &arm_opts, Err(judge::Missing::Service(reason)));
             lines.insert(0, format!("judge: the service answered {reason}; nothing was sent"));
             (code, lines)
         }
         None => {
-            let (code, mut lines) = enrich_with(vault, opts, Ok(&model));
+            let (code, mut lines) = enrich_with(vault, &arm_opts, Ok(&model));
 
             // C2 Task 9 — the events pass. Runs whenever at least one event source is enabled,
             // even when the enrichment batch above was empty: a vault can have nothing to enrich
@@ -399,8 +410,11 @@ pub fn run_lines_with(
             // the enrichment batch rather than getting a fresh fifteen minutes of its own — the
             // remaining time is whatever `arm_started` has not already spent — and
             // `judge_roster`'s own loop breaks on it exactly as `enrich_with`'s does above, folding
-            // what it does not reach into a "left for the next slot" line. `events_config` is the
-            // one already loaded before the probe, not re-read.
+            // what it does not reach into a "left for the next slot" line. C2 final review E-4:
+            // `events_config` is read HERE only to decide whether this pass runs at all
+            // (`any_feed`) and to pass `judge_per_run_cap` — `judge_roster` re-reads
+            // `config/events.yaml` itself, so this is not the config it works from, and an earlier
+            // comment claiming it was handed down was wrong.
             let remaining_budget = opts.budget.saturating_sub(arm_started.elapsed());
             let proxy = |url: &str| -> Result<String, String> {
                 crate::cloudmodel::fetch_event_source(client, url)
@@ -426,11 +440,15 @@ pub fn run_lines_with(
                 lines.extend(pull_gmail(vault, client, opts, gmail_budget));
             }
 
-            // C2 Task 12 — rule promotion. Runs on every cloud arm, whatever the three passes
-            // above found: it sends any decision the student already made and files whatever the
-            // service is offering, and both directions are cheap PostgREST reads/writes with no
-            // model call behind them.
-            lines.extend(pull_rules(vault, client, opts));
+            // C2 Task 12 — rule promotion. Runs whenever the cloud arm got past the probe,
+            // whatever the three passes above found: it sends any decision the student already
+            // made and files whatever the service is offering, and both directions are cheap
+            // PostgREST reads/writes with no model call behind them. C2 final review E-1: it takes
+            // whatever of `opts.budget` the three passes above have not already spent, the same
+            // way `judge_roster` and `pull_gmail` do — before this it took no budget at all and
+            // could start a request after the slot's own twenty minutes were already gone.
+            let rules_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(pull_rules(vault, client, opts, rules_budget));
 
             if let Some(reason) = model.fatal() {
                 lines.push(format!(
@@ -531,6 +549,7 @@ pub fn pull_gmail(
     let mut lines: Vec<String> = Vec::new();
     let (mut notes, mut cards, mut dropped, mut invalid, mut failed) =
         (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut deferred = 0u64;
     let mut ack: Vec<String> = Vec::new();
     let started = std::time::Instant::now();
 
@@ -541,10 +560,16 @@ pub fn pull_gmail(
         // include model calls at up to that cost each; asking with less of the slot left than one
         // more call could take risks stalling past `scheduler::CHILD_TIMEOUT` for nothing.
         if started.elapsed() + crate::cloudmodel::CALL_TIMEOUT > budget {
-            lines.push(format!("gmail: {} queued, left for the next slot", notes + cards + dropped));
+            // C2 final review E-4: only when this run actually queued something. A slot whose
+            // budget ran out before the FIRST round has nothing to leave for the next one, and
+            // `gmail: 0 queued, left for the next slot` read as a loss rather than a no-op.
+            let queued = notes + cards + dropped;
+            if queued > 0 {
+                lines.push(format!("gmail: {queued} queued, left for the next slot"));
+            }
             break;
         }
-        let (items, more) = match crate::cloudmodel::pull_gmail_queue(client, &ack) {
+        let pulled = match crate::cloudmodel::pull_gmail_queue(client, &ack) {
             Ok(got) => got,
             // R-C2-E41: a calendar-only grant is not a failure at all — a step left out, exactly
             // like `judge (skipped: no model)` — so it prints nothing rather than a line that
@@ -557,6 +582,8 @@ pub fn pull_gmail(
                 return lines;
             }
         };
+        let (items, more) = (pulled.items, pulled.more);
+        deferred += pulled.deferred;
         ack.clear();
         if items.is_empty() {
             if round == 0 {
@@ -662,6 +689,13 @@ pub fn pull_gmail(
         }
     }
     let mut summary = format!("gmail: {notes} task(s), {cards} proposed, {dropped} dropped as information");
+    // C2 final review E-4: the service's own count of messages it read and could not queue — a
+    // spent cap, a verdict under the floor, a model failure. They are neither queued nor marked
+    // seen server-side, so they come back next slot; without this line a student whose account is
+    // capped sees `0 task(s), 0 proposed, 0 dropped` and nothing to explain it.
+    if deferred > 0 {
+        summary.push_str(&format!(", {deferred} deferred by the service"));
+    }
     if invalid > 0 {
         summary.push_str(&format!(", {invalid} skipped as malformed"));
     }
@@ -794,14 +828,27 @@ pub const RULES_ACTOR: &str = "agent:knowlu.rules";
 
 /// Send the decisions the student has already made, then file whatever the service is offering.
 ///
+/// **Runs on a cloud arm that got past the probe** — not on "every cloud arm". A vault with
+/// nothing to enrich, no enabled event source, no Google grant and no answered rule card takes
+/// `run_lines_with`'s early return and never reaches this, which is exactly what keeps a twice-daily
+/// slot from spending two PostgREST round trips a day forever on a vault that has nothing to say.
+///
 /// **Sending first** means a slot never proposes a rule the student answered an hour ago. The card
 /// is an ordinary proposal, so it is counted, escalated, snoozed past the 15-a-day cap and expired
 /// exactly as every other card is. `rank` leaves an approved one alone (hand-off H6), because
 /// `rank` never opens a socket for a judgment.
+///
+/// `budget` is whatever of the slot the three passes before this one have left (C2 final review
+/// E-1), checked before each request exactly as [`pull_gmail`] checks its own. Both directions
+/// here are cheap PostgREST calls with no model behind them — but "cheap" is a property of the
+/// server, not of the network, and each one can still cost a whole `CALL_TIMEOUT` on a connection
+/// that black-holes. Whatever this run does not reach is named and left for the next slot: a
+/// decision is re-read from its still-`approved` card, and a proposal is re-offered.
 pub fn pull_rules(
     vault: &Path,
     client: &crate::cloudmodel::CloudClient,
     opts: &Options<'_>,
+    budget: std::time::Duration,
 ) -> Vec<String> {
     let ctx = WriteContext {
         actor: RULES_ACTOR.to_string(),
@@ -811,11 +858,21 @@ pub fn pull_rules(
     let mut journal = Journal::new(vault);
     let mut lines: Vec<String> = Vec::new();
     let today = jiff::Zoned::now().date();
+    let started = std::time::Instant::now();
+    // The same discipline `pull_gmail` uses: checked BEFORE the request, not after, so the worst
+    // case this bounds is the budget plus one call already in flight.
+    let spent = |elapsed: std::time::Duration| elapsed + crate::cloudmodel::CALL_TIMEOUT > budget;
 
-    for (path, id, decision) in decided_rule_cards(vault) {
-        match crate::cloudmodel::decide_rule(client, id, &decision) {
+    let cards = decided_rule_cards(vault);
+    for (i, (path, id, decision)) in cards.iter().enumerate() {
+        if spent(started.elapsed()) {
+            lines.push(format!("rules: {} decision(s) left for the next slot", cards.len() - i));
+            return lines;
+        }
+        let (path, id, decision) = (path.as_path(), *id, decision.as_str());
+        match crate::cloudmodel::decide_rule(client, id, decision) {
             Ok(()) => {
-                archive_decided_card(vault, &path, &ctx, &mut journal);
+                archive_decided_card(vault, path, &ctx, &mut journal);
                 lines.push(format!("rules {id}: {decision}"));
             }
             // I4 (R-C2-E47 fix 1), narrowed by R-C2-E49 fix 3: a 404 means the service already
@@ -834,7 +891,7 @@ pub fn pull_rules(
             Err(crate::cloudmodel::CloudError::Status { code: 404, ref detail })
                 if detail == "no such undecided proposal" =>
             {
-                archive_decided_card(vault, &path, &ctx, &mut journal);
+                archive_decided_card(vault, path, &ctx, &mut journal);
                 lines.push(format!("rules {id}: already settled"));
             }
             // NOT archived on any other failure — including a 404 whose body does not match the
@@ -843,6 +900,10 @@ pub fn pull_rules(
         }
     }
 
+    if spent(started.elapsed()) {
+        lines.push("rules: the offer was left for the next slot".to_string());
+        return lines;
+    }
     let proposals = match crate::cloudmodel::pull_rule_proposals(client) {
         Ok(p) => p,
         Err(e) => {
@@ -1535,6 +1596,17 @@ mod tests {
     /// `engine/tests/cloud_contract.rs`'s `Loopback` uses, duplicated here rather than shared
     /// because a `src` unit test cannot depend on a separate test binary.
     fn multi_reply_loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        multi_reply_loopback_slow(replies, std::time::Duration::ZERO)
+    }
+
+    /// [`multi_reply_loopback`] with the FIRST reply held back by `first_delay` — the one way a
+    /// test can spend a measurable amount of the cloud arm's wall clock without sleeping in the
+    /// test itself. Used by the budget test (C2 final review E-1), which needs the probe to cost
+    /// more than the whole budget.
+    fn multi_reply_loopback_slow(
+        replies: Vec<(u16, String)>,
+        first_delay: std::time::Duration,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
         // C2 Task 9 fix 2 (R-C2-E22 second pass, minor): non-blocking and polled against a
         // deadline, not a blocking `accept()` — a regression that makes the events pass send fewer
@@ -1545,7 +1617,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             use std::io::{BufRead, BufReader, Read, Write};
             let mut seen = Vec::new();
-            for (code, body) in replies {
+            for (index, (code, body)) in replies.into_iter().enumerate() {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 let mut accepted = None;
                 while std::time::Instant::now() < deadline {
@@ -1584,6 +1656,9 @@ mod tests {
                     let _ = reader.read_exact(&mut body_buf);
                 }
                 seen.push(format!("{head}{}", String::from_utf8_lossy(&body_buf)));
+                if index == 0 && !first_delay.is_zero() {
+                    std::thread::sleep(first_delay);
+                }
                 let response = format!(
                     "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -1672,6 +1747,7 @@ mod tests {
     /// the one line that is *supposed* to differ; everything else is the contract.
     #[test]
     fn an_approved_gmail_card_materialises_the_same_note_a_task_tier_would() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("gmail-card");
         // `vault(tag)` seeds one fixture task (`hw3.md`) for the enrichment-focused tests above;
         // this test's own `find` below picks out "whichever task is not `direct`", so an empty
@@ -1717,6 +1793,7 @@ mod tests {
     /// it applies to them unchanged — which is the narrowing recorded in the fidelity ledger.
     #[test]
     fn an_over_budget_gmail_batch_is_snoozed_not_dropped() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("gmail-budget");
         let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -1968,7 +2045,11 @@ mod tests {
     }
 
     /// R-C2-E42: a zero-length remaining budget must stop `pull_gmail` before its first round even
-    /// asks — the round check happens before the network call, not after.
+    /// asks — the round check happens before the network call, not after. C2 final review E-4
+    /// narrowed what it SAYS when it stops: `gmail: 0 queued, left for the next slot` read as a
+    /// loss, when in fact nothing had been pulled and so nothing was left behind. The property
+    /// R-C2-E42 exists for is the empty request list below; the line is only reported when this run
+    /// really did queue something it is now leaving for the next slot.
     #[test]
     fn the_gmail_pull_stops_before_its_first_round_when_the_slot_has_no_budget_left() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
@@ -1977,7 +2058,10 @@ mod tests {
         let client = client_for(base);
         let log = v.join("_log");
         let lines = pull_gmail(&v, &client, &opts(&log), std::time::Duration::ZERO);
-        assert!(lines.iter().any(|l| l.contains("left for the next slot")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("left for the next slot")),
+            "nothing was queued, so nothing was left for the next slot: {lines:?}"
+        );
         let requests = handle.join().expect("the listener thread did not panic");
         assert!(requests.is_empty(), "a zero budget must make no request at all: {requests:?}");
         let _ = std::fs::remove_dir_all(&v);
@@ -2221,12 +2305,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&unconnected);
     }
 
+    /// C2 final review E-2 (closing deferred m5): `outcome: "capped"` is the account's daily
+    /// judgment cap, not fifty model failures. Before this fix the three verdict-null arms read
+    /// only `cause` — which a capped reply leaves null — so every item in the batch made its own
+    /// request, got `the judgment service answered no verdict`, and logged `model failed`. Now the
+    /// first capped reply sets the same fatal flag a 402 sets: no further request is made, one
+    /// summary line names the cap, and the judgment log says `capped`.
+    #[test]
+    fn a_capped_reply_stops_the_batch_after_one_request_and_the_log_says_capped() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("cloud-capped");
+        // A second flagged note, so "stopped after one request" is a claim with something to stop.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw4.md"),
+            &NOTE.replace("Homework 3", "Homework 4").replace("task_1111111111", "task_2222222222"),
+        ).unwrap();
+        let capped = crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": null, "outcome": "capped", "cause": null, "tier": 3,
+        }));
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // the probe
+            (200, capped),                                                              // /judge-task
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // pull_rules
+        ]);
+        let log = v.join("_log");
+        let (code, lines) = run_lines_with(&v, &opts(&log), Some(&client));
+
+        assert_eq!(code, 0, "a spent cap is a normal outcome: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l ==
+                "judge: the service answered the daily judgment cap, so the rest of the batch was not sent"),
+            "the student's line must name the cap: {lines:?}"
+        );
+        let requests = server.requests();
+        let asked: Vec<&String> = requests.iter().filter(|r| r.contains("/judge-task")).collect();
+        assert_eq!(asked.len(), 1, "one /judge-task and no more: {requests:?}");
+
+        let raw = raw_log_text(&log);
+        assert!(raw.contains("\"cause\": \"capped\""), "the log must record the cap: {raw}");
+        assert!(!raw.contains("model failed"), "a spent cap is not a model failure: {raw}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// C2 final review E-1: the cloud arm shares ONE budget across four passes, and before this
+    /// fix two of them did not know that. `enrich_with` started its own clock, so it was handed a
+    /// full `opts.budget` however much the probe had already spent; `pull_rules` took no budget at
+    /// all and would open a connection after the slot's own `scheduler::CHILD_TIMEOUT` had run
+    /// out. Here the probe alone costs more than the whole budget — the listener holds its first
+    /// reply back — so the enrichment batch must take NO item and `pull_rules` must make NO
+    /// request, and the run must still exit 0 naming what was left.
+    #[test]
+    fn a_probe_that_eats_the_budget_leaves_the_batch_and_the_rules_pull_for_the_next_slot() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("budget-arm");
+        // One scripted reply: the probe's. A second request would be refused, and every line
+        // asserted below would read differently — which is what makes "no request" provable
+        // without waiting on an accept that never comes.
+        let (base, handle) = multi_reply_loopback_slow(
+            vec![(200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] })))],
+            std::time::Duration::from_millis(500),
+        );
+        let client = client_for(base);
+        let log = v.join("_log");
+        let o = Options { budget: std::time::Duration::from_millis(150), ..opts(&log) };
+        let (code, lines) = run_lines_with(&v, &o, Some(&client));
+
+        assert_eq!(code, 0, "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l == "judge: 0 item(s), 0 enriched, 0 proposed, 1 left for the next slot"),
+            "the batch must take no item once the probe has spent the budget: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "rules: the offer was left for the next slot"),
+            "pull_rules must not open a connection with no budget left: {lines:?}"
+        );
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "the probe and nothing else: {requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     // -----------------------------------------------------------------------------------------
     // C2 Task 12 — rule promotion: the loop that retires model calls.
     // -----------------------------------------------------------------------------------------
 
     #[test]
     fn a_rule_proposal_becomes_a_card_the_deck_can_answer() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-file");
         let offered = crate::ledger::dumps_value(&serde_json::json!({
             "proposals": [{
@@ -2239,7 +2404,7 @@ mod tests {
         let (client, mut server) = loopback_client(vec![(200, offered)]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(lines.iter().any(|l| l.contains("rules 41: proposed")), "{lines:?}");
         let card = std::fs::read_to_string(vault.join("approvals").join("rule-41.md")).expect("the card exists");
         assert!(card.contains("kind: rule"));
@@ -2252,6 +2417,7 @@ mod tests {
 
     #[test]
     fn a_card_is_never_minted_twice_for_one_proposal_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-once");
         let offered = crate::ledger::dumps_value(&serde_json::json!({
             "proposals": [{ "id": 41, "kind": "task", "feature": "title_prefix", "value": "CS 100 Lab",
@@ -2261,9 +2427,9 @@ mod tests {
             loopback_client(vec![(200, offered.clone()), (200, offered)]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let first = pull_rules(&vault, &client, &o);
+        let first = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(first.iter().any(|l| l.contains("1 proposed of 1")), "{first:?}");
-        let second = pull_rules(&vault, &client, &o);
+        let second = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(second.iter().any(|l| l.contains("0 proposed of 1")), "{second:?}");
         let _ = server.requests();
         let _ = std::fs::remove_dir_all(&vault);
@@ -2271,6 +2437,7 @@ mod tests {
 
     #[test]
     fn an_approved_card_is_sent_once_and_then_archived() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-decide");
         let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -2304,13 +2471,13 @@ mod tests {
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(lines.iter().any(|l| l.contains("rules 41: approved")), "{lines:?}");
         assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
         // A third pull re-sends no decision (the card is archived, not `approvals/`), and — even
         // though the service offers id 41 again — files no new card: `existing_rule_ids` sees
         // `rule_id: 41` in `archive/` and skips it.
-        let again = pull_rules(&vault, &client, &o);
+        let again = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(!again.iter().any(|l| l.contains("rules 41: approved") || l.contains("rules 41: proposed")), "{again:?}");
         assert!(again.iter().any(|l| l.contains("0 proposed of 1")), "{again:?}");
         assert!(!vault.join("approvals").join("rule-41.md").exists(), "must not be re-filed");
@@ -2324,6 +2491,7 @@ mod tests {
     /// and archive exactly as an approved one archives, no round trip needed for the vault side.
     #[test]
     fn a_rejected_card_sends_rejected_and_is_archived() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-reject");
         let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -2346,7 +2514,7 @@ mod tests {
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(lines.iter().any(|l| l.contains("rules 41: rejected")), "{lines:?}");
         assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must archive");
 
@@ -2363,6 +2531,7 @@ mod tests {
     /// from ever firing again for this vault.
     #[test]
     fn a_decision_the_service_already_settled_is_archived_not_retried() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-already-settled");
         let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -2385,7 +2554,7 @@ mod tests {
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(lines.iter().any(|l| l.contains("rules 41: already settled")), "{lines:?}");
         assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "a 404 must still archive the card");
         let _ = server.requests();
@@ -2399,6 +2568,7 @@ mod tests {
     /// at all, so there is no `error` field to extract.
     #[test]
     fn a_404_with_no_matching_body_is_not_read_as_already_settled() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-404-generic");
         let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -2421,7 +2591,7 @@ mod tests {
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(!lines.iter().any(|l| l.contains("already settled")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("rules 41: not sent") && l.contains("HTTP 404")), "{lines:?}");
         assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "an unmatched 404 must not archive the card");
@@ -2431,6 +2601,7 @@ mod tests {
 
     #[test]
     fn a_decision_that_cannot_be_sent_keeps_its_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = vault("rules-retry");
         let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -2452,7 +2623,7 @@ mod tests {
         ]);
         let log = vault.join("_log");
         let o = opts(&log);
-        let lines = pull_rules(&vault, &client, &o);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
         assert!(lines.iter().any(|l| l.contains("not sent")), "{lines:?}");
         assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must survive to retry");
         let _ = server.requests();
