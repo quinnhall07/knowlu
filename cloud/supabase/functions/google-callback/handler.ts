@@ -30,27 +30,47 @@ function page(message: string, status = 200): Response {
   );
 }
 
+// R-C2-E31: every page said "Gmail", but the FIRST ask this pair ever makes is the calendar — a
+// student connecting only their calendar must not read a success page that names a mailbox they
+// were never asked about. The success message names what `tokens.scopes` actually carries.
+const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+
+function successMessage(scopes: string[]): string {
+  const calendar = scopes.includes(CALENDAR_SCOPE);
+  const gmail = scopes.includes(GMAIL_SCOPE);
+  const what = calendar && gmail
+    ? "Google Calendar and Gmail are"
+    : gmail
+    ? "Gmail is"
+    : calendar
+    ? "Google Calendar is"
+    : "Google is";
+  return `${what} connected. You can <b>close this window</b> — Knowlu will read it at your next slot.`;
+}
+
 export function callbackHandler(deps: CallbackDeps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const state = url.searchParams.get("state") ?? "";
     const code = url.searchParams.get("code") ?? "";
     if (url.searchParams.get("error") !== null) {
-      return page("Gmail was <b>not connected</b>. You can close this window and try again from Knowlu.");
+      return page("Google was <b>not connected</b>. You can close this window and try again from Knowlu.");
     }
     const accountId = state === "" ? null : await deps.takeState(state);
     if (accountId === null || code === "") {
       return page("That link has expired. Start again from Knowlu.", 400);
     }
+    let tokens: Awaited<ReturnType<CallbackDeps["exchange"]>>;
     try {
-      const tokens = await deps.exchange(code);
+      tokens = await deps.exchange(code);
       await deps.storeRefreshToken(accountId, tokens.sub, tokens.email, tokens.refresh_token, tokens.scopes);
     } catch (e) {
       // The class only. A token-exchange error body can echo the code and, on some failures, the
       // client secret's prefix.
       console.error(`google-callback: ${e instanceof Error ? e.constructor.name : "unknown"}`);
-      return page("Gmail could not be connected just now. You can close this window and try again from Knowlu.");
+      return page("Google could not be connected just now. You can close this window and try again from Knowlu.");
     }
-    return page("Gmail is connected. You can <b>close this window</b> — Knowlu will read it at your next slot.");
+    return page(successMessage(tokens.scopes));
   };
 }

@@ -29,6 +29,38 @@ Deno.test("every table this stream creates has row level security enabled", asyn
   }
 });
 
+Deno.test("every SECURITY DEFINER function this stream creates has execute revoked from anon and authenticated", async () => {
+  // R-C2-E29: `revoke execute … from public` removes only the PUBLIC entry. Supabase grants
+  // execute to `anon` and `authenticated` explicitly on every new function by default, so a
+  // SECURITY DEFINER function — which runs with the DEFINING role's privileges, not the caller's —
+  // stays reachable over PostgREST with the anon key unless both are named too. The revoke may
+  // live in this same migration or a later one (a follow-up migration is how a privilege gap gets
+  // fixed without editing an applied one), never earlier.
+  const files = await ours();
+  for (let i = 0; i < files.length; i++) {
+    const [name, sql] = files[i];
+    for (const d of sql.matchAll(/create\s+(?:or\s+replace\s+)?function\s+(\w+)\s*\([^)]*\)[\s\S]*?\$\$;/gi)) {
+      if (!/security\s+definer/i.test(d[0])) continue;
+      const fn = d[1];
+      const rest = files.slice(i).map(([, s]) => s).join("\n");
+      // A previous migration's own `revoke … from public` may still be sitting right there
+      // (forward-only: it is never edited out) — every match counts, not just the first, so a
+      // narrower fix-up revoke later in the corpus still satisfies this.
+      const revokeRe = new RegExp(`revoke\\s+execute\\s+on\\s+function\\s+${fn}\\s*\\([^)]*\\)\\s+from\\s+([^;]+);`, "gi");
+      const matches = [...rest.matchAll(revokeRe)];
+      assert(matches.length > 0, `${name}: ${fn} is SECURITY DEFINER with no 'revoke execute … from …' in this or a later migration (R-C2-E29)`);
+      const ok = matches.some((m) => {
+        const from = m[1].toLowerCase();
+        return from.includes("anon") && from.includes("authenticated");
+      });
+      assert(
+        ok,
+        `${name}: ${fn} has no revoke naming both anon and authenticated — 'from public' alone leaves both callable`,
+      );
+    }
+  }
+});
+
 Deno.test("the judgments table has nowhere to put a body", async () => {
   const sql = await Deno.readTextFile(new URL("20260911000100_judgment_service.sql", HERE));
   const start = sql.indexOf("create table if not exists judgments");

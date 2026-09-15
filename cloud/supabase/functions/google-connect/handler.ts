@@ -45,14 +45,20 @@ export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Reque
     try {
       const { account_id } = await entitle(req);
       if (deps.clientId === "") {
-        return Response.json({ error: "Gmail is not configured on this deployment" }, { status: 503 });
+        // "Google", not "Gmail": the FIRST ask this endpoint makes is the calendar, and a student
+        // who has never heard of the Gmail step must not read this as a mail-only failure (§11a,
+        // ruling R-C2-E31).
+        return Response.json({ error: "Google sign-in is not configured on this deployment" }, { status: 503 });
       }
       if (req.method === "DELETE") {
         try {
           await deps.disconnect(account_id);
         } catch (e) {
-          // The user asked to be disconnected; a failed revoke must not leave a live grant behind
-          // a UI that says "disconnected". The row goes either way, and this is the record.
+          // R-C2-E33: `deps.disconnect` (`disconnect.ts`'s `disconnectGrant`) forgets the row only
+          // once the revoke has succeeded or was already moot — a genuinely failed revoke throws
+          // and the row STAYS, on purpose, so the student can retry rather than lose the only copy
+          // of the token. Swallowed here so the user still sees "disconnected" rather than a 500;
+          // the failure is this log line, not a live grant claiming to be gone.
           console.error(`google-connect: revoke failed (${e instanceof Error ? e.constructor.name : "unknown"})`);
         }
         return Response.json({ disconnected: true });

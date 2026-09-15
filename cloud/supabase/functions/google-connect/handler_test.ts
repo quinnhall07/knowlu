@@ -82,24 +82,30 @@ Deno.test("?status=1 distinguishes a gmail-only grant from a calendar one", asyn
   assertEquals(reply.scopes.includes(CALENDAR_SCOPE), false);
 });
 
-Deno.test("disconnect revokes at Google before it forgets the row", async () => {
-  const order: string[] = [];
+Deno.test("the handler answers disconnected: true once deps.disconnect resolves", async () => {
+  // R-C2-E33: this only proves the shape at this layer — that a resolved `deps.disconnect` is
+  // awaited before the reply. The real revoke-then-forget ORDERING, and what a failed revoke does
+  // to the row, is `disconnect.ts`'s own contract, proven in `disconnect_test.ts` — a mock's own
+  // literal here proved nothing about either.
+  let called = false;
   const handler = connectHandler(OK, deps({
     disconnect: () => {
-      order.push("revoked-then-deleted");
+      called = true;
       return Promise.resolve();
     },
   }));
   const response = await handler(new Request("http://127.0.0.1/google-connect", { method: "DELETE" }));
   assertEquals(response.status, 200);
   assertEquals(await response.json(), { disconnected: true });
-  assertEquals(order, ["revoked-then-deleted"]);
+  assert(called, "deps.disconnect must be awaited before the reply");
 });
 
-Deno.test("a disconnect that Google refuses is still a disconnect here", async () => {
-  // The user asked to be disconnected. If the revoke call fails we must still stop reading their
-  // mail: the row goes whatever Google says, and the failure is a log line, not a 500 that leaves
-  // a live grant behind a UI that says "disconnected".
+Deno.test("a rejected deps.disconnect still answers disconnected: true at this layer", async () => {
+  // The user asked to be disconnected; a failed revoke must not surface as a 500 that leaves a UI
+  // stuck retrying forever. Whether the grant itself survives a failed revoke is `disconnect.ts`'s
+  // job (`disconnect_test.ts`), not this handler's — this only proves the API boundary swallows
+  // the rejection and logs it (`google-connect: revoke failed (…)`), which is a distinct promise
+  // from what actually happens to the row.
   const handler = connectHandler(OK, deps({ disconnect: () => Promise.reject(new Error("google 503")) }));
   const response = await handler(new Request("http://127.0.0.1/google-connect", { method: "DELETE" }));
   assertEquals(response.status, 200);
@@ -110,7 +116,7 @@ Deno.test("a missing client id is a 503 that names the configuration, not the ac
   const handler = connectHandler(OK, deps({ clientId: "" }));
   const response = await handler(new Request("http://127.0.0.1/google-connect"));
   assertEquals(response.status, 503);
-  assertEquals((await response.json()).error, "Gmail is not configured on this deployment");
+  assertEquals((await response.json()).error, "Google sign-in is not configured on this deployment");
 });
 
 Deno.test("the entitlement check runs before a nonce is minted", async () => {
