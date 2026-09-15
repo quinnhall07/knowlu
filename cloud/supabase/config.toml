@@ -81,3 +81,7 @@ verify_jwt = false
 verify_jwt = false
 [functions.ingest-coursework]
 verify_jwt = false
+[functions.ingest-ics]
+verify_jwt = false
+[functions.ingest-calendar]
+verify_jwt = false

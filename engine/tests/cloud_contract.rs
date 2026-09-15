@@ -237,3 +237,72 @@ fn tier1_still_answers_without_the_service_being_reached_at_all() {
     assert_eq!(seed.effort_hours, Some(1.52));
     assert_eq!(seed.tier, 1);
 }
+
+#[test]
+fn the_ics_fetch_is_a_get_that_sends_no_url_of_its_own() {
+    let feed = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+    let body = knowlu_engine::ledger::dumps_value(&serde_json::json!({ "ics": feed, "courses": 0 }));
+    let mut server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    // R-C2-E8: `fetch_ics` takes `first_run` and returns `(ics, past_due_uids)`; this reply carries
+    // no `past_due_uids` field, so the second half of the tuple is an empty `Vec` (Task 8a's field).
+    let (got, past_due) = knowlu_engine::cloudmodel::fetch_ics(&client, false).expect("the service answered");
+    assert!(got.contains("BEGIN:VCALENDAR"));
+    assert!(past_due.is_empty());
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("GET /functions/v1/ingest-ics HTTP/1.1"));
+    // The device does not know the URL any more and must not be able to name one.
+    assert!(!sent.contains("ics_url"), "{sent}");
+}
+
+/// A cloud vault whose `ics_url` is blank must reach `/ingest-ics` before it gives up.
+///
+/// Without hand-off H3 this exits 1 six lines into `run_lines`, which sets
+/// `RunSummary.engine_ok = false` and paints the tray amber twice a day forever — the exact
+/// failure `judge`'s always-exit-0 rule exists to prevent, on the step beside it.
+///
+/// **F10**: this test spawns no loopback listener. The run never reaches the service because the
+/// test vault has no session credential in Credential Manager — `cloudmodel::resolve` fails before
+/// any HTTP call is made — so a listener thread here would block forever in `accept()`.
+#[test]
+fn a_cloud_vault_reaches_the_service_before_it_refuses_a_blank_ics_url() {
+    let dir = std::env::temp_dir().join(format!("knowlu-c2-ics-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+    std::fs::create_dir_all(dir.join("tasks")).expect("scratch vault");
+    std::fs::write(dir.join("config").join("ingest.yaml"), "timezone: America/Chicago\nics_url: \"\"\n")
+        .expect("write ingest.yaml");
+    std::fs::write(
+        dir.join("config").join("cloud.yaml"),
+        "api_base: 'https://cloud.example.invalid/functions/v1'\nanon_key: 'anon-not-a-secret'\nsession_credential_target: 'knowlu/c2-test/session'\naccount_id: 'acct-1'\n",
+    )
+    .expect("write cloud.yaml");
+
+    let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, None);
+    // With H3 applied and a session present this is 0 and the feed came from the service. On this
+    // machine there is no credential at that target, so `resolve` fails and the run falls through
+    // to the blank-url refusal — which is still exit 1, but the LINE must name the whole reason,
+    // not merely "no ics_url configured", or the next reader will not know the service was asked.
+    assert_eq!(code, 1);
+    assert!(
+        lines[0].contains("no ics_url configured"),
+        "the refusal must still say what is missing: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_calendar_fetch_is_a_get_that_names_the_feed_and_no_address() {
+    let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g1\r\nSUMMARY:Seminar\r\n\
+               DTSTART:20260909T140000Z\r\nDTEND:20260909T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let body = knowlu_engine::ledger::dumps_value(
+        &serde_json::json!({ "ics": ics, "source": "google_calendar" }),
+    );
+    let mut server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let got = knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    assert!(got.contains("BEGIN:VEVENT"));
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("GET /functions/v1/ingest-calendar?name=google HTTP/1.1"), "{sent}");
+    // The device does not know the secret address any more and must not be able to name one.
+    assert!(!sent.contains("ics_url") && !sent.contains("calendar_ics"), "{sent}");
+}

@@ -378,3 +378,58 @@ impl CloudModel<'_> {
         }
     }
 }
+
+/// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not
+/// judgment** — `ingest` parses what comes back with the same `parse_ics` the golden `today.md`
+/// oracle covers, so the vault's bytes are unchanged by the move.
+///
+/// `first_run` asks `GET /ingest-ics?first_run=1` — set only on the vault's first-ever ingest
+/// (`ingest::is_first_run`) — because that is the one run with no seen-ledger to tell the device
+/// which uids are already archived. The returned `past_due_uids` is Task 8a's: this function
+/// returns an empty `Vec` whenever the reply carries no such field, which is every reply until
+/// Task 8a's server change ships.
+pub fn fetch_ics(client: &CloudClient, first_run: bool) -> Result<(String, Vec<String>), CloudError> {
+    let path = if first_run { "/ingest-ics?first_run=1" } else { "/ingest-ics" };
+    let reply = client.get(path)?;
+    let ics = reply
+        .get("ics")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| CloudError::Body("the reply carried no ics field".to_string()))?;
+    let past_due_uids = reply
+        .get("past_due_uids")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Ok((ics, past_due_uids))
+}
+
+/// One calendar feed, as ICS, from the service (cloud design §11a). **Transport, not judgment** —
+/// `calfeed` parses what comes back with the same `parse_calendar_ics` the golden `today.md`
+/// oracle covers, bounds it to the same 28-day horizon and falls back to the same snapshot.
+///
+/// `Err(String)` because the caller is `Fetchers.calendar`, whose contract predates this module
+/// and whose failure already degrades to "using snapshot".
+pub fn fetch_calendar(client: &CloudClient, name: &str) -> Result<String, String> {
+    let reply = client
+        .get(&format!("/ingest-calendar?name={}", urlencode_component(name)))
+        .map_err(|e| e.to_string())?;
+    reply
+        .get("ics")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "the reply carried no ics field".to_string())
+}
+
+/// The three characters a feed name could carry that a query string would misread. Not a general
+/// percent-encoder: a feed name comes from `config/ingest.yaml`, and anything wilder than this
+/// should fail loudly at the server rather than be smuggled through.
+fn urlencode_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            other => other.encode_utf8(&mut [0u8; 4]).bytes().map(|b| format!("%{b:02X}")).collect(),
+        })
+        .collect()
+}
