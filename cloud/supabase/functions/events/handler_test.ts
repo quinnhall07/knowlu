@@ -113,6 +113,27 @@ Deno.test("a host with no DNS records at all is refused", async () => {
   );
 });
 
+// SSRF fix round 2 (R-C2-E22 second pass, Important) — a resolver that throws SYNCHRONOUSLY rather
+// than rejecting (the shape `Deno.resolveDns` itself takes when it is absent or permission-denied)
+// must still land as "no records", never an unhandled exception that skips the guard and reaches
+// the fetch anyway.
+Deno.test("a resolver that throws synchronously is treated as no records, not a crash", async () => {
+  const resolveDns: ResolveDns = () => {
+    throw new Error("Deno.resolveDns: permission denied");
+  };
+  let fetched = false;
+  await assertRejects(() =>
+    guardedFetch("https://calendar.example.edu/e.ics", {
+      fetchImpl: () => {
+        fetched = true;
+        return Promise.resolve(new Response("", { status: 200 }));
+      },
+      resolveDns,
+    })
+  );
+  assertEquals(fetched, false, "a resolver crash must refuse the fetch, not skip the guard");
+});
+
 Deno.test("a 302 to a host that resolves privately is refused at the hop, and the sneaky host is never fetched", async () => {
   const resolveDns: ResolveDns = (hostname) =>
     Promise.resolve(hostname === "calendar.example.edu" ? ["93.184.216.34"] : ["10.0.0.1"]);

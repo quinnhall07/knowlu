@@ -86,8 +86,12 @@ function ipLiteral(hostname: string): string | null {
 
 export type ResolveDns = (hostname: string, recordType: "A" | "AAAA") => Promise<string[]>;
 
-function defaultResolveDns(hostname: string, recordType: "A" | "AAAA"): Promise<string[]> {
-  return recordType === "A" ? Deno.resolveDns(hostname, "A") : Deno.resolveDns(hostname, "AAAA");
+// `async`, deliberately, and not just `(h, t) => Deno.resolveDns(...)`: if the runtime has no
+// `Deno.resolveDns` (or refuses it — permission, an unsupported record type), the real
+// implementation throws SYNCHRONOUSLY, not by rejecting. An `async` function turns any throw in
+// its body into a rejection automatically, which is what makes `.catch` below able to see it.
+async function defaultResolveDns(hostname: string, recordType: "A" | "AAAA"): Promise<string[]> {
+  return await (recordType === "A" ? Deno.resolveDns(hostname, "A") : Deno.resolveDns(hostname, "AAAA"));
 }
 
 /**
@@ -103,9 +107,13 @@ function defaultResolveDns(hostname: string, recordType: "A" | "AAAA"): Promise<
 async function hostResolvesPublicly(hostname: string, resolveDns: ResolveDns): Promise<boolean> {
   const literal = ipLiteral(hostname);
   if (literal !== null) return !isPrivateAddress(literal);
+  // `Promise.resolve().then(() => resolveDns(...))`, not a bare call: `resolveDns` is injectable
+  // (a test's fake, or `defaultResolveDns` above), and a resolver that throws SYNCHRONOUSLY rather
+  // than rejecting must still land as "no records" here, never an unhandled exception that skips
+  // the guard entirely.
   const [a, aaaa] = await Promise.all([
-    resolveDns(hostname, "A").catch(() => [] as string[]),
-    resolveDns(hostname, "AAAA").catch(() => [] as string[]),
+    Promise.resolve().then(() => resolveDns(hostname, "A")).catch(() => [] as string[]),
+    Promise.resolve().then(() => resolveDns(hostname, "AAAA")).catch(() => [] as string[]),
   ]);
   const addresses = [...a, ...aaaa];
   if (addresses.length === 0) return false;
@@ -186,6 +194,9 @@ export async function guardedFetch(url: string, deps: GuardedFetchDeps = {}): Pr
     });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
+      // A redirect response's body is never read here — released rather than left open, the same
+      // way an over-cap body is released in `readBounded` below.
+      await response.body?.cancel();
       if (location === null) throw new Error("redirect with no location");
       // Re-validated at the top of the next iteration — never followed on trust.
       current = new URL(location, current).toString();

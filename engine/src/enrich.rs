@@ -1009,12 +1009,32 @@ mod tests {
     /// because a `src` unit test cannot depend on a separate test binary.
     fn multi_reply_loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        // C2 Task 9 fix 2 (R-C2-E22 second pass, minor): non-blocking and polled against a
+        // deadline, not a blocking `accept()` — a regression that makes the events pass send fewer
+        // requests than `replies` expects must fail this test, not hang the thread (and the test
+        // that joins it) forever.
+        listener.set_nonblocking(true).expect("nonblocking");
         let port = listener.local_addr().expect("the listener has an address").port();
         let handle = std::thread::spawn(move || {
             use std::io::{BufRead, BufReader, Read, Write};
             let mut seen = Vec::new();
             for (code, body) in replies {
-                let Ok((mut stream, _)) = listener.accept() else { break };
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut accepted = None;
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(pair) => {
+                            accepted = Some(pair);
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let Some((mut stream, _)) = accepted else { break };
+                stream.set_nonblocking(false).expect("blocking for the request/response exchange");
                 let mut reader = BufReader::new(stream.try_clone().expect("clone the accepted stream"));
                 let mut head = String::new();
                 let mut length = 0usize;
