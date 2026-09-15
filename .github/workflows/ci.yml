@@ -82,3 +82,51 @@ jobs:
       # root, precisely so this grant can stay scoped to the one directory that needs it.
       - name: deno test
         run: deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
+
+  # §5.4 measure 2's deploy blocker (hand-off H8, part 2; C2 Task 14): the eval suite replays
+  # `cloud/eval/`'s seed against the pinned model whenever a PR touches what a judgment is asked
+  # (a prompt, a schema) or which model answers it (a `models` row), and fails the PR on a
+  # regression past `cloud/eval/thresholds.json`. C0's branch protection is what actually blocks
+  # the merge; this job only fails the check.
+  #
+  # `cloud/eval/seed/` is empty at merge (ruling R-C2-E12, Task 13) and stays empty until cases
+  # arrive from consented corrections (a later stream's opt-in), so `run_eval.ts` itself exits 0
+  # printing "0 cases — nothing to score" before it reads ANTHROPIC_API_KEY, EVAL_ACCOUNT_ID, or
+  # SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, or opens a connection (ruling R-C2-E50 (2)) — which is
+  # what lets this job pass green on a PR that sets none of its three secrets.
+  eval-gate:
+    runs-on: ubuntu-latest
+    needs: cloud
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0 }
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        with: { deno-version: "2.x" }
+      - name: does this PR touch a prompt, a schema, or the model pins?
+        id: touched
+        shell: bash
+        run: |
+          files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          run=no
+          # The three files that define what is asked and how the answer is checked...
+          if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/judge_(prompts|models|validate)\.ts$'; then run=yes; fi
+          # ...and ANY migration that mentions the `models` table. A pin change is "a migration row
+          # with a date" (§5.2) — `20260912000100_pin_sonnet.sql`, say — so a filename pattern is
+          # exactly the wrong test: it would miss the model swap the gate exists for.
+          for f in $(echo "$files" | grep -E '^cloud/supabase/migrations/.*\.sql$' || true); do
+            if [ -f "$f" ] && grep -qiE '\bmodels\b' "$f"; then run=yes; fi
+          done
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      # `SUPABASE_URL` is not secret (the C1 plan: "each project's reference id, its URL ... none
+      # secret" — `app/src/account.rs`'s own `DEFAULT_API_BASE` names prod's the same way), so it
+      # is the literal staging project URL, not a GitHub secret; the three secrets Quinn sets are
+      # named in the C2 Task 14 report, never a value.
+      - name: eval suite
+        if: steps.touched.outputs.run == 'yes'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_ACCOUNT_ID: ${{ secrets.EVAL_ACCOUNT_ID }}
+          SUPABASE_URL: https://brvhgbihxevrudqpulcm.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
+        run: deno run --allow-read --allow-env --allow-net --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
