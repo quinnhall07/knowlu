@@ -358,15 +358,17 @@ pub fn run_lines_with(
     // nothing to pull, and a vault that HAS linked one must not be starved by an empty enrichment
     // queue and no event source, or its mail would never be asked for.
     let google = google_calendar_linked(vault);
-    // R-C2-E15, widened by fix 1 (R-C2-E22 #1) and again by Task 11 (R-C2-E38): the probe is a
-    // network round trip, and it must not fire when there is nothing to judge in ANY of the three
-    // passes — reusing `pending`'s own predicate, `judge_roster`'s own enabled-source predicate and
-    // `google_calendar_linked` here (not a second scanning routine) is what lets a job that runs
-    // twice a day forever skip both the call and, on a network that black-holes rather than
-    // refuses, the up-to-`CALL_TIMEOUT` stall a probe with no queue behind it would otherwise
-    // risk. `enrich_with` below re-derives the pending list; that second read is the accepted cost
-    // of leaving `enrich_with`'s own signature — and every test that calls it directly — untouched.
-    if pending(vault).0.is_empty() && !any_feed && !google {
+    // R-C2-E15, widened by fix 1 (R-C2-E22 #1), again by Task 11 (R-C2-E38) and again by Task 12
+    // (R-C2-E46): the probe is a network round trip, and it must not fire when there is nothing to
+    // judge or send in ANY of the four passes — reusing `pending`'s own predicate, `judge_roster`'s
+    // own enabled-source predicate, `google_calendar_linked`, and `rule_decisions_waiting` (an
+    // answered `kind: rule` card not yet sent) here, rather than a second scanning routine for any
+    // of them, is what lets a job that runs twice a day forever skip both the call and, on a
+    // network that black-holes rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no
+    // queue behind it would otherwise risk. `enrich_with` below re-derives the pending list; that
+    // second read is the accepted cost of leaving `enrich_with`'s own signature — and every test
+    // that calls it directly — untouched.
+    if pending(vault).0.is_empty() && !any_feed && !google && !rule_decisions_waiting(vault) {
         return enrich_with(vault, opts, Ok(&model));
     }
     // A session or entitlement problem answers every item identically, so the FIRST call decides
@@ -423,6 +425,12 @@ pub fn run_lines_with(
                 let gmail_budget = opts.budget.saturating_sub(arm_started.elapsed());
                 lines.extend(pull_gmail(vault, client, opts, gmail_budget));
             }
+
+            // C2 Task 12 — rule promotion. Runs on every cloud arm, whatever the three passes
+            // above found: it sends any decision the student already made and files whatever the
+            // service is offering, and both directions are cheap PostgREST reads/writes with no
+            // model call behind them.
+            lines.extend(pull_rules(vault, client, opts));
 
             if let Some(reason) = model.fatal() {
                 lines.push(format!(
@@ -771,6 +779,172 @@ fn write_gmail_card(
         suffix += 1;
     }
     let rel = crate::ids::rel(vault, &path);
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+// -----------------------------------------------------------------------------------------
+// C2 Task 12 — rule promotion: the loop that retires model calls.
+// -----------------------------------------------------------------------------------------
+
+/// The agent actor for rule cards. Its own name, not `agent:knowlu.enrich`, so the journal says
+/// which loop filed a card.
+pub const RULES_ACTOR: &str = "agent:knowlu.rules";
+
+/// Send the decisions the student has already made, then file whatever the service is offering.
+///
+/// **Sending first** means a slot never proposes a rule the student answered an hour ago. The card
+/// is an ordinary proposal, so it is counted, escalated, snoozed past the 15-a-day cap and expired
+/// exactly as every other card is. `rank` leaves an approved one alone (hand-off H6), because
+/// `rank` never opens a socket for a judgment.
+pub fn pull_rules(
+    vault: &Path,
+    client: &crate::cloudmodel::CloudClient,
+    opts: &Options<'_>,
+) -> Vec<String> {
+    let ctx = WriteContext {
+        actor: RULES_ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let mut lines: Vec<String> = Vec::new();
+    let today = jiff::Zoned::now().date();
+
+    for (path, id, decision) in decided_rule_cards(vault) {
+        match crate::cloudmodel::decide_rule(client, id, &decision) {
+            Ok(()) => {
+                let rel = crate::ids::rel(vault, &path);
+                let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
+                let literals = vec![
+                    ("status".to_string(), "executed".to_string()),
+                    ("executed_at".to_string(), stamped),
+                ];
+                if crate::write::write_literals(vault, &rel, &literals, &ctx, &mut journal, &WriteOpts::default()).is_ok() {
+                    let _ = crate::write::delete(vault, &rel, &ctx, &mut journal);
+                }
+                lines.push(format!("rules {id}: {decision}"));
+            }
+            // NOT archived on failure: an unsent decision must come back next slot.
+            Err(e) => lines.push(format!("rules {id}: not sent ({e})")),
+        }
+    }
+
+    let proposals = match crate::cloudmodel::pull_rule_proposals(client) {
+        Ok(p) => p,
+        Err(e) => {
+            lines.push(format!("rules: skipped ({e})"));
+            return lines;
+        }
+    };
+    if proposals.is_empty() {
+        return lines;
+    }
+    let existing = existing_rule_ids(vault);
+    let mut filed = 0usize;
+    for proposal in &proposals {
+        // A card is never minted twice for one proposal id — the id is in the card's frontmatter
+        // and this is the guard, exactly as `find_pending_amendment` guards an amend card.
+        if existing.contains(&proposal.id) {
+            continue;
+        }
+        match write_rule_card(vault, proposal, today, &ctx, &mut journal) {
+            Ok(stem) => {
+                filed += 1;
+                lines.push(format!("rules {}: proposed ({stem})", proposal.id));
+            }
+            Err(e) => lines.push(format!("rules {}: not written ({e})", proposal.id)),
+        }
+    }
+    lines.push(format!("rules: {filed} proposed of {} offered", proposals.len()));
+    lines
+}
+
+/// `kind: rule` cards the student has answered, as `(path, rule_id, decision)`. Also what
+/// [`rule_decisions_waiting`] scans — one scanner for "is there an answered rule card", not two.
+fn decided_rule_cards(vault: &Path) -> Vec<(std::path::PathBuf, i64, String)> {
+    let mut out = Vec::new();
+    for path in crate::approvals::sorted_md(&vault.join("approvals")) {
+        let Ok(text) = crate::pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("rule") {
+            continue;
+        }
+        let status = crate::yaml::opt_text(crate::yaml::get(&meta, "status")).unwrap_or_default();
+        if status != "approved" && status != "rejected" {
+            continue;
+        }
+        let Some(id) = crate::yaml::get(&meta, "rule_id").and_then(crate::yaml::i64_of) else { continue };
+        out.push((path, id, status));
+    }
+    out
+}
+
+/// R-C2-E46: whether this vault has an answered `kind: rule` card not yet sent to the service —
+/// reusing [`decided_rule_cards`], the same scan `pull_rules` performs to find them, so there is
+/// one scanner for this question, not two.
+fn rule_decisions_waiting(vault: &Path) -> bool {
+    !decided_rule_cards(vault).is_empty()
+}
+
+/// Every `rule_id` already filed — `approvals/` for the live ones and `archive/` for the settled,
+/// because a card that was decided last week must not be re-offered this week.
+fn existing_rule_ids(vault: &Path) -> std::collections::BTreeSet<i64> {
+    let mut out = std::collections::BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = crate::pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            if let Some(id) = crate::yaml::get(&meta, "rule_id").and_then(crate::yaml::i64_of) {
+                out.insert(id);
+            }
+        }
+    }
+    out
+}
+
+/// The card the deck renders. `kind: rule` is a kind `approvals.rs` leaves alone (hand-off H6):
+/// the decision is *sent* by the next `judge` step, which then stamps and archives it.
+fn write_rule_card(
+    vault: &Path,
+    proposal: &crate::cloudmodel::RuleProposal,
+    today: jiff::civil::Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<String, String> {
+    let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let expires = today
+        .checked_add(jiff::Span::new().days(14))
+        .unwrap_or(today)
+        .strftime("%Y-%m-%d")
+        .to_string();
+    let title = format!("Always judge {} the same way", proposal.value.replace('|', " "));
+    let mut body = String::from(
+        "Three judgments agreed and none disagreed in 60 days. Approving this stops the model \
+         being asked about this pattern again; the fields it will write are below.\n\n",
+    );
+    if let Some(map) = proposal.verdict.as_object() {
+        let mut names: Vec<&String> = map.keys().collect();
+        names.sort();
+        for name in names {
+            body.push_str(&format!("- {name}: {}\n", crate::pystr::json_str(&map[name])));
+        }
+    }
+    let text = format!(
+        "---\ntype: approval\nkind: rule\ntitle: {}\nstatus: pending\nproposed_at: {stamp}\n\
+         first_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\ncreated_by: rules\n\
+         rule_id: {}\nfeature: {}\nvalue: {}\n---\n\n{body}",
+        lit(&title),
+        proposal.id,
+        lit(&proposal.feature),
+        lit(&proposal.value),
+    );
+    let approvals = vault.join("approvals");
+    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    let stem = format!("rule-{}", proposal.id);
+    let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
     crate::write::create(vault, &rel, &text, ctx, journal, None)
         .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
         .map_err(|e| e.to_string())
@@ -1423,13 +1597,15 @@ mod tests {
             "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
             "tier": 3
         }));
-        // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), then
-        // the verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because
-        // its own batch is empty.
+        // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), the
+        // verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because its
+        // own batch is empty — and, since Task 12, the rule pull's own `GET /judge-rules` at the
+        // end of the cloud arm, with nothing decided and nothing offered.
         let (base, handle) = multi_reply_loopback(vec![
             (200, "{}".to_string()),
             (200, events_reply),
             (200, judge_reply),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let cfg = crate::cloudmodel::CloudConfig {
             api_base: base,
@@ -1448,10 +1624,11 @@ mod tests {
         assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
 
         let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert_eq!(requests.len(), 4, "{requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
         assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
+        assert!(requests[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests[3]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -1551,6 +1728,21 @@ mod tests {
             account_id: "acct-1".into(),
         };
         crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret")
+    }
+
+    /// A scripted `127.0.0.1:0` listener answering `replies` in order, as a `CloudClient` already
+    /// aimed at it — [`multi_reply_loopback`] plus [`client_for`], under the name C2 Task 12's own
+    /// tests call it. `LoopbackServer::requests` joins the listener thread once, the same discipline
+    /// [`multi_reply_loopback`]'s other callers use directly.
+    struct LoopbackServer(Option<std::thread::JoinHandle<Vec<String>>>);
+    impl LoopbackServer {
+        fn requests(&mut self) -> Vec<String> {
+            self.0.take().map(|h| h.join().expect("the listener thread did not panic")).unwrap_or_default()
+        }
+    }
+    fn loopback_client(replies: Vec<(u16, String)>) -> (crate::cloudmodel::CloudClient, LoopbackServer) {
+        let (base, handle) = multi_reply_loopback(replies);
+        (client_for(base), LoopbackServer(Some(handle)))
     }
 
     /// The whole pull, end to end: one `tier: task` item becomes a note through `write::create`,
@@ -1961,15 +2153,22 @@ mod tests {
             &connected.join("config").join("ingest.yaml"),
             "calendars:\n  - name: google\n    ics_url: 'cloud:google'\n",
         ).unwrap();
-        let (base, handle) = gmail_loopback(vec![(200, "{}".to_string()), gmail_reply("[]", false)]);
+        // The probe, then the Gmail pull, then Task 12's own rule pull at the end of the cloud
+        // arm (nothing decided, nothing offered).
+        let (base, handle) = gmail_loopback(vec![
+            (200, "{}".to_string()),
+            gmail_reply("[]", false),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
         let client = client_for(base);
         let log = connected.join("_log");
         let (code, _lines) = run_lines_with(&connected, &opts(&log), Some(&client));
         assert_eq!(code, 0);
         let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 2, "the probe, then the pull: {requests:?}");
+        assert_eq!(requests.len(), 3, "the probe, the pull, then the rule pull: {requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
+        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
         assert!(
             !connected.join("state").join("calendar.md").exists(),
             "R-C2-E43: the predicate is a pure config read and must never write a snapshot"
@@ -1992,5 +2191,190 @@ mod tests {
         let requests2 = handle2.join().expect("the listener thread did not panic");
         assert!(requests2.is_empty(), "no judge request either way: {requests2:?}");
         let _ = std::fs::remove_dir_all(&unconnected);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // C2 Task 12 — rule promotion: the loop that retires model calls.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_rule_proposal_becomes_a_card_the_deck_can_answer() {
+        let vault = vault("rules-file");
+        let offered = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{
+                "id": 41, "kind": "task", "feature": "created_by+title_prefix",
+                "value": "zybooks|CS 100 Lab",
+                "verdict": {"effort_hours": "0.5", "importance": "2"},
+                "proposed_at": "2026-09-11"
+            }]
+        }));
+        let (client, mut server) = loopback_client(vec![(200, offered)]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(lines.iter().any(|l| l.contains("rules 41: proposed")), "{lines:?}");
+        let card = std::fs::read_to_string(vault.join("approvals").join("rule-41.md")).expect("the card exists");
+        assert!(card.contains("kind: rule"));
+        assert!(card.contains("rule_id: 41"));
+        assert!(card.contains("status: pending"));
+        assert!(card.contains("- effort_hours: 0.5"));
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_card_is_never_minted_twice_for_one_proposal_id() {
+        let vault = vault("rules-once");
+        let offered = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{ "id": 41, "kind": "task", "feature": "title_prefix", "value": "CS 100 Lab",
+                            "verdict": {"importance": "2"}, "proposed_at": "2026-09-11" }]
+        }));
+        let (client, mut server) =
+            loopback_client(vec![(200, offered.clone()), (200, offered)]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let first = pull_rules(&vault, &client, &o);
+        assert!(first.iter().any(|l| l.contains("1 proposed of 1")), "{first:?}");
+        let second = pull_rules(&vault, &client, &o);
+        assert!(second.iter().any(|l| l.contains("0 proposed of 1")), "{second:?}");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn an_approved_card_is_sent_once_and_then_archived() {
+        let vault = vault("rules-decide");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let empty = crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }));
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
+            (200, empty.clone()),
+            (200, empty),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(lines.iter().any(|l| l.contains("rules 41: approved")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
+        // A third pull sends nothing: the card is archived and `existing_rule_ids` still sees it.
+        let again = pull_rules(&vault, &client, &o);
+        assert!(!again.iter().any(|l| l.contains("rules 41:")), "{again:?}");
+        let sent = server.requests();
+        assert_eq!(sent.iter().filter(|r| r.contains("POST /functions/v1/judge-rules")).count(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_decision_that_cannot_be_sent_keeps_its_card() {
+        let vault = vault("rules-retry");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+        let (client, mut server) = loopback_client(vec![
+            (503, r#"{"error":"upstream"}"#.to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(lines.iter().any(|l| l.contains("not sent")), "{lines:?}");
+        assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must survive to retry");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-E46: an answered `kind: rule` card is exactly what widens the four-way early return —
+    /// an empty enrichment queue, no event source and no linked Google calendar are not "nothing
+    /// to do" while a rule decision is still waiting to be sent. The companion half (no answered
+    /// card, everything else empty) proves the early return still fires exactly as before this
+    /// task: no request of any kind, not even the probe.
+    #[test]
+    fn an_answered_rule_card_alone_makes_the_probe_fire_and_a_bare_vault_makes_none() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+
+        let waiting = vault("rules-waiting");
+        crate::pystr::write_text(
+            &waiting.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&waiting);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&waiting, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &waiting, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (200, "{}".to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = waiting.join("_log");
+        let (code, _lines) = run_lines_with(&waiting, &opts(&log), Some(&client));
+        assert_eq!(code, 0);
+        let requests = server.requests();
+        assert!(
+            requests.iter().any(|r| r.starts_with("POST /functions/v1/judge-rules")),
+            "the answered card's decision must reach the service: {requests:?}"
+        );
+        let _ = std::fs::remove_dir_all(&waiting);
+
+        let bare = vault("rules-bare");
+        crate::pystr::write_text(
+            &bare.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client2 = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let log2 = bare.join("_log");
+        let (code2, lines2) = run_lines_with(&bare, &opts(&log2), Some(&client2));
+        assert_eq!(code2, 0);
+        assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
+        assert!(
+            listener.accept().is_err(),
+            "no rule decision waiting, and nothing else pending, must never reach the service"
+        );
+        let _ = std::fs::remove_dir_all(&bare);
     }
 }

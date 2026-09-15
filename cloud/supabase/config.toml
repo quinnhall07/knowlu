@@ -100,3 +100,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.gmail-read]
 verify_jwt = false
+[functions.judge-rules]
+verify_jwt = false

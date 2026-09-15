@@ -171,8 +171,10 @@ Deno.test("every SECURITY DEFINER function in every migration has execute revoke
   // R-C2-E37e: pinned so a future function that silently stops being parsed (rather than being
   // caught by the per-file count check) still shows up here as a number that moved without a
   // reason on the diff. Ten single functions plus `store_google_grant`'s own `create or replace`
-  // in both 20260911000200 and 20260911000300 — counted by hand against today's corpus.
-  assertEquals(parsed, 11, "today's corpus should parse exactly 11 function creations");
+  // in both 20260911000200 and 20260911000300, plus Task 12's three non-definer functions in
+  // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`) —
+  // counted by hand against today's corpus.
+  assertEquals(parsed, 14, "today's corpus should parse exactly 14 function creations");
 });
 
 Deno.test("a trigger function is exempt from the execute-revoke guard by kind, not by name — and the scan proves it by finding one", async () => {

@@ -559,6 +559,39 @@ impl CloudModel<'_> {
     }
 }
 
+/// One promoted-rule proposal the service is offering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleProposal {
+    pub id: i64,
+    pub kind: String,
+    pub feature: String,
+    pub value: String,
+    pub verdict: Value,
+    pub proposed_at: String,
+}
+
+pub fn pull_rule_proposals(client: &CloudClient) -> Result<Vec<RuleProposal>, CloudError> {
+    let reply = client.get("/judge-rules")?;
+    let mut out = Vec::new();
+    for row in reply.get("proposals").and_then(Value::as_array).into_iter().flatten() {
+        let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let Some(id) = row.get("id").and_then(Value::as_i64) else { continue };
+        out.push(RuleProposal {
+            id,
+            kind: text("kind"),
+            feature: text("feature"),
+            value: text("value"),
+            verdict: row.get("verdict").cloned().unwrap_or(Value::Null),
+            proposed_at: text("proposed_at"),
+        });
+    }
+    Ok(out)
+}
+
+pub fn decide_rule(client: &CloudClient, id: i64, decision: &str) -> Result<(), CloudError> {
+    client.post("/judge-rules", &json!({ "id": id, "decision": decision })).map(|_| ())
+}
+
 /// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not
 /// judgment** — `ingest` parses what comes back with the same `parse_ics` the golden `today.md`
 /// oracle covers, so the vault's bytes are unchanged by the move.
