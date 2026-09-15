@@ -262,14 +262,22 @@ $$;
   );
 });
 
-Deno.test("the widened guard actually reached and exempted C2's three pre-existing capacity functions", async () => {
-  // R-C2-E47 fix 1: `charge_call`, `record_tokens` and `enforce_budget` (20260911000100) are the
-  // real writing, non-definer functions the widened guard found with no revoke — pre-existing,
-  // out of scope for this task to revoke, and marked rather than silently grandfathered.
+Deno.test("the three cap-store functions are revoked, not marked — R-C2-E48 fix 2 corrected fix 1's marker", async () => {
+  // R-C2-E47 fix 1 marked `charge_call`, `record_tokens` and `enforce_budget` (20260911000100) as
+  // `-- rpc: authenticated by design`, reasoning they were pre-existing and out of scope. R-C2-E48
+  // ruled that was wrong: they are this stream's OWN functions (C2 Task 1), called only through
+  // the service role (`_shared/judge_caps.ts`'s `capStore`) with zero app/engine call sites naming
+  // a user session — so they belong to the same uniform "no C2 SQL function is reachable from a
+  // browser" rule every other C2 function follows, and 20260911000600_caps_privileges.sql revokes
+  // them for real instead. This asserts the marker is gone and the guard found a real revoke for
+  // all three — not that they are silently exempt either way.
   const { exemptedByMarker } = assertExecuteRevoked(await everyMigrationFile());
   for (const fn of ["charge_call", "record_tokens", "enforce_budget"]) {
-    assert(exemptedByMarker.includes(fn), `expected ${fn} among the marker-exempted functions, got: ${exemptedByMarker}`);
+    assert(!exemptedByMarker.includes(fn), `${fn} must be revoked, not marker-exempt: ${exemptedByMarker}`);
   }
+  // No genuine C0/C1 app-called function ever carried this marker (confirmed by hand against
+  // today's corpus), so removing fix 1's three false ones empties the list entirely.
+  assertEquals(exemptedByMarker, [], "no function in today's corpus should be marker-exempt");
 });
 
 Deno.test("a trigger function is exempt from the execute-revoke guard by kind, not by name — and the scan proves it by finding one", async () => {
