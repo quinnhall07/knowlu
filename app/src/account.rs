@@ -1025,15 +1025,6 @@ fn get_json(url: &str, token: &str) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|_| "the service returned no JSON".to_string())
 }
 
-/// Open a URL in the system browser — the same `open_in_browser` mechanism `open_policy` and
-/// `open_checkout` already use, exposed once so the wizard's Google step needs no third private
-/// path. It joins the **wizard** window's list beside the two commands above.
-///
-/// **`https://accounts.google.com/` and nothing else.** This command takes a URL from the page, and
-/// the page takes it from the service; one that opened anything would be one indirection away from
-/// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
-/// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
-/// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
 /// The whole allow-list, as a pure predicate (ruling R-C2-E32): `https://accounts.google.com/` and
 /// nothing else, no CR/LF, under 2048 chars. Split out of `open_external` so it is a plain function
 /// a unit test can drive with no spawn and no browser — `starts_with` alone is the guard, and it
@@ -1043,6 +1034,15 @@ fn external_url_allowed(url: &str) -> bool {
     url.starts_with("https://accounts.google.com/") && !url.contains('\n') && !url.contains('\r') && url.len() < 2048
 }
 
+/// Open a URL in the system browser — the same `open_in_browser` mechanism `open_policy` and
+/// `open_checkout` already use, exposed once so the wizard's Google step needs no third private
+/// path. It joins the **wizard** window's list beside the two commands above.
+///
+/// **`https://accounts.google.com/` and nothing else.** This command takes a URL from the page, and
+/// the page takes it from the service; one that opened anything would be one indirection away from
+/// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
+/// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
+/// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
 #[tauri::command(async)]
 pub fn open_external(url: String) -> Value {
     if !external_url_allowed(&url) {
@@ -1091,5 +1091,16 @@ mod external_url_allowed_tests {
         let url = format!("https://accounts.google.com/{padding}");
         assert!(url.len() >= 2048);
         assert!(!external_url_allowed(&url));
+    }
+
+    #[test]
+    fn the_2048_boundary_is_exclusive() {
+        let prefix = "https://accounts.google.com/";
+        let at_2047 = format!("{prefix}{}", "a".repeat(2047 - prefix.len()));
+        let at_2048 = format!("{prefix}{}", "a".repeat(2048 - prefix.len()));
+        assert_eq!(at_2047.len(), 2047);
+        assert_eq!(at_2048.len(), 2048);
+        assert!(external_url_allowed(&at_2047), "2047 chars is still under 2048");
+        assert!(!external_url_allowed(&at_2048), "2048 chars is not under 2048");
     }
 }
