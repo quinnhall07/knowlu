@@ -145,6 +145,8 @@ create table if not exists usage_daily (
 alter table usage_daily enable row level security;
 
 -- One statement, so two concurrent calls cannot both read `calls` below the cap and both write.
+-- Called only from `_shared/judge_caps.ts`'s `capStore`, over the service-role client (R-C2-E47 fix 1, I1).
+-- rpc: authenticated by design
 create or replace function charge_call(p_account uuid, p_kind text, p_cap integer)
 returns boolean
 language plpgsql
@@ -165,6 +167,8 @@ $$;
 
 -- The tokens a call actually used, recorded after the fact. Separate from `charge_call` because
 -- the count is not known until the reply arrives, and a call that failed still spent its input.
+-- Called only from `_shared/judge_caps.ts`'s `capStore`, over the service-role client (R-C2-E47 fix 1, I1).
+-- rpc: authenticated by design
 create or replace function record_tokens(p_account uuid, p_kind text, p_in bigint, p_out bigint)
 returns void
 language sql
@@ -203,6 +207,8 @@ alter table budget_alerts enable row level security;
 -- call (once per account per hour is enough, so the pipeline memoises it): over the ceiling, the
 -- judgment is refused with outcome `capped` exactly as a daily cap refusal is, and one row lands
 -- in `budget_alerts` so the month's overspend is visible without querying a view nobody queries.
+-- Called only from `_shared/judge_caps.ts`'s `capStore`, over the service-role client (R-C2-E47 fix 1, I1).
+-- rpc: authenticated by design
 create or replace function enforce_budget(p_account uuid, p_ceiling numeric)
 returns boolean
 language plpgsql

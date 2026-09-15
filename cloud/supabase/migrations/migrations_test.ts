@@ -85,26 +85,48 @@ function stripLineComments(sql: string): string {
     .join("\n");
 }
 
+/** The exact marker a writing, non-definer function's definition must carry on the line
+ * IMMEDIATELY before its `create [or replace] function` line to be exempted from the widened
+ * write-revoke rule below (R-C2-E47 fix 1, I1) — checked against the ORIGINAL text, never the
+ * comment-stripped one, since the marker is itself a `--` comment. `matchIndex` is an offset into
+ * `strippedSql`; line counts are identical between the stripped and original text because
+ * `stripLineComments` only blanks part of a line, never removes a newline. */
+const WRITE_REVOKE_MARKER = "-- rpc: authenticated by design";
+function markerLineBefore(originalSql: string, strippedSql: string, matchIndex: number): boolean {
+  const lineNumber = strippedSql.slice(0, matchIndex).split("\n").length - 1;
+  const before = originalSql.split("\n")[lineNumber - 1];
+  return before !== undefined && before.trim() === WRITE_REVOKE_MARKER;
+}
+
 /**
- * `files`, sorted, from earliest to latest: for every SECURITY DEFINER function creation, a
- * `revoke execute … from …` naming both `anon` and `authenticated` somewhere from THAT file
- * onward (R-C2-E29 fixed it; R-C2-E36 widens where this guard is allowed to look for both the
- * creation and the fix; R-C2-E37 closes the three ways a definer function could still pass unseen).
- * A `returns trigger` function is exempt BY KIND, not by name or by migration — it cannot be
- * called through PostgREST at all (it takes no ordinary arguments and its return type means
- * nothing outside a trigger context) — and every exempted name is returned so a caller can assert
- * on it directly, rather than the exemption silently swallowing the one case (C1's
- * `handle_new_user`) that proves the rule fires. `parsed` is the total definitions this run
- * actually parsed, across every file, so a caller can pin the corpus's own count.
+ * `files`, sorted, from earliest to latest: for every SECURITY DEFINER function creation, AND for
+ * every non-definer function whose body writes (`insert`/`update`/`delete`, R-C2-E47 fix 1, I1), a
+ * `revoke execute … from …` naming both `anon` and `authenticated` somewhere from THAT file onward
+ * (R-C2-E29 fixed it; R-C2-E36 widens where this guard is allowed to look for both the creation and
+ * the fix; R-C2-E37 closes the three ways a definer function could still pass unseen). The
+ * definer/invoker split only decides whose privileges a call runs with — it never decides whether
+ * `anon`/`authenticated` can reach the function over PostgREST at all — so a writing INVOKER
+ * function is exactly as reachable as a writing DEFINER one, and the old guard's silent `if (!
+ * security definer) continue` was a gap of exactly that shape (`charge_call`, `record_tokens`,
+ * `enforce_budget` all had it). A `returns trigger` function is exempt BY KIND, not by name or by
+ * migration — it cannot be called through PostgREST at all. A non-definer writing function may
+ * instead be exempt BY MARKER (`WRITE_REVOKE_MARKER` on the line directly above its `create`) when
+ * its write is already safe some OTHER way (e.g. RLS-with-no-policy on the table it writes) and
+ * revoking it is deliberately out of scope for the task that found it — never silently, and every
+ * exempted name (by kind or by marker) is returned so a caller can assert on it directly rather
+ * than the exemption swallowing the cases that prove it fires. `parsed` is the total definitions
+ * this run actually parsed, across every file, so a caller can pin the corpus's own count.
  */
 export function assertExecuteRevoked(
   files: Array<[string, string]>,
-): { exemptedTriggers: string[]; parsed: number } {
+): { exemptedTriggers: string[]; exemptedByMarker: string[]; parsed: number } {
   const stripped = files.map(([name, sql]) => [name, stripLineComments(sql)] as [string, string]);
   const exemptedTriggers: string[] = [];
+  const exemptedByMarker: string[] = [];
   let parsed = 0;
   for (let i = 0; i < stripped.length; i++) {
     const [name, sql] = stripped[i];
+    const originalSql = files[i][1];
     const rawCount = (sql.match(RAW_FUNCTION_KEYWORD) ?? []).length;
     const definitions = [...sql.matchAll(FUNCTION_DEFINITION)];
     assert(
@@ -121,7 +143,13 @@ export function assertExecuteRevoked(
         exemptedTriggers.push(fn);
         continue;
       }
-      if (!/security\s+definer/i.test(d[0])) continue;
+      const isDefiner = /security\s+definer/i.test(d[0]);
+      const writes = /\b(insert|update|delete)\b/i.test(d[0]);
+      if (!isDefiner && !writes) continue;
+      if (!isDefiner && writes && markerLineBefore(originalSql, sql, d.index ?? -1)) {
+        exemptedByMarker.push(fn);
+        continue;
+      }
       const rest = stripped.slice(i).map(([, s]) => s).join("\n");
       // A previous migration's own `revoke … from public` may still be sitting right there
       // (forward-only: it is never edited out) — every match counts, not just the first, so a
@@ -133,7 +161,9 @@ export function assertExecuteRevoked(
       const matches = [...rest.matchAll(revokeRe)];
       assert(
         matches.length > 0,
-        `${name}: ${fn} is SECURITY DEFINER with no 'revoke execute … from …' in this or a later migration (R-C2-E29)`,
+        `${name}: ${fn} is ${isDefiner ? "SECURITY DEFINER" : "a writing function"} with no ` +
+          `'revoke execute … from …' in this or a later migration, and carries no ` +
+          `'${WRITE_REVOKE_MARKER}' marker (R-C2-E29 / R-C2-E47 fix 1)`,
       );
       const ok = matches.some((m) => {
         const from = m[1].toLowerCase();
@@ -145,7 +175,7 @@ export function assertExecuteRevoked(
       );
     }
   }
-  return { exemptedTriggers, parsed };
+  return { exemptedTriggers, exemptedByMarker, parsed };
 }
 
 Deno.test("every table this stream creates has row level security enabled", async () => {
@@ -160,21 +190,86 @@ Deno.test("every table this stream creates has row level security enabled", asyn
   }
 });
 
-Deno.test("every SECURITY DEFINER function in every migration has execute revoked from anon and authenticated", async () => {
+Deno.test("every SECURITY DEFINER or writing function in every migration has execute revoked, unless marked authenticated-by-design", async () => {
   // R-C2-E29 / R-C2-E36: `revoke execute … from public` removes only the PUBLIC entry. Supabase
   // grants execute to `anon` and `authenticated` explicitly on every new function by default, so a
   // SECURITY DEFINER function — which runs with the DEFINING role's privileges, not the caller's —
   // stays reachable over PostgREST with the anon key unless both are named too. Scoped to EVERY
   // migration, not only this stream's own `20260911…` ones: a gap in a later stream's own function
-  // is exactly as live a hole as one in this stream's.
+  // is exactly as live a hole as one in this stream's. R-C2-E47 fix 1 (I1) widened the guard: a
+  // non-definer function that writes (`insert`/`update`/`delete`) is just as reachable over
+  // PostgREST as a definer one, so it now needs the same revoke unless marked
+  // `-- rpc: authenticated by design` on the line directly before its `create`.
   const { parsed } = assertExecuteRevoked(await everyMigrationFile());
   // R-C2-E37e: pinned so a future function that silently stops being parsed (rather than being
   // caught by the per-file count check) still shows up here as a number that moved without a
   // reason on the diff. Ten single functions plus `store_google_grant`'s own `create or replace`
   // in both 20260911000200 and 20260911000300, plus Task 12's three non-definer functions in
-  // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`) —
-  // counted by hand against today's corpus.
-  assertEquals(parsed, 14, "today's corpus should parse exactly 14 function creations");
+  // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`), plus
+  // fix 1's re-issue of the same three in 20260911000500 — counted by hand against today's corpus.
+  assertEquals(parsed, 17, "today's corpus should parse exactly 17 function creations");
+});
+
+Deno.test("a writing, non-definer function with no revoke and no marker is caught by the widened guard", () => {
+  // R-C2-E47 fix 1: before this fix, `!security definer` short-circuited the whole check — a
+  // writing INVOKER function was invisible to it no matter what it wrote or who could call it.
+  const sql = `
+create or replace function sneaky_writer(p_account uuid)
+returns void
+language sql
+security invoker
+as $$
+  insert into some_table (account_id) values (p_account);
+$$;
+`;
+  assertThrows(
+    () => assertExecuteRevoked([["synthetic-writer.sql", sql]]),
+    Error,
+    "sneaky_writer",
+  );
+});
+
+Deno.test("the marker exempts a writing function only from the line directly above its create, never from further up", () => {
+  const marked = `
+-- Called only from the service role, never a public bearer.
+-- rpc: authenticated by design
+create or replace function marked_writer(p_account uuid)
+returns void
+language sql
+security invoker
+as $$
+  insert into some_table (account_id) values (p_account);
+$$;
+`;
+  const { exemptedByMarker } = assertExecuteRevoked([["synthetic-marked.sql", marked]]);
+  assertEquals(exemptedByMarker, ["marked_writer"]);
+
+  const markedTooFarUp = `
+-- rpc: authenticated by design
+--
+create or replace function almost_marked_writer(p_account uuid)
+returns void
+language sql
+security invoker
+as $$
+  insert into some_table (account_id) values (p_account);
+$$;
+`;
+  assertThrows(
+    () => assertExecuteRevoked([["synthetic-almost-marked.sql", markedTooFarUp]]),
+    Error,
+    "almost_marked_writer",
+  );
+});
+
+Deno.test("the widened guard actually reached and exempted C2's three pre-existing capacity functions", async () => {
+  // R-C2-E47 fix 1: `charge_call`, `record_tokens` and `enforce_budget` (20260911000100) are the
+  // real writing, non-definer functions the widened guard found with no revoke — pre-existing,
+  // out of scope for this task to revoke, and marked rather than silently grandfathered.
+  const { exemptedByMarker } = assertExecuteRevoked(await everyMigrationFile());
+  for (const fn of ["charge_call", "record_tokens", "enforce_budget"]) {
+    assert(exemptedByMarker.includes(fn), `expected ${fn} among the marker-exempted functions, got: ${exemptedByMarker}`);
+  }
 });
 
 Deno.test("a trigger function is exempt from the execute-revoke guard by kind, not by name — and the scan proves it by finding one", async () => {
