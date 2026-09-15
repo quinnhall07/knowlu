@@ -818,18 +818,27 @@ pub fn pull_rules(
                 archive_decided_card(vault, &path, &ctx, &mut journal);
                 lines.push(format!("rules {id}: {decision}"));
             }
-            // I4 (R-C2-E47 fix 1): a 404 ("no such undecided proposal") means the service already
+            // I4 (R-C2-E47 fix 1), narrowed by R-C2-E49 fix 3: a 404 means the service already
             // settled this exact decision — most likely this same card, sent by a previous run
             // that died between the POST above and the stamp below. Treated as success, not
             // failure: stamped and archived exactly as `Ok` is. Without this, a card whose POST
             // succeeded once but whose stamp never landed would re-POST every slot forever, 404
             // every time, and — because `rule_decisions_waiting` scans exactly this card — keep the
             // widened early return (R-C2-E46) from ever firing again for this vault.
-            Err(crate::cloudmodel::CloudError::Status { code: 404, .. }) => {
+            //
+            // **Matched on the handler's own body, not the status alone** (`judge-rules/handler.ts`'s
+            // `Response.json({ error: "no such undecided proposal" }, { status: 404 })`, extracted
+            // into `detail` by `CloudClient::finish`) — a gateway 404 (the function not deployed, a
+            // stale `api_base`, a slug typo) is ALSO an HTTP 404 and would otherwise be read as
+            // "already settled" and silently discard a real, unsent decision.
+            Err(crate::cloudmodel::CloudError::Status { code: 404, ref detail })
+                if detail == "no such undecided proposal" =>
+            {
                 archive_decided_card(vault, &path, &ctx, &mut journal);
                 lines.push(format!("rules {id}: already settled"));
             }
-            // NOT archived on any other failure: an unsent decision must come back next slot.
+            // NOT archived on any other failure — including a 404 whose body does not match the
+            // handler's own text — an unsent decision must come back next slot.
             Err(e) => lines.push(format!("rules {id}: not sent ({e})")),
         }
     }
@@ -2379,6 +2388,43 @@ mod tests {
         let lines = pull_rules(&vault, &client, &o);
         assert!(lines.iter().any(|l| l.contains("rules 41: already settled")), "{lines:?}");
         assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "a 404 must still archive the card");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-E49 fix 3: a 404 whose body is NOT the handler's own `no such undecided proposal` text
+    /// (a gateway 404 — the function not deployed, a stale `api_base`, a slug typo) must NOT read
+    /// as "already settled": that would silently discard a real, unsent decision. `{}` is the
+    /// shape any of those would actually produce — none of them go through `judge-rules/handler.ts`
+    /// at all, so there is no `error` field to extract.
+    #[test]
+    fn a_404_with_no_matching_body_is_not_read_as_already_settled() {
+        let vault = vault("rules-404-generic");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (404, "{}".to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o);
+        assert!(!lines.iter().any(|l| l.contains("already settled")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("rules 41: not sent") && l.contains("HTTP 404")), "{lines:?}");
+        assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "an unmatched 404 must not archive the card");
         let _ = server.requests();
         let _ = std::fs::remove_dir_all(&vault);
     }

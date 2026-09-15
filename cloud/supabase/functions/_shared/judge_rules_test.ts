@@ -69,15 +69,27 @@ function stripComments(sql: string): string {
     .join("\n");
 }
 
-/** The LAST `create or replace function promote_rules()` body in the concatenated
- * `*rule_promotion*` corpus — a fix migration redefines the function wholesale, so only the last
- * definition is what actually runs; an earlier, superseded body is history, not the contract. */
-function lastPromoteRulesBody(sql: string): string {
-  const marker = "create or replace function promote_rules()";
-  const start = sql.lastIndexOf(marker);
-  assert(start !== -1, "no promote_rules() definition found in the *rule_promotion* migrations");
+/** The LAST `create or replace function <name>(...)` body of that name in the concatenated
+ * `*rule_promotion*` corpus — a fix migration redefines a function wholesale, so only the last
+ * definition is what actually runs; an earlier, superseded body is history, not the contract.
+ *
+ * R-C2-E49 fix 3: case-insensitive, with an optional schema-qualifying `public.` (and either half
+ * optionally double-quoted) — the same shape `identPattern` gives every identifier in
+ * `migrations_test.ts` — so a future schema-qualified re-issue (`create or replace function
+ * public.promote_rules()`) is still found as the LAST definition rather than silently falling back
+ * to a superseded, unqualified one a literal-string search would have missed. Matched up to the
+ * opening `(` only, not the whole argument list, since two functions in this corpus
+ * (`promote_rules()`, `judgment_features(p_kind text, p_fields jsonb)`) do not share one shape. */
+function lastFunctionBody(sql: string, name: string): string {
+  const marker = new RegExp(
+    `create\\s+or\\s+replace\\s+function\\s+(?:"?public"?\\s*\\.\\s*)?"?${name}"?\\s*\\(`,
+    "gi",
+  );
+  let start = -1;
+  for (const m of sql.matchAll(marker)) start = m.index;
+  assert(start !== -1, `no ${name}(...) definition found in the *rule_promotion* migrations`);
   const close = sql.indexOf("\n$$;", start);
-  assert(close !== -1, "could not find the closing $$; for the last promote_rules body");
+  assert(close !== -1, `could not find the closing $$; for the last ${name} body`);
   return sql.slice(start, close + 4);
 }
 
@@ -98,7 +110,9 @@ function lastCronSchedule(sql: string): string {
 
 Deno.test("promote_rules is scheduled, deterministic, and never promotes a global rule", async () => {
   const sql = await ruleMigrationText();
-  const body = stripComments(lastPromoteRulesBody(sql));
+  const wholeCorpus = stripComments(sql);
+  const body = stripComments(lastFunctionBody(sql, "promote_rules"));
+  const featuresBody = stripComments(lastFunctionBody(sql, "judgment_features"));
   const cron = stripComments(lastCronSchedule(sql));
 
   // (a) `min(jsonb)` does not exist in PostgreSQL and would error on the first call.
@@ -116,9 +130,17 @@ Deno.test("promote_rules is scheduled, deterministic, and never promotes a globa
     `the schedule must be two schema-qualified statements: ${cron}`,
   );
 
-  // (c) §11 R5: nothing here writes or activates a global rule.
+  // (c) §11 R5: nothing here writes or activates a global rule — checked on the LAST
+  // `promote_rules` body (what actually runs today) AND, R-C2-E49 fix 3, over the WHOLE
+  // comment-stripped `*rule_promotion*` corpus (every superseded body too — a fix migration that
+  // re-issues `promote_rules` but leaves an old, still-live global-writing statement somewhere
+  // else in an earlier file would pass the body-only check and still be a real hole).
   assert(!body.includes("'global'"), "global rules are hand-reviewed and this job never writes one");
   assert(body.includes("'account'"));
+  assert(
+    !wholeCorpus.includes("'global'"),
+    "no *rule_promotion* migration, superseded or current, writes or activates a global rule",
+  );
 
   // (d) R-C2-E47 fix 1 (I2): a prior decision — approved OR rejected — blocks re-promotion for 90
   // days, not only while active or undecided (which matched neither state of a rejection).
@@ -131,5 +153,27 @@ Deno.test("promote_rules is scheduled, deterministic, and never promotes a globa
   assert(
     /delete\s+from\s+rules\s+where\s+scope\s*=\s*'account'/.test(body),
     "the expiry sweep must be scoped to account rules only",
+  );
+
+  // (f) R-C2-E49 fix 3 — the three minors fix 1 introduced but never pinned, on the last body of
+  // the function each actually lives in:
+  //   M1 — `created_by+title_prefix` requires a non-empty title prefix, not just a non-empty
+  //   `created_by` (an earlier version promoted on `"zybooks|"`, a key the TypeScript lookup can
+  //   never produce). Lives in `judgment_features`, not `promote_rules` — `promote_rules` only
+  //   calls it.
+  assert(
+    featuresBody.includes("coalesce(p_fields->>'title_prefix', '') <> ''"),
+    "the created_by+title_prefix feature must require a non-empty title prefix (M1)",
+  );
+  //   M3 — the representative answer's tie-break is a TOTAL order (`judged_at desc, id desc`), not
+  //   `judged_at desc` alone, which is non-deterministic between judgments at the same timestamp.
+  assert(
+    body.includes("order by judged_at desc, id desc"),
+    "the representative answer's tie-break must be a total order (M3)",
+  );
+  //   M11 — an all-empty verdict is never promoted, however many times it agreed.
+  assert(
+    body.includes("answer <> '{}'::jsonb"),
+    "an all-empty verdict must not be promoted (M11)",
   );
 });

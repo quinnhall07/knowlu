@@ -6,8 +6,10 @@
 -- What this corrects, and why:
 --
 --   C1 (CRITICAL) — `backfill_correction_judgments()`'s `UPDATE ... FROM LATERAL` correlated
---     subquery raises 42P10 ("could not identify an equality operator") on real Postgres, confirmed
---     live on staging. Because the nightly cron job is ONE statement
+--     subquery raises 42P10 (`invalid_column_reference`: "a FROM clause item may not reference the
+--     UPDATE result relation `c`" — a `LATERAL` subquery in an `UPDATE ... FROM` may not reference
+--     the row being updated, `c`, at all, however indirectly) on real Postgres, confirmed live on
+--     staging. Because the nightly cron job is ONE statement
 --     (`select backfill_correction_judgments(), promote_rules();`), that error aborted the whole
 --     statement and took `promote_rules()` down with it, every night, silently (`judge`'s
 --     always-exit-0 rule and pg_cron's own silence mean nothing surfaces this from the app side).
@@ -91,11 +93,14 @@ revoke execute on function public.judgment_features(text, jsonb) from public, an
 grant execute on function public.judgment_features(text, jsonb) to service_role;
 
 -- C1 (CRITICAL, 42P10 confirmed live on staging): the earlier `UPDATE ... FROM LATERAL (...) j`
--- correlated the lateral subquery's `c.account_id`/`c.item_id`/`c.ts` against the OUTER `corrections
--- c` row-by-row in a way Postgres could not plan an equality operator for. Rewritten as a derived
--- table joined by primary key instead: `distinct on (c2.id)` picks the one most-recent-then-highest-id
--- matching judgment per correction, exactly as the lateral form intended, but as an ordinary join
--- Postgres can actually execute.
+-- correlated the lateral subquery's `j2.account_id = c.account_id`/`j2.item_id = c.item_id`/
+-- `j2.judged_at < c.ts` against `c` — the very row `UPDATE public.corrections c` is updating — and
+-- Postgres's `UPDATE ... FROM` forbids a `LATERAL` item from referencing the UPDATE result relation
+-- at all (42P10, `invalid_column_reference`), not because no equality operator exists for the
+-- types involved. Rewritten as a derived table joined by primary key instead: `distinct on (c2.id)`
+-- picks the one most-recent-then-highest-id matching judgment per correction, exactly as the
+-- lateral form intended, but as an ordinary join that never references `c` inside its own FROM
+-- item and so is legal for Postgres to plan at all.
 create or replace function public.backfill_correction_judgments()
 returns integer
 language plpgsql
