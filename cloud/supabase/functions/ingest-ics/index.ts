@@ -31,4 +31,5 @@ Deno.serve(icsHandler(requireActiveEntitlement, {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.text();
   },
+  now: () => new Date(),
 }));

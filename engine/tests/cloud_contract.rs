@@ -68,6 +68,22 @@ fn loopback(replies: Vec<(u16, String)>) -> Loopback {
     Loopback { base: format!("http://127.0.0.1:{port}/functions/v1"), handle: Some(handle) }
 }
 
+/// `sorted(folder.glob("*.md"))` — `knowlu_engine::approvals::sorted_md` does exactly this but is
+/// `pub(crate)` and unreachable from an integration test (F9), so this is a local copy rather than
+/// a widened visibility.
+fn sorted_md(folder: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = match std::fs::read_dir(folder) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "md") == Some(true))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    paths.sort();
+    paths
+}
+
 fn config(base: &str) -> CloudConfig {
     CloudConfig {
         api_base: base.to_string(),
@@ -270,6 +286,105 @@ fn a_first_run_asks_first_run_1_and_gets_back_both_past_due_uids() {
     assert_eq!(past_due, vec!["a".to_string(), "b".to_string()]);
     let sent = server.requests().remove(0);
     assert!(sent.starts_with("GET /functions/v1/ingest-ics?first_run=1 HTTP/1.1"), "{sent}");
+}
+
+/// R-OB-3: the first page a student ever sees must show the future.
+///
+/// A feed's window reaches backwards, and a vault born today has no history to reconcile against —
+/// so Quinn's first slot imported four overdue items, one from 2025. On a FIRST ingest (no
+/// `today.md`, R-C2-9) a past-due item is recorded as seen and written straight into
+/// `archive/`; on every later run it is created normally, because an item that goes past due while
+/// the vault is watching it is exactly the item the system exists to shout about.
+#[test]
+fn ingest_on_a_fresh_vault_archives_past_due_items() {
+    let dir = std::env::temp_dir().join(format!("knowlu-c2-firstrun-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["config", "tasks", "state", "archive"] {
+        std::fs::create_dir_all(dir.join(sub)).expect("scratch vault");
+    }
+    std::fs::write(
+        dir.join("config").join("ingest.yaml"),
+        "ics_url: \"https://example.invalid/learn.ics\"\ntimezone: America/Chicago\ncourse_map:\n  CS-100: cs-100\n",
+    )
+    .expect("write ingest.yaml");
+    // One item long past, one comfortably ahead. `parse_ics` reads `DTSTART` as the due date.
+    let feed = "BEGIN:VCALENDAR\r\n\
+        BEGIN:VEVENT\r\nUID:bb-old\r\nSUMMARY:CS-100 Homework 1\r\nDTSTART:20250902T045900Z\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:bb-new\r\nSUMMARY:CS-100 Homework 9\r\nDTSTART:20991002T045900Z\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    let fetch = |_: &str| Ok(feed.to_string());
+
+    // First run is the absence of `today.md`, NOT of the seen-ledger (R-C2-9) — and this test
+    // proves the distinction by writing the ledger first, exactly as `coursework` does at
+    // `coursework.rs:310` earlier in the same slot.
+    std::fs::write(
+        dir.join("state").join("ingest-seen.md"),
+        "# header\n- zybooks:UACS100Fall2026:1.2 · Section 1.2 · first seen 2026-09-09\n",
+    )
+    .expect("coursework got here first");
+    assert!(!dir.join("state").join("today.md").exists());
+    let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, Some(&fetch));
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("archived (imported-past)") && l.contains("bb-old") == false),
+        "the past-due item is archived and named by its stem: {lines:?}"
+    );
+
+    // The future item is a task; the past one is in `archive/` and in nothing else.
+    let tasks: Vec<_> = sorted_md(&dir.join("tasks"));
+    assert_eq!(tasks.len(), 1, "only the future item is a task");
+    assert!(std::fs::read_to_string(&tasks[0]).unwrap().contains("Homework 9"));
+    let archived: Vec<_> = sorted_md(&dir.join("archive"));
+    assert_eq!(archived.len(), 1);
+    let note = std::fs::read_to_string(&archived[0]).unwrap();
+    assert!(note.contains("Homework 1"));
+    assert!(note.contains("status: archived"));
+    assert!(note.contains("archived_reason: imported-past"));
+    // Recorded as seen, so a second run does not resurrect it.
+    let seen = std::fs::read_to_string(dir.join("state").join("ingest-seen.md")).unwrap();
+    assert!(seen.contains("bb-old") && seen.contains("bb-new"));
+
+    // `rank` has since finished the slot and written `today.md`, which is what makes the next
+    // ingest not-first. A LATER run is unchanged: a new past-due item is created as a task, loudly.
+    std::fs::write(dir.join("state").join("today.md"), "# Today\n").expect("rank wrote today.md");
+    let later = "BEGIN:VCALENDAR\r\n\
+        BEGIN:VEVENT\r\nUID:bb-late\r\nSUMMARY:CS-100 Homework 2\r\nDTSTART:20250903T045900Z\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    let fetch_later = |_: &str| Ok(later.to_string());
+    let (code, lines) = knowlu_engine::ingest::run_lines(&dir, "cli", None, Some(&fetch_later));
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(sorted_md(&dir.join("tasks")).len(), 2, "{lines:?}");
+    assert_eq!(sorted_md(&dir.join("archive")).len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R-C2-9: the predicate is the absence of `today.md`, not of `state/ingest-seen.md`.
+///
+/// The slot order is `coursework → ingest → judge → rank`, and `coursework` calls
+/// `ingest::record_seen` (`coursework.rs:19`, `:310`, `:415`) — so on the very first slot the
+/// seen-ledger already exists by the time `ingest` runs, and a `first_run` derived from it is
+/// `false` on exactly the run R-OB-3 was written for. `today.md` is `rank`'s, the last step, so the
+/// first `ingest` always sees it absent and every later one sees it present. It is also the
+/// predicate the app already uses (`app/src/scheduler.rs::needs_first_run`).
+#[test]
+fn first_run_is_the_absence_of_today_md_not_of_ingest_seen() {
+    let dir = std::env::temp_dir().join(format!("knowlu-c2-firstpred-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+
+    // What `coursework` leaves behind on the first slot, before `ingest` has run at all.
+    std::fs::write(dir.join("state").join("ingest-seen.md"), "# header\n").unwrap();
+    assert!(
+        knowlu_engine::ingest::is_first_run(&dir),
+        "the seen-ledger is shared with coursework and cannot be the predicate"
+    );
+
+    // What `rank` leaves behind at the end of that same slot.
+    std::fs::write(dir.join("state").join("today.md"), "# Today\n").unwrap();
+    assert!(!knowlu_engine::ingest::is_first_run(&dir));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A cloud vault whose `ics_url` is blank must still refuse by naming `ics_url`, on the one arm
