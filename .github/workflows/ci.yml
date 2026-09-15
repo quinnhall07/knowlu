@@ -63,10 +63,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
         with: { deno-version: "2.x" }
+      # `cloud/eval/` is C2's and sits outside `cloud/supabase/`, so every path is named explicitly
+      # (hand-off H8 part 1, C2 Task 13; the `eval-gate` job is Task 14's, added in its own commit).
       - name: deno check
-        run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts
+        run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts cloud/eval/*.ts
       - name: deno lint
-        run: deno lint --config cloud/supabase/deno.json cloud/supabase/
+        run: deno lint --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
       # --allow-net=127.0.0.1 is needed from C2 Task 0 on, and only from then: `judge_anthropic_test.ts`
       # exercises the model client against a listener bound to 127.0.0.1:0 inside the test. No egress,
       # no name resolution, no listener on a routable interface (CLAUDE.md; plan 3a's loopback rule).
@@ -75,5 +77,8 @@ jobs:
       # ANTHROPIC_CUSTOM_HEADERS) even though this file always passes apiKey/baseURL explicitly and
       # never reads a secret through it — not anticipated when Task 0's exact CI line was ruled;
       # flagged in the Task 0 report for review, not a silent change.
+      # --allow-write is `cloud/eval/`'s loader tests: they build their temp fixtures under
+      # `cloud/eval/.tmp-<random>/` (git-ignored by `cloud/eval/.gitignore`) rather than the OS temp
+      # root, precisely so this grant can stay scoped to the one directory that needs it.
       - name: deno test
-        run: deno test --allow-read --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/
+        run: deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
