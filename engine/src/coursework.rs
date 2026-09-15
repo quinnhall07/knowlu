@@ -8,7 +8,7 @@
 //! (see `Cargo.toml`).
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use jiff::civil::{Date, DateTime};
@@ -655,19 +655,28 @@ pub(crate) fn coursework_request(tz_name: &str, sources: &[FetchedSource]) -> se
     serde_json::json!({ "timezone": tz_name, "sources": sources })
 }
 
-/// Posts an already-built request and turns the reply into assignments plus warnings. The
-/// service-unavailable and malformed-row paths both live here, where a loopback test can reach
+/// `post_coursework`'s full decode of an `/ingest-coursework` reply: the assignments it carries
+/// and the proposals beside them (R-OB-1) — one per source key the account's mapping does not
+/// recognise yet. A struct rather than a bare tuple so `result.proposals` reads at the call site.
+#[derive(Debug, Default)]
+pub(crate) struct PostCourseworkResult {
+    pub assignments: Vec<Assignment>,
+    pub proposals: Vec<MapProposal>,
+}
+
+/// Posts an already-built request and turns the reply into assignments, proposals and warnings.
+/// The service-unavailable and malformed-row paths both live here, where a loopback test can reach
 /// them with no credential and no live vendor (R-C2-E17 / I1).
 pub(crate) fn post_coursework(
     client: &crate::cloudmodel::CloudClient,
     request: &serde_json::Value,
     warnings: &mut Vec<String>,
-) -> Vec<Assignment> {
+) -> PostCourseworkResult {
     let reply = match client.post("/ingest-coursework", request) {
         Ok(reply) => reply,
         Err(err) => {
             warnings.push(format!("coursework: the service is unavailable ({err}); nothing changed"));
-            return Vec::new();
+            return PostCourseworkResult::default();
         }
     };
     for warning in reply.get("warnings").and_then(serde_json::Value::as_array).into_iter().flatten() {
@@ -675,14 +684,43 @@ pub(crate) fn post_coursework(
             warnings.push(text.to_string());
         }
     }
-    let mut out = Vec::new();
+    let mut assignments = Vec::new();
     for row in reply.get("assignments").and_then(serde_json::Value::as_array).into_iter().flatten() {
         match assignment_from_row(row) {
-            Some(item) => out.push(item),
+            Some(item) => assignments.push(item),
             None => warnings.push("coursework: a reply row could not be read; skipped".to_string()),
         }
     }
-    out
+    let mut proposals = Vec::new();
+    for row in reply.get("proposals").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        let text = |k: &str| row.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+        // A proposal with no key names nothing `write_map_card` could file a card under; skipped
+        // rather than warned, the same way a malformed assignment row is a warning but a wholly
+        // absent field here is not — there is nothing here to say was even attempted.
+        let key = match text("key") {
+            Some(k) if !k.is_empty() => k,
+            _ => continue,
+        };
+        proposals.push(MapProposal {
+            source: text("source").unwrap_or_default(),
+            key,
+            label: text("label").unwrap_or_default(),
+            suggested_course: text("suggested_course").filter(|c| !c.is_empty()),
+        });
+    }
+    PostCourseworkResult { assignments, proposals }
+}
+
+/// The agent actor for coursework-mapping cards. `agent:` prefix, so `provenance::is_agent` holds.
+pub const MAP_ACTOR: &str = "agent:knowlu.coursework";
+
+/// One thing the account's mapping does not know about (R-OB-1), as the service reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapProposal {
+    pub source: String,
+    pub key: String,
+    pub label: String,
+    pub suggested_course: Option<String>,
 }
 
 /// *Fetch on device, think in the cloud* (D11, §4.3). Every credentialed request is made here with
@@ -693,10 +731,17 @@ pub(crate) fn post_coursework(
 /// *an-empty-parse-is-a-failure* rule `collect` applies locally. The timezone is resolved through
 /// [`resolve_timezone`] — the same validation and single fallback warning `collect` gives the
 /// local path (I3 / R-C2-E17): an unknown IANA name must not silently drop the whole source.
+///
+/// R-OB-1 / R-C2-E17 correction F5: widened over Task 7's shape to carry what the card-writing
+/// half needs — `vault`, `ctx` and `today` — so an unmapped book or section becomes a card in
+/// `approvals/` rather than only a line in `warnings`.
 #[cfg(windows)]
 pub fn collect_cloud(
+    vault: &Path,
     config: &Mapping,
     warnings: &mut Vec<String>,
+    ctx: &crate::write::WriteContext,
+    today: Date,
     client: &crate::cloudmodel::CloudClient,
 ) -> Vec<Assignment> {
     let block = match crate::yaml::get(config, "coursework") {
@@ -746,7 +791,33 @@ pub fn collect_cloud(
         return Vec::new();
     }
     let request = coursework_request(&tz_name, &sources);
-    post_coursework(client, &request, warnings)
+    let result = post_coursework(client, &request, warnings);
+
+    // R-OB-1: one card per unmapped book or section, before the items are written, so a student
+    // whose only zyBook is unmapped opens the deck to a question rather than to an empty list.
+    let mut journal = Journal::new(vault);
+    let card_ctx = ctx.with_actor(MAP_ACTOR);
+    // Every key already asked about, live or decided — computed ONCE before the loop, exactly as
+    // Task 12's `existing_rule_ids` is. `write::create`'s `Exists` guard only sees `approvals/`, and
+    // a rejected card is in `archive/`; without this a book the student said no to is re-proposed
+    // every slot until the end of time.
+    let asked = asked_map_keys(vault, today);
+    for proposal in &result.proposals {
+        if asked.contains(&(proposal.source.clone(), proposal.key.clone())) {
+            continue;
+        }
+        match write_map_card(vault, proposal, today, &card_ctx, &mut journal) {
+            Ok(path) => {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                warnings.push(format!("{}: not mapped; proposed ({stem})", proposal.source));
+            }
+            // `asked` catches the same case a step earlier and this is all but unreachable; it
+            // stays as defence in depth and is not worth a line.
+            Err(crate::write::WriteError::Exists(_)) => {}
+            Err(e) => warnings.push(format!("{}: proposal not written ({e})", proposal.source)),
+        }
+    }
+    result.assignments
 }
 
 /// The credential store is Windows-only (spec §6.5), so the credentialed fetch is too. A cloud
@@ -754,12 +825,335 @@ pub fn collect_cloud(
 /// the semester is empty — the same shape `fetch_zybooks` and `fetch_vhl` already have.
 #[cfg(not(windows))]
 pub fn collect_cloud(
+    _vault: &Path,
     _config: &Mapping,
     warnings: &mut Vec<String>,
+    _ctx: &crate::write::WriteContext,
+    _today: Date,
     _client: &crate::cloudmodel::CloudClient,
 ) -> Vec<Assignment> {
     warnings.push("coursework: credential store unavailable on this platform".to_string());
     Vec::new()
+}
+
+/// The card the deck renders. `kind: coursework-map` is a kind `approvals.rs` leaves alone
+/// (hand-off H12): the decision is *applied* by the next `coursework` step, which then archives it.
+///
+/// `Err` when a card for this key already exists — the next slot fetches the same unmapped book and
+/// must not mint a second card for it. The stem carries the key, so the guard is the filename.
+/// That guard sees only `approvals/`, which is why `asked_map_keys` (below) is the real one and
+/// this is defence in depth: a **rejected** card is in `archive/` and this check cannot see it.
+pub fn write_map_card(
+    vault: &Path,
+    proposal: &MapProposal,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<PathBuf, crate::write::WriteError> {
+    let lit = |s: &str| crate::write::to_literal(&Yaml::String(s.to_string()));
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let expires = today
+        .checked_add(jiff::Span::new().days(30))
+        .unwrap_or(today)
+        .strftime("%Y-%m-%d")
+        .to_string();
+    let course = proposal.suggested_course.clone().unwrap_or_default();
+    let text = format!(
+        "---\ntype: approval\nkind: coursework-map\ntitle: {}\nstatus: pending\n\
+         proposed_at: {stamp}\nfirst_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\n\
+         created_by: coursework\nsource: {}\nmap_key: {}\ncourse: {}\n---\n\n\
+         {} returned work, and nothing in your setup says which course it belongs to — so none of \
+         it reached your list.\n\n\
+         Approve to map it. **Edit `course:` above first if the guess is wrong**, or if it is \
+         blank: it is the course slug the items will be filed under, the same one your course note \
+         uses.\n",
+        lit(&format!("Map {} to a course", proposal.label)),
+        // `source` (`zybooks`/`vhl`), `map_key` (a vendor code) and a non-empty `course` (a slug)
+        // are plain-scalar-safe identifiers, written bare rather than through `lit()` — which would
+        // JSON-quote them, since none of the three is ISO-date-shaped. Only the genuinely empty
+        // case needs an explicit `""`: an unquoted nothing after `course:` reads back as null, not
+        // as an empty string, and `apply_map_cards`' blank check is a string check.
+        proposal.source,
+        proposal.key,
+        if course.is_empty() { "\"\"".to_string() } else { course.clone() },
+        proposal.label,
+    );
+    let approvals = vault.join("approvals");
+    std::fs::create_dir_all(&approvals).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
+    // The key is in the stem, so a second card for the same book is `WriteError::Exists` and not a
+    // duplicate — the same guard `find_pending_amendment` gives an amend card.
+    let stem = format!("map-{}-{}", proposal.source, crate::ingest::slugify(&proposal.key));
+    let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+}
+
+/// Every `(source, map_key)` a card has already asked about and whose card has not yet expired —
+/// `approvals/` for the live ones and **`archive/` for the decided ones**, which is the whole point.
+///
+/// The same mechanism as Task 12's `existing_rule_ids`, and for the same reason. `write_map_card`'s
+/// only other guard is `write::create`'s `Exists` on `approvals/map-<source>-<slug>.md`, and a
+/// **rejected** card is not there — `process_approvals` settles it into `archive/`. Without this
+/// the next `coursework` run finds the book still unmapped, gets the same proposal and mints a
+/// fresh card, twice a day, forever, each one charging the 15-a-day proposal budget.
+///
+/// **Where the memory lives:** in the card itself, at `archive/map-<source>-<slug>.md`. The vault
+/// keeps `archive/` forever and the journal records the move, so nothing new has to be remembered
+/// anywhere else. **For how long:** until the `expires:` that card was minted with —
+/// `write_map_card` sets it to 30 days out — after which a still-unmapped book is proposed
+/// again. That is the loop H12 describes, and this is what makes it true: a student who does not
+/// recognise a book is asked again next month, not twice a day forever.
+fn asked_map_keys(vault: &Path, today: Date) -> std::collections::BTreeSet<(String, String)> {
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let mut out = std::collections::BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("coursework-map") {
+                continue;
+            }
+            // ISO dates compare correctly as text, which is why the vault writes them that way.
+            let expires = crate::yaml::opt_text(crate::yaml::get(&meta, "expires")).unwrap_or_default();
+            if expires < stamp {
+                continue;
+            }
+            let source = crate::yaml::opt_text(crate::yaml::get(&meta, "source")).unwrap_or_default();
+            let key = crate::yaml::opt_text(crate::yaml::get(&meta, "map_key")).unwrap_or_default();
+            if !key.is_empty() {
+                out.insert((source, key));
+            }
+        }
+    }
+    out
+}
+
+/// Apply every approved `kind: coursework-map` card, then archive it.
+///
+/// **The write into `config/ingest.yaml` is a text-level insertion, never a rewrite** (ruling
+/// R-C2-8). CLAUDE.md's invariant is absolute and has no config exemption — *no vault file is
+/// parsed and re-dumped*, and `src/yamlemit.rs` is the crate's one YAML emitter. (`scaffold::
+/// ingest_yaml` writing this file at birth is **creation**, which is a different act from
+/// rewriting one that already exists.) So `write_mapping` below finds the `courses:` /
+/// `sections:` line and inserts three lines beneath it, and the *card* it came from is journalled
+/// through `write` like every other note, which is where the audit trail lives.
+pub fn apply_map_cards(vault: &Path, ctx: &WriteContext, journal: &mut Journal) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for path in crate::approvals::sorted_md(&vault.join("approvals")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("coursework-map") {
+            continue;
+        }
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "status")).as_deref() != Some("approved") {
+            continue;
+        }
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let source = crate::yaml::opt_text(crate::yaml::get(&meta, "source")).unwrap_or_default();
+        let key = crate::yaml::opt_text(crate::yaml::get(&meta, "map_key")).unwrap_or_default();
+        let course = crate::yaml::opt_text(crate::yaml::get(&meta, "course")).unwrap_or_default();
+        if course.trim().is_empty() {
+            // Kept, not archived: an empty `course` would file every item from that book under
+            // `course: ""`, which reads as attributed-to-nothing rather than unattributed. The
+            // student edits the card and approves it again.
+            //
+            // Written back to **pending**, which is what `approvals.rs` does with a recoverable
+            // refusal (`approvals.rs:1360-1368`) and for the same reason: a card left `approved` on
+            // disk is never counted, never escalated into Must do and never expires, so it re-logs
+            // this line every run forever. Pending, it ages.
+            let rel = crate::ids::rel(vault, &path);
+            let pending = vec![("status".to_string(), "pending".to_string())];
+            let _ = crate::write::write_literals(vault, &rel, &pending, ctx, journal, &WriteOpts::default());
+            lines.push(format!("coursework: {stem} not applied (no course on the card)"));
+            continue;
+        }
+        match write_mapping(vault, &source, &key, &course) {
+            Ok(inserted) => {
+                let rel = crate::ids::rel(vault, &path);
+                let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
+                let literals = vec![
+                    ("status".to_string(), "executed".to_string()),
+                    ("executed_at".to_string(), stamped),
+                ];
+                if crate::write::write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default()).is_ok() {
+                    let _ = crate::write::delete(vault, &rel, ctx, journal);
+                }
+                // R-C2-8's idempotence. `Ok(false)` is "the key was already there" — a re-approved
+                // card, or a hand edit that got there first — and it is a line, not an error: the
+                // file already says what the card was asking for, so the card is still archived.
+                lines.push(if inserted {
+                    format!("coursework: mapped {key} to {course}")
+                } else {
+                    format!("coursework: {key} was already mapped; card archived, file untouched")
+                });
+            }
+            // Unwritable — there is no `coursework.<source>:` block to insert under, so the
+            // mapping would be dead config. Same treatment as a blank course, and the same reason.
+            Err(e) => {
+                let rel = crate::ids::rel(vault, &path);
+                let pending = vec![("status".to_string(), "pending".to_string())];
+                let _ = crate::write::write_literals(vault, &rel, &pending, ctx, journal, &WriteOpts::default());
+                lines.push(format!("coursework: {stem} not applied ({e})"));
+            }
+        }
+    }
+    lines
+}
+
+/// The indentation of a line, in spaces. Vault YAML is space-indented — a tab is invalid YAML
+/// there and every reader in the crate would already have refused the file.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// A line that carries no structure: blank, or a comment. Its column means nothing, so neither
+/// helper below may let one end a block or set an indent.
+fn is_filler(line: &str) -> bool {
+    let t = line.trim_start();
+    t.is_empty() || t.starts_with('#')
+}
+
+/// The first line in `[from, end)` at exactly `depth` whose key is `name`, or `None` if the block
+/// ends first. A block ends at the first structural line indented *less* than `depth`.
+fn find_key(lines: &[String], from: usize, end: usize, name: &str, depth: usize) -> Option<usize> {
+    for i in from..end.min(lines.len()) {
+        if is_filler(&lines[i]) {
+            continue;
+        }
+        let ind = indent_of(&lines[i]);
+        if ind < depth {
+            return None;
+        }
+        if ind == depth {
+            let rest = lines[i].trim_start();
+            if rest == format!("{name}:") || rest.starts_with(&format!("{name}: ")) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Where the block headed by `header` ends: the first structural line indented no deeper than the
+/// header itself, or the end of the file.
+fn block_end(lines: &[String], header: usize) -> usize {
+    let depth = indent_of(&lines[header]);
+    (header + 1..lines.len())
+        .find(|&i| !is_filler(&lines[i]) && indent_of(&lines[i]) <= depth)
+        .unwrap_or(lines.len())
+}
+
+/// **The file's own indentation**: the column of the first structural child of `header`, or the
+/// header's own plus 2 when it has none yet. Never a constant — a student who indents by four
+/// keeps indenting by four.
+fn child_indent(lines: &[String], header: usize, end: usize) -> usize {
+    (header + 1..end)
+        .find(|&i| !is_filler(&lines[i]))
+        .map(|i| indent_of(&lines[i]))
+        .unwrap_or_else(|| indent_of(&lines[header]) + 2)
+}
+
+/// Insert one mapping into `config/ingest.yaml` — `coursework.zybooks.courses.<code>` or
+/// `coursework.vhl.sections.<id>`, each `{course, label}`.
+///
+/// **A text-level insertion, never a parse-and-re-dump** (ruling R-C2-8). CLAUDE.md's engine
+/// invariant is absolute and has no config exemption: *no vault file is parsed and re-dumped*,
+/// and `src/yamlemit.rs` is the crate's one YAML emitter. A `serde_yaml_ng::to_string` round trip
+/// would re-render every line of a file whose whole point is that it is editable text — comments
+/// gone, quoting style changed, key order at the serialiser's mercy. (`scaffold::ingest_yaml`
+/// writing this file at birth is **creation**, a different act from rewriting one that exists.)
+///
+/// So this finds the `courses:` / `sections:` line and inserts three lines directly beneath it at
+/// the file's own indentation, and **touches no other byte**. The one shape it rewrites is a
+/// `courses: {}` scalar, which becomes the block form the insertion needs — one line replaced,
+/// in place, with the same leading spaces it already had.
+///
+/// **It can only ADD a key, and that costs nothing.** A book or section that is already mapped
+/// never produces a card in the first place: `route_zybook` answers `BookRouting::Mapped` and
+/// `parse_vhl` finds its section, so `/ingest-coursework` reports no proposal and there is no path
+/// by which an existing key needs updating. A student who wants to change one edits the file,
+/// which is the point of it being text.
+///
+/// `Ok(true)` inserted, `Ok(false)` the key was already there — a no-op, and the file is not
+/// opened for writing at all. `Err` when the source's block is missing, because a mapping under a
+/// `coursework.vhl:` nobody configured is dead config; the card is kept so the student sees why.
+///
+/// Line endings are the crate's usual discipline: `pystr::read_text` normalises to `\n` and
+/// `pystr::write_text` writes `os.linesep` back, so a CRLF vault file stays CRLF exactly as it
+/// does for every note this engine writes.
+fn write_mapping(vault: &Path, source: &str, key: &str, course: &str) -> Result<bool, String> {
+    let (block, field) = match source {
+        "zybooks" => ("zybooks", "courses"),
+        "vhl" => ("vhl", "sections"),
+        other => return Err(format!("unknown coursework source {other:?}")),
+    };
+    let path = vault.join("config").join("ingest.yaml");
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+
+    let coursework = find_key(&lines, 0, lines.len(), "coursework", 0)
+        .ok_or_else(|| "config/ingest.yaml has no coursework: block".to_string())?;
+    let coursework_end = block_end(&lines, coursework);
+    let source_depth = child_indent(&lines, coursework, coursework_end);
+    let source_line = find_key(&lines, coursework + 1, coursework_end, block, source_depth)
+        .ok_or_else(|| format!("config/ingest.yaml has no coursework.{block}: block"))?;
+    let source_end = block_end(&lines, source_line);
+    let field_depth = child_indent(&lines, source_line, source_end);
+
+    // Both scalars go through the crate's ONE literal writer — `write::to_literal`, the same
+    // function every frontmatter value goes through, which routes anything non-scalar to
+    // `yamlemit`. No second emitter is introduced. Quoting the key is what makes it work: an
+    // unquoted `2102121:` is an integer key and `yaml::get(sections, "2102121")` then misses.
+    let lit = |s: &str| crate::write::to_literal(&Yaml::String(s.to_string()));
+    // The label prefixes every title the parser produces (`CS 100 HW 01`). Derived from the slug
+    // rather than asked for: one field on the card is one decision, and this one is mechanical.
+    let label = course.trim().to_uppercase().replace('-', " ");
+
+    let (insert_at, entry_indent) = match find_key(&lines, source_line + 1, source_end, field, field_depth) {
+        Some(at) => {
+            let value = lines[at].trim_start()[field.len() + 1..].trim().to_string();
+            if value == "{}" || value == "{ }" {
+                // The birth shape `courses: {}` (C1's `scaffold::ingest_yaml`). One line replaced,
+                // in place, by the block header the insertion needs — same indentation, and it is
+                // the only line in the file this function ever rewrites.
+                lines[at] = format!("{}{field}:", " ".repeat(field_depth));
+            } else if !value.is_empty() {
+                return Err(format!("coursework.{block}.{field} is not a block mapping ({value})"));
+            }
+            let end = block_end(&lines, at);
+            let deeper = child_indent(&lines, at, end);
+            // Idempotence: a key already under this field is a no-op, never a second entry — two
+            // `UACS100Fall2026:` keys is a duplicate-key YAML error and the file stops loading.
+            for i in (at + 1)..end {
+                if is_filler(&lines[i]) || indent_of(&lines[i]) != deeper {
+                    continue;
+                }
+                let name = lines[i].trim_start();
+                let name = name.split(':').next().unwrap_or("").trim_matches(['\'', '"']);
+                if name == key {
+                    return Ok(false);
+                }
+            }
+            (at + 1, deeper)
+        }
+        // No `courses:` line under a `zybooks:` that exists: insert the field header too. Still a
+        // pure insertion — two lines added, none changed.
+        None => {
+            lines.insert(source_line + 1, format!("{}{field}:", " ".repeat(field_depth)));
+            (source_line + 2, field_depth + 2)
+        }
+    };
+
+    let pad = " ".repeat(entry_indent);
+    lines.splice(
+        insert_at..insert_at,
+        [
+            format!("{pad}{}:", lit(key)),
+            format!("{pad}  course: {}", lit(course.trim())),
+            format!("{pad}  label: {}", lit(&label)),
+        ],
+    );
+    pystr::write_text(&path, &lines.join("\n")).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1068,17 +1462,24 @@ pub fn main_with_fetchers(
     let mut warnings: Vec<String> = Vec::new();
     let mut log: Vec<String> = Vec::new();
     let mut assignments: Vec<Assignment> = Vec::new();
+    // H12 / R-OB-1: today's date, computed once and shared by the map-card machinery below —
+    // both when a proposal is stamped and when a still-unmapped book is asked about again.
+    let today = jiff::Zoned::now().date();
     let outcome = (|| -> Result<(), SourceError> {
+        // H12: an approved coursework-map card is applied BEFORE this run fetches, so a card
+        // approved in the console at 11am is a mapping the noon slot already uses.
+        let mut map_journal = Journal::new(vault);
+        log.extend(apply_map_cards(vault, &ctx, &mut map_journal));
         let (config, config_warnings) = load_coursework_config(vault)?;
         warnings.extend(config_warnings);
         assignments = match (fetchers, crate::cloudmodel::resolve(vault).ok()) {
             // `fetchers` is the test seam and always wins; a vault with an account parses on the
             // server (§4.3); everything else is plan-3a's local path, unchanged until C4.
-            (None, Some(client)) => collect_cloud(&config, &mut warnings, &client),
+            (None, Some(client)) => collect_cloud(vault, &config, &mut warnings, &ctx, today, &client),
             _ => collect(vault, &config, &mut warnings, fetchers),
         };
         if !assignments.is_empty() {
-            log = sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?;
+            log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?);
         }
         Ok(())
     })();
@@ -1207,6 +1608,18 @@ mod tests {
     fn vault_with(name: &str) -> PathBuf {
         let vault = scratch(name);
         for folder in ["tasks", "archive", "state"] {
+            std::fs::create_dir_all(vault.join(folder)).unwrap();
+        }
+        vault
+    }
+
+    /// A `std::env::temp_dir()`-rooted vault carrying `config/`, `approvals/`, `archive/`,
+    /// `state/` and `tasks/` — never the worktree (R-3a-12). Unique per `tag`, the same way
+    /// [`scratch`] is unique per `name`, so the coursework-map tests below can run concurrently
+    /// without treading on each other's `config/ingest.yaml` or `approvals/`.
+    fn scratch_vault(tag: &str) -> PathBuf {
+        let vault = scratch(&format!("map-{tag}"));
+        for folder in ["config", "approvals", "archive", "state", "tasks"] {
             std::fs::create_dir_all(vault.join(folder)).unwrap();
         }
         vault
@@ -2707,7 +3120,8 @@ mod tests {
         let client = crate::cloudmodel::CloudClient::new(&cloud_test_config(&server.base), "jwt-not-a-secret");
         let mut warnings: Vec<String> = Vec::new();
         let out = post_coursework(&client, &request, &mut warnings);
-        assert!(out.is_empty());
+        assert!(out.assignments.is_empty());
+        assert!(out.proposals.is_empty());
         assert!(warnings.is_empty(), "{warnings:?}");
         let sent = server.requests().remove(0);
 
@@ -2747,7 +3161,7 @@ mod tests {
         let request = coursework_request("America/Chicago", &[]);
         let mut warnings: Vec<String> = Vec::new();
         let out = post_coursework(&client, &request, &mut warnings);
-        assert!(out.is_empty());
+        assert!(out.assignments.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("the service is unavailable"), "{warnings:?}");
         assert!(warnings[0].ends_with("nothing changed"), "{warnings:?}");
@@ -2779,8 +3193,9 @@ mod tests {
         let mut warnings: Vec<String> = Vec::new();
         let out = post_coursework(&client, &request, &mut warnings);
         let _ = server.requests();
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert_eq!(out[0].uid, "zybooks:1839992");
+        assert_eq!(out.assignments.len(), 1, "{out:?}");
+        assert_eq!(out.assignments[0].uid, "zybooks:1839992");
+        assert!(out.proposals.is_empty(), "{out:?}");
         assert!(
             warnings.contains(&"zybooks: zybook surprise-101 not in config; skipped".to_string()),
             "{warnings:?}"
@@ -2835,5 +3250,335 @@ mod tests {
     fn a_malformed_reply_row_is_a_warning_and_not_a_note() {
         let row = serde_json::json!({ "uid": "zybooks:1", "title": "x", "due": "not a date" });
         assert!(assignment_from_row(&row).is_none());
+    }
+
+    // --- R-OB-1: an unmapped book or section is a card in the deck (C2 Task 7a) ----------------
+
+    /// R-OB-1: the reply's proposals become cards in the deck, one per unmapped source.
+    #[test]
+    fn an_unmapped_book_becomes_a_card_the_deck_can_answer() {
+        let vault = scratch_vault("map-card");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let path = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(),
+                key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(),
+                suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .expect("the card writes");
+        let card = std::fs::read_to_string(&path).unwrap();
+        assert!(card.contains("kind: coursework-map"));
+        assert!(card.contains("source: zybooks"));
+        assert!(card.contains("map_key: UACS100Fall2026"));
+        assert!(card.contains("course: cs-100"));
+        assert!(card.contains("status: pending"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card is never minted twice for one key — the next slot fetches the same unmapped book.
+    #[test]
+    fn a_map_card_is_never_minted_twice_for_one_key() {
+        let vault = scratch_vault("map-once");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let p = MapProposal {
+            source: "vhl".into(),
+            key: "2102121".into(),
+            label: "VHL section 2102121".into(),
+            suggested_course: None,
+        };
+        let today = jiff::civil::date(2026, 9, 9);
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_ok());
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_err());
+        assert_eq!(crate::approvals::sorted_md(&vault.join("approvals")).len(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card the student REJECTED is not re-asked on the next slot — `write::create`'s `Exists`
+    /// guard only sees `approvals/`, and a rejected card lives in `archive/`.
+    #[test]
+    fn a_rejected_map_card_is_not_re_asked_until_it_expires() {
+        let vault = scratch_vault("map-rejected");
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let today = jiff::civil::date(2026, 9, 9);
+        let p = MapProposal {
+            source: "zybooks".into(),
+            key: "UACS100Fall2026".into(),
+            label: "UACS100Fall2026".into(),
+            suggested_course: Some("cs-100".into()),
+        };
+        let path = write_map_card(&vault, &p, today, &ctx, &mut journal).unwrap();
+        let rel = crate::ids::rel(&vault, &path);
+
+        // The student says no, and `process_approvals` settles the card into `archive/`.
+        crate::write::write_literals(
+            &vault,
+            &rel,
+            &[("status".to_string(), "rejected".to_string())],
+            &ctx,
+            &mut journal,
+            &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        crate::write::delete(&vault, &rel, &ctx, &mut journal).unwrap();
+        assert!(crate::approvals::sorted_md(&vault.join("approvals")).is_empty());
+
+        // The next slot fetches the same unmapped book and asks nothing.
+        let key = ("zybooks".to_string(), "UACS100Fall2026".to_string());
+        assert!(asked_map_keys(&vault, today).contains(&key), "the archived card is the memory");
+        // …until it expires, 30 days out, when the question is worth asking again.
+        assert!(
+            asked_map_keys(&vault, jiff::civil::date(2026, 10, 10)).is_empty(),
+            "asked again next month, not twice a day forever"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Approving one writes the mapping into `config/ingest.yaml` and archives the card.
+    #[test]
+    fn an_approved_map_card_writes_the_mapping_and_is_archived() {
+        let vault = scratch_vault("map-apply");
+        std::fs::write(
+            vault.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n",
+        )
+        .unwrap();
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let path = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(),
+                key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(),
+                suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .unwrap();
+        let rel = crate::ids::rel(&vault, &path);
+        crate::write::write_literals(
+            &vault,
+            &rel,
+            &[("status".to_string(), "approved".to_string())],
+            &ctx,
+            &mut journal,
+            &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("mapped UACS100Fall2026")), "{lines:?}");
+        let cfg = crate::pystr::read_text(&vault.join("config").join("ingest.yaml")).unwrap();
+        assert!(cfg.contains("\"UACS100Fall2026\":"), "{cfg}");
+        assert!(cfg.contains("course: \"cs-100\""), "{cfg}");
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: the insertion goes directly beneath an existing `courses:` line, at the
+    /// indentation the file already uses, and the entry that was there is left exactly as it was.
+    #[test]
+    fn a_mapping_is_inserted_under_an_existing_block() {
+        let vault = scratch_vault("map-insert");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     'UAMATH120Fall2026':\n        course: 'math-120'\n        label: 'MATH 120'\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+
+        assert_eq!(
+            crate::pystr::read_text(&path).unwrap(),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     \"UACS100Fall2026\":\n        course: \"cs-100\"\n        label: \"CS 100\"\n\
+             \u{20}     'UAMATH120Fall2026':\n        course: 'math-120'\n        label: 'MATH 120'\n"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: `courses: {}` — what C1's `scaffold::ingest_yaml` writes at birth — becomes the
+    /// block form, one line replaced in place at its own indentation. The VHL half is `sections`.
+    #[test]
+    fn an_empty_flow_mapping_becomes_the_block_form() {
+        let vault = scratch_vault("map-flow");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n\
+             \u{20} vhl:\n    enabled: true\n    sections: {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        assert_eq!(write_mapping(&vault, "vhl", "2102121", "gn-103"), Ok(true));
+
+        assert_eq!(
+            crate::pystr::read_text(&path).unwrap(),
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses:\n\
+             \u{20}     \"UACS100Fall2026\":\n        course: \"cs-100\"\n        label: \"CS 100\"\n\
+             \u{20} vhl:\n    enabled: true\n    sections:\n\
+             \u{20}     \"2102121\":\n        course: \"gn-103\"\n        label: \"GN 103\"\n"
+        );
+        // The section id survives as a STRING key, which is the whole reason it is quoted:
+        // `route_section` looks it up by the text the dashboard gave it.
+        let cfg: Yaml = serde_yaml_ng::from_str(&crate::pystr::read_text(&path).unwrap()).unwrap();
+        assert!(cfg["coursework"]["vhl"]["sections"]["2102121"]["course"].as_str() == Some("gn-103"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8: a second apply of the same key is a no-op with a log line — not a duplicate key,
+    /// which would be a YAML load error and would take the whole config down with it.
+    #[test]
+    fn a_second_apply_of_the_same_key_is_a_no_op() {
+        let vault = scratch_vault("map-again");
+        let path = vault.join("config").join("ingest.yaml");
+        crate::pystr::write_text(
+            &path,
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n    courses: {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        let once = std::fs::read(&path).unwrap();
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(false));
+        assert_eq!(std::fs::read(&path).unwrap(), once, "the file is not even opened for writing");
+
+        // And the card that asks for it a second time is still executed and archived, with the
+        // line that says why nothing changed.
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let card_path = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "zybooks".into(),
+                key: "UACS100Fall2026".into(),
+                label: "UACS100Fall2026".into(),
+                suggested_course: Some("cs-100".into()),
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .unwrap();
+        let rel = crate::ids::rel(&vault, &card_path);
+        crate::write::write_literals(
+            &vault,
+            &rel,
+            &[("status".to_string(), "approved".to_string())],
+            &ctx,
+            &mut journal,
+            &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("was already mapped")), "{lines:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), once, "still byte-identical");
+        assert!(!card_path.exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-8, the invariant itself: **every byte outside the inserted lines is unchanged** —
+    /// comments, blank lines, key order, the single-quoted style `scaffold::ingest_yaml` uses, and
+    /// the file's own line terminator. This is the test a `serde_yaml_ng::to_string` round trip
+    /// cannot pass, and it is why the ruling exists.
+    #[test]
+    fn every_byte_outside_the_inserted_lines_is_unchanged() {
+        let vault = scratch_vault("map-bytes");
+        let path = vault.join("config").join("ingest.yaml");
+        let original = [
+            "ics_url: 'https://lms.example.invalid/feed/a.ics'",
+            "timezone: America/Chicago",
+            "course_map: {}",
+            "calendars: []",
+            "",
+            "# Passwords are NOT here. They live in Windows Credential Manager under the",
+            "# credential_target names below.",
+            "coursework:",
+            "  zybooks:",
+            "    enabled: true",
+            "    credential_target: 'knowlu/p1/zybooks'",
+            "    ignore:",
+            "      - 'HowToUseZyBooks2'",
+            "    courses:",
+            "      'UAMATH120Fall2026':",
+            "        course: 'math-120'",
+            "        label: 'MATH 120'   # hand-edited, and it stays hand-edited",
+            "  vhl:",
+            "    enabled: true",
+            "    sections: {}",
+            "",
+        ]
+        .join("\n");
+        // Written through `write_text`, so the fixture is in THIS platform's own terminator and the
+        // comparison below is a real byte comparison rather than a line-ending artefact.
+        crate::pystr::write_text(&path, &original).unwrap();
+        let before = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(write_mapping(&vault, "zybooks", "UACS100Fall2026", "cs-100"), Ok(true));
+        let after = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+
+        let nl = crate::pystr::NEWLINE;
+        let inserted = format!(
+            "      \"UACS100Fall2026\":{nl}        course: \"cs-100\"{nl}        label: \"CS 100\"{nl}"
+        );
+        assert!(after.contains(&format!("    courses:{nl}{inserted}      'UAMATH120Fall2026':")));
+        assert_eq!(after.replacen(&inserted, "", 1), before, "three lines added and nothing else");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A card with no course on it is refused rather than writing an empty mapping — an empty
+    /// `course` would make every item from that book `course: ""`, which reads as attributed.
+    #[test]
+    fn a_map_card_with_no_course_is_refused_and_kept() {
+        let vault = scratch_vault("map-blank");
+        std::fs::write(
+            vault.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncoursework:\n  vhl:\n    enabled: true\n    sections: {}\n",
+        )
+        .unwrap();
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let path = write_map_card(
+            &vault,
+            &MapProposal {
+                source: "vhl".into(),
+                key: "2102121".into(),
+                label: "VHL section 2102121".into(),
+                suggested_course: None,
+            },
+            jiff::civil::date(2026, 9, 9),
+            &ctx,
+            &mut journal,
+        )
+        .unwrap();
+        let rel = crate::ids::rel(&vault, &path);
+        crate::write::write_literals(
+            &vault,
+            &rel,
+            &[("status".to_string(), "approved".to_string())],
+            &ctx,
+            &mut journal,
+            &crate::write::WriteOpts::default(),
+        )
+        .unwrap();
+        let lines = apply_map_cards(&vault, &ctx, &mut journal);
+        assert!(lines.iter().any(|l| l.contains("no course on the card")), "{lines:?}");
+        let card = std::fs::read_to_string(&path).expect("the card survives to be edited");
+        assert!(card.contains("status: pending"), "back to pending, so it ages and expires: {card}");
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }
