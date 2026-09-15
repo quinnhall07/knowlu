@@ -140,6 +140,31 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     assert_eq!(ics_state(&v), IcsState::NoUrl);
 }
 
+/// C2 hand-off H5: a cloud vault runs `ingest` even with a blank `ics_url`, because the feed can
+/// come from `/ingest-ics` instead — safe only because C2's H3 makes the engine ask the service
+/// before it refuses a blank url. A vault with no `config/cloud.yaml` keeps leaving `ingest` out,
+/// exactly as `the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configured`
+/// pins above.
+#[test]
+fn a_cloud_vault_runs_ingest_with_no_ics_url() {
+    let v = scratch("cloud-argv");
+    let exe = Path::new(r"C:\bin\knowlu-engine.exe");
+    let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
+
+    let cfg = v.join("config").join("ingest.yaml");
+    std::fs::write(&cfg, "ics_url: \"   \"\n").unwrap();
+    assert!(!has_ics_url(&v));
+
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'https://cloud.example.invalid/functions/v1'\nanon_key: 'anon-not-a-secret'\nsession_credential_target: 'knowlu/test-profile/session'\naccount_id: 'acct-1'\n",
+    )
+    .unwrap();
+
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
+    assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
+}
+
 /// D7: no runtime and no model are NORMAL. The step is recorded with code 0 and a name that says
 /// which half is missing — the shape `ingest (skipped: no ics_url)` already uses — so a friend with
 /// no model sees an explanation on the Runs view rather than a slot that quietly does less.

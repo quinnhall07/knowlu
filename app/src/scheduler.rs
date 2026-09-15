@@ -317,7 +317,10 @@ fn judge_plan_for(state: crate::account::EntitlementState, cs: &ConsoleState) ->
 pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan) -> Vec<(PathBuf, Vec<String>)> {
     let v = vault.to_string_lossy().to_string();
     let mut steps = vec![(exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
-    if has_ics_url(vault) {
+    // C2 Task 8: the LMS capability URL lives in the account from here on, so a cloud vault runs
+    // `ingest` whether or not the vault still carries a copy. Safe only with C2's H3 applied —
+    // without it, a blank `ics_url` exits 1 before the service is ever asked.
+    if has_ics_url(vault) || vault.join("config").join("cloud.yaml").is_file() {
         steps.push((exe.to_path_buf(), vec!["ingest".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
     }
     match judge {
