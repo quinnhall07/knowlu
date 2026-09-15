@@ -1,7 +1,7 @@
 // Static pins on the migrations. There is no Docker in this plan, so nothing here applies SQL:
 // these are the invariants that would otherwise only be discovered on a project that already has
 // rows in it, which is the wrong time to discover them.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 
 const HERE = new URL(".", import.meta.url);
 
@@ -35,42 +35,99 @@ export async function everyMigrationFile(dir: URL = HERE): Promise<Array<[string
   return out;
 }
 
+/** One identifier, in any of the forms `supabase db diff` (or a person) can write it: bare
+ * (`foo`), schema-qualified (`public.foo`), or either half double-quoted (`"public".foo`,
+ * `public."foo"`, `"public"."foo"`). `name` is either `(\w+)` — a capturing group, for parsing an
+ * unknown name out of a definition — or an already-known literal name, for searching a revoke
+ * statement for it; either way the NAME ALONE compares unquoted, so a definition and a revoke that
+ * spell the same function differently still match (R-C2-E37c). */
+function identPattern(name: string): string {
+  return `(?:"?public"?\\s*\\.\\s*)?"?${name}"?`;
+}
+
 /**
- * A function definition, anywhere: an optional `public.` schema prefix (Postgres's own default
- * schema, and the only one this codebase uses), the name, its parameter list, and — non-greedily —
- * everything up to and through its `AS $tag$ … $tag$` body, whatever the dollar-quote tag is
- * (`$$`, `$fn$`, …; group 3 is the tag and `\3` demands the SAME one close it, so a body that
- * itself contains an unrelated `$$` is never mistaken for the end).
+ * A function definition, anywhere: `create [or replace] function`, the identifier (§`IDENT`), its
+ * parameter list, and — non-greedily — everything up to and through its `AS $tag$ … $tag$` body,
+ * whatever the dollar-quote tag is (`$$`, `$fn$`, …; the SAME tag must close it, so a body
+ * containing an unrelated `$$` is never mistaken for the end), through the terminating `;` —
+ * because Postgres allows trailing clauses AFTER the body (`as $$ … $$ language sql security
+ * definer;`), and a definer test that stopped at the closing tag would miss one (R-C2-E37b).
+ *
+ * Group 1 is the HEADER ALONE — from `create` through the opening `as $tag$`, never the body —
+ * because the `returns trigger` exemption below must never be satisfied by anything a body merely
+ * CONTAINS (a string literal, a comment that survived stripping) rather than the real return type
+ * the function was actually declared with (R-C2-E37a). Group 2 is the name; group 3 the tag.
  */
-const FUNCTION_DEFINITION = /create\s+(?:or\s+replace\s+)?function\s+(?:public\.)?(\w+)\s*\(([^)]*)\)[\s\S]*?\bas\s+(\$[A-Za-z_]*\$)[\s\S]*?\3/gi;
+const FUNCTION_DEFINITION = new RegExp(
+  `(create\\s+(?:or\\s+replace\\s+)?function\\s+${identPattern("(\\w+)")}\\s*\\([^)]*\\)[\\s\\S]*?\\bas\\s+(\\$[A-Za-z_]*\\$))[\\s\\S]*?\\3[\\s\\S]*?;`,
+  "gi",
+);
+
+/** How many times the bare `create [or replace] function` phrase appears — independent of whether
+ * `FUNCTION_DEFINITION` above can actually parse what follows. Used only by the parse-count check
+ * (R-C2-E37e): a shape the definition regex cannot parse (a digit in the dollar tag, a
+ * `begin atomic` body, a single-quoted body, a schema this codebase does not otherwise use, …)
+ * must never silently vanish from the scan — it must fail loud instead. */
+const RAW_FUNCTION_KEYWORD = /create\s+(?:or\s+replace\s+)?function/gi;
+
+/** Strips every `--` line comment (R-C2-E37d): a commented-out `-- revoke execute …` must not
+ * satisfy the guard, and a commented-out definition must not be scanned at all — by either the
+ * definition regex or the raw keyword count above, so the two stay in agreement on real code only.
+ * Line-based, not string-literal-aware: nothing in this corpus puts `--` inside a string (checked
+ * by hand), and a guard that is too strict here fails loud (R-C2-E37e) rather than silently. */
+function stripLineComments(sql: string): string {
+  return sql
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("--");
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join("\n");
+}
 
 /**
  * `files`, sorted, from earliest to latest: for every SECURITY DEFINER function creation, a
  * `revoke execute … from …` naming both `anon` and `authenticated` somewhere from THAT file
  * onward (R-C2-E29 fixed it; R-C2-E36 widens where this guard is allowed to look for both the
- * creation and the fix). A `returns trigger` function is exempt BY KIND, not by name or by
- * migration — it cannot be called through PostgREST at all (it takes no ordinary arguments and its
- * return type means nothing outside a trigger context) — and every exempted name is returned so a
- * caller can assert on it directly, rather than the exemption silently swallowing the one case
- * (C1's `handle_new_user`) that proves the rule fires.
+ * creation and the fix; R-C2-E37 closes the three ways a definer function could still pass unseen).
+ * A `returns trigger` function is exempt BY KIND, not by name or by migration — it cannot be
+ * called through PostgREST at all (it takes no ordinary arguments and its return type means
+ * nothing outside a trigger context) — and every exempted name is returned so a caller can assert
+ * on it directly, rather than the exemption silently swallowing the one case (C1's
+ * `handle_new_user`) that proves the rule fires. `parsed` is the total definitions this run
+ * actually parsed, across every file, so a caller can pin the corpus's own count.
  */
-export function assertExecuteRevoked(files: Array<[string, string]>): { exemptedTriggers: string[] } {
+export function assertExecuteRevoked(
+  files: Array<[string, string]>,
+): { exemptedTriggers: string[]; parsed: number } {
+  const stripped = files.map(([name, sql]) => [name, stripLineComments(sql)] as [string, string]);
   const exemptedTriggers: string[] = [];
-  for (let i = 0; i < files.length; i++) {
-    const [name, sql] = files[i];
-    for (const d of sql.matchAll(FUNCTION_DEFINITION)) {
-      const fn = d[1];
-      if (/returns\s+trigger/i.test(d[0])) {
+  let parsed = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const [name, sql] = stripped[i];
+    const rawCount = (sql.match(RAW_FUNCTION_KEYWORD) ?? []).length;
+    const definitions = [...sql.matchAll(FUNCTION_DEFINITION)];
+    assert(
+      rawCount === definitions.length,
+      `${name}: found ${rawCount} 'create function' occurrence(s) but the definition regex parsed ` +
+        `${definitions.length} — a shape it cannot parse (R-C2-E37e). Every function this file ` +
+        `creates must be a shape the scan can see, or it is a privilege gap the scan cannot see either.`,
+    );
+    for (const d of definitions) {
+      parsed += 1;
+      const header = d[1];
+      const fn = d[2];
+      if (/returns\s+trigger/i.test(header)) {
         exemptedTriggers.push(fn);
         continue;
       }
       if (!/security\s+definer/i.test(d[0])) continue;
-      const rest = files.slice(i).map(([, s]) => s).join("\n");
+      const rest = stripped.slice(i).map(([, s]) => s).join("\n");
       // A previous migration's own `revoke … from public` may still be sitting right there
       // (forward-only: it is never edited out) — every match counts, not just the first, so a
       // narrower fix-up revoke later in the corpus still satisfies this.
       const revokeRe = new RegExp(
-        `revoke\\s+execute\\s+on\\s+function\\s+(?:public\\.)?${fn}\\s*\\([^)]*\\)\\s+from\\s+([^;]+);`,
+        `revoke\\s+execute\\s+on\\s+function\\s+${identPattern(fn)}\\s*\\([^)]*\\)\\s+from\\s+([^;]+);`,
         "gi",
       );
       const matches = [...rest.matchAll(revokeRe)];
@@ -88,7 +145,7 @@ export function assertExecuteRevoked(files: Array<[string, string]>): { exempted
       );
     }
   }
-  return { exemptedTriggers };
+  return { exemptedTriggers, parsed };
 }
 
 Deno.test("every table this stream creates has row level security enabled", async () => {
@@ -110,7 +167,12 @@ Deno.test("every SECURITY DEFINER function in every migration has execute revoke
   // stays reachable over PostgREST with the anon key unless both are named too. Scoped to EVERY
   // migration, not only this stream's own `20260911…` ones: a gap in a later stream's own function
   // is exactly as live a hole as one in this stream's.
-  assertExecuteRevoked(await everyMigrationFile());
+  const { parsed } = assertExecuteRevoked(await everyMigrationFile());
+  // R-C2-E37e: pinned so a future function that silently stops being parsed (rather than being
+  // caught by the per-file count check) still shows up here as a number that moved without a
+  // reason on the diff. Ten single functions plus `store_google_grant`'s own `create or replace`
+  // in both 20260911000200 and 20260911000300 — counted by hand against today's corpus.
+  assertEquals(parsed, 11, "today's corpus should parse exactly 11 function creations");
 });
 
 Deno.test("a trigger function is exempt from the execute-revoke guard by kind, not by name — and the scan proves it by finding one", async () => {
@@ -125,6 +187,126 @@ Deno.test("a trigger function is exempt from the execute-revoke guard by kind, n
     exemptedTriggers.includes("handle_new_user"),
     `expected handle_new_user among the trigger-exempted functions, got: ${exemptedTriggers}`,
   );
+});
+
+// R-C2-E37: five synthetic-SQL regression cases, one per adversarial shape the re-review found.
+// Each is a small string through the exported `assertExecuteRevoked` — no directory, no real
+// migration file needed, and no earlier RED evidence would have caught these (the real corpus
+// never carried any of these shapes; that's exactly how they went unnoticed).
+
+Deno.test("(a) the trigger exemption reads only the header, never the body", () => {
+  // Before R-C2-E37a this function would have been wrongly exempted: `/returns\s+trigger/i`
+  // tested the WHOLE match, and this body's own text (a string literal, not a comment — comment
+  // stripping would not save it either) contains exactly that phrase.
+  const sql = `
+create or replace function sneaky_definer(p_account uuid)
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  raise exception 'this body returns trigger nonsense on purpose, and must not exempt me';
+  return 'x';
+end;
+$$;
+`;
+  assertThrows(
+    () => assertExecuteRevoked([["synthetic-a.sql", sql]]),
+    Error,
+    "sneaky_definer",
+  );
+});
+
+Deno.test("(b) SECURITY DEFINER trailing the body still counts", () => {
+  // Postgres allows `language`/`security` after the closing dollar tag. Before R-C2-E37b the
+  // match ended at the closing tag, so this function read as non-definer and passed silently
+  // with no revoke at all.
+  const sql = `
+create or replace function trailing_definer(p_account uuid)
+returns text
+as $$
+  select 'x';
+$$ language sql security definer;
+`;
+  assertThrows(
+    () => assertExecuteRevoked([["synthetic-b.sql", sql]]),
+    Error,
+    "trailing_definer",
+  );
+});
+
+Deno.test("(c) a double-quoted, schema-qualified identifier is parsed and matched unquoted", () => {
+  // The shape `supabase db diff` emits. Definition and revoke spell the identifier two different
+  // ways (fully quoted vs bare) — both must resolve to the same unquoted name for the guard to
+  // pass at all.
+  const sql = `
+create or replace function "public"."quoted_definer"(p_account uuid)
+returns text
+language sql
+security definer
+as $$
+  select 'x';
+$$;
+revoke execute on function quoted_definer(uuid) from public, anon, authenticated;
+`;
+  assertExecuteRevoked([["synthetic-c.sql", sql]]); // must not throw
+});
+
+Deno.test("(d) comments are stripped before either scan", () => {
+  // (d1) A commented-out revoke must not satisfy the guard.
+  const commentedRevoke = `
+create or replace function commented_revoke_definer(p_account uuid)
+returns text
+language sql
+security definer
+as $$
+  select 'x';
+$$;
+-- revoke execute on function commented_revoke_definer(uuid) from public, anon, authenticated;
+`;
+  assertThrows(
+    () => assertExecuteRevoked([["synthetic-d1.sql", commentedRevoke]]),
+    Error,
+    "commented_revoke_definer",
+  );
+
+  // (d2) A commented-out DEFINITION must not be scanned at all — the parse-count check (e) must
+  // not misfire on it either: zero raw `create function` occurrences, zero parsed, in agreement.
+  const commentedDefinition = `
+-- create or replace function ghost_definer(p_account uuid)
+-- returns text
+-- language sql
+-- security definer
+-- as $$
+--   select 'x';
+-- $$;
+`;
+  const { exemptedTriggers } = assertExecuteRevoked([["synthetic-d2.sql", commentedDefinition]]);
+  assertEquals(exemptedTriggers, []);
+});
+
+Deno.test("(e) a shape the definition regex cannot parse fails loud via the parse-count check", () => {
+  // A dollar-quote tag with a digit in it (`$tag1$`) is valid Postgres but this file's tag pattern
+  // is letters/underscore only, so `FUNCTION_DEFINITION` parses zero definitions here even though
+  // one real `create function` exists — exactly the silent-miss shape this check exists to catch.
+  // A correct revoke is present and irrelevant: without the count check this passes with zero
+  // iterations, silently, whether or not any revoke exists at all.
+  const sql = `
+create or replace function unparseable_tag_definer(p_account uuid)
+returns text
+language sql
+security definer
+as $tag1$
+  select 'x';
+$tag1$;
+revoke execute on function unparseable_tag_definer(uuid) from public, anon, authenticated;
+`;
+  const err = assertThrows(() => assertExecuteRevoked([["synthetic-e.sql", sql]]), Error);
+  const message = err instanceof Error ? err.message : String(err);
+  assert(message.includes("synthetic-e.sql"), message);
+  assert(message.includes("found 1"), message);
+  assert(message.includes("parsed 0"), message);
 });
 
 Deno.test("the judgments table has nowhere to put a body", async () => {
