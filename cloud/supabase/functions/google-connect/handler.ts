@@ -15,9 +15,11 @@
 // exactly that on both panels — the wizard is C1's; this is the endpoint behind it, and its copy
 // is hand-off H9.
 import type { Entitle } from "../_shared/judge_handler.ts";
+// R-C2-E35: one home for the two scope literals — re-exported here so `handler_test.ts` and every
+// existing caller of `./handler.ts` keep importing `CALENDAR_SCOPE` / `GMAIL_SCOPE` from this file.
+export { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
+import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 
-export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 export const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 
 /** `?scope=` -> the one scope this consent asks for, and whether it widens an existing grant. */
@@ -54,12 +56,15 @@ export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Reque
         try {
           await deps.disconnect(account_id);
         } catch (e) {
-          // R-C2-E33: `deps.disconnect` (`disconnect.ts`'s `disconnectGrant`) forgets the row only
-          // once the revoke has succeeded or was already moot — a genuinely failed revoke throws
-          // and the row STAYS, on purpose, so the student can retry rather than lose the only copy
-          // of the token. Swallowed here so the user still sees "disconnected" rather than a 500;
-          // the failure is this log line, not a live grant claiming to be gone.
+          // R-C2-E33 / R-C2-E34: `deps.disconnect` (`disconnect.ts`'s `disconnectGrant`) forgets
+          // the row only once the revoke has succeeded or was already moot — a genuinely failed
+          // revoke throws and the row STAYS, on purpose, so the student can retry rather than lose
+          // the only copy of the token. Answering `{disconnected: true}` here would be a lie the
+          // very next `?status=1` poll exposes (`connected: true`, the grant never having moved),
+          // so this is a 502 instead: the grant is still live at Google and still stored, and the
+          // failure is this log line's class only, never the body.
           console.error(`google-connect: revoke failed (${e instanceof Error ? e.constructor.name : "unknown"})`);
+          return Response.json({ error: "Google could not be reached to disconnect; try again" }, { status: 502 });
         }
         return Response.json({ disconnected: true });
       }

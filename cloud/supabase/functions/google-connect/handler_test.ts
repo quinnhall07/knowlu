@@ -100,16 +100,18 @@ Deno.test("the handler answers disconnected: true once deps.disconnect resolves"
   assert(called, "deps.disconnect must be awaited before the reply");
 });
 
-Deno.test("a rejected deps.disconnect still answers disconnected: true at this layer", async () => {
-  // The user asked to be disconnected; a failed revoke must not surface as a 500 that leaves a UI
-  // stuck retrying forever. Whether the grant itself survives a failed revoke is `disconnect.ts`'s
-  // job (`disconnect_test.ts`), not this handler's — this only proves the API boundary swallows
-  // the rejection and logs it (`google-connect: revoke failed (…)`), which is a distinct promise
-  // from what actually happens to the row.
+Deno.test("a rejected deps.disconnect is a 502 that claims nothing was disconnected", async () => {
+  // R-C2-E34: `disconnectGrant` forgets the row only on a successful (or already-moot) revoke, so
+  // a rejected `deps.disconnect` means the grant is STILL live at Google and STILL stored.
+  // Answering `{disconnected: true}` here would be a lie the very next `?status=1` poll exposes —
+  // so this is a 502, and the body must never carry a `disconnected` field a caller could read as
+  // truthy by accident.
   const handler = connectHandler(OK, deps({ disconnect: () => Promise.reject(new Error("google 503")) }));
   const response = await handler(new Request("http://127.0.0.1/google-connect", { method: "DELETE" }));
-  assertEquals(response.status, 200);
-  assertEquals((await response.json()).disconnected, true);
+  assertEquals(response.status, 502);
+  const body = await response.json();
+  assertEquals(body, { error: "Google could not be reached to disconnect; try again" });
+  assertEquals("disconnected" in body, false, "nothing here may claim the grant is gone");
 });
 
 Deno.test("a missing client id is a 503 that names the configuration, not the account", async () => {

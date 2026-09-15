@@ -2,14 +2,8 @@ import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { importAesKey } from "../_shared/crypto.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
+import { CALENDAR_SCOPE } from "../_shared/google_scopes.ts";
 import { CAL_USER_AGENT, calendarHandler } from "./handler.ts";
-
-// The calendar scope `read_google_grant` is asked for — the same string `google-connect/handler.ts`
-// exports as `CALENDAR_SCOPE` (§11a: the sensitive scope, asked for first and alone). Not imported
-// from there: every function directory in this codebase is self-contained outside `_shared/`, and a
-// literal that both `judge_db_test.ts`'s scoping guard and a reader can see is worth more here than
-// one shared constant would be.
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
 // Imported once, lazily, and kept: `importAesKey` is a `crypto.subtle` call and re-importing it
 // per request is work for nothing. Built at first use, never at module scope, so a missing secret

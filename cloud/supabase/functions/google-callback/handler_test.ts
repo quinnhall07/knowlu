@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { callbackHandler } from "./handler.ts";
+import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 
 const TOKENS = {
   refresh_token: "REFRESH-TRIPWIRE-9f2c",
@@ -40,9 +41,28 @@ Deno.test("a good code stores the refresh token and says the window may be close
   assertEquals(response.status, 200);
   const page = await response.text();
   assert(page.includes("close this window"));
+  // R-C2-E31: TOKENS.scopes is the calendar scope alone (§11a's first, common ask) — the page
+  // must name the calendar, not the mailbox nobody was asked about.
+  assert(page.includes("Google Calendar is connected"), page);
   // The token reaches the store and NOTHING else — not the page, not a header.
   assertEquals((stored as { token: string }).token, TOKENS.refresh_token);
   assertEquals(page.includes("TRIPWIRE-9f2c"), false);
+});
+
+Deno.test("the success page names exactly what tokens.scopes granted", async () => {
+  // R-C2-E31: calendar-only, Gmail-only and both, over the same handler — one test, one fixture
+  // matrix, matching the loop-over-fixtures idiom this suite already uses elsewhere in the repo.
+  const cases: Array<[string[], string]> = [
+    [[CALENDAR_SCOPE], "Google Calendar is connected"],
+    [[GMAIL_SCOPE], "Gmail is connected"],
+    [[CALENDAR_SCOPE, GMAIL_SCOPE], "Google Calendar and Gmail are"],
+  ];
+  for (const [scopes, want] of cases) {
+    const handler = callbackHandler(deps({ exchange: () => Promise.resolve({ ...TOKENS, scopes }) }));
+    const response = await handler(get("state=good&code=abc"));
+    const page = await response.text();
+    assert(page.includes(want), `scopes ${scopes.join(",")}: expected "${want}" in ${page}`);
+  }
 });
 
 Deno.test("the state nonce is required and single use", async () => {
@@ -57,6 +77,8 @@ Deno.test("a Google error is a page, not a stack trace, and names no token", asy
   const response = await handler(get("state=good&code=abc"));
   const page = await response.text();
   assert(page.includes("try again"));
+  // R-C2-E31: "Google", not "Gmail" — the exchange can fail on a calendar-only connect too.
+  assert(page.includes("Google could not be connected"), page);
   assertEquals(page.includes("TRIPWIRE-9f2c"), false);
 });
 
@@ -70,7 +92,11 @@ Deno.test("a user who declined at Google gets a page and no exchange is attempte
   }));
   const response = await handler(get("state=good&error=access_denied"));
   assertEquals(response.status, 200);
-  assert((await response.text()).includes("not connected"));
+  const page = await response.text();
+  // R-C2-E31: "Google", not "Gmail" — the FIRST ask is the calendar, and a student declining that
+  // consent must not read a page that names a mailbox they were never asked about.
+  assert(page.includes("Google was"), page);
+  assert(page.includes("not connected"), page);
   assertEquals(exchanged, false);
 });
 

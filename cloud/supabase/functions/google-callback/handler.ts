@@ -8,6 +8,8 @@
 // it is authenticated by the single-use `state` nonce, which `take_google_state` consumes and
 // expires in one statement. `config.toml` therefore sets `verify_jwt = false` here for a different
 // reason than everywhere else, and hand-off H7 says so.
+import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
+
 export interface CallbackDeps {
   clientId: string;
   clientSecret: string;
@@ -33,9 +35,6 @@ function page(message: string, status = 200): Response {
 // R-C2-E31: every page said "Gmail", but the FIRST ask this pair ever makes is the calendar — a
 // student connecting only their calendar must not read a success page that names a mailbox they
 // were never asked about. The success message names what `tokens.scopes` actually carries.
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-
 function successMessage(scopes: string[]): string {
   const calendar = scopes.includes(CALENDAR_SCOPE);
   const gmail = scopes.includes(GMAIL_SCOPE);
