@@ -46,6 +46,20 @@ import { type Case, failed, score } from "./score.ts";
 
 const KINDS: Kind[] = ["task", "event", "email"];
 
+/**
+ * The ceiling on how many cases ONE run will score, per kind (C2 final review S-5).
+ *
+ * Every non-`--dry-run` case is one real model call at roughly $0.0014 (the arithmetic is in
+ * `judge_caps.ts`), and the corpus is unbounded by construction: `eval_cases` grows with every
+ * consented correction, and this gate runs on every PR that touches a prompt, a schema or a model
+ * pin. Today the corpus is empty, so the gate costs nothing — which is exactly when a ceiling is
+ * cheap to add and impossible to remember later. 200 per kind is 600 calls, under a dollar, and far
+ * more than a regression needs to show itself; it is applied as PostgREST's own `&limit=`, so the
+ * rows never leave the database, and it is printed before the loop so a run always says what it is
+ * about to spend.
+ */
+export const MAX_CASES = 200;
+
 /** The eval is not a user (R-C2-E9 / R-C2-E51 fix 1, finding 3): every stub below ignores this
  * value, and there is no real account behind an automated run, so it is the nil UUID rather than a
  * secret that named an account nothing here actually used. */
@@ -82,7 +96,8 @@ async function load(db: Db, kind: Kind): Promise<Row[]> {
   // request (ruling R-C2-4 — that is only ever true under the (c) opt-in, whose UI is C4).
   const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
   return await db.select(
-    `eval_cases?kind=eq.${kind}&or=(source.eq.seed,added_at.gte.${since})&select=id,kind,request,ours,theirs`,
+    `eval_cases?kind=eq.${kind}&or=(source.eq.seed,added_at.gte.${since})` +
+      `&select=id,kind,request,ours,theirs&order=id&limit=${MAX_CASES}`,
   ) as Row[];
 }
 
@@ -215,6 +230,9 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       }
       continue;
     }
+    // S-5: what this run is about to spend, before it spends it. Tier 2 is off for the eval and
+    // `--dry-run` reaches no provider at all, so the model-call count is the case count exactly.
+    console.log(`${kind}: ${rows.length} cases, <= ${rows.length} model calls (cap ${MAX_CASES})`);
     const row = await modelRow(db, kind);
     const cases: Case[] = rows.map((r) => ({ kind, theirs: r.theirs }));
     const answers: Array<Record<string, unknown> | null> = [];

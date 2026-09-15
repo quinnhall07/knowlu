@@ -28,3 +28,21 @@
 --
 -- `migrations_test.ts`'s view guard is what keeps the next view from repeating this.
 revoke all on public.monthly_spend from anon, authenticated;
+
+-- ---------------------------------------------------------------------------------------------
+-- S-1 — the gmail queue is swept.
+--
+-- `gmail_queue` had no sweep at all: a row stayed forever once delivered. Each one carries a
+-- model-written title and rationale derived from a student's mail (the comment correction beside
+-- the table in 20260911000200 says so), so an unswept queue is an indefinite store of writing
+-- about someone's inbox that nothing reads again after the device has pulled it.
+--
+-- Delivered rows only, and only after seven days: an UNdelivered row is work the device has not
+-- collected yet — a laptop that is off for a fortnight must still get its tasks — so it is never
+-- touched here. Seven days past delivery is long enough for the device to have been asked twice a
+-- day for a week and short enough that nothing lingers.
+--
+-- 07:31 UTC, beside the other nightly jobs (`knowlu-billing-jobs` at :17, `knowlu-promote-rules`
+-- at :17, `knowlu-sweep-google-state` at :23) and deliberately not on the same minute as any of
+-- them.
+select cron.schedule('knowlu-sweep-gmail-queue', '31 7 * * *', $$delete from public.gmail_queue where delivered_at is not null and delivered_at < now() - interval '7 days';$$);

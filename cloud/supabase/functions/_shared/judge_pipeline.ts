@@ -60,19 +60,25 @@ export interface PipelineDeps {
  * figure, an importance, a three-word title prefix that is the note's filename. The free-text
  * fields (`importance_reason`, `why`, `title`) are dropped here, and `a_body_token_reaches_no_
  * judgment_row` is what keeps that true.
+ *
+ * **The feature map merges LAST** (C2 final review S-6). The two halves share a namespace, and a
+ * verdict field could one day be named `source` or `course`-like enough to collide with a feature
+ * key. `promote_rules` builds a rule's verdict as `fields` MINUS the feature keys, so a feature
+ * the verdict had overwritten would be subtracted as though it were still there — the rule would
+ * be promoted on a value that is not the one it was looked up by, and would never fire. Nothing
+ * collides today; this is the order that keeps that a property rather than a coincidence.
  */
 export function fieldsOf(
   verdict: Record<string, unknown> | null,
   kind: Kind,
   item: Record<string, unknown>,
 ): Record<string, string> {
-  const out: Record<string, string> = featureMap(kind, item);
-  if (verdict === null) return out;
-  for (const [name, value] of Object.entries(verdict)) {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(verdict ?? {})) {
     if (["confidence", "why", "importance_reason", "title"].includes(name)) continue;
     out[name] = value === null ? "null" : String(value);
   }
-  return out;
+  return { ...out, ...featureMap(kind, item) };
 }
 
 function itemId(item: Record<string, unknown>): string {

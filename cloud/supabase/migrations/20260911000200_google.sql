@@ -38,6 +38,13 @@ alter table gmail_seen enable row level security;
 
 -- What the device has not pulled yet. `payload` is the VERDICT and the fields to write — never
 -- the message text, which is discarded the moment the judgment returns (§5.3).
+--
+-- CORRECTION (comment only, C2 final review S-1): "the fields to write" is not only ids. The
+-- verdict carries a model-WRITTEN `title` and a model-written `why`, both derived from the message
+-- and both stored here until the device pulls them. That is deliberate and is what the device
+-- needs to make a note at all — but it means a row here is a short piece of writing about a
+-- student's mail, not a bare reference, and rows that are never pulled must not accumulate
+-- forever. 20260911000900 sweeps the delivered ones nightly.
 create table if not exists gmail_queue (
   id           bigserial primary key,
   account_id   uuid not null references public.accounts(id) on delete cascade,

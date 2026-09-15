@@ -3,6 +3,7 @@ import { ScriptedModel } from "./judge_anthropic.ts";
 import {
   type CapStore,
   DAILY_CAP,
+  fieldsOf,
   judge,
   type JudgmentRow,
   type JudgmentSink,
@@ -106,7 +107,7 @@ Deno.test("the model answer becomes a tier 3 verdict, one logged row, and a judg
 
 Deno.test("a body token reaches no judgment row, and neither does a title beyond its prefix", async () => {
   // The server-side twin of `enrich.rs`'s `the_judgment_log_never_carries_a_notes_title_or_body_text`
-  // (ruling R-3a-21). §5.2: "the log holds ids, field values, confidences and the four promotion
+  // (ruling R-3a-21). §5.2: "the log holds ids, field values, confidences and the five promotion
   // features — never the body." The tripwire is in the FOURTH word of the title on purpose: the
   // three-word `title_prefix` is a promotion key and does travel, and this proves the cut is where
   // it is claimed to be.
@@ -121,6 +122,55 @@ Deno.test("a body token reaches no judgment row, and neither does a title beyond
   assert(rendered.includes("CS 100 HW"), "the three-word title prefix is a promotion key and must travel");
   assertEquals(log.rows[0].fields.created_by, "zybooks");
   assertEquals(log.rows[0].fields.title_prefix, "CS 100 HW");
+});
+
+Deno.test("an email's subject and body reach no judgment row — only its sender does", async () => {
+  // C2 final review S-6, the twin of the task tripwire above for the kind that carries a person's
+  // MAIL. An email item's every text field is message content: the subject as much as the body, so
+  // unlike a task there is no prefix that is allowed to travel. What lands in `fields` is the
+  // sender (the one promotion feature an email has, S-2) plus the verdict's own non-free-text
+  // values — and `fieldsOf` is called directly as well as through `judge`, because the row the
+  // pipeline writes and the map the nightly promotion job reads are the same object.
+  const item = {
+    message_id: "gmail:19c2f",
+    from: "registrar@example.edu",
+    subject: "Re: your schedule TRIPWIRE-7a31",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500",
+    text: "Please confirm by Friday. TRIPWIRE-7a31",
+  };
+  const verdict = {
+    tier: "task",
+    title: "Confirm schedule TRIPWIRE-7a31",
+    course: null,
+    due: "2026-09-18",
+    effort_hours: 0.5,
+    importance: 3,
+    why: "the message asks for a reply by Friday TRIPWIRE-7a31",
+    confidence: 0.9,
+  };
+  const fields = fieldsOf(verdict, "email", item);
+  assertEquals(JSON.stringify(fields).includes("TRIPWIRE-7a31"), false, JSON.stringify(fields));
+  assertEquals(fields.source, "registrar@example.edu");
+  assertEquals(fields.tier, "task");
+  assertEquals(Object.keys(fields).sort(), ["course", "due", "effort_hours", "importance", "source", "tier"]);
+
+  // And through the pipeline, which is what actually writes the row.
+  const log = new Sink();
+  await judge("acct-1", { kind: "email", item, heuristics_seed: { known_courses: ["cs-100"] } }, {
+    ...deps(new ScriptedModel([verdict]), log, new Caps()),
+    row: { ...ROW, kind: "email", prompt_version: "email-1", grammar_version: "email-1" },
+  });
+  assertEquals(JSON.stringify(log.rows).includes("TRIPWIRE-7a31"), false, JSON.stringify(log.rows));
+  assertEquals(log.rows[0].fields.source, "registrar@example.edu");
+});
+
+Deno.test("fieldsOf merges the verdict first and the feature map last", () => {
+  // C2 final review S-6: a promotion feature can never be overwritten by a verdict field of the
+  // same name. `promote_rules` subtracts the feature keys from `fields` to build a rule's verdict,
+  // so a feature the verdict had clobbered would be subtracted as if it were still the key it was
+  // looked up by — and the promoted rule would never fire.
+  const fields = fieldsOf({ source: "the verdict's own value" }, "event", { source: "engage" });
+  assertEquals(fields.source, "engage");
 });
 
 Deno.test("a rule answers without a model call and without charging the day's cap", async () => {

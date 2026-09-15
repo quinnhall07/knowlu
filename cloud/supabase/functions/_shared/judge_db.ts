@@ -9,10 +9,23 @@
 // scans this directory's source for the `.select(` call SHAPE this interface produces.
 //
 // **The service role bypasses RLS**, which is exactly why every C2 table has RLS on and no policy
-// (Task 1) and why every call site here scopes by `account_id` in the query string. That scoping
-// is the whole access control, so `judge_db_test.ts` scans this directory's `.ts` files for a
-// `select`/`insert` on an account-scoped table that omits it — one missing `.eq` would be a
-// cross-account read with no database backstop.
+// (Task 1) and why every call site scopes by `account_id` in the query string. That scoping is the
+// whole access control, so `judge_db_test.ts` enforces it by scanning the source — and the sentence
+// that says what it scans has to be the truth, because the scan's blind spots are live holes
+// (R-C2-E20, then C2 final review S-3). What it scans today, exactly:
+//
+//   * every non-test `.ts` file in `_shared/` AND every non-test `.ts` file in every function
+//     directory — not `index.ts`/`handler.ts` alone, since a helper beside them
+//     (`google-connect/disconnect.ts`, `google-callback/exchange.ts`) deploys in the same bundle;
+//   * in each, every `.select(` and every `.update(` whose path names an account-scoped table,
+//     written with either backticks or double quotes, must carry an `account_id` filter;
+//   * and every `.rpc(` naming a SQL function whose signature takes `p_account` — the list is
+//     derived from the migrations, not written down — must pass one.
+//
+// Not scanned, deliberately: `insert(table, row)` names its account in the ROW, which is a shape
+// this scan cannot check by pattern and the table's own `not null` column does check; `cloud/eval/`,
+// whose two tables are global; and any `.rpc(` whose name or arguments are not literals, which
+// fails the scan loud rather than passing it silently.
 export interface Db {
   /** A PostgREST path, e.g. `models?kind=eq.task&select=*`. Returns the rows. */
   select(path: string): Promise<unknown[]>;

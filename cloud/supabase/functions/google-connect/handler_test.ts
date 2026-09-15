@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { CALENDAR_SCOPE, connectHandler, GMAIL_SCOPE, IDENTITY_SCOPES } from "./handler.ts";
+import { CALENDAR_SCOPE, connectHandler, GMAIL_SCOPE, GOOGLE_NOT_CONFIGURED, IDENTITY_SCOPES } from "./handler.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -121,7 +121,7 @@ Deno.test("a missing client id is a 503 that names the configuration, not the ac
   const handler = connectHandler(OK, deps({ clientId: "" }));
   const response = await handler(new Request("http://127.0.0.1/google-connect"));
   assertEquals(response.status, 503);
-  assertEquals((await response.json()).error, "Google sign-in is not configured on this deployment");
+  assertEquals((await response.json()).error, GOOGLE_NOT_CONFIGURED);
 });
 
 Deno.test("the entitlement check runs before a nonce is minted", async () => {

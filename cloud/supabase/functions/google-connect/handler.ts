@@ -17,8 +17,8 @@
 import type { Entitle } from "../_shared/judge_handler.ts";
 // R-C2-E35: one home for the two scope literals — re-exported here so `handler_test.ts` and every
 // existing caller of `./handler.ts` keep importing `CALENDAR_SCOPE` / `GMAIL_SCOPE` from this file.
-export { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
-import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
+export { CALENDAR_SCOPE, GMAIL_SCOPE, GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
+import { CALENDAR_SCOPE, GMAIL_SCOPE, GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
 
 export const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 
@@ -62,10 +62,9 @@ export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Reque
     try {
       const { account_id } = await entitle(req);
       if (deps.clientId === "") {
-        // "Google", not "Gmail": the FIRST ask this endpoint makes is the calendar, and a student
-        // who has never heard of the Gmail step must not read this as a mail-only failure (§11a,
-        // ruling R-C2-E31).
-        return Response.json({ error: "Google sign-in is not configured on this deployment" }, { status: 503 });
+        // C2 final review S-4: the ONE copy, in `_shared/google_scopes.ts`. The device matches it
+        // exactly to tell an unconfigured deployment from an ordinary 503.
+        return Response.json({ error: GOOGLE_NOT_CONFIGURED }, { status: 503 });
       }
       if (req.method === "DELETE") {
         try {

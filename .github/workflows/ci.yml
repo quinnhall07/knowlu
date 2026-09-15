@@ -94,6 +94,14 @@ jobs:
   # printing "0 cases — nothing to score" before it reads ANTHROPIC_API_KEY or
   # SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, or opens a connection (ruling R-C2-E50 (2)) — which is
   # what lets this job pass green on a PR that sets none of its two secrets.
+  #
+  # **A fork PR gets no secrets at all** (GitHub does not expose them to `pull_request` runs from a
+  # fork), so on a fork this job can never make a real model call however many cases exist: both
+  # `secrets.*` below arrive empty and `run_eval.ts` exits 2 naming the missing key rather than
+  # spending anything. The spend this job CAN incur is on a branch PR in this repository, and it is
+  # bounded: `run_eval.ts`'s `MAX_CASES` caps each kind's corpus at 200 rows in the query itself
+  # (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0014 each, and the
+  # run prints its own case count before each kind's loop.
   eval-gate:
     runs-on: ubuntu-latest
     needs: cloud

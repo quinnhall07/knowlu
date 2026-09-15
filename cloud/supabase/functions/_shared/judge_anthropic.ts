@@ -27,10 +27,15 @@
 //     work as the first thing to reach for.
 import Anthropic from "npm:@anthropic-ai/sdk@0.125.0";
 
-/// One call's wall-clock bound. Deliberately BELOW the device's own 120 s per-call bound is not
-/// possible on an edge function's budget, so it is the same number and the device is the one that
-/// gives up first; `gmail-read` (Task 11), which makes many calls in one invocation, carries its
-/// own wall-clock budget and a resume cursor instead of relying on this.
+/// One call's wall-clock bound, and the DEFAULT only — a caller that makes many calls inside one
+/// invocation passes its own (`gmail-read` passes 60 s, so its 40 s read budget plus one call in
+/// flight still lands inside the edge function's own wall clock).
+///
+/// 120 s is the device's own per-call bound (`cloudmodel::CALL_TIMEOUT`) exactly, not a hair under
+/// it: a shorter bound here would only mean the service gave up on a call the device was still
+/// willing to wait for, and then had nothing to say about it. Equal means the device is the one
+/// that gives up, with a timeout it can name. (C2 final review S-6: the sentence that used to be
+/// here had lost a clause in an edit and read as its own opposite.)
 export const CALL_TIMEOUT_MS = 120_000;
 
 /// What the pinned row says about sampling. `{}` means "this model has no sampling parameters" —

@@ -6,8 +6,18 @@
 -- `requireActiveEntitlement` returned. No judgment row is ever served to a client, so there is
 -- nothing a client policy could be for. If a later stream needs one, it adds it deliberately.
 --
--- `pg_cron` is needed by 20260911000300 (nightly rule promotion) and is enabled here, once, so
+-- `pg_cron` is needed by 20260911000400 (nightly rule promotion) and is enabled here, once, so
 -- that migration is a function plus a schedule and nothing else.
+--
+-- CORRECTION (comment only, C2 final review S-6; the statement below is applied and stays as it
+-- was): two things about this line are wrong and neither is load-bearing. The cross-reference
+-- above said 20260911000300 — that migration is the Google privileges; rule promotion is
+-- 20260911000400. And `with schema extensions` is wrong on pg_cron, which is NOT relocatable:
+-- Supabase installs it into its own fixed `cron` schema and a `with schema` clause on a fresh
+-- install fails the migration outright. It did not fail here only because C1 had already created
+-- the extension (20260910000200_billing_jobs.sql:46, which says exactly this), so
+-- `if not exists` short-circuited and the clause was never read. C1's is the one that made it;
+-- this line is a no-op that must never be copied into a new project's first migration.
 create extension if not exists pg_cron with schema extensions;
 
 -- The pinned model per kind. Changing a pin is a migration row with a date, so every historical
@@ -18,8 +28,13 @@ create extension if not exists pg_cron with schema extensions;
 --   * `sampling` — `temperature`/`top_p`/`top_k` are removed and return a 400 on Sonnet 5, Opus 5,
 --     Opus 4.8/4.7 and Fable 5/5.1, and remain valid on Haiku 4.5 and the 4.6 generation. A pin
 --     change to any of the first group sets this to `{}` in the same migration row.
---   * `usd_per_m_in` / `usd_per_m_out` — Haiku 4.5's published rates, so `monthly_spend` prices
---     each month with the model that actually ran it.
+--   * `usd_per_m_in` / `usd_per_m_out` — Haiku 4.5's published rates.
+--     CORRECTION (comment only, C2 final review S-6): this used to claim `monthly_spend` prices
+--     each month with the model that actually ran it. It does not, and cannot: `usage_daily` has
+--     no model column, so the view joins `models` on `kind` alone and prices EVERY month — history
+--     included — at whatever the pin is today. A pin change therefore re-prices the past. That is
+--     accepted (the view is a budget alarm, not an invoice); pricing history correctly would mean
+--     a model column on `usage_daily`, which is a schema change nothing today needs.
 create table if not exists models (
   kind            text primary key check (kind in ('task', 'event', 'email')),
   provider        text not null default 'anthropic',
@@ -44,8 +59,9 @@ insert into models (kind, provider, model_id, prompt_version, grammar_version, m
 on conflict (kind) do nothing;
 
 -- One row per judgment, whatever the outcome. `fields` is field name -> the literal that was (or
--- would have been) written, plus the four promotion features (`created_by`, `title_prefix`,
--- `organizer`, `source`, `series_uid`) that tier 2 is keyed on. Those are keys, not content: a
+-- would have been) written, plus the five promotion features (`created_by`, `title_prefix`,
+-- `organizer`, `source`, `series_uid`) that tier 2 is keyed on. (Comment only, C2 final review
+-- S-6: the count said four and the list has always named five.) Those are keys, not content: a
 -- three-word title prefix is already the note's filename. There is nowhere here to put a title, a
 -- body, a prompt or a reply, and `migrations_test.ts` keeps it so.
 create table if not exists judgments (

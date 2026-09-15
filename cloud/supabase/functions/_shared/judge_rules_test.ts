@@ -15,6 +15,27 @@ Deno.test("an event is keyed on organizer, source, series and the title prefix",
   assertEquals(features("event", item).map(([f]) => f), ["organizer", "source", "series", "title_prefix"]);
 });
 
+Deno.test("an email is keyed on its sender, and on nothing else", () => {
+  // C2 final review S-2: tier 2 was dead for email. An email item has no `title`, no `organizer`,
+  // no `source` and no `series_uid`, so `features` returned [] for every message and `lookup`
+  // short-circuited to null — no rule could ever fire, whatever the promotion job wrote.
+  const item = {
+    message_id: "gmail:abc",
+    from: "no-reply@bursar.example.edu",
+    subject: "Your account statement TRIPWIRE-4b7e",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500",
+    text: "body TRIPWIRE-4b7e",
+  };
+  assertEquals(features("email", item), [["source", "no-reply@bursar.example.edu"]]);
+  assertEquals(featureMap("email", item), { source: "no-reply@bursar.example.edu" });
+  // The subject is deliberately not a feature: it is message content, and a promoted rule keyed on
+  // it would outlive the message it came from.
+  assertEquals(JSON.stringify(features("email", item)).includes("TRIPWIRE"), false);
+  assertEquals(JSON.stringify(featureMap("email", item)).includes("TRIPWIRE"), false);
+  // A message with no usable sender simply has no feature — the model answers, as before.
+  assertEquals(features("email", { message_id: "gmail:def", subject: "x" }), []);
+});
+
 /** Every `*rule_promotion*` migration, filename order, concatenated (ruling R-C2-E47 fix 1):
  * `promote_rules()` is redefined by a later fix migration (`create or replace function`), and the
  * SQL twin's shape lives in whichever definition is LAST — reading only the original file would
@@ -42,9 +63,34 @@ Deno.test("featureMap and the SQL twin name the same features", async () => {
   const inTs = new Set([
     ...features("task", { title: "a b c", created_by: "x" }).map(([f]) => f),
     ...features("event", { title: "a b c", organizer: "o", source: "s", series_uid: "u" }).map(([f]) => f),
+    // C2 final review S-2: email is in this set now that it has a feature at all. It maps its
+    // sender into `source`, so it adds no NEW name here — which is the point: no migration, and
+    // `rules.feature`'s check constraint is untouched.
+    ...features("email", { from: "no-reply@bursar.example.edu" }).map(([f]) => f),
   ]);
   for (const feature of inSql) assert(inTs.has(feature), `the SQL promotes on '${feature}' and the lookup does not`);
   for (const feature of inTs) assert(inSql.includes(feature), `the lookup keys on '${feature}' and the SQL does not`);
+});
+
+Deno.test("the SQL twin subtracts exactly the keys featureMap can produce", async () => {
+  // C2 final review S-6. `promote_rules` builds a rule's verdict as `j.fields` MINUS the feature
+  // keys — the fields a judgment wrote, with the lookup keys taken back out. If `featureMap` ever
+  // learns a sixth key and that `-` chain does not, the promoted rule's verdict carries a feature
+  // as though it were a field to write, and the device writes it into a note. Pinned against
+  // `Object.keys(featureMap(…))` rather than a comment, so the two move together or fail.
+  const sql = await ruleMigrationText();
+  const subtracted = new Set(
+    [...sql.matchAll(/j\.fields(?:\s*-\s*'[a-z_]+')+/g)][0][0]
+      .matchAll(/'([a-z_]+)'/g),
+  );
+  const subtractedKeys = new Set([...subtracted].map((m) => m[1]));
+  const produced = new Set([
+    ...Object.keys(featureMap("task", { title: "a b c", created_by: "x" })),
+    ...Object.keys(featureMap("event", { title: "a b c", organizer: "o", source: "s", series_uid: "u" })),
+    ...Object.keys(featureMap("email", { from: "s@example.test" })),
+  ]);
+  assertEquals([...subtractedKeys].sort(), [...produced].sort());
+  assertEquals(produced.size, 5, "five promotion features (cloud design §5.2)");
 });
 
 Deno.test("the feature map carries keys and never free text", () => {

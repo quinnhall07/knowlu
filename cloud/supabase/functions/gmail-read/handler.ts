@@ -24,6 +24,7 @@
 // else: not in `gmail_queue`, not in `judgments`, not in a log line.
 import { judge, type JudgeReply, type PipelineDeps } from "../_shared/judge_pipeline.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
+import { GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
 
 export const WINDOW = "newer_than:7d";
 /** A bound on one read, so a mailbox with a thousand unread messages cannot eat a slot. */
@@ -108,7 +109,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           // Not a per-account situation at all — P2 was never set on this deployment — so it is
           // never `quiet` (which the device reads as "reconnect from settings", a UI Quinn cannot
           // act on) and never `markRevoked` (there may be no grant to revoke in the first place).
-          return Response.json({ error: "Google sign-in is not configured on this deployment" }, { status: 503 });
+          return Response.json({ error: GOOGLE_NOT_CONFIGURED }, { status: 503 });
         }
         if (lookup.missing === "scope") {
           // A calendar-only grant. Not a failure and not `markRevoked` — that would kill the
