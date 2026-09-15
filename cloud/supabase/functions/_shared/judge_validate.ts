@@ -21,6 +21,43 @@ export const EVENT_VERDICTS = ["obligation", "opportunity", "drop"] as const;
 /** The five email tiers of cloud design §5.3. */
 export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information"] as const;
 
+// Added for `cloud/eval/schema.ts` (C2 Task 13): this file had no item-field or labelled-field
+// lists before — nothing here validated `request.item`'s shape, only the model's answer — so
+// these are new, additive exports and change no existing behaviour; `validate()` above is
+// untouched. Each list is transcribed from the one place the device actually builds a request body
+// (`engine/src/cloudmodel.rs`'s `task_request` / `event_request` / `email_request`), not guessed
+// from the prompt text, so a field the device stops sending — or a label the pipeline stops
+// scoring — is one file to update, not two.
+/** `request.item`'s keys, by kind — the exact shape `cloudmodel.rs` sends today. */
+export const TASK_ITEM_FIELDS = ["id", "title", "body", "source_uid", "created_by", "course", "due"] as const;
+export const EVENT_ITEM_FIELDS = [
+  "uid",
+  "title",
+  "start",
+  "end",
+  "source",
+  "organizer",
+  "location",
+  "url",
+  "description",
+  "categories",
+  "audiences",
+  "series_uid",
+] as const;
+export const EMAIL_ITEM_FIELDS = ["message_id", "subject", "from", "date", "text"] as const;
+
+/** `theirs`'s keys, by kind — the fields a human's correction can label (ruling R-C2-E10). */
+export const TASK_LABELLED_FIELDS = ["effort_hours", "importance", "course"] as const;
+export const EVENT_LABELLED_FIELDS = ["verdict"] as const;
+export const EMAIL_LABELLED_FIELDS = [
+  "tier",
+  "title",
+  "course",
+  "due",
+  "effort_hours",
+  "importance",
+] as const;
+
 function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
