@@ -470,6 +470,30 @@ pub fn record_seen(vault: &Path, uid: &str, title: &str, date_str: &str) -> std:
     pystr::write_text(&path, &text)
 }
 
+/// R-OB-3: is this the first ingest this vault has ever had?
+///
+/// **The absence of `today.md`, and deliberately not the absence of `state/ingest-seen.md`**
+/// (ruling R-C2-9). That ledger is not `ingest`'s alone: `coursework` imports
+/// `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the
+/// slot order is `coursework → ingest → judge → rank`. So on a genuinely fresh vault the
+/// seen-ledger already exists by the time `ingest` looks at it, and a flag derived from it is
+/// `false` on exactly the run R-OB-3 was written for. `today.md` is written by `rank`, the LAST
+/// step of the slot, so the first `ingest` always sees it absent and every later one sees it
+/// present.
+///
+/// It is also the predicate the app already uses to decide a vault needs its first slot at all
+/// (`app/src/scheduler.rs::needs_first_run`, main `f8649d5`), so the two halves of "this vault has
+/// never been through a slot" now agree by construction rather than by coincidence.
+///
+/// **The residue, and it is acceptable:** a first slot that dies before `rank` leaves `today.md`
+/// absent, so the *next* slot is "first" again and archives whatever has gone past in between.
+/// Nothing is double-archived — the uid is already in the seen-ledger — and no page has been
+/// rendered for the student to have seen the difference, because `today.md` not existing is
+/// precisely the premise.
+pub fn is_first_run(vault: &Path) -> bool {
+    !vault.join("state").join("today.md").exists()
+}
+
 /// Did the due date actually change? An unparseable old value counts as changed.
 pub fn due_changed(old: Option<&serde_yaml_ng::Value>, new_due: &str) -> bool {
     let parsed_new = crate::models::coerce_datetime(Some(&serde_yaml_ng::Value::String(
@@ -739,13 +763,50 @@ pub fn run_lines(
         Err(e) => return (1, vec![format!("ingest: config unreadable: {e}")]),
     };
     let url = config.get("ics_url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
     let tz_name = config.get("timezone").and_then(|v| v.as_str()).unwrap_or("America/Chicago").to_string();
     let tz = match TimeZone::get(&tz_name) {
         Ok(tz) => tz,
         Err(e) => return (1, vec![format!("ingest: config unreadable: unknown timezone {tz_name}: {e}")]),
     };
-    let fetched = match fetch { Some(f) => f(&url), None => crate::calfeed::fetch_ics(&url) };
+    // C2 (cloud design §3.1): the LMS capability URL lives in the account, encrypted, not in the
+    // vault — so when this vault has an account the feed is fetched by `/ingest-ics` with the
+    // service role and the URL never leaves the server. `config/ingest.yaml`'s `ics_url` stays the
+    // fallback for a vault with no account and for a service that is unreachable: dead hotel
+    // Wi-Fi must not stop an ingest that could have run from the URL already on disk.
+    //
+    // **The empty-URL refusal moved here on purpose.** It used to sit six lines above, before any
+    // cloud attempt; a cloud vault with a blank `ics_url` would then exit 1 without ever asking
+    // the service, and a non-zero step is retry backoff and an amber tray twice a day forever.
+    // Exit 1 now means what it says: there was no way at all to get a feed.
+    let cloud = crate::cloudmodel::resolve(vault).ok();
+    // R-OB-3 (hand-off H11), by R-C2-9's predicate: this vault has never been through a whole slot
+    // if `rank` has never written `today.md`. NOT the seen-ledger — `coursework` runs before
+    // `ingest` in the same slot and calls `record_seen`, so that file exists on the very first run.
+    let first_run = crate::ingest::is_first_run(vault);
+    let fetched = match (fetch, &cloud) {
+        (Some(f), _) => {
+            if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
+            f(&url)
+        }
+        // `_past` is bound and unused on purpose: the device archives on its own comparison, which
+        // is the guarantee (it knows the vault's timezone), and the service's list is corroboration
+        // and what the wizard counts. Binding it here is what makes the next reader ask which half
+        // is authoritative; the answer is in `fetch_ics`'s doc comment.
+        (None, Some(client)) => match crate::cloudmodel::fetch_ics(client, first_run) {
+            Ok((text, _past)) => Ok(text),
+            Err(e) if url.is_empty() => {
+                return (1, vec![format!("ingest: no feed — the service is unavailable ({e}) and no ics_url is configured")]);
+            }
+            Err(e) => {
+                println!("ingest: /ingest-ics unavailable ({e}); using the vault's ics_url");
+                crate::calfeed::fetch_ics(&url)
+            }
+        },
+        (None, None) => {
+            if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
+            crate::calfeed::fetch_ics(&url)
+        }
+    };
     let feed = match fetched {
         Ok(t) => t,
         Err(e) => return (1, vec![format!("ingest: fetch failed: {e}")]),
