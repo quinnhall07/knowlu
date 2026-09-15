@@ -1,10 +1,44 @@
-import { assert, assertAlmostEquals, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertAlmostEquals } from "@std/assert";
+import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { validate } from "../supabase/functions/_shared/judge_validate.ts";
+import { loadSeed } from "./loader.ts";
 import { dryRunAnswer, main } from "./run_eval.ts";
+import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
 
 function tasks(n: number, theirs: Record<string, unknown>): Case[] {
   return Array.from({ length: n }, () => ({ kind: "task" as const, theirs }));
+}
+
+function fakeDb(overrides: Partial<Db> = {}): Db {
+  return {
+    select: () => Promise.resolve([]),
+    insert: () => Promise.resolve(null),
+    update: () => Promise.resolve(),
+    rpc: () => Promise.resolve(null),
+    ...overrides,
+  };
+}
+
+function captureConsole(): { log: string[]; error: string[]; restore: () => void } {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const log: string[] = [];
+  const error: string[] = [];
+  console.log = (...args: unknown[]) => {
+    log.push(args.map(String).join(" "));
+  };
+  console.error = (...args: unknown[]) => {
+    error.push(args.map(String).join(" "));
+  };
+  return {
+    log,
+    error,
+    restore: () => {
+      console.log = originalLog;
+      console.error = originalError;
+    },
+  };
 }
 
 Deno.test("task metrics are mean absolute error and two exact-match rates", () => {
@@ -13,7 +47,7 @@ Deno.test("task metrics are mean absolute error and two exact-match rates", () =
     { effort_hours: 3, importance: 4, course: "cs-100" },
     { effort_hours: 2, importance: 2, course: null },
   ]);
-  assertAlmostEquals(got[0].value, 0.5);
+  assertAlmostEquals(got[0].value as number, 0.5);
   assertEquals(got[1].value, 0.5);
   assertEquals(got[2].value, 0.5);
 });
@@ -24,14 +58,14 @@ Deno.test("a missed obligation costs three times a missed opportunity", () => {
   const missedObligation = score("event", obligation, [{ verdict: "drop" }])[0].value;
   const missedOpportunity = score("event", opportunity, [{ verdict: "drop" }])[0].value;
   assertEquals(missedObligation, 0);
-  assertAlmostEquals(missedOpportunity, 2 / 3);
+  assertAlmostEquals(missedOpportunity as number, 2 / 3);
 });
 
 Deno.test("a task called information costs three times an information called borderline", () => {
   const task: Case[] = [{ kind: "email", theirs: { tier: "task" } }];
   const info: Case[] = [{ kind: "email", theirs: { tier: "information" } }];
   assertEquals(score("email", task, [{ tier: "information" }])[0].value, 0);
-  assertAlmostEquals(score("email", info, [{ tier: "borderline" }])[0].value, 2 / 3);
+  assertAlmostEquals(score("email", info, [{ tier: "borderline" }])[0].value as number, 2 / 3);
 });
 
 Deno.test("a perfect run scores 1 and an empty set scores nothing at all", () => {
@@ -41,8 +75,8 @@ Deno.test("a perfect run scores 1 and an empty set scores nothing at all", () =>
 });
 
 Deno.test("one point below a threshold fails and one point above passes", () => {
-  const higher = { metric: "weighted_exact", value: 0.749, higherIsBetter: true };
-  const lower = { metric: "effort_mae", value: 1.51, higherIsBetter: false };
+  const higher = { metric: "weighted_exact", value: 0.749, higherIsBetter: true, n: 1 };
+  const lower = { metric: "effort_mae", value: 1.51, higherIsBetter: false, n: 1 };
   assertEquals(failed(higher, 0.75), true);
   assertEquals(failed({ ...higher, value: 0.751 }, 0.75), false);
   assertEquals(failed(lower, 1.5), true);
@@ -56,52 +90,250 @@ Deno.test("a null answer scores as wrong rather than throwing", () => {
   assertEquals(score("event", cases, [null])[0].value, 0);
 });
 
+Deno.test("a metric with nothing labelling it is null and never fails; NaN always fails", () => {
+  const scored = { metric: "effort_mae", value: null, higherIsBetter: false, n: 0 };
+  assertEquals(failed(scored, 1.5), false);
+  const nan = { metric: "effort_mae", value: NaN, higherIsBetter: false, n: 1 };
+  assertEquals(failed(nan, 1.5), true);
+  const nanHigher = { metric: "weighted_exact", value: NaN, higherIsBetter: true, n: 1 };
+  assertEquals(failed(nanHigher, 0.5), true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E51 fix 1, finding 1: Task 13's schema accepts a `theirs` that labels any non-empty
+// SUBSET of a kind's scorable fields (a real single-field correction). A case must contribute
+// only to the metric(s) it actually labels — never credited, never penalised on a field it never
+// spoke to — and a metric nothing labels reports `null`/`n: 0` rather than a number.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("a case that labels only one task field contributes only to that field's metric", () => {
+  const effortOnly: Case = { kind: "task", theirs: { effort_hours: 2 } };
+  const importanceOnly: Case = { kind: "task", theirs: { importance: 4 } };
+  const courseOnly: Case = { kind: "task", theirs: { course: "cs-101" } };
+  const scored = score("task", [effortOnly, importanceOnly, courseOnly], [
+    { effort_hours: 2 }, // exact match
+    { importance: 4 }, // exact match
+    { course: "cs-101" }, // exact match
+  ]);
+  const effort = scored.find((s) => s.metric === "effort_mae")!;
+  const importance = scored.find((s) => s.metric === "importance_exact")!;
+  const course = scored.find((s) => s.metric === "course_exact")!;
+  assertEquals(effort.n, 1);
+  assertEquals(effort.value, 0);
+  assertEquals(importance.n, 1);
+  assertEquals(importance.value, 1);
+  assertEquals(course.n, 1);
+  assertEquals(course.value, 1);
+});
+
+Deno.test("a task case that labels nothing scorable scores no metric at all", () => {
+  // Structurally impossible under `validateSeedRecord` (theirs must be non-empty), but score()
+  // itself must not crash or silently credit a field nobody labelled.
+  const nothing: Case = { kind: "task", theirs: {} };
+  const scored = score("task", [nothing], [{ effort_hours: 99, importance: 1, course: "x" }]);
+  for (const s of scored) {
+    assertEquals(s.n, 0);
+    assertEquals(s.value, null);
+  }
+});
+
+Deno.test("an email case that labels only 'course' (never 'tier') contributes nothing to weighted_exact", () => {
+  const courseOnly: Case = { kind: "email", theirs: { course: "cs-101" } };
+  const scored = score("email", [courseOnly], [{ tier: "information", course: "cs-101" }]);
+  assertEquals(scored[0].n, 0);
+  assertEquals(scored[0].value, null);
+});
+
 // ---------------------------------------------------------------------------------------------
 // Ruling R-C2-E50 (2): a normal run with zero cases is a stated, PASSING outcome, and it must
 // never touch a secret or a connection setting to get there — this is what lets `eval-gate`
-// (hand-off H8, part 2) pass green on a PR that sets none of its three secrets. The real,
-// committed `cloud/eval/seed/` directory is empty (Task 13, ruling R-C2-E12), so this drives
-// `main()` against the genuine seed on disk rather than a mock, and proves the actual CI path.
+// (hand-off H8, part 2) pass green on a PR that sets none of its secrets. Both tests below first
+// assert the REAL, committed `cloud/eval/seed/` is empty (Task 13, ruling R-C2-E12) — the test
+// assumes that, and says so, so a filled seed fails this test plainly rather than the assertion
+// below it silently proving nothing.
 // ---------------------------------------------------------------------------------------------
 
 Deno.test("a normal run with zero cases prints the exact message, exits 0, and reads no secret", async () => {
+  const committed = await loadSeed();
+  assert(
+    committed.length === 0,
+    "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
+  );
   const throwing = (name: string): string => {
     throw new Error(`must not read '${name}' when there are no cases to score`);
   };
-  const original = console.log;
-  const logged: string[] = [];
-  console.log = (...args: unknown[]) => {
-    logged.push(args.map(String).join(" "));
-  };
+  const captured = captureConsole();
   let code: number;
   try {
     // No --load-seed, no --dry-run, no --thresholds: none of it should matter, because the
     // zero-case check runs before any of these other switches are even consulted.
-    code = await main([], throwing);
+    code = await main([], { envGet: throwing });
   } finally {
-    console.log = original;
+    captured.restore();
   }
   assertEquals(code, 0);
-  assertEquals(logged, ["0 cases — nothing to score"]);
+  assertEquals(captured.log, ["0 cases — nothing to score"]);
 });
 
 Deno.test("the same zero-case exit holds with --dry-run and --thresholds present", async () => {
+  const committed = await loadSeed();
+  assert(
+    committed.length === 0,
+    "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
+  );
   const throwing = (name: string): string => {
     throw new Error(`must not read '${name}' when there are no cases to score`);
   };
-  const original = console.log;
-  const logged: string[] = [];
-  console.log = (...args: unknown[]) => {
-    logged.push(args.map(String).join(" "));
-  };
+  const captured = captureConsole();
   let code: number;
   try {
-    code = await main(["--dry-run", "--thresholds", "cloud/eval/thresholds.json"], throwing);
+    code = await main(["--dry-run", "--thresholds", "cloud/eval/thresholds.json"], { envGet: throwing });
   } finally {
-    console.log = original;
+    captured.restore();
   }
   assertEquals(code, 0);
-  assertEquals(logged, ["0 cases — nothing to score"]);
+  assertEquals(captured.log, ["0 cases — nothing to score"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E51 fix 1, finding 2: a non-empty LOCAL seed with a kind the database corpus does not
+// hold (because `--load-seed` was never run against it) must not be a silent skip — the gate
+// would go green having scored nothing. Tested against a fake `Db` so no real connection is
+// needed either way.
+// ---------------------------------------------------------------------------------------------
+
+const SYNTHETIC_SEED: SeedRecord[] = [
+  {
+    id: "seed-0001",
+    kind: "task",
+    request: { kind: "task", item: { id: "x", title: "t" }, heuristics_seed: { known_courses: ["cs-101"] } },
+    theirs: { effort_hours: 1 },
+  },
+];
+
+Deno.test("a non-empty local seed with an unloaded corpus fails the gate, naming --load-seed", async () => {
+  const db = fakeDb();
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      { db: () => db, loadSeed: () => Promise.resolve(SYNTHETIC_SEED), envGet: () => undefined },
+    );
+  } finally {
+    captured.restore();
+  }
+  assertEquals(code, 2);
+  assert(
+    captured.error.some((l) => l.includes("task") && l.includes("--load-seed")),
+    `expected an error naming task and --load-seed, got: ${JSON.stringify(captured.error)}`,
+  );
+  // event/email were never in the seed at all, so their absence from `eval_cases` is a legitimate
+  // skip, not the same failure — the corpus-not-loaded message must name only "task".
+  assert(!captured.error.some((l) => l.includes("event") || l.includes("email")));
+});
+
+Deno.test("a seeded, loaded corpus scores normally under --dry-run, stamping one run_id and dry_run on every row", async () => {
+  const seedTheirs = { effort_hours: 2, importance: 4, course: "cs-101" };
+  const records: SeedRecord[] = [
+    {
+      id: "seed-0001",
+      kind: "task",
+      request: { kind: "task", item: { id: "x", title: "t" }, heuristics_seed: { known_courses: ["cs-101"] } },
+      theirs: seedTheirs,
+    },
+  ];
+  const evalRunsInserted: Array<Record<string, unknown>> = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?kind=eq.task")) {
+        return Promise.resolve([{ id: 1, kind: "task", request: records[0].request, ours: null, theirs: seedTheirs }]);
+      }
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.task")) {
+        return Promise.resolve([{
+          kind: "task",
+          provider: "anthropic",
+          model_id: "claude-haiku-4-5",
+          prompt_version: "v1",
+          grammar_version: "v1",
+          max_tokens: 256,
+          sampling: {},
+          usd_per_m_in: 1,
+          usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") evalRunsInserted.push(row);
+      return Promise.resolve(null);
+    },
+  });
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      { db: () => db, loadSeed: () => Promise.resolve(records), envGet: () => undefined },
+    );
+  } finally {
+    captured.restore();
+  }
+  assertEquals(code, 0);
+  assertEquals(captured.error.filter((l) => l.includes("--load-seed")), []);
+  // task's three metrics, all fully labelled by seedTheirs, each score 1.0/0 exactly and write a row.
+  assertEquals(evalRunsInserted.length, 3);
+  const runIds = new Set(evalRunsInserted.map((r) => r.run_id));
+  assertEquals(runIds.size, 1, "every row of one run must share the same run_id");
+  assert(typeof [...runIds][0] === "string" && ([...runIds][0] as string).length > 0);
+  for (const row of evalRunsInserted) {
+    assertEquals(row.dry_run, true);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E51 fix 1, finding 5: `--load-seed` is idempotent — it inserts only the `seed_id`s not
+// already present among `source = 'seed'` rows, and reports both counts.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("--load-seed inserts only missing seed_ids and reports both counts", async () => {
+  const records: SeedRecord[] = [
+    {
+      id: "seed-0001",
+      kind: "task",
+      request: { kind: "task", item: {}, heuristics_seed: {} },
+      theirs: { effort_hours: 1 },
+    },
+    {
+      id: "seed-0002",
+      kind: "task",
+      request: { kind: "task", item: {}, heuristics_seed: {} },
+      theirs: { effort_hours: 2 },
+    },
+  ];
+  const inserted: Array<Record<string, unknown>> = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?source=eq.seed")) return Promise.resolve([{ seed_id: "seed-0001" }]);
+      return Promise.resolve([]);
+    },
+    insert: (_table: string, row: Record<string, unknown>) => {
+      inserted.push(row);
+      return Promise.resolve(null);
+    },
+  });
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(["--load-seed"], { db: () => db, loadSeed: () => Promise.resolve(records) });
+  } finally {
+    captured.restore();
+  }
+  assertEquals(code, 0);
+  assertEquals(inserted.length, 1);
+  assertEquals(inserted[0].seed_id, "seed-0002");
+  assertEquals(captured.log, ["1 inserted, 1 already present"]);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -140,6 +372,43 @@ Deno.test("R-C2-E10: the dry-run answer validates and scores 1.0 exactly, per ki
   assert(emailChecked.ok, "the dry-run email answer must validate");
   const emailScores = score("email", [{ kind: "email", theirs: emailTheirs }], [emailChecked.verdict ?? null]);
   assertEquals(emailScores[0].value, 1);
+});
+
+Deno.test("R-C2-E10 + partial labels: a single-field label still scores 1.0 on a dry run, per kind", () => {
+  const seed = { known_courses: ["cs-101"] };
+
+  const effortOnly = { effort_hours: 2 };
+  const effortChecked = validate("task", dryRunAnswer("task", effortOnly), seed);
+  assert(effortChecked.ok);
+  const effortScored = score("task", [{ kind: "task", theirs: effortOnly }], [effortChecked.verdict ?? null]);
+  const effortMetric = effortScored.find((s) => s.metric === "effort_mae")!;
+  assertEquals(effortMetric.n, 1);
+  assertEquals(effortMetric.value, 0);
+  for (const s of effortScored.filter((s) => s.metric !== "effort_mae")) {
+    assertEquals(s.n, 0);
+    assertEquals(s.value, null);
+  }
+
+  const importanceOnly = { importance: 4 };
+  const importanceChecked = validate("task", dryRunAnswer("task", importanceOnly), seed);
+  assert(importanceChecked.ok);
+  const importanceScored = score("task", [{ kind: "task", theirs: importanceOnly }], [importanceChecked.verdict ?? null]);
+  assertEquals(importanceScored.find((s) => s.metric === "importance_exact")?.value, 1);
+
+  const courseOnly = { course: "cs-101" };
+  const courseChecked = validate("task", dryRunAnswer("task", courseOnly), seed);
+  assert(courseChecked.ok);
+  const courseScored = score("task", [{ kind: "task", theirs: courseOnly }], [courseChecked.verdict ?? null]);
+  assertEquals(courseScored.find((s) => s.metric === "course_exact")?.value, 1);
+
+  // An email case that labels only "course" (never "tier") must validate fine but contribute
+  // NOTHING to weighted_exact — the only metric `score()` computes for email.
+  const emailCourseOnly = { course: "cs-101" };
+  const emailChecked = validate("email", dryRunAnswer("email", emailCourseOnly), seed);
+  assert(emailChecked.ok);
+  const emailScored = score("email", [{ kind: "email", theirs: emailCourseOnly }], [emailChecked.verdict ?? null]);
+  assertEquals(emailScored[0].n, 0);
+  assertEquals(emailScored[0].value, null);
 });
 
 // ---------------------------------------------------------------------------------------------
