@@ -139,11 +139,45 @@ pub fn resolve(vault: &Path) -> Result<CloudClient, Unavailable> {
 /// in again", "your subscription lapsed" and "try later"; the **body** is kept only as the
 /// server's own short `error` field, clipped, because a service reply is the one place a prompt
 /// could come back out.
+/// R-C2-E41: why `/gmail-read` answered `quiet` — a real variant, never a `Status { code: 200 }`
+/// pun, because the pun made a calendar-only grant (`no_gmail_scope`, not a failure at all)
+/// indistinguishable from a genuinely revoked one and worth `markRevoked`ing over. Parsed from the
+/// reply's `reason` field by [`pull_gmail_queue`]; an unrecognised `reason` reads as [`Revoked`]'s
+/// handling, since that is the answer a student can actually act on ("reconnect from settings").
+///
+/// [`Revoked`]: QuietReason::Revoked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuietReason {
+    /// The device's `cloud:google` marker is a CALENDAR grant; this account simply never took the
+    /// later, incremental Gmail step. Not a failure — a step left out, like `ingest (skipped: no
+    /// ics_url)` — so [`pull_gmail`](crate::enrich::pull_gmail) prints nothing for it at all.
+    NoGmailScope,
+    /// A revoked or expired grant (while the Google project is in Testing, every 7 days by
+    /// design).
+    Revoked,
+    /// P2 (the Google client) was never set on this deployment — not a per-account situation.
+    NotConfigured,
+}
+
+impl QuietReason {
+    fn label(&self) -> &'static str {
+        match self {
+            QuietReason::NoGmailScope => "gmail is not connected",
+            QuietReason::Revoked => "gmail is not connected; re-connect from settings",
+            QuietReason::NotConfigured => "google sign-in is not configured on this deployment",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloudError {
     Transport(String),
     Status { code: u16, detail: String },
     Body(String),
+    /// `/gmail-read` answered `quiet: true`, or (for [`QuietReason::NotConfigured`]) its own 503 —
+    /// never carries an HTTP code in its `label()` or `Display`, so "HTTP 200" can never appear
+    /// for what is not an HTTP failure at all.
+    Quiet(QuietReason),
 }
 
 impl CloudError {
@@ -152,18 +186,19 @@ impl CloudError {
     pub fn label(&self) -> &'static str {
         match self {
             CloudError::Transport(_) => "no network",
-            CloudError::Status { code: 200, .. } => "gmail is not connected",
             CloudError::Status { code: 401, .. } => "no session",
             CloudError::Status { code: 402, .. } => "no entitlement",
             CloudError::Status { code: 403, .. } => "not allowed",
             CloudError::Status { code: 429, .. } => "rate limited",
             CloudError::Status { .. } => "the service refused",
             CloudError::Body(_) => "an unreadable reply",
+            CloudError::Quiet(reason) => reason.label(),
         }
     }
 
     /// Does this answer every remaining item the same way? A session, an entitlement or a
-    /// permission problem does; a 429, a 5xx and a dropped connection do not.
+    /// permission problem does; a 429, a 5xx and a dropped connection do not. `Quiet` is Gmail's
+    /// own situation, never the account's session or entitlement, so it is not fatal either.
     pub fn fatal(&self) -> bool {
         matches!(self, CloudError::Status { code: 401 | 402 | 403, .. })
     }
@@ -176,6 +211,7 @@ impl std::fmt::Display for CloudError {
             CloudError::Status { code, detail } if detail.is_empty() => write!(f, "{} (HTTP {code})", self.label()),
             CloudError::Status { code, detail } => write!(f, "{} (HTTP {code}: {detail})", self.label()),
             CloudError::Body(why) => write!(f, "an unreadable reply ({why})"),
+            CloudError::Quiet(reason) => write!(f, "{}", reason.label()),
         }
     }
 }
@@ -452,12 +488,25 @@ pub fn pull_gmail_queue(
     client: &CloudClient,
     ack: &[String],
 ) -> Result<(Vec<GmailItem>, bool), CloudError> {
-    let reply = client.post("/gmail-read", &json!({ "ack": ack }))?;
+    // R-C2-E41: an unconfigured deployment (no P2) is the one situation `/gmail-read` answers
+    // with a real HTTP failure rather than `quiet: true` — there may be no account row to name a
+    // reason against at all. Caught here, once, so every caller downstream sees the same closed
+    // `QuietReason` set regardless of which of the two shapes the service used to say it.
+    let reply = match client.post("/gmail-read", &json!({ "ack": ack })) {
+        Ok(reply) => reply,
+        Err(CloudError::Status { code: 503, .. }) => {
+            return Err(CloudError::Quiet(QuietReason::NotConfigured));
+        }
+        Err(e) => return Err(e),
+    };
     if reply.get("quiet").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(CloudError::Status {
-            code: 200,
-            detail: "gmail is not connected; re-connect from settings".to_string(),
-        });
+        let reason = match reply.get("reason").and_then(Value::as_str) {
+            Some("no_gmail_scope") => QuietReason::NoGmailScope,
+            // Every other reason — "revoked" and any the device does not recognise — reads as
+            // revoked: the one quiet reason a student can act on ("reconnect from settings").
+            _ => QuietReason::Revoked,
+        };
+        return Err(CloudError::Quiet(reason));
     }
     let more = reply.get("more").and_then(Value::as_bool).unwrap_or(false);
     let mut out = Vec::new();
