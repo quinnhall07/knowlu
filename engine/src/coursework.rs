@@ -624,69 +624,46 @@ pub fn assignment_from_row(row: &serde_json::Value) -> Option<Assignment> {
     })
 }
 
-/// *Fetch on device, think in the cloud* (D11, §4.3). Every credentialed request is made here with
-/// the student's own password out of Credential Manager; the raw payload then goes to
-/// `/ingest-coursework` and the reconciled list comes back.
-///
-/// One source's failure never stops another, and the server applies the same
-/// *an-empty-parse-is-a-failure* rule `collect` applies locally.
-#[cfg(windows)]
-pub fn collect_cloud(
-    config: &Mapping,
-    warnings: &mut Vec<String>,
+/// One source's fetch result, already redacted and JSON-shaped — everything
+/// [`coursework_request`] needs and nothing [`collect_cloud`]'s credentialed step still holds.
+/// `pub(crate)` rather than private: it is the seam a loopback test builds directly, with no
+/// `wincred` or network in reach (R-C2-E17 / I1).
+pub(crate) enum FetchedSource {
+    ZyBooks { config: serde_json::Value, books: Vec<(String, serde_json::Value)> },
+    Vhl { config: serde_json::Value, html: String },
+}
+
+/// The exact JSON body `/ingest-coursework` receives. **Pure** — no credential, no fetch, no
+/// clock: everything here is either already-redacted config or the vendor's own raw bytes. This is
+/// the function a test can assert the wire-format of without ever touching Credential Manager.
+pub(crate) fn coursework_request(tz_name: &str, sources: &[FetchedSource]) -> serde_json::Value {
+    let sources: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|source| match source {
+            FetchedSource::ZyBooks { config, books } => serde_json::json!({
+                "name": "zybooks", "config": config,
+                "books": books
+                    .iter()
+                    .map(|(code, payload)| serde_json::json!({"code": code, "payload": payload}))
+                    .collect::<Vec<_>>(),
+            }),
+            FetchedSource::Vhl { config, html } => {
+                serde_json::json!({ "name": "vhl", "config": config, "html": html })
+            }
+        })
+        .collect();
+    serde_json::json!({ "timezone": tz_name, "sources": sources })
+}
+
+/// Posts an already-built request and turns the reply into assignments plus warnings. The
+/// service-unavailable and malformed-row paths both live here, where a loopback test can reach
+/// them with no credential and no live vendor (R-C2-E17 / I1).
+pub(crate) fn post_coursework(
     client: &crate::cloudmodel::CloudClient,
+    request: &serde_json::Value,
+    warnings: &mut Vec<String>,
 ) -> Vec<Assignment> {
-    let block = match crate::yaml::get(config, "coursework") {
-        Some(Yaml::Mapping(map)) => map.clone(),
-        _ => Mapping::new(),
-    };
-    let tz_name = match crate::yaml::get(config, "timezone") {
-        Some(value) => crate::yaml::text(value).unwrap_or_else(|| DEFAULT_TZ.to_string()),
-        None => DEFAULT_TZ.to_string(),
-    };
-    let mut sources: Vec<serde_json::Value> = Vec::new();
-
-    for name in ["zybooks", "vhl"] {
-        let cfg = match crate::yaml::get(&block, name) {
-            Some(Yaml::Mapping(map)) => map.clone(),
-            _ => continue,
-        };
-        if !crate::yaml::get(&cfg, "enabled").map(crate::pystr::yaml_truthy).unwrap_or(false) {
-            continue;
-        }
-        let credential = match crate::wincred::read_credential(&cfg_str(&cfg, "credential_target", "")) {
-            Ok(c) => c,
-            Err(err) => {
-                warnings.push(format!("{name}: fetch failed ({err}); nothing changed"));
-                continue;
-            }
-        };
-        let redacted = yaml_to_json_for_request(&redact(&cfg, name));
-        match name {
-            "zybooks" => match crate::zybooks::fetch_payloads(&credential.username, credential.password.expose()) {
-                Ok(books) => sources.push(serde_json::json!({
-                    "name": "zybooks", "config": redacted,
-                    "books": books.into_iter().map(|(code, payload)| serde_json::json!({"code": code, "payload": payload})).collect::<Vec<_>>(),
-                })),
-                Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("zybooks: session invalid ({m}); nothing changed")),
-                Err(SourceError::Failed(m)) => warnings.push(format!("zybooks: fetch failed ({m}); nothing changed")),
-            },
-            _ => {
-                let base = cfg_str(&cfg, "base_url", "https://www.vhlcentral.com");
-                match crate::vhl::login_and_fetch_dashboard(&credential.username, credential.password.expose(), &base, None) {
-                    Ok(html) => sources.push(serde_json::json!({"name": "vhl", "config": redacted, "html": html})),
-                    Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("vhl: session invalid ({m}); nothing changed")),
-                    Err(SourceError::Failed(m)) => warnings.push(format!("vhl: fetch failed ({m}); nothing changed")),
-                }
-            }
-        }
-    }
-
-    if sources.is_empty() {
-        return Vec::new();
-    }
-    let body = serde_json::json!({ "timezone": tz_name, "sources": sources });
-    let reply = match client.post("/ingest-coursework", &body) {
+    let reply = match client.post("/ingest-coursework", request) {
         Ok(reply) => reply,
         Err(err) => {
             warnings.push(format!("coursework: the service is unavailable ({err}); nothing changed"));
@@ -706,6 +683,70 @@ pub fn collect_cloud(
         }
     }
     out
+}
+
+/// *Fetch on device, think in the cloud* (D11, §4.3). Every credentialed request is made here with
+/// the student's own password out of Credential Manager; the raw payload then goes to
+/// `/ingest-coursework` and the reconciled list comes back.
+///
+/// One source's failure never stops another, and the server applies the same
+/// *an-empty-parse-is-a-failure* rule `collect` applies locally. The timezone is resolved through
+/// [`resolve_timezone`] — the same validation and single fallback warning `collect` gives the
+/// local path (I3 / R-C2-E17): an unknown IANA name must not silently drop the whole source.
+#[cfg(windows)]
+pub fn collect_cloud(
+    config: &Mapping,
+    warnings: &mut Vec<String>,
+    client: &crate::cloudmodel::CloudClient,
+) -> Vec<Assignment> {
+    let block = match crate::yaml::get(config, "coursework") {
+        Some(Yaml::Mapping(map)) => map.clone(),
+        _ => Mapping::new(),
+    };
+    let tz_name = resolve_timezone(config, warnings)
+        .iana_name()
+        .unwrap_or(DEFAULT_TZ)
+        .to_string();
+    let mut sources: Vec<FetchedSource> = Vec::new();
+
+    for name in ["zybooks", "vhl"] {
+        let cfg = match crate::yaml::get(&block, name) {
+            Some(Yaml::Mapping(map)) => map.clone(),
+            _ => continue,
+        };
+        if !crate::yaml::get(&cfg, "enabled").map(crate::pystr::yaml_truthy).unwrap_or(false) {
+            continue;
+        }
+        let credential = match crate::wincred::read_credential(&cfg_str(&cfg, "credential_target", "")) {
+            Ok(c) => c,
+            Err(err) => {
+                warnings.push(format!("{name}: fetch failed ({err}); nothing changed"));
+                continue;
+            }
+        };
+        let redacted = yaml_to_json_for_request(&redact(&cfg, name));
+        match name {
+            "zybooks" => match crate::zybooks::fetch_payloads(&credential.username, credential.password.expose()) {
+                Ok(books) => sources.push(FetchedSource::ZyBooks { config: redacted, books }),
+                Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("zybooks: session invalid ({m}); nothing changed")),
+                Err(SourceError::Failed(m)) => warnings.push(format!("zybooks: fetch failed ({m}); nothing changed")),
+            },
+            _ => {
+                let base = cfg_str(&cfg, "base_url", "https://www.vhlcentral.com");
+                match crate::vhl::login_and_fetch_dashboard(&credential.username, credential.password.expose(), &base, None) {
+                    Ok(html) => sources.push(FetchedSource::Vhl { config: redacted, html }),
+                    Err(SourceError::NotLoggedIn(m)) => warnings.push(format!("vhl: session invalid ({m}); nothing changed")),
+                    Err(SourceError::Failed(m)) => warnings.push(format!("vhl: fetch failed ({m}); nothing changed")),
+                }
+            }
+        }
+    }
+
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let request = coursework_request(&tz_name, &sources);
+    post_coursework(client, &request, warnings)
 }
 
 /// The credential store is Windows-only (spec §6.5), so the credentialed fetch is too. A cloud
@@ -935,12 +976,18 @@ pub fn collect(
 /// Substrings that mark a warning as a source- or run-level failure rather than a note about one
 /// item. `collect` and `load_coursework_config` own every phrase here, so this stays a closed set
 /// rather than a guess about arbitrary text.
-const FAILURE_MARKERS: [&str; 5] = [
+const FAILURE_MARKERS: [&str; 7] = [
     "session invalid",
     "fetch failed",
     "0 assignments parsed",
     "config unreadable",
     "coursework pass failed",
+    // C2 Task 7 fix 1 (R-C2-E17 / I2): `collect_cloud` and the service's own handler can now
+    // fail a whole source without ever saying "fetch failed" or "session invalid" — a dead
+    // service and a server-side parse error are new failure shapes, and without their own
+    // markers here they collapse into `(+N more)` behind a benign per-item note.
+    "the service is unavailable",
+    "parse failed",
 ];
 
 /// Failures first, benign per-item notes last; **stable** within each group.
@@ -2121,7 +2168,20 @@ mod tests {
         for marker in FAILURE_MARKERS {
             assert!(rank_warnings(&[format!("x {marker} y")])[0].contains(marker));
         }
-        assert_eq!(FAILURE_MARKERS.len(), 5);
+        assert_eq!(FAILURE_MARKERS.len(), 7);
+    }
+
+    /// C2 Task 7 fix 1 (R-C2-E17 / I2): a server-side parse failure must rank ahead of a benign
+    /// per-item note, exactly as a dead session already does — the run-log summary keeps only one
+    /// warning, and it must never be the harmless one.
+    #[test]
+    fn a_parse_failed_warning_sorts_as_a_failure() {
+        let warnings: Vec<String> = vec![
+            "zybooks: Midterm Reflection: uncategorised; using default importance".to_string(),
+            "vhl: parse failed (server timeout); nothing changed".to_string(),
+        ];
+        let ranked = rank_warnings(&warnings);
+        assert_eq!(ranked[0], warnings[1]);
     }
 
     // --- main ---------------------------------------------------------------------------------
@@ -2530,34 +2590,225 @@ mod tests {
     }
 
     // --- fetch on device, think in the cloud (C2 Task 7) --------------------------------------
+    //
+    // C2 Task 7 fix 1 (R-C2-E17 / I1): `collect_cloud` itself is not exercised here — it reads a
+    // real Credential Manager entry inline (`wincred::read_credential`) before it ever builds a
+    // request, and this suite does not touch the real credential store (CLAUDE.md). What IS
+    // exercised, end to end over a real loopback socket, is the seam `collect_cloud` hands off
+    // to once the credentialed fetch is done: `coursework_request` (pure) and `post_coursework`
+    // (the wire). That is where the credential-free guarantee and the reply-decoding paths
+    // actually live, and it needs no credential of any kind to prove.
 
-    /// D11 and the VISION amendment, at the boundary that now exists: the payload the device posts
-    /// carries the vendor's own bytes and the parser's config, and **no credential of any kind**.
-    /// The device signs in; the server never could.
+    use std::io::{BufRead, BufReader, Read as StdRead, Write as StdWrite};
+    use std::net::TcpListener;
+
+    /// A loopback server that answers `replies` in order and hands back everything it was sent.
+    /// Lifted from `engine/tests/cloud_contract.rs`'s pattern; duplicated here (not shared) because
+    /// `coursework_request`/`post_coursework` are `pub(crate)` and this module's own test
+    /// submodule is the only place outside `coursework.rs` that can reach them.
+    struct Loopback {
+        base: String,
+        handle: Option<std::thread::JoinHandle<Vec<String>>>,
+    }
+
+    impl Loopback {
+        fn requests(&mut self) -> Vec<String> {
+            self.handle.take().expect("joined once").join().expect("the listener thread did not panic")
+        }
+    }
+
+    fn read_request(stream: &std::net::TcpStream) -> String {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone the accepted stream"));
+        let mut head = String::new();
+        let mut length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = rest.trim().parse().unwrap_or(0);
+            }
+            let blank = line == "\r\n" || line == "\n";
+            head.push_str(&line);
+            if blank {
+                break;
+            }
+        }
+        let mut body = vec![0u8; length];
+        if length > 0 {
+            let _ = reader.read_exact(&mut body);
+        }
+        format!("{head}{}", String::from_utf8_lossy(&body))
+    }
+
+    fn loopback(replies: Vec<(u16, String)>) -> Loopback {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (code, body) in replies {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                seen.push(read_request(&stream));
+                let response = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            seen
+        });
+        Loopback { base: format!("http://127.0.0.1:{port}/functions/v1"), handle: Some(handle) }
+    }
+
+    fn cloud_test_config(base: &str) -> crate::cloudmodel::CloudConfig {
+        crate::cloudmodel::CloudConfig {
+            api_base: base.to_string(),
+            anon_key: "anon-not-a-secret".to_string(),
+            session_credential_target: "knowlu/test-profile/session".to_string(),
+            account_id: "acct-1".to_string(),
+        }
+    }
+
+    /// D11 and the VISION amendment, at the boundary that now exists: the request `post_coursework`
+    /// actually puts on the wire carries the vendor's own bytes and the parser's config, and **no
+    /// credential of any kind** — not the credential target, not the portal password, not the
+    /// account username, not a filesystem path pointing at either. The device signs in; the server
+    /// never could. Rewritten end to end for C2 Task 7 fix 1 (R-C2-E17 / I1): the earlier version
+    /// asserted over a hand-built JSON value and never touched `collect_cloud`'s own request
+    /// builder or its transport.
     #[test]
     fn the_coursework_payload_carries_no_credential() {
         let cfg = crate::yaml::mapping_of(concat!(
             "enabled: true\n",
             "credential_target: knowlu/test-profile/zybooks\n",
             "base_url: https://www.vhlcentral.com\n",
+            "username: user-not-a-secret\n",
+            "password: pw-not-a-secret\n",
+            "state_dir: C:/Users/test-profile/AppData/Local/knowlu/cache\n",
             "courses:\n  cs-100-2026:\n    course: cs-100\n    label: CS 100\n",
             "ignore:\n  - HowToUseZyBooks2\n",
             "categories:\n  HW: hw\n",
             "effort:\n  minutes_per_section: 6\n  floors:\n    hw: 0.25\n",
             "importance:\n  hw: 2\n",
         ));
-        let redacted = redact(&cfg, "zybooks");
-        let rendered = crate::ledger::dumps_value(&serde_json::json!({
-            "timezone": "America/Chicago",
-            "sources": [{ "name": "zybooks", "config": yaml_to_json_for_request(&redacted), "books": [] }],
-        }));
-        for forbidden in ["credential_target", "knowlu/test-profile", "base_url", "enabled", "password"] {
-            assert!(!rendered.contains(forbidden), "the request body carried {forbidden:?}: {rendered}");
+        let redacted = yaml_to_json_for_request(&redact(&cfg, "zybooks"));
+        let books = vec![(
+            "cs-100-2026".to_string(),
+            serde_json::json!({ "success": true, "assignments": [{ "assignment_id": 1839982 }] }),
+        )];
+        let request = coursework_request(
+            "America/Chicago",
+            &[FetchedSource::ZyBooks { config: redacted, books }],
+        );
+
+        let mut server = loopback(vec![(200, r#"{"assignments":[],"warnings":[]}"#.to_string())]);
+        let client = crate::cloudmodel::CloudClient::new(&cloud_test_config(&server.base), "jwt-not-a-secret");
+        let mut warnings: Vec<String> = Vec::new();
+        let out = post_coursework(&client, &request, &mut warnings);
+        assert!(out.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let sent = server.requests().remove(0);
+
+        for forbidden in [
+            "credential_target",
+            "knowlu/test-profile",
+            "base_url",
+            "enabled",
+            "pw-not-a-secret",
+            "user-not-a-secret",
+            "C:/Users/test-profile",
+            "knowlu/",
+        ] {
+            assert!(!sent.contains(forbidden), "the request body carried {forbidden:?}: {sent}");
         }
-        // And everything the parser genuinely needs did travel.
-        for needed in ["courses", "cs-100-2026", "categories", "minutes_per_section", "importance", "ignore"] {
-            assert!(rendered.contains(needed), "the request body lost {needed:?}: {rendered}");
+        // And everything the parser genuinely needs — plus the vendor's own raw payload — did
+        // travel.
+        for needed in [
+            "America/Chicago", "zybooks", "courses", "cs-100-2026", "categories",
+            "minutes_per_section", "importance", "ignore", "assignment_id",
+        ] {
+            assert!(sent.contains(needed), "the request body lost {needed:?}: {sent}");
         }
+    }
+
+    /// R-C2-E17 / I1: a dead service must be exactly one named warning and nothing else — never a
+    /// silently empty semester, and never a panic on a connection the OS refuses outright.
+    #[test]
+    fn a_dead_service_is_one_named_warning_and_nothing_changes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener); // nothing is listening on that port now: the connection is refused
+        let client = crate::cloudmodel::CloudClient::new(
+            &cloud_test_config(&format!("http://127.0.0.1:{port}/functions/v1")),
+            "jwt-not-a-secret",
+        );
+        let request = coursework_request("America/Chicago", &[]);
+        let mut warnings: Vec<String> = Vec::new();
+        let out = post_coursework(&client, &request, &mut warnings);
+        assert!(out.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("the service is unavailable"), "{warnings:?}");
+        assert!(warnings[0].ends_with("nothing changed"), "{warnings:?}");
+    }
+
+    /// R-C2-E17 / I1: `post_coursework` is where a reply row actually gets decoded off the wire —
+    /// a good row and a row this engine cannot read must be told apart there, not only at
+    /// `assignment_from_row`'s own unit-test level, and the malformed one is a warning, never a
+    /// panic or a note written half-formed.
+    #[test]
+    fn post_coursework_keeps_the_good_row_and_warns_on_the_malformed_one() {
+        let reply = serde_json::json!({
+            "assignments": [
+                {
+                    "uid": "zybooks:1839992", "slug": "cs-100-hw-01", "title": "CS 100 HW 01",
+                    "due": "2026-08-26T23:59", "course": "cs-100", "effort_hours": 2.5,
+                    "effort_confidence": "low", "effort_source": "inferred", "importance": 2,
+                    "importance_reason": "reason text", "progress": 0, "created_by": "zybooks",
+                    "body": "body text",
+                },
+                { "uid": "zybooks:1", "title": "x", "due": "not a date" },
+            ],
+            "warnings": ["zybooks: zybook surprise-101 not in config; skipped"],
+        })
+        .to_string();
+        let mut server = loopback(vec![(200, reply)]);
+        let client = crate::cloudmodel::CloudClient::new(&cloud_test_config(&server.base), "jwt-not-a-secret");
+        let request = coursework_request("America/Chicago", &[]);
+        let mut warnings: Vec<String> = Vec::new();
+        let out = post_coursework(&client, &request, &mut warnings);
+        let _ = server.requests();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].uid, "zybooks:1839992");
+        assert!(
+            warnings.contains(&"zybooks: zybook surprise-101 not in config; skipped".to_string()),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.contains(&"coursework: a reply row could not be read; skipped".to_string()),
+            "{warnings:?}"
+        );
+    }
+
+    /// I3 / R-C2-E17: `collect_cloud` resolves the timezone through the same [`resolve_timezone`]
+    /// `collect` uses for the local path — one warning and a fallback, never a silently dropped
+    /// source. An unknown IANA name reaching `dueLocal` server-side unstamped would otherwise turn
+    /// every item into "unreadable due date … skipped" and the whole source into "0 assignments
+    /// parsed; treating as failure" — a full source lost to one bad word in a YAML file.
+    #[test]
+    fn a_bad_timezone_still_resolves_locally_and_the_request_carries_the_fallback() {
+        let config = crate::yaml::mapping_of("timezone: Nowhere/Fake\n");
+        let mut warnings: Vec<String> = Vec::new();
+        let tz_name = resolve_timezone(&config, &mut warnings)
+            .iana_name()
+            .unwrap_or(DEFAULT_TZ)
+            .to_string();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("bad timezone"), "{warnings:?}");
+        assert!(warnings[0].contains(&format!("using {DEFAULT_TZ}")), "{warnings:?}");
+        let request = coursework_request(&tz_name, &[]);
+        assert_eq!(request["timezone"], serde_json::json!(DEFAULT_TZ));
     }
 
     /// The reconciled list the service returns is written by the same `sync_coursework` the local

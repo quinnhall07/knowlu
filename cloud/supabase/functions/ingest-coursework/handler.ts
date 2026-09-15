@@ -34,7 +34,7 @@ function pickZybooks(source: Obj, timeZone: string, warnings: string[]): Assignm
     // Checked before routing, not after: a session can die between the device's item-list call
     // and this book's own assignment fetch, and that signal must not be swallowed by an unmapped
     // or ignored code — a dead session is a property of the session, not of any one course.
-    requireSuccess(book.payload, `assignment payload for ${code}`);
+    requireSuccess(book.payload, `assignment fetch for ${code}`);
     const routing = routeZybook(code, courses, ignore);
     if (routing.kind === "ignored") continue;
     if (routing.kind === "unmapped") {
