@@ -11,7 +11,7 @@ const TASK_ANSWER = {
   effort_hours: 2.5, importance: 4, why: "the email states a Friday deadline", confidence: 0.86,
 };
 
-function fakes(replies: Array<Record<string, unknown>>, ids = ["m1"]) {
+function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"]) {
   const rows: JudgmentRow[] = [];
   const queued: Array<{ uid: string; tier: string; payload: Record<string, unknown> }> = [];
   const delivered: string[] = [];
@@ -35,7 +35,7 @@ function fakes(replies: Array<Record<string, unknown>>, ids = ["m1"]) {
   };
   const deps: ReadDeps = {
     api,
-    accessTokenFor: () => Promise.resolve("access-token-not-a-secret"),
+    accessTokenFor: () => Promise.resolve({ token: "access-token-not-a-secret" }),
     excludedLabels: () => Promise.resolve([]),
     markRevoked: () => Promise.resolve(),
     seen: () => Promise.resolve(seen),
@@ -166,22 +166,6 @@ Deno.test("excluded_labels_become_negative_label_terms (and the window is seven 
   assertEquals(READ_CAP, 60);
 });
 
-Deno.test("a revoked grant is quiet, not an error, and never a failed slot", async () => {
-  const { deps } = fakes([]);
-  let revoked = false;
-  const response = await readHandler(OK, {
-    ...deps,
-    accessTokenFor: () => Promise.resolve(null),
-    markRevoked: () => {
-      revoked = true;
-      return Promise.resolve();
-    },
-  })(post());
-  assertEquals(response.status, 200);
-  assertEquals((await response.json()).quiet, true);
-  assertEquals(revoked, true);
-});
-
 Deno.test("gmail_rows_are_excluded_from_the_training_export", async () => {
   // A static test over the function's own text: the filter is one predicate and losing it is
   // silent, so it is pinned where it cannot be lost by an edit that looks like a refactor.
@@ -191,4 +175,124 @@ Deno.test("gmail_rows_are_excluded_from_the_training_export", async () => {
     body.includes("origin <> 'gmail_api'"),
     "cloud design §5.3 and §9: gmail-derived rows are excluded by the export filter",
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E41 — a revoked grant, a calendar-only grant and an unconfigured deployment are three
+// different situations, and only one of them is ever `markRevoked`.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("a calendar-only grant reads as no_gmail_scope, and markRevoked is never called", async () => {
+  const { deps } = fakes([]);
+  let revoked = false;
+  const response = await readHandler(OK, {
+    ...deps,
+    accessTokenFor: () => Promise.resolve({ missing: "scope" } as const),
+    markRevoked: () => {
+      revoked = true;
+      return Promise.resolve();
+    },
+  })(post());
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.quiet, true);
+  assertEquals(body.reason, "no_gmail_scope");
+  assertEquals(revoked, false, "a calendar-only grant must never be revoked over a Gmail step never taken");
+});
+
+Deno.test("a rejected refresh reads as revoked, and markRevoked is called", async () => {
+  const { deps } = fakes([]);
+  let revoked = false;
+  const response = await readHandler(OK, {
+    ...deps,
+    accessTokenFor: () => Promise.resolve({ missing: "grant" } as const),
+    markRevoked: () => {
+      revoked = true;
+      return Promise.resolve();
+    },
+  })(post());
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.quiet, true);
+  assertEquals(body.reason, "revoked");
+  assertEquals(revoked, true);
+});
+
+Deno.test("no Google client configured on this deployment is a 503, never quiet and never markRevoked", async () => {
+  const { deps } = fakes([]);
+  let revoked = false;
+  const response = await readHandler(OK, {
+    ...deps,
+    accessTokenFor: () => Promise.resolve({ missing: "config" } as const),
+    markRevoked: () => {
+      revoked = true;
+      return Promise.resolve();
+    },
+  })(post());
+  assertEquals(response.status, 503);
+  assertEquals(revoked, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E42 — dedup before the cap, and an unjudged verdict is deferred rather than dropped.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("dedup happens before the read cap, so a backlog past it is still reachable", async () => {
+  // 65 ids, the first 5 already seen: dedup-before-slice means the 60 UNSEEN ids fill the whole
+  // cap, rather than 5 of the 60 slots being spent on ids this account has already judged.
+  const ids = Array.from({ length: 65 }, (_, i) => `m${i}`);
+  const { deps, queued, seen } = fakes(Array.from({ length: READ_CAP }, () => TASK_ANSWER), ids);
+  for (let i = 0; i < 5; i++) seen.add(`gmail:m${i}`);
+  const reply = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(reply.read, READ_CAP, JSON.stringify(reply));
+  assertEquals(queued.length, READ_CAP);
+  assert(!queued.some((q) => Number(q.uid.replace("gmail:m", "")) < 5), "a seen id must never be read again");
+});
+
+Deno.test("a capped outcome stops the round on the spot, defers, and answers more:false", async () => {
+  const ids = ["m1", "m2"];
+  // Only one reply is scripted: m2 must never reach the model at all, since `withinBudget`
+  // answers false for it before `judge` ever calls `complete`.
+  const { deps, queued, seen } = fakes([TASK_ANSWER], ids);
+  let calls = 0;
+  const basePipeline = deps.pipeline;
+  deps.pipeline = async () => {
+    const p = await basePipeline();
+    return { ...p, caps: { ...p.caps, withinBudget: () => Promise.resolve((calls += 1) === 1) } };
+  };
+  const reply = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(queued.length, 1, "only the first item was judged and queued");
+  assertEquals(queued[0].uid, "gmail:m1");
+  assertEquals(reply.deferred, 1);
+  assertEquals(reply.more, false, "retrying the rest of THIS round would not help while capped");
+  assert(!seen.has("gmail:m2"), "a capped item must not be marked seen, so it is asked about again");
+});
+
+Deno.test("a model failure defers that one uid and continues to the next", async () => {
+  const ids = ["m1", "m2"];
+  const { deps, queued, seen } = fakes([new Error("boom"), TASK_ANSWER], ids);
+  const reply = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(queued.length, 1, "the second item was still judged");
+  assertEquals(queued[0].uid, "gmail:m2");
+  assertEquals(reply.deferred, 1);
+  assert(!seen.has("gmail:m1"), "a failed item must not be marked seen, so it is asked about again");
+  assert(seen.has("gmail:m2"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// R-C2-E44 — the minors: a malformed ack is dropped, and a label carrying a quote is escaped.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("a malformed ack entry is dropped rather than reaching the delivery filter", async () => {
+  const { deps } = fakes([TASK_ANSWER]);
+  let delivered: string[] = [];
+  const tracked = { ...deps, deliver: (_a: string, uids: string[]) => { delivered = uids; return Promise.resolve(); } };
+  await readHandler(OK, tracked)(post({ ack: ["gmail:m1", "not-an-ack", "gmail:evil; drop table", ""] }));
+  assertEquals(delivered, ["gmail:m1"]);
+});
+
+Deno.test("a label carrying a double quote is escaped, not left to break the query", async () => {
+  const { deps, asked } = fakes([TASK_ANSWER]);
+  await readHandler(OK, { ...deps, excludedLabels: () => Promise.resolve(['Say "Hi"']) })(post());
+  assertEquals(asked[0], 'newer_than:7d -label:"Say \\"Hi\\""');
 });

@@ -2,7 +2,7 @@ import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { GMAIL_SCOPE } from "../_shared/google_scopes.ts";
-import { type GmailApi, READ_BUDGET_MS, readHandler } from "./handler.ts";
+import { GmailApiError, type GmailApi, READ_BUDGET_MS, readHandler, type TokenLookup } from "./handler.ts";
 
 const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -28,7 +28,7 @@ const api: GmailApi = {
   async list(accessToken, q) {
     const url = `${GMAIL}/messages?q=${encodeURIComponent(q)}&maxResults=100`;
     const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!response.ok) throw new Error(`gmail list ${response.status}`);
+    if (!response.ok) throw new GmailApiError(response.status, `gmail list ${response.status}`);
     const body = await response.json() as { messages?: Array<{ id: string }> };
     return (body.messages ?? []).map((m) => m.id);
   },
@@ -36,7 +36,7 @@ const api: GmailApi = {
     const response = await fetch(`${GMAIL}/messages/${id}?format=full`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!response.ok) throw new Error(`gmail message ${response.status}`);
+    if (!response.ok) throw new GmailApiError(response.status, `gmail message ${response.status}`);
     const body = await response.json() as { payload?: Record<string, unknown> };
     const headers = (body.payload?.headers as Array<{ name: string; value: string }> | undefined) ?? [];
     const header = (name: string) =>
@@ -52,22 +52,37 @@ const api: GmailApi = {
 
 Deno.serve(readHandler(requireActiveEntitlement, {
   api,
-  async accessTokenFor(accountId) {
+  async accessTokenFor(accountId): Promise<TokenLookup> {
+    // R-C2-E41: a missing P2 (no Google client configured on this deployment at all) is checked
+    // first and answers `missing: "config"` — never per-account, and never worth a DB round trip.
+    const clientId = Deno.env.get("GOOGLE_CLIENT_ID") ?? "";
+    if (clientId === "") return { missing: "config" };
     // The Gmail scope specifically: a grant that carries only `calendar.readonly` must read no
     // mail, and `read_google_grant` refuses rather than this function remembering to check.
     // R-C2-E39: reuse Task 10's shared token exchange — `invalid_grant` (a revoked grant, or the
-    // 7-day testing-mode expiry) comes back as null and folds into the handler's existing
-    // `quiet` path; any other failure throws and surfaces as the handler's 502.
+    // 7-day testing-mode expiry) comes back as null and folds into `missing: "grant"`; any other
+    // failure throws and surfaces as the handler's generic 500.
     const refresh = await sharedDb().rpc("read_google_grant", {
       p_account: accountId,
       p_scope: GMAIL_SCOPE,
     });
-    if (typeof refresh !== "string" || refresh === "") return null;
-    return await accessTokenFromRefresh(refresh, {
-      clientId: Deno.env.get("GOOGLE_CLIENT_ID") ?? "",
-      clientSecret: Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "",
-      fetch,
-    });
+    if (typeof refresh === "string" && refresh !== "") {
+      const token = await accessTokenFromRefresh(refresh, {
+        clientId,
+        clientSecret: Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "",
+        fetch,
+      });
+      return token === null ? { missing: "grant" } : { token };
+    }
+    // The RPC answered nothing: either this account never connected Google at all, or it did and
+    // the grant simply does not carry the Gmail scope (`p_scope` is checked inside the RPC —
+    // Task 10 step 7). The two read as different things to the device (R-C2-E41): a calendar-only
+    // grant must never be marked revoked over a Gmail step the student never took, so this
+    // distinguishes them by whether a live `google_accounts` row exists at all.
+    const rows = await sharedDb().select(
+      `google_accounts?account_id=eq.${accountId}&status=neq.revoked&select=scopes`,
+    ) as Array<{ scopes: string[] }>;
+    return rows.length > 0 ? { missing: "scope" } : { missing: "grant" };
   },
   async excludedLabels(accountId) {
     const rows = await sharedDb().select(
