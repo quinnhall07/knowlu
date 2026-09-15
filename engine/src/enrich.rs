@@ -345,14 +345,23 @@ pub fn run_lines_with(
         };
     };
     let model = crate::cloudmodel::CloudModel::new(client);
-    // R-C2-E15: the probe is a network round trip, and it must not fire when there is nothing to
-    // judge — reusing `pending`'s own predicate here (not a second scanning routine) is what lets
-    // a job that runs twice a day forever skip both the call and, on a network that black-holes
-    // rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no queue behind it would
-    // otherwise risk. `enrich_with` below re-derives the same list; that second read is the
-    // accepted cost of leaving `enrich_with`'s own signature — and every test that calls it
-    // directly — untouched.
-    if pending(vault).0.is_empty() {
+    // C2 Task 9 fix 1 (R-C2-E22 #2): the cloud arm's wall clock starts here, before the probe —
+    // the events pass below shares `opts.budget` with the enrichment batch rather than getting a
+    // fresh fifteen minutes of its own, and the two together must still land inside
+    // `scheduler::CHILD_TIMEOUT`.
+    let arm_started = std::time::Instant::now();
+    let (events_config, _) =
+        crate::events::load_events_config(&vault.join("config").join("events.yaml"));
+    let any_feed = events_config.sources.iter().any(|s| s.enabled);
+    // R-C2-E15, widened by fix 1 (R-C2-E22 #1): the probe is a network round trip, and it must not
+    // fire when there is nothing to judge in EITHER pass — reusing `pending`'s own predicate and
+    // `judge_roster`'s own enabled-source predicate here (not a second scanning routine) is what
+    // lets a job that runs twice a day forever skip both the call and, on a network that
+    // black-holes rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no queue behind
+    // it would otherwise risk. `enrich_with` below re-derives the pending list; that second read is
+    // the accepted cost of leaving `enrich_with`'s own signature — and every test that calls it
+    // directly — untouched. (Tasks 11–12's pulls join this same predicate later.)
+    if pending(vault).0.is_empty() && !any_feed {
         return enrich_with(vault, opts, Ok(&model));
     }
     // A session or entitlement problem answers every item identically, so the FIRST call decides
@@ -375,11 +384,17 @@ pub fn run_lines_with(
         None => {
             let (code, mut lines) = enrich_with(vault, opts, Ok(&model));
 
-            // C2 Task 9 — the events pass. Runs even when the enrichment batch was empty: a vault
-            // can have nothing to enrich and forty events to judge. The feeds are fetched through
-            // the same server-side proxy `rank` uses, so the HTML sources return a page here too.
-            let (events_config, _) =
-                crate::events::load_events_config(&vault.join("config").join("events.yaml"));
+            // C2 Task 9 — the events pass. Runs whenever at least one event source is enabled,
+            // even when the enrichment batch above was empty: a vault can have nothing to enrich
+            // and forty events to judge (the early return above already covers "neither"). The
+            // feeds are fetched through the same server-side proxy `rank` uses, so the HTML
+            // sources return a page here too. Fix 1 (R-C2-E22 #2): it shares `opts.budget` with
+            // the enrichment batch rather than getting a fresh fifteen minutes of its own — the
+            // remaining time is whatever `arm_started` has not already spent — and
+            // `judge_roster`'s own loop breaks on it exactly as `enrich_with`'s does above, folding
+            // what it does not reach into a "left for the next slot" line. `events_config` is the
+            // one already loaded before the probe, not re-read.
+            let remaining_budget = opts.budget.saturating_sub(arm_started.elapsed());
             let proxy = |url: &str| -> Result<String, String> {
                 crate::cloudmodel::fetch_event_source(client, url)
                     .or_else(|_| crate::eventfeed::fetch_event_source(url))
@@ -390,6 +405,7 @@ pub fn run_lines_with(
                 Some(&proxy),
                 jiff::Zoned::now().date(),
                 events_config.judge_per_run_cap.max(0) as usize,
+                remaining_budget,
             ));
 
             if let Some(reason) = model.fatal() {
@@ -984,6 +1000,113 @@ mod tests {
             listener.accept().is_err(),
             "an empty queue must never reach the judgment service"
         );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A loopback server that answers `replies` in order (by arrival, not by path) and hands back
+    /// everything it was sent, joined once at the end — the same discipline
+    /// `engine/tests/cloud_contract.rs`'s `Loopback` uses, duplicated here rather than shared
+    /// because a `src` unit test cannot depend on a separate test binary.
+    fn multi_reply_loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut seen = Vec::new();
+            for (code, body) in replies {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone the accepted stream"));
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = rest.trim().parse().unwrap_or(0);
+                    }
+                    let blank = line == "\r\n" || line == "\n";
+                    head.push_str(&line);
+                    if blank {
+                        break;
+                    }
+                }
+                let mut body_buf = vec![0u8; length];
+                if length > 0 {
+                    let _ = reader.read_exact(&mut body_buf);
+                }
+                seen.push(format!("{head}{}", String::from_utf8_lossy(&body_buf)));
+                let response = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            seen
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+    }
+
+    /// C2 Task 9 fix 1 (R-C2-E22 #7a): the pull phase this task added had no test — every other
+    /// `enrich::` test either takes the widened early return or runs against a `vault(tag)` with
+    /// no `config/events.yaml` at all. This one gives the vault one enabled event source and an
+    /// empty enrichment queue, and proves the whole chain end to end: the probe, the feed fetched
+    /// through the server-side proxy, the verdict recorded in the ledger, and the summary line
+    /// naming the pass — with no real socket, only a loopback listener answering in order.
+    #[test]
+    fn the_events_pass_runs_after_an_empty_enrichment_batch_and_the_verdict_reaches_the_ledger() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("events-pull");
+        // Clear the fixture's one flagged task so the enrichment queue is empty — the events pass
+        // must still run because `config/events.yaml` below names an enabled source.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        crate::pystr::write_text(
+            &v.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        ).unwrap();
+
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
+                   DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
+                   DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let events_reply = crate::ledger::dumps_value(&serde_json::json!({ "body": ics }));
+        let judge_reply = crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
+            "tier": 3
+        }));
+        // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), then
+        // the verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because
+        // its own batch is empty.
+        let (base, handle) = multi_reply_loopback(vec![
+            (200, "{}".to_string()),
+            (200, events_reply),
+            (200, judge_reply),
+        ]);
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let log = v.join("_log");
+        let o = opts(&log);
+        let (code, lines) = run_lines_with(&v, &o, Some(&client));
+        assert_eq!(code, 0);
+        assert!(lines.iter().any(|l| l == "judge: nothing to enrich"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("events:")), "the pass must name itself: {lines:?}");
+        let ledger = crate::eventledger::load_ledger(&v, None);
+        assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
         let _ = std::fs::remove_dir_all(&v);
     }
 }

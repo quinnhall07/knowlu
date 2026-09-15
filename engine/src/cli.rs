@@ -203,8 +203,12 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
 ///
 /// Python's `test_cli.py` monkeypatches `calfeed.fetch_ics` and `eventfeed.fetch_event_source`
 /// as module globals; `calfeed` and `eventfeed` already carry this seam one level down, and
-/// `run_with` only threads it through. Production (`run`) passes neither, so the default fetchers
-/// are the ones both modules would have used anyway.
+/// `run_with` only threads it through. **Production (`run`) builds both, since hand-off H4**: an
+/// `events` closure that tries the service first and falls back to `eventfeed::fetch_event_source`,
+/// and a `calendar` closure that routes a `cloud:<name>` url to the service and everything else to
+/// `calfeed::fetch_ics`. Only tests construct a bare `Fetchers` directly, and several of those pass
+/// `Fetchers::default()`, which leaves both closures at `None` — the on-device fallbacks `calfeed`
+/// and `eventfeed` would have used anyway.
 #[derive(Default, Clone, Copy)]
 pub struct Fetchers<'a> {
     pub calendar: Option<&'a dyn Fn(&str) -> Result<String, String>>,

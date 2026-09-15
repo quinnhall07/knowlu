@@ -369,12 +369,21 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// seconds later, and by then the verdicts are in the ledger it reads.
 ///
 /// Never panics and never fails a run: every failure is a line.
+///
+/// **`budget`** (fix 1, R-C2-E22 #2): a wall-clock bound on this call, checked BEFORE each item
+/// starts — the same discipline `enrich_with`'s own `BATCH_BUDGET` loop uses, and for the same
+/// reason. This pass runs after the enrichment batch has already spent part of `opts.budget`, and
+/// with no bound of its own it could push up to `cap` sequential `/judge-event` calls (150 by
+/// default, 120 seconds each) well past `scheduler::CHILD_TIMEOUT`. Items cut by the budget are
+/// folded into the same "left for the next slot" line as items cut by `cap` — nothing is lost,
+/// and no slot is held for hours.
 pub fn judge_roster(
     vault: &Path,
     model: &dyn crate::judge::EventModel,
     fetch: Option<&dyn Fn(&str) -> Result<String, String>>,
     today: Date,
     cap: usize,
+    budget: std::time::Duration,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let (config, _) = load_events_config(&vault.join("config").join("events.yaml"));
@@ -398,10 +407,20 @@ pub fn judge_roster(
         .iter()
         .filter(|e| ledger.get(&e.uid).and_then(|entry| entry.verdict.as_ref()).is_none())
         .collect();
-    let left = pending.len().saturating_sub(cap);
+    let left_for_cap = pending.len().saturating_sub(cap);
+    let batch: Vec<&DiscoveredEvent> = pending.into_iter().take(cap).collect();
+    let started = std::time::Instant::now();
     let mut judged = 0usize;
+    let mut processed = 0usize;
 
-    for event in pending.into_iter().take(cap) {
+    for event in &batch {
+        // Checked BEFORE starting each item, not after — the worst case this bounds is the budget
+        // plus one call already in flight, not the budget plus a whole extra item.
+        if started.elapsed() >= budget {
+            break;
+        }
+        processed += 1;
+        let event = *event;
         let item = crate::judge::EventItem {
             uid: event.uid.clone(),
             title: crate::judge::one_line(&event.title, 200),
@@ -445,6 +464,9 @@ pub fn judge_roster(
             Err(e) => lines.push(format!("events {}: not recorded ({e:?})", event.uid)),
         }
     }
+    // `left_for_cap` already counts what `cap` excluded from the batch; fold in whatever the
+    // budget cut off the batch itself, so one line always names everything not reached this run.
+    let left = left_for_cap + (batch.len() - processed);
     let mut summary = format!("events: {judged} judged");
     if left > 0 {
         summary.push_str(&format!(", {left} left for the next slot"));
@@ -800,7 +822,7 @@ mod tests {
         let (vault, feed) = scratch_vault_with_feed("unjudged");
         let fetch = |_: &str| Ok(feed.clone());
         let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("opportunity", "matches the stated interests"))]));
-        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("engage:2") && l.contains("opportunity")), "{lines:?}");
         assert!(!lines.iter().any(|l| l.contains("engage:1")), "{lines:?}");
         let ledger = crate::eventledger::load_ledger(&vault, None);
@@ -827,7 +849,7 @@ mod tests {
                 Err(crate::judge::ModelError::Failed("recorded only".into()))
             }
         }
-        let _ = judge_roster(&vault, &Recorder(&seen), Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let _ = judge_roster(&vault, &Recorder(&seen), Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
         let items = seen.borrow();
         assert_eq!(items.len(), 1);
         assert!(items[0].description.contains("Employers"), "{:?}", items[0].description);
@@ -842,9 +864,9 @@ mod tests {
         let (vault, feed) = scratch_vault_with_feed("badword");
         let fetch = |_: &str| Ok(feed.clone());
         let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("maybe", "unsure"))]));
-        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("refused")), "{lines:?}");
-        assert!(crate::eventledger::load_ledger(&vault, None).get("engage:2").is_none());
+        assert!(crate::eventledger::load_ledger(&vault, None).get("ics:engage:2").is_none());
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -857,7 +879,7 @@ mod tests {
         let (vault, feed) = scratch_vault_with_feed("why");
         let fetch = |_: &str| Ok(feed.clone());
         let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("drop", "she said \"no\" \u{b7} twice"))]));
-        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("engage:2")), "{lines:?}");
         let ledger = crate::eventledger::load_ledger(&vault, None);
         assert_eq!(ledger["ics:engage:2"].verdict.as_deref(), Some("drop"));
@@ -870,7 +892,7 @@ mod tests {
         let (vault, feed) = scratch_vault_with_feed("cap");
         let fetch = |_: &str| Ok(feed.clone());
         let model = Scripted(std::cell::RefCell::new(vec![]));
-        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 0);
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 0, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("1 left for the next slot")), "{lines:?}");
         let _ = std::fs::remove_dir_all(&vault);
     }
@@ -880,8 +902,60 @@ mod tests {
         let (vault, _) = scratch_vault_with_feed("deadfeed");
         let fetch = |_: &str| Err("connection refused".to_string());
         let model = Scripted(std::cell::RefCell::new(vec![]));
-        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("fetch failed")), "{lines:?}");
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// C2 Task 9 fix 1 (R-C2-E22 #2): the events pass has its own wall-clock budget, checked
+    /// BEFORE each item starts — the same discipline `enrich_with`'s own `BATCH_BUDGET` loop
+    /// uses. A model that sleeps past the budget on its first call must never be handed a second
+    /// event: the pass stops there and folds what it did not reach into the existing "left for the
+    /// next slot" line. This is what stands between `judge_per_run_cap` (150 sequential calls at
+    /// 120 seconds each) and `scheduler::CHILD_TIMEOUT` killing the slot.
+    #[test]
+    fn the_events_pass_stops_at_its_wall_clock_budget_and_reports_the_remainder() {
+        let dir = std::env::temp_dir()
+            .join(format!("knowlu-c2-events-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        let feed = "BEGIN:VCALENDAR\r\n\
+             BEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:First\r\n\
+             DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\nEND:VEVENT\r\n\
+             BEGIN:VEVENT\r\nUID:engage:2\r\nSUMMARY:Second\r\n\
+             DTSTART:20260830T150000Z\r\nDTEND:20260830T190000Z\r\nEND:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+            .to_string();
+        let fetch = |_: &str| Ok(feed.clone());
+
+        struct Sleepy(std::time::Duration);
+        impl crate::judge::EventModel for Sleepy {
+            fn judge_event(
+                &self,
+                _item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                std::thread::sleep(self.0);
+                Ok(verdict("drop", "sleepy"))
+            }
+        }
+        let model = Sleepy(std::time::Duration::from_millis(300));
+        let lines = judge_roster(
+            &dir,
+            &model,
+            Some(&fetch),
+            jiff::civil::date(2026, 8, 28),
+            150,
+            std::time::Duration::from_millis(20),
+        );
+        let summary = lines.last().expect("a summary line");
+        assert!(summary.starts_with("events: 1 judged"), "only the first item should have started: {summary}");
+        assert!(summary.contains("1 left"), "the other one must be folded into the existing line: {summary}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
