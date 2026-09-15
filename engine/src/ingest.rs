@@ -530,6 +530,35 @@ needs_enrichment: true
 {body}
 "#;
 
+/// R-OB-3: why a note went straight to `archive/` on a first ingest. A frontmatter field rather
+/// than a naming convention, so a human reading the note in six months can see it, and so a future
+/// `surface` view can filter on it without parsing a filename.
+pub const IMPORTED_PAST: &str = "imported-past";
+
+/// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
+/// deliberately a second template rather than a substitution on the first, because the two differ
+/// in what they MEAN and a reader should not have to diff them to see it.
+pub const IMPORTED_PAST_TEMPLATE: &str = r#"---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: 1.0
+effort_confidence: low
+effort_source: inferred
+importance: 3
+importance_reason: "pending enrichment"
+status: archived
+archived_reason: imported-past
+progress: 0
+created_by: blackboard
+source_uid: {uid}
+needs_enrichment: false
+---
+
+{body}
+"#;
+
 /// `json.dumps(s)` with Python's **default** `ensure_ascii=True`: every non-ASCII character becomes
 /// a lowercase `\uXXXX` escape, with a surrogate pair above the BMP.
 ///
@@ -588,13 +617,16 @@ pub fn sync_tasks(
     ctx: Option<&crate::write::WriteContext>,
     journal: &mut crate::journal::Journal,
     today: Option<Date>,
+    // R-OB-3. `true` only on a vault that has never been through a whole slot — `is_first_run`
+    // above, which is the absence of `today.md` and **not** of the seen-ledger (R-C2-9).
+    // `run_lines` computes it; every caller in the tests passes `false`, which is the behaviour
+    // they were written against.
+    first_run: bool,
 ) -> Vec<String> {
     let default_ctx = crate::write::WriteContext::new("agent:ingest.blackboard", "cli");
     let ctx = ctx.unwrap_or(&default_ctx);
-    let stamp = today
-        .unwrap_or_else(|| jiff::Zoned::now().date())
-        .strftime("%Y-%m-%d")
-        .to_string();
+    let stamp_date = today.unwrap_or_else(|| jiff::Zoned::now().date());
+    let stamp = stamp_date.strftime("%Y-%m-%d").to_string();
 
     let mut log: Vec<String> = Vec::new();
     let mut known = existing_by_uid(vault);
@@ -678,6 +710,55 @@ pub fn sync_tasks(
         }
 
         let course = match_course(event, course_map);
+
+        // R-OB-3: a feed's window reaches backwards, and a vault born today has no history to
+        // reconcile against — Quinn's first slot imported four items already past due, one of them
+        // from 2025. On a FIRST ingest such an item is recorded as seen and written straight into
+        // `archive/`, so the first page a student ever sees shows the future.
+        //
+        // **Not skipped** — skipping leaves the uid unseen and the next run creates it. **Not
+        // created-then-deleted** — that is two journal records and a note that briefly ranks. One
+        // `create` into `archive/`, one `record_seen`, one line.
+        //
+        // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work,
+        // and the one thing worse than importing a stale task is archiving a live one.
+        let past_due = first_run
+            && match due {
+                Due::Date(d) => d < stamp_date,
+                Due::DateTime(dt) => dt.date() < stamp_date,
+            };
+        if past_due {
+            let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
+            let archive_dir = vault.join("archive");
+            let _ = std::fs::create_dir_all(&archive_dir);
+            let mut path = archive_dir.join(format!("{slug}.md"));
+            let mut suffix = 2;
+            while path.exists() {
+                path = archive_dir.join(format!("{slug}-{suffix}.md"));
+                suffix += 1;
+            }
+            let body = IMPORTED_PAST_TEMPLATE
+                .replace("{title}", &json_dumps_unicode(&event.title))
+                .replace(
+                    "{course}",
+                    &course.as_deref().map(json_dumps_unicode).unwrap_or_else(|| "null".to_string()),
+                )
+                .replace("{due}", &new_due)
+                .replace("{uid}", &json_dumps_unicode(&event.uid))
+                .replace("{body}", &event.description);
+            let rel_path = crate::ids::rel(vault, &path);
+            match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
+                Ok(created) => {
+                    let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    log.push(format!("archived (imported-past) {stem}"));
+                    known.insert(event.uid.clone(), created);
+                    let _ = record_seen(vault, &event.uid, &event.title, &stamp);
+                }
+                Err(err) => log.push(format!("skipped (unwritable): {err}")),
+            }
+            continue;
+        }
+
         let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
         let mut path = tasks_dir.join(format!("{slug}.md"));
         let mut suffix = 2;
@@ -820,7 +901,11 @@ pub fn run_lines(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None);
+    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None, first_run);
+    if first_run {
+        log.push(format!("ingest: first run — {} item(s) already past were archived",
+            log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
+    }
     if malformed > 0 { log.push(format!("skipped {malformed} malformed event(s)")); }
     let summary = format!("ingest: {} events, {} action(s)", events.len(), log.len());
     log.push(summary);
@@ -1204,7 +1289,7 @@ mod tests {
 
     fn run(vault: &Path, events: &[Event], map: &[(String, String)]) -> Vec<String> {
         let mut j = crate::journal::Journal::new(vault);
-        sync_tasks(events, vault, map, None, &mut j, Some(Date::constant(2026, 8, 28)))
+        sync_tasks(events, vault, map, None, &mut j, Some(Date::constant(2026, 8, 28)), false)
     }
 
     #[test]
