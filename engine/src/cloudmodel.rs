@@ -484,6 +484,13 @@ impl judge::EmailModel for CloudModel<'_> {
 /// marked delivered once the device has actually written it, so a crash between the reply and the
 /// write costs a repeat, not a lost task. The `bool` is the service's `more`: it stopped at its own
 /// wall-clock budget and the device should ask again in this same slot.
+/// The exact `error` text `/gmail-read` answers when P2 (the Google client) was never set on this
+/// deployment (`handler.ts`'s `missing: "config"` branch). Matched exactly (R-C2-E45 (3)) so a
+/// platform 503 — a redeploy, a gateway hiccup, anything that is not THIS situation — stays a
+/// genuine `CloudError::Status` rather than telling a student Google sign-in is unconfigured when
+/// the real answer is "try later".
+const GMAIL_NOT_CONFIGURED_DETAIL: &str = "Google sign-in is not configured on this deployment";
+
 pub fn pull_gmail_queue(
     client: &CloudClient,
     ack: &[String],
@@ -494,7 +501,7 @@ pub fn pull_gmail_queue(
     // `QuietReason` set regardless of which of the two shapes the service used to say it.
     let reply = match client.post("/gmail-read", &json!({ "ack": ack })) {
         Ok(reply) => reply,
-        Err(CloudError::Status { code: 503, .. }) => {
+        Err(CloudError::Status { code: 503, ref detail }) if detail == GMAIL_NOT_CONFIGURED_DETAIL => {
             return Err(CloudError::Quiet(QuietReason::NotConfigured));
         }
         Err(e) => return Err(e),

@@ -556,18 +556,27 @@ pub fn pull_gmail(
             }
             break;
         }
-        // Re-read per round: the previous round's `record_seen` calls are in it. R-C2-E44: also
-        // the per-batch guard — a duplicate queue row for the SAME uid within this one batch must
-        // not produce two notes, so a uid is reserved here the moment it is first seen, before its
-        // write is even attempted.
-        let mut seen = crate::ingest::load_seen(vault);
+        // Re-read per round: the previous round's `record_seen` calls are in it.
+        let seen = crate::ingest::load_seen(vault);
+        // R-C2-E44/E45 (2): the per-batch guard, tracked apart from `seen` (the disk ledger, read
+        // fresh above and never mutated here) because a duplicate row must be handled differently
+        // depending on how its FIRST occurrence in this batch turned out: acked again if it was
+        // written or seen-recorded, but never acked, re-attempted or re-counted if it failed — an
+        // unwritten duplicate must not be told to the server as written.
+        let mut acked_this_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut failed_this_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &items {
             // The uid is the same `gmail:<message-id>` the server deduplicates on, so a message is
             // written once whichever side asked. A uid already here means an earlier slot (or an
-            // earlier duplicate row in this same batch) wrote it and the acknowledgement did not
-            // reach the server — acknowledge and move on.
-            if !seen.insert(item.uid.clone()) {
+            // earlier, SUCCESSFUL duplicate row in this same batch) wrote it and the
+            // acknowledgement did not reach the server — acknowledge and move on.
+            if seen.contains(&item.uid) || acked_this_batch.contains(&item.uid) {
                 ack.push(item.uid.clone());
+                continue;
+            }
+            // A duplicate row whose first occurrence in THIS batch already failed: skip silently,
+            // rather than re-attempt the same doomed write or count the same failure twice.
+            if failed_this_batch.contains(&item.uid) {
                 continue;
             }
             // R-C2-E43: a shape check on `due` (and `uid`) mirroring the server's own — belt and
@@ -609,6 +618,10 @@ pub fn pull_gmail(
                     if !note.is_empty() {
                         lines.push(format!("gmail {}: {} ({})", item.uid, item.tier, note));
                     }
+                    // The underlying write (or the deliberate no-write for `information`) already
+                    // succeeded here — a duplicate of this uid later in the batch is safe to ack
+                    // again regardless of what the seen-ledger write below does.
+                    acked_this_batch.insert(item.uid.clone());
                     let title = if item.tier == "information" { "(email)" } else { &item.title };
                     if let Err(e) = crate::ingest::record_seen(vault, &item.uid, title, &stamp) {
                         lines.push(format!("gmail {}: seen ledger not written ({e})", item.uid));
@@ -618,7 +631,13 @@ pub fn pull_gmail(
                 }
                 // A single unwritable item must not end the batch, and it must NOT be
                 // acknowledged: an unacknowledged row comes back next slot, which is the recovery.
-                Err(e) => lines.push(format!("gmail {}: not written ({e})", item.uid)),
+                // R-C2-E45 (2): a duplicate of this SAME uid later in the batch must not be acked
+                // either — nothing was written or seen-recorded for it, so telling the server
+                // otherwise would lose it for good the moment the ack reached the server.
+                Err(e) => {
+                    failed_this_batch.insert(item.uid.clone());
+                    lines.push(format!("gmail {}: not written ({e})", item.uid));
+                }
             }
         }
         if !more {
@@ -1797,6 +1816,129 @@ mod tests {
         assert_eq!(lines.last().unwrap(), "gmail: 1 task(s), 0 proposed, 0 dropped as information", "{lines:?}");
         let requests = handle.join().expect("the listener thread did not panic");
         assert_eq!(requests.len(), 2, "one pull, then one ack flush carrying the uid once: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A duplicate row whose FIRST occurrence in the batch already failed must not be acked by a
+    /// later occurrence of the same uid — R-C2-E45 (2). The first `m1` is malformed (skipped,
+    /// counted, not written); the second `m1` must be skipped silently: no re-attempt, no second
+    /// count, and — critically — no ack, because nothing was ever written or seen-recorded for it.
+    #[test]
+    fn a_duplicate_row_whose_first_occurrence_failed_is_never_acknowledged() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-duplicate-row-failed");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11\nstatus: done","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}},
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11\nstatus: done","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}
+                ]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(!v.join("tasks").join("ph-106-problem-set-4.md").exists());
+        assert!(!crate::ingest::load_seen(&v).contains("gmail:m1"));
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("gmail gmail:m1: not written (")).count(), 1,
+            "the second occurrence must not be re-counted: {lines:?}"
+        );
+        assert!(lines.last().unwrap().ends_with(", 1 skipped as malformed"), "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "an empty ack means no second, ack-flush request: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // R-C2-E41 open clause — the pull's own quiet behaviours, driven through the loopback rather
+    // than asserted only at the server (Deno) layer.
+    // ---------------------------------------------------------------------------------------------
+
+    /// `reason: "no_gmail_scope"` is not a failure at all — a calendar-only grant, the routine
+    /// account shape while the wizard has no Gmail button yet — so `pull_gmail` must return no
+    /// line, write nothing, and never attempt a second (ack-flush) request.
+    #[test]
+    fn a_quiet_no_gmail_scope_reply_prints_no_line_and_makes_no_second_request() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-quiet-no-scope");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![(200, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        // `vault(tag)` seeds one fixture task (`hw3.md`); nothing Gmail-derived was written.
+        let tasks: Vec<_> = std::fs::read_dir(v.join("tasks")).unwrap().flatten().collect();
+        assert_eq!(tasks.len(), 1, "nothing beyond the fixture task was written: {tasks:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "no ack-flush request when there was nothing to ack: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// `reason: "revoked"` IS the failure the student can act on, and reads as exactly one line —
+    /// through `label()`, never a raw HTTP status.
+    #[test]
+    fn a_quiet_revoked_reply_prints_exactly_one_skipped_line() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-quiet-revoked");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "revoked", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![(200, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines, vec!["gmail: skipped (gmail is not connected; re-connect from settings)".to_string()]);
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The service's 503 for an unconfigured deployment (no P2) reads as exactly one line, through
+    /// `QuietReason::NotConfigured`'s `label()` — never a raw HTTP status either.
+    #[test]
+    fn a_503_not_configured_reply_prints_exactly_one_skipped_line() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-503-not-configured");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "error": "Google sign-in is not configured on this deployment",
+        }));
+        let (base, handle) = gmail_loopback(vec![(503, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines, vec!["gmail: skipped (google sign-in is not configured on this deployment)".to_string()]);
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E45 (3): a 503 whose body does NOT carry the exact "not configured" text is a platform
+    /// failure (a redeploy, a gateway hiccup) and must stay a genuine `CloudError::Status` — never
+    /// misread as "Google sign-in is not configured".
+    #[test]
+    fn a_bare_503_is_not_read_as_not_configured() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-bare-503");
+        let (base, handle) = gmail_loopback(vec![(503, "{}".to_string())]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("HTTP 503"), "{lines:?}");
+        assert!(!lines[0].contains("not configured"), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
         let _ = std::fs::remove_dir_all(&v);
     }
 
