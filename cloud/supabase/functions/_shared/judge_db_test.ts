@@ -14,6 +14,8 @@ const SCOPED = [
   "gmail_queue",
   "google_accounts",
   "sources",
+  // `google_state` deliberately stays OUT of this list: it is keyed by its single-use nonce, and
+  // the callback has no account until that row is read — there is no account_id to scope by yet.
 ];
 
 /** The one scan, applied to one file: every `.select(\`…\`)` on a scoped table must name an account. */

@@ -89,3 +89,10 @@ verify_jwt = false
 verify_jwt = false
 [functions.events]
 verify_jwt = false
+[functions.google-connect]
+verify_jwt = false
+# The browser's redirect from Google carries no bearer, so the callback authenticates by its
+# single-use state nonce instead (`take_google_state`) — a different reason than every other
+# function on this page, and hand-off H7 says so.
+[functions.google-callback]
+verify_jwt = false

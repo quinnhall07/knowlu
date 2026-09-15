@@ -1,7 +1,15 @@
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { importAesKey } from "../_shared/crypto.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
+import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { CAL_USER_AGENT, calendarHandler } from "./handler.ts";
+
+// The calendar scope `read_google_grant` is asked for — the same string `google-connect/handler.ts`
+// exports as `CALENDAR_SCOPE` (§11a: the sensitive scope, asked for first and alone). Not imported
+// from there: every function directory in this codebase is self-contained outside `_shared/`, and a
+// literal that both `judge_db_test.ts`'s scoping guard and a reader can see is worth more here than
+// one shared constant would be.
+const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
 // Imported once, lazily, and kept: `importAesKey` is a `crypto.subtle` call and re-importing it
 // per request is work for nothing. Built at first use, never at module scope, so a missing secret
@@ -27,20 +35,53 @@ Deno.serve(calendarHandler(requireActiveEntitlement, {
     if (rows.length === 0) return null;
     return { ciphertext: rows[0].url_ciphertext, iv: rows[0].url_iv };
   },
-  // R-C2-E7: the Google arm of `/ingest-calendar` is a stub until Task 10. This wiring always
-  // answers "not connected" — the handler's own 409 — rather than reaching for a
-  // `read_google_grant` RPC or a `google_accounts` table that do not exist yet. Task 10 replaces
-  // only this function's body; the seam in `handler.ts` (`CalendarDeps.calendarTokenFor` /
-  // `googleEvents`) does not change.
-  calendarTokenFor(_accountId: string): Promise<string | null> {
-    return Promise.resolve(null);
+  async calendarTokenFor(accountId: string): Promise<string | null> {
+    // Returns nothing when the grant was never made, was revoked, or carries only the Gmail scope
+    // — `p_scope` is checked inside the RPC (Task 10 step 7), not here.
+    const refreshToken = await sharedDb().rpc("read_google_grant", {
+      p_account: accountId,
+      p_scope: CALENDAR_SCOPE,
+    });
+    if (typeof refreshToken !== "string" || refreshToken === "") return null;
+    const clientId = Deno.env.get("GOOGLE_CLIENT_ID") ?? "";
+    // A missing client id is "not connected" here too — the same 409 `calendarHandler` already
+    // gives for no grant at all, never a 500 for a deployment that has not set P2 yet.
+    if (clientId === "") return null;
+    return await accessTokenFromRefresh(refreshToken, {
+      clientId,
+      clientSecret: Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "",
+      fetch: globalThis.fetch,
+    });
   },
-  googleEvents(
-    _accessToken: string,
-    _from: Date,
-    _to: Date,
+  async googleEvents(
+    accessToken: string,
+    from: Date,
+    to: Date,
   ): Promise<Array<{ uid: string; summary: string; start: string; end: string; allDay: boolean }>> {
-    throw new Error("google calendar is not connected (Task 10)");
+    // `singleEvents=true` is what makes Google expand recurrences, so `calfeed`'s own RRULE
+    // handling never sees one.
+    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+    url.searchParams.set("timeMin", from.toISOString());
+    url.searchParams.set("timeMax", to.toISOString());
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json() as {
+      items?: Array<{
+        id: string;
+        summary?: string;
+        start: { dateTime?: string; date?: string };
+        end: { dateTime?: string; date?: string };
+      }>;
+    };
+    return (body.items ?? []).map((item) => ({
+      uid: item.id,
+      summary: item.summary ?? "",
+      start: (item.start.dateTime ?? item.start.date) as string,
+      end: (item.end.dateTime ?? item.end.date) as string,
+      allDay: item.start.date !== undefined,
+    }));
   },
   async fetchText(url: string): Promise<string> {
     const response = await fetch(url, { headers: { "User-Agent": CAL_USER_AGENT } });
