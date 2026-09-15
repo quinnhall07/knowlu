@@ -18,12 +18,19 @@ export const ICS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Knowlu/
 /**
  * The uids whose date is already past, for a **first** ingest only (R-OB-3).
  *
- * A deliberate 15-line scan and **not** a second ICS parser: it reads `UID` and the first of
- * `DTSTART` / `DTEND` per `VEVENT` and compares dates, and it does not unfold, unescape, expand a
- * recurrence or resolve a `TZID`. It cannot: the vault's timezone is on the device and so is
- * `parse_ics`, which is where the real reading happens and where the golden `today.md` oracle
- * covers it. **The device's own check is the guarantee**; this list is corroboration, and it is
- * what the wizard counts to say "14 upcoming items, 4 already past" on the finish panel.
+ * A deliberate scan and **not** a second ICS parser: for each `VEVENT` it reads `UID` and the
+ * FIRST of `DUE`, `DTEND`, `DTSTART` present — the same property, in the same order, that the
+ * device's `event_from` (`engine/src/ingest.rs`) walks to pick a due date — and compares dates. It
+ * does not unfold, unescape, expand a recurrence or resolve a `TZID`.
+ *
+ * **What this cannot promise, and why that is accepted (ruling R-C2-E21).** This scan compares the
+ * stamp's own digits — UTC for a `Z` stamp, wall-clock otherwise — against `now()`'s UTC date; the
+ * device converts the same stamp into the *vault's own timezone* and compares vault-local dates.
+ * The two can disagree on a stamp within a few hours of UTC midnight, because a moment that is
+ * already tomorrow in UTC can still be today in Chicago. **The device's own comparison is the
+ * guarantee** — it is what actually writes `archive/` — and this list is corroboration only: what
+ * the wizard counts to say "14 upcoming items, 4 already past" on the finish panel. When the two
+ * disagree, the device wins.
  */
 export function pastDueUids(ics: string, now: Date): string[] {
   const out: string[] = [];
@@ -31,9 +38,12 @@ export function pastDueUids(ics: string, now: Date): string[] {
     const body = block.split(/END:VEVENT/i)[0];
     const uid = /^UID:(.*)$/im.exec(body)?.[1]?.trim();
     if (uid === undefined || uid === "") continue;
-    // `DTSTART` is what `ingest::parse_ics` reads as the due date; `DTEND` is the fallback for a
-    // feed that carries only an end. Both forms: `20250902T045900Z` and a bare `20250902`.
-    const stamp = (/^DTSTART[^:]*:(\d{8})/im.exec(body) ?? /^DTEND[^:]*:(\d{8})/im.exec(body))?.[1];
+    // The device's own precedence (`ingest.rs`'s `event_from`: `["DUE", "DTEND", "DTSTART"]`,
+    // first present wins) — never DTSTART-first, which is not what creates the vault's task. Both
+    // forms match: `20250902T045900Z` and a bare `20250902`. Scoped to THIS event's `body`, not the
+    // whole feed, so the property picked always belongs to the uid just read above.
+    const stamp = (/^DUE[^:]*:(\d{8})/im.exec(body) ?? /^DTEND[^:]*:(\d{8})/im.exec(body) ??
+      /^DTSTART[^:]*:(\d{8})/im.exec(body))?.[1];
     if (stamp === undefined) continue;
     const day = new Date(Date.UTC(+stamp.slice(0, 4), +stamp.slice(4, 6) - 1, +stamp.slice(6, 8)));
     // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work, and

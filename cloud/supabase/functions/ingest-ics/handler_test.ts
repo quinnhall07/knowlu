@@ -83,3 +83,25 @@ Deno.test("an event with no date at all is never called past due", async () => {
   })(new Request("http://127.0.0.1/ingest-ics?first_run=1"))).json();
   assertEquals(reply.past_due_uids, []);
 });
+
+/// R-C2-E21: the server must read the same property, in the same order, the device does —
+/// `["DUE", "DTEND", "DTSTART"]`, first present wins (`engine/src/ingest.rs`'s `event_from`) —
+/// never DTSTART-first, which is not what creates the vault's task.
+Deno.test("past_due_uids reads DUE, then DTEND, then DTSTART — the device's order, not DTSTART-first", async () => {
+  // Under fixed NOW (2026-09-09T12:00:00Z), "today" is 2026-09-09 UTC and "yesterday" is 2026-09-08.
+  const feed = "BEGIN:VCALENDAR\r\n" +
+    // DTSTART is today (not past); DTEND is yesterday. No DUE, so DTEND is what must be read —
+    // a DTSTART-first reading would wrongly leave this uid out of the list.
+    "BEGIN:VEVENT\r\nUID:bb-dtend-past\r\nSUMMARY:DTEND past\r\n" +
+    "DTSTART:20260909T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\n" +
+    // DUE is yesterday; DTSTART is today. DUE must win over DTSTART.
+    "BEGIN:VEVENT\r\nUID:bb-due-past\r\nSUMMARY:DUE past\r\n" +
+    "DUE:20260908T100000Z\r\nDTSTART:20260909T090000Z\r\nEND:VEVENT\r\n" +
+    "END:VCALENDAR\r\n";
+  const reply = await (await icsHandler(OK, {
+    urlFor: () => Promise.resolve("https://lms.example.invalid/f.ics"),
+    fetchText: () => Promise.resolve(feed),
+    now: NOW,
+  })(new Request("http://127.0.0.1/ingest-ics?first_run=1"))).json();
+  assertEquals(reply.past_due_uids, ["bb-dtend-past", "bb-due-past"]);
+});
