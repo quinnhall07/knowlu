@@ -1034,17 +1034,62 @@ fn get_json(url: &str, token: &str) -> Result<Value, String> {
 /// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
 /// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
 /// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
+/// The whole allow-list, as a pure predicate (ruling R-C2-E32): `https://accounts.google.com/` and
+/// nothing else, no CR/LF, under 2048 chars. Split out of `open_external` so it is a plain function
+/// a unit test can drive with no spawn and no browser — `starts_with` alone is the guard, and it
+/// works precisely because it demands the literal `/` right after the host: a lookalike host like
+/// `accounts.google.com.evil.example` fails at that character, never reaching the real prefix.
+fn external_url_allowed(url: &str) -> bool {
+    url.starts_with("https://accounts.google.com/") && !url.contains('\n') && !url.contains('\r') && url.len() < 2048
+}
+
 #[tauri::command(async)]
 pub fn open_external(url: String) -> Value {
-    let allowed = url.starts_with("https://accounts.google.com/")
-        && !url.contains('\n')
-        && !url.contains('\r')
-        && url.len() < 2048;
-    if !allowed {
+    if !external_url_allowed(&url) {
         return json!({ "ok": false, "error": "only the Google consent page may be opened" });
     }
     match open_in_browser(&url) {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[cfg(test)]
+mod external_url_allowed_tests {
+    use super::external_url_allowed;
+
+    #[test]
+    fn only_the_real_https_google_consent_prefix_is_allowed() {
+        assert!(external_url_allowed("https://accounts.google.com/o/oauth2/v2/auth?x=1"));
+    }
+
+    #[test]
+    fn plain_http_is_refused() {
+        assert!(!external_url_allowed("http://accounts.google.com/x"));
+    }
+
+    #[test]
+    fn a_lookalike_host_is_refused() {
+        // `starts_with` alone is the guard: the literal prefix demands a `/` right where a
+        // lookalike host puts a `.`, so `accounts.google.com.evil.example` never matches.
+        assert!(!external_url_allowed("https://accounts.google.com.evil.example/"));
+    }
+
+    #[test]
+    fn the_real_host_smuggled_after_an_evil_one_is_refused() {
+        assert!(!external_url_allowed("https://evil.example/https://accounts.google.com/"));
+    }
+
+    #[test]
+    fn an_embedded_crlf_is_refused() {
+        assert!(!external_url_allowed("https://accounts.google.com/\r\nSet-Cookie: x"));
+    }
+
+    #[test]
+    fn an_oversized_url_is_refused() {
+        let padding = "a".repeat(2048);
+        let url = format!("https://accounts.google.com/{padding}");
+        assert!(url.len() >= 2048);
+        assert!(!external_url_allowed(&url));
     }
 }
