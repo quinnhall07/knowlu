@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { CALENDAR_SCOPE, connectHandler, GMAIL_SCOPE } from "./handler.ts";
+import { CALENDAR_SCOPE, connectHandler, GMAIL_SCOPE, IDENTITY_SCOPES } from "./handler.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -22,8 +22,11 @@ Deno.test("the DEFAULT ask is calendar.readonly alone, offline, with consent", a
   const reply = await (await handler(new Request("http://127.0.0.1/google-connect"))).json();
   const url = new URL(reply.url);
   assertEquals(url.origin + url.pathname, "https://accounts.google.com/o/oauth2/v2/auth");
-  assertEquals(url.searchParams.get("scope"), CALENDAR_SCOPE);
+  assertEquals(url.searchParams.get("scope"), `${IDENTITY_SCOPES.join(" ")} ${CALENDAR_SCOPE}`);
   assertEquals(CALENDAR_SCOPE, "https://www.googleapis.com/auth/calendar.readonly");
+  // C2 final review C-2: `openid email` ride along so Google returns an `id_token` at all. Both
+  // are NON-SENSITIVE and touch neither the sensitive nor the restricted review path.
+  assertEquals(IDENTITY_SCOPES, ["openid", "email"]);
   assert(!url.searchParams.get("scope")!.includes("gmail"), "Gmail is a separate, later, optional ask");
   assert(!url.searchParams.get("scope")!.includes("calendar.events"), "read-only; write is a third ask");
   assertEquals(url.searchParams.get("access_type"), "offline");
@@ -33,11 +36,11 @@ Deno.test("the DEFAULT ask is calendar.readonly alone, offline, with consent", a
   assertEquals(url.searchParams.get("response_type"), "code");
 });
 
-Deno.test("the gmail ask is incremental — one scope, and it widens the existing grant", async () => {
+Deno.test("the gmail ask is incremental — one API scope, and it widens the existing grant", async () => {
   const handler = connectHandler(OK, deps());
   const reply = await (await handler(new Request("http://127.0.0.1/google-connect?scope=gmail"))).json();
   const url = new URL(reply.url);
-  assertEquals(url.searchParams.get("scope"), GMAIL_SCOPE);
+  assertEquals(url.searchParams.get("scope"), `${IDENTITY_SCOPES.join(" ")} ${GMAIL_SCOPE}`);
   assertEquals(GMAIL_SCOPE, "https://www.googleapis.com/auth/gmail.readonly");
   // `include_granted_scopes=true` is what makes this ADD to the grant rather than replace it: a
   // student who connected the calendar in the wizard must not lose it by connecting Gmail later.
@@ -142,10 +145,14 @@ Deno.test("calendar_is_asked_for_before_gmail_and_never_together", async () => {
   const handler = connectHandler(OK, deps());
   const first = new URL((await (await handler(new Request("http://127.0.0.1/google-connect"))).json()).url);
   const second = new URL((await (await handler(new Request("http://127.0.0.1/google-connect?scope=gmail"))).json()).url);
-  assertEquals(first.searchParams.get("scope"), CALENDAR_SCOPE);
-  assertEquals(second.searchParams.get("scope"), GMAIL_SCOPE);
+  assertEquals(first.searchParams.get("scope"), `${IDENTITY_SCOPES.join(" ")} ${CALENDAR_SCOPE}`);
+  assertEquals(second.searchParams.get("scope"), `${IDENTITY_SCOPES.join(" ")} ${GMAIL_SCOPE}`);
   for (const url of [first, second]) {
-    assertEquals(url.searchParams.get("scope")!.split(" ").length, 1, "one scope per consent");
+    // C2 final review C-2: exactly ONE Google API scope per consent — the identity scopes
+    // (`openid email`, non-sensitive) do not count, because the thing §11a's ordering exists to
+    // avoid is dragging the calendar's *sensitive* review behind Gmail's *restricted* one.
+    const api = url.searchParams.get("scope")!.split(" ").filter((s) => s.includes("googleapis.com/auth/"));
+    assertEquals(api.length, 1, "exactly one Google API scope per consent");
   }
   assertEquals(first.searchParams.get("include_granted_scopes"), "false");
   assertEquals(second.searchParams.get("include_granted_scopes"), "true");

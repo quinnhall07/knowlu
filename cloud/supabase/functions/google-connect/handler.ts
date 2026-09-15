@@ -22,12 +22,27 @@ import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 
 export const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 
-/** `?scope=` -> the one scope this consent asks for, and whether it widens an existing grant. */
+/**
+ * The identity scopes every consent asks for ALONGSIDE its one API scope (C2 final review C-2).
+ *
+ * Google returns an `id_token` — the only cheap way to learn WHICH Google account just consented —
+ * **only** when `openid` was asked for. C2 asked for one API scope and nothing else, so no
+ * `id_token` ever came back and `google-callback` dereferenced a field that was never there.
+ * `email` rides along because `google_accounts.email` is what the settings row shows the student
+ * ("connected as …"), and because it costs no extra review: `openid` and `email` are both
+ * NON-SENSITIVE scopes — they do not touch §11a's sensitive/restricted staging at all.
+ */
+export const IDENTITY_SCOPES = ["openid", "email"];
+
+/** `?scope=` -> the scope string this consent asks for — the identity scopes plus exactly ONE
+ * Google API scope — and whether it widens an existing grant. */
 export function scopeFor(name: string | null): { scope: string; incremental: boolean } | null {
-  if (name === null || name === "" || name === "calendar") {
-    return { scope: CALENDAR_SCOPE, incremental: false };
-  }
-  if (name === "gmail") return { scope: GMAIL_SCOPE, incremental: true };
+  const ask = (apiScope: string, incremental: boolean) => ({
+    scope: [...IDENTITY_SCOPES, apiScope].join(" "),
+    incremental,
+  });
+  if (name === null || name === "" || name === "calendar") return ask(CALENDAR_SCOPE, false);
+  if (name === "gmail") return ask(GMAIL_SCOPE, true);
   return null;
 }
 
