@@ -1,0 +1,30 @@
+-- Knowlu C2 — the whole-branch review's schema and privilege fixes (ruling R-C2-E52).
+--
+-- Forward-only, like every migration here: 20260911000100…000800 are applied and are never edited
+-- (the corrections they carry are comments beside the lines they correct, nothing more). Every
+-- schema, privilege and cron change the final review asked for lands here, each under the finding
+-- that asked for it.
+--
+--   C-1  `monthly_spend` was readable with the anon key.
+--   S-1  `gmail_queue` was never swept.
+--   F-2  `gmail_seen` grew without bound.
+
+-- ---------------------------------------------------------------------------------------------
+-- C-1 — the spend view is service-role only.
+--
+-- `20260911000100_judgment_service.sql:188` created `monthly_spend` with no `security_invoker` and
+-- no revoke. A view with neither is a SECURITY DEFINER view — it reads `usage_daily` and `models`
+-- as its OWNER, so RLS on `usage_daily` never applies to it — and Supabase grants `select` on a
+-- new view to `anon` and `authenticated` exactly as it grants `execute` on a new function. The
+-- result was a live read: `GET /rest/v1/monthly_spend` answered 200 to the project's anon key,
+-- returning every account's id and its month's inference spend, while C1's `telemetry_daily` —
+-- the same shape, but revoked in 20260910000400 — answered 401.
+--
+-- Revoked rather than switched to `security_invoker = true`: `enforce_budget` reads this view on
+-- every model call, and under an invoker view that read would run as the caller and be filtered to
+-- nothing by `usage_daily`'s own (policy-less) RLS. The view stays a definer view and simply stops
+-- being reachable from a browser; `_shared/judge_caps.ts` reaches it through the service role,
+-- which these revokes do not touch.
+--
+-- `migrations_test.ts`'s view guard is what keeps the next view from repeating this.
+revoke all on public.monthly_spend from anon, authenticated;

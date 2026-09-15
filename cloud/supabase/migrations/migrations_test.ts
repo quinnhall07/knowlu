@@ -178,6 +178,89 @@ export function assertExecuteRevoked(
   return { exemptedTriggers, exemptedByMarker, parsed };
 }
 
+/**
+ * A view definition, anywhere: `create [or replace] view`, the identifier (§`IDENT`), and — non
+ * greedily — everything up to and through the `as` that opens its body. Group 1 is the HEADER
+ * ALONE (never the body), because the `security_invoker` test below must read the view's own
+ * declared storage option and never a phrase the SELECT merely contains. Group 2 is the name.
+ */
+const VIEW_DEFINITION = new RegExp(
+  `(create\\s+(?:or\\s+replace\\s+)?view\\s+${identPattern("(\\w+)")}[\\s\\S]*?\\bas\\b)`,
+  "gi",
+);
+
+/** How many times the bare `create [or replace] view` phrase appears — the same fail-loud pairing
+ * `RAW_FUNCTION_KEYWORD` gives the function scan (R-C2-E37e): a view shape the definition regex
+ * cannot parse must never silently vanish from the scan. */
+const RAW_VIEW_KEYWORD = /create\s+(?:or\s+replace\s+)?view/gi;
+
+/**
+ * `files`, sorted, from earliest to latest: every view any migration creates must EITHER declare
+ * `with (security_invoker = true)` — so PostgREST reads it with the CALLER's privileges and RLS on
+ * the underlying tables applies — OR be named by a `revoke … on … <view> from … anon,
+ * authenticated` line in that or a later migration (C2 final review C-1).
+ *
+ * A `security definer` view (the Postgres DEFAULT, and what `with (security_invoker = false)`
+ * spells out) runs its SELECT as the view's OWNER, which bypasses RLS on every table it reads —
+ * and Supabase grants `select` to `anon` and `authenticated` on a new view the same way it grants
+ * `execute` on a new function. `monthly_spend` (20260911000100) was exactly that gap: no
+ * `security_invoker`, no revoke, and `GET /rest/v1/monthly_spend` answered 200 to the anon key
+ * while C1's `telemetry_daily` — same shape, but revoked — answered 401. Every view name found is
+ * returned, split by which of the two ways it is guarded, so a caller can assert on the real
+ * corpus rather than trust an empty scan; `parsed` is the total this run actually parsed.
+ */
+export function assertViewsGuarded(
+  files: Array<[string, string]>,
+): { invoker: string[]; revoked: string[]; parsed: number } {
+  const stripped = files.map(([name, sql]) => [name, stripLineComments(sql)] as [string, string]);
+  const invoker: string[] = [];
+  const revoked: string[] = [];
+  let parsed = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const [name, sql] = stripped[i];
+    const rawCount = (sql.match(RAW_VIEW_KEYWORD) ?? []).length;
+    const definitions = [...sql.matchAll(VIEW_DEFINITION)];
+    assert(
+      rawCount === definitions.length,
+      `${name}: found ${rawCount} 'create view' occurrence(s) but the definition regex parsed ` +
+        `${definitions.length} — a shape it cannot parse. Every view this file creates must be a ` +
+        `shape the scan can see, or it is a privilege gap the scan cannot see either.`,
+    );
+    for (const d of definitions) {
+      parsed += 1;
+      const header = d[1];
+      const view = d[2];
+      if (/security_invoker\s*=\s*true/i.test(header)) {
+        invoker.push(view);
+        continue;
+      }
+      const rest = stripped.slice(i).map(([, s]) => s).join("\n");
+      const revokeRe = new RegExp(
+        `revoke\\s+(?:all\\s+privileges|all|select)(?:\\s*\\([^)]*\\))?\\s+on\\s+(?:table\\s+)?` +
+          `${identPattern(view)}\\s+from\\s+([^;]+);`,
+        "gi",
+      );
+      const matches = [...rest.matchAll(revokeRe)];
+      assert(
+        matches.length > 0,
+        `${name}: the view ${view} declares no 'with (security_invoker = true)' and has no ` +
+          `'revoke … on … from …' in this or a later migration, so it is readable with the anon ` +
+          `key (C2 final review C-1)`,
+      );
+      const ok = matches.some((m) => {
+        const from = m[1].toLowerCase();
+        return from.includes("anon") && from.includes("authenticated");
+      });
+      assert(
+        ok,
+        `${name}: ${view} has no revoke naming both anon and authenticated — 'from public' alone leaves both readable`,
+      );
+      revoked.push(view);
+    }
+  }
+  return { invoker, revoked, parsed };
+}
+
 Deno.test("every table this stream creates has row level security enabled", async () => {
   for (const [name, sql] of await ours()) {
     for (const m of sql.matchAll(/create table if not exists (\w+)/g)) {
@@ -208,6 +291,55 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`), plus
   // fix 1's re-issue of the same three in 20260911000500 — counted by hand against today's corpus.
   assertEquals(parsed, 17, "today's corpus should parse exactly 17 function creations");
+});
+
+Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
+  // C2 final review C-1. Same shape as the function guard above and for the same reason: the
+  // definer/invoker split decides WHOSE privileges the read runs with, never whether `anon` can
+  // reach the object over PostgREST at all — so a `security definer` view (the Postgres default)
+  // needs the revoke that a `security_invoker = true` view does not.
+  const { invoker, revoked, parsed } = assertViewsGuarded(await everyMigrationFile());
+  // Pinned so a view that silently stops being parsed shows up as a number that moved without a
+  // reason on the diff: C1's `billing_subscribers` (invoker), `telemetry_daily` and
+  // `correction_rates` (revoked, 20260910000400), and C2's `monthly_spend` (revoked,
+  // 20260911000900) — counted by hand against today's corpus.
+  assertEquals(parsed, 4, "today's corpus should parse exactly 4 view creations");
+  // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
+  // than papering over a scan that never reached one.
+  assertEquals(invoker, ["billing_subscribers"]);
+  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend"]);
+});
+
+Deno.test("a view with neither security_invoker nor a revoke is caught by the view guard", () => {
+  // The exact shape `monthly_spend` had before 20260911000900: no storage option, no revoke, and
+  // therefore a 200 to the anon key.
+  const sql = `
+create or replace view leaky_spend as
+select account_id, sum(usd) as usd from usage_daily group by 1;
+`;
+  assertThrows(
+    () => assertViewsGuarded([["synthetic-view.sql", sql]]),
+    Error,
+    "leaky_spend",
+  );
+
+  // `from public` alone is not enough: Supabase's own grants to anon/authenticated survive it.
+  const publicOnly = `
+create view public.half_revoked with (security_invoker = false) as select 1 as one;
+revoke all on public.half_revoked from public;
+`;
+  assertThrows(
+    () => assertViewsGuarded([["synthetic-view-public.sql", publicOnly]]),
+    Error,
+    "anon and authenticated",
+  );
+
+  // And a revoke in a LATER migration satisfies it, exactly as the function guard allows.
+  const later = assertViewsGuarded([
+    ["synthetic-view-a.sql", `create view public.fixed_later with (security_invoker = false) as select 1 as one;`],
+    ["synthetic-view-b.sql", `revoke all on public.fixed_later from anon, authenticated;`],
+  ]);
+  assertEquals(later.revoked, ["fixed_later"]);
 });
 
 Deno.test("a writing, non-definer function with no revoke and no marker is caught by the widened guard", () => {
