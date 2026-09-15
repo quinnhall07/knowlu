@@ -148,6 +148,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
     let plan = WizardPlan {
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
         campus_choice: Default::default(),
@@ -169,6 +170,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         profile_id: knowlu::profiles::id_for(dest),
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".into(),
         slots: vec!["12:00".into()],
         device: "MACHINE".into(),
@@ -342,6 +344,7 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
     WizardPlan {
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".to_string(),
         slots: vec!["12:00".to_string(), "18:00".to_string()],
         campus_choice: Default::default(),

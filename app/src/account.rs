@@ -631,6 +631,10 @@ pub fn attach_config_and_session(
         profile_id: profile_id.to_string(),
         ics_url: None,
         personal_calendar: None,
+        // An adopted vault's own `calendars:` list is not rewritten here — see the comment above —
+        // so this flag plays no part in this call; it is `false` only because `write_cloud_yaml_if_absent`
+        // never reads it either.
+        google_calendar: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
         zybooks_ignore: Vec::new(),
@@ -926,4 +930,121 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
         h.exit(0);
     });
     json!({ "ok": true, "error": Value::Null })
+}
+
+/// The Google consent URL for the account this wizard signed in as (§11a).
+///
+/// **Vault-less on purpose.** `#wiz-google` is on the wizard window, which has no `ConsoleState`
+/// (C1: "no command that needs one can be called" there), so the session comes from
+/// `PENDING_TARGET` — the same pre-vault target `sign_in` writes and `create_vault_in` later moves
+/// onto the profile — and the base URLs come from `api_base()` / `anon_key()`, never from a
+/// `config/cloud.yaml` that does not exist yet.
+///
+/// `scope` is `"calendar"` (the default, and the wizard's) or `"gmail"` (the later, incremental
+/// ask). The service decides which Google scope each means and whether the consent widens an
+/// existing grant; this command carries the session bearer and nothing else, and **never sees a
+/// Google token** — the exchange happens server-side in `google-callback` (D12).
+#[tauri::command(async)]
+pub fn google_connect_url(scope: String) -> Value {
+    let scope = if scope == "gmail" { "gmail" } else { "calendar" };
+    let api = api_base();
+    let auth = match auth_base(&api) {
+        Ok(auth) => auth,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let token = match valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, jiff::Timestamp::now().as_second()) {
+        Ok(token) => token,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    match get_json(&format!("{api}/google-connect?scope={scope}"), &token) {
+        Ok(v) => match v.get("url").and_then(Value::as_str) {
+            Some(url) => json!({ "ok": true, "url": url }),
+            None => json!({ "ok": false, "error": "the service returned no url" }),
+        },
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// Has the consent landed yet, and what did Google actually grant?
+///
+/// The calendar panel polls this after opening the consent page — the browser window closes itself
+/// and there is nothing else to tell the wizard the round trip finished. `GET /google-connect?status=1`
+/// answers `{connected, scopes}` from `google_accounts`, and the panel keys on the calendar scope
+/// specifically, because a student can untick one on the consent screen.
+#[tauri::command(async)]
+pub fn google_connected() -> Value {
+    let api = api_base();
+    let auth = match auth_base(&api) {
+        Ok(auth) => auth,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let token = match valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, jiff::Timestamp::now().as_second()) {
+        Ok(token) => token,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    match get_json(&format!("{api}/google-connect?status=1"), &token) {
+        Ok(v) => {
+            let scopes: Vec<String> = v
+                .get("scopes")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            json!({
+                "ok": true,
+                "connected": v.get("connected").and_then(Value::as_bool).unwrap_or(false),
+                "calendar": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/calendar.readonly"),
+                "gmail": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/gmail.readonly"),
+            })
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// One bearer GET against the functions base. `check_api_base` is applied first, so an
+/// `KNOWLU_API_BASE` pointing anywhere but https (or loopback, for the tests) is refused here
+/// rather than turned into a request to a host nobody chose.
+fn get_json(url: &str, token: &str) -> Result<Value, String> {
+    check_api_base(url)?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent
+        .get(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("apikey", anon_key())
+        .call()
+        .map_err(|e| format!("no network ({e})"))?;
+    let code = response.status().as_u16();
+    let body = response.body_mut().read_to_string().unwrap_or_default();
+    if !(200..300).contains(&code) {
+        // The status, not the body: this string reaches the wizard's error line.
+        return Err(format!("the service refused (HTTP {code})"));
+    }
+    serde_json::from_str(&body).map_err(|_| "the service returned no JSON".to_string())
+}
+
+/// Open a URL in the system browser — the same `open_in_browser` mechanism `open_policy` and
+/// `open_checkout` already use, exposed once so the wizard's Google step needs no third private
+/// path. It joins the **wizard** window's list beside the two commands above.
+///
+/// **`https://accounts.google.com/` and nothing else.** This command takes a URL from the page, and
+/// the page takes it from the service; one that opened anything would be one indirection away from
+/// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
+/// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
+/// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
+#[tauri::command(async)]
+pub fn open_external(url: String) -> Value {
+    let allowed = url.starts_with("https://accounts.google.com/")
+        && !url.contains('\n')
+        && !url.contains('\r')
+        && url.len() < 2048;
+    if !allowed {
+        return json!({ "ok": false, "error": "only the Google consent page may be opened" });
+    }
+    match open_in_browser(&url) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
 }

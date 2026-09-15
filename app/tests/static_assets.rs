@@ -422,9 +422,9 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
     assert!(panel.contains("Secret address in iCal format"), "the panel says where the address is");
     assert!(panel.contains("Reset"), "…and advises resetting it first");
-    // C2's Google sign-in has a labelled place and does nothing yet — a button that lied would be
-    // worse than a button that says when it arrives.
-    assert!(panel.contains("id=\"wiz-google\"") && panel.contains("disabled"), "the Google placeholder is present and inert");
+    // C2's Google sign-in is live: the calendar scope only, ordered ahead of Gmail (§11a).
+    assert!(panel.contains("id=\"wiz-google\""), "the Google sign-in is on the calendars panel");
+    assert!(!panel.contains("id=\"wiz-google\" disabled"), "…and is live from C2 on");
     // R-OB-2: the enrolled classes are confirmed on this panel — captured from the sign-in window if
     // the campus lets us, typed if it does not. Without them a first ingest is 28 tasks with no
     // course, which is the run this section of the plan exists because of.

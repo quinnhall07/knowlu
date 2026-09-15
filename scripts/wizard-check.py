@@ -170,8 +170,8 @@ def check(page) -> list:
         bad.append("the personal calendar was not validated under kind calendar_ics")
     if "already on your calendar" not in page.inner_text("#wiz-cal-note"):
         bad.append("the personal calendar was not summarised")
-    if not page.query_selector("#wiz-google[disabled]"):
-        bad.append("the Google placeholder must be present and inert in C1")
+    if not page.query_selector("#wiz-google:not([disabled])"):
+        bad.append("the Google sign-in must be live from C2 on")
     # R-OB-2: the captured class list is on this panel, with a typed fallback beside it.
     if page.is_hidden("#wiz-courses"): bad.append("the class list did not appear after the sign-in")
     if "CS 100" not in page.inner_text("#wiz-course-rows"): bad.append("the captured course is not listed")

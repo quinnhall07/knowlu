@@ -1615,6 +1615,7 @@
     zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
     WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
     var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
+                 google_calendar: WIZ_GOOGLE,
                  timezone: WIZ.tz, slots: WIZ.slots,
                  zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
                  campus_choice: WIZ.campus,
@@ -1855,6 +1856,39 @@
       if (r.ok && r.note) { WIZ.calNote += " " + r.note; }
       renderWizard();
     }).catch(function () {});
+  });
+
+  // The wizard's one place to show an out-of-band failure on the current panel — the same
+  // `WIZ.error` / `renderWizard()` pair every other wizard error already uses.
+  function showWizardError(msg) { WIZ.error = msg; renderWizard(); }
+
+  // C2 (§11a): one Google connect for the calendars now, Gmail later and only if asked. The scope
+  // named here is "calendar" — the *sensitive* one, which carries a lighter review and no CASA.
+  // Nothing is written to the vault here: the wizard creates it at Finish, so this sets a flag on
+  // the plan and `scaffold::ingest_yaml` writes the `calendars:` entry when the vault is born.
+  var WIZ_GOOGLE = false;
+
+  document.getElementById("wiz-google").addEventListener("click", async () => {
+    var got = await invoke("google_connect_url", { scope: "calendar" });
+    if (!got.ok) { showWizardError(got.error); return; }
+    var opened = await invoke("open_external", { url: got.url });
+    if (!opened.ok) { showWizardError(opened.error); return; }
+    var note = document.getElementById("wiz-cal-note");
+    note.textContent = "Finish signing in to Google in your browser — this may take a moment.";
+    // The consent window closes itself, so there is nothing else to tell us the round trip finished.
+    // Twenty tries at three seconds is a minute, which is longer than a consent takes and shorter
+    // than a student will sit staring at it; giving up is a message, never a silent stall.
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      var status = await invoke("google_connected");
+      if (status.ok && status.calendar) {
+        WIZ_GOOGLE = true;
+        note.textContent = "Google Calendar connected — already on your calendar.";
+        document.getElementById("wiz-google").disabled = true;
+        return;
+      }
+    }
+    note.textContent = "Google did not finish connecting. You can try again, or use the secret address above.";
   });
 
   // ---- R-OB-4: the school typeahead.

@@ -17,6 +17,7 @@ fn plan_for(dest: &Path) -> VaultPlan {
         profile_id: knowlu::profiles::id_for(dest),
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".into(),
         slots: vec!["12:00".into(), "18:00".into()],
         device: "M".into(),
@@ -214,6 +215,7 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         profile_id: "profile_8888888888".into(),
         ics_url: Some(url.to_string()),
         personal_calendar: None,
+        google_calendar: false,
         timezone: nasty.to_string(),
         slots: vec!["12:00: x #c 'q'".into(), "18:00 {b} \"d\"".into()],
         device: "DESK: TOP #1 'q' \"d\" {z}".into(),
@@ -446,6 +448,7 @@ fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
         profile_id: "profile_0123456789".into(),
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".into(),
         slots: vec!["12:00".into(), "18:00".into()],
         device: "MACHINE".into(),
@@ -499,6 +502,33 @@ fn a_personal_calendar_becomes_the_engines_calendars_list() {
     let mut bad = base.clone();
     bad.personal_calendar = Some("https://a\nb".into());
     assert!(ingest_yaml(&bad).unwrap_err().contains("personal calendar address"));
+}
+
+/// H9 (a3), §11a: the Google grant is a flag, not a URL, and the marker it writes is `cloud:google`
+/// — the `cloud:` prefix hand-off H4's fetcher matches and routes to `/ingest-calendar?name=google`.
+/// Personal comes first when both are present, matching the fixed order `ingest_yaml` writes them in.
+#[test]
+fn a_google_grant_becomes_the_engines_calendars_list() {
+    use knowlu::scaffold::ingest_yaml;
+    let base = plan_for(&std::env::temp_dir().join("knowlu-google-calendar-vault"));
+    // Google alone, no personal address: one entry, the marker feed.
+    let mut google_only = base.clone();
+    google_only.google_calendar = true;
+    assert!(
+        ingest_yaml(&google_only).unwrap().contains("calendars:\n  - name: google\n    ics_url: 'cloud:google'\n"),
+        "{}", ingest_yaml(&google_only).unwrap()
+    );
+    // Both: personal first, google second — the fixed order the writer promises.
+    let mut both = base.clone();
+    both.personal_calendar = Some("https://calendar.google.com/calendar/ical/x/private-def/basic.ics".into());
+    both.google_calendar = true;
+    let text = ingest_yaml(&both).unwrap();
+    assert!(
+        text.contains(
+            "calendars:\n  - name: personal\n    ics_url: 'https://calendar.google.com/calendar/ical/x/private-def/basic.ics'\n  - name: google\n    ics_url: 'cloud:google'\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
@@ -566,6 +596,7 @@ fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
         profile_id: "profile_0123456789".into(),
         ics_url: None,
         personal_calendar: None,
+        google_calendar: false,
         timezone: "America/Chicago".into(),
         slots: vec!["12:00".into()],
         device: "M".into(),
