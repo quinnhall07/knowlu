@@ -96,3 +96,7 @@ verify_jwt = false
 # function on this page, and hand-off H7 says so.
 [functions.google-callback]
 verify_jwt = false
+[functions.judge-email]
+verify_jwt = false
+[functions.gmail-read]
+verify_jwt = false

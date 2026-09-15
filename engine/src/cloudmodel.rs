@@ -152,6 +152,7 @@ impl CloudError {
     pub fn label(&self) -> &'static str {
         match self {
             CloudError::Transport(_) => "no network",
+            CloudError::Status { code: 200, .. } => "gmail is not connected",
             CloudError::Status { code: 401, .. } => "no session",
             CloudError::Status { code: 402, .. } => "no entitlement",
             CloudError::Status { code: 403, .. } => "not allowed",
@@ -386,6 +387,97 @@ impl judge::EventModel for CloudModel<'_> {
             tier: reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8,
         })
     }
+}
+
+/// One judged message the service is holding for this device.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GmailItem {
+    pub uid: String,
+    pub tier: String,
+    pub title: String,
+    pub course: Option<String>,
+    pub due: Option<String>,
+    pub effort_hours: Option<f64>,
+    pub importance: Option<i64>,
+    pub why: String,
+    pub confidence: f64,
+}
+
+/// The body of `POST /judge-email`. Used by the eval harness's parity check and by §13's
+/// forwarding fallback; **not by the Gmail path**, which judges server-side because Gmail message
+/// text must never reach the device (D12).
+pub fn email_request(item: &judge::EmailItem) -> Value {
+    json!({
+        "kind": "email",
+        "item": {
+            "message_id": item.message_id,
+            "subject": judge::one_line(&item.subject, 200),
+            "from": judge::one_line(&item.from, 200),
+            "date": item.date,
+            "text": judge::clip(item.text.trim(), judge::MAX_BODY_CHARS),
+        },
+        "heuristics_seed": { "known_courses": item.known_courses }
+    })
+}
+
+impl judge::EmailModel for CloudModel<'_> {
+    fn judge_email(&self, item: &judge::EmailItem) -> Result<judge::EmailVerdict, ModelError> {
+        let reply = self.call("/judge-email", &email_request(item))?;
+        let verdict = reply.get("verdict").filter(|v| !v.is_null()).ok_or_else(|| {
+            let cause = reply.get("cause").and_then(Value::as_str).unwrap_or("no verdict");
+            ModelError::Failed(format!("the judgment service answered {cause}"))
+        })?;
+        let text = |key: &str| verdict.get(key).and_then(Value::as_str).map(str::to_string);
+        Ok(judge::EmailVerdict {
+            tier: text("tier").unwrap_or_else(|| "information".to_string()),
+            title: judge::one_line(&text("title").unwrap_or_default(), 200),
+            course: text("course"),
+            due: text("due"),
+            effort_hours: verdict.get("effort_hours").and_then(Value::as_f64).map(|e| e.clamp(0.25, 40.0)),
+            importance: verdict.get("importance").and_then(Value::as_i64).map(|i| i.clamp(1, 5)),
+            why: judge::one_line(&text("why").unwrap_or_default(), 140),
+            confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+        })
+    }
+}
+
+/// Pull what the service has queued, acknowledging what the last pull wrote.
+///
+/// **A pull, never a push** — the device asks inside its own slot, so a laptop that is off for a
+/// week simply asks later and gets everything. `ack` is the previous pull's uids: a row is only
+/// marked delivered once the device has actually written it, so a crash between the reply and the
+/// write costs a repeat, not a lost task. The `bool` is the service's `more`: it stopped at its own
+/// wall-clock budget and the device should ask again in this same slot.
+pub fn pull_gmail_queue(
+    client: &CloudClient,
+    ack: &[String],
+) -> Result<(Vec<GmailItem>, bool), CloudError> {
+    let reply = client.post("/gmail-read", &json!({ "ack": ack }))?;
+    if reply.get("quiet").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(CloudError::Status {
+            code: 200,
+            detail: "gmail is not connected; re-connect from settings".to_string(),
+        });
+    }
+    let more = reply.get("more").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = Vec::new();
+    for row in reply.get("items").and_then(Value::as_array).into_iter().flatten() {
+        let p = row.get("payload").unwrap_or(&Value::Null);
+        let text = |key: &str| p.get(key).and_then(Value::as_str).map(str::to_string);
+        let Some(uid) = row.get("uid").and_then(Value::as_str) else { continue };
+        out.push(GmailItem {
+            uid: uid.to_string(),
+            tier: row.get("tier").and_then(Value::as_str).unwrap_or("information").to_string(),
+            title: judge::one_line(&text("title").unwrap_or_default(), 200),
+            course: text("course"),
+            due: text("due"),
+            effort_hours: p.get("effort_hours").and_then(Value::as_f64).map(|e| e.clamp(0.25, 40.0)),
+            importance: p.get("importance").and_then(Value::as_i64).map(|i| i.clamp(1, 5)),
+            why: judge::one_line(&text("why").unwrap_or_default(), 140),
+            confidence: p.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+        });
+    }
+    Ok((out, more))
 }
 
 impl CloudModel<'_> {
