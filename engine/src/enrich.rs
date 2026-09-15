@@ -374,6 +374,24 @@ pub fn run_lines_with(
         }
         None => {
             let (code, mut lines) = enrich_with(vault, opts, Ok(&model));
+
+            // C2 Task 9 — the events pass. Runs even when the enrichment batch was empty: a vault
+            // can have nothing to enrich and forty events to judge. The feeds are fetched through
+            // the same server-side proxy `rank` uses, so the HTML sources return a page here too.
+            let (events_config, _) =
+                crate::events::load_events_config(&vault.join("config").join("events.yaml"));
+            let proxy = |url: &str| -> Result<String, String> {
+                crate::cloudmodel::fetch_event_source(client, url)
+                    .or_else(|_| crate::eventfeed::fetch_event_source(url))
+            };
+            lines.extend(crate::events::judge_roster(
+                vault,
+                &model,
+                Some(&proxy),
+                jiff::Zoned::now().date(),
+                events_config.judge_per_run_cap.max(0) as usize,
+            ));
+
             if let Some(reason) = model.fatal() {
                 lines.push(format!(
                     "judge: the service answered {reason}, so the rest of the batch was not sent"

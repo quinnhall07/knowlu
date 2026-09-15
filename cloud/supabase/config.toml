@@ -85,3 +85,7 @@ verify_jwt = false
 verify_jwt = false
 [functions.ingest-calendar]
 verify_jwt = false
+[functions.judge-event]
+verify_jwt = false
+[functions.events]
+verify_jwt = false

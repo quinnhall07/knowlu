@@ -356,6 +356,38 @@ impl judge::Model for CloudModel<'_> {
     }
 }
 
+/// The body of `POST /judge-event`. The event as the feed carries it, plus
+/// `profile/interests.md` as its grounding — the same shape a task's grade weights have. No vault
+/// path, no account id, no config file.
+pub fn event_request(item: &judge::EventItem) -> Value {
+    json!({
+        "kind": "event",
+        "item": {
+            "uid": item.uid, "title": item.title, "start": item.start, "end": item.end,
+            "source": item.source, "organizer": item.organizer, "location": item.location,
+            "url": item.url, "description": item.description,
+            "categories": item.categories, "audiences": item.audiences, "series_uid": item.series_uid,
+        },
+        "heuristics_seed": { "interests": item.interests }
+    })
+}
+
+impl judge::EventModel for CloudModel<'_> {
+    fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
+        let reply = self.call("/judge-event", &event_request(item))?;
+        let verdict = reply.get("verdict").filter(|v| !v.is_null()).ok_or_else(|| {
+            let cause = reply.get("cause").and_then(Value::as_str).unwrap_or("no verdict");
+            ModelError::Failed(format!("the judgment service answered {cause}"))
+        })?;
+        Ok(judge::EventVerdict {
+            verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
+            why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
+            confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+            tier: reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8,
+        })
+    }
+}
+
 impl CloudModel<'_> {
     /// Ask once, before the batch, whether this account can be judged at all.
     ///
@@ -419,6 +451,23 @@ pub fn fetch_calendar(client: &CloudClient, name: &str) -> Result<String, String
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "the reply carried no ics field".to_string())
+}
+
+/// Fetch one event feed through the service (cloud design §3.1). **Transport, and nothing else**:
+/// this is what `rank`'s existing `Fetchers.events` seam is handed, and it is why the HTML sources
+/// finally return a page — a server can present a real browser's headers and follow a redirect
+/// chain the desktop's agent could not. `rank` still never calls a model (decision 11), and
+/// `rank_cannot_reach_a_judgment_endpoint` proves it structurally.
+///
+/// `Err(String)` rather than `CloudError`, because the caller is `Fetchers.events`, whose contract
+/// predates this module and whose failure already degrades to "keep the last known roster".
+pub fn fetch_event_source(client: &CloudClient, url: &str) -> Result<String, String> {
+    let reply = client.post("/events", &json!({ "url": url })).map_err(|e| e.to_string())?;
+    reply
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "the reply carried no body field".to_string())
 }
 
 /// The three characters a feed name could carry that a query string would misread. Not a general

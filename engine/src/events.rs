@@ -347,6 +347,112 @@ pub fn load_interests(path: &Path) -> (Interests, Vec<String>) {
     )
 }
 
+/// The agent actor for event verdicts. `agent:` prefix, because `provenance::is_agent` is a plain
+/// `starts_with("agent:")` test and nothing else.
+pub const ACTOR: &str = "agent:knowlu.events";
+
+/// Judge every event the feeds carry that has no verdict yet, and record what comes back.
+///
+/// **One verdict per uid, forever** (events spec §7). The ledger is append-only and a uid that
+/// already has a verdict is never re-asked, because a drop the student has lived with for a week
+/// must not silently become an opportunity.
+///
+/// **Judged from the FEEDS, not from `state/events.md`.** `eventroster::read_roster` reconstructs
+/// six fields and hard-codes `source: "roster"`; the description, the categories, the audiences and
+/// the series uid — most of what the prompt is written around, and two of the four promotion
+/// features — are not in it. So this calls `eventfeed::load_discovered_events`, the same function
+/// `rank`'s events pass calls, through the same `Fetchers.events` seam and therefore through the
+/// same server-side proxy (hand-off H4). One extra fetch per slot buys a judgment that can see the
+/// event.
+///
+/// **Writes only the ledger.** Nothing here writes `state/events.md` — `rank` regenerates it a few
+/// seconds later, and by then the verdicts are in the ledger it reads.
+///
+/// Never panics and never fails a run: every failure is a line.
+pub fn judge_roster(
+    vault: &Path,
+    model: &dyn crate::judge::EventModel,
+    fetch: Option<&dyn Fn(&str) -> Result<String, String>>,
+    today: Date,
+    cap: usize,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let (config, _) = load_events_config(&vault.join("config").join("events.yaml"));
+    if !config.sources.iter().any(|s| s.enabled) {
+        return lines;
+    }
+    let (discovered, warnings) = crate::eventfeed::load_discovered_events(vault, fetch);
+    for warning in warnings {
+        lines.push(format!("events: {warning}"));
+    }
+    if discovered.is_empty() {
+        return lines;
+    }
+
+    let ledger = crate::eventledger::load_ledger(vault, None);
+    let interests = crate::pystr::read_text(&vault.join("profile").join("interests.md"))
+        .map(|t| crate::judge::clip(t.trim(), crate::judge::MAX_PREFS_CHARS))
+        .unwrap_or_default();
+
+    let pending: Vec<&DiscoveredEvent> = discovered
+        .iter()
+        .filter(|e| ledger.get(&e.uid).and_then(|entry| entry.verdict.as_ref()).is_none())
+        .collect();
+    let left = pending.len().saturating_sub(cap);
+    let mut judged = 0usize;
+
+    for event in pending.into_iter().take(cap) {
+        let item = crate::judge::EventItem {
+            uid: event.uid.clone(),
+            title: crate::judge::one_line(&event.title, 200),
+            start: event.start().strftime("%Y-%m-%dT%H:%M").to_string(),
+            end: event.end().strftime("%Y-%m-%dT%H:%M").to_string(),
+            source: event.source.clone(),
+            organizer: crate::judge::one_line(&event.organizer, 120),
+            location: crate::judge::one_line(&event.location, 120),
+            url: event.url.clone(),
+            description: crate::judge::clip(event.description.trim(), crate::judge::MAX_BODY_CHARS),
+            categories: event.categories.clone(),
+            audiences: event.audiences.clone(),
+            series_uid: event.series_uid.clone(),
+            interests: interests.clone(),
+        };
+        let verdict = match model.judge_event(&item) {
+            Ok(v) => v,
+            Err(e) => {
+                lines.push(format!("events {}: not judged ({e})", event.uid));
+                continue;
+            }
+        };
+        // Checked again here, not only on the server: `record_verdict` refuses an unknown word and
+        // a `why` carrying a quote, a newline or the field separator, and a refusal at that depth
+        // would lose the verdict with no line to explain it.
+        if !crate::eventledger::VALID_VERDICTS.contains(&verdict.verdict.as_str()) {
+            lines.push(format!("events {}: refused ({:?} is not a verdict)", event.uid, verdict.verdict));
+            continue;
+        }
+        let why = crate::judge::one_line(
+            &verdict.why.replace('"', "'").replace(" \u{b7} ", " - "),
+            140,
+        );
+        match crate::eventledger::record_verdict(
+            vault, &event.uid, &event.title, today, &verdict.verdict, "", &why, "",
+        ) {
+            Ok(()) => {
+                judged += 1;
+                lines.push(format!("events {}: {} ({:.2})", event.uid, verdict.verdict, verdict.confidence));
+            }
+            Err(e) => lines.push(format!("events {}: not recorded ({e:?})", event.uid)),
+        }
+    }
+    let mut summary = format!("events: {judged} judged");
+    if left > 0 {
+        summary.push_str(&format!(", {left} left for the next slot"));
+    }
+    lines.push(summary);
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     //! Direct port of `tests/test_events_config.py` — all 14 tests, same names.
@@ -631,5 +737,151 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(interests.never, vec!["None", "True", "5", "2.5", "spaced"]);
         assert_eq!(interests.strong, vec!["Robotics"]);
+    }
+
+    /// A scripted event model, so the roster pass is exercised with no socket at all.
+    struct Scripted(std::cell::RefCell<Vec<Result<crate::judge::EventVerdict, crate::judge::ModelError>>>);
+
+    impl crate::judge::EventModel for Scripted {
+        fn judge_event(
+            &self,
+            _item: &crate::judge::EventItem,
+        ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+            self.0
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| Err(crate::judge::ModelError::Failed("nothing scripted".into())))
+        }
+    }
+
+    fn verdict(word: &str, why: &str) -> crate::judge::EventVerdict {
+        crate::judge::EventVerdict { verdict: word.into(), why: why.into(), confidence: 0.9, tier: 3 }
+    }
+
+    /// A vault with two events on one enabled ICS source, and a verdict already recorded for the
+    /// first. Never points at the worktree (ruling R-3a-12).
+    fn scratch_vault_with_feed(name: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2-events-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("profile")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        std::fs::write(dir.join("profile").join("interests.md"), "Machine learning, German.\n")
+            .expect("write interests.md");
+        // Seeded under `ics:engage:1`, not the raw `engage:1` the ICS UID line carries:
+        // `eventfeed::event_from_block` prefixes every ICS-sourced uid with `ics:` before it ever
+        // reaches the ledger, and a seed at the unprefixed key would never be recognised as
+        // already-judged.
+        crate::eventledger::record_verdict(
+            &dir, "ics:engage:1", "AI Club Kickoff", jiff::civil::date(2026, 8, 20), "drop", "", "not this term", "",
+        )
+        .expect("seed a verdict");
+        let feed = "BEGIN:VCALENDAR\r\n\
+             BEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club Kickoff\r\n\
+             DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
+             DESCRIPTION:An evening for anyone curious about machine learning.\r\nEND:VEVENT\r\n\
+             BEGIN:VEVENT\r\nUID:engage:2\r\nSUMMARY:Career Fair\r\n\
+             DTSTART:20260830T150000Z\r\nDTEND:20260830T190000Z\r\n\
+             DESCRIPTION:Employers across engineering and computing.\r\nEND:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+            .to_string();
+        (dir, feed)
+    }
+
+    #[test]
+    fn only_unjudged_uids_are_sent_and_one_verdict_per_uid_forever() {
+        // §7's one-verdict-per-uid-forever rule is what makes a drop permanent, and re-asking
+        // would quietly overwrite a decision the student already lives with.
+        let (vault, feed) = scratch_vault_with_feed("unjudged");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("opportunity", "matches the stated interests"))]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        assert!(lines.iter().any(|l| l.contains("engage:2") && l.contains("opportunity")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("engage:1")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger["ics:engage:2"].verdict.as_deref(), Some("opportunity"));
+        assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("drop"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn the_judged_item_carries_the_description_and_the_real_source() {
+        // The defect this pass was rewritten to avoid: judging from `read_roster` would send an
+        // empty description and the literal source "roster" for every event on every account,
+        // which is most of the prompt and two of the four promotion features.
+        let (vault, feed) = scratch_vault_with_feed("carries");
+        let fetch = |_: &str| Ok(feed.clone());
+        let seen: std::cell::RefCell<Vec<crate::judge::EventItem>> = std::cell::RefCell::new(Vec::new());
+        struct Recorder<'a>(&'a std::cell::RefCell<Vec<crate::judge::EventItem>>);
+        impl crate::judge::EventModel for Recorder<'_> {
+            fn judge_event(
+                &self,
+                item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                self.0.borrow_mut().push(item.clone());
+                Err(crate::judge::ModelError::Failed("recorded only".into()))
+            }
+        }
+        let _ = judge_roster(&vault, &Recorder(&seen), Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        let items = seen.borrow();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].description.contains("Employers"), "{:?}", items[0].description);
+        assert_eq!(items[0].source, "engage");
+        assert!(items[0].interests.contains("Machine learning"));
+        drop(items);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_verdict_word_the_ledger_refuses_is_dropped_and_named() {
+        let (vault, feed) = scratch_vault_with_feed("badword");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("maybe", "unsure"))]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        assert!(lines.iter().any(|l| l.contains("refused")), "{lines:?}");
+        assert!(crate::eventledger::load_ledger(&vault, None).get("engage:2").is_none());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_why_carrying_the_field_separator_is_repaired_rather_than_lost() {
+        // `eventledger::why_problem` refuses a double quote, a newline and the field separator
+        // outright, and a refused why throws the whole verdict away. The service one-lines it; the
+        // device checks again, because a service that changed and a device that did not is the
+        // case this guards.
+        let (vault, feed) = scratch_vault_with_feed("why");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("drop", "she said \"no\" \u{b7} twice"))]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        assert!(lines.iter().any(|l| l.contains("engage:2")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger["ics:engage:2"].verdict.as_deref(), Some("drop"));
+        assert!(!ledger["ics:engage:2"].why.contains('"'));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn the_per_run_cap_bounds_the_batch_and_says_what_is_left() {
+        let (vault, feed) = scratch_vault_with_feed("cap");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 0);
+        assert!(lines.iter().any(|l| l.contains("1 left for the next slot")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_feed_that_will_not_fetch_is_a_line_and_never_a_panic() {
+        let (vault, _) = scratch_vault_with_feed("deadfeed");
+        let fetch = |_: &str| Err("connection refused".to_string());
+        let model = Scripted(std::cell::RefCell::new(vec![]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150);
+        assert!(lines.iter().any(|l| l.contains("fetch failed")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

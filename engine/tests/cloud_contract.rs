@@ -436,3 +436,28 @@ fn the_calendar_fetch_is_a_get_that_names_the_feed_and_no_address() {
     // The device does not know the secret address any more and must not be able to name one.
     assert!(!sent.contains("ics_url") && !sent.contains("calendar_ics"), "{sent}");
 }
+
+/// `rank` never calls a model (decision 11), and after hand-off H4 that is a property of the
+/// SOURCE rather than of the module graph — `cli.rs` links `cloudmodel` for the events fetch
+/// proxy. So it is pinned the way the SDK boundary is pinned (`dependency_boundary.rs`): cheaply,
+/// statically, and at the moment somebody writes the wrong line rather than the moment a slot
+/// starts judging in the wrong step.
+#[test]
+fn rank_cannot_reach_a_judgment_endpoint() {
+    let cli = include_str!("../src/cli.rs");
+    for forbidden in ["/judge-task", "/judge-event", "/judge-email", "judge_task", "CloudModel", "EventModel", "EmailModel"] {
+        assert!(
+            !cli.contains(forbidden),
+            "engine/src/cli.rs mentions `{forbidden}`. `rank` may reach the service for TRANSPORT \
+             (cloudmodel::fetch_event_source, cloudmodel::fetch_ics) and for nothing else: judgment \
+             is the separate `judge` command, which runs before `rank` and writes fields into notes \
+             (Knowlu spec decision 11, CLAUDE.md)."
+        );
+    }
+    // And the two transport functions ARE allowed, so this test fails loudly if H4 was never
+    // applied rather than passing vacuously.
+    assert!(
+        cli.contains("cloudmodel::fetch_event_source"),
+        "hand-off H4 has not been applied: `cli::run` still fetches event feeds on the device."
+    );
+}
