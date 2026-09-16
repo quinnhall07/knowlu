@@ -178,3 +178,62 @@ Deno.test("scrubForPrompt leaves a plain long word alone, unlike scrub's TOKEN r
 Deno.test("scrubForPrompt does not scrub a Windows path or a note filename (not a prompt concern)", () => {
   assertEquals(scrubForPrompt(String.raw`C:\Users\Ada\notes.md`), String.raw`C:\Users\Ada\notes.md`);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Fix round 1 (Task 3 review): `DIGIT_TOKEN`'s original class kept `_`, `.` and `-`, so a whole
+// separator-joined identifier -- a course section code, an attachment filename -- was one run,
+// and a real one cleared the old 20-character floor and got redacted, deleting the `course` and
+// `title` signal the email prompt exists to extract. These pin the recall (the false positives
+// survive) alongside every existing positive (the false negatives still get caught), and the
+// floor itself, so the 16-character choice is proven rather than merely asserted in a comment.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("scrubForPrompt fix round 1: a course section code survives, hyphens and a year included", () => {
+  assertEquals(scrubForPrompt("MATH-301-002-Fall2026"), "MATH-301-002-Fall2026");
+  assertEquals(scrubForPrompt("CHEM-101-003-Fall2026"), "CHEM-101-003-Fall2026");
+});
+
+Deno.test("scrubForPrompt fix round 1: an underscore- or dot-joined filename survives", () => {
+  assertEquals(scrubForPrompt("Syllabus_ECON_202_Spring2026.docx"), "Syllabus_ECON_202_Spring2026.docx");
+  assertEquals(scrubForPrompt("assignment_3_final_draft.pdf"), "assignment_3_final_draft.pdf");
+});
+
+Deno.test("scrubForPrompt fix round 1: the floor is 16 separator-free characters, not 20", () => {
+  // 15 alphanumeric characters with a digit: one under the floor, survives.
+  const under = "abcdefghijklmn1";
+  assertEquals(under.length, 15);
+  assertEquals(scrubForPrompt(`code ${under} end`), `code ${under} end`);
+  // 16: exactly the floor, redacted.
+  const atFloor = "abcdefghijklmn12";
+  assertEquals(atFloor.length, 16);
+  assertEquals(scrubForPrompt(`code ${atFloor} end`), "code <token> end");
+});
+
+Deno.test("scrubForPrompt fix round 1: a bare JWT's three dot-joined segments (20/27/16) each meet the floor on their own", () => {
+  // No credential keyword precedes it here, so DIGIT_TOKEN alone has to catch it -- one
+  // dot-joined segment at a time, since `.` is no longer part of the run.
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdef1234567890";
+  assertEquals(scrubForPrompt(`see ${jwt} attached`), "see <token>.<token>.<token> attached");
+});
+
+Deno.test("scrubForPrompt fix round 1: the 26-character confirmation code is still caught", () => {
+  // Pre-existing positive (already asserted above); repeated here as the fix round's own record
+  // that the floor change did not lose it.
+  assertEquals(scrubForPrompt("your code is abcdEFGH12345678901234wxyz today"), "your code is <token> today");
+});
+
+// Fix round 1, item 3 (Quinn's preference): bare `key` in the prompt-path credential pattern
+// claimed ordinary student mail -- "Answer key: Problem Set 3 is posted" has nothing to hide, and
+// `key` alone is too common a word in course material to keep as a credential keyword on this
+// path. `scrub`'s own (report) pattern is untouched: it keeps bare `key`, per its own existing
+// tests below.
+Deno.test("scrubForPrompt fix round 1: bare 'key' no longer claims ordinary prose", () => {
+  const sentence = "Answer key: Problem Set 3 is posted";
+  assertEquals(scrubForPrompt(sentence), sentence);
+});
+
+Deno.test("scrubForPrompt fix round 1: a real credential keyword still redacts", () => {
+  assertEquals(scrubForPrompt("password=hunter2"), "password=<secret>");
+  assertEquals(scrubForPrompt("api_key=sk_live_abc123"), "api_key=<secret>");
+  assertEquals(scrubForPrompt("token: abc123def456"), "token=<secret>");
+});

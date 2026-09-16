@@ -4,7 +4,11 @@
 // The task prompt is `judge::prompt_for` moved across the boundary, with the same four bounds —
 // body 1200 characters, weights 600, preferences 600, reason 140 — and the same rules, because
 // the frozen behaviour these bounds protect is "the question can never be pushed out of the
-// context by a note that pasted a syllabus".
+// context by a note that pasted a syllabus". Fix round 1 (Task 3 review): each bound still caps
+// the CONTENT `clip` keeps — a clipped field's own marker (13 characters, " …[truncated]") is
+// appended beyond the bound, not carved out of it, so a fully clipped 1200-character body prompt
+// emits 1213 characters, the marker being the frame telling the model it cut something, not part
+// of what it cut. `judge_prompts_test.ts` pins the exact count.
 import { oneLine } from "./judge_validate.ts";
 import { scrubForPrompt } from "./scrub.ts";
 
@@ -22,6 +26,9 @@ export interface Prompt {
 // the model no sign that its last sentence might be a cut-off fragment rather than the note's own
 // ending — a body that trailed off mid-word read as complete. The marker names the cut so the
 // model can weigh (or ask for) the missing tail instead of treating a truncated body as a full one.
+// The marker is appended BEYOND `max`, never carved out of it (fix round 1, Task 3 review): `max`
+// bounds the content this function keeps, and the 13-character marker is the frame around that
+// content, not a thirteenth of it — a clipped MAX_BODY_CHARS body emits 1213 characters, not 1200.
 function clip(text: string, max: number): string {
   const chars = [...text];
   return chars.length > max ? chars.slice(0, max).join("") + " …[truncated]" : text;

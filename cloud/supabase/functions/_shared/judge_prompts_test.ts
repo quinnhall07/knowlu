@@ -2,7 +2,7 @@
 // rule, the empty-body line and the scrub site (provider swap, Task 3). There was no
 // `judge_prompts_test.ts` before this task; the prompt shape was exercised only indirectly, through
 // `judge_pipeline_test.ts` and the handlers' own tests, none of which pin prompt TEXT.
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { buildPrompt, MAX_BODY_CHARS, systemTemplate } from "./judge_prompts.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -26,6 +26,20 @@ Deno.test("task: a body over MAX_BODY_CHARS is clipped and marked truncated", ()
   const clipped = "a".repeat(MAX_BODY_CHARS);
   assert(user.includes(`${clipped} …[truncated]`), `expected the clipped body in: ${user}`);
   assert(!user.includes("a".repeat(MAX_BODY_CHARS + 1)), "the body must actually be cut");
+});
+
+// Fix round 1, item 5 (Task 3 review): the marker falls BEYOND the bound, not inside it -- a
+// clipped body emits MAX_BODY_CHARS content characters plus the marker's own 13, never
+// MAX_BODY_CHARS total. Pinned with an exact count so "the same four bounds" language in the
+// header stays honest about what the bound measures (the frame the model is told to trust, not
+// the total bytes on the wire).
+Deno.test("task: the marker's 13 characters land beyond MAX_BODY_CHARS, not inside it", () => {
+  const body = "a".repeat(MAX_BODY_CHARS + 500);
+  const { user } = buildPrompt("task", { title: "PS3", due: null, body }, {});
+  const marker = " …[truncated]";
+  assertEquals([...marker].length, 13, "sanity: the marker itself is 13 characters");
+  const emitted = user.slice(user.indexOf("Body:\n") + "Body:\n".length);
+  assertEquals([...emitted].length, MAX_BODY_CHARS + 13, "content + marker, not content alone");
 });
 
 Deno.test("event: a description over MAX_BODY_CHARS is clipped and marked truncated", () => {
@@ -94,6 +108,20 @@ Deno.test("email: an empty text yields 'Message: (no plain-text body)' in the us
     from: "lms@example.invalid",
     date: "2026-10-02",
     text: "",
+  }, {});
+  assert(user.includes("Message: (no plain-text body)"), `expected the empty-body line in: ${user}`);
+});
+
+// Fix round 1, item 4 (Task 3 review): a body of nothing but whitespace reads as empty too. This
+// works because `buildPrompt` trims BEFORE it scrubs (`str(item.text).trim()`, then
+// `scrubForPrompt`, then `clip`) -- `"   \n  ".trim()` is `""`, so the same empty-string branch
+// that (a) above exercises fires here, with no separate whitespace-detection code needed.
+Deno.test("email: a whitespace-only text also yields 'Message: (no plain-text body)'", () => {
+  const { user } = buildPrompt("email", {
+    subject: "Reminder",
+    from: "lms@example.invalid",
+    date: "2026-10-02",
+    text: "   \n  ",
   }, {});
   assert(user.includes("Message: (no plain-text body)"), `expected the empty-body line in: ${user}`);
 });
