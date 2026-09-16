@@ -11,6 +11,27 @@ import { type JudgeModel, type ModelReply, type ModelRequest, ModelRefused } fro
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const CALL_TIMEOUT_MS = 120_000;
 
+/** The zero-retention pin a route MUST carry before any request is built from it: one named
+ *  upstream, no fallback, OpenRouter's zero-data-retention filter and strict parameters. A row
+ *  whose `route` is `{}` (the column default) or missing entirely would otherwise send an
+ *  unpinned request — any upstream, fallbacks on, no zero-retention filter — with nothing thrown
+ *  or logged (whole-branch review I1). Throws a PLAIN `Error`, never `ModelRefused`: a refused
+ *  route is not the model declining, and `judge_pipeline.ts` maps a plain `Error` whose message
+ *  lacks `max_tokens` to `model failed` — a named low-confidence outcome, exit 0, fail closed. */
+export function assertPinnedRoute(route: Record<string, unknown> | undefined): void {
+  const order = route?.order;
+  const pinned = route !== undefined &&
+    Array.isArray(order) && order.length === 1 && typeof order[0] === "string" && order[0].length > 0 &&
+    route.allow_fallbacks === false &&
+    route.zdr === true &&
+    route.require_parameters === true;
+  if (!pinned) {
+    throw new Error(
+      "the pinned row's route does not carry the zero-retention pin (order of one, allow_fallbacks false, zdr true, require_parameters true)",
+    );
+  }
+}
+
 /** The request body, pure: the row's sampling spreads at the top level (temperature, reasoning),
  *  the row's route becomes OpenRouter's `provider` object, the schema is strict. */
 export function openRouterBody(req: ModelRequest): Record<string, unknown> {
@@ -38,6 +59,7 @@ export class OpenRouterModel implements JudgeModel {
     this.#fetch = opts.fetchImpl ?? fetch;
   }
   async complete(req: ModelRequest): Promise<ModelReply> {
+    assertPinnedRoute(req.route);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
     let response: Response;
@@ -69,6 +91,7 @@ export class OpenRouterModel implements JudgeModel {
     let data: {
       choices?: { finish_reason?: string; message?: { content?: string | null; refusal?: string | null } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
+      error?: unknown;
     };
     try {
       data = JSON.parse(envelopeText);
@@ -76,6 +99,13 @@ export class OpenRouterModel implements JudgeModel {
       // Deliberately does NOT quote the body: a 2xx answer that is not JSON at all (an HTML error
       // page from an intermediary, say) must not leak its text into a 500 log line.
       throw new Error(`the model service answered with a body that is not JSON (${envelopeText.length} chars)`);
+    }
+    if (data.error !== undefined && (data.choices === undefined || data.choices.length === 0)) {
+      // Never includes `data.error`'s text: OpenRouter can answer HTTP 200 with an error envelope
+      // (an upstream fault it chose not to surface as a non-2xx), and that text is exactly the
+      // kind of provider string that can carry a fragment of the prompt back out (whole-branch
+      // review M2) — the same reason `judge_pipeline.ts` never logs a failure's message.
+      throw new Error("the model service answered a 2xx with an error envelope");
     }
     const choice = data.choices?.[0];
     if (choice?.message?.refusal) throw new ModelRefused("the model declined");

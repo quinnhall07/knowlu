@@ -1,9 +1,9 @@
 // The OpenRouter adapter, exercised entirely against an injected fetch — no listener, no socket,
 // no network permission needed for this file (CLAUDE.md, plan 3a's loopback rule covers the
 // Anthropic adapter's real-listener tests; this one needs none of that).
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { ModelRefused } from "./judge_anthropic.ts";
-import { OPENROUTER_URL, openRouterBody, OpenRouterModel } from "./judge_openrouter.ts";
+import { assertPinnedRoute, OPENROUTER_URL, openRouterBody, OpenRouterModel } from "./judge_openrouter.ts";
 
 const SCHEMA = { type: "object" } as const;
 
@@ -173,4 +173,71 @@ Deno.test("a sampling that carries model or max_tokens never overrides the pinne
   assertEquals(body.model, "qwen/qwen3.5-35b-a3b");
   assertEquals(body.max_tokens, 640);
   assertEquals(body.temperature, 0);
+});
+
+// I1 — assertPinnedRoute refuses any route that does not carry the zero-retention pin, fail
+// closed: the pipeline maps the plain Error it throws to `model failed`, never `refused`.
+const PINNED_ROUTE = { order: ["DeepInfra"], allow_fallbacks: false, zdr: true, require_parameters: true };
+
+Deno.test("assertPinnedRoute accepts the exact pinned shape", () => {
+  assertPinnedRoute(PINNED_ROUTE);
+});
+
+Deno.test("assertPinnedRoute refuses {} (the column default)", () => {
+  assertThrows(() => assertPinnedRoute({}), Error, "does not carry the zero-retention pin");
+});
+
+Deno.test("assertPinnedRoute refuses a missing route", () => {
+  assertThrows(() => assertPinnedRoute(undefined), Error, "does not carry the zero-retention pin");
+});
+
+Deno.test("assertPinnedRoute refuses an order of two", () => {
+  assertThrows(
+    () => assertPinnedRoute({ ...PINNED_ROUTE, order: ["DeepInfra", "CoreWeave"] }),
+    Error,
+    "does not carry the zero-retention pin",
+  );
+});
+
+Deno.test("assertPinnedRoute refuses zdr: false", () => {
+  assertThrows(
+    () => assertPinnedRoute({ ...PINNED_ROUTE, zdr: false }),
+    Error,
+    "does not carry the zero-retention pin",
+  );
+});
+
+Deno.test("assertPinnedRoute refuses a missing allow_fallbacks", () => {
+  const { allow_fallbacks: _drop, ...rest } = PINNED_ROUTE;
+  assertThrows(() => assertPinnedRoute(rest), Error, "does not carry the zero-retention pin");
+});
+
+Deno.test("complete() never calls fetch when the route is not pinned", async () => {
+  let called = false;
+  const fake: typeof fetch = () => {
+    called = true;
+    return Promise.resolve(jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "{}" } }] }));
+  };
+  const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake });
+  await assertRejects(
+    () => model.complete(request({ route: {} })),
+    Error,
+    "does not carry the zero-retention pin",
+  );
+  assertEquals(called, false);
+});
+
+// M2 — a 2xx envelope carrying `{"error": ...}` and no `choices` is a named failure, never
+// leaking the error's own text (which can carry a fragment of the prompt back out).
+Deno.test("a 2xx error envelope with no choices is named without quoting the error", async () => {
+  const fake: typeof fetch = () => Promise.resolve(jsonResponse({ error: { message: "SECRET-LOOKING" } }, 200));
+  const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake });
+  let message = "";
+  try {
+    await model.complete(request());
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assertEquals(message, "the model service answered a 2xx with an error envelope");
+  assertEquals(message.includes("SECRET-LOOKING"), false, message);
 });

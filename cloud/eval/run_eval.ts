@@ -10,7 +10,9 @@
 //   --thresholds  the file the gate reads. Required once there is at least one case to score.
 //
 // Every run of this program without --dry-run spends real money (one model call per case, at
-// roughly $0.0014 each — the arithmetic is in `judge_caps.ts`). `--dry-run` first, always.
+// roughly $0.0002 each as a conservative bound on the pinned OpenRouter models — measured on
+// staging 2026-09-16 at about $0.00003 for a task call and $0.0001 for an email call; the
+// arithmetic is in `judge_caps.ts`). `--dry-run` first, always.
 //
 // Ruling R-C2-E50 (2), corrected by C2 final review A-4: `cloud/eval/seed/` is empty at merge
 // (ruling R-C2-E12, Task 13) and STAYS empty — it is not where a consented correction lands once
@@ -55,14 +57,15 @@ const KINDS: Kind[] = ["task", "event", "email"];
 /**
  * The ceiling on how many cases ONE run will score, per kind (C2 final review S-5).
  *
- * Every non-`--dry-run` case is one real model call at roughly $0.0014 (the arithmetic is in
- * `judge_caps.ts`), and the corpus is unbounded by construction: `eval_cases` grows with every
- * consented correction, and this gate runs on every PR that touches a prompt, a schema or a model
- * pin. Today the corpus is empty, so the gate costs nothing — which is exactly when a ceiling is
- * cheap to add and impossible to remember later. 200 per kind is 600 calls, under a dollar, and far
- * more than a regression needs to show itself; it is applied as PostgREST's own `&limit=`, so the
- * rows never leave the database, and it is printed before the loop so a run always says what it is
- * about to spend.
+ * Every non-`--dry-run` case is one real model call at roughly $0.0002 as a conservative bound on
+ * the pinned OpenRouter models (measured on staging 2026-09-16 at about $0.00003 for a task call
+ * and $0.0001 for an email call; the arithmetic is in `judge_caps.ts`), and the corpus is
+ * unbounded by construction: `eval_cases` grows with every consented correction, and this gate
+ * runs on every PR that touches a prompt, a schema or a model pin. Today the corpus is empty, so
+ * the gate costs nothing — which is exactly when a ceiling is cheap to add and impossible to
+ * remember later. 200 per kind is 600 calls, under a dollar, and far more than a regression needs
+ * to show itself; it is applied as PostgREST's own `&limit=`, so the rows never leave the
+ * database, and it is printed before the loop so a run always says what it is about to spend.
  */
 export const MAX_CASES = 200;
 
