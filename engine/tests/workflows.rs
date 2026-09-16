@@ -77,10 +77,16 @@ fn the_eval_gate_job_exists_is_pull_request_only_and_names_both_its_secrets() {
     let c = workflow("ci.yml");
     let job = job_block(&c, "eval-gate");
     assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate must run only on pull_request: {job}");
-    assert!(job.contains("secrets.ANTHROPIC_API_KEY"), "eval-gate must reference secrets.ANTHROPIC_API_KEY");
+    assert!(job.contains("secrets.OPENROUTER_API_KEY"), "eval-gate must reference secrets.OPENROUTER_API_KEY");
     assert!(
         job.contains("secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"),
         "eval-gate must reference secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"
+    );
+    // Provider swap Task 4: the eval runner now calls OpenRouter, so the Anthropic secret has no
+    // reason to be in this job at all — its lingering presence would mean a key nothing reads.
+    assert!(
+        !job.contains("secrets.ANTHROPIC_API_KEY"),
+        "eval-gate must not reference secrets.ANTHROPIC_API_KEY any more: {job}"
     );
 }
 
@@ -98,12 +104,12 @@ jobs:
   zzz-later-job:
     if: github.event_name == 'pull_request'
     steps:
-      - run: echo \"uses secrets.ANTHROPIC_API_KEY and secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY\"
+      - run: echo \"uses secrets.OPENROUTER_API_KEY and secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY\"
 ";
     let job = job_block(synthetic, "eval-gate");
     assert!(!job.contains("zzz-later-job"), "the block must not reach the next job at all: {job:?}");
     assert!(!job.contains("if: github.event_name == 'pull_request'"), "the later job's content leaked in: {job:?}");
-    assert!(!job.contains("secrets.ANTHROPIC_API_KEY"), "the later job's content leaked in: {job:?}");
+    assert!(!job.contains("secrets.OPENROUTER_API_KEY"), "the later job's content leaked in: {job:?}");
 
     // And with no job after it, the block still reaches EOF exactly as before.
     let last = "\
