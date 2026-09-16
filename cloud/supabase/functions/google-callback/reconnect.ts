@@ -33,7 +33,17 @@ export async function storeGrantRevokingStale(
   scopes: string[],
   deps: ReconnectDeps,
 ): Promise<void> {
-  const current = await deps.currentGrant(accountId);
+  // R2-2: a transient `google_accounts` read failure here must not fail the whole reconnect — the
+  // `state` nonce and the authorization code are both already spent by this point, so a rejection
+  // used to force the student to restart from scratch. Treat a failed lookup the same as no prior
+  // grant: there is nothing to compare `sub` against, so skip the stale-revoke step and store the
+  // new grant regardless.
+  let current: { sub: string; token: string } | null = null;
+  try {
+    current = await deps.currentGrant(accountId);
+  } catch (e) {
+    console.error(`google-callback: current grant lookup ${e instanceof Error ? e.constructor.name : "unknown"}`);
+  }
   if (current !== null && current.sub !== sub) {
     try {
       const response = await deps.revoke(current.token);

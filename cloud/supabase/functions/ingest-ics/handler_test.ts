@@ -123,3 +123,25 @@ Deno.test("past_due_uids reads DUE, then DTEND, then DTSTART — the device's or
   })(new Request("http://127.0.0.1/ingest-ics?first_run=1"))).json();
   assertEquals(reply.past_due_uids, ["bb-dtend-past", "bb-due-past"]);
 });
+
+// R2-4, the same cross-language pin `_shared/google_scopes_test.ts` uses for the Gmail 503: this
+// body is an exact-match contract, not a copy. `ingest.rs`'s `cloud_ics_failure_with_no_local_url`
+// compares it character for character to tell "this account simply has no LMS feed configured" — a
+// permanent, normal state named a skip at exit 0 — from a gateway 404 (the function not deployed, a
+// stale `api_base`, a slug typo), which must stay a real failure. The pin goes one way, from here
+// into the Rust source: Rust cannot read this file's literal, and `ingest.rs`'s constant is private
+// to that module.
+Deno.test("the no-lms-ics 404 body has exactly one copy, and the engine's matches it", async () => {
+  const rust = await Deno.readTextFile(
+    new URL("../../../../engine/src/ingest.rs", import.meta.url),
+  );
+  const pinned = /const NO_LMS_ICS_SOURCE_DETAIL: &str = "([^"]*)";/.exec(rust);
+  assert(pinned !== null, "ingest.rs no longer declares NO_LMS_ICS_SOURCE_DETAIL");
+  const handler = icsHandler(OK, {
+    urlFor: () => Promise.resolve(null),
+    fetchText: () => Promise.reject(new Error("must not fetch")),
+    now: NOW,
+  });
+  const response = await handler(new Request("http://127.0.0.1/ingest-ics"));
+  assertEquals((await response.json()).error, pinned[1]);
+});

@@ -213,6 +213,8 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   const seedRecords = await loadSeedFn();
   if (seedRecords.length === 0) {
     const serviceKey = envGet("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    // Deliberately uncaught (ruling m147): a key IS present here, so a thrown `anyEvalCasesExist`
+    // (a staging outage, a bad key) must fail this PR-only gate loud, never be read as "0 cases".
     const haveCases = serviceKey !== "" && await anyEvalCasesExist(dbFactory());
     if (!haveCases) {
       console.log("0 cases — nothing to score (no seed, no database access)");

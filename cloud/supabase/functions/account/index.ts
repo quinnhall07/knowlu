@@ -12,7 +12,7 @@ import { encryptString, importAesKey, sha256Hex } from "../_shared/crypto.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
-import { sharedDb } from "../_shared/judge_deps.ts";
+import { serviceDb } from "../_shared/judge_db.ts";
 import { handle } from "./handler.ts";
 import { liveGoogleDeleteDeps, revokeGoogleGrantOnDelete } from "./google_delete.ts";
 
@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
         // row below, but a cascade only ever removes the ROW. The refresh token Google is still
         // holding stays valid there forever unless it is revoked here; `revokeGoogleGrantOnDelete`
         // never blocks the deletion below on a failed revoke (the account's right to delete wins).
-        await revokeGoogleGrantOnDelete(id, liveGoogleDeleteDeps(sharedDb()));
+        await revokeGoogleGrantOnDelete(id, liveGoogleDeleteDeps(serviceDb()));
         // The consent log survives, with its account_id and its ip nulled: California's ARL wants
         // the record for at least three years, and `subject_hash` is what keeps it meaningful
         // without identifying. **`ip` goes with the account id** (R-C1-56, C2): an IP address is

@@ -161,17 +161,25 @@ Deno.test("attachments are never fetched, because there is no code path that cou
 });
 
 Deno.test("the read stops at its wall-clock budget and says there is more", async () => {
-  // An edge function's wall clock is far under sixty model calls at 120 s each. The dedup set is
-  // the resume cursor: everything judged is marked seen, so the next round starts where this one
-  // stopped and nothing is judged twice.
+  // R2-6: rewritten against the exported constants so this proves what its name says. Under the
+  // current check (`elapsed + PER_CALL_MS >= budgetMs`), the old `budgetMs: 10` tripped on the very
+  // FIRST iteration (elapsed is already 8 there, and 8 + PER_CALL_MS always dwarfs 10) — so
+  // `queued.length < 5` was true no matter how the stop logic behaved, even a broken one that
+  // stopped after zero items. `started` is one clock call, and each loop iteration's check is one
+  // more, each advancing the clock by 8ms: `elapsed` at iteration i (1-indexed) is `i * 8`. Picking
+  // `budgetMs = PER_CALL_MS + 32` puts the threshold (`budgetMs - PER_CALL_MS = 32`) strictly above
+  // i=1,2,3's elapsed (8, 16, 24) and at i=4's (32, and `>=` trips on equality) — three items
+  // processed, the fourth refused before it starts.
   let tick = 0;
   const { deps, queued } = fakes(
     Array.from({ length: 5 }, () => TASK_ANSWER),
     ["m1", "m2", "m3", "m4", "m5"],
   );
-  const reply = await (await readHandler(OK, { ...deps, budgetMs: 10, clock: () => (tick += 8) })(post())).json();
+  const reply = await (
+    await readHandler(OK, { ...deps, budgetMs: PER_CALL_MS + 32, clock: () => (tick += 8) })(post())
+  ).json();
   assert(reply.more === true, "the handler must say it stopped early");
-  assert(queued.length < 5, "it must actually have stopped early");
+  assertEquals(queued.length, 3, "exactly three items must have been processed before the stop");
 });
 
 // ---------------------------------------------------------------------------------------------

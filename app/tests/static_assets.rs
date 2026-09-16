@@ -490,6 +490,15 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
     );
     assert!(finish.contains("WIZ.google") , "the polled flag is still read, as the fallback");
     assert!(!js.contains("google_calendar: WIZ_GOOGLE"), "the plan no longer reads the old bare flag directly");
+
+    // R2-3: the button is disabled as the FIRST statement of wizFinish, before the `google_connected`
+    // await — not after it. Two Finish clicks landing in that window used to start two
+    // `retarget_credentials`/`wizRegister` flows racing each other.
+    let disabled_write = finish.find("EL(\"wiz-next\").disabled = true").expect("wizFinish disables wiz-next");
+    assert!(
+        disabled_write < google_connected_call.unwrap(),
+        "wiz-next is disabled before the google_connected await, not after it"
+    );
 }
 
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's

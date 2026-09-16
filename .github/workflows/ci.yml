@@ -98,6 +98,9 @@ jobs:
   # access)" without ever reading `ANTHROPIC_API_KEY` or opening a connection — which is what lets
   # this job pass green on a PR that sets neither secret. Present, it asks the database once
   # whether `eval_cases` holds anything at all, and runs the suite for real the day it does.
+  # Deliberately, that count is uncaught (ruling m147): a key IS present at that point, so a failed
+  # `eval_cases` count — a staging outage, a bad key — must fail this PR-only gate loud, never be
+  # read as "0 cases" and pass vacuously.
   #
   # **A fork PR gets no secrets at all** (GitHub does not expose them to `pull_request` runs from a
   # fork), so on a fork this job can never make a real model call however many cases staging's

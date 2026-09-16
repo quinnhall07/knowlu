@@ -1625,6 +1625,10 @@
   }
 
   function wizFinish() {
+    // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
+    // second Finish click landing in that window used to start a second `retarget_credentials`/
+    // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
+    EL("wiz-next").disabled = true;
     readSlotsPanel();
     // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
     // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
@@ -1659,7 +1663,6 @@
                    zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
                                           .map(function (r) { return r.key; }),
                    courses: WIZ.courses };
-      EL("wiz-next").disabled = true;
       // Before anything is created: move the credentials if the path has changed since they were
       // written, so Credential Manager and the vault's `credential_target:` lines agree the moment
       // the vault exists. The secret never comes back to the page — the move happens in the command.

@@ -179,20 +179,28 @@ export function assertExecuteRevoked(
 }
 
 /**
- * A view definition, anywhere: `create [or replace] view`, the identifier (§`IDENT`), and — non
- * greedily — everything up to and through the `as` that opens its body. Group 1 is the HEADER
- * ALONE (never the body), because the `security_invoker` test below must read the view's own
- * declared storage option and never a phrase the SELECT merely contains. Group 2 is the name.
+ * A view definition, anywhere: `create [or replace] [materialized] view`, the identifier
+ * (§`IDENT`), and — non greedily — everything up to and through the `as` that opens its body.
+ * Group 1 is the HEADER ALONE (never the body), because the `security_invoker` test below must
+ * read the view's own declared storage option and never a phrase the SELECT merely contains.
+ * Group 2 is the name.
+ *
+ * R2-5: `materialized` is optional so a matview is not invisible to this scan. Supabase grants
+ * `select` on a matview to `anon`/`authenticated` the same way it does an ordinary view, and a
+ * matview cannot take `with (security_invoker = true)` at all (there is no such storage option for
+ * one) — so every matview this corpus ever creates MUST be caught by the revoke branch below, never
+ * silently skipped.
  */
 const VIEW_DEFINITION = new RegExp(
-  `(create\\s+(?:or\\s+replace\\s+)?view\\s+${identPattern("(\\w+)")}[\\s\\S]*?\\bas\\b)`,
+  `(create\\s+(?:or\\s+replace\\s+)?(?:materialized\\s+)?view\\s+${identPattern("(\\w+)")}[\\s\\S]*?\\bas\\b)`,
   "gi",
 );
 
-/** How many times the bare `create [or replace] view` phrase appears — the same fail-loud pairing
- * `RAW_FUNCTION_KEYWORD` gives the function scan (R-C2-E37e): a view shape the definition regex
- * cannot parse must never silently vanish from the scan. */
-const RAW_VIEW_KEYWORD = /create\s+(?:or\s+replace\s+)?view/gi;
+/** How many times the bare `create [or replace] [materialized] view` phrase appears — the same
+ * fail-loud pairing `RAW_FUNCTION_KEYWORD` gives the function scan (R-C2-E37e): a view shape
+ * (including a matview) the definition regex cannot parse must never silently vanish from the
+ * scan. */
+const RAW_VIEW_KEYWORD = /create\s+(?:or\s+replace\s+)?(?:materialized\s+)?view/gi;
 
 /**
  * `files`, sorted, from earliest to latest: every view any migration creates must EITHER declare
@@ -302,7 +310,10 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // Pinned so a view that silently stops being parsed shows up as a number that moved without a
   // reason on the diff: C1's `billing_subscribers` (invoker), `telemetry_daily` and
   // `correction_rates` (revoked, 20260910000400), and C2's `monthly_spend` (revoked,
-  // 20260911000900) — counted by hand against today's corpus.
+  // 20260911000900) — counted by hand against today's corpus. R2-5 widened `VIEW_DEFINITION` and
+  // `RAW_VIEW_KEYWORD` to see `create materialized view` too; this count stays 4 because today's
+  // corpus creates no materialized view at all, not because the scan cannot see one — the synthetic
+  // case below proves it can.
   assertEquals(parsed, 4, "today's corpus should parse exactly 4 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.
@@ -340,6 +351,39 @@ revoke all on public.half_revoked from public;
     ["synthetic-view-b.sql", `revoke all on public.fixed_later from anon, authenticated;`],
   ]);
   assertEquals(later.revoked, ["fixed_later"]);
+});
+
+Deno.test("R2-5: a materialized view is visible to the guard, not invisible to it", () => {
+  // A matview cannot declare `with (security_invoker = true)` at all — there is no such storage
+  // option for one — so an unrevoked matview must be caught exactly as an unrevoked ordinary view
+  // is. Pre-fix, `RAW_VIEW_KEYWORD`/`VIEW_DEFINITION` matched only `create [or replace] view`, so
+  // `create materialized view` matched neither: invisible to the scan AND to its own fail-loud
+  // parse-count check.
+  const leaky = `
+create materialized view leaky_matview as
+select account_id, sum(usd) as usd from usage_daily group by 1;
+`;
+  assertThrows(
+    () => assertViewsGuarded([["synthetic-matview.sql", leaky]]),
+    Error,
+    "leaky_matview",
+  );
+
+  // And a revoke in a LATER migration satisfies it, exactly as an ordinary view.
+  const later = assertViewsGuarded([
+    ["synthetic-matview-a.sql", `create materialized view public.fixed_matview as select 1 as one;`],
+    ["synthetic-matview-b.sql", `revoke all on public.fixed_matview from anon, authenticated;`],
+  ]);
+  assertEquals(later.revoked, ["fixed_matview"]);
+
+  // `create or replace` composes with `materialized` in the regex regardless of whether Postgres
+  // itself accepts that combination — the scan must parse the shape wherever it appears, not
+  // silently assume no migration could ever write it.
+  const orReplace = assertViewsGuarded([
+    ["synthetic-matview-c.sql", `create or replace materialized view public.replaced_matview as select 1 as one;`],
+    ["synthetic-matview-d.sql", `revoke all on public.replaced_matview from anon, authenticated;`],
+  ]);
+  assertEquals(orReplace.revoked, ["replaced_matview"]);
 });
 
 Deno.test("a writing, non-definer function with no revoke and no marker is caught by the widened guard", () => {

@@ -833,9 +833,18 @@ pub fn run_with(
 /// Windows Credential Manager session — no test in this crate or `cloud_contract.rs` has one, by
 /// design (`cloud_contract.rs`'s own doc comment says why), so this is the one place the decision
 /// can be exercised directly.
+///
+/// R2-4: the exact `error` text `/ingest-ics` answers when this account has no `lms_ics` source
+/// configured (`cloud/supabase/functions/ingest-ics/handler.ts`'s `Response.json({ error: "no
+/// lms_ics source for this account" }, { status: 404 })`). Matched exactly, the same shape
+/// `enrich.rs`'s `pull_rules` settle arm uses for its own 404 (R-C2-E49) — a gateway 404 (the
+/// function not deployed, a stale `api_base`, a slug typo) is ALSO an HTTP 404 and must not read as
+/// the normal, permanent "no feed configured" state.
+const NO_LMS_ICS_SOURCE_DETAIL: &str = "no lms_ics source for this account";
+
 fn cloud_ics_failure_with_no_local_url(e: &crate::cloudmodel::CloudError) -> (i32, Vec<String>) {
     match e {
-        crate::cloudmodel::CloudError::Status { code: 404, .. } => {
+        crate::cloudmodel::CloudError::Status { code: 404, ref detail } if detail == NO_LMS_ICS_SOURCE_DETAIL => {
             (0, vec!["ingest: no LMS feed on this account — skipped".to_string()])
         }
         crate::cloudmodel::CloudError::Status { code, .. } => (
@@ -958,6 +967,22 @@ mod tests {
         let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
         assert_eq!(code, 0);
         assert_eq!(lines, vec!["ingest: no LMS feed on this account — skipped".to_string()]);
+    }
+
+    // R2-4: a 404 whose body is NOT the handler's own `no lms_ics source for this account` text —
+    // a gateway 404 (the function not deployed, a stale `api_base`, a slug typo) — must fall into
+    // the "the service answered HTTP {code}" exit-1 arm, never the named skip. Pre-fix, the arm
+    // matched on `code == 404` alone and this case read as a permanent, silent "no feed configured"
+    // forever.
+    #[test]
+    fn a_404_without_the_handlers_detail_keeps_exit_1_and_names_http_404() {
+        let e = crate::cloudmodel::CloudError::Status { code: 404, detail: String::new() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("the service answered HTTP 404"), "{lines:?}");
+        assert!(lines[0].contains("no ics_url is configured"), "{lines:?}");
+        assert!(!lines[0].contains("skipped"), "a mismatched 404 must never read as the named skip: {lines:?}");
     }
 
     #[test]

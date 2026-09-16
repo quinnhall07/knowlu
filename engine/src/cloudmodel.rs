@@ -48,6 +48,10 @@ pub struct CloudConfig {
     pub api_base: String,
     pub anon_key: String,
     pub session_credential_target: String,
+    /// Required here only because `app/src/account.rs` parses this same file and expects the
+    /// field — the engine keeps `config/cloud.yaml`'s shape a contract with the app even though
+    /// nothing in the engine itself reads this value (C2 final review E-4 removed `CloudClient`'s
+    /// own copy).
     pub account_id: String,
 }
 
