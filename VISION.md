@@ -127,7 +127,7 @@ Tracked here because each one forecloses something if decided carelessly.
 | Decision | Status |
 |---|---|
 | Hosted accounts vs local profiles only | **Decided 2026-09-09: hosted accounts, required** |
-| Cloud inference provider (zero-retention required) | Anthropic API, cheapest model that passes the eval suite per kind; provider pinned per kind, swappable behind the seam |
+| Cloud inference provider (zero-retention required) | Anthropic API, cheapest model that passes the eval suite per kind; provider pinned per kind, swappable behind the seam. **Amended 2026-09-16 (Quinn's ruling): OpenRouter pinned per request to one named zero-retention host per kind — see the spec's Amendment section.** |
 | Sync: user's own storage vs our encrypted relay | **Decided 2026-09-09: our storage (Supabase), per account** |
 | Mobile port timing | Revisit against pilot retention — plan §6.3 flags desktop-only as the first hypothesis if the ritual dies |
 | Price | **Decided 2026-09-09: $9.99/mo, no free tier.** The $69.99/academic-year price is kept as a Stripe option (cloud design §11 R3) |

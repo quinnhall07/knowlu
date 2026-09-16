@@ -60,7 +60,7 @@
     <li><strong>Supabase</strong> — hosting, the database and the sign-in system. Your account row, your password hash and every row above live there.</li>
     <li><strong>Stripe</strong> — payments and the subscription. Stripe sees your card; we do not.</li>
     <li><strong>Cloudflare</strong> — this website and the downloads.</li>
-    <li><strong>OpenRouter</strong> — the router every judgment request goes through on its way to a model. It carries the text but does not itself run a model on it, keeps zero data retention switched on for Knowlu's account, and trains nothing on what passes through. Each request names the one company allowed to answer it and is <strong>refused outright, never sent somewhere else,</strong> if that company cannot meet every requirement we set.</li>
+    <li><strong>OpenRouter</strong> — the router every judgment request goes through on its way to a model. It carries the text but does not itself run a model on it, sends every request under zero data retention — never as a default it could quietly lose — and trains nothing on what passes through. Each request names the one company allowed to answer it and is <strong>refused outright, never sent somewhere else,</strong> if that company cannot meet every requirement we set.</li>
     <li><strong>CoreWeave</strong> — reads your assignments and the events on your calendar to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
     <li><strong>DeepInfra</strong> — reads your email to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
   </ul>

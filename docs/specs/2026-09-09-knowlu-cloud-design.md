@@ -407,9 +407,10 @@ commercial API is a self-serve tier that retains prompts up to 30 days by defaul
 a detected violation); it is not on zero-retention terms without a sales conversation this product
 never had. That inaccuracy runs wherever this spec repeats the claim — the architecture diagram's
 "Inference provider: zero-retention API, pinned models" (§3), §5.2's "the provider is under
-zero-retention terms", and §10's diff line "templated proposal generation goes to a zero-retention
-cloud provider" — and none of those sentences is rewritten here (§10 is a historical diff and the
-rest of the body stands as written); this amendment is the correction of record. The claim **is**
+zero-retention terms", and the line §10 actually applied to `VISION.md` on 2026-09-09, "our cloud
+against zero-retention inference, grammar-constrained, model-pinned, logged by id" (§10, ~line 275)
+— and none of those sentences is rewritten here (§10 is a historical diff and the rest of the body
+stands as written); this amendment is the correction of record. The claim **is**
 true of the pinned endpoints named above: OpenRouter's zero-data-retention setting on Knowlu's
 account, and CoreWeave's and DeepInfra's own zero-retention terms for the upstream that actually
 reads the text.
