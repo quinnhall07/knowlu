@@ -116,19 +116,38 @@ Deno.test("the granted scopes reach storeRefreshToken, not just the token", asyn
   assertEquals(sawScopes, TOKENS.scopes);
 });
 
-// F-6: every page this handler answers is real HTML served to a browser mid-redirect from Google —
-// the one such response in this codebase — so it carries the two headers that keep a hostile
-// network position from doing anything with it beyond reading the fixed text.
-Deno.test("every page carries nosniff and a CSP that allows nothing but its own inline style", async () => {
-  for (
-    const response of [
+// R2-8 / R-C2-E56: Supabase's functions relay rewrites an HTML response as `text/plain` on the
+// shared *.supabase.co domain — observed live on staging 2026-09-16, `GET
+// /functions/v1/google-callback?state=bogus&code=x` answered with `content-type: text/plain` and a
+// `content-security-policy: default-src 'none'; sandbox` this code never set, with the markup
+// arriving as literal text in the body. Every consent page (success, declined, expired, error) was
+// showing raw HTML source to the student. `page()` now answers the plain sentence itself — no
+// markup at all — with headers that match what actually reaches the browser.
+Deno.test("every page is a plain sentence, no markup, with nosniff and a CSP of default-src 'none'", async () => {
+  const cases: Array<[Response, string]> = [
+    [
       await callbackHandler(deps())(get("state=good&code=abc")),
+      "Google Calendar is connected. You can close this window — Knowlu will read it at your next slot.",
+    ],
+    [
       await callbackHandler(deps())(get("code=abc")),
+      "That link has expired. Start again from Knowlu.",
+    ],
+    [
       await callbackHandler(deps({ exchange: () => Promise.reject(new Error("boom")) }))(get("state=good&code=abc")),
+      "Google could not be connected just now. You can close this window and try again from Knowlu.",
+    ],
+    [
       await callbackHandler(deps())(get("state=good&error=access_denied")),
-    ]
-  ) {
+      "Google was not connected. You can close this window and try again from Knowlu.",
+    ],
+  ];
+  for (const [response, expected] of cases) {
+    assertEquals(response.headers.get("content-type"), "text/plain; charset=utf-8");
     assertEquals(response.headers.get("x-content-type-options"), "nosniff");
-    assertEquals(response.headers.get("content-security-policy"), "default-src 'none'; style-src 'unsafe-inline'");
+    assertEquals(response.headers.get("content-security-policy"), "default-src 'none'");
+    const body = await response.text();
+    assertEquals(body.includes("<"), false, `the body must carry no markup at all: ${body}`);
+    assertEquals(body, expected);
   }
 });

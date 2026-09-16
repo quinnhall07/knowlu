@@ -24,25 +24,27 @@ export interface CallbackDeps {
   ): Promise<void>;
 }
 
-// F-6: this page renders whatever `message` names (never anything from the request — every string
-// passed to `page` below is one of this file's own literals), but it is still the one HTML response
-// in this whole codebase, served to a real browser mid-redirect from Google. `nosniff` stops a
-// browser from ever re-interpreting the body as something other than what `content-type` says, and
-// the CSP allows nothing but this page's own inline `style` attribute — no script, no external
-// resource of any kind, on a page a hostile network position could otherwise try to inject into.
+// R2-8 / R-C2-E56 (regrading Task 10's F-6): this used to render `message` as an HTML page, but
+// Supabase's functions relay rewrites that response before it ever reaches the browser — observed
+// live on staging 2026-09-16, the wire response for this function arrived as `content-type:
+// text/plain` carrying a `content-security-policy: default-src 'none'; sandbox` this code never
+// set, with the markup below passed through as literal text in the body. Every consent page
+// (success, declined, expired, error) was showing raw HTML source to the student, on every call,
+// since Task 10 — no test caught it because the tests call this handler directly, never the relay
+// in front of it. So this is not HTML at all: the body is the sentence alone, nothing else;
+// `content-type: text/plain; charset=utf-8` matches what a browser actually receives; `nosniff`
+// still applies; and the CSP tightens to `default-src 'none'` — there is no inline style left to
+// allow. A real page of our own is C4's, once the site is public and a redirect can land there
+// instead of on the shared functions domain.
 function page(message: string, status = 200): Response {
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><title>Knowlu</title>` +
-      `<body style="font:16px system-ui;padding:3rem"><p>${message}</p></body>`,
-    {
-      status,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "x-content-type-options": "nosniff",
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
-      },
+  return new Response(message, {
+    status,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'",
     },
-  );
+  });
 }
 
 // R-C2-E31: every page said "Gmail", but the FIRST ask this pair ever makes is the calendar — a
@@ -58,7 +60,7 @@ function successMessage(scopes: string[]): string {
     : calendar
     ? "Google Calendar is"
     : "Google is";
-  return `${what} connected. You can <b>close this window</b> — Knowlu will read it at your next slot.`;
+  return `${what} connected. You can close this window — Knowlu will read it at your next slot.`;
 }
 
 export function callbackHandler(deps: CallbackDeps): (req: Request) => Promise<Response> {
@@ -67,7 +69,7 @@ export function callbackHandler(deps: CallbackDeps): (req: Request) => Promise<R
     const state = url.searchParams.get("state") ?? "";
     const code = url.searchParams.get("code") ?? "";
     if (url.searchParams.get("error") !== null) {
-      return page("Google was <b>not connected</b>. You can close this window and try again from Knowlu.");
+      return page("Google was not connected. You can close this window and try again from Knowlu.");
     }
     const accountId = state === "" ? null : await deps.takeState(state);
     if (accountId === null || code === "") {
