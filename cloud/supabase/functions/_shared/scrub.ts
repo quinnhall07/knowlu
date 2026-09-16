@@ -30,6 +30,13 @@ const NOTE = /\b[\w.-]+\.md\b/g;
 const CREDENTIAL =
   /\b(password|passwd|pwd|token|secret|api[_-]?key|key|authorization|bearer)\s*[:=]\s*(?:bearer\s+)?\S+/gi;
 const TOKEN = /\b[A-Za-z0-9_.-]{20,}\b/g;
+// The prompt's own token rule (provider swap Task 3): `TOKEN` above catches any opaque run of
+// 20+ characters, alphabetic ones included, and that is the right floor for a report a person
+// reads — but a judge prompt carries ordinary student mail, and a plain word can clear 20
+// characters on its own (a German compound such as "Hausaufgabenbesprechungstermin" is 30). This
+// rule requires at least one digit somewhere in the run, which a real opaque token — a session id,
+// a JWT, a confirmation code — always has and a long natural-language word never does.
+const DIGIT_TOKEN = /\b(?=[A-Za-z0-9_.-]*\d)[A-Za-z0-9_.-]{20,}\b/g;
 
 export function scrub(text: string): string {
   return text
@@ -39,6 +46,21 @@ export function scrub(text: string): string {
     .replace(NOTE, "<note>")
     .replace(CREDENTIAL, "$1=<secret>")
     .replace(TOKEN, "<token>");
+}
+
+/**
+ * The narrower scrub a judge prompt goes through (provider swap Task 3, `judge_prompts.ts`'s
+ * email branch): URLs, email addresses, the named-credential and bearer patterns, and opaque runs
+ * that carry a digit. Deliberately NOT `scrub`: `TOKEN`'s plain 20-character floor would redact an
+ * ordinary long word out of a student's own message, and neither `WINUSER` nor `NOTE` has anything
+ * to catch in mail a student did not write about their own machine or vault.
+ */
+export function scrubForPrompt(text: string): string {
+  return text
+    .replace(EMAIL, "<email>")
+    .replace(URL_RE, "<url>")
+    .replace(CREDENTIAL, "$1=<secret>")
+    .replace(DIGIT_TOKEN, "<token>");
 }
 
 export function scrubJson(v: unknown): unknown {

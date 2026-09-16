@@ -1,5 +1,5 @@
-import { assertEquals } from "@std/assert";
-import { scrub, scrubJson } from "./scrub.ts";
+import { assert, assertEquals } from "@std/assert";
+import { scrub, scrubForPrompt, scrubJson } from "./scrub.ts";
 
 Deno.test("the seven things a report must never carry", () => {
   // An address — somebody else's, usually.
@@ -146,4 +146,35 @@ Deno.test("a non-breaking space and NEL are this file's whitespace, in both dire
   // NEL (U+0085) inside a URL's tail: this file's `\s` does not include it, so the whole
   // capability URL — NEL and all — is claimed, not just the part before it.
   assertEquals(scrub("see https://x.invalid/secrettail more"), "see <url> more");
+});
+
+// Provider swap Task 3: `scrubForPrompt` is the narrower scrub a judge prompt goes through
+// (`judge_prompts.ts`'s email branch) -- URLs, email addresses, named credentials and bearer
+// tokens, and opaque runs that carry a digit, but NOT the plain 20-character floor `scrub`'s
+// `TOKEN` rule uses, which a student's own long word can clear on its own.
+Deno.test("scrubForPrompt catches URLs, email addresses, named credentials and digit-bearing tokens", () => {
+  assertEquals(scrubForPrompt("mailed a.student@crimson.ua.edu twice"), "mailed <email> twice");
+  assertEquals(
+    scrubForPrompt("fetching https://lms.example.invalid/feed/abc123.ics failed"),
+    "fetching <url> failed",
+  );
+  assertEquals(scrubForPrompt("password=hunter2"), "password=<secret>");
+  assertEquals(
+    scrubForPrompt("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdef"),
+    "authorization=<secret>",
+  );
+  // A digit-bearing opaque run -- a confirmation code, a session id -- is still caught.
+  assertEquals(scrubForPrompt("your code is abcdEFGH12345678901234wxyz today"), "your code is <token> today");
+});
+
+Deno.test("scrubForPrompt leaves a plain long word alone, unlike scrub's TOKEN rule", () => {
+  const sentence = "Please see the Hausaufgabenbesprechungstermin tomorrow.";
+  // `scrub` over-redacts: the word alone clears TOKEN's 20-character floor.
+  assert(scrub(sentence).includes("<token>"), "sanity: scrub's plain TOKEN rule does redact this word");
+  // `scrubForPrompt` requires a digit in the run, so an ordinary long word survives.
+  assertEquals(scrubForPrompt(sentence), sentence);
+});
+
+Deno.test("scrubForPrompt does not scrub a Windows path or a note filename (not a prompt concern)", () => {
+  assertEquals(scrubForPrompt(String.raw`C:\Users\Ada\notes.md`), String.raw`C:\Users\Ada\notes.md`);
 });
