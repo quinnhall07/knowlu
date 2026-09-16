@@ -41,6 +41,7 @@ function request(overrides: Record<string, unknown> = {}) {
     schema: SCHEMA as unknown as Record<string, unknown>,
     maxTokens: 256,
     sampling: { temperature: 0 },
+    route: {},
     ...overrides,
   };
 }

@@ -68,7 +68,8 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"]) {
         row: {
           kind: "email", provider: "anthropic", model_id: "claude-haiku-4-5",
           prompt_version: "email-1", grammar_version: "email-1", max_tokens: 640,
-          sampling: { temperature: 0 }, usd_per_m_in: 1.0, usd_per_m_out: 5.0,
+          sampling: { temperature: 0 }, route: {}, precision: "bf16",
+          usd_per_m_in: 1.0, usd_per_m_out: 5.0,
         },
         model: new ScriptedModel(replies),
         rules: { lookup: () => Promise.resolve(null) },

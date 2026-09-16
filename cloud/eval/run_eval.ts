@@ -41,10 +41,11 @@
 import type { CapStore } from "../supabase/functions/_shared/judge_caps.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { serviceDb } from "../supabase/functions/_shared/judge_db.ts";
-import { AnthropicModel, type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
+import { type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import { modelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { judge, type Kind } from "../supabase/functions/_shared/judge_pipeline.ts";
 import { promptHash } from "../supabase/functions/_shared/judge_prompts.ts";
+import { modelFor } from "../supabase/functions/_shared/judge_provider.ts";
 import { loadSeed } from "./loader.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
@@ -235,11 +236,6 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   await db.rpc("backfill_correction_judgments", {});
 
   const dry = argSet.has("--dry-run");
-  const apiKey = envGet("ANTHROPIC_API_KEY") ?? "";
-  if (!dry && apiKey === "") {
-    console.error("ANTHROPIC_API_KEY is required unless --dry-run");
-    return 2;
-  }
 
   // One id for the whole run (R-C2-E51 fix 1, finding 5): every `eval_runs` row this run writes,
   // across every kind and every metric, carries the same `run_id`, so a later reader can group a
@@ -266,13 +262,30 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     // `--dry-run` reaches no provider at all, so the model-call count is the case count exactly.
     console.log(`${kind}: ${rows.length} cases, <= ${rows.length} model calls (cap ${MAX_CASES})`);
     const row = await modelRow(db, kind);
+    // R-PS-3: the model is built only now — the row is read, and there is at least one
+    // non-dry-run case this kind is actually about to spend on. One build per kind (not per
+    // case): a missing key fails this kind loud, once, instead of once per case.
+    let liveModel: JudgeModel | undefined;
+    if (!dry) {
+      try {
+        liveModel = modelFor(row, envGet);
+      } catch (e) {
+        // `modelFor`'s own message already names the row's provider and its secret (Step 6 of
+        // the provider seam); this is that same "no key" fault, at the point a real spend was
+        // about to happen — the ONLY thing this adds is that `--dry-run` is the way around it.
+        const detail = e instanceof Error ? e.message : String(e);
+        console.error(`${kind}: ${detail} (unless --dry-run)`);
+        worst = Math.max(worst, 2);
+        continue;
+      }
+    }
     const cases: Case[] = rows.map((r) => ({ kind, theirs: r.theirs }));
     const answers: Array<Record<string, unknown> | null> = [];
     let inputTokens = 0, outputTokens = 0;
     for (const r of rows) {
       const raw: JudgeModel = dry
         ? new ScriptedModel([dryRunAnswer(kind, r.theirs)])
-        : new AnthropicModel({ apiKey });
+        : liveModel!;
       // Wraps whichever model answers, so the run's own token spend is recorded (ruling
       // R-C2-E9) regardless of which branch produced the `ModelReply`.
       const metered: JudgeModel = {

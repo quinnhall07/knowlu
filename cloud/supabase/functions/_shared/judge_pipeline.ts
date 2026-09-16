@@ -176,6 +176,7 @@ export async function judge(
       schema: prompt.schema,
       maxTokens: deps.row.max_tokens,
       sampling: deps.row.sampling,
+      route: deps.row.route,
     });
   } catch (e) {
     // The failure text is deliberately not carried into the row: §5.6 forbids a body in the log,

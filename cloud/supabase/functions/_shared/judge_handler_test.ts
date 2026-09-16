@@ -18,6 +18,8 @@ const ROW: ModelRow = {
   grammar_version: "task-1",
   max_tokens: 256,
   sampling: { temperature: 0 },
+  route: {},
+  precision: "bf16",
   usd_per_m_in: 1.0,
   usd_per_m_out: 5.0,
 };
