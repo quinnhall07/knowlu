@@ -153,26 +153,33 @@ Deno.test("an email case that labels only 'course' (never 'tier') contributes no
 // below it silently proving nothing.
 // ---------------------------------------------------------------------------------------------
 
-Deno.test("a normal run with zero cases prints the exact message, exits 0, and reads no secret", async () => {
+// A-4: the ONE env read the empty-seed path is now allowed — `SUPABASE_SERVICE_ROLE_KEY`, to ask
+// whether it is even worth asking the database — answered here as absent, exactly as a fork PR
+// with no secrets sees it. Anything else read is still a bug this fake catches by throwing.
+function throwingExceptServiceKey(): (name: string) => string | undefined {
+  return (name: string) => {
+    if (name === "SUPABASE_SERVICE_ROLE_KEY") return undefined;
+    throw new Error(`must not read '${name}' when there are no cases to score and no service key`);
+  };
+}
+
+Deno.test("a normal run with zero cases and no service-role key prints the exact message, exits 0, and reads no other secret", async () => {
   const committed = await loadSeed();
   assert(
     committed.length === 0,
     "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
   );
-  const throwing = (name: string): string => {
-    throw new Error(`must not read '${name}' when there are no cases to score`);
-  };
   const captured = captureConsole();
   let code: number;
   try {
     // No --load-seed, no --dry-run, no --thresholds: none of it should matter, because the
     // zero-case check runs before any of these other switches are even consulted.
-    code = await main([], { envGet: throwing });
+    code = await main([], { envGet: throwingExceptServiceKey() });
   } finally {
     captured.restore();
   }
   assertEquals(code, 0);
-  assertEquals(captured.log, ["0 cases — nothing to score"]);
+  assertEquals(captured.log, ["0 cases — nothing to score (no seed, no database access)"]);
 });
 
 Deno.test("the same zero-case exit holds with --dry-run and --thresholds present", async () => {
@@ -181,18 +188,109 @@ Deno.test("the same zero-case exit holds with --dry-run and --thresholds present
     committed.length === 0,
     "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
   );
-  const throwing = (name: string): string => {
-    throw new Error(`must not read '${name}' when there are no cases to score`);
-  };
   const captured = captureConsole();
   let code: number;
   try {
-    code = await main(["--dry-run", "--thresholds", "cloud/eval/thresholds.json"], { envGet: throwing });
+    code = await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      { envGet: throwingExceptServiceKey() },
+    );
   } finally {
     captured.restore();
   }
   assertEquals(code, 0);
-  assertEquals(captured.log, ["0 cases — nothing to score"]);
+  assertEquals(captured.log, ["0 cases — nothing to score (no seed, no database access)"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// A-4: an empty local seed with a service-role key present and NOTHING in `eval_cases` either
+// must still answer the same "nothing to score" — the key alone is not cases.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("an empty seed with a service-role key but an empty database still exits 0 with nothing to score", async () => {
+  const committed = await loadSeed();
+  assert(committed.length === 0, "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12)");
+  let dbCalls = 0;
+  const db = fakeDb();
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main([], {
+      envGet: (name) => (name === "SUPABASE_SERVICE_ROLE_KEY" ? "service-role-not-a-secret" : undefined),
+      db: () => {
+        dbCalls += 1;
+        return db;
+      },
+    });
+  } finally {
+    captured.restore();
+  }
+  assertEquals(code, 0);
+  assertEquals(captured.log, ["0 cases — nothing to score (no seed, no database access)"]);
+  assertEquals(dbCalls, 1, "the count check reaches the database exactly once");
+});
+
+// ---------------------------------------------------------------------------------------------
+// A-4: the gate's whole point — an empty LOCAL seed with real rows in `eval_cases` (the shape a
+// consented correction takes once C4's (c) opt-in exists) must wake the gate up, not answer
+// "nothing to score" forever.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("an empty seed with a service-role key and cases already in eval_cases runs the suite for real", async () => {
+  const committed = await loadSeed();
+  assert(committed.length === 0, "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12)");
+  const consentedTheirs = { effort_hours: 2, importance: 4, course: "cs-101" };
+  const evalRunsInserted: Array<Record<string, unknown>> = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path === "eval_cases?select=id&limit=1") {
+        // The database has ONE consented case (no local seed names it at all) — this is what a
+        // fork of no seed and a live `eval_cases` corpus actually looks like.
+        return Promise.resolve([{ id: 1 }]);
+      }
+      if (path.startsWith("eval_cases?kind=eq.task")) {
+        return Promise.resolve([{
+          id: 1,
+          kind: "task",
+          request: { kind: "task", item: { id: "x", title: "t" }, heuristics_seed: { known_courses: ["cs-101"] } },
+          ours: null,
+          theirs: consentedTheirs,
+        }]);
+      }
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.task")) {
+        return Promise.resolve([{
+          kind: "task", provider: "anthropic", model_id: "claude-haiku-4-5",
+          prompt_version: "v1", grammar_version: "v1", max_tokens: 256, sampling: {},
+          usd_per_m_in: 1, usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") evalRunsInserted.push(row);
+      return Promise.resolve(null);
+    },
+  });
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      {
+        db: () => db,
+        loadSeed: () => Promise.resolve([]),
+        envGet: (name) => (name === "SUPABASE_SERVICE_ROLE_KEY" ? "service-role-not-a-secret" : undefined),
+      },
+    );
+  } finally {
+    captured.restore();
+  }
+  assertEquals(code, 0);
+  assertEquals(captured.log.filter((l) => l.includes("nothing to score")), [], "the gate must not have short-circuited");
+  // task's three metrics, all fully labelled by consentedTheirs, each score 1.0/0 exactly and write a row —
+  // proof the run actually scored the case a fake model answered, not merely that it declined to exit early.
+  assertEquals(evalRunsInserted.length, 3);
 });
 
 // ---------------------------------------------------------------------------------------------

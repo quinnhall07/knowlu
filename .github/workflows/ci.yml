@@ -89,24 +89,36 @@ jobs:
   # regression past `cloud/eval/thresholds.json`. C0's branch protection is what actually blocks
   # the merge; this job only fails the check.
   #
-  # `cloud/eval/seed/` is empty at merge (ruling R-C2-E12, Task 13) and stays empty until cases
-  # arrive from consented corrections (a later stream's opt-in), so `run_eval.ts` itself exits 0
-  # printing "0 cases — nothing to score" before it reads ANTHROPIC_API_KEY or
-  # SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, or opens a connection (ruling R-C2-E50 (2)) — which is
-  # what lets this job pass green on a PR that sets none of its two secrets.
+  # `cloud/eval/seed/` is empty at merge (ruling R-C2-E12, Task 13) and stays empty FOREVER — it is
+  # not where a consented correction lands once a later stream's opt-in exists; `eval_cases` is.
+  # `run_eval.ts` checks the seed first and, if it is empty, asks exactly one more question before
+  # doing anything else that could spend money or need a connection: is
+  # `SUPABASE_SERVICE_ROLE_KEY` set at all (C2 final review A-4, regrading a gate that could never
+  # wake up)? Absent, it exits 0 printing "0 cases — nothing to score (no seed, no database
+  # access)" without ever reading `ANTHROPIC_API_KEY` or opening a connection — which is what lets
+  # this job pass green on a PR that sets neither secret. Present, it asks the database once
+  # whether `eval_cases` holds anything at all, and runs the suite for real the day it does.
   #
   # **A fork PR gets no secrets at all** (GitHub does not expose them to `pull_request` runs from a
-  # fork), so on a fork this job can never make a real model call however many cases exist: both
-  # `secrets.*` below arrive empty and `run_eval.ts` exits 2 naming the missing key rather than
-  # spending anything. The spend this job CAN incur is on a branch PR in this repository, and it is
-  # bounded: `run_eval.ts`'s `MAX_CASES` caps each kind's corpus at 200 rows in the query itself
-  # (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0014 each, and the
-  # run prints its own case count before each kind's loop.
+  # fork), so on a fork this job can never make a real model call however many cases staging's
+  # `eval_cases` holds — the check above answers "no database access" before it could ever find
+  # out, and spends nothing finding that out. The spend this job CAN incur is on a branch PR in
+  # this repository — whose steps below set both secrets TOGETHER, never one without the other —
+  # and it is bounded even then: `run_eval.ts`'s `MAX_CASES` caps each kind's corpus at 200 rows in
+  # the query itself (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0014
+  # each, and the run prints its own case count before each kind's loop.
   eval-gate:
     runs-on: ubuntu-latest
     needs: cloud
     if: github.event_name == 'pull_request'
     timeout-minutes: 20
+    # A-6: the staging project's host, named once at job level and referenced twice below (the
+    # `eval suite` step's own `SUPABASE_URL` and its `--allow-net` list) — the literal used to
+    # appear twice, independently, which is exactly the shape that drifts the day staging moves.
+    # Not a secret (the C1 plan: "each project's reference id, its URL ... none secret" —
+    # `app/src/account.rs`'s own `DEFAULT_API_BASE` names prod's the same way).
+    env:
+      STAGING_HOST: brvhgbihxevrudqpulcm.supabase.co
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: { fetch-depth: 0 }
@@ -122,8 +134,10 @@ jobs:
         run: |
           files=$(git diff --name-only "origin/$BASE_REF"...HEAD)
           run=no
-          # The three files that define what is asked and how the answer is checked...
-          if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/judge_(prompts|models|validate)\.ts$'; then run=yes; fi
+          # The four files that define what is asked and how the answer is checked — A-6 adds
+          # `judge_pipeline.ts` (the call order, the verdict shape, the outcome the eval suite
+          # itself replays) beside the three that were already here...
+          if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/judge_(prompts|models|validate|pipeline)\.ts$'; then run=yes; fi
           # ...and ANY migration that mentions the `models` table. A pin change is "a migration row
           # with a date" (§5.2) — `20260912000100_pin_sonnet.sql`, say — so a filename pattern is
           # exactly the wrong test: it would miss the model swap the gate exists for.
@@ -131,17 +145,20 @@ jobs:
             if [ -f "$f" ] && grep -qiE '\bmodels\b' "$f"; then run=yes; fi
           done
           echo "run=$run" >> "$GITHUB_OUTPUT"
-      # `SUPABASE_URL` is not secret (the C1 plan: "each project's reference id, its URL ... none
-      # secret" — `app/src/account.rs`'s own `DEFAULT_API_BASE` names prod's the same way), so it
-      # is the literal staging project URL, not a GitHub secret; the two secrets Quinn sets are
-      # named in the C2 Task 14 report, never a value. C2 Task 14 fix 1 (R-C2-E51, finding 3)
-      # dropped `EVAL_ACCOUNT_ID`: nothing in the eval path uses an account id for anything real
-      # (every consumer is a stub), so it named a secret that did nothing.
+      # `SUPABASE_URL` is not secret (the job-level `STAGING_HOST` comment above says why); the two
+      # secrets Quinn sets are named in the C2 Task 14 report, never a value. This step runs
+      # PR-AUTHORED CODE (`cloud/eval/run_eval.ts`, and everything it imports) WITH the staging
+      # service-role key — the same trust every job on this workflow already extends to a branch
+      # PR in this repository — while a FORK PR gets neither secret at all (GitHub does not expose
+      # them to `pull_request` runs from a fork), which is what keeps this step from ever spending
+      # anything on an untrusted checkout. C2 Task 14 fix 1 (R-C2-E51, finding 3) dropped
+      # `EVAL_ACCOUNT_ID`: nothing in the eval path uses an account id for anything real (every
+      # consumer is a stub), so it named a secret that did nothing.
       - name: eval suite
         if: steps.touched.outputs.run == 'yes'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SUPABASE_URL: https://brvhgbihxevrudqpulcm.supabase.co
+          SUPABASE_URL: https://${{ env.STAGING_HOST }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
         # C2 Task 14 fix 1 (R-C2-E51, finding 4): the grants are scoped to exactly what this run
         # needs while it holds the service-role key — the four names Task 0 ruled the pinned
@@ -150,4 +167,4 @@ jobs:
         # hosts it actually calls. `--allow-read` stays unscoped: npm module downloads at import
         # time are not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s
         # absence entirely, and this step needs to read its own source tree and thresholds.json.
-        run: deno run --allow-read --allow-env=ANTHROPIC_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=api.anthropic.com,brvhgbihxevrudqpulcm.supabase.co --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
+        run: deno run --allow-read --allow-env=ANTHROPIC_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=api.anthropic.com,${{ env.STAGING_HOST }} --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json

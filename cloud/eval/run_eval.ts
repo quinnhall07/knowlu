@@ -12,14 +12,19 @@
 // Every run of this program without --dry-run spends real money (one model call per case, at
 // roughly $0.0014 each — the arithmetic is in `judge_caps.ts`). `--dry-run` first, always.
 //
-// Ruling R-C2-E50 (2): `cloud/eval/seed/` is empty at merge (ruling R-C2-E12, Task 13) and, until
-// C4's (c) opt-in ships a second path, it is the ONLY way a row ever lands in `eval_cases` — so an
-// empty seed on disk means an empty case set, full stop. `loadSeed()` reads nothing but the local
-// filesystem, so counting its result is the free, local, no-secret way to know there is nothing to
-// do, and it is checked FIRST — before `--thresholds`, before `ANTHROPIC_API_KEY`, before
-// `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` (both read inside `serviceDb()`), and before any
-// connection opens or any `eval_runs` row is written. That is what lets `eval-gate` (hand-off H8,
-// part 2) pass green on a PR that sets none of its secrets.
+// Ruling R-C2-E50 (2), corrected by C2 final review A-4: `cloud/eval/seed/` is empty at merge
+// (ruling R-C2-E12, Task 13) and STAYS empty — it is not where a consented correction lands once
+// C4's (c) opt-in exists; `eval_cases` is. `loadSeed()` reads nothing but the local filesystem, so
+// it is checked FIRST, before anything else — but an empty seed is no longer the WHOLE answer
+// (A-4, regrading m-something: the old check stopped here unconditionally, so the gate could never
+// wake up no matter how large `eval_cases` grew). An empty seed now asks exactly one more
+// question, `SUPABASE_SERVICE_ROLE_KEY` — present or not — before `--thresholds`, before
+// `ANTHROPIC_API_KEY`, before `serviceDb()`'s own `SUPABASE_URL` read, and before any connection
+// opens or any `eval_runs` row is written: absent, this reads no further and answers exactly as
+// before (`0 cases`); present, it asks the database once whether `eval_cases` holds anything at
+// all, and runs the suite for real the day it does. That is what lets `eval-gate` (hand-off H8,
+// part 2) pass green on a fork PR, which gets no secrets at all (ci.yml's own job comment says
+// so), while still being able to wake up on a PR that has them.
 //
 // R-C2-E51 fix 1, finding 2: a non-empty LOCAL seed that a kind's `eval_cases` corpus does not
 // reflect (because `--load-seed` was never run against this database) is NOT the same as "nothing
@@ -99,6 +104,17 @@ async function load(db: Db, kind: Kind): Promise<Row[]> {
     `eval_cases?kind=eq.${kind}&or=(source.eq.seed,added_at.gte.${since})` +
       `&select=id,kind,request,ours,theirs&order=id&limit=${MAX_CASES}`,
   ) as Row[];
+}
+
+/**
+ * A-4: is there anything in `eval_cases` at all, of any kind? One row is enough to know the gate
+ * should run — an exact count is not needed, and `select=id&limit=1` is the cheapest way to ask
+ * PostgREST. Reached only after the local seed has already answered "empty" AND a service-role
+ * key is present, so a fork PR (or any run with no database access) never calls this at all.
+ */
+async function anyEvalCasesExist(db: Db): Promise<boolean> {
+  const rows = await db.select("eval_cases?select=id&limit=1");
+  return rows.length > 0;
 }
 
 /**
@@ -182,12 +198,26 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     return 0;
   }
 
-  // See the header (ruling R-C2-E50 (2)): this is the WHOLE check, and it runs before anything
-  // else — no thresholds file, no env var, no connection.
+  // A-4 (C2 final review, regrading the gate's own vacuity): the local seed is checked FIRST, same
+  // as always — no thresholds file, no env var, no connection, for a run whose seed has cases.
+  //
+  // What changes: an EMPTY local seed used to be the whole answer, unconditionally. `cloud/eval/`
+  // ships with an empty seed by design (ruling R-C2-E12) and stays that way forever — the seed is
+  // not where a consented correction lands (C4's (c) opt-in writes `eval_cases` directly) — so the
+  // old check could never see a real case arrive and the gate could never wake up, no matter how
+  // large `eval_cases` grew. Now: an empty seed falls through to ONE more question — is there a
+  // service-role key in the environment at all? A fork PR gets no secrets (ci.yml's own comment
+  // says so) and reads no further than this one variable, answering exactly as before. A PR that
+  // DOES have one asks the database whether `eval_cases` holds anything, and runs the suite for
+  // real the day it does.
   const seedRecords = await loadSeedFn();
   if (seedRecords.length === 0) {
-    console.log("0 cases — nothing to score");
-    return 0;
+    const serviceKey = envGet("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const haveCases = serviceKey !== "" && await anyEvalCasesExist(dbFactory());
+    if (!haveCases) {
+      console.log("0 cases — nothing to score (no seed, no database access)");
+      return 0;
+    }
   }
 
   const thresholdIndex = args.indexOf("--thresholds");

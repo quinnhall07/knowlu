@@ -1000,6 +1000,22 @@ pub fn google_connected() -> Value {
     }
 }
 
+/// A-6: what the wizard's Google error line says for a failed status — pulled out as a pure
+/// function (no network, no agent) so the mapping is tested directly rather than only through a
+/// live `get_json` call. `get_json` below is reached by exactly two commands (`google_connect_url`,
+/// `google_connected`), so this is specific to the Google flow on purpose: 401 means the wizard's
+/// own pending session has gone stale (the fix is a sign-in, not a retry of THIS request), and 503
+/// means the deployment has no Google client configured at all (`GOOGLE_NOT_CONFIGURED` on the
+/// service side) — the fix is the `calendar_ics` fallback the panel already shows, not "try again".
+/// Every other status keeps the generic form, which names the code but nothing more specific.
+fn google_error_for_status(code: u16) -> String {
+    match code {
+        401 => "sign in again".to_string(),
+        503 => "Google sign-in is not available right now — use the secret address below".to_string(),
+        _ => format!("the service refused (HTTP {code})"),
+    }
+}
+
 /// One bearer GET against the functions base. `check_api_base` is applied first, so an
 /// `KNOWLU_API_BASE` pointing anywhere but https (or loopback, for the tests) is refused here
 /// rather than turned into a request to a host nobody chose.
@@ -1020,7 +1036,7 @@ fn get_json(url: &str, token: &str) -> Result<Value, String> {
     let body = response.body_mut().read_to_string().unwrap_or_default();
     if !(200..300).contains(&code) {
         // The status, not the body: this string reaches the wizard's error line.
-        return Err(format!("the service refused (HTTP {code})"));
+        return Err(google_error_for_status(code));
     }
     serde_json::from_str(&body).map_err(|_| "the service returned no JSON".to_string())
 }
@@ -1051,6 +1067,31 @@ pub fn open_external(url: String) -> Value {
     match open_in_browser(&url) {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[cfg(test)]
+mod google_error_for_status_tests {
+    use super::google_error_for_status;
+
+    #[test]
+    fn a_401_says_sign_in_again() {
+        assert_eq!(google_error_for_status(401), "sign in again");
+    }
+
+    #[test]
+    fn a_503_names_the_fallback_rather_than_asking_for_a_retry() {
+        assert_eq!(
+            google_error_for_status(503),
+            "Google sign-in is not available right now — use the secret address below"
+        );
+    }
+
+    #[test]
+    fn every_other_status_keeps_the_generic_form() {
+        assert_eq!(google_error_for_status(500), "the service refused (HTTP 500)");
+        assert_eq!(google_error_for_status(429), "the service refused (HTTP 429)");
+        assert_eq!(google_error_for_status(404), "the service refused (HTTP 404)");
     }
 }
 

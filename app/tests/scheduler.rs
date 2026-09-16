@@ -311,6 +311,46 @@ fn a_vault_without_a_feed_records_the_ingest_skip_in_the_step_list() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// A-2: a cloud vault with no `ics_url` used to get BOTH a fake `ingest (skipped: no ics_url)`
+/// step (pushed on `ics_state` alone) AND the real `ingest` child process's own step (`slot_argv`
+/// includes it whenever `config/cloud.yaml` exists) — two `ingest` entries in one
+/// `RunSummary.steps`, one of them describing a step that never actually ran. The fix is one
+/// decision point (`ingest_included`) both places now read; this proves `steps` names `ingest`
+/// exactly once for a cloud vault, and that the one entry is the REAL step, never the skip line.
+#[test]
+fn a_cloud_vault_names_ingest_exactly_once_never_the_skip_line_too() {
+    let v = scratch("cloudingestonce");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // No `ics_url` at all — exactly `a_vault_without_a_feed_records_the_ingest_skip_in_the_step_list`'s
+    // setup, except this vault ALSO has an account, which is the one thing that must change the
+    // answer (H5/A-1: the feed lives in the account from here on).
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'https://cloud.example.invalid/functions/v1'\nanon_key: 'anon-not-a-secret'\nsession_credential_target: 'knowlu/test/session'\naccount_id: 'acct-1'\n",
+    ).unwrap();
+    assert!(!has_ics_url(&v));
+    let cs = open(&v, "cloudingestonce");
+    let sch = Scheduler::default();
+    let fake_local_appdata = std::env::temp_dir().join(format!("qo-console-sched-localappdata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    std::fs::create_dir_all(&fake_local_appdata).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake_local_appdata.as_os_str()),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let ingest_entries: Vec<&String> = named.iter().filter(|n| n.starts_with("ingest")).collect();
+    assert_eq!(ingest_entries.len(), 1, "exactly one ingest entry, real or skipped: {named:?}");
+    assert_eq!(ingest_entries[0], "ingest", "the one entry must be the REAL step, not a skip line: {named:?}");
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 #[test]
 fn engine_exe_prefers_the_env_override_and_names_both_places_when_missing() {
     let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

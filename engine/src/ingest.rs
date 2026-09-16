@@ -817,6 +817,40 @@ pub fn run_with(
     code
 }
 
+/// A-1 (H5 fix, CLAUDE.md's "Neither feed is compulsory"): what `ingest` does when `/ingest-ics`
+/// failed and there is no local `ics_url` to fall back to — a genuinely dead end either way, but
+/// TWO different dead ends. A 404 means this account simply has no `lms_ics` source: a permanent,
+/// normal state for a student who left the LMS capture empty, never a failure — exit 0 and name
+/// the skip, the same shape as `ingest (skipped: no ics_url)` for a vault with no account at all,
+/// never exit 1 every slot forever (`scheduler.rs`'s own invariant: a non-zero step is retry
+/// backoff and an amber tray, and nothing here can ever change without the student taking an
+/// action the app already offers). Any OTHER failure still means there is no way at all to get a
+/// feed — exit 1 stands — but the line says what actually happened: a genuine HTTP status from the
+/// service reads differently than the service being unreachable altogether.
+///
+/// Pulled out as a pure function over `CloudError` (not tested through `run_lines` itself): a
+/// cloud vault reaching this arm needs `cloudmodel::resolve` to succeed, which needs a real
+/// Windows Credential Manager session — no test in this crate or `cloud_contract.rs` has one, by
+/// design (`cloud_contract.rs`'s own doc comment says why), so this is the one place the decision
+/// can be exercised directly.
+fn cloud_ics_failure_with_no_local_url(e: &crate::cloudmodel::CloudError) -> (i32, Vec<String>) {
+    match e {
+        crate::cloudmodel::CloudError::Status { code: 404, .. } => {
+            (0, vec!["ingest: no LMS feed on this account — skipped".to_string()])
+        }
+        crate::cloudmodel::CloudError::Status { code, .. } => (
+            1,
+            vec![format!(
+                "ingest: no feed — the service answered HTTP {code} ({e}) and no ics_url is configured"
+            )],
+        ),
+        _ => (
+            1,
+            vec![format!("ingest: no feed — the service is unavailable ({e}) and no ics_url is configured")],
+        ),
+    }
+}
+
 /// The testable core: everything `run_with` does, with the output returned instead of printed, in
 /// the same order Python prints it. Python's tests assert on `capsys`; Rust has no such capture, so
 /// the lines are a value.
@@ -875,9 +909,7 @@ pub fn run_lines(
         // is authoritative; the answer is in `fetch_ics`'s doc comment.
         (None, Some(client)) => match crate::cloudmodel::fetch_ics(client, first_run) {
             Ok((text, _past)) => Ok(text),
-            Err(e) if url.is_empty() => {
-                return (1, vec![format!("ingest: no feed — the service is unavailable ({e}) and no ics_url is configured")]);
-            }
+            Err(e) if url.is_empty() => return cloud_ics_failure_with_no_local_url(&e),
             Err(e) => {
                 println!("ingest: /ingest-ics unavailable ({e}); using the vault's ics_url");
                 crate::calfeed::fetch_ics(&url)
@@ -915,6 +947,38 @@ pub fn run_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- A-1: the cloud ingest arm's 404-vs-everything-else decision, tested directly over
+    // `CloudError` since reaching it through `run_lines` needs a real Windows session
+    // (`cloud_contract.rs`'s doc comment explains why no test here has one).
+
+    #[test]
+    fn a_404_with_no_local_url_is_a_named_skip_at_exit_0() {
+        let e = crate::cloudmodel::CloudError::Status { code: 404, detail: "no lms_ics source for this account".to_string() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 0);
+        assert_eq!(lines, vec!["ingest: no LMS feed on this account — skipped".to_string()]);
+    }
+
+    #[test]
+    fn a_503_with_no_local_url_keeps_exit_1_but_names_the_real_status() {
+        let e = crate::cloudmodel::CloudError::Status { code: 503, detail: String::new() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("the service answered HTTP 503"), "{lines:?}");
+        assert!(lines[0].contains("no ics_url is configured"), "{lines:?}");
+        assert!(!lines[0].contains("unavailable"), "a real status must never read as merely down: {lines:?}");
+    }
+
+    #[test]
+    fn a_transport_failure_with_no_local_url_reads_as_unavailable_not_a_status() {
+        let e = crate::cloudmodel::CloudError::Transport("connection refused".to_string());
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert!(lines[0].contains("the service is unavailable"), "{lines:?}");
+        assert!(!lines[0].contains("HTTP"), "a transport failure carries no status to name: {lines:?}");
+    }
 
     fn changes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

@@ -50,3 +50,20 @@ fn ci_enforces_zero_warnings_and_the_eol_contract() {
     assert!(c.contains("scripts/ci/eol-check.ps1"), "ci.yml must run the eol check");
     assert!(c.contains("cargo test --workspace"), "ci.yml must test the whole workspace");
 }
+
+/// A-6 (C2 final review): the eval gate exists, never runs on a plain push (a fork PR's `push` to
+/// its own branch must not spend the staging service-role key), and names both secrets it needs —
+/// so a secret renamed here but not in the repository's settings fails this test rather than only
+/// on the first PR that touches a prompt.
+#[test]
+fn the_eval_gate_job_exists_is_pull_request_only_and_names_both_its_secrets() {
+    let c = workflow("ci.yml");
+    let start = c.find("\n  eval-gate:").expect("ci.yml must define an eval-gate job");
+    let job = &c[start..];
+    assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate must run only on pull_request: {job}");
+    assert!(job.contains("secrets.ANTHROPIC_API_KEY"), "eval-gate must reference secrets.ANTHROPIC_API_KEY");
+    assert!(
+        job.contains("secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"),
+        "eval-gate must reference secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"
+    );
+}

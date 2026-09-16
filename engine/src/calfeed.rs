@@ -691,6 +691,9 @@ pub fn load_calendar_events(
             fresh.insert(name.clone(), previous.get(&name).cloned().unwrap_or_default());
             continue;
         }
+        // A-6: `url` can be the literal `cloud:<name>` marker (C2 Task 8, §11a) — this module
+        // never parses that prefix itself; `cli.rs`'s own `calendar` closure is what strips it and
+        // routes to `cloudmodel::fetch_calendar`, so `fetch` here is opaque either way.
         let text = match fetch(url) {
             Ok(text) => text,
             Err(err) => {

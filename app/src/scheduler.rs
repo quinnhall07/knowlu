@@ -161,13 +161,22 @@ pub fn engine_exe() -> Result<PathBuf, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcsState { Feed, NoUrl, Unreadable }
 
-/// The engine's `ingest` exits **1** on an empty `ics_url` (Python does, and the port keeps it),
-/// and a slot step that exits non-zero sets `engine_ok = false` — which would put every friend with
-/// no LMS feed into permanent retry backoff and an amber tray, twice a day, forever. So the APP
-/// decides not to run the step; the engine's own behaviour is unchanged (ruling R-P4a-9).
+/// The engine's `ingest` exits **1** on an empty `ics_url` with no account to fall back to (Python
+/// did, and the port keeps it), and a slot step that exits non-zero sets `engine_ok = false` —
+/// which would put every friend with no LMS feed into permanent retry backoff and an amber tray,
+/// twice a day, forever. So a vault with NO account and no `ics_url` has the APP decide not to run
+/// the step at all (ruling R-P4a-9).
+///
+/// **A cloud vault is different (C2 final review A-1/A-2, restating the stale rule this doc
+/// carried before): the feed lives in the account, not the vault, so this app runs `ingest`
+/// regardless of what `ics_state` says.** The engine itself names a missing `lms_ics` source as a
+/// skip — `/ingest-ics` answering 404 is exit 0, never exit 1 — so there is no longer a failure
+/// mode here for this app to protect a cloud vault from; `ingest_included` (below `has_ics_url`) is
+/// the one decision point both `slot_argv` and `run_slot_inner`'s own skip line agree on.
 ///
 /// A **missing** file is `NoUrl` (a vault without one has no feed, which is not a fault); a file
-/// that does not parse is `Unreadable`.
+/// that does not parse is `Unreadable`. Both states are still meaningful for a vault with NO
+/// account — `ingest_included` is what decides whether they ever reach the Runs view at all.
 pub fn ics_state(vault: &Path) -> IcsState {
     let path = vault.join("config").join("ingest.yaml");
     let Ok(text) = std::fs::read_to_string(&path) else { return IcsState::NoUrl };
@@ -179,6 +188,19 @@ pub fn ics_state(vault: &Path) -> IcsState {
 }
 
 pub fn has_ics_url(vault: &Path) -> bool { ics_state(vault) == IcsState::Feed }
+
+/// Whether this slot includes `ingest` at all — the ONE decision point `slot_argv` (what actually
+/// runs) and `run_slot_inner` (what the skip line, if any, says) both have to agree with (A-2 fix).
+///
+/// Before this, the two answered related but DIFFERENT questions, each on its own: `slot_argv`
+/// checked exactly the condition below, while `run_slot_inner`'s skip line was pushed on
+/// `ics_state` alone, with no `cloud.yaml` check at all. A cloud vault with no `ics_url` therefore
+/// got BOTH a fake `ingest (skipped: no ics_url)` step AND the real `ingest` child process's own
+/// step in the same `RunSummary.steps` — two `ingest` entries, one of them describing a step that
+/// never actually ran.
+pub fn ingest_included(vault: &Path) -> bool {
+    has_ics_url(vault) || vault.join("config").join("cloud.yaml").is_file()
+}
 
 /// A vault that has never been ranked is owed its first slot at launch, whatever the clock says
 /// (cloud design §4.2 step 7 — "the first slot runs immediately"; Quinn's cut-day note,
@@ -318,9 +340,11 @@ pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan) -> Vec<(PathBuf, V
     let v = vault.to_string_lossy().to_string();
     let mut steps = vec![(exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
     // C2 Task 8: the LMS capability URL lives in the account from here on, so a cloud vault runs
-    // `ingest` whether or not the vault still carries a copy. Safe only with C2's H3 applied —
-    // without it, a blank `ics_url` exits 1 before the service is ever asked.
-    if has_ics_url(vault) || vault.join("config").join("cloud.yaml").is_file() {
+    // `ingest` whether or not the vault still carries a copy — the feed lives in the account, and
+    // the engine names a missing one as a skip (A-1) rather than this app leaving the step out.
+    // Safe only with C2's H3/A-1 applied — without either, a blank `ics_url` (or a 404 from the
+    // service) exits 1 forever before this app or the student can do anything about it.
+    if ingest_included(vault) {
         steps.push((exe.to_path_buf(), vec!["ingest".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
     }
     match judge {
@@ -562,10 +586,18 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // a slot with no ingest in it and no reason why. `0` because a skip is not a failure — the same
     // shape `sync_step` uses for a busy lock. Recorded before the engine is resolved, so a missing
     // exe does not also hide the explanation. The two reasons read differently (R-P4a-17).
-    match ics_state(&cs.vault) {
-        IcsState::Feed => {}
-        IcsState::NoUrl => steps.push(("ingest (skipped: no ics_url)".to_string(), 0)),
-        IcsState::Unreadable => steps.push(("ingest (skipped: config unreadable)".to_string(), 0)),
+    //
+    // A-2 fix: gated on `ingest_included`, the SAME predicate `slot_argv` uses to decide whether to
+    // run the step at all — never on `ics_state` alone. A cloud vault always has `ingest_included`
+    // true (the feed lives in the account), so this line is never pushed for one; only a vault with
+    // NO account and no local feed ever sees it, which is the one case `slot_argv` truly leaves the
+    // step out.
+    if !ingest_included(&cs.vault) {
+        match ics_state(&cs.vault) {
+            IcsState::Feed => {}
+            IcsState::NoUrl => steps.push(("ingest (skipped: no ics_url)".to_string(), 0)),
+            IcsState::Unreadable => steps.push(("ingest (skipped: config unreadable)".to_string(), 0)),
+        }
     }
     // Every arm records a step with exit code **0** and a sentence — never a non-zero code, which
     // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a

@@ -61,8 +61,12 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
   row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
   come from it, and it writes nothing.
-- `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. Exits 1 on
-  an empty `ics_url`, which is why the app leaves the step out rather than run it.
+- `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. A vault
+  with no account and an empty `ics_url` exits 1, which is why the app leaves the step out rather
+  than run it — but **a cloud vault runs `ingest` regardless of `ics_url`**, because the feed lives
+  in the account, not the vault (C2 final review A-1/A-2): `/ingest-ics` answering 404 (no
+  `lms_ics` source configured) is a named skip at exit 0, never a failure, and any other service
+  failure with no local `ics_url` names the real cause honestly and keeps exit 1.
 - `judge --vault <v> [--via <via>] [--run-id <id>] [--runtime <llama-cli.exe>] [--model <.gguf>]
   [--log-dir <dir>] [--limit N]` — enriches tasks flagged `needs_enrichment: true` in three tiers
   (heuristics, promoted rules, the model — one process per judgment). **Always exits 0**: no runtime
