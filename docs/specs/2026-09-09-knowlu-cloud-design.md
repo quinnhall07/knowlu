@@ -411,9 +411,12 @@ zero-retention terms", and the line §10 actually applied to `VISION.md` on 2026
 against zero-retention inference, grammar-constrained, model-pinned, logged by id" (§10, ~line 275)
 — and none of those sentences is rewritten here (§10 is a historical diff and the rest of the body
 stands as written); this amendment is the correction of record. The claim **is**
-true of the pinned endpoints named above: OpenRouter's zero-data-retention setting on Knowlu's
-account, and CoreWeave's and DeepInfra's own zero-retention terms for the upstream that actually
-reads the text.
+true of the pinned endpoints named above, and it is enforced per request rather than assumed from
+an account-level setting: every call the adapter sends carries the pinned row's `route` — one
+named upstream, `allow_fallbacks: false`, `zdr: true`, `require_parameters: true` — and
+`_shared/judge_openrouter.ts`'s `assertPinnedRoute` refuses to send anything the row does not
+carry that pin for, before any fetch (whole-branch review I1); CoreWeave's and DeepInfra's own
+zero-retention terms cover the upstream that actually reads the text.
 
 This rests on `docs/notes/2026-09-16-inference-provider-and-model-scoping.md` (Quinn's ruling of
 2026-09-16 on that note's option 1, option 1 being "per-kind pins on one zero-retention host") and
