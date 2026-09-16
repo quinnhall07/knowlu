@@ -19,7 +19,7 @@
 // (A-4, regrading m-something: the old check stopped here unconditionally, so the gate could never
 // wake up no matter how large `eval_cases` grew). An empty seed now asks exactly one more
 // question, `SUPABASE_SERVICE_ROLE_KEY` — present or not — before `--thresholds`, before
-// `ANTHROPIC_API_KEY`, before `serviceDb()`'s own `SUPABASE_URL` read, and before any connection
+// the provider's API key, before `serviceDb()`'s own `SUPABASE_URL` read, and before any connection
 // opens or any `eval_runs` row is written: absent, this reads no further and answers exactly as
 // before (`0 cases`); present, it asks the database once whether `eval_cases` holds anything at
 // all, and runs the suite for real the day it does. That is what lets `eval-gate` (hand-off H8,

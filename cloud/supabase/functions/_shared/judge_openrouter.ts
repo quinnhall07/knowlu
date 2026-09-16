@@ -15,12 +15,14 @@ export const CALL_TIMEOUT_MS = 120_000;
  *  the row's route becomes OpenRouter's `provider` object, the schema is strict. */
 export function openRouterBody(req: ModelRequest): Record<string, unknown> {
   return {
+    // The row's sampling spreads FIRST: a sampling object can never override a pinned key
+    // (`model`, `max_tokens`, `messages`, `response_format`, `provider`) — only add to them.
+    ...req.sampling,
     model: req.model,
     messages: [{ role: "system", content: req.system }, { role: "user", content: req.user }],
     max_tokens: req.maxTokens,
     response_format: { type: "json_schema", json_schema: { name: "verdict", strict: true, schema: req.schema } },
     provider: req.route,
-    ...req.sampling,
   };
 }
 
@@ -63,10 +65,18 @@ export class OpenRouterModel implements JudgeModel {
       await response.body?.cancel();
       throw new Error(`the model service answered HTTP ${response.status}`);
     }
-    const data = await response.json() as {
+    const envelopeText = await response.text();
+    let data: {
       choices?: { finish_reason?: string; message?: { content?: string | null; refusal?: string | null } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
+    try {
+      data = JSON.parse(envelopeText);
+    } catch {
+      // Deliberately does NOT quote the body: a 2xx answer that is not JSON at all (an HTML error
+      // page from an intermediary, say) must not leak its text into a 500 log line.
+      throw new Error(`the model service answered with a body that is not JSON (${envelopeText.length} chars)`);
+    }
     const choice = data.choices?.[0];
     if (choice?.message?.refusal) throw new ModelRefused("the model declined");
     if (choice?.finish_reason === "length") {

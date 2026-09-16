@@ -103,6 +103,26 @@ Deno.test("temperature is sent only when the pinned row asks for it", async () =
   }
 });
 
+Deno.test("a sampling that carries model or max_tokens never overrides the pinned request", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
+    seen.push(await req.json());
+    return messagesReply(ANSWER);
+  });
+  try {
+    const model = new AnthropicModel({
+      apiKey: "test-key-not-a-secret",
+      baseURL: `http://127.0.0.1:${server.addr.port}`,
+    });
+    await model.complete(request({ sampling: { model: "evil", max_tokens: 1, temperature: 0 } }));
+    assertEquals(seen[0].model, "claude-haiku-4-5");
+    assertEquals(seen[0].max_tokens, 256);
+    assertEquals(seen[0].temperature, 0);
+  } finally {
+    await server.shutdown();
+  }
+});
+
 Deno.test("a truncated reply says it was truncated, not that the model talked nonsense", async () => {
   // `stop_reason: "max_tokens"` with half a JSON object is a CONFIGURATION fault — the row's
   // `max_tokens` is too small for that schema — and it must not read as a provider fault, because

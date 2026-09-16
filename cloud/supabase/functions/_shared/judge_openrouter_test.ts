@@ -55,6 +55,8 @@ Deno.test("a reply's content parses and its usage is mapped", async () => {
   const reply = await model.complete(request());
   assertEquals(reply, { json: { tier: "task" }, inputTokens: 810, outputTokens: 80 });
   assertEquals(seenUrl, OPENROUTER_URL);
+  assertEquals(seenInit?.method, "POST");
+  assertEquals(JSON.parse(String(seenInit?.body)), openRouterBody(request()));
   const headers = seenInit?.headers as Record<string, string>;
   assertEquals(headers["Authorization"], "Bearer test-key-not-a-secret");
   assertEquals(headers["HTTP-Referer"], "https://knowlu.com");
@@ -147,5 +149,28 @@ Deno.test("the request times out at timeoutMs", async () => {
       });
     });
   const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake, timeoutMs: 10 });
-  await assertRejects(() => model.complete(request()), Error);
+  await assertRejects(() => model.complete(request()), Error, "timed out after 10 ms");
+});
+
+Deno.test("a 2xx body that is not JSON at all is named by length, never quoted", async () => {
+  const fake: typeof fetch = () =>
+    Promise.resolve(
+      new Response("<html>SECRET-LOOKING</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+  const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake });
+  let message = "";
+  try {
+    await model.complete(request());
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assertEquals(message.includes("a body that is not JSON (27 chars)"), true, message);
+  assertEquals(message.includes("SECRET-LOOKING"), false, message);
+});
+
+Deno.test("a sampling that carries model or max_tokens never overrides the pinned request", () => {
+  const body = openRouterBody(request({ sampling: { model: "evil", max_tokens: 1, temperature: 0 } }));
+  assertEquals(body.model, "qwen/qwen3.5-35b-a3b");
+  assertEquals(body.max_tokens, 640);
+  assertEquals(body.temperature, 0);
 });

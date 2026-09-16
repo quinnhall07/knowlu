@@ -89,12 +89,14 @@ export class AnthropicModel implements JudgeModel {
 
   async complete(req: ModelRequest): Promise<ModelReply> {
     const response = await this.#client.messages.create({
+      // The row's sampling spreads FIRST: a sampling object can never override a pinned key
+      // (`model`, `max_tokens`, `system`, `messages`, `output_config`) — only add to them.
+      ...req.sampling,
       model: req.model,
       max_tokens: req.maxTokens,
       system: req.system,
       messages: [{ role: "user", content: req.user }],
       output_config: { format: { type: "json_schema", schema: req.schema } },
-      ...req.sampling,
     });
     // Checked BEFORE `content` is read, always: on a refusal `content` is empty and on a
     // `max_tokens` stop it is half an object, and both would otherwise arrive as "bad JSON".
