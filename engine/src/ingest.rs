@@ -817,6 +817,14 @@ pub fn run_with(
     code
 }
 
+/// R2-4: the exact `error` text `/ingest-ics` answers when this account has no `lms_ics` source
+/// configured (`cloud/supabase/functions/ingest-ics/handler.ts`'s `Response.json({ error: "no
+/// lms_ics source for this account" }, { status: 404 })`) — must equal that handler's body byte for
+/// byte, the same shape `enrich.rs`'s `pull_rules` settle arm uses for its own 404 (R-C2-E49).
+/// `ingest-ics/handler_test.ts` pins this constant from the Deno side: it reads this file, extracts
+/// the literal, and asserts it against the handler's own response.
+const NO_LMS_ICS_SOURCE_DETAIL: &str = "no lms_ics source for this account";
+
 /// A-1 (H5 fix, CLAUDE.md's "Neither feed is compulsory"): what `ingest` does when `/ingest-ics`
 /// failed and there is no local `ics_url` to fall back to — a genuinely dead end either way, but
 /// TWO different dead ends. A 404 means this account simply has no `lms_ics` source: a permanent,
@@ -833,15 +841,6 @@ pub fn run_with(
 /// Windows Credential Manager session — no test in this crate or `cloud_contract.rs` has one, by
 /// design (`cloud_contract.rs`'s own doc comment says why), so this is the one place the decision
 /// can be exercised directly.
-///
-/// R2-4: the exact `error` text `/ingest-ics` answers when this account has no `lms_ics` source
-/// configured (`cloud/supabase/functions/ingest-ics/handler.ts`'s `Response.json({ error: "no
-/// lms_ics source for this account" }, { status: 404 })`). Matched exactly, the same shape
-/// `enrich.rs`'s `pull_rules` settle arm uses for its own 404 (R-C2-E49) — a gateway 404 (the
-/// function not deployed, a stale `api_base`, a slug typo) is ALSO an HTTP 404 and must not read as
-/// the normal, permanent "no feed configured" state.
-const NO_LMS_ICS_SOURCE_DETAIL: &str = "no lms_ics source for this account";
-
 fn cloud_ics_failure_with_no_local_url(e: &crate::cloudmodel::CloudError) -> (i32, Vec<String>) {
     match e {
         crate::cloudmodel::CloudError::Status { code: 404, ref detail } if detail == NO_LMS_ICS_SOURCE_DETAIL => {
