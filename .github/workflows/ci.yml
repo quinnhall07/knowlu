@@ -95,12 +95,18 @@ jobs:
   # doing anything else that could spend money or need a connection: is
   # `SUPABASE_SERVICE_ROLE_KEY` set at all (C2 final review A-4, regrading a gate that could never
   # wake up)? Absent, it exits 0 printing "0 cases — nothing to score (no seed, no database
-  # access)" without ever reading `ANTHROPIC_API_KEY` or opening a connection — which is what lets
+  # access)" without ever reading `OPENROUTER_API_KEY` or opening a connection — which is what lets
   # this job pass green on a PR that sets neither secret. Present, it asks the database once
   # whether `eval_cases` holds anything at all, and runs the suite for real the day it does.
   # Deliberately, that count is uncaught (ruling m147): a key IS present at that point, so a failed
   # `eval_cases` count — a staging outage, a bad key — must fail this PR-only gate loud, never be
   # read as "0 cases" and pass vacuously.
+  #
+  # The two GitHub secrets Quinn sets, by name: **`OPENROUTER_API_KEY`** and
+  # **`SUPABASE_STAGING_SERVICE_ROLE_KEY`**. Which model actually answers is not a CI decision: the
+  # runner reads the pinned `models` row per kind and calls whichever provider that row names
+  # (`openrouter`, since the provider swap of 2026-09-16) — a model pin change never needs a
+  # workflow edit; a provider change needs this step's env and net lists too.
   #
   # **A fork PR gets no secrets at all** (GitHub does not expose them to `pull_request` runs from a
   # fork), so on a fork this job can never make a real model call however many cases staging's
@@ -108,8 +114,9 @@ jobs:
   # out, and spends nothing finding that out. The spend this job CAN incur is on a branch PR in
   # this repository — whose steps below set both secrets TOGETHER, never one without the other —
   # and it is bounded even then: `run_eval.ts`'s `MAX_CASES` caps each kind's corpus at 200 rows in
-  # the query itself (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0014
-  # each, and the run prints its own case count before each kind's loop.
+  # the query itself (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0002
+  # each on the pinned OpenRouter models (provider swap Task 4; the figure was Haiku-priced before
+  # 2026-09-16) — well under a dollar — and the run prints its own case count before each kind's loop.
   eval-gate:
     runs-on: ubuntu-latest
     needs: cloud
@@ -149,25 +156,33 @@ jobs:
           done
           echo "run=$run" >> "$GITHUB_OUTPUT"
       # `SUPABASE_URL` is not secret (the job-level `STAGING_HOST` comment above says why); the two
-      # secrets Quinn sets are named in the C2 Task 14 report, never a value. This step runs
-      # PR-AUTHORED CODE (`cloud/eval/run_eval.ts`, and everything it imports) WITH the staging
-      # service-role key — the same trust every job on this workflow already extends to a branch
-      # PR in this repository — while a FORK PR gets neither secret at all (GitHub does not expose
-      # them to `pull_request` runs from a fork), which is what keeps this step from ever spending
-      # anything on an untrusted checkout. C2 Task 14 fix 1 (R-C2-E51, finding 3) dropped
+      # secrets Quinn sets — `OPENROUTER_API_KEY` and `SUPABASE_STAGING_SERVICE_ROLE_KEY` — are
+      # named in the C2 Task 14 report and the provider-swap Task 4 report, never a value. This
+      # step runs PR-AUTHORED CODE (`cloud/eval/run_eval.ts`, and everything it imports) WITH the
+      # staging service-role key — the same trust every job on this workflow already extends to a
+      # branch PR in this repository — while a FORK PR gets neither secret at all (GitHub does not
+      # expose them to `pull_request` runs from a fork), which is what keeps this step from ever
+      # spending anything on an untrusted checkout. C2 Task 14 fix 1 (R-C2-E51, finding 3) dropped
       # `EVAL_ACCOUNT_ID`: nothing in the eval path uses an account id for anything real (every
       # consumer is a stub), so it named a secret that did nothing.
+      #
+      # Provider swap Task 4 (2026-09-16, R8 amended): the runner's model is chosen by the pinned
+      # `models` row, and every row now pins `provider = 'openrouter'` — so this step authenticates
+      # to OpenRouter, not Anthropic. `ANTHROPIC_API_KEY` is deliberately unset here; the four
+      # `ANTHROPIC_*` names stay in `--allow-env` only because the pinned `@anthropic-ai/sdk` is
+      # still compiled into the runner (the `cloud` job's own comment explains why) and its
+      # constructor reads them unconditionally even when no Anthropic call is ever made.
       - name: eval suite
         if: steps.touched.outputs.run == 'yes'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SUPABASE_URL: https://${{ env.STAGING_HOST }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
         # C2 Task 14 fix 1 (R-C2-E51, finding 4): the grants are scoped to exactly what this run
-        # needs while it holds the service-role key — the four names Task 0 ruled the pinned
-        # @anthropic-ai/sdk reads unconditionally (never a secret through them; see the `cloud`
-        # job's own comment) plus the three this script itself reads, and network only to the two
-        # hosts it actually calls. `--allow-read` stays unscoped: npm module downloads at import
-        # time are not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s
-        # absence entirely, and this step needs to read its own source tree and thresholds.json.
-        run: deno run --allow-read --allow-env=ANTHROPIC_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=api.anthropic.com,${{ env.STAGING_HOST }} --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
+        # needs while it holds the service-role key — the three this script itself reads plus the
+        # four names Task 0 ruled the pinned @anthropic-ai/sdk reads unconditionally (never a
+        # secret through them; see the `cloud` job's own comment), and network only to the hosts it
+        # actually calls. `--allow-read` stays unscoped: npm module downloads at import time are
+        # not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s absence
+        # entirely, and this step needs to read its own source tree and thresholds.json.
+        run: deno run --allow-read --allow-env=OPENROUTER_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=openrouter.ai,${{ env.STAGING_HOST }} --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json

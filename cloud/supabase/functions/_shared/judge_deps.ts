@@ -1,12 +1,12 @@
 // The live wiring: a PostgREST client with the service role, the pinned model row, the account's
 // rules, the cap store, the judgment sink. Split out of the handlers so every handler test can
 // build the same `PipelineDeps` from fakes and never reach a project.
-import { AnthropicModel } from "./judge_anthropic.ts";
 import { capStore } from "./judge_caps.ts";
 import { type Db, serviceDb } from "./judge_db.ts";
 import { judgmentSink } from "./judge_log.ts";
 import { modelRow } from "./judge_models.ts";
 import type { JudgmentRow, Kind, PipelineDeps } from "./judge_pipeline.ts";
+import { modelFor } from "./judge_provider.ts";
 import { ruleTable } from "./judge_rules.ts";
 
 /// Built at first use, never at module scope: a throw at module scope is a boot failure with an
@@ -25,12 +25,14 @@ export async function liveDeps(
   // `judge_anthropic.ts`'s own `CALL_TIMEOUT_MS`.
   modelTimeoutMs?: number,
 ): Promise<PipelineDeps> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (apiKey === undefined || apiKey === "") throw new Error("the function is missing ANTHROPIC_API_KEY");
   const client = sharedDb();
+  // The row is read FIRST: `modelFor` needs its `provider` column to pick the client and name the
+  // right secret, so building the model before the row exists is not an option any more (it also
+  // used to hard-code the one provider this file could ever build).
+  const row = await modelRow(client, kind);
   return {
-    row: await modelRow(client, kind),
-    model: new AnthropicModel({ apiKey, timeoutMs: modelTimeoutMs }),
+    row,
+    model: modelFor(row, Deno.env.get, { timeoutMs: modelTimeoutMs }),
     rules: ruleTable(client),
     caps: capStore(client),
     log: judgmentSink(client),

@@ -41,6 +41,7 @@ function request(overrides: Record<string, unknown> = {}) {
     schema: SCHEMA as unknown as Record<string, unknown>,
     maxTokens: 256,
     sampling: { temperature: 0 },
+    route: {},
     ...overrides,
   };
 }
@@ -97,6 +98,26 @@ Deno.test("temperature is sent only when the pinned row asks for it", async () =
     assertEquals(seen[0].temperature, 0);
     assertEquals("temperature" in seen[1], false, "a model with sampling removed must not be sent one");
     assertEquals(seen[1].model, "claude-sonnet-5");
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("a sampling that carries model or max_tokens never overrides the pinned request", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
+    seen.push(await req.json());
+    return messagesReply(ANSWER);
+  });
+  try {
+    const model = new AnthropicModel({
+      apiKey: "test-key-not-a-secret",
+      baseURL: `http://127.0.0.1:${server.addr.port}`,
+    });
+    await model.complete(request({ sampling: { model: "evil", max_tokens: 1, temperature: 0 } }));
+    assertEquals(seen[0].model, "claude-haiku-4-5");
+    assertEquals(seen[0].max_tokens, 256);
+    assertEquals(seen[0].temperature, 0);
   } finally {
     await server.shutdown();
   }

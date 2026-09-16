@@ -4,8 +4,13 @@
 // The task prompt is `judge::prompt_for` moved across the boundary, with the same four bounds —
 // body 1200 characters, weights 600, preferences 600, reason 140 — and the same rules, because
 // the frozen behaviour these bounds protect is "the question can never be pushed out of the
-// context by a note that pasted a syllabus".
+// context by a note that pasted a syllabus". Fix round 1 (Task 3 review): each bound still caps
+// the CONTENT `clip` keeps — a clipped field's own marker (13 characters, " …[truncated]") is
+// appended beyond the bound, not carved out of it, so a fully clipped 1200-character body prompt
+// emits 1213 characters, the marker being the frame telling the model it cut something, not part
+// of what it cut. `judge_prompts_test.ts` pins the exact count.
 import { oneLine } from "./judge_validate.ts";
+import { scrubForPrompt } from "./scrub.ts";
 
 export const MAX_BODY_CHARS = 1200;
 export const MAX_WEIGHTS_CHARS = 600;
@@ -17,8 +22,16 @@ export interface Prompt {
   schema: Record<string, unknown>;
 }
 
+// Provider swap Task 3 (prompt_version task-2 / event-2 / email-2): a clipped field used to give
+// the model no sign that its last sentence might be a cut-off fragment rather than the note's own
+// ending — a body that trailed off mid-word read as complete. The marker names the cut so the
+// model can weigh (or ask for) the missing tail instead of treating a truncated body as a full one.
+// The marker is appended BEYOND `max`, never carved out of it (fix round 1, Task 3 review): `max`
+// bounds the content this function keeps, and the 13-character marker is the frame around that
+// content, not a thirteenth of it — a clipped MAX_BODY_CHARS body emits 1213 characters, not 1200.
 function clip(text: string, max: number): string {
-  return [...text].slice(0, max).join("");
+  const chars = [...text];
+  return chars.length > max ? chars.slice(0, max).join("") + " …[truncated]" : text;
 }
 
 const TASK_SCHEMA = {
@@ -113,9 +126,10 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     "- information: everything else, including receipts, newsletters, notifications and marketing.",
     "Rules:",
     "- title: what the resulting task or card should be called, one line, under 200 characters.",
-    "- due: YYYY-MM-DD or YYYY-MM-DDTHH:MM when the email states one, else null.",
+    '- due: the deadline as YYYY-MM-DD, or YYYY-MM-DDTHH:MM when a time is given. Resolve a relative deadline ("Friday", "next week", "end of the month") against the Date line above, in that line\'s own timezone. If you cannot resolve it to one calendar day, answer null.',
     "- effort_hours and importance: only for tier task, else null. importance is a whole number 1 to 5.",
     "- course: one of the known course slugs given below, or null.",
+    "- with no message body, judge from the subject and sender alone and answer a confidence at or below 0.5.",
     "- why: one line, under 140 characters, no line breaks, no double quotes.",
     "- confidence: 0 to 1.",
   ].join("\n");
@@ -167,14 +181,24 @@ export function buildPrompt(
   }
 
   const known = list(seed.known_courses);
+  // The scrub site (provider swap Task 3): the one place both the Gmail-read path
+  // (`gmail-read/handler.ts`) and the device's `judge-email` path build the email prompt, because
+  // both hand their item straight to `judge()`, which calls `buildPrompt` here. `From` is NEVER
+  // scrubbed — `judge_rules.ts`'s `featureMap` maps `item.from` into the `source` promotion
+  // feature, and `scrub`/`scrubForPrompt` would replace an email address in it.
+  const subject = scrubForPrompt(str(item.subject));
   const parts = [
-    `Subject: ${oneLine(str(item.subject), 200)}`,
+    `Subject: ${oneLine(subject, 200)}`,
     `From: ${oneLine(str(item.from), 200)}`,
     `Date: ${str(item.date)}`,
   ];
   if (known.length > 0) parts.push(`Known course slugs: ${known.join(", ")}`);
-  const text = clip(str(item.text).trim(), MAX_BODY_CHARS);
-  if (text !== "") parts.push(`Message:\n${text}`);
+  // Scrub before clip, not after: clipping a token in half would leave a partial secret on the
+  // wire, where scrubbing first replaces it with a short, fixed-length placeholder that clip then
+  // has no reason to cut.
+  const scrubbedText = scrubForPrompt(str(item.text).trim());
+  const text = clip(scrubbedText, MAX_BODY_CHARS);
+  parts.push(text !== "" ? `Message:\n${text}` : "Message: (no plain-text body)");
   return { system: systemTemplate("email"), user: parts.join("\n"), schema };
 }
 

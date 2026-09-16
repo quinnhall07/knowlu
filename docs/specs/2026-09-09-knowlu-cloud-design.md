@@ -323,6 +323,9 @@ The full briefing is `docs/superpowers/notes/2026-09-09-knowlu-cloud-legal-lands
 +| Making the code public | `quinn-ops` stays private and archived; `knowlu` has no secrets in its history by construction (the fixtures carry the founder's coursework titles — replace them with synthetic vaults before any public release) |
 ```
 
+> **Amended 2026-09-16 (Quinn's ruling): see the Amendment section at the end.** (The "Cloud
+> inference provider" row of the "Open decisions" diff above, naming Anthropic, is superseded.)
+
 The "People" amendment, the tutoring/SetNForget/content domains, the success criteria and the other standing rules are unchanged.
 
 ---
@@ -340,7 +343,7 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
 | R6 | Staging Supabase project + test Stripe from day one | yes (default) |
 | R7 | Replace the three fixture vaults with synthetic ones before any public code release | later; noted in `PROVENANCE.md` |
-| R8 | Anthropic as the launch inference provider (zero-retention API terms; the eval suite picks the model) | yes (default) |
+| R8 | Anthropic as the launch inference provider (zero-retention API terms; the eval suite picks the model) | yes (default) **Amended 2026-09-16 (Quinn's ruling): see the Amendment section at the end.** |
 
 ---
 
@@ -376,3 +379,54 @@ Each plan is written with the writing-plans skill from this spec, carries a fide
 ## 13. What this spec does not decide
 
 The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); reading grades from the student's signed-in LMS session (wanted — §11a). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
+
+---
+
+## Amendment 2026-09-16 — the inference provider (ruling R8 amended by Quinn)
+
+**R8 is amended.** The launch provider is no longer Anthropic's own API. It is **OpenRouter**,
+pinned per request to one named, zero-retention upstream per judgment kind — never routed
+dynamically and never allowed to fall back to a second host: **CoreWeave** for the `task` and
+`event` kinds, **DeepInfra** for the `email` kind. The two models, their precision and their
+prices, as pinned in `cloud/supabase/migrations/20260916000100_provider_swap.sql`:
+
+| kind | model | precision, host | usd / M tokens in, out |
+|---|---|---|---|
+| `task` | `ibm-granite/granite-4.2-8b` | bf16, CoreWeave | 0.10, 0.15 |
+| `event` | `ibm-granite/granite-4.2-8b` | bf16, CoreWeave | 0.10, 0.15 |
+| `email` | `qwen/qwen3.5-35b-a3b` | fp8, DeepInfra | 0.14, 1.00 |
+
+Every request carries `provider.order`, `allow_fallbacks: false` and OpenRouter's zero-data-retention
+flag; a request the named host cannot honour on every point is refused, not silently answered by a
+different host. This costs about **$0.24 a month for a typical student and $0.87 for a heavy one**,
+against **$1.73 and $6.44** on the Anthropic pin R8 originally named (§2 and §6 of the scoping note
+below).
+
+**§5.2's "zero-retention" claim was not true of the provider R8 actually named.** Anthropic's
+commercial API is a self-serve tier that retains prompts up to 30 days by default (up to two years on
+a detected violation); it is not on zero-retention terms without a sales conversation this product
+never had. That inaccuracy runs wherever this spec repeats the claim — the architecture diagram's
+"Inference provider: zero-retention API, pinned models" (§3), §5.2's "the provider is under
+zero-retention terms", and the line §10 actually applied to `VISION.md` on 2026-09-09, "our cloud
+against zero-retention inference, grammar-constrained, model-pinned, logged by id" (§10, ~line 275)
+— and none of those sentences is rewritten here (§10 is a historical diff and the rest of the body
+stands as written); this amendment is the correction of record. The claim **is**
+true of the pinned endpoints named above, and it is enforced per request rather than assumed from
+an account-level setting: every call the adapter sends carries the pinned row's `route` — one
+named upstream, `allow_fallbacks: false`, `zdr: true`, `require_parameters: true` — and
+`_shared/judge_openrouter.ts`'s `assertPinnedRoute` refuses to send anything the row does not
+carry that pin for, before any fetch (whole-branch review I1); CoreWeave's and DeepInfra's own
+zero-retention terms cover the upstream that actually reads the text.
+
+This rests on `docs/notes/2026-09-16-inference-provider-and-model-scoping.md` (Quinn's ruling of
+2026-09-16 on that note's option 1, option 1 being "per-kind pins on one zero-retention host") and
+the four research reports behind it —
+`docs/reports/2026-09-16-inference-scoping-{legal-floor,provider-offers,model-capability,host-check}.md`,
+the last written after Quinn's ruling to find which host actually serves both picks self-serve —
+and `docs/plans/2026-09-16-inference-provider-swap-plan.md`, the five-task plan that carried it out.
+
+**The eval suite still picks the model.** Nothing about how a pin is chosen or validated changes:
+`cloud/eval/run_eval.ts` replays the seed against whichever model a `models` row names and blocks a
+regression past `cloud/eval/thresholds.json` on any PR that touches a prompt, a schema or a pin —
+before this amendment against Anthropic's Haiku 4.5, after it against the two models above, and
+against whatever is pinned next.

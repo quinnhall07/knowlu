@@ -9,7 +9,7 @@
 <body>
 <main class="doc">
   <h1>Privacy policy</h1>
-  <p class="date">Effective 2026-09-10. This page is version <strong>2026-09-10</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
+  <p class="date">Effective 2026-09-16. This page is version <strong>2026-09-16</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
   <p>Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.</p>
   <p>That is the whole policy in one line. The rest of this page is the same promise said slowly, so you can check it.</p>
 
@@ -51,17 +51,20 @@
     <li><strong>No birthdate.</strong> The 18+ gate is an attestation — a yes and a timestamp. There is no date-of-birth column in our database and there is not going to be one.</li>
     <li><strong>No card number.</strong> Stripe's payment page is Stripe's; the card never touches Knowlu.</li>
     <li><strong>No campus password.</strong> Knowlu never asks for your university sign-in, and there is nowhere in the app to type one. When you sign in to your school, it happens on your school's own page, in a window Knowlu opens, and Knowlu never sees what you type there. Once you are signed in it uses that window's own session, on your machine, to fetch two things — your calendar link and your course list — and then throws the session away. It keeps neither the password nor the cookies.</li>
-    <li><strong>No note bodies.</strong> The text of your tasks and notes stays in the folder on your machine. If that ever changes it will be a separate switch, off by default, with its own screen explaining what and why — and no such switch exists today.</li>
+    <li><strong>No note bodies stored.</strong> The text of your tasks and notes lives in the folder on your machine and we keep no copy of it. What travels to the model is what the judgment needs and nothing more: the note's title and up to the first 1,200 characters of its text, your stated preferences and grade weights, and for an email its subject, its sender and up to the first 1,200 characters of the message — for the length of that one call, and written down by neither side. If we ever start keeping them it will be a separate switch, off by default, with its own screen explaining what and why — and no such switch exists today.</li>
   </ul>
 
   <h2>Who else touches it</h2>
-  <p>Four companies, each doing one job, and only one of them ever has any content of yours read by a model.</p>
+  <p>Six companies, each doing one job, and only two of them ever have any content of yours read by a model.</p>
   <ul>
     <li><strong>Supabase</strong> — hosting, the database and the sign-in system. Your account row, your password hash and every row above live there.</li>
     <li><strong>Stripe</strong> — payments and the subscription. Stripe sees your card; we do not.</li>
     <li><strong>Cloudflare</strong> — this website and the downloads.</li>
-    <li><strong>Anthropic</strong> — the API that makes the judgments, and <strong>the only place your content is ever sent to be read by a model</strong>: one item at a time, to answer one question about that item, and only while a judgment is being made. Anthropic's commercial API terms say they do not train their models on what is sent through it. We hold the text for the length of the call and then let it go; what we write down is the answer.</li>
+    <li><strong>OpenRouter</strong> — the router every judgment request goes through on its way to a model. It carries the text but does not itself run a model on it, sends every request under zero data retention — never as a default it could quietly lose — and trains nothing on what passes through. Each request names the one company allowed to answer it and is <strong>refused outright, never sent somewhere else,</strong> if that company cannot meet every requirement we set.</li>
+    <li><strong>CoreWeave</strong> — reads your assignments and the events on your calendar to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
+    <li><strong>DeepInfra</strong> — reads your email to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
   </ul>
+  <p>CoreWeave and DeepInfra are <strong>the only two places your content is ever sent to be read by a model.</strong> We hold the text for the length of the call and then let it go; what we write down is the answer.</p>
   <p>One more, doing nothing with your data but delivering it: the provider that sends our account and billing email sees the address a message is going to. Nobody else gets anything. There is no advertising network, no data broker and no analytics company anywhere on this list.</p>
 
   <h2>We do not sell or share your personal information</h2>
@@ -72,7 +75,7 @@
   <p>Knowlu's use and transfer of information received from Google APIs to any other app will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. In plain words:</p>
   <ul>
     <li>Gmail data is used for <strong>one thing</strong>: finding the obligations in your own inbox and proposing them as tasks inside Knowlu, where you approve or decline each one.</li>
-    <li>It is transferred to <strong>one place</strong>: Anthropic's API, to make that judgment for you. Nowhere else, and never for advertising, credit, lending or resale.</li>
+    <li>It is transferred to <strong>the companies named above</strong>: Gmail text goes to OpenRouter, which carries the request under zero data retention and reads none of it itself, and to DeepInfra, which reads it on a zero-retention endpoint to make that judgment for you. Google Calendar events go to OpenRouter the same way and to CoreWeave, which reads them on a zero-retention endpoint to make that judgment for you — Google's Limited Use terms bind Calendar data the same way they bind Gmail's. Nowhere else, and never for advertising, credit, lending or resale.</li>
     <li><strong>No human at Knowlu reads your mail without your explicit consent.</strong> There is no support tool that opens an inbox. The one path by which a message could reach a person is the issue-report screen, where you choose to include it, see exactly what will be sent, and send it yourself — message by message, one decision at a time.</li>
     <li>It is <strong>never used to train or improve a model</strong> beyond the rules Knowlu learns for your own account. Rows that came from Gmail are flagged as such and are excluded from anything that would pool them with another person's.</li>
     <li><strong>Attachments are never fetched.</strong> Knowlu reads the headers and the text of a message and stops there.</li>

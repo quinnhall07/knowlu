@@ -10,7 +10,9 @@
 //   --thresholds  the file the gate reads. Required once there is at least one case to score.
 //
 // Every run of this program without --dry-run spends real money (one model call per case, at
-// roughly $0.0014 each — the arithmetic is in `judge_caps.ts`). `--dry-run` first, always.
+// roughly $0.0002 each as a conservative bound on the pinned OpenRouter models — measured on
+// staging 2026-09-16 at about $0.00003 for a task call and $0.0001 for an email call; the
+// arithmetic is in `judge_caps.ts`). `--dry-run` first, always.
 //
 // Ruling R-C2-E50 (2), corrected by C2 final review A-4: `cloud/eval/seed/` is empty at merge
 // (ruling R-C2-E12, Task 13) and STAYS empty — it is not where a consented correction lands once
@@ -19,7 +21,7 @@
 // (A-4, regrading m-something: the old check stopped here unconditionally, so the gate could never
 // wake up no matter how large `eval_cases` grew). An empty seed now asks exactly one more
 // question, `SUPABASE_SERVICE_ROLE_KEY` — present or not — before `--thresholds`, before
-// `ANTHROPIC_API_KEY`, before `serviceDb()`'s own `SUPABASE_URL` read, and before any connection
+// the provider's API key, before `serviceDb()`'s own `SUPABASE_URL` read, and before any connection
 // opens or any `eval_runs` row is written: absent, this reads no further and answers exactly as
 // before (`0 cases`); present, it asks the database once whether `eval_cases` holds anything at
 // all, and runs the suite for real the day it does. That is what lets `eval-gate` (hand-off H8,
@@ -41,10 +43,11 @@
 import type { CapStore } from "../supabase/functions/_shared/judge_caps.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { serviceDb } from "../supabase/functions/_shared/judge_db.ts";
-import { AnthropicModel, type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
+import { type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import { modelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { judge, type Kind } from "../supabase/functions/_shared/judge_pipeline.ts";
 import { promptHash } from "../supabase/functions/_shared/judge_prompts.ts";
+import { modelFor } from "../supabase/functions/_shared/judge_provider.ts";
 import { loadSeed } from "./loader.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
@@ -54,14 +57,15 @@ const KINDS: Kind[] = ["task", "event", "email"];
 /**
  * The ceiling on how many cases ONE run will score, per kind (C2 final review S-5).
  *
- * Every non-`--dry-run` case is one real model call at roughly $0.0014 (the arithmetic is in
- * `judge_caps.ts`), and the corpus is unbounded by construction: `eval_cases` grows with every
- * consented correction, and this gate runs on every PR that touches a prompt, a schema or a model
- * pin. Today the corpus is empty, so the gate costs nothing — which is exactly when a ceiling is
- * cheap to add and impossible to remember later. 200 per kind is 600 calls, under a dollar, and far
- * more than a regression needs to show itself; it is applied as PostgREST's own `&limit=`, so the
- * rows never leave the database, and it is printed before the loop so a run always says what it is
- * about to spend.
+ * Every non-`--dry-run` case is one real model call at roughly $0.0002 as a conservative bound on
+ * the pinned OpenRouter models (measured on staging 2026-09-16 at about $0.00003 for a task call
+ * and $0.0001 for an email call; the arithmetic is in `judge_caps.ts`), and the corpus is
+ * unbounded by construction: `eval_cases` grows with every consented correction, and this gate
+ * runs on every PR that touches a prompt, a schema or a model pin. Today the corpus is empty, so
+ * the gate costs nothing — which is exactly when a ceiling is cheap to add and impossible to
+ * remember later. 200 per kind is 600 calls, under a dollar, and far more than a regression needs
+ * to show itself; it is applied as PostgREST's own `&limit=`, so the rows never leave the
+ * database, and it is printed before the loop so a run always says what it is about to spend.
  */
 export const MAX_CASES = 200;
 
@@ -235,11 +239,6 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   await db.rpc("backfill_correction_judgments", {});
 
   const dry = argSet.has("--dry-run");
-  const apiKey = envGet("ANTHROPIC_API_KEY") ?? "";
-  if (!dry && apiKey === "") {
-    console.error("ANTHROPIC_API_KEY is required unless --dry-run");
-    return 2;
-  }
 
   // One id for the whole run (R-C2-E51 fix 1, finding 5): every `eval_runs` row this run writes,
   // across every kind and every metric, carries the same `run_id`, so a later reader can group a
@@ -266,13 +265,30 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     // `--dry-run` reaches no provider at all, so the model-call count is the case count exactly.
     console.log(`${kind}: ${rows.length} cases, <= ${rows.length} model calls (cap ${MAX_CASES})`);
     const row = await modelRow(db, kind);
+    // R-PS-3: the model is built only now — the row is read, and there is at least one
+    // non-dry-run case this kind is actually about to spend on. One build per kind (not per
+    // case): a missing key fails this kind loud, once, instead of once per case.
+    let liveModel: JudgeModel | undefined;
+    if (!dry) {
+      try {
+        liveModel = modelFor(row, envGet);
+      } catch (e) {
+        // `modelFor`'s own message already names the row's provider and its secret (Step 6 of
+        // the provider seam); this is that same "no key" fault, at the point a real spend was
+        // about to happen — the ONLY thing this adds is that `--dry-run` is the way around it.
+        const detail = e instanceof Error ? e.message : String(e);
+        console.error(`${kind}: ${detail} (unless --dry-run)`);
+        worst = Math.max(worst, 2);
+        continue;
+      }
+    }
     const cases: Case[] = rows.map((r) => ({ kind, theirs: r.theirs }));
     const answers: Array<Record<string, unknown> | null> = [];
     let inputTokens = 0, outputTokens = 0;
     for (const r of rows) {
       const raw: JudgeModel = dry
         ? new ScriptedModel([dryRunAnswer(kind, r.theirs)])
-        : new AnthropicModel({ apiKey });
+        : liveModel!;
       // Wraps whichever model answers, so the run's own token spend is recorded (ruling
       // R-C2-E9) regardless of which branch produced the `ModelReply`.
       const metered: JudgeModel = {

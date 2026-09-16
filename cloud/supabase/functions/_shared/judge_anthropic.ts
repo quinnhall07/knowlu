@@ -39,8 +39,10 @@ import Anthropic from "npm:@anthropic-ai/sdk@0.125.0";
 export const CALL_TIMEOUT_MS = 120_000;
 
 /// What the pinned row says about sampling. `{}` means "this model has no sampling parameters" —
-/// which is the correct request for every model above Haiku.
-export type Sampling = { temperature: number } | Record<string, never>;
+/// which is the correct request for every model above Haiku. Widened to admit the OpenRouter
+/// adapter's own sampling shape (e.g. `reasoning: { enabled: false }`), which is not a bare
+/// `temperature`.
+export type Sampling = Record<string, unknown>;
 
 export interface ModelRequest {
   model: string;
@@ -50,6 +52,9 @@ export interface ModelRequest {
   schema: Record<string, unknown>;
   maxTokens: number;
   sampling: Sampling;
+  /** Provider-routing preferences from the pinned row (`models.route`); the OpenRouter adapter
+   *  sends them as its `provider` object, the Anthropic adapter ignores them. */
+  route: Record<string, unknown>;
 }
 
 export interface ModelReply {
@@ -84,12 +89,14 @@ export class AnthropicModel implements JudgeModel {
 
   async complete(req: ModelRequest): Promise<ModelReply> {
     const response = await this.#client.messages.create({
+      // The row's sampling spreads FIRST: a sampling object can never override a pinned key
+      // (`model`, `max_tokens`, `system`, `messages`, `output_config`) — only add to them.
+      ...req.sampling,
       model: req.model,
       max_tokens: req.maxTokens,
       system: req.system,
       messages: [{ role: "user", content: req.user }],
       output_config: { format: { type: "json_schema", schema: req.schema } },
-      ...req.sampling,
     });
     // Checked BEFORE `content` is read, always: on a refusal `content` is empty and on a
     // `max_tokens` stop it is half an object, and both would otherwise arrive as "bad JSON".
