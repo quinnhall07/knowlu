@@ -71,6 +71,9 @@ pub const DEFAULT_LIMIT: usize = 50;
 /// `"{left} left for the next slot"` line; nothing is lost, and no slot is held for an hour.
 pub const BATCH_BUDGET: Duration = Duration::from_secs(15 * 60);
 
+/// `Copy` so the cloud arm can build a variant with one field changed (`..*opts`); every field is
+/// already a shared reference or a plain value, so a copy is what a borrow would have been.
+#[derive(Clone, Copy)]
 pub struct Options<'a> {
     pub via: &'a str,
     pub run_id: Option<&'a str>,
@@ -298,21 +301,162 @@ pub fn enrich_with(
     (0, lines)
 }
 
-/// Resolve the runtime and the model, then enrich against a `runtime::PerCall`.
+/// Resolve the service — or, on a vault with no account, plan 3a's local runtime — and enrich.
+///
+/// **The cloud comes first from C2 on** (cloud design D3, §3.2). The local branch below is plan
+/// 3a's and is removed by C4; until then a vault with no `config/cloud.yaml` behaves exactly as it
+/// did. Every arm exits 0: no account, no session, no network and no entitlement are all normal
+/// outcomes reported on stdout.
+pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
+    match crate::cloudmodel::resolve(vault) {
+        Ok(client) => run_lines_with(vault, opts, Some(&client)),
+        Err(crate::cloudmodel::Unavailable::NoConfig) => run_lines_with(vault, opts, None),
+        Err(why) => {
+            // A vault WITH an account whose session is missing or unreadable. Not a fallback to
+            // the local runtime: this is a cloud machine and the answer is "sign in again".
+            let (code, mut lines) =
+                enrich_with(vault, opts, Err(judge::Missing::Service(why.label())));
+            lines.insert(0, format!("judge: skipped ({why})"));
+            (code, lines)
+        }
+    }
+}
+
+/// [`run_lines`] with the service seam exposed, exactly as `ingest::run_with` exposes its fetch and
+/// `coursework::main_with_fetchers` exposes its sources. Production resolves; tests pass a client
+/// aimed at a listener bound to `127.0.0.1:0`, so no test needs a credential or an environment
+/// variable and there is no process-global state to race.
 ///
 /// **No server, no load phase (spec §5.3 as amended 2026-09-07).** The spike found the server's
 /// advantage shrinking as the batch grows, not growing — 2.15x at thirty items, converging to
 /// 2.21x, against a pre-committed 3x bar — so there is no long-lived process here: `judge_task`
 /// spawns one `llama-cli` process per judgment, through `PerCall`, and it is gone before the next
 /// item starts. A missing runtime or model is one line and exit 0 — never a failed slot.
-pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
-    match crate::runtime::resolve(opts.runtime, opts.model) {
-        Err(missing) => enrich_with(vault, opts, Err(missing)),
-        Ok((rt, gguf)) => enrich_with(
-            vault,
-            opts,
-            Ok(&crate::runtime::PerCall::new(&rt, &gguf, crate::runtime::CALL_TIMEOUT)),
-        ),
+pub fn run_lines_with(
+    vault: &Path,
+    opts: &Options<'_>,
+    cloud: Option<&crate::cloudmodel::CloudClient>,
+) -> (i32, Vec<String>) {
+    let Some(client) = cloud else {
+        return match crate::runtime::resolve(opts.runtime, opts.model) {
+            Err(missing) => enrich_with(vault, opts, Err(missing)),
+            Ok((rt, gguf)) => enrich_with(
+                vault,
+                opts,
+                Ok(&crate::runtime::PerCall::new(&rt, &gguf, crate::runtime::CALL_TIMEOUT)),
+            ),
+        };
+    };
+    let model = crate::cloudmodel::CloudModel::new(client);
+    // C2 Task 9 fix 1 (R-C2-E22 #2): the cloud arm's wall clock starts here, before the probe —
+    // the events pass below shares `opts.budget` with the enrichment batch rather than getting a
+    // fresh fifteen minutes of its own, and the two together must still land inside
+    // `scheduler::CHILD_TIMEOUT`.
+    let arm_started = std::time::Instant::now();
+    let (events_config, _) =
+        crate::events::load_events_config(&vault.join("config").join("events.yaml"));
+    let any_feed = events_config.sources.iter().any(|s| s.enabled);
+    // R-C2-E38: the Gmail pull's own precondition, computed once and reused below — a vault that
+    // has never linked a Google calendar must not make the probe fire just to learn there is
+    // nothing to pull, and a vault that HAS linked one must not be starved by an empty enrichment
+    // queue and no event source, or its mail would never be asked for.
+    let google = google_calendar_linked(vault);
+    // R-C2-E15, widened by fix 1 (R-C2-E22 #1), again by Task 11 (R-C2-E38) and again by Task 12
+    // (R-C2-E46): the probe is a network round trip, and it must not fire when there is nothing to
+    // judge or send in ANY of the four passes — reusing `pending`'s own predicate, `judge_roster`'s
+    // own enabled-source predicate, `google_calendar_linked`, and `rule_decisions_waiting` (an
+    // answered `kind: rule` card not yet sent) here, rather than a second scanning routine for any
+    // of them, is what lets a job that runs twice a day forever skip both the call and, on a
+    // network that black-holes rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no
+    // queue behind it would otherwise risk. `enrich_with` below re-derives the pending list; that
+    // second read is the accepted cost of leaving `enrich_with`'s own signature — and every test
+    // that calls it directly — untouched.
+    if pending(vault).0.is_empty() && !any_feed && !google && !rule_decisions_waiting(vault) {
+        return enrich_with(vault, opts, Ok(&model));
+    }
+    // A session or entitlement problem answers every item identically, so the FIRST call decides
+    // the batch. Asked once before the loop, the whole run then reports one honest outcome
+    // (`Missing::Service`, which becomes `Outcome::ServiceUnavailable` and logs as
+    // `service unavailable`) instead of fifty `model failed` lines — ruling R-3a-20's point, at
+    // the boundary a cloud judge adds. Every other failure (a 429, a 5xx, a dropped connection)
+    // stays per-item, because the next item genuinely may succeed.
+    let probe = model.probe();
+    // C2 final review E-1: `enrich_with` starts its OWN clock (`batch_started`), so before this it
+    // was handed a full `opts.budget` no matter how much of the slot the probe had already spent —
+    // and on a network that black-holes rather than refuses, the probe alone can cost a whole
+    // `CALL_TIMEOUT`. The arm's remaining time is what every pass below gets: the enrichment batch
+    // here, then `judge_roster`, then `pull_gmail`, then `pull_rules`, each subtracting what the
+    // ones before it spent. The sum is what has to fit inside `scheduler::CHILD_TIMEOUT`.
+    let arm_opts = Options { budget: opts.budget.saturating_sub(arm_started.elapsed()), ..*opts };
+    match probe {
+        Some(reason) => {
+            // Exactly one line: `probe()` already set `model.fatal()` to this same reason, so the
+            // `if let Some(reason) = model.fatal()` line below — which exists for a batch that
+            // turned fatal partway through — must not also fire here, or the run would print two
+            // contradictory summaries ("nothing was sent" and "the rest ... was not sent") for the
+            // one call that was actually made.
+            let (code, mut lines) = enrich_with(vault, &arm_opts, Err(judge::Missing::Service(reason)));
+            lines.insert(0, format!("judge: the service answered {reason}; nothing was sent"));
+            (code, lines)
+        }
+        None => {
+            let (code, mut lines) = enrich_with(vault, &arm_opts, Ok(&model));
+
+            // C2 Task 9 — the events pass. Runs whenever at least one event source is enabled,
+            // even when the enrichment batch above was empty: a vault can have nothing to enrich
+            // and forty events to judge (the early return above already covers "neither"). The
+            // feeds are fetched through the same server-side proxy `rank` uses, so the HTML
+            // sources return a page here too. Fix 1 (R-C2-E22 #2): it shares `opts.budget` with
+            // the enrichment batch rather than getting a fresh fifteen minutes of its own — the
+            // remaining time is whatever `arm_started` has not already spent — and
+            // `judge_roster`'s own loop breaks on it exactly as `enrich_with`'s does above, folding
+            // what it does not reach into a "left for the next slot" line. C2 final review E-4:
+            // `events_config` is read HERE only to decide whether this pass runs at all
+            // (`any_feed`) and to pass `judge_per_run_cap` — `judge_roster` re-reads
+            // `config/events.yaml` itself, so this is not the config it works from, and an earlier
+            // comment claiming it was handed down was wrong.
+            let remaining_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            let proxy = |url: &str| -> Result<String, String> {
+                crate::cloudmodel::fetch_event_source(client, url)
+                    .or_else(|_| crate::eventfeed::fetch_event_source(url))
+            };
+            lines.extend(crate::events::judge_roster(
+                vault,
+                &model,
+                Some(&proxy),
+                jiff::Zoned::now().date(),
+                events_config.judge_per_run_cap.max(0) as usize,
+                remaining_budget,
+            ));
+
+            // Task 11 — the Gmail pull. Runs whenever this vault has ever linked a Google
+            // calendar, even when both passes above found nothing (the early return above already
+            // covers "neither, and no Google either"). `pull_gmail` talks to `/gmail-read` through
+            // `client` directly, not through `model`, so it carries its own failure lines rather
+            // than feeding `model.fatal()`. R-C2-E42: it takes whatever of `opts.budget` the
+            // events pass has not already spent, the same way `judge_roster` above does.
+            if google {
+                let gmail_budget = opts.budget.saturating_sub(arm_started.elapsed());
+                lines.extend(pull_gmail(vault, client, opts, gmail_budget));
+            }
+
+            // C2 Task 12 — rule promotion. Runs whenever the cloud arm got past the probe,
+            // whatever the three passes above found: it sends any decision the student already
+            // made and files whatever the service is offering, and both directions are cheap
+            // PostgREST reads/writes with no model call behind them. C2 final review E-1: it takes
+            // whatever of `opts.budget` the three passes above have not already spent, the same
+            // way `judge_roster` and `pull_gmail` do — before this it took no budget at all and
+            // could start a request after the slot's own twenty minutes were already gone.
+            let rules_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(pull_rules(vault, client, opts, rules_budget));
+
+            if let Some(reason) = model.fatal() {
+                lines.push(format!(
+                    "judge: the service answered {reason}, so the rest of the batch was not sent"
+                ));
+            }
+            (code, lines)
+        }
     }
 }
 
@@ -347,6 +491,552 @@ pub fn run(
             budget: BATCH_BUDGET,
         },
     )
+}
+
+/// R-C2-E38, narrowed to a pure read by R-C2-E43. The vault's `config/ingest.yaml` `calendars:`
+/// list is the device's only trace of a Google grant — hand-off H9 writes `- name: google` /
+/// `ics_url: 'cloud:google'` — so a vault that has never linked a Google calendar asks the service
+/// nothing extra.
+///
+/// **Named for what the marker actually is, not for "the account has a grant"**: the app's Tauri
+/// command `google_connected` means the latter — a live grant, which this vault might have and
+/// still never have taken the wizard's calendar step to write the marker for (or vice versa, on a
+/// vault whose grant was later revoked server-side). This predicate answers only "does this
+/// vault's OWN config carry the marker", through [`crate::calfeed::calendar_entries`] — the one
+/// place `calendars:` is parsed, so this is a config read and nothing else: no fetch, no snapshot
+/// write, no network round trip.
+fn google_calendar_linked(vault: &Path) -> bool {
+    crate::calfeed::calendar_entries(vault).iter().any(|(_, url)| url.starts_with("cloud:google"))
+}
+
+/// The agent actor for Gmail-derived writes. `agent:` prefix, so judge-once holds and a field the
+/// student set comes back as a `kind: amend` card rather than being overwritten.
+pub const GMAIL_ACTOR: &str = "agent:knowlu.gmail";
+
+/// How many times one slot asks. The service stops at its own wall-clock budget and says `more`;
+/// three rounds covers a 180-message backlog and still cannot hold the slot open.
+pub const PULL_ROUNDS: usize = 3;
+
+/// The template a `tier: task` message becomes. `needs_enrichment: false` because the service has
+/// already judged effort and importance — flagging it would send it straight back for a second
+/// judgment of the same thing.
+const GMAIL_NOTE: &str = "---\ntitle: {title}\ncourse: {course}\ndomain: school\ndue: {due}\n\
+effort_hours: {effort_hours}\neffort_confidence: low\neffort_source: inferred\n\
+importance: {importance}\nimportance_reason: {why}\nstatus: active\nprogress: 0\n\
+created_by: gmail\nsource_uid: {uid}\nneeds_enrichment: false\n---\n\n{body}\n";
+
+/// Pull the service's queued Gmail judgments and write them, then acknowledge them.
+///
+/// Every write goes through `write` (journal first, single-line surgery second) under
+/// [`GMAIL_ACTOR`]; a `tier: task` becomes a note, the three middle tiers become ordinary
+/// proposals — so the 15-a-day cap applies to them exactly as it applies to every other card,
+/// through `approvals::defer_over_budget` at the next `rank` — and `information` is dropped with
+/// its uid recorded so it is never asked about again.
+pub fn pull_gmail(
+    vault: &Path,
+    client: &crate::cloudmodel::CloudClient,
+    opts: &Options<'_>,
+    budget: std::time::Duration,
+) -> Vec<String> {
+    let ctx = WriteContext {
+        actor: GMAIL_ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let today = jiff::Zoned::now().date();
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let mut lines: Vec<String> = Vec::new();
+    let (mut notes, mut cards, mut dropped, mut invalid, mut failed) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut deferred = 0u64;
+    let mut ack: Vec<String> = Vec::new();
+    let started = std::time::Instant::now();
+
+    for round in 0..PULL_ROUNDS {
+        // R-C2-E42: the same discipline `judge_roster` uses — checked BEFORE the round, not
+        // after, so the worst case this bounds is the budget plus one call already in flight, not
+        // the budget plus a whole extra round. `CALL_TIMEOUT` is the bound because a round can
+        // include model calls at up to that cost each; asking with less of the slot left than one
+        // more call could take risks stalling past `scheduler::CHILD_TIMEOUT` for nothing.
+        if started.elapsed() + crate::cloudmodel::CALL_TIMEOUT > budget {
+            // C2 final review E-4: only when this run actually queued something. A slot whose
+            // budget ran out before the FIRST round has nothing to leave for the next one, and
+            // `gmail: 0 queued, left for the next slot` read as a loss rather than a no-op.
+            let queued = notes + cards + dropped;
+            if queued > 0 {
+                lines.push(format!("gmail: {queued} queued, left for the next slot"));
+            }
+            break;
+        }
+        let pulled = match crate::cloudmodel::pull_gmail_queue(client, &ack) {
+            Ok(got) => got,
+            // R-C2-E41: a calendar-only grant is not a failure at all — a step left out, exactly
+            // like `judge (skipped: no model)` — so it prints nothing rather than a line that
+            // would read as trouble on an account that has none.
+            Err(crate::cloudmodel::CloudError::Quiet(crate::cloudmodel::QuietReason::NoGmailScope)) => {
+                return lines;
+            }
+            Err(e) => {
+                lines.push(format!("gmail: skipped ({e})"));
+                return lines;
+            }
+        };
+        let (items, more) = (pulled.items, pulled.more);
+        deferred += pulled.deferred;
+        ack.clear();
+        if items.is_empty() {
+            if round == 0 {
+                return lines;
+            }
+            break;
+        }
+        // Re-read per round: the previous round's `record_seen` calls are in it.
+        let seen = crate::ingest::load_seen(vault);
+        // R-C2-E44/E45 (2): the per-batch guard, tracked apart from `seen` (the disk ledger, read
+        // fresh above and never mutated here) because a duplicate row must be handled differently
+        // depending on how its FIRST occurrence in this batch turned out: acked again if it was
+        // written or seen-recorded, but never acked, re-attempted or re-counted if it failed — an
+        // unwritten duplicate must not be told to the server as written.
+        let mut acked_this_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut failed_this_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &items {
+            // The uid is the same `gmail:<message-id>` the server deduplicates on, so a message is
+            // written once whichever side asked. A uid already here means an earlier slot (or an
+            // earlier, SUCCESSFUL duplicate row in this same batch) wrote it and the
+            // acknowledgement did not reach the server — acknowledge and move on.
+            if seen.contains(&item.uid) || acked_this_batch.contains(&item.uid) {
+                ack.push(item.uid.clone());
+                continue;
+            }
+            // A duplicate row whose first occurrence in THIS batch already failed: skip silently,
+            // rather than re-attempt the same doomed write or count the same failure twice.
+            if failed_this_batch.contains(&item.uid) {
+                continue;
+            }
+            // R-C2-E43: a shape check on `due` (and `uid`) mirroring the server's own — belt and
+            // braces, since this doc comment's "every write goes through `write`" claim must hold
+            // even if a payload somehow arrived malformed. Routed through the same `Result` the
+            // write functions return, so a malformed item is handled exactly like an unwritable
+            // one: not written, not acknowledged, and counted.
+            let outcome: Result<String, String> = match gmail_item_shape_ok(item) {
+                Err(reason) => {
+                    invalid += 1;
+                    Err(reason)
+                }
+                Ok(()) => match item.tier.as_str() {
+                    // `information` is the noise tier: nothing is written, and the uid is recorded
+                    // so the service is never asked about that message again. Recorded with a
+                    // fixed title, never the model's: the note it would have named is dropped
+                    // exactly because it wasn't worth writing, so its subject is not worth keeping
+                    // either (R-C2-E44).
+                    "information" => {
+                        dropped += 1;
+                        Ok(String::new())
+                    }
+                    "task" => write_gmail_note(vault, item, &ctx, &mut journal)
+                        .map(|stem| {
+                            notes += 1;
+                            format!("created {stem}")
+                        })
+                        .inspect_err(|_| failed += 1),
+                    _ => write_gmail_card(vault, item, today, &ctx, &mut journal)
+                        .map(|stem| {
+                            cards += 1;
+                            format!("proposed {stem}")
+                        })
+                        .inspect_err(|_| failed += 1),
+                },
+            };
+            match outcome {
+                Ok(note) => {
+                    if !note.is_empty() {
+                        lines.push(format!("gmail {}: {} ({})", item.uid, item.tier, note));
+                    }
+                    // The underlying write (or the deliberate no-write for `information`) already
+                    // succeeded here — a duplicate of this uid later in the batch is safe to ack
+                    // again regardless of what the seen-ledger write below does.
+                    acked_this_batch.insert(item.uid.clone());
+                    let title = if item.tier == "information" { "(email)" } else { &item.title };
+                    if let Err(e) = crate::ingest::record_seen(vault, &item.uid, title, &stamp) {
+                        lines.push(format!("gmail {}: seen ledger not written ({e})", item.uid));
+                        continue;
+                    }
+                    ack.push(item.uid.clone());
+                }
+                // A single unwritable item must not end the batch, and it must NOT be
+                // acknowledged: an unacknowledged row comes back next slot, which is the recovery.
+                // R-C2-E45 (2): a duplicate of this SAME uid later in the batch must not be acked
+                // either — nothing was written or seen-recorded for it, so telling the server
+                // otherwise would lose it for good the moment the ack reached the server.
+                Err(e) => {
+                    failed_this_batch.insert(item.uid.clone());
+                    lines.push(format!("gmail {}: not written ({e})", item.uid));
+                }
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+
+    if !ack.is_empty() {
+        if let Err(e) = crate::cloudmodel::pull_gmail_queue(client, &ack) {
+            lines.push(format!(
+                "gmail: {} written but not acknowledged ({e}); they will come back next slot",
+                ack.len()
+            ));
+        }
+    }
+    let mut summary = format!("gmail: {notes} task(s), {cards} proposed, {dropped} dropped as information");
+    // C2 final review E-4: the service's own count of messages it read and could not queue — a
+    // spent cap, a verdict under the floor, a model failure. They are neither queued nor marked
+    // seen server-side, so they come back next slot; without this line a student whose account is
+    // capped sees `0 task(s), 0 proposed, 0 dropped` and nothing to explain it.
+    if deferred > 0 {
+        summary.push_str(&format!(", {deferred} deferred by the service"));
+    }
+    if invalid > 0 {
+        summary.push_str(&format!(", {invalid} skipped as malformed"));
+    }
+    if failed > 0 {
+        summary.push_str(&format!(", {failed} not written"));
+    }
+    lines.push(summary);
+    lines
+}
+
+/// R-C2-E43: the device's own shape check, mirroring the server's `judge_validate.ts` regex
+/// (`^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$`). The server already validates this before a verdict is
+/// queued; this is the belt to that server-side brace — nothing here is written to a note without
+/// also being checked on this side.
+static GMAIL_DUE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$").unwrap());
+
+fn gmail_item_shape_ok(item: &crate::cloudmodel::GmailItem) -> Result<(), String> {
+    if item.uid.contains('\n') || item.uid.contains('\r') {
+        return Err("the uid carries a line break".to_string());
+    }
+    if let Some(due) = item.due.as_deref() {
+        if due.contains('\n') || due.contains('\r') || !GMAIL_DUE_RE.is_match(due) {
+            return Err(format!("malformed due ({due:?})"));
+        }
+    }
+    Ok(())
+}
+
+/// A `tier: task` message as a note. Through `write::create`, so the journal record comes first.
+fn write_gmail_note(
+    vault: &Path,
+    item: &crate::cloudmodel::GmailItem,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<String, String> {
+    let text = gmail_note_text(item);
+    let stem = crate::ingest::slugify(&item.title);
+    let tasks = vault.join("tasks");
+    std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
+    let mut path = tasks.join(format!("{stem}.md"));
+    let mut suffix = 2;
+    while path.exists() {
+        path = tasks.join(format!("{stem}-{suffix}.md"));
+        suffix += 1;
+    }
+    let rel = crate::ids::rel(vault, &path);
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+/// The frontmatter one item becomes. Every free-text field goes through `write::to_literal`, so a
+/// colon or a quote in a subject line cannot produce frontmatter the loader silently drops.
+fn gmail_note_text(item: &crate::cloudmodel::GmailItem) -> String {
+    let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
+    let course = match item.course.as_deref().filter(|c| !c.is_empty()) {
+        Some(c) => lit(c),
+        None => "null".to_string(),
+    };
+    let due = match item.due.as_deref().filter(|d| !d.is_empty()) {
+        Some(d) => d.to_string(),
+        None => "null".to_string(),
+    };
+    let effort = write::to_literal(&Value::Number(serde_yaml_ng::Number::from(
+        item.effort_hours.unwrap_or(1.0),
+    )));
+    GMAIL_NOTE
+        .replace("{title}", &lit(&item.title))
+        .replace("{course}", &course)
+        .replace("{due}", &due)
+        .replace("{effort_hours}", &effort)
+        .replace("{importance}", &item.importance.unwrap_or(3).to_string())
+        .replace("{why}", &lit(&item.why))
+        .replace("{uid}", &lit(&item.uid))
+        .replace("{body}", &format!("From email. {}", item.why))
+}
+
+/// The three middle tiers as a `kind: task` approval card. The payload is the same note text, in a
+/// fenced `task` block, because that is exactly what `approvals::materialize` turns into a note
+/// when the card is approved — so an approved card and a `tier: task` message produce the same
+/// note, and there is one note writer rather than two.
+///
+/// The stem must start with `task-`: `materialize` strips that prefix to name the note.
+fn write_gmail_card(
+    vault: &Path,
+    item: &crate::cloudmodel::GmailItem,
+    today: jiff::civil::Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<String, String> {
+    let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let expires = today
+        .checked_add(jiff::Span::new().days(14))
+        .unwrap_or(today)
+        .strftime("%Y-%m-%d")
+        .to_string();
+    let stem = format!("task-{}", crate::ingest::slugify(&item.title));
+    let text = format!(
+        "---\ntype: approval\nkind: task\ntitle: {}\nstatus: pending\nproposed_at: {stamp}\n\
+         first_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\ncreated_by: gmail\n\
+         source_uid: {}\n---\n\n{}\n\n```task\n{}```\n",
+        lit(&item.title),
+        lit(&item.uid),
+        item.why,
+        gmail_note_text(item),
+    );
+    let approvals = vault.join("approvals");
+    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    let mut path = approvals.join(format!("{stem}.md"));
+    let mut suffix = 2;
+    while path.exists() {
+        path = approvals.join(format!("{stem}-{suffix}.md"));
+        suffix += 1;
+    }
+    let rel = crate::ids::rel(vault, &path);
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+// -----------------------------------------------------------------------------------------
+// C2 Task 12 — rule promotion: the loop that retires model calls.
+// -----------------------------------------------------------------------------------------
+
+/// The agent actor for rule cards. Its own name, not `agent:knowlu.enrich`, so the journal says
+/// which loop filed a card.
+pub const RULES_ACTOR: &str = "agent:knowlu.rules";
+
+/// Send the decisions the student has already made, then file whatever the service is offering.
+///
+/// **Runs on a cloud arm that got past the probe** — not on "every cloud arm". A vault with
+/// nothing to enrich, no enabled event source, no Google grant and no answered rule card takes
+/// `run_lines_with`'s early return and never reaches this, which is exactly what keeps a twice-daily
+/// slot from spending two PostgREST round trips a day forever on a vault that has nothing to say.
+///
+/// **Sending first** means a slot never proposes a rule the student answered an hour ago. The card
+/// is an ordinary proposal, so it is counted, escalated, snoozed past the 15-a-day cap and expired
+/// exactly as every other card is. `rank` leaves an approved one alone (hand-off H6), because
+/// `rank` never opens a socket for a judgment.
+///
+/// `budget` is whatever of the slot the three passes before this one have left (C2 final review
+/// E-1), checked before each request exactly as [`pull_gmail`] checks its own. Both directions
+/// here are cheap PostgREST calls with no model behind them — but "cheap" is a property of the
+/// server, not of the network, and each one can still cost a whole `CALL_TIMEOUT` on a connection
+/// that black-holes. Whatever this run does not reach is named and left for the next slot: a
+/// decision is re-read from its still-`approved` card, and a proposal is re-offered.
+pub fn pull_rules(
+    vault: &Path,
+    client: &crate::cloudmodel::CloudClient,
+    opts: &Options<'_>,
+    budget: std::time::Duration,
+) -> Vec<String> {
+    let ctx = WriteContext {
+        actor: RULES_ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let mut lines: Vec<String> = Vec::new();
+    let today = jiff::Zoned::now().date();
+    let started = std::time::Instant::now();
+    // The same discipline `pull_gmail` uses: checked BEFORE the request, not after, so the worst
+    // case this bounds is the budget plus one call already in flight.
+    let spent = |elapsed: std::time::Duration| elapsed + crate::cloudmodel::CALL_TIMEOUT > budget;
+
+    let cards = decided_rule_cards(vault);
+    for (i, (path, id, decision)) in cards.iter().enumerate() {
+        if spent(started.elapsed()) {
+            lines.push(format!("rules: {} decision(s) left for the next slot", cards.len() - i));
+            return lines;
+        }
+        let (path, id, decision) = (path.as_path(), *id, decision.as_str());
+        match crate::cloudmodel::decide_rule(client, id, decision) {
+            Ok(()) => {
+                archive_decided_card(vault, path, &ctx, &mut journal);
+                lines.push(format!("rules {id}: {decision}"));
+            }
+            // I4 (R-C2-E47 fix 1), narrowed by R-C2-E49 fix 3: a 404 means the service already
+            // settled this exact decision — most likely this same card, sent by a previous run
+            // that died between the POST above and the stamp below. Treated as success, not
+            // failure: stamped and archived exactly as `Ok` is. Without this, a card whose POST
+            // succeeded once but whose stamp never landed would re-POST every slot forever, 404
+            // every time, and — because `rule_decisions_waiting` scans exactly this card — keep the
+            // widened early return (R-C2-E46) from ever firing again for this vault.
+            //
+            // **Matched on the handler's own body, not the status alone** (`judge-rules/handler.ts`'s
+            // `Response.json({ error: "no such undecided proposal" }, { status: 404 })`, extracted
+            // into `detail` by `CloudClient::finish`) — a gateway 404 (the function not deployed, a
+            // stale `api_base`, a slug typo) is ALSO an HTTP 404 and would otherwise be read as
+            // "already settled" and silently discard a real, unsent decision.
+            Err(crate::cloudmodel::CloudError::Status { code: 404, ref detail })
+                if detail == "no such undecided proposal" =>
+            {
+                archive_decided_card(vault, path, &ctx, &mut journal);
+                lines.push(format!("rules {id}: already settled"));
+            }
+            // NOT archived on any other failure — including a 404 whose body does not match the
+            // handler's own text — an unsent decision must come back next slot.
+            Err(e) => lines.push(format!("rules {id}: not sent ({e})")),
+        }
+    }
+
+    if spent(started.elapsed()) {
+        lines.push("rules: the offer was left for the next slot".to_string());
+        return lines;
+    }
+    let proposals = match crate::cloudmodel::pull_rule_proposals(client) {
+        Ok(p) => p,
+        Err(e) => {
+            lines.push(format!("rules: skipped ({e})"));
+            return lines;
+        }
+    };
+    if proposals.is_empty() {
+        return lines;
+    }
+    let existing = existing_rule_ids(vault);
+    let mut filed = 0usize;
+    for proposal in &proposals {
+        // A card is never minted twice for one proposal id — the id is in the card's frontmatter
+        // and this is the guard, exactly as `find_pending_amendment` guards an amend card.
+        if existing.contains(&proposal.id) {
+            continue;
+        }
+        match write_rule_card(vault, proposal, today, &ctx, &mut journal) {
+            Ok(stem) => {
+                filed += 1;
+                lines.push(format!("rules {}: proposed ({stem})", proposal.id));
+            }
+            Err(e) => lines.push(format!("rules {}: not written ({e})", proposal.id)),
+        }
+    }
+    lines.push(format!("rules: {filed} proposed of {} offered", proposals.len()));
+    lines
+}
+
+/// Stamp a decided rule card `executed` and archive it — the shared tail of both `pull_rules`
+/// outcomes that count as settled (the service accepted the decision, or already had it). Best
+/// effort: if the stamp write fails the card is simply left `approved`/`rejected` and comes back
+/// next slot, exactly as it would if this were never called.
+fn archive_decided_card(vault: &Path, path: &std::path::Path, ctx: &WriteContext, journal: &mut Journal) {
+    let rel = crate::ids::rel(vault, path);
+    let stamped = format!("\"{}\"", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M"));
+    let literals = vec![
+        ("status".to_string(), "executed".to_string()),
+        ("executed_at".to_string(), stamped),
+    ];
+    if crate::write::write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default()).is_ok() {
+        let _ = crate::write::delete(vault, &rel, ctx, journal);
+    }
+}
+
+/// `kind: rule` cards the student has answered, as `(path, rule_id, decision)`. Also what
+/// [`rule_decisions_waiting`] scans — one scanner for "is there an answered rule card", not two.
+fn decided_rule_cards(vault: &Path) -> Vec<(std::path::PathBuf, i64, String)> {
+    let mut out = Vec::new();
+    for path in crate::approvals::sorted_md(&vault.join("approvals")) {
+        let Ok(text) = crate::pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        if crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref() != Some("rule") {
+            continue;
+        }
+        let status = crate::yaml::opt_text(crate::yaml::get(&meta, "status")).unwrap_or_default();
+        if status != "approved" && status != "rejected" {
+            continue;
+        }
+        let Some(id) = crate::yaml::get(&meta, "rule_id").and_then(crate::yaml::i64_of) else { continue };
+        out.push((path, id, status));
+    }
+    out
+}
+
+/// R-C2-E46: whether this vault has an answered `kind: rule` card not yet sent to the service —
+/// reusing [`decided_rule_cards`], the same scan `pull_rules` performs to find them, so there is
+/// one scanner for this question, not two.
+fn rule_decisions_waiting(vault: &Path) -> bool {
+    !decided_rule_cards(vault).is_empty()
+}
+
+/// Every `rule_id` already filed — `approvals/` for the live ones and `archive/` for the settled,
+/// because a card that was decided last week must not be re-offered this week.
+fn existing_rule_ids(vault: &Path) -> std::collections::BTreeSet<i64> {
+    let mut out = std::collections::BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = crate::pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            if let Some(id) = crate::yaml::get(&meta, "rule_id").and_then(crate::yaml::i64_of) {
+                out.insert(id);
+            }
+        }
+    }
+    out
+}
+
+/// The card the deck renders. `kind: rule` is a kind `approvals.rs` leaves alone (hand-off H6):
+/// the decision is *sent* by the next `judge` step, which then stamps and archives it.
+fn write_rule_card(
+    vault: &Path,
+    proposal: &crate::cloudmodel::RuleProposal,
+    today: jiff::civil::Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<String, String> {
+    let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
+    let stamp = today.strftime("%Y-%m-%d").to_string();
+    let expires = today
+        .checked_add(jiff::Span::new().days(14))
+        .unwrap_or(today)
+        .strftime("%Y-%m-%d")
+        .to_string();
+    let title = format!("Always judge {} the same way", proposal.value.replace('|', " "));
+    let mut body = String::from(
+        "Three judgments agreed and none disagreed in 60 days. Approving this stops the model \
+         being asked about this pattern again; the fields it will write are below.\n\n",
+    );
+    if let Some(map) = proposal.verdict.as_object() {
+        let mut names: Vec<&String> = map.keys().collect();
+        names.sort();
+        for name in names {
+            body.push_str(&format!("- {name}: {}\n", crate::pystr::json_str(&map[name])));
+        }
+    }
+    let text = format!(
+        "---\ntype: approval\nkind: rule\ntitle: {}\nstatus: pending\nproposed_at: {stamp}\n\
+         first_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\ncreated_by: rules\n\
+         rule_id: {}\nfeature: {}\nvalue: {}\n---\n\n{body}",
+        lit(&title),
+        proposal.id,
+        lit(&proposal.feature),
+        lit(&proposal.value),
+    );
+    let approvals = vault.join("approvals");
+    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    let stem = format!("rule-{}", proposal.id);
+    let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
+    crate::write::create(vault, &rel, &text, ctx, journal, None)
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -827,5 +1517,1186 @@ mod tests {
         assert!(!raw.contains("ZQXTITLE"), "the note's title leaked into the judgment log: {raw}");
         assert!(!raw.contains("ZQXBODY"), "the note's body leaked into the judgment log: {raw}");
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The whole `judge` step against a service that is not there: every item still gets tier 1's
+    /// answer written, the run says why, and the exit code is 0. This is the case the app actually
+    /// meets on a train, and the one a non-zero exit would turn into an amber tray forever.
+    ///
+    /// R-C2-E14: this vault's one note IS flagged `needs_enrichment: true`, so the write really
+    /// happens — `write_literals`/`journal::make_record` both read process-global `device_name()`
+    /// (see the comment above `enrichment_writes_the_five_fields_...`), so this test takes the same
+    /// lock every other note-writing test in this module takes.
+    #[test]
+    fn a_service_that_cannot_be_reached_still_writes_tier_one_and_exits_zero() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("cloud-down");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let opts = Options {
+            via: "local-runner", run_id: None, runtime: None, model: None,
+            log_dir: None, limit: 10, budget: BATCH_BUDGET,
+        };
+        let (code, lines) = run_lines_with(&v, &opts, Some(&client));
+        assert_eq!(code, 0, "the judge step always exits 0");
+        assert!(lines.iter().any(|l| l.contains("no network")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E15: an empty queue must never reach the service at all — not even the one-call probe.
+    /// A slot that runs twice a day forever and has nothing to enrich must not spend a round trip
+    /// (and, on a network that black-holes instead of refusing, risk up to `CALL_TIMEOUT` stalling
+    /// the slot) proving what `pending`'s own empty result already answers for free.
+    #[test]
+    fn an_empty_queue_makes_no_request_to_the_service() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("cloud-empty");
+        // The fixture's one note starts flagged; clear it so `pending` finds nothing.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let opts = Options {
+            via: "local-runner", run_id: None, runtime: None, model: None,
+            log_dir: None, limit: 10, budget: BATCH_BUDGET,
+        };
+        let (code, lines) = run_lines_with(&v, &opts, Some(&client));
+        assert_eq!(code, 0);
+        assert_eq!(lines, vec!["judge: nothing to enrich".to_string()], "{lines:?}");
+        // Non-blocking, not a timed wait: `run_lines_with` above already ran to completion on this
+        // thread, so a request — had one been sent to a live loopback listener — would already be
+        // sitting in the accept queue. `Err` here means the probe never dialled out at all.
+        assert!(
+            listener.accept().is_err(),
+            "an empty queue must never reach the judgment service"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A loopback server that answers `replies` in order (by arrival, not by path) and hands back
+    /// everything it was sent, joined once at the end — the same discipline
+    /// `engine/tests/cloud_contract.rs`'s `Loopback` uses, duplicated here rather than shared
+    /// because a `src` unit test cannot depend on a separate test binary.
+    fn multi_reply_loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        multi_reply_loopback_slow(replies, std::time::Duration::ZERO)
+    }
+
+    /// [`multi_reply_loopback`] with the FIRST reply held back by `first_delay` — the one way a
+    /// test can spend a measurable amount of the cloud arm's wall clock without sleeping in the
+    /// test itself. Used by the budget test (C2 final review E-1), which needs the probe to cost
+    /// more than the whole budget.
+    fn multi_reply_loopback_slow(
+        replies: Vec<(u16, String)>,
+        first_delay: std::time::Duration,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        // C2 Task 9 fix 2 (R-C2-E22 second pass, minor): non-blocking and polled against a
+        // deadline, not a blocking `accept()` — a regression that makes the events pass send fewer
+        // requests than `replies` expects must fail this test, not hang the thread (and the test
+        // that joins it) forever.
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut seen = Vec::new();
+            for (index, (code, body)) in replies.into_iter().enumerate() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut accepted = None;
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(pair) => {
+                            accepted = Some(pair);
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let Some((mut stream, _)) = accepted else { break };
+                stream.set_nonblocking(false).expect("blocking for the request/response exchange");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone the accepted stream"));
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = rest.trim().parse().unwrap_or(0);
+                    }
+                    let blank = line == "\r\n" || line == "\n";
+                    head.push_str(&line);
+                    if blank {
+                        break;
+                    }
+                }
+                let mut body_buf = vec![0u8; length];
+                if length > 0 {
+                    let _ = reader.read_exact(&mut body_buf);
+                }
+                seen.push(format!("{head}{}", String::from_utf8_lossy(&body_buf)));
+                if index == 0 && !first_delay.is_zero() {
+                    std::thread::sleep(first_delay);
+                }
+                let response = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            seen
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+    }
+
+    /// C2 Task 9 fix 1 (R-C2-E22 #7a): the pull phase this task added had no test — every other
+    /// `enrich::` test either takes the widened early return or runs against a `vault(tag)` with
+    /// no `config/events.yaml` at all. This one gives the vault one enabled event source and an
+    /// empty enrichment queue, and proves the whole chain end to end: the probe, the feed fetched
+    /// through the server-side proxy, the verdict recorded in the ledger, and the summary line
+    /// naming the pass — with no real socket, only a loopback listener answering in order.
+    #[test]
+    fn the_events_pass_runs_after_an_empty_enrichment_batch_and_the_verdict_reaches_the_ledger() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("events-pull");
+        // Clear the fixture's one flagged task so the enrichment queue is empty — the events pass
+        // must still run because `config/events.yaml` below names an enabled source.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        crate::pystr::write_text(
+            &v.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        ).unwrap();
+
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
+                   DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
+                   DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let events_reply = crate::ledger::dumps_value(&serde_json::json!({ "body": ics }));
+        let judge_reply = crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
+            "tier": 3
+        }));
+        // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), the
+        // verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because its
+        // own batch is empty — and, since Task 12, the rule pull's own `GET /judge-rules` at the
+        // end of the cloud arm, with nothing decided and nothing offered.
+        let (base, handle) = multi_reply_loopback(vec![
+            (200, "{}".to_string()),
+            (200, events_reply),
+            (200, judge_reply),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let log = v.join("_log");
+        let o = opts(&log);
+        let (code, lines) = run_lines_with(&v, &o, Some(&client));
+        assert_eq!(code, 0);
+        assert!(lines.iter().any(|l| l == "judge: nothing to enrich"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("events:")), "the pass must name itself: {lines:?}");
+        let ledger = crate::eventledger::load_ledger(&v, None);
+        assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
+        assert!(requests[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests[3]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // C2 Task 11 — the five email tiers, judged server-side, pulled by the slot.
+    // -----------------------------------------------------------------------------------------
+
+    /// An approved Gmail card must produce the SAME note a `tier: task` message produces, or there
+    /// are two note writers and one of them will drift.
+    ///
+    /// **Compared without `id:`** — `write::create` mints a fresh opaque id into the frontmatter of
+    /// every note it creates, so a byte-for-byte comparison would fail by construction. The id is
+    /// the one line that is *supposed* to differ; everything else is the contract.
+    #[test]
+    fn an_approved_gmail_card_materialises_the_same_note_a_task_tier_would() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("gmail-card");
+        // `vault(tag)` seeds one fixture task (`hw3.md`) for the enrichment-focused tests above;
+        // this test's own `find` below picks out "whichever task is not `direct`", so an empty
+        // `tasks/` is what it needs.
+        std::fs::remove_file(vault.join("tasks").join("hw3.md")).unwrap();
+        let item = crate::cloudmodel::GmailItem {
+            uid: "gmail:m1".into(), tier: "borderline".into(),
+            title: "PH 106 problem set 4".into(), course: Some("ph-106".into()),
+            due: Some("2026-09-11".into()), effort_hours: Some(2.5), importance: Some(4),
+            why: "the email states a Friday deadline".into(), confidence: 0.86,
+        };
+        let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let today = jiff::civil::date(2026, 9, 9);
+
+        let direct = write_gmail_note(&vault, &item, &ctx, &mut journal).expect("the note writes");
+        let card = write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("the card writes");
+        // Approve it exactly as the deck would, then let `process_approvals` materialise it.
+        let rel = format!("approvals/{card}.md");
+        crate::write::write_literals(
+            &vault, &rel, &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+        let _ = crate::approvals::process_approvals(
+            &vault, today, jiff::civil::date(2026, 9, 9).at(9, 0, 0, 0), &ctx, &mut journal,
+        );
+
+        let strip_id = |text: &str| {
+            text.lines().filter(|l| !l.starts_with("id:")).collect::<Vec<_>>().join("\n")
+        };
+        let from_tier = std::fs::read_to_string(vault.join("tasks").join(format!("{direct}.md"))).unwrap();
+        let materialised = crate::approvals::sorted_md(&vault.join("tasks"))
+            .into_iter()
+            .find(|p| p.file_stem().map(|s| s != direct.as_str()).unwrap_or(false))
+            .expect("the card produced a note");
+        let from_card = std::fs::read_to_string(&materialised).unwrap();
+        assert_eq!(strip_id(&from_tier), strip_id(&from_card));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The 15-a-day cap is the ENGINE's, and Gmail proposals go through the ordinary card path so
+    /// it applies to them unchanged — which is the narrowing recorded in the fidelity ledger.
+    #[test]
+    fn an_over_budget_gmail_batch_is_snoozed_not_dropped() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("gmail-budget");
+        let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let today = jiff::civil::date(2026, 9, 9);
+        for n in 0..20 {
+            let item = crate::cloudmodel::GmailItem {
+                uid: format!("gmail:m{n}"), tier: "opportunity".into(),
+                title: format!("Opportunity {n}"), course: None, due: None,
+                effort_hours: None, importance: None, why: "worth a look".into(), confidence: 0.8,
+            };
+            write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("card");
+        }
+        let deferred = crate::approvals::defer_over_budget(&vault, today, 15, &ctx, &mut journal);
+        assert_eq!(deferred.len(), 5, "the surplus is snoozed to tomorrow, never deleted");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A loopback server that answers one `/gmail-read` reply per accepted connection, in arrival
+    /// order — [`multi_reply_loopback`] under a name that reads at the call site, since every test
+    /// below is scripting the pull's own endpoint and nothing else.
+    fn gmail_loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        multi_reply_loopback(replies)
+    }
+
+    fn gmail_reply(items: &str, more: bool) -> (u16, String) {
+        (200, crate::ledger::dumps_value(&serde_json::json!({
+            "items": serde_json::from_str::<serde_json::Value>(items).expect("valid items json"),
+            "read": 0, "quiet": false, "more": more,
+        })))
+    }
+
+    fn client_for(base: String) -> crate::cloudmodel::CloudClient {
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret")
+    }
+
+    /// A scripted `127.0.0.1:0` listener answering `replies` in order, as a `CloudClient` already
+    /// aimed at it — [`multi_reply_loopback`] plus [`client_for`], under the name C2 Task 12's own
+    /// tests call it. `LoopbackServer::requests` joins the listener thread once, the same discipline
+    /// [`multi_reply_loopback`]'s other callers use directly.
+    struct LoopbackServer(Option<std::thread::JoinHandle<Vec<String>>>);
+    impl LoopbackServer {
+        fn requests(&mut self) -> Vec<String> {
+            self.0.take().map(|h| h.join().expect("the listener thread did not panic")).unwrap_or_default()
+        }
+    }
+    fn loopback_client(replies: Vec<(u16, String)>) -> (crate::cloudmodel::CloudClient, LoopbackServer) {
+        let (base, handle) = multi_reply_loopback(replies);
+        (client_for(base), LoopbackServer(Some(handle)))
+    }
+
+    /// The whole pull, end to end: one `tier: task` item becomes a note through `write::create`,
+    /// `created_by: gmail`, `source_uid: gmail:<message-id>`, `needs_enrichment: false` — and the
+    /// device acknowledges it on the very next request, exactly as [`pull_gmail`]'s doc comment
+    /// promises.
+    #[test]
+    fn a_clear_task_email_becomes_a_note_with_created_by_gmail() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-task");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let meta = meta_of(&v, "ph-106-problem-set-4.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "created_by")).as_deref(), Some("gmail"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "source_uid")).as_deref(), Some("gmail:m1"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "course")).as_deref(), Some("ph-106"));
+        assert_eq!(crate::yaml::opt_f64(crate::yaml::get(&meta, "effort_hours"), 0.0), 2.5);
+        assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&meta, "importance"), 0), 4);
+        assert_eq!(crate::yaml::get(&meta, "needs_enrichment"), Some(&serde_yaml_ng::Value::Bool(false)));
+        assert_eq!(lines.last().unwrap(), "gmail: 1 task(s), 0 proposed, 0 dropped as information", "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "one pull, then one ack flush: {requests:?}");
+        assert!(requests[1].contains("gmail:m1"), "the ack flush must name the uid it wrote: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// `borderline` (and, by the same code path, `event` and `opportunity`) becomes a `kind: task`
+    /// approval card, never a note directly — the student decides, not the pull.
+    #[test]
+    fn a_borderline_email_becomes_a_proposal_and_not_a_note() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-borderline");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m2","tier":"borderline","payload":{"title":"CS midterm review session","course":"cs-100","due":null,"effort_hours":1.0,"importance":3,"why":"might be worth attending","confidence":0.6}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(
+            !v.join("tasks").join("cs-midterm-review-session.md").exists(),
+            "a borderline tier must not write a note directly"
+        );
+        let meta = meta_of_approval(&v, "task-cs-midterm-review-session.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "kind")).as_deref(), Some("task"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "status")).as_deref(), Some("pending"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "source_uid")).as_deref(), Some("gmail:m2"));
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 1 proposed, 0 dropped as information", "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// `information` is the noise tier: nothing is written, and the uid goes into
+    /// `state/ingest-seen.md` — the same ledger `ingest` uses — so a re-pull that somehow re-offers
+    /// the same uid is recognised locally and never turned into a second write or a second ask.
+    #[test]
+    fn an_information_email_writes_nothing_but_is_never_asked_about_twice() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-information");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m3","tier":"information","payload":{"title":"Weekly newsletter","course":null,"due":null,"effort_hours":null,"importance":null,"why":"a newsletter","confidence":0.95}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(!v.join("tasks").join("weekly-newsletter.md").exists());
+        assert!(!v.join("approvals").join("task-weekly-newsletter.md").exists());
+        assert!(
+            crate::ingest::load_seen(&v).contains("gmail:m3"),
+            "the uid must be recorded so this message is never asked about again"
+        );
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 0 proposed, 1 dropped as information", "{lines:?}");
+
+        // R-C2-E44: an information-tier uid is recorded with a fixed title, never the model's —
+        // the note it would have named was dropped exactly because it was not worth writing.
+        let ledger = crate::pystr::read_text(&v.join("state").join("ingest-seen.md")).unwrap();
+        assert!(ledger.contains("gmail:m3 \u{b7} (email) \u{b7}"), "{ledger}");
+        assert!(!ledger.contains("Weekly newsletter"), "{ledger}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "one pull, then one ack flush: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E45 (renamed from `nothing_is_acknowledged_that_was_not_written`, which now names a
+    /// different, per-item test below): a round that fails after an earlier round already wrote
+    /// something. The write stands (it is on disk and in `state/ingest-seen.md` either way), but
+    /// its uid never completes a SUCCESSFUL acknowledgement round trip, and the run says so rather
+    /// than pretending nothing happened.
+    ///
+    /// Scripted as two requests: the first hands over one `task` item and says `more: true`, so
+    /// `pull_gmail` loops for a second round carrying that item's uid in `ack`; the listener answers
+    /// that second request with a 500. `pull_gmail` must stop there — no third "flush" request is
+    /// ever attempted.
+    #[test]
+    fn a_failed_round_stops_the_pull_and_says_so() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-partial-500");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                true,
+            ),
+            (500, "{\"error\":\"boom\"}".to_string()),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(
+            v.join("tasks").join("ph-106-problem-set-4.md").exists(),
+            "the first round's item was really written before the second round failed"
+        );
+        assert!(
+            crate::ingest::load_seen(&v).contains("gmail:m1"),
+            "written locally even though the server never confirmed the ack"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("gmail: skipped (")),
+            "the failure must reach the run's own summary: {lines:?}"
+        );
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(
+            requests.len(), 2,
+            "no third, final ack-flush request may follow a round that already failed: {requests:?}"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    fn meta_of_approval(v: &Path, name: &str) -> serde_yaml_ng::Mapping {
+        crate::ids::read_meta(&v.join("approvals").join(name)).unwrap()
+    }
+
+    /// IMPORTANT 7: a WRITE failure, not a network one — the first item's write succeeds and the
+    /// second's fails, within the SAME batch. The failed uid must be absent from `ack` (never
+    /// acknowledged) while the first item's uid still is, and the summary counts the failure.
+    ///
+    /// The second item is `borderline` (writes into `approvals/`), pre-created as a FILE rather
+    /// than a directory so `create_dir_all` fails for it deterministically — while the first item
+    /// (`task`, `tasks/`) is a different directory entirely and is unaffected.
+    #[test]
+    fn nothing_is_acknowledged_that_was_not_written() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-write-fails");
+        std::fs::remove_dir_all(v.join("approvals")).unwrap();
+        crate::pystr::write_text(&v.join("approvals"), "not a directory").unwrap();
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}},
+                    {"uid":"gmail:m2","tier":"borderline","payload":{"title":"CS midterm review session","course":"cs-100","due":null,"effort_hours":1.0,"importance":3,"why":"might be worth attending","confidence":0.6}}
+                ]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(v.join("tasks").join("ph-106-problem-set-4.md").exists(), "the first item must still be written");
+        assert!(
+            lines.iter().any(|l| l.starts_with("gmail gmail:m2: not written (")),
+            "the second item's failure must be named: {lines:?}"
+        );
+        assert!(lines.last().unwrap().ends_with(", 1 not written"), "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[1].contains("gmail:m1"), "the written uid must be acknowledged: {}", requests[1]);
+        assert!(!requests[1].contains("gmail:m2"), "the failed uid must be absent from ack: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E42: a zero-length remaining budget must stop `pull_gmail` before its first round even
+    /// asks — the round check happens before the network call, not after. C2 final review E-4
+    /// narrowed what it SAYS when it stops: `gmail: 0 queued, left for the next slot` read as a
+    /// loss, when in fact nothing had been pulled and so nothing was left behind. The property
+    /// R-C2-E42 exists for is the empty request list below; the line is only reported when this run
+    /// really did queue something it is now leaving for the next slot.
+    #[test]
+    fn the_gmail_pull_stops_before_its_first_round_when_the_slot_has_no_budget_left() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-nobudget");
+        let (base, handle) = gmail_loopback(vec![]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), std::time::Duration::ZERO);
+        assert!(
+            !lines.iter().any(|l| l.contains("left for the next slot")),
+            "nothing was queued, so nothing was left for the next slot: {lines:?}"
+        );
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert!(requests.is_empty(), "a zero budget must make no request at all: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E43: a `due` that could not have come from the server's own validated verdict (here,
+    /// an injection attempt against the note's own frontmatter) is skipped, not written and not
+    /// acknowledged, and the summary counts it — the same "not written" recovery every other
+    /// per-item failure gets.
+    #[test]
+    fn a_malformed_due_is_skipped_not_written_and_not_acknowledged() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-bad-due");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11\nstatus: done","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(!v.join("tasks").join("ph-106-problem-set-4.md").exists(), "a malformed due must not be written");
+        assert!(!crate::ingest::load_seen(&v).contains("gmail:m1"), "and must not be marked seen");
+        assert!(lines.last().unwrap().ends_with(", 1 skipped as malformed"), "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "the empty ack means no items were ever ready to flush: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E44 (minor): a duplicate queue row for the SAME uid, within the SAME batch, must
+    /// produce exactly one note — the per-batch guard is checked, not only the disk-persisted one.
+    #[test]
+    fn a_duplicate_queue_row_in_the_same_batch_produces_only_one_note() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-duplicate-row");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}},
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}
+                ]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(v.join("tasks").join("ph-106-problem-set-4.md").exists());
+        assert!(!v.join("tasks").join("ph-106-problem-set-4-2.md").exists(), "a duplicate row must not mint a second note");
+        assert_eq!(lines.last().unwrap(), "gmail: 1 task(s), 0 proposed, 0 dropped as information", "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "one pull, then one ack flush carrying the uid once: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A duplicate row whose FIRST occurrence in the batch already failed must not be acked by a
+    /// later occurrence of the same uid — R-C2-E45 (2). The first `m1` is malformed (skipped,
+    /// counted, not written); the second `m1` must be skipped silently: no re-attempt, no second
+    /// count, and — critically — no ack, because nothing was ever written or seen-recorded for it.
+    #[test]
+    fn a_duplicate_row_whose_first_occurrence_failed_is_never_acknowledged() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-duplicate-row-failed");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11\nstatus: done","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}},
+                    {"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11\nstatus: done","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}
+                ]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(!v.join("tasks").join("ph-106-problem-set-4.md").exists());
+        assert!(!crate::ingest::load_seen(&v).contains("gmail:m1"));
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("gmail gmail:m1: not written (")).count(), 1,
+            "the second occurrence must not be re-counted: {lines:?}"
+        );
+        assert!(lines.last().unwrap().ends_with(", 1 skipped as malformed"), "{lines:?}");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "an empty ack means no second, ack-flush request: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // R-C2-E41 open clause — the pull's own quiet behaviours, driven through the loopback rather
+    // than asserted only at the server (Deno) layer.
+    // ---------------------------------------------------------------------------------------------
+
+    /// `reason: "no_gmail_scope"` is not a failure at all — a calendar-only grant, the routine
+    /// account shape while the wizard has no Gmail button yet — so `pull_gmail` must return no
+    /// line, write nothing, and never attempt a second (ack-flush) request.
+    #[test]
+    fn a_quiet_no_gmail_scope_reply_prints_no_line_and_makes_no_second_request() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-quiet-no-scope");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![(200, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        // `vault(tag)` seeds one fixture task (`hw3.md`); nothing Gmail-derived was written.
+        let tasks: Vec<_> = std::fs::read_dir(v.join("tasks")).unwrap().flatten().collect();
+        assert_eq!(tasks.len(), 1, "nothing beyond the fixture task was written: {tasks:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "no ack-flush request when there was nothing to ack: {requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// `reason: "revoked"` IS the failure the student can act on, and reads as exactly one line —
+    /// through `label()`, never a raw HTTP status.
+    #[test]
+    fn a_quiet_revoked_reply_prints_exactly_one_skipped_line() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-quiet-revoked");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "revoked", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![(200, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines, vec!["gmail: skipped (gmail is not connected; re-connect from settings)".to_string()]);
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The service's 503 for an unconfigured deployment (no P2) reads as exactly one line, through
+    /// `QuietReason::NotConfigured`'s `label()` — never a raw HTTP status either.
+    #[test]
+    fn a_503_not_configured_reply_prints_exactly_one_skipped_line() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-503-not-configured");
+        let body = crate::ledger::dumps_value(&serde_json::json!({
+            "error": "Google sign-in is not configured on this deployment",
+        }));
+        let (base, handle) = gmail_loopback(vec![(503, body)]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines, vec!["gmail: skipped (google sign-in is not configured on this deployment)".to_string()]);
+        assert!(!lines.iter().any(|l| l.contains("HTTP 200")), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E45 (3): a 503 whose body does NOT carry the exact "not configured" text is a platform
+    /// failure (a redeploy, a gateway hiccup) and must stay a genuine `CloudError::Status` — never
+    /// misread as "Google sign-in is not configured".
+    #[test]
+    fn a_bare_503_is_not_read_as_not_configured() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-bare-503");
+        let (base, handle) = gmail_loopback(vec![(503, "{}".to_string())]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("HTTP 503"), "{lines:?}");
+        assert!(!lines[0].contains("not configured"), "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-C2-E38, R-C2-E43: the Gmail pull's local precondition. A vault that has linked a Google
+    /// calendar — its `config/ingest.yaml` carries the `cloud:google` entry hand-off H9 writes —
+    /// asks the service even with an empty enrichment queue and no event source; a vault that
+    /// never linked one asks nothing at all, exactly as before Task 11. And the predicate itself
+    /// never writes: no `state/calendar.md` on a vault that had none.
+    #[test]
+    fn the_gmail_pull_runs_only_when_the_vault_has_linked_a_google_calendar() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+
+        // Linked: the early return must be skipped, so the probe AND the pull both fire.
+        let connected = vault("gmail-predicate-connected");
+        crate::pystr::write_text(
+            &connected.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        crate::pystr::write_text(
+            &connected.join("config").join("ingest.yaml"),
+            "calendars:\n  - name: google\n    ics_url: 'cloud:google'\n",
+        ).unwrap();
+        // The probe, then the Gmail pull, then Task 12's own rule pull at the end of the cloud
+        // arm (nothing decided, nothing offered).
+        let (base, handle) = gmail_loopback(vec![
+            (200, "{}".to_string()),
+            gmail_reply("[]", false),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let client = client_for(base);
+        let log = connected.join("_log");
+        let (code, _lines) = run_lines_with(&connected, &opts(&log), Some(&client));
+        assert_eq!(code, 0);
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 3, "the probe, the pull, then the rule pull: {requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
+        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
+        assert!(
+            !connected.join("state").join("calendar.md").exists(),
+            "R-C2-E43: the predicate is a pure config read and must never write a snapshot"
+        );
+        let _ = std::fs::remove_dir_all(&connected);
+
+        // Not linked: the widened early return still applies, exactly as it did before this
+        // task — no request of any kind, `judge` included.
+        let unconnected = vault("gmail-predicate-unconnected");
+        crate::pystr::write_text(
+            &unconnected.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let (base2, handle2) = gmail_loopback(vec![]);
+        let client2 = client_for(base2);
+        let log2 = unconnected.join("_log");
+        let (code2, lines2) = run_lines_with(&unconnected, &opts(&log2), Some(&client2));
+        assert_eq!(code2, 0);
+        assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
+        let requests2 = handle2.join().expect("the listener thread did not panic");
+        assert!(requests2.is_empty(), "no judge request either way: {requests2:?}");
+        let _ = std::fs::remove_dir_all(&unconnected);
+    }
+
+    /// C2 final review E-2 (closing deferred m5): `outcome: "capped"` is the account's daily
+    /// judgment cap, not fifty model failures. Before this fix the three verdict-null arms read
+    /// only `cause` — which a capped reply leaves null — so every item in the batch made its own
+    /// request, got `the judgment service answered no verdict`, and logged `model failed`. Now the
+    /// first capped reply sets the same fatal flag a 402 sets: no further request is made, one
+    /// summary line names the cap, and the judgment log says `capped`.
+    #[test]
+    fn a_capped_reply_stops_the_batch_after_one_request_and_the_log_says_capped() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("cloud-capped");
+        // A second flagged note, so "stopped after one request" is a claim with something to stop.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw4.md"),
+            &NOTE.replace("Homework 3", "Homework 4").replace("task_1111111111", "task_2222222222"),
+        ).unwrap();
+        let capped = crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": null, "outcome": "capped", "cause": null, "tier": 3,
+        }));
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // the probe
+            (200, capped),                                                              // /judge-task
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // pull_rules
+        ]);
+        let log = v.join("_log");
+        let (code, lines) = run_lines_with(&v, &opts(&log), Some(&client));
+
+        assert_eq!(code, 0, "a spent cap is a normal outcome: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l ==
+                "judge: the service answered the daily judgment cap, so the rest of the batch was not sent"),
+            "the student's line must name the cap: {lines:?}"
+        );
+        let requests = server.requests();
+        let asked: Vec<&String> = requests.iter().filter(|r| r.contains("/judge-task")).collect();
+        assert_eq!(asked.len(), 1, "one /judge-task and no more: {requests:?}");
+
+        let raw = raw_log_text(&log);
+        assert!(raw.contains("\"cause\": \"capped\""), "the log must record the cap: {raw}");
+        assert!(!raw.contains("model failed"), "a spent cap is not a model failure: {raw}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// C2 final review E-1: the cloud arm shares ONE budget across four passes, and before this
+    /// fix two of them did not know that. `enrich_with` started its own clock, so it was handed a
+    /// full `opts.budget` however much the probe had already spent; `pull_rules` took no budget at
+    /// all and would open a connection after the slot's own `scheduler::CHILD_TIMEOUT` had run
+    /// out. Here the probe alone costs more than the whole budget — the listener holds its first
+    /// reply back — so the enrichment batch must take NO item and `pull_rules` must make NO
+    /// request, and the run must still exit 0 naming what was left.
+    #[test]
+    fn a_probe_that_eats_the_budget_leaves_the_batch_and_the_rules_pull_for_the_next_slot() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("budget-arm");
+        // One scripted reply: the probe's. A second request would be refused, and every line
+        // asserted below would read differently — which is what makes "no request" provable
+        // without waiting on an accept that never comes.
+        let (base, handle) = multi_reply_loopback_slow(
+            vec![(200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] })))],
+            std::time::Duration::from_millis(500),
+        );
+        let client = client_for(base);
+        let log = v.join("_log");
+        let o = Options { budget: std::time::Duration::from_millis(150), ..opts(&log) };
+        let (code, lines) = run_lines_with(&v, &o, Some(&client));
+
+        assert_eq!(code, 0, "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l == "judge: 0 item(s), 0 enriched, 0 proposed, 1 left for the next slot"),
+            "the batch must take no item once the probe has spent the budget: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "rules: the offer was left for the next slot"),
+            "pull_rules must not open a connection with no budget left: {lines:?}"
+        );
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "the probe and nothing else: {requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // C2 Task 12 — rule promotion: the loop that retires model calls.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_rule_proposal_becomes_a_card_the_deck_can_answer() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-file");
+        let offered = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{
+                "id": 41, "kind": "task", "feature": "created_by+title_prefix",
+                "value": "zybooks|CS 100 Lab",
+                "verdict": {"effort_hours": "0.5", "importance": "2"},
+                "proposed_at": "2026-09-11"
+            }]
+        }));
+        let (client, mut server) = loopback_client(vec![(200, offered)]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(lines.iter().any(|l| l.contains("rules 41: proposed")), "{lines:?}");
+        let card = std::fs::read_to_string(vault.join("approvals").join("rule-41.md")).expect("the card exists");
+        assert!(card.contains("kind: rule"));
+        assert!(card.contains("rule_id: 41"));
+        assert!(card.contains("status: pending"));
+        assert!(card.contains("- effort_hours: 0.5"));
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_card_is_never_minted_twice_for_one_proposal_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-once");
+        let offered = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{ "id": 41, "kind": "task", "feature": "title_prefix", "value": "CS 100 Lab",
+                            "verdict": {"importance": "2"}, "proposed_at": "2026-09-11" }]
+        }));
+        let (client, mut server) =
+            loopback_client(vec![(200, offered.clone()), (200, offered)]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let first = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(first.iter().any(|l| l.contains("1 proposed of 1")), "{first:?}");
+        let second = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(second.iter().any(|l| l.contains("0 proposed of 1")), "{second:?}");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn an_approved_card_is_sent_once_and_then_archived() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-decide");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let empty = crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }));
+        // M7 (R-C2-E47 fix 1): the second pull's proposals reply offers id 41 AGAIN — as the
+        // service legitimately might, since nothing on its side remembers a device has already
+        // filed a card for a proposal — so "still seen in archive, not re-filed" below is a real
+        // assertion about `existing_rule_ids` scanning `archive/`, not a vacuous one about an
+        // empty reply.
+        let offered_again = crate::ledger::dumps_value(&serde_json::json!({
+            "proposals": [{ "id": 41, "kind": "task", "feature": "title_prefix", "value": "CS 100 Lab",
+                            "verdict": {"importance": "2"}, "proposed_at": "2026-09-11" }]
+        }));
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
+            (200, empty),
+            (200, offered_again),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(lines.iter().any(|l| l.contains("rules 41: approved")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists());
+        // A third pull re-sends no decision (the card is archived, not `approvals/`), and — even
+        // though the service offers id 41 again — files no new card: `existing_rule_ids` sees
+        // `rule_id: 41` in `archive/` and skips it.
+        let again = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(!again.iter().any(|l| l.contains("rules 41: approved") || l.contains("rules 41: proposed")), "{again:?}");
+        assert!(again.iter().any(|l| l.contains("0 proposed of 1")), "{again:?}");
+        assert!(!vault.join("approvals").join("rule-41.md").exists(), "must not be re-filed");
+        let sent = server.requests();
+        assert_eq!(sent.iter().filter(|r| r.contains("POST /functions/v1/judge-rules")).count(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M8 (R-C2-E47 fix 1): the `rejected` branch of `decided_rule_cards`, undriven by any
+    /// existing test — a card set `status: rejected` in the file must send `decision: rejected`
+    /// and archive exactly as an approved one archives, no round trip needed for the vault side.
+    #[test]
+    fn a_rejected_card_sends_rejected_and_is_archived() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-reject");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "rejected".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("reject");
+
+        let (client, mut server) = loopback_client(vec![
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "rejected" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(lines.iter().any(|l| l.contains("rules 41: rejected")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must archive");
+
+        let sent = server.requests();
+        let post = sent.iter().find(|r| r.starts_with("POST /functions/v1/judge-rules")).expect("a POST was sent");
+        assert!(post.contains(r#""decision": "rejected""#), "the POST body must carry the rejection: {post}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I4 (R-C2-E47 fix 1): a 404 from `decide_rule` means the service already settled this
+    /// decision — most likely this same card, sent by a previous run that died between the POST
+    /// and the stamp. Without this, the card would stay `approved` and re-POST (and re-404) every
+    /// slot forever, and `rule_decisions_waiting` would keep the widened early return (R-C2-E46)
+    /// from ever firing again for this vault.
+    #[test]
+    fn a_decision_the_service_already_settled_is_archived_not_retried() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-already-settled");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (404, crate::ledger::dumps_value(&serde_json::json!({ "error": "no such undecided proposal" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(lines.iter().any(|l| l.contains("rules 41: already settled")), "{lines:?}");
+        assert!(!vault.join("approvals").join(format!("{stem}.md")).exists(), "a 404 must still archive the card");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-E49 fix 3: a 404 whose body is NOT the handler's own `no such undecided proposal` text
+    /// (a gateway 404 — the function not deployed, a stale `api_base`, a slug typo) must NOT read
+    /// as "already settled": that would silently discard a real, unsent decision. `{}` is the
+    /// shape any of those would actually produce — none of them go through `judge-rules/handler.ts`
+    /// at all, so there is no `error` field to extract.
+    #[test]
+    fn a_404_with_no_matching_body_is_not_read_as_already_settled() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-404-generic");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (404, "{}".to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(!lines.iter().any(|l| l.contains("already settled")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("rules 41: not sent") && l.contains("HTTP 404")), "{lines:?}");
+        assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "an unmatched 404 must not archive the card");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_decision_that_cannot_be_sent_keeps_its_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let vault = vault("rules-retry");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&vault);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &vault, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+        let (client, mut server) = loopback_client(vec![
+            (503, r#"{"error":"upstream"}"#.to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = vault.join("_log");
+        let o = opts(&log);
+        let lines = pull_rules(&vault, &client, &o, BATCH_BUDGET);
+        assert!(lines.iter().any(|l| l.contains("not sent")), "{lines:?}");
+        assert!(vault.join("approvals").join(format!("{stem}.md")).exists(), "the card must survive to retry");
+        let _ = server.requests();
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C2-E46: an answered `kind: rule` card is exactly what widens the four-way early return —
+    /// an empty enrichment queue, no event source and no linked Google calendar are not "nothing
+    /// to do" while a rule decision is still waiting to be sent. The companion half (no answered
+    /// card, everything else empty) proves the early return still fires exactly as before this
+    /// task: no request of any kind, not even the probe.
+    #[test]
+    fn an_answered_rule_card_alone_makes_the_probe_fire_and_a_bare_vault_makes_none() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+
+        let waiting = vault("rules-waiting");
+        crate::pystr::write_text(
+            &waiting.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&waiting);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&waiting, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+            .expect("the card writes");
+        crate::write::write_literals(
+            &waiting, &format!("approvals/{stem}.md"),
+            &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut journal, &WriteOpts::default(),
+        )
+        .expect("approve");
+
+        let (client, mut server) = loopback_client(vec![
+            (200, "{}".to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let log = waiting.join("_log");
+        let (code, _lines) = run_lines_with(&waiting, &opts(&log), Some(&client));
+        assert_eq!(code, 0);
+        let requests = server.requests();
+        assert!(
+            requests.iter().any(|r| r.starts_with("POST /functions/v1/judge-rules")),
+            "the answered card's decision must reach the service: {requests:?}"
+        );
+        let _ = std::fs::remove_dir_all(&waiting);
+
+        let bare = vault("rules-bare");
+        crate::pystr::write_text(
+            &bare.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let cfg = crate::cloudmodel::CloudConfig {
+            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client2 = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let log2 = bare.join("_log");
+        let (code2, lines2) = run_lines_with(&bare, &opts(&log2), Some(&client2));
+        assert_eq!(code2, 0);
+        assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
+        assert!(
+            listener.accept().is_err(),
+            "no rule decision waiting, and nothing else pending, must never reach the service"
+        );
+        let _ = std::fs::remove_dir_all(&bare);
     }
 }

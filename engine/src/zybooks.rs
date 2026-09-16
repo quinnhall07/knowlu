@@ -137,6 +137,12 @@ fn as_object<'a>(
 
 /// Turn one zyBooks assignment payload into [`Assignment`]s. Pure: every field comes from the
 /// payload plus config, which is what keeps this inside the engine's no-inference rule.
+///
+/// **This function is the reference the server-side port is measured against** (cloud design
+/// §4.3): `cloud/supabase/functions/ingest-coursework/parse_zybooks.ts` is a faithful TypeScript
+/// port of it, and both are gated by the same frozen `tests/fixtures/zybooks-parsed-reference.json`.
+/// From C2 on, production parses on the server and this half is what the port is checked against —
+/// change one and the other's test fails, which is the point.
 pub fn parse_assignments(
     payload: &Json,
     course_slug: &str,
@@ -635,6 +641,21 @@ pub fn fetch_assignments(
     )?;
     require_success(&data, &format!("assignment fetch for {zybook_code}"))?;
     Ok(data)
+}
+
+/// The fetch half alone: sign in, list the student's zybooks, and fetch each book's raw payload.
+///
+/// **No parsing and no routing** — both moved server-side in C2 (§4.3). What stays here is exactly
+/// what needs the student's own credentials, which never leave the machine (D11).
+#[cfg(windows)]
+pub fn fetch_payloads(email: &str, password: &str) -> Result<Vec<(String, Json)>, SourceError> {
+    let (token, user_id) = signin(email, password, None)?;
+    let mut out = Vec::new();
+    for code in fetch_zybook_codes(&token, user_id, None)? {
+        let payload = fetch_assignments(&token, &code, None)?;
+        out.push((code, payload));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

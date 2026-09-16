@@ -150,6 +150,11 @@ pub struct VaultPlan {
     /// `config/ingest.yaml`'s `calendars:` list, which is what makes today's page know the day is
     /// already half full — the reason this ruling exists at all.
     pub personal_calendar: Option<String>,
+    /// C2 (§11a): the account has a Google calendar grant, so the vault carries the marker feed
+    /// `cloud:google`. Not a URL — hand-off H4's fetcher matches the `cloud:` prefix and routes it
+    /// to `/ingest-calendar?name=google`. Deliberately unfetchable: a vault whose grant is gone
+    /// gets one "using snapshot" warning and still ranks the day.
+    pub google_calendar: bool,
     pub timezone: String,
     pub slots: Vec<String>,
     pub device: String,
@@ -403,14 +408,24 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         }
     }
     // The engine reads `calendars:` as a list of `{name, ics_url}` mappings (`calfeed.rs`), and an
-    // empty list is why the first page of a fresh install used to show a day with no busy time in it
-    // at all. A block list, through the same `yaml_scalar` every other wizard value goes through.
-    match &p.personal_calendar {
-        None => s.push_str("calendars: []\n"),
-        Some(u) => s.push_str(&format!(
-            "calendars:\n  - name: personal\n    ics_url: {}\n",
-            yaml_scalar("personal calendar address", u)?
-        )),
+    // empty list is why the first page of a fresh install used to show a day with no busy time in
+    // it at all. Two possible entries, in a fixed order, through the same `yaml_scalar` every other
+    // wizard value goes through: `personal` (the secret iCal address, C1's) and `google` (the
+    // marker for the account's grant, C2's — §11a).
+    let mut entries: Vec<String> = Vec::new();
+    if let Some(u) = &p.personal_calendar {
+        entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
+    }
+    if p.google_calendar {
+        entries.push("  - name: google\n    ics_url: 'cloud:google'\n".to_string());
+    }
+    if entries.is_empty() {
+        s.push_str("calendars: []\n");
+    } else {
+        s.push_str("calendars:\n");
+        for entry in &entries {
+            s.push_str(entry);
+        }
     }
     if p.zybooks || p.vhl {
         s.push_str("\n# Passwords are NOT here. They live in Windows Credential Manager under the\n");

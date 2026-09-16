@@ -16,20 +16,23 @@ after a friend has installed orphans all three. It changed from `app.knowlu.desk
 9, before the first installer existed; the one visible cost was that the next launch re-registered
 autostart and reset the window position once. `tauri.conf.json` has no comment syntax, hence this note.
 
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Fifty-nine**
-`#[tauri::command]`s exist — **twenty-six in `src/commands.rs`, fourteen in `src/onboarding.rs`, twelve
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Sixty-two**
+(recounted 2026-09-15, C2 Task 15, by script)
+`#[tauri::command]`s exist — **twenty-six in `src/commands.rs`, fourteen in `src/onboarding.rs`, fifteen
 in `src/account.rs`, five in `src/lms_link.rs` and two in `src/report.rs`**. Commands live beside the
 module they serve, never all in one file. Count them in `src/main.rs`'s two `generate_handler!` lists
 if this drifts, and note that the two lists are different windows, not one:
 
 - **The console window** registers 43 — all 26 of `commands.rs`; `launch_state`, `pick_folder` and
-  `pick_file` from `onboarding.rs`; all 12 of `account.rs` (the eight sign-in commands included,
-  because an install that predates the account is upgraded in place, inside this window, over its own
-  vault); and both of `report.rs`.
-- **The vault-less shell** (picker or wizard) registers 27 — the 14 of `onboarding.rs`, eight of
+  `pick_file` from `onboarding.rs`; twelve of `account.rs`'s fifteen (the eight sign-in commands
+  included, because an install that predates the account is upgraded in place, inside this window,
+  over its own vault; the three it lacks are the picker-only Google ones below); and both of
+  `report.rs`.
+- **The vault-less shell** (picker or wizard) registers 30 — the 14 of `onboarding.rs`, eleven of
   `account.rs` (`sign_up`, `sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`,
-  `entitlement_now`, `open_checkout`, `open_policy`) and all five of `lms_link.rs`: there is no
-  `ConsoleState` yet, so no command that needs one can be called.
+  `entitlement_now`, `open_checkout`, `open_policy`, plus `google_connect_url`, `google_connected`
+  and `open_external` — C2's hand-off H9 phase (a), the wizard's Google button) and all five of
+  `lms_link.rs`: there is no `ConsoleState` yet, so no command that needs one can be called.
 
 In `commands.rs`: `state`, `note`, `mark_seen`, `ui_event` (read-only with respect to the vault's
 notes); `set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,

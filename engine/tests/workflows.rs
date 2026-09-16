@@ -12,6 +12,23 @@ fn uses_lines(text: &str) -> Vec<String> {
     text.lines().map(str::trim).filter(|l| l.starts_with("- uses:") || l.starts_with("uses:")).map(String::from).collect()
 }
 
+/// R2-7: the block for one top-level job, `<name>:` through the line directly before the NEXT
+/// top-level job key (`^  [a-z-]+:$`, two-space indent) or EOF — never simply "to end of file",
+/// which was correct only by accident while the named job happened to be the workflow's last one.
+/// A job appended after it would otherwise let that later job's own content satisfy assertions
+/// meant for this one.
+fn job_block<'a>(text: &'a str, name: &str) -> &'a str {
+    let key_re = regex::Regex::new(r"(?m)^  [a-z-]+:\s*$").unwrap();
+    let starts: Vec<usize> = key_re.find_iter(text).map(|m| m.start()).collect();
+    let needle = format!("  {name}:");
+    let job_start = *starts
+        .iter()
+        .find(|&&s| text[s..].starts_with(&needle))
+        .unwrap_or_else(|| panic!("{name}: no such top-level job key"));
+    let job_end = starts.into_iter().find(|&s| s > job_start).unwrap_or(text.len());
+    &text[job_start..job_end]
+}
+
 #[test]
 fn every_action_is_pinned_to_a_full_commit_sha() {
     for name in ["ci.yml", "release.yml"] {
@@ -49,4 +66,54 @@ fn ci_enforces_zero_warnings_and_the_eol_contract() {
     assert!(c.contains("RUSTFLAGS") && c.contains("-D warnings"), "ci.yml must set RUSTFLAGS=-D warnings");
     assert!(c.contains("scripts/ci/eol-check.ps1"), "ci.yml must run the eol check");
     assert!(c.contains("cargo test --workspace"), "ci.yml must test the whole workspace");
+}
+
+/// A-6 (C2 final review): the eval gate exists, never runs on a plain push (a fork PR's `push` to
+/// its own branch must not spend the staging service-role key), and names both secrets it needs —
+/// so a secret renamed here but not in the repository's settings fails this test rather than only
+/// on the first PR that touches a prompt.
+#[test]
+fn the_eval_gate_job_exists_is_pull_request_only_and_names_both_its_secrets() {
+    let c = workflow("ci.yml");
+    let job = job_block(&c, "eval-gate");
+    assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate must run only on pull_request: {job}");
+    assert!(job.contains("secrets.ANTHROPIC_API_KEY"), "eval-gate must reference secrets.ANTHROPIC_API_KEY");
+    assert!(
+        job.contains("secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"),
+        "eval-gate must reference secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"
+    );
+}
+
+/// R2-7's own regression test: with `job_block` unbounded (the pre-fix "to end of file" slice), a
+/// job appended after `eval-gate:` whose OWN body happens to contain everything the assertions look
+/// for would let a real `eval-gate` job that is missing all three pass anyway. This proves the block
+/// stops at the next top-level job key, so `eval-gate`'s own (empty) body is what gets asserted on.
+#[test]
+fn job_block_stops_at_the_next_top_level_job_never_reads_into_it() {
+    let synthetic = "\
+name: ci
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+  zzz-later-job:
+    if: github.event_name == 'pull_request'
+    steps:
+      - run: echo \"uses secrets.ANTHROPIC_API_KEY and secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY\"
+";
+    let job = job_block(synthetic, "eval-gate");
+    assert!(!job.contains("zzz-later-job"), "the block must not reach the next job at all: {job:?}");
+    assert!(!job.contains("if: github.event_name == 'pull_request'"), "the later job's content leaked in: {job:?}");
+    assert!(!job.contains("secrets.ANTHROPIC_API_KEY"), "the later job's content leaked in: {job:?}");
+
+    // And with no job after it, the block still reaches EOF exactly as before.
+    let last = "\
+name: ci
+jobs:
+  earlier-job:
+    runs-on: ubuntu-latest
+  eval-gate:
+    if: github.event_name == 'pull_request'
+";
+    let job = job_block(last, "eval-gate");
+    assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate as the last job must still be read to EOF: {job:?}");
 }

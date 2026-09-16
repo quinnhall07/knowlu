@@ -96,6 +96,11 @@ pub mod runtime;
 // into the vault (spec §5.4, §5.6). 3b's rule promotion reads it.
 pub mod judgelog;
 
+// Knowlu C2 — the judgment service as seen from the device (cloud design §3.2, §5.2): one HTTPS
+// call per item behind `judge::Model`, `judge::EventModel` and `judge::EmailModel`, with the
+// account's session token out of Credential Manager. `rank` never reaches it (decision 11).
+pub mod cloudmodel;
+
 // Knowlu plan 3a — the enrichment pass (spec §5.5 step 1): select, judge, write as
 // `agent:knowlu.enrich`, log. The cloud routine's step 3, run locally, so that step starves.
 pub mod enrich;

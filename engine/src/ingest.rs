@@ -470,6 +470,30 @@ pub fn record_seen(vault: &Path, uid: &str, title: &str, date_str: &str) -> std:
     pystr::write_text(&path, &text)
 }
 
+/// R-OB-3: is this the first ingest this vault has ever had?
+///
+/// **The absence of `today.md`, and deliberately not the absence of `state/ingest-seen.md`**
+/// (ruling R-C2-9). That ledger is not `ingest`'s alone: `coursework` imports
+/// `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the
+/// slot order is `coursework → ingest → judge → rank`. So on a genuinely fresh vault the
+/// seen-ledger already exists by the time `ingest` looks at it, and a flag derived from it is
+/// `false` on exactly the run R-OB-3 was written for. `today.md` is written by `rank`, the LAST
+/// step of the slot, so the first `ingest` always sees it absent and every later one sees it
+/// present.
+///
+/// It is also the predicate the app already uses to decide a vault needs its first slot at all
+/// (`app/src/scheduler.rs::needs_first_run`, main `f8649d5`), so the two halves of "this vault has
+/// never been through a slot" now agree by construction rather than by coincidence.
+///
+/// **The residue, and it is acceptable:** a first slot that dies before `rank` leaves `today.md`
+/// absent, so the *next* slot is "first" again and archives whatever has gone past in between.
+/// Nothing is double-archived — the uid is already in the seen-ledger — and no page has been
+/// rendered for the student to have seen the difference, because `today.md` not existing is
+/// precisely the premise.
+pub fn is_first_run(vault: &Path) -> bool {
+    !vault.join("state").join("today.md").exists()
+}
+
 /// Did the due date actually change? An unparseable old value counts as changed.
 pub fn due_changed(old: Option<&serde_yaml_ng::Value>, new_due: &str) -> bool {
     let parsed_new = crate::models::coerce_datetime(Some(&serde_yaml_ng::Value::String(
@@ -501,6 +525,35 @@ progress: 0
 created_by: blackboard
 source_uid: {uid}
 needs_enrichment: true
+---
+
+{body}
+"#;
+
+/// R-OB-3: why a note went straight to `archive/` on a first ingest. A frontmatter field rather
+/// than a naming convention, so a human reading the note in six months can see it, and so a future
+/// `surface` view can filter on it without parsing a filename.
+pub const IMPORTED_PAST: &str = "imported-past";
+
+/// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
+/// deliberately a second template rather than a substitution on the first, because the two differ
+/// in what they MEAN and a reader should not have to diff them to see it.
+pub const IMPORTED_PAST_TEMPLATE: &str = r#"---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: 1.0
+effort_confidence: low
+effort_source: inferred
+importance: 3
+importance_reason: "pending enrichment"
+status: archived
+archived_reason: imported-past
+progress: 0
+created_by: blackboard
+source_uid: {uid}
+needs_enrichment: false
 ---
 
 {body}
@@ -564,13 +617,16 @@ pub fn sync_tasks(
     ctx: Option<&crate::write::WriteContext>,
     journal: &mut crate::journal::Journal,
     today: Option<Date>,
+    // R-OB-3. `true` only on a vault that has never been through a whole slot — `is_first_run`
+    // above, which is the absence of `today.md` and **not** of the seen-ledger (R-C2-9).
+    // `run_lines` computes it; every caller in the tests passes `false`, which is the behaviour
+    // they were written against.
+    first_run: bool,
 ) -> Vec<String> {
     let default_ctx = crate::write::WriteContext::new("agent:ingest.blackboard", "cli");
     let ctx = ctx.unwrap_or(&default_ctx);
-    let stamp = today
-        .unwrap_or_else(|| jiff::Zoned::now().date())
-        .strftime("%Y-%m-%d")
-        .to_string();
+    let stamp_date = today.unwrap_or_else(|| jiff::Zoned::now().date());
+    let stamp = stamp_date.strftime("%Y-%m-%d").to_string();
 
     let mut log: Vec<String> = Vec::new();
     let mut known = existing_by_uid(vault);
@@ -654,6 +710,55 @@ pub fn sync_tasks(
         }
 
         let course = match_course(event, course_map);
+
+        // R-OB-3: a feed's window reaches backwards, and a vault born today has no history to
+        // reconcile against — Quinn's first slot imported four items already past due, one of them
+        // from 2025. On a FIRST ingest such an item is recorded as seen and written straight into
+        // `archive/`, so the first page a student ever sees shows the future.
+        //
+        // **Not skipped** — skipping leaves the uid unseen and the next run creates it. **Not
+        // created-then-deleted** — that is two journal records and a note that briefly ranks. One
+        // `create` into `archive/`, one `record_seen`, one line.
+        //
+        // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work,
+        // and the one thing worse than importing a stale task is archiving a live one.
+        let past_due = first_run
+            && match due {
+                Due::Date(d) => d < stamp_date,
+                Due::DateTime(dt) => dt.date() < stamp_date,
+            };
+        if past_due {
+            let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
+            let archive_dir = vault.join("archive");
+            let _ = std::fs::create_dir_all(&archive_dir);
+            let mut path = archive_dir.join(format!("{slug}.md"));
+            let mut suffix = 2;
+            while path.exists() {
+                path = archive_dir.join(format!("{slug}-{suffix}.md"));
+                suffix += 1;
+            }
+            let body = IMPORTED_PAST_TEMPLATE
+                .replace("{title}", &json_dumps_unicode(&event.title))
+                .replace(
+                    "{course}",
+                    &course.as_deref().map(json_dumps_unicode).unwrap_or_else(|| "null".to_string()),
+                )
+                .replace("{due}", &new_due)
+                .replace("{uid}", &json_dumps_unicode(&event.uid))
+                .replace("{body}", &event.description);
+            let rel_path = crate::ids::rel(vault, &path);
+            match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
+                Ok(created) => {
+                    let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    log.push(format!("archived (imported-past) {stem}"));
+                    known.insert(event.uid.clone(), created);
+                    let _ = record_seen(vault, &event.uid, &event.title, &stamp);
+                }
+                Err(err) => log.push(format!("skipped (unwritable): {err}")),
+            }
+            continue;
+        }
+
         let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
         let mut path = tasks_dir.join(format!("{slug}.md"));
         let mut suffix = 2;
@@ -712,6 +817,48 @@ pub fn run_with(
     code
 }
 
+/// R2-4: the exact `error` text `/ingest-ics` answers when this account has no `lms_ics` source
+/// configured (`cloud/supabase/functions/ingest-ics/handler.ts`'s `Response.json({ error: "no
+/// lms_ics source for this account" }, { status: 404 })`) — must equal that handler's body byte for
+/// byte, the same shape `enrich.rs`'s `pull_rules` settle arm uses for its own 404 (R-C2-E49).
+/// `ingest-ics/handler_test.ts` pins this constant from the Deno side: it reads this file, extracts
+/// the literal, and asserts it against the handler's own response.
+const NO_LMS_ICS_SOURCE_DETAIL: &str = "no lms_ics source for this account";
+
+/// A-1 (H5 fix, CLAUDE.md's "Neither feed is compulsory"): what `ingest` does when `/ingest-ics`
+/// failed and there is no local `ics_url` to fall back to — a genuinely dead end either way, but
+/// TWO different dead ends. A 404 means this account simply has no `lms_ics` source: a permanent,
+/// normal state for a student who left the LMS capture empty, never a failure — exit 0 and name
+/// the skip, the same shape as `ingest (skipped: no ics_url)` for a vault with no account at all,
+/// never exit 1 every slot forever (`scheduler.rs`'s own invariant: a non-zero step is retry
+/// backoff and an amber tray, and nothing here can ever change without the student taking an
+/// action the app already offers). Any OTHER failure still means there is no way at all to get a
+/// feed — exit 1 stands — but the line says what actually happened: a genuine HTTP status from the
+/// service reads differently than the service being unreachable altogether.
+///
+/// Pulled out as a pure function over `CloudError` (not tested through `run_lines` itself): a
+/// cloud vault reaching this arm needs `cloudmodel::resolve` to succeed, which needs a real
+/// Windows Credential Manager session — no test in this crate or `cloud_contract.rs` has one, by
+/// design (`cloud_contract.rs`'s own doc comment says why), so this is the one place the decision
+/// can be exercised directly.
+fn cloud_ics_failure_with_no_local_url(e: &crate::cloudmodel::CloudError) -> (i32, Vec<String>) {
+    match e {
+        crate::cloudmodel::CloudError::Status { code: 404, ref detail } if detail == NO_LMS_ICS_SOURCE_DETAIL => {
+            (0, vec!["ingest: no LMS feed on this account — skipped".to_string()])
+        }
+        crate::cloudmodel::CloudError::Status { code, .. } => (
+            1,
+            vec![format!(
+                "ingest: no feed — the service answered HTTP {code} ({e}) and no ics_url is configured"
+            )],
+        ),
+        _ => (
+            1,
+            vec![format!("ingest: no feed — the service is unavailable ({e}) and no ics_url is configured")],
+        ),
+    }
+}
+
 /// The testable core: everything `run_with` does, with the output returned instead of printed, in
 /// the same order Python prints it. Python's tests assert on `capsys`; Rust has no such capture, so
 /// the lines are a value.
@@ -739,13 +886,48 @@ pub fn run_lines(
         Err(e) => return (1, vec![format!("ingest: config unreadable: {e}")]),
     };
     let url = config.get("ics_url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
     let tz_name = config.get("timezone").and_then(|v| v.as_str()).unwrap_or("America/Chicago").to_string();
     let tz = match TimeZone::get(&tz_name) {
         Ok(tz) => tz,
         Err(e) => return (1, vec![format!("ingest: config unreadable: unknown timezone {tz_name}: {e}")]),
     };
-    let fetched = match fetch { Some(f) => f(&url), None => crate::calfeed::fetch_ics(&url) };
+    // C2 (cloud design §3.1): the LMS capability URL lives in the account, encrypted, not in the
+    // vault — so when this vault has an account the feed is fetched by `/ingest-ics` with the
+    // service role and the URL never leaves the server. `config/ingest.yaml`'s `ics_url` stays the
+    // fallback for a vault with no account and for a service that is unreachable: dead hotel
+    // Wi-Fi must not stop an ingest that could have run from the URL already on disk.
+    //
+    // **The empty-URL refusal moved here on purpose.** It used to sit six lines above, before any
+    // cloud attempt; a cloud vault with a blank `ics_url` would then exit 1 without ever asking
+    // the service, and a non-zero step is retry backoff and an amber tray twice a day forever.
+    // Exit 1 now means what it says: there was no way at all to get a feed.
+    let cloud = crate::cloudmodel::resolve(vault).ok();
+    // R-OB-3 (hand-off H11), by R-C2-9's predicate: this vault has never been through a whole slot
+    // if `rank` has never written `today.md`. NOT the seen-ledger — `coursework` runs before
+    // `ingest` in the same slot and calls `record_seen`, so that file exists on the very first run.
+    let first_run = crate::ingest::is_first_run(vault);
+    let fetched = match (fetch, &cloud) {
+        (Some(f), _) => {
+            if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
+            f(&url)
+        }
+        // `_past` is bound and unused on purpose: the device archives on its own comparison, which
+        // is the guarantee (it knows the vault's timezone), and the service's list is corroboration
+        // and what the wizard counts. Binding it here is what makes the next reader ask which half
+        // is authoritative; the answer is in `fetch_ics`'s doc comment.
+        (None, Some(client)) => match crate::cloudmodel::fetch_ics(client, first_run) {
+            Ok((text, _past)) => Ok(text),
+            Err(e) if url.is_empty() => return cloud_ics_failure_with_no_local_url(&e),
+            Err(e) => {
+                println!("ingest: /ingest-ics unavailable ({e}); using the vault's ics_url");
+                crate::calfeed::fetch_ics(&url)
+            }
+        },
+        (None, None) => {
+            if url.is_empty() { return (1, vec!["ingest: no ics_url configured".to_string()]); }
+            crate::calfeed::fetch_ics(&url)
+        }
+    };
     let feed = match fetched {
         Ok(t) => t,
         Err(e) => return (1, vec![format!("ingest: fetch failed: {e}")]),
@@ -759,7 +941,11 @@ pub fn run_lines(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None);
+    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None, first_run);
+    if first_run {
+        log.push(format!("ingest: first run — {} item(s) already past were archived",
+            log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
+    }
     if malformed > 0 { log.push(format!("skipped {malformed} malformed event(s)")); }
     let summary = format!("ingest: {} events, {} action(s)", events.len(), log.len());
     log.push(summary);
@@ -769,6 +955,54 @@ pub fn run_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- A-1: the cloud ingest arm's 404-vs-everything-else decision, tested directly over
+    // `CloudError` since reaching it through `run_lines` needs a real Windows session
+    // (`cloud_contract.rs`'s doc comment explains why no test here has one).
+
+    #[test]
+    fn a_404_with_no_local_url_is_a_named_skip_at_exit_0() {
+        let e = crate::cloudmodel::CloudError::Status { code: 404, detail: "no lms_ics source for this account".to_string() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 0);
+        assert_eq!(lines, vec!["ingest: no LMS feed on this account — skipped".to_string()]);
+    }
+
+    // R2-4: a 404 whose body is NOT the handler's own `no lms_ics source for this account` text —
+    // a gateway 404 (the function not deployed, a stale `api_base`, a slug typo) — must fall into
+    // the "the service answered HTTP {code}" exit-1 arm, never the named skip. Pre-fix, the arm
+    // matched on `code == 404` alone and this case read as a permanent, silent "no feed configured"
+    // forever.
+    #[test]
+    fn a_404_without_the_handlers_detail_keeps_exit_1_and_names_http_404() {
+        let e = crate::cloudmodel::CloudError::Status { code: 404, detail: String::new() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("the service answered HTTP 404"), "{lines:?}");
+        assert!(lines[0].contains("no ics_url is configured"), "{lines:?}");
+        assert!(!lines[0].contains("skipped"), "a mismatched 404 must never read as the named skip: {lines:?}");
+    }
+
+    #[test]
+    fn a_503_with_no_local_url_keeps_exit_1_but_names_the_real_status() {
+        let e = crate::cloudmodel::CloudError::Status { code: 503, detail: String::new() };
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("the service answered HTTP 503"), "{lines:?}");
+        assert!(lines[0].contains("no ics_url is configured"), "{lines:?}");
+        assert!(!lines[0].contains("unavailable"), "a real status must never read as merely down: {lines:?}");
+    }
+
+    #[test]
+    fn a_transport_failure_with_no_local_url_reads_as_unavailable_not_a_status() {
+        let e = crate::cloudmodel::CloudError::Transport("connection refused".to_string());
+        let (code, lines) = cloud_ics_failure_with_no_local_url(&e);
+        assert_eq!(code, 1);
+        assert!(lines[0].contains("the service is unavailable"), "{lines:?}");
+        assert!(!lines[0].contains("HTTP"), "a transport failure carries no status to name: {lines:?}");
+    }
 
     fn changes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
@@ -1085,6 +1319,18 @@ mod tests {
         assert_eq!(seen.len(), 2);
     }
 
+    /// R-C2-E20 fix 1: the predicate `/ingest-ics`'s `first_run` flag is built from, pinned
+    /// directly rather than only through `run_lines`'s cloud arm (which no test machine here can
+    /// reach end to end — see `cloud_contract.rs`'s doc comment on the blank-`ics_url` test).
+    #[test]
+    fn is_first_run_is_true_with_no_today_md_and_false_once_rank_has_written_one() {
+        let v = uid_vault();
+        assert!(is_first_run(&v), "a vault that has never been ranked has no state/today.md yet");
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        std::fs::write(v.join("state").join("today.md"), "# Today\n").unwrap();
+        assert!(!is_first_run(&v), "today.md now exists — this vault has finished at least one slot");
+    }
+
     #[test]
     fn due_changed_detects_a_real_move_and_ignores_an_equal_one() {
         use serde_yaml_ng::Value;
@@ -1131,7 +1377,7 @@ mod tests {
 
     fn run(vault: &Path, events: &[Event], map: &[(String, String)]) -> Vec<String> {
         let mut j = crate::journal::Journal::new(vault);
-        sync_tasks(events, vault, map, None, &mut j, Some(Date::constant(2026, 8, 28)))
+        sync_tasks(events, vault, map, None, &mut j, Some(Date::constant(2026, 8, 28)), false)
     }
 
     #[test]

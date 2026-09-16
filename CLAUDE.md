@@ -61,8 +61,12 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
   row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
   come from it, and it writes nothing.
-- `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. Exits 1 on
-  an empty `ics_url`, which is why the app leaves the step out rather than run it.
+- `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. A vault
+  with no account and an empty `ics_url` exits 1, which is why the app leaves the step out rather
+  than run it — but **a cloud vault runs `ingest` regardless of `ics_url`**, because the feed lives
+  in the account, not the vault (C2 final review A-1/A-2): `/ingest-ics` answering 404 (no
+  `lms_ics` source configured) is a named skip at exit 0, never a failure, and any other service
+  failure with no local `ics_url` names the real cause honestly and keeps exit 1.
 - `judge --vault <v> [--via <via>] [--run-id <id>] [--runtime <llama-cli.exe>] [--model <.gguf>]
   [--log-dir <dir>] [--limit N]` — enriches tasks flagged `needs_enrichment: true` in three tiers
   (heuristics, promoted rules, the model — one process per judgment). **Always exits 0**: no runtime
@@ -70,15 +74,26 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   `starts_with` test) with `judged: true`, `propose: true`. Judgment logs never enter the vault.
 - `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
   [--today] [--now] [--seen-at] [--build-sha]` — the read model as JSON. Never writes.
+- **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
+  onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
+  `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
+  server-side, so `CloudModel` (`engine/src/cloudmodel.rs`) implements the same `judge::Model` the
+  local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
+  for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
+  move server-side) — never for judgment, so `rank` never calls a model still holds.
+  `engine/src/enrich.rs`'s `run_lines_with` hosts the four cloud pulls a judge step runs in one slot:
+  the tier-3 judge pass, the events pass, the Gmail pull and the rule-decision pull.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
   items, issue notes, journaled note edits.
 
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-10** from the two
-  `generate_handler!` lists in `app/src/main.rs`: the console window registers **43**, the vault-less
-  picker/wizard window **27** — 59 distinct. Commands live beside the module they serve
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-15** (C2 Task 15,
+  by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
+  registers **43**, the vault-less picker/wizard window **30** (+3 from C2's hand-off H9 phase (a) —
+  `account::google_connect_url`, `account::google_connected`, `account::open_external`) — **62**
+  distinct. Commands live beside the module they serve
   (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one
   file. Seven mutate notes
   (`set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,

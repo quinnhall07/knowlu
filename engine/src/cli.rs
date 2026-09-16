@@ -203,8 +203,12 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
 ///
 /// Python's `test_cli.py` monkeypatches `calfeed.fetch_ics` and `eventfeed.fetch_event_source`
 /// as module globals; `calfeed` and `eventfeed` already carry this seam one level down, and
-/// `run_with` only threads it through. Production (`run`) passes neither, so the default fetchers
-/// are the ones both modules would have used anyway.
+/// `run_with` only threads it through. **Production (`run`) builds both, since hand-off H4**: an
+/// `events` closure that tries the service first and falls back to `eventfeed::fetch_event_source`,
+/// and a `calendar` closure that routes a `cloud:<name>` url to the service and everything else to
+/// `calfeed::fetch_ics`. Only tests construct a bare `Fetchers` directly, and several of those pass
+/// `Fetchers::default()`, which leaves both closures at `None` — the on-device fallbacks `calfeed`
+/// and `eventfeed` would have used anyway.
 #[derive(Default, Clone, Copy)]
 pub struct Fetchers<'a> {
     pub calendar: Option<&'a dyn Fn(&str) -> Result<String, String>>,
@@ -221,10 +225,46 @@ pub fn run(
     runner: &str,
     run_id: Option<&str>,
 ) -> Result<RunOutcome, RunError> {
-    run_with(vault, today_iso, runner, run_id, Fetchers::default())
+    // C2 (cloud design §3.1): event feeds are fetched by the service, which can present a real
+    // browser's headers and follow a redirect chain the desktop could not. A transport swap and
+    // nothing more — the parsers, the pre-filter, the roster and the digest are the same
+    // deterministic code, and `rank` still never calls a model (decision 11). A vault with no
+    // account, or a service that is down, falls straight back to `eventfeed::fetch_event_source`.
+    let cloud = crate::cloudmodel::resolve(vault).ok();
+    let events = |url: &str| -> Result<String, String> {
+        match &cloud {
+            Some(client) => crate::cloudmodel::fetch_event_source(client, url)
+                .or_else(|_| crate::eventfeed::fetch_event_source(url)),
+            None => crate::eventfeed::fetch_event_source(url),
+        }
+    };
+    // C2 Task 8 (cloud design §11a): a `calendars:` entry whose `ics_url` is `cloud:<name>` is
+    // served by `/ingest-calendar` — the Google grant's events, or the account's stored secret
+    // iCal address, rendered as ICS. Every other url is fetched on the device exactly as before,
+    // so the `calendar_ics` secret-address path keeps working with no account at all. `calfeed`
+    // then parses, bounds to its 28-day horizon, dedups and snapshots it like any other feed:
+    // there is no second parser and no new vault file.
+    let calendar = |url: &str| -> Result<String, String> {
+        match (url.strip_prefix("cloud:"), &cloud) {
+            (Some(name), Some(client)) => crate::cloudmodel::fetch_calendar(client, name),
+            // A `cloud:` feed on a vault with no account is not an error worth failing a run for:
+            // `load_calendar_events` turns this into "using snapshot" and the day still ranks.
+            (Some(_), None) => Err("no account on this vault".to_string()),
+            (None, _) => crate::calfeed::fetch_ics(url),
+        }
+    };
+    run_with(
+        vault,
+        today_iso,
+        runner,
+        run_id,
+        Fetchers { calendar: Some(&calendar), events: Some(&events) },
+    )
 }
 
-/// [`run`] with the network seam exposed. Everything else is identical.
+/// [`run`] with the network seam exposed — a test seam: production (`run`) always builds real
+/// fetchers, and only tests construct a `Fetchers` directly (several pass `Fetchers::default()`,
+/// which leaves both closures at their module-level defaults). Everything else is identical.
 pub fn run_with(
     vault: &Path,
     today_iso: Option<&str>,

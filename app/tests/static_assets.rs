@@ -422,18 +422,83 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
     assert!(panel.contains("Secret address in iCal format"), "the panel says where the address is");
     assert!(panel.contains("Reset"), "…and advises resetting it first");
-    // C2's Google sign-in has a labelled place and does nothing yet — a button that lied would be
-    // worse than a button that says when it arrives.
-    assert!(panel.contains("id=\"wiz-google\"") && panel.contains("disabled"), "the Google placeholder is present and inert");
+    // C2's Google sign-in is live: the calendar scope only, ordered ahead of Gmail (§11a).
+    assert!(panel.contains("id=\"wiz-google\""), "the Google sign-in is on the calendars panel");
+    assert!(!panel.contains("id=\"wiz-google\" disabled"), "…and is live from C2 on");
     // R-OB-2: the enrolled classes are confirmed on this panel — captured from the sign-in window if
     // the campus lets us, typed if it does not. Without them a first ingest is 28 tasks with no
     // course, which is the run this section of the plan exists because of.
     assert!(panel.contains("id=\"wiz-courses\"") && panel.contains("id=\"wiz-course-rows\""), "the class list");
     assert!(panel.contains("id=\"wiz-course-add\""), "…and the typed fallback beside it");
     assert!(js.contains("\"capture_courses\"") && js.contains("function renderCourses("), "the capture and its rows");
-    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Google connect in C1");
+    // A-6: relabelled to what this actually guards. C2 shipped Google connect (calendar scope
+    // only, via `google_connect_url`) — the stale message called that "no Google connect in C1",
+    // which stopped being true at C2 and would have kept passing for the wrong reason forever.
+    // What is still true, and what this proves: no `gmail.readonly` scope string anywhere on the
+    // wizard page (the incremental Gmail consent is a later, separate step — not this branch), and
+    // no leftover pre-C2 `connect_google` command name.
+    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Gmail scope on the wizard page until C4");
     let slots = html.split("id=\"wiz-slots\"").nth(1).and_then(|s| s.split("id=\"wiz-finish\"").next()).expect("the slots panel");
     assert!(!slots.contains("id=\"wiz-school\""), "the school must not also be on the slots panel");
+}
+
+/// C2 final review A-5 (m59+m60): the Google flow's own state lives on `WIZ`, rendered by
+/// `renderWizard()` like every other field — never a bare module-level flag a direct DOM write can
+/// desync from the next repaint, and never a poll that outlives the panel it started on.
+#[test]
+fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
+    let js = read("console.js");
+    let html = read("index.html");
+
+    // The flag and its note are WIZ fields, not a bare module-level variable a direct DOM write
+    // could desync from the next `renderWizard()` call.
+    assert!(js.contains("google: false") && js.contains("googleNote:"), "WIZ carries the Google flow's own state");
+    assert!(!js.contains("var WIZ_GOOGLE"), "the old bare flag must be gone, not merely unused");
+
+    // A dedicated note element — never the personal calendar field's `wiz-cal-note`, which the
+    // original click handler wrote into by mistake.
+    assert!(html.contains("id=\"wiz-google-note\""), "the Google status line has its own element");
+    assert!(js.contains("EL(\"wiz-google-note\").textContent = WIZ.googleNote"), "renderWizard paints it");
+
+    // The button's disabled state is computed from WIZ on every render — connected OR mid-poll —
+    // not set once, directly, and left for a later render to forget.
+    assert!(
+        js.contains("EL(\"wiz-google\").disabled = WIZ.google || WIZ.googlePolling"),
+        "the button's disabled state is derived from WIZ state on every render"
+    );
+
+    // Leaving the calendars panel (step 4) cancels a poll in flight — the same cancellation-token
+    // shape `WIZ.schoolSeq` uses for the typeahead — so a stale timer never writes onto a panel the
+    // student is no longer looking at.
+    assert!(js.contains("googleSeq"), "a cancellation token exists");
+    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
+    assert!(
+        go.find("WIZ.googleSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
+        "wizGo itself bumps the token on leaving the panel"
+    );
+
+    // wizFinish re-reads the truth with one more `google_connected` call, falling back to the
+    // polled flag only if THAT call fails — a consent that finished after the last poll tick must
+    // still birth the vault with the `cloud:google` entry.
+    let finish = js.find("function wizFinish(").map(|i| &js[i..]).expect("wizFinish");
+    let google_connected_call = finish.find("invoke(\"google_connected\"");
+    let plan_build = finish.find("google_calendar:");
+    assert!(google_connected_call.is_some(), "wizFinish re-checks google_connected");
+    assert!(
+        google_connected_call.unwrap() < plan_build.expect("the plan is built somewhere in wizFinish"),
+        "the re-check happens BEFORE the plan is built, not after"
+    );
+    assert!(finish.contains("WIZ.google") , "the polled flag is still read, as the fallback");
+    assert!(!js.contains("google_calendar: WIZ_GOOGLE"), "the plan no longer reads the old bare flag directly");
+
+    // R2-3: the button is disabled as the FIRST statement of wizFinish, before the `google_connected`
+    // await — not after it. Two Finish clicks landing in that window used to start two
+    // `retarget_credentials`/`wizRegister` flows racing each other.
+    let disabled_write = finish.find("EL(\"wiz-next\").disabled = true").expect("wizFinish disables wiz-next");
+    assert!(
+        disabled_write < google_connected_call.unwrap(),
+        "wiz-next is disabled before the google_connected await, not after it"
+    );
 }
 
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's

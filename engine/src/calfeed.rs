@@ -557,6 +557,67 @@ pub fn fetch_ics(url: &str) -> Result<String, String> {
 ///
 /// `fetcher` exists so tests never touch the network. Python achieves the same by monkeypatching
 /// the module global; Rust needs the seam to be explicit.
+/// Python: `feeds = config.get("calendars") or []`, then `for feed in feeds`. So a falsy value
+/// (absent, null, empty, false, 0) is silence; a sequence is the feed list; and anything else is
+/// iterated as whatever it is — a STRING one character at a time, a mapping one key at a time —
+/// each element then failing `.get` inside the per-feed try and warning `bad feed entry`.
+/// Preserved defect 20 (`calendars: "https://…"` is one warning per character). A scalar that is
+/// not iterable at all (`calendars: 5`) raises TypeError OUTSIDE every try in Python: the run
+/// FAILs and no page is written; here that is `Err` with the same message, and the caller's early
+/// return leaves the previous snapshot untouched — the same class of divergence as
+/// `load_runners_config`, taken because a config typo should name itself in the log, not take the
+/// morning's ranking with it.
+///
+/// The one place `calendars:`'s own value-shape coercion happens — [`load_calendar_events`] and
+/// [`calendar_entries`] both call this rather than each parsing the key on their own.
+///
+/// `Ok(None)` for a falsy or absent value (Python's `or []` never even enters the per-feed loop,
+/// so the caller must take the SAME early return it always has — no per-feed warning, and no
+/// snapshot write). `Ok(Some(feeds))` for anything with entries. `Err` only for a scalar that is
+/// not iterable at all.
+fn calendars_feeds(config: &serde_yaml_ng::Value) -> Result<Option<Vec<serde_yaml_ng::Value>>, String> {
+    use serde_yaml_ng::Value;
+    match config.get("calendars") {
+        Some(value) if !pystr::yaml_truthy(value) => Ok(None),
+        None => Ok(None),
+        Some(Value::Sequence(items)) => Ok(Some(items.clone())),
+        Some(Value::String(s)) => Ok(Some(s.chars().map(|c| Value::String(c.to_string())).collect())),
+        Some(Value::Mapping(m)) => Ok(Some(m.keys().cloned().collect())),
+        Some(other) => Err(format!(
+            "calendar: bad calendars value ('{}' object is not iterable)",
+            pystr::yaml_type_name(other)
+        )),
+    }
+}
+
+/// This vault's `config/ingest.yaml` `calendars:` entries, as `(name, ics_url)` pairs — a pure
+/// config read with no fetch, no snapshot write and no warning: a non-mapping entry (the "bad feed
+/// entry" case [`load_calendar_events`] warns about) simply contributes nothing here, since it has
+/// no name or url to report. R-C2-E43: this is what [`crate::enrich`]'s Google-calendar predicate
+/// reads, through the one parser both it and `load_calendar_events` share ([`calendars_feeds`]),
+/// so checking whether a vault has ever connected Google costs a config read and nothing else.
+pub fn calendar_entries(vault: &Path) -> Vec<(String, String)> {
+    use serde_yaml_ng::Value;
+    let config_path = vault.join("config").join("ingest.yaml");
+    let Ok(raw) = pystr::read_text(&config_path) else { return Vec::new() };
+    let Ok(config) = serde_yaml_ng::from_str::<Value>(&raw) else { return Vec::new() };
+    let feeds = calendars_feeds(&config).ok().flatten().unwrap_or_default();
+    feeds
+        .iter()
+        .filter_map(|feed| {
+            let mapping = feed.as_mapping()?;
+            let name = mapping
+                .get(Value::from("name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("calendar")
+                .to_string();
+            let url = mapping.get(Value::from("ics_url")).and_then(|v| v.as_str()).unwrap_or("");
+            Some((name, pystr::strip(url).to_string()))
+        })
+        .collect()
+}
+
 pub fn load_calendar_events(
     vault: &Path,
     today: Date,
@@ -577,32 +638,11 @@ pub fn load_calendar_events(
         Ok(value) => value,
         Err(err) => return (Vec::new(), vec![format!("config unreadable: {err}")]),
     };
-    // Python: `feeds = config.get("calendars") or []`, then `for feed in feeds`. So a falsy value
-    // (absent, null, empty, false, 0) is silence; a sequence is the feed list; and anything else
-    // is iterated as whatever it is — a STRING one character at a time, a mapping one key at a
-    // time — each element then failing `.get` inside the per-feed try and warning `bad feed
-    // entry`. Preserved defect 20 (`calendars: "https://…"` is one warning per character). A
-    // scalar that is not iterable at all (`calendars: 5`) raises TypeError OUTSIDE every try in
-    // Python: the run FAILs and no page is written. Here that is one warning and an early
-    // return that leaves the previous snapshot untouched — the same class of divergence as
-    // `load_runners_config`, taken because a config typo should name itself in the log, not
-    // take the morning's ranking with it.
     use serde_yaml_ng::Value;
-    let feeds: Vec<Value> = match config.get("calendars") {
-        Some(value) if !pystr::yaml_truthy(value) => return (Vec::new(), Vec::new()),
-        None => return (Vec::new(), Vec::new()),
-        Some(Value::Sequence(items)) => items.clone(),
-        Some(Value::String(s)) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-        Some(Value::Mapping(m)) => m.keys().cloned().collect(),
-        Some(other) => {
-            return (
-                Vec::new(),
-                vec![format!(
-                    "calendar: bad calendars value ('{}' object is not iterable)",
-                    pystr::yaml_type_name(other)
-                )],
-            )
-        }
+    let feeds: Vec<Value> = match calendars_feeds(&config) {
+        Ok(Some(feeds)) => feeds,
+        Ok(None) => return (Vec::new(), Vec::new()),
+        Err(warning) => return (Vec::new(), vec![warning]),
     };
 
     let mut warnings: Vec<String> = Vec::new();
@@ -651,6 +691,9 @@ pub fn load_calendar_events(
             fresh.insert(name.clone(), previous.get(&name).cloned().unwrap_or_default());
             continue;
         }
+        // A-6: `url` can be the literal `cloud:<name>` marker (C2 Task 8, §11a) — this module
+        // never parses that prefix itself; `cli.rs`'s own `calendar` closure is what strips it and
+        // routes to `cloudmodel::fetch_calendar`, so `fetch` here is opaque either way.
         let text = match fetch(url) {
             Ok(text) => text,
             Err(err) => {
@@ -946,6 +989,41 @@ mod tests {
         let dir = tmp_vault("noconfig");
         let (events, warnings) = load_calendar_events(&dir, date(2026, 9, 7), None);
         assert!(events.is_empty() && warnings.is_empty());
+    }
+
+    /// R-C2-E43: `calendar_entries` is a pure config read — no fetch, no snapshot write, and it
+    /// never even needs a `fetch` seam to prove that with.
+    #[test]
+    fn calendar_entries_reads_the_calendars_list_with_no_fetch_and_no_write() {
+        let dir = tmp_vault("entries");
+        assert_eq!(calendar_entries(&dir), Vec::<(String, String)>::new(), "no config file at all");
+
+        write(&dir.join("config").join("ingest.yaml"), "timezone: America/Chicago\ncourse_map: {}\n");
+        assert_eq!(calendar_entries(&dir), Vec::<(String, String)>::new(), "no calendars: key");
+
+        write(
+            &dir.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncalendars:\n  - name: personal\n    ics_url: https://a.test/a.ics\n",
+        );
+        assert_eq!(
+            calendar_entries(&dir),
+            vec![("personal".to_string(), "https://a.test/a.ics".to_string())],
+        );
+
+        write(
+            &dir.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncalendars:\n  - name: personal\n    ics_url: https://a.test/a.ics\n  - name: google\n    ics_url: 'cloud:google'\n",
+        );
+        assert_eq!(
+            calendar_entries(&dir),
+            vec![
+                ("personal".to_string(), "https://a.test/a.ics".to_string()),
+                ("google".to_string(), "cloud:google".to_string()),
+            ],
+        );
+        // No fetch was ever possible to make (this function takes no fetcher at all) and no
+        // snapshot was written: the state directory this vault never had stays absent.
+        assert!(!dir.join("state").join("calendar.md").exists());
     }
 
     fn one_feed_config(dir: &Path) {

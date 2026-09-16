@@ -96,6 +96,11 @@ pub enum LowCause {
     Incomplete,
     /// The model did not answer at all: the process failed, timed out, or replied unparseably.
     ModelFailed,
+    /// C2 final review E-2: the judgment service refused because the account has spent its daily
+    /// judgment cap (or its monthly budget ceiling). **Not a model failure** — nothing went wrong
+    /// with the model, the answer simply was not bought — and a log that said `model failed`
+    /// fifty times for one exhausted cap is the reading this variant exists to prevent.
+    Capped,
 }
 
 impl LowCause {
@@ -106,6 +111,7 @@ impl LowCause {
             LowCause::BelowFloor => "below floor",
             LowCause::Incomplete => "incomplete",
             LowCause::ModelFailed => "model failed",
+            LowCause::Capped => "capped",
         }
     }
 }
@@ -123,6 +129,10 @@ pub enum Outcome {
     LowConfidence { seed: Verdict, why: String, cause: LowCause },
     ModelNotInstalled(Verdict),
     RuntimeNotInstalled(Verdict),
+    /// C2: this vault has an account and the service did not answer. `v` is what the device's own
+    /// tiers had, and it is still written — a slot with no signal must not lose tier 1's work.
+    /// Normal, like the two above it, and still exit 0.
+    ServiceUnavailable(Verdict),
 }
 
 impl Outcome {
@@ -134,6 +144,7 @@ impl Outcome {
             Outcome::LowConfidence { seed, .. } => seed,
             Outcome::ModelNotInstalled(v) => v,
             Outcome::RuntimeNotInstalled(v) => v,
+            Outcome::ServiceUnavailable(v) => v,
         }
     }
 
@@ -144,6 +155,7 @@ impl Outcome {
             Outcome::LowConfidence { .. } => "low confidence",
             Outcome::ModelNotInstalled(_) => "model not installed",
             Outcome::RuntimeNotInstalled(_) => "runtime not installed",
+            Outcome::ServiceUnavailable(_) => "service unavailable",
         }
     }
 }
@@ -153,17 +165,31 @@ impl Outcome {
 pub enum Missing {
     Runtime,
     Model,
+    /// C2: this vault has an account, and the judgment service could not be reached or refused —
+    /// no session, no entitlement, no network. The reason is a `&'static str` from a closed set
+    /// (`cloudmodel::CloudError::label`), so it can be printed and logged: it can never carry a
+    /// server's body, a prompt or a token.
+    Service(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelError {
     Failed(String),
+    /// C2 final review E-2: the service answered `outcome: "capped"` — the account's daily
+    /// judgment cap or its monthly budget ceiling. Its own variant, not a `Failed` carrying those
+    /// words, because it is the one model error that is not a fault and must not be logged as one.
+    Capped,
 }
+
+/// The one sentence this crate uses for a spent cap, in both the per-item error and the batch's
+/// summary line. A closed-set literal: nothing here came from a server body.
+pub const CAPPED_LABEL: &str = "the daily judgment cap";
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModelError::Failed(m) => write!(f, "{m}"),
+            ModelError::Capped => write!(f, "the judgment service: {CAPPED_LABEL}"),
         }
     }
 }
@@ -172,6 +198,77 @@ impl std::fmt::Display for ModelError {
 /// owns only the tiers — which is what makes `runtime::PerCall` and a scripted fake substitutable.
 pub trait Model {
     fn judge(&self, item: &Item, h: &Heuristics, seed: &Verdict) -> Result<Verdict, ModelError>;
+}
+
+/// Tier 3 for an event (cloud design §5.2). Separate from [`Model`] because an event is not a
+/// task: the answer is one of `eventledger::VALID_VERDICTS` and a one-line why, not five task
+/// fields. Implemented by `cloudmodel::CloudModel` in Task 9; a scripted fake in every test.
+pub trait EventModel {
+    fn judge_event(&self, item: &EventItem) -> Result<EventVerdict, ModelError>;
+}
+
+/// One event, flattened out of `state/events.md` by `events::judge_roster`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EventItem {
+    pub uid: String,
+    pub title: String,
+    pub start: String,
+    pub end: String,
+    pub source: String,
+    pub organizer: String,
+    pub location: String,
+    pub url: String,
+    pub description: String,
+    pub categories: Vec<String>,
+    pub audiences: Vec<String>,
+    pub series_uid: String,
+    /// `profile/interests.md`, clipped. The grounding, exactly as grade weights ground a task.
+    pub interests: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventVerdict {
+    /// `obligation` | `opportunity` | `drop` — validated again on the device before it is written.
+    pub verdict: String,
+    /// One line, no double quote, no ` · ` — `eventledger::why_problem` refuses all three.
+    pub why: String,
+    pub confidence: f64,
+    pub tier: u8,
+}
+
+/// Tier 3 for one email (cloud design §5.3's five tiers).
+///
+/// **The Gmail path does not call this**, and that is D12 rather than an oversight: Gmail message
+/// text must never reach the device, so `/gmail-read` judges server-side and returns verdicts.
+/// The seam exists because it is the same judgment, reached the same way, by the two callers that
+/// are not Gmail — the eval harness's device-side parity check, and the forwarding fallback the
+/// spec keeps in reserve (§13) — and because a third judgment with no trait here would be the one
+/// place `judge` is not a seam.
+pub trait EmailModel {
+    fn judge_email(&self, item: &EmailItem) -> Result<EmailVerdict, ModelError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmailItem {
+    pub message_id: String,
+    pub subject: String,
+    pub from: String,
+    pub date: String,
+    pub text: String,
+    pub known_courses: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmailVerdict {
+    /// `task` | `borderline` | `event` | `opportunity` | `information`.
+    pub tier: String,
+    pub title: String,
+    pub course: Option<String>,
+    pub due: Option<String>,
+    pub effort_hours: Option<f64>,
+    pub importance: Option<i64>,
+    pub why: String,
+    pub confidence: f64,
 }
 
 /// Tier 2 — **the seam plan 3b fills** (spec §5.4). A rule that reproduces the model's output
@@ -383,10 +480,21 @@ pub fn judge_task(
     let model = match model {
         Err(Missing::Runtime) => return Outcome::RuntimeNotInstalled(seed),
         Err(Missing::Model) => return Outcome::ModelNotInstalled(seed),
+        Err(Missing::Service(_)) => return Outcome::ServiceUnavailable(seed),
         Ok(m) => m,
     };
     let mut answer = match model.judge(item, h, &seed) {
         Ok(a) => a,
+        // C2 final review E-2: a spent cap is its own cause. Everything else about the outcome is
+        // the same — tier 1's work is still written, the run still exits 0 — but the log says
+        // `capped`, which is a thing to act on, rather than `model failed`, which is not.
+        Err(ModelError::Capped) => {
+            return Outcome::LowConfidence {
+                seed,
+                why: ModelError::Capped.to_string(),
+                cause: LowCause::Capped,
+            }
+        }
         Err(e) => {
             return Outcome::LowConfidence { seed, why: e.to_string(), cause: LowCause::ModelFailed }
         }

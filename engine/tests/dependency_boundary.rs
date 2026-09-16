@@ -73,3 +73,26 @@ fn release_profile_is_size_tuned() {
         );
     }
 }
+
+/// Judgment is a service, and the engine reaches it with `ureq` and nothing else.
+///
+/// Cloud design §8: "`dependency_boundary.rs` now also forbids `tauri` and any cloud SDK in the
+/// engine; the engine talks HTTP with `ureq` and nothing else." A provider SDK in this crate would
+/// bring a runtime, a TLS stack of its own and — the actual cost — a second place where a request
+/// body is assembled, out of reach of the one test that proves what a request may carry.
+#[test]
+fn no_cloud_sdk_enters_the_engine() {
+    for (name, manifest) in MANIFESTS {
+        for forbidden in [
+            "anthropic", "openai", "supabase", "postgrest", "aws-sdk", "azure_", "google-cloud",
+            "reqwest", "hyper", "isahc", "curl",
+        ] {
+            assert!(
+                !manifest.contains(forbidden),
+                "`{forbidden}` must not be a dependency of the engine crate ({name}). The engine \
+                 talks to the judgment service over `ureq` and nothing else (cloud design §8), so \
+                 every request body is assembled in `cloudmodel.rs` where one test can see it."
+            );
+        }
+    }
+}

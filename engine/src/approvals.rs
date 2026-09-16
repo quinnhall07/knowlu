@@ -1391,6 +1391,18 @@ fn transition_note(
             write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
             delete(vault, &rel, ctx, journal)?;
             result.executed.push(format!("{stem} ({created} events)"));
+        } else if kind == "coursework-map" {
+            // C2 (§11a, R-OB-1): a mapping from an unmapped zyBook or VHL section to a course.
+            // `rank` does not apply it — the next `coursework` step does, before it fetches, so a
+            // card approved at 11am is a mapping the noon slot already uses. Left exactly as it is
+            // here, and deliberately not an `unknown kind` warning: a WARN line on every run until
+            // the next slot would train the reader to ignore the list.
+        } else if kind == "rule" {
+            // C2 (cloud design §5.4): a promoted rule. `rank` never opens a socket for a judgment,
+            // so the decision is *sent* by the next `judge` step, which then stamps this card and
+            // archives it. Left exactly as it is here, deliberately not an `unknown kind` warning,
+            // because a WARN line on every run until the next slot would train the reader to ignore
+            // the list, which is the one thing `rank_warnings` exists to prevent.
         } else {
             result.warnings.push(format!("unknown kind: {name}"));
         }

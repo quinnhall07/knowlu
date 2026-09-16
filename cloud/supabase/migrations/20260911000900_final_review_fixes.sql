@@ -1,0 +1,72 @@
+-- Knowlu C2 — the whole-branch review's schema and privilege fixes (ruling R-C2-E52).
+--
+-- Forward-only, like every migration here: 20260911000100…000800 are applied and are never edited
+-- (the corrections they carry are comments beside the lines they correct, nothing more). Every
+-- schema, privilege and cron change the final review asked for lands here, each under the finding
+-- that asked for it.
+--
+--   C-1  `monthly_spend` was readable with the anon key.
+--   S-1  `gmail_queue` was never swept.
+--   F-2  `gmail_seen` grew without bound.
+
+-- ---------------------------------------------------------------------------------------------
+-- C-1 — the spend view is service-role only.
+--
+-- `20260911000100_judgment_service.sql:188` created `monthly_spend` with no `security_invoker` and
+-- no revoke. A view with neither is a SECURITY DEFINER view — it reads `usage_daily` and `models`
+-- as its OWNER, so RLS on `usage_daily` never applies to it — and Supabase grants `select` on a
+-- new view to `anon` and `authenticated` exactly as it grants `execute` on a new function. The
+-- result was a live read: `GET /rest/v1/monthly_spend` answered 200 to the project's anon key,
+-- returning every account's id and its month's inference spend, while C1's `telemetry_daily` —
+-- the same shape, but revoked in 20260910000400 — answered 401.
+--
+-- Revoked rather than switched to `security_invoker = true`: `enforce_budget` reads this view on
+-- every model call, and under an invoker view that read would run as the caller and be filtered to
+-- nothing by `usage_daily`'s own (policy-less) RLS. The view stays a definer view and simply stops
+-- being reachable from a browser; `_shared/judge_caps.ts` reaches it through the service role,
+-- which these revokes do not touch.
+--
+-- `migrations_test.ts`'s view guard is what keeps the next view from repeating this.
+revoke all on public.monthly_spend from anon, authenticated;
+
+-- ---------------------------------------------------------------------------------------------
+-- S-1 — the gmail queue is swept.
+--
+-- `gmail_queue` had no sweep at all: a row stayed forever once delivered. Each one carries a
+-- model-written title and rationale derived from a student's mail (the comment correction beside
+-- the table in 20260911000200 says so), so an unswept queue is an indefinite store of writing
+-- about someone's inbox that nothing reads again after the device has pulled it.
+--
+-- Delivered rows only, and only after seven days: an UNdelivered row is work the device has not
+-- collected yet — a laptop that is off for a fortnight must still get its tasks — so it is never
+-- touched here. Seven days past delivery is long enough for the device to have been asked twice a
+-- day for a week and short enough that nothing lingers.
+--
+-- 07:31 UTC, beside the other nightly jobs (`knowlu-billing-jobs` at :17, `knowlu-promote-rules`
+-- at :17, `knowlu-sweep-google-state` at :23) and deliberately not on the same minute as any of
+-- them.
+select cron.schedule('knowlu-sweep-gmail-queue', '31 7 * * *', $$delete from public.gmail_queue where delivered_at is not null and delivered_at < now() - interval '7 days';$$);
+
+-- ---------------------------------------------------------------------------------------------
+-- F-2 — the gmail_seen dedup set is swept, and its read no longer truncates silently.
+--
+-- `gmail_seen` had no sweep at all: every uid a mailbox ever produced stayed forever, one row per
+-- message. `gmail-read/index.ts`'s `seen` read every row for the account with no window, no
+-- order and no limit — a fine query the day an account has a hundred rows, and a silently
+-- truncated one (PostgREST's own `max_rows`) the day it has a hundred thousand. A truncated read
+-- means uids fall OUT of the returned set, `gmail-read` re-judges mail it already judged, tries to
+-- `markSeen` a uid already in the table, and — because `insert` was a bare POST with no conflict
+-- handling — that write 409s on the primary key every single round from then on, forever.
+--
+-- Two independent fixes: the read is windowed and bounded (`gmail-read/index.ts`), and the insert
+-- is idempotent (`judge_db.ts`'s `insert` gains an `onConflict` parameter, used here with
+-- `resolution=ignore-duplicates` against the table's own `(account_id, uid)` primary key — a
+-- second `markSeen` for a uid already seen is a no-op, not a 409). The sweep below is the third
+-- leg: 30 days past `seen_at` is well past `gmail-read`'s own 7-day `WINDOW`, so a swept row could
+-- never still be relevant to the dedup check, and it keeps the table from growing without bound in
+-- the first place — the same problem S-1 fixed for `gmail_queue`, on the table dedup depends on
+-- rather than the one the device pulls from.
+--
+-- 07:33 UTC — beside the other nightly jobs and the :31 gmail_queue sweep just above, on its own
+-- minute so the two never contend for the same lock at once.
+select cron.schedule('knowlu-prune-gmail-seen', '33 7 * * *', $$delete from public.gmail_seen where seen_at < now() - interval '30 days';$$);

@@ -1,0 +1,118 @@
+// PostgREST over `fetch`, with the service role. Not `supabase-js`: C1 established that this
+// codebase has no runtime dependency but the inference SDK, and one HTTP client for one schema is
+// smaller than a library that brings its own.
+//
+// C1 already has `_shared/db.ts` (`Rest`, `restSelect`, `restUpsert`, …): free functions taking a
+// `Rest` struct, no interface. This file exists beside it, not instead of it, because the pipeline
+// (`judge_pipeline.ts`) is injected with a `Db` — an interface, not a set of free functions — so a
+// test can substitute an in-memory fake, and because `judge_db_test.ts`'s account-scoping guard
+// scans this directory's source for the `.select(` call SHAPE this interface produces.
+//
+// **The service role bypasses RLS**, which is exactly why every C2 table has RLS on and no policy
+// (Task 1) and why every call site scopes by `account_id` in the query string. That scoping is the
+// whole access control, so `judge_db_test.ts` enforces it by scanning the source — and the sentence
+// that says what it scans has to be the truth, because the scan's blind spots are live holes
+// (R-C2-E20, then C2 final review S-3). What it scans today, exactly:
+//
+//   * every non-test `.ts` file in `_shared/` AND every non-test `.ts` file in every function
+//     directory — not `index.ts`/`handler.ts` alone, since a helper beside them
+//     (`google-connect/disconnect.ts`, `google-callback/exchange.ts`) deploys in the same bundle;
+//   * in each, every `.select(` and every `.update(` whose path names an account-scoped table,
+//     written with either backticks or double quotes, must carry an `account_id` filter;
+//   * and every `.rpc(` naming a SQL function whose signature takes `p_account` — the list is
+//     derived from the migrations, not written down — must pass one.
+//
+// Not scanned, deliberately: `insert(table, row)` names its account in the ROW, which is a shape
+// this scan cannot check by pattern and the table's own `not null` column does check; `cloud/eval/`,
+// whose two tables are global; and any `.rpc(` whose name or arguments are not literals, which
+// fails the scan loud rather than passing it silently.
+export interface Db {
+  /** A PostgREST path, e.g. `models?kind=eq.task&select=*`. Returns the rows. */
+  select(path: string): Promise<unknown[]>;
+  /**
+   * Inserts one row and returns it (`Prefer: return=representation`), or null when asked not to.
+   * `onConflict` (F-2) names the column list of an existing unique or primary key; the insert then
+   * carries `resolution=ignore-duplicates` and a conflicting row is a no-op rather than a 409 —
+   * `gmail-read`'s `markSeen` needs exactly this against `gmail_seen`'s `(account_id, uid)` primary
+   * key, so a uid already marked seen is never re-thrown as a write failure.
+   */
+  insert(
+    table: string,
+    row: Record<string, unknown>,
+    returning?: boolean,
+    onConflict?: string,
+  ): Promise<Record<string, unknown> | null>;
+  update(path: string, patch: Record<string, unknown>): Promise<void>;
+  /** `POST /rpc/<fn>`. */
+  rpc(fn: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
+ * The path and `Prefer` header one `insert` call builds — pulled out as a pure function (no env,
+ * no fetch) so `judge_db_test.ts` can prove F-2's `onConflict` shape without the `--allow-env` and
+ * `--allow-net` this file's real HTTP calls would otherwise need in every test run.
+ */
+export function insertRequest(
+  table: string,
+  returning: boolean,
+  onConflict?: string,
+): { path: string; prefer: string } {
+  const path = onConflict ? `${table}?on_conflict=${onConflict}` : table;
+  const base = returning ? "return=representation" : "return=minimal";
+  return { path, prefer: onConflict ? `${base},resolution=ignore-duplicates` : base };
+}
+
+function env(name: string): string {
+  const value = Deno.env.get(name);
+  if (value === undefined || value === "") throw new Error(`the function is missing ${name}`);
+  return value;
+}
+
+/// Built lazily, at first use — never at module scope. A throw at module scope is a boot failure
+/// with an opaque message; a throw here is caught by the handler and becomes a named 500.
+export function serviceDb(): Db {
+  const base = `${env("SUPABASE_URL")}/rest/v1`;
+  const key = env("SUPABASE_SERVICE_ROLE_KEY");
+  const headers = { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+
+  async function call(path: string, init: RequestInit): Promise<Response> {
+    const response = await fetch(`${base}/${path}`, {
+      ...init,
+      headers: { ...headers, ...(init.headers ?? {}) },
+    });
+    if (!response.ok) {
+      // The status and the PostgREST error CODE, never the body: a constraint violation's message
+      // quotes the offending row, and this string reaches a log line (§5.6).
+      const code = (await response.json().catch(() => ({}))).code ?? "unknown";
+      throw new Error(`postgrest ${response.status} (${code}) on ${path.split("?")[0]}`);
+    }
+    return response;
+  }
+
+  return {
+    async select(path) {
+      return await (await call(path, { method: "GET" })).json();
+    },
+    async insert(table, row, returning = true, onConflict) {
+      const { path, prefer } = insertRequest(table, returning, onConflict);
+      const response = await call(path, {
+        method: "POST",
+        body: JSON.stringify(row),
+        headers: { Prefer: prefer },
+      });
+      if (!returning) return null;
+      const rows = await response.json();
+      return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    },
+    async update(path, patch) {
+      await call(path, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+        headers: { Prefer: "return=minimal" },
+      });
+    },
+    async rpc(fn, args) {
+      return await (await call(`rpc/${fn}`, { method: "POST", body: JSON.stringify(args) })).json();
+    },
+  };
+}

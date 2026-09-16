@@ -432,6 +432,11 @@ pub struct WizardPlan {
     /// The personal calendar's secret iCal address (spec §11a). Same panel as the school feed, and
     /// the same treatment: validated on the device, stored on the account, written into the vault.
     pub personal_calendar: Option<String>,
+    /// Did the student connect a Google calendar on panel 5 (§11a)? A flag, not a URL: the grant
+    /// lives on the account and the vault only needs to know the feed exists. `#[serde(default)]`
+    /// so a page that predates C2 still deserialises.
+    #[serde(default)]
+    pub google_calendar: bool,
     pub timezone: String,
     pub slots: Vec<String>,
     /// R-OB-4: the school, chosen from the bundled US institution list (`onboarding::campus_search`)
@@ -635,6 +640,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         profile_id: profile_id.clone(),
         ics_url: plan.ics_url.clone().filter(|u| !u.trim().is_empty()),
         personal_calendar,
+        google_calendar: plan.google_calendar,
         zybooks_courses,
         vhl_sections,
         zybooks_ignore,

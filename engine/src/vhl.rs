@@ -134,6 +134,12 @@ fn yaml_field(map: &Mapping, key: &str) -> String {
 
 /// Turn a VHL dashboard page into [`Assignment`]s — one per due-date bucket.
 ///
+/// **This function is the reference the server-side port is measured against** (cloud design
+/// §4.3): `cloud/supabase/functions/ingest-coursework/parse_vhl.ts` is a faithful TypeScript port
+/// of it, and both are gated by the same frozen `tests/fixtures/vhl-parsed-reference.json`. From
+/// C2 on, production parses on the server; the fetch half above stays here, because a portal
+/// password never leaves the machine (D11).
+///
 /// `_tz` is in the signature and unused, exactly as in Python: every VHL bucket is due at a
 /// hard-coded local `23:59`, so there is no instant to convert. It stays a parameter so `fetch_vhl`
 /// reads the same in both engines and so the day VHL starts publishing a real timestamp, the

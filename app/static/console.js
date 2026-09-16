@@ -1380,6 +1380,17 @@
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
               ics: "", icsNote: "", cal: "", calNote: "",
+              // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
+              // `renderWizard()` like every other wizard field — a direct DOM write from inside
+              // the click handler was invisible to it and got wiped by the next render a Back, a
+              // Next or an unrelated poll caused. `google` is whether the calendar grant is
+              // connected (what `wizFinish` used to read off a bare module-level `WIZ_GOOGLE`);
+              // `googleNote` is the status line (its own element now — `wiz-cal-note` belongs to
+              // the personal iCal field, not this one); `googlePolling` drives the button's
+              // disabled state for the WHOLE poll, not only after it succeeds; `googleSeq` is the
+              // cancellation token `wizGo` bumps on leaving the panel, the same shape
+              // `schoolSeq` uses for the typeahead.
+              google: false, googleNote: "", googlePolling: false, googleSeq: 0,
               // R-OB-4: the school the student picked — a unitid, a name, a state and (once
               // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
               // command, and the page holds only the ten rows it is showing.
@@ -1457,6 +1468,10 @@
     EL("wiz-lms-capture").hidden = !WIZ.lmsOpen;
     EL("wiz-ics-note").textContent = WIZ.ics && !ICS_OK.test(WIZ.ics) ? "That does not look like a calendar feed link." : "";
     EL("wiz-cal-note").textContent = WIZ.calNote;
+    // A-5: driven entirely by WIZ state, so returning to this panel (or any other re-render while
+    // on it) always shows the truth — connected, mid-poll, or neither — never a stale DOM write.
+    EL("wiz-google-note").textContent = WIZ.googleNote;
+    EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
   }
 
@@ -1542,6 +1557,14 @@
       invoke("close_lms_window", {}).catch(function () {});
       WIZ.lmsOpen = false;
     }
+    // A-5: cancel any Google poll in flight — bumping the token is enough, the loop checks it on
+    // its own next wake and stops touching the page. Only the "still polling" flag is cleared here
+    // (not `googleNote`): a consent that already finished, or one still open in the browser, is
+    // still true when the student comes back to this panel, and the note should still say so.
+    if (leaving === 4 && WIZ.googlePolling) {
+      WIZ.googleSeq += 1;
+      WIZ.googlePolling = false;
+    }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
       // R-C1-55, I3: one discovery at a time. `discover_coursework` spawns the engine and logs into
@@ -1602,6 +1625,10 @@
   }
 
   function wizFinish() {
+    // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
+    // second Finish click landing in that window used to start a second `retarget_credentials`/
+    // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
+    EL("wiz-next").disabled = true;
     readSlotsPanel();
     // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
     // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
@@ -1614,40 +1641,48 @@
     var codes = {};
     zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
     WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
-    var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
-                 timezone: WIZ.tz, slots: WIZ.slots,
-                 zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
-                 campus_choice: WIZ.campus,
-                 zybooks_courses: zyRows.map(function (r) { return { code: r.key, course: r.course, label: r.course }; }),
-                 vhl_sections: vhlRows.map(function (r) { return { section: r.key, course: r.course, label: r.course }; }),
-                 // The second element is the slug, and the page has none: an empty string is what
-                 // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
-                 course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
-                 // Review round 1, I2: every discovered zyBook the student declined. Out of this list
-                 // an unmapped book is `not in config; skipped` on every healthy run, forever.
-                 zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
-                                        .map(function (r) { return r.key; }),
-                 courses: WIZ.courses };
-    EL("wiz-next").disabled = true;
-    // Before anything is created: move the credentials if the path has changed since they were
-    // written, so Credential Manager and the vault's `credential_target:` lines agree the moment
-    // the vault exists. The secret never comes back to the page — the move happens in the command.
-    var moved = (WIZ.credVault && WIZ.credVault !== dest())
-      ? invoke("retarget_credentials", { from_vault: WIZ.credVault, to_vault: dest() })
-      : Promise.resolve({ ok: true, error: null });
-    return moved.then(function (rt) {
-      if (!rt || !rt.ok) { credentialsStranded(); return; }
-      if (WIZ.credVault) { WIZ.credVault = dest(); }
-      return wizRegister(plan).then(function (r) {
-        if (!r.ok) { WIZ.error = r.error; EL("wiz-next").disabled = false; renderWizard(); return; }
-        // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
-        // from the pending target onto this profile, so this is the first moment the cache can be
-        // written where the console will look for it — and the console relaunches into a vault whose
-        // grace clock has already started rather than one that must reach the network to paint.
-        // Best effort in both directions: a refusal, or a build where the command is not yet
-        // registered, must never stop a finished wizard from opening.
-        return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {
-          return invoke("finish_onboarding", { id: r.profile.id });
+    // A-5 (b): re-read the truth rather than trust the poll loop's last tick. A consent that
+    // finished (in the browser, or after the poll was cancelled by leaving and returning to the
+    // panel) after the loop last checked must still birth the vault with the `cloud:google` entry
+    // — `WIZ.google` is only the FALLBACK, used when this one extra call itself fails.
+    return invoke("google_connected").then(function (status) {
+      return (status && status.ok) ? status.calendar === true : WIZ.google;
+    }).catch(function () { return WIZ.google; }).then(function (googleCalendar) {
+      var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
+                   google_calendar: googleCalendar,
+                   timezone: WIZ.tz, slots: WIZ.slots,
+                   zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
+                   campus_choice: WIZ.campus,
+                   zybooks_courses: zyRows.map(function (r) { return { code: r.key, course: r.course, label: r.course }; }),
+                   vhl_sections: vhlRows.map(function (r) { return { section: r.key, course: r.course, label: r.course }; }),
+                   // The second element is the slug, and the page has none: an empty string is what
+                   // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
+                   course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
+                   // Review round 1, I2: every discovered zyBook the student declined. Out of this list
+                   // an unmapped book is `not in config; skipped` on every healthy run, forever.
+                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
+                                          .map(function (r) { return r.key; }),
+                   courses: WIZ.courses };
+      // Before anything is created: move the credentials if the path has changed since they were
+      // written, so Credential Manager and the vault's `credential_target:` lines agree the moment
+      // the vault exists. The secret never comes back to the page — the move happens in the command.
+      var moved = (WIZ.credVault && WIZ.credVault !== dest())
+        ? invoke("retarget_credentials", { from_vault: WIZ.credVault, to_vault: dest() })
+        : Promise.resolve({ ok: true, error: null });
+      return moved.then(function (rt) {
+        if (!rt || !rt.ok) { credentialsStranded(); return; }
+        if (WIZ.credVault) { WIZ.credVault = dest(); }
+        return wizRegister(plan).then(function (r) {
+          if (!r.ok) { WIZ.error = r.error; EL("wiz-next").disabled = false; renderWizard(); return; }
+          // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
+          // from the pending target onto this profile, so this is the first moment the cache can be
+          // written where the console will look for it — and the console relaunches into a vault whose
+          // grace clock has already started rather than one that must reach the network to paint.
+          // Best effort in both directions: a refusal, or a build where the command is not yet
+          // registered, must never stop a finished wizard from opening.
+          return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {
+            return invoke("finish_onboarding", { id: r.profile.id });
+          });
         });
       });
     }).catch(function (e) { WIZ.error = String(e.message || e); EL("wiz-next").disabled = false; renderWizard(); });
@@ -1855,6 +1890,50 @@
       if (r.ok && r.note) { WIZ.calNote += " " + r.note; }
       renderWizard();
     }).catch(function () {});
+  });
+
+  // The wizard's one place to show an out-of-band failure on the current panel — the same
+  // `WIZ.error` / `renderWizard()` pair every other wizard error already uses.
+  function showWizardError(msg) { WIZ.error = msg; renderWizard(); }
+
+  // C2 (§11a): one Google connect for the calendars now, Gmail later and only if asked. The scope
+  // named here is "calendar" — the *sensitive* one, which carries a lighter review and no CASA.
+  // Nothing is written to the vault here: the wizard creates it at Finish, so this sets a flag on
+  // the plan and `scaffold::ingest_yaml` writes the `calendars:` entry when the vault is born.
+  //
+  // A-5 (m59+m60): every field this poll touches lives on `WIZ` and is painted by `renderWizard()`
+  // — never a direct DOM write — and `mySeq` is the cancellation check: `wizGo` bumps
+  // `WIZ.googleSeq` on leaving this panel, and a poll whose own captured value no longer matches
+  // stops touching the page at all, rather than writing a note onto a panel the student is no
+  // longer looking at (or, worse, one a LATER click on this same button has since restarted).
+  document.getElementById("wiz-google").addEventListener("click", async () => {
+    var got = await invoke("google_connect_url", { scope: "calendar" });
+    if (!got.ok) { showWizardError(got.error); return; }
+    var opened = await invoke("open_external", { url: got.url });
+    if (!opened.ok) { showWizardError(opened.error); return; }
+    var mySeq = ++WIZ.googleSeq;
+    WIZ.googlePolling = true;
+    WIZ.googleNote = "Finish signing in to Google in your browser — this may take a moment.";
+    renderWizard();
+    // The consent window closes itself, so there is nothing else to tell us the round trip finished.
+    // Twenty tries at three seconds is a minute, which is longer than a consent takes and shorter
+    // than a student will sit staring at it; giving up is a message, never a silent stall.
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (WIZ.googleSeq !== mySeq) { return; }
+      var status = await invoke("google_connected");
+      if (WIZ.googleSeq !== mySeq) { return; }
+      if (status.ok && status.calendar) {
+        WIZ.google = true;
+        WIZ.googlePolling = false;
+        WIZ.googleNote = "Google Calendar connected — already on your calendar.";
+        renderWizard();
+        return;
+      }
+    }
+    WIZ.googlePolling = false;
+    WIZ.googleNote = "Google did not finish connecting. You can try again, or use the secret address above.";
+    renderWizard();
   });
 
   // ---- R-OB-4: the school typeahead.
