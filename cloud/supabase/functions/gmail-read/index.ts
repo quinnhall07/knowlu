@@ -2,7 +2,17 @@ import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { GMAIL_SCOPE } from "../_shared/google_scopes.ts";
-import { GmailApiError, type GmailApi, READ_BUDGET_MS, readHandler, type TokenLookup } from "./handler.ts";
+import {
+  GmailApiError,
+  type GmailApi,
+  type ListPage,
+  pagedList,
+  PER_CALL_MS,
+  READ_BUDGET_MS,
+  READ_CAP,
+  readHandler,
+  type TokenLookup,
+} from "./handler.ts";
 
 const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -25,12 +35,18 @@ function firstTextPart(part: Record<string, unknown> | undefined): string {
 // There is no `attachments` method here and no call to `.../attachments/`. Adding one would mean
 // adding a method to `GmailApi`, which the handler test forbids by scanning the handler's source.
 const api: GmailApi = {
-  async list(accessToken, q) {
-    const url = `${GMAIL}/messages?q=${encodeURIComponent(q)}&maxResults=100`;
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!response.ok) throw new GmailApiError(response.status, `gmail list ${response.status}`);
-    const body = await response.json() as { messages?: Array<{ id: string }> };
-    return (body.messages ?? []).map((m) => m.id);
+  // F-3: pages via `pagedList` rather than asking for a single page of 100 and dropping
+  // `nextPageToken` — `unseen` is `pagedList`'s stop condition, `READ_CAP` is what it stops at, and
+  // `MAX_LIST_PAGES` (5, `pagedList`'s own default) is the hard ceiling regardless.
+  async list(accessToken, q, unseen) {
+    return await pagedList(async (pageToken): Promise<ListPage> => {
+      const url = `${GMAIL}/messages?q=${encodeURIComponent(q)}&maxResults=100` +
+        (pageToken === undefined ? "" : `&pageToken=${encodeURIComponent(pageToken)}`);
+      const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      if (!response.ok) throw new GmailApiError(response.status, `gmail list ${response.status}`);
+      const body = await response.json() as { messages?: Array<{ id: string }>; nextPageToken?: string };
+      return { ids: (body.messages ?? []).map((m) => m.id), nextPageToken: body.nextPageToken };
+    }, unseen, READ_CAP);
   },
   async message(accessToken, id) {
     const response = await fetch(`${GMAIL}/messages/${id}?format=full`, {
@@ -94,13 +110,24 @@ Deno.serve(readHandler(requireActiveEntitlement, {
     await sharedDb().update(`google_accounts?account_id=eq.${accountId}`, { status: "revoked" });
   },
   async seen(accountId) {
+    // F-2: windowed and bounded. `WINDOW` (the query this function sends Gmail) only ever asks for
+    // the last 7 days, so a row past 14 can never affect a dedup decision here again — but an
+    // unbounded `select` reads every row this account has EVER produced, and PostgREST's own
+    // `max_rows` truncates that silently once it is large, which used to drop real uids out of the
+    // set with no error anywhere. Newest first with an explicit `limit`, so a truncation (if the
+    // window still somehow held more than the cap) drops the OLDEST rows — the ones least likely to
+    // matter to this round — rather than an arbitrary slice.
+    const since = new Date(Date.now() - 14 * 86_400_000).toISOString();
     const rows = await sharedDb().select(
-      `gmail_seen?account_id=eq.${accountId}&select=uid`,
+      `gmail_seen?account_id=eq.${accountId}&seen_at=gte.${since}&select=uid&order=seen_at.desc&limit=5000`,
     ) as Array<{ uid: string }>;
     return new Set(rows.map((r) => r.uid));
   },
   async markSeen(accountId, uid) {
-    await sharedDb().insert("gmail_seen", { account_id: accountId, uid }, false);
+    // F-2: idempotent against `gmail_seen`'s own `(account_id, uid)` primary key. Without this, a
+    // uid the truncated `seen` read above had silently dropped would 409 here every round from
+    // then on — `insert`'s `onConflict` makes a repeat mark a no-op instead of a write failure.
+    await sharedDb().insert("gmail_seen", { account_id: accountId, uid }, false, "account_id,uid");
   },
   async enqueue(accountId, uid, tier, payload, judgmentId) {
     await sharedDb().insert(
@@ -125,9 +152,12 @@ Deno.serve(readHandler(requireActiveEntitlement, {
     // Derived from the account's own history — there is no course table server-side, and inventing
     // one would mean the device syncing its `courses/` folder, which is C3's problem. A new
     // account has none, every `course` comes back null, and the first coursework sync fixes it.
+    // F-2: bounded and ordered like `seen` above — 120 days of judgments can run past PostgREST's
+    // row cap for an active account, and the newest rows are the ones most likely to still name a
+    // course the student is actually in this term.
     const since = new Date(Date.now() - 120 * 86_400_000).toISOString();
     const rows = await sharedDb().select(
-      `judgments?account_id=eq.${accountId}&judged_at=gte.${since}&select=fields`,
+      `judgments?account_id=eq.${accountId}&judged_at=gte.${since}&select=fields&order=judged_at.desc&limit=1000`,
     ) as Array<{ fields: Record<string, string> }>;
     const out = new Set<string>();
     for (const row of rows) {
@@ -136,7 +166,9 @@ Deno.serve(readHandler(requireActiveEntitlement, {
     }
     return [...out];
   },
-  pipeline: () => liveDeps("email", "gmail_api"),
+  // F-4: a shorter model timeout than the default 120 s, so a call that starts right at the
+  // budget's edge cannot run long enough to threaten the edge function's own wall clock.
+  pipeline: () => liveDeps("email", "gmail_api", PER_CALL_MS),
   budgetMs: READ_BUDGET_MS,
   clock: () => Date.now(),
 }));

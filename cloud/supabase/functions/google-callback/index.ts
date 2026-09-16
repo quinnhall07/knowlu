@@ -1,6 +1,8 @@
 import { sharedDb } from "../_shared/judge_deps.ts";
+import { revokeGoogleToken } from "../_shared/google_revoke.ts";
 import { exchangeCode } from "./exchange.ts";
 import { callbackHandler } from "./handler.ts";
+import { storeGrantRevokingStale } from "./reconnect.ts";
 
 // The wiring only. Every line of parsing lives in `./exchange.ts`, where `exchange_test.ts` drives
 // it with a fake `fetch` — nothing in this file can be reached by a test, and the review found the
@@ -24,10 +26,26 @@ Deno.serve(callbackHandler({
       redirectUri: redirectUri(),
     });
   },
-  async storeRefreshToken(accountId, sub, email, refreshToken, scopes) {
-    const id = await sharedDb().rpc("store_google_grant", {
-      p_account: accountId, p_sub: sub, p_email: email ?? null, p_token: refreshToken, p_scopes: scopes,
+  // F-5: revokes a DIFFERENT Google account's stale token before this one overwrites its row —
+  // `store_google_grant`'s own upsert has no way to see that the `sub` changed, only that a row
+  // exists (`reconnect.ts` has the full reasoning).
+  storeRefreshToken(accountId, sub, email, refreshToken, scopes) {
+    return storeGrantRevokingStale(accountId, sub, email, refreshToken, scopes, {
+      async currentGrant(id) {
+        const rows = await sharedDb().select(
+          `google_accounts?account_id=eq.${id}&select=google_sub`,
+        ) as Array<{ google_sub: string }>;
+        if (rows.length === 0) return null;
+        const token = await sharedDb().rpc("read_google_grant_any", { p_account: id });
+        return typeof token === "string" && token !== "" ? { sub: rows[0].google_sub, token } : null;
+      },
+      revoke: (token) => revokeGoogleToken(fetch, token),
+      async store(id, s, e, t, sc) {
+        const gid = await sharedDb().rpc("store_google_grant", {
+          p_account: id, p_sub: s, p_email: e ?? null, p_token: t, p_scopes: sc,
+        });
+        if (typeof gid !== "string") throw new Error("the grant was not stored");
+      },
     });
-    if (typeof id !== "string") throw new Error("the grant was not stored");
   },
 }));

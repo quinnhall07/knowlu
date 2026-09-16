@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { encryptString, importAesKey } from "../_shared/crypto.ts";
 import { calendarHandler, toIcs } from "./handler.ts";
+import { guardedFetch } from "../_shared/guarded_fetch.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -160,6 +161,30 @@ Deno.test("the personal source is fetched server-side and its address appears in
   const failResponse = await failHandler(new Request("http://127.0.0.1/ingest-calendar?name=personal"));
   assertEquals(failResponse.status, 502);
   assertEquals((await failResponse.text()).includes("secret-address"), false);
+});
+
+// C2 final review F-1 (regrading m36): the decrypted secret iCal address goes through the same
+// `guardedFetch` `/events` uses (`ingest-calendar/index.ts`'s `fetchText`) — real `guardedFetch`,
+// no fake, on a loopback host. The guard's refusal must land in the SAME catch as an unfetchable
+// feed: the named 502 the handler already answers for a network failure, with nothing about the
+// address or which guard fired reflected back.
+Deno.test("a personal source that decrypts to a loopback host is refused by the guard and answers the same 502 as an unfetchable feed", async () => {
+  const key = await importAesKey(TEST_KEY_B64);
+  const { ciphertext, iv } = await encryptString(key, "https://127.0.0.1/feed/secret-address.ics");
+  const handler = calendarHandler(
+    OK,
+    deps({
+      personalSource: () => Promise.resolve({ ciphertext, iv }),
+      encKey: () => Promise.resolve(key),
+      fetchText: (url: string) => guardedFetch(url),
+    }),
+  );
+  const response = await handler(new Request("http://127.0.0.1/ingest-calendar?name=personal"));
+  assertEquals(response.status, 502);
+  const reply = await response.json();
+  assertEquals(reply.error, "the calendar could not be fetched");
+  assertEquals(JSON.stringify(reply).includes("secret-address"), false);
+  assertEquals(JSON.stringify(reply).includes("127.0.0.1"), false);
 });
 
 Deno.test("a Google grant without calendar.readonly is a 409, not a 404, and no fetch is attempted", async () => {

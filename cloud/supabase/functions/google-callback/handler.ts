@@ -24,11 +24,24 @@ export interface CallbackDeps {
   ): Promise<void>;
 }
 
+// F-6: this page renders whatever `message` names (never anything from the request — every string
+// passed to `page` below is one of this file's own literals), but it is still the one HTML response
+// in this whole codebase, served to a real browser mid-redirect from Google. `nosniff` stops a
+// browser from ever re-interpreting the body as something other than what `content-type` says, and
+// the CSP allows nothing but this page's own inline `style` attribute — no script, no external
+// resource of any kind, on a page a hostile network position could otherwise try to inject into.
 function page(message: string, status = 200): Response {
   return new Response(
     `<!doctype html><meta charset="utf-8"><title>Knowlu</title>` +
       `<body style="font:16px system-ui;padding:3rem"><p>${message}</p></body>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } },
+    {
+      status,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+      },
+    },
   );
 }
 

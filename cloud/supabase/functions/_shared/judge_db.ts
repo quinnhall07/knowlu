@@ -29,15 +29,37 @@
 export interface Db {
   /** A PostgREST path, e.g. `models?kind=eq.task&select=*`. Returns the rows. */
   select(path: string): Promise<unknown[]>;
-  /** Inserts one row and returns it (`Prefer: return=representation`), or null when asked not to. */
+  /**
+   * Inserts one row and returns it (`Prefer: return=representation`), or null when asked not to.
+   * `onConflict` (F-2) names the column list of an existing unique or primary key; the insert then
+   * carries `resolution=ignore-duplicates` and a conflicting row is a no-op rather than a 409 —
+   * `gmail-read`'s `markSeen` needs exactly this against `gmail_seen`'s `(account_id, uid)` primary
+   * key, so a uid already marked seen is never re-thrown as a write failure.
+   */
   insert(
     table: string,
     row: Record<string, unknown>,
     returning?: boolean,
+    onConflict?: string,
   ): Promise<Record<string, unknown> | null>;
   update(path: string, patch: Record<string, unknown>): Promise<void>;
   /** `POST /rpc/<fn>`. */
   rpc(fn: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
+ * The path and `Prefer` header one `insert` call builds — pulled out as a pure function (no env,
+ * no fetch) so `judge_db_test.ts` can prove F-2's `onConflict` shape without the `--allow-env` and
+ * `--allow-net` this file's real HTTP calls would otherwise need in every test run.
+ */
+export function insertRequest(
+  table: string,
+  returning: boolean,
+  onConflict?: string,
+): { path: string; prefer: string } {
+  const path = onConflict ? `${table}?on_conflict=${onConflict}` : table;
+  const base = returning ? "return=representation" : "return=minimal";
+  return { path, prefer: onConflict ? `${base},resolution=ignore-duplicates` : base };
 }
 
 function env(name: string): string {
@@ -71,11 +93,12 @@ export function serviceDb(): Db {
     async select(path) {
       return await (await call(path, { method: "GET" })).json();
     },
-    async insert(table, row, returning = true) {
-      const response = await call(table, {
+    async insert(table, row, returning = true, onConflict) {
+      const { path, prefer } = insertRequest(table, returning, onConflict);
+      const response = await call(path, {
         method: "POST",
         body: JSON.stringify(row),
-        headers: { Prefer: returning ? "return=representation" : "return=minimal" },
+        headers: { Prefer: prefer },
       });
       if (!returning) return null;
       const rows = await response.json();

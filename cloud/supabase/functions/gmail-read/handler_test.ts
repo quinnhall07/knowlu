@@ -1,7 +1,17 @@
 import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
-import { type GmailApi, READ_CAP, readHandler, type ReadDeps } from "./handler.ts";
+import {
+  type GmailApi,
+  type ListPage,
+  MAX_LIST_PAGES,
+  pagedList,
+  PER_CALL_MS,
+  READ_BUDGET_MS,
+  READ_CAP,
+  readHandler,
+  type ReadDeps,
+} from "./handler.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 const TRIPWIRE = "TRIPWIRE-9f2c";
@@ -76,7 +86,12 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"]) {
         origin: "gmail_api",
         now: () => 0,
       }),
-    budgetMs: 60_000,
+    // F-4: matches production (`gmail-read/index.ts` passes `READ_BUDGET_MS` too) rather than an
+    // arbitrary round number — with `clock` pinned at a constant 0 below, elapsed never advances
+    // between calls, so no ordinary test here comes anywhere near the budget check regardless of
+    // exactly how large this is, but keeping it the REAL value is what makes a mismatch between the
+    // two impossible to introduce by accident.
+    budgetMs: READ_BUDGET_MS,
     clock: () => 0,
   };
   return { deps, rows, queued, seen, asked, attachmentsRead: () => attachments };
@@ -157,6 +172,54 @@ Deno.test("the read stops at its wall-clock budget and says there is more", asyn
   const reply = await (await readHandler(OK, { ...deps, budgetMs: 10, clock: () => (tick += 8) })(post())).json();
   assert(reply.more === true, "the handler must say it stopped early");
   assert(queued.length < 5, "it must actually have stopped early");
+});
+
+// ---------------------------------------------------------------------------------------------
+// F-4 — the budget bounds when the last call ENDS, not when it starts: the check reserves
+// `PER_CALL_MS` up front, so nothing starts that could not finish inside `budgetMs`.
+// ---------------------------------------------------------------------------------------------
+
+/** A `clock()` fake that returns 0 once (for `started`), then each of `checks` in order — one per
+ * loop iteration's budget check — then throws if asked for more than that, so a test that expects
+ * to stop after N checks fails loudly rather than silently reading a stale value past the point it
+ * meant to assert about. */
+function scriptedClock(...checks: number[]): () => number {
+  const values = [0, ...checks];
+  let i = 0;
+  return () => {
+    if (i >= values.length) throw new Error("scriptedClock: asked for more ticks than scripted");
+    return values[i++];
+  };
+}
+
+Deno.test("a call is refused the instant starting it could not finish before the budget — elapsed + PER_CALL_MS === budgetMs", async () => {
+  const { deps, queued } = fakes([TASK_ANSWER], ["m1"]);
+  const budgetMs = 100_000;
+  // elapsed at the check is exactly `budgetMs - PER_CALL_MS`: this call's worst case would land
+  // EXACTLY on the deadline, and `>=` refuses it rather than letting it just touch the line.
+  const clock = scriptedClock(budgetMs - PER_CALL_MS);
+  const reply = await (await readHandler(OK, { ...deps, budgetMs, clock })(post())).json();
+  assertEquals(queued.length, 0, "a call whose worst case lands exactly on the deadline must not start");
+  assertEquals(reply.more, true);
+});
+
+Deno.test("one millisecond of slack is enough to let the call start", async () => {
+  const { deps, queued } = fakes([TASK_ANSWER], ["m1"]);
+  const budgetMs = 100_000;
+  // One millisecond less elapsed than the refusal case above: the same call now finishes inside
+  // the deadline in the worst case, and must be allowed to start.
+  const clock = scriptedClock(budgetMs - PER_CALL_MS - 1);
+  const reply = await (await readHandler(OK, { ...deps, budgetMs, clock })(post())).json();
+  assertEquals(queued.length, 1, "a call with one millisecond of slack must start");
+  assertEquals(reply.more, false);
+});
+
+Deno.test("READ_BUDGET_MS keeps the same new-work cutoff as before (40 s) by reserving PER_CALL_MS on top of it", () => {
+  // F-4's whole point: the OLD 40 s threshold for "stop accepting new work" is preserved exactly —
+  // only the constant's own value and meaning changed, to also cover the last call's own tail.
+  assertEquals(READ_BUDGET_MS - PER_CALL_MS, 40_000);
+  assertEquals(PER_CALL_MS, 60_000);
+  assert(READ_BUDGET_MS + 0 < 150_000, "the round's true worst case must stay under the assumed edge function ceiling");
 });
 
 Deno.test("excluded_labels_become_negative_label_terms (and the window is seven days)", async () => {
@@ -280,6 +343,96 @@ Deno.test("a model failure defers that one uid and continues to the next", async
 });
 
 // ---------------------------------------------------------------------------------------------
+// F-3 — `pagedList` follows `nextPageToken` until it has enough UNSEEN ids or the pages run out,
+// with a hard ceiling regardless. A fake `fetchPage` proves every stopping condition with no
+// Gmail shape and no network at all.
+// ---------------------------------------------------------------------------------------------
+
+function page(ids: string[], nextPageToken?: string): ListPage {
+  return { ids, nextPageToken };
+}
+
+Deno.test("a single page with enough unseen ids never asks for a second page", async () => {
+  let calls = 0;
+  const fetchPage = () => {
+    calls += 1;
+    return Promise.resolve(page(["m1", "m2", "m3"], "would-be-page-2"));
+  };
+  const ids = await pagedList(fetchPage, () => true, 3);
+  assertEquals(ids, ["m1", "m2", "m3"]);
+  assertEquals(calls, 1, "a page token is never followed once `want` is already met");
+});
+
+Deno.test("a page short of unseen ids follows nextPageToken for more", async () => {
+  const pages = [page(["m1", "m2"], "tok-2"), page(["m3", "m4"], "tok-3"), page(["m5"], undefined)];
+  const tokensAsked: Array<string | undefined> = [];
+  const fetchPage = (pageToken?: string) => {
+    tokensAsked.push(pageToken);
+    return Promise.resolve(pages[tokensAsked.length - 1]);
+  };
+  const ids = await pagedList(fetchPage, () => true, 4);
+  // Stops the moment 4 have been gathered — the third page (no more unseen needed) is never asked.
+  assertEquals(ids, ["m1", "m2", "m3", "m4"]);
+  assertEquals(tokensAsked, [undefined, "tok-2"]);
+});
+
+Deno.test("pages run out before `want` is met, and the loop stops rather than looping forever", async () => {
+  const fetchPage = (pageToken?: string) =>
+    Promise.resolve(pageToken === undefined ? page(["m1"], "tok-2") : page(["m2"], undefined));
+  const ids = await pagedList(fetchPage, () => true, 100);
+  assertEquals(ids, ["m1", "m2"], "every id gathered before the pages ran out");
+});
+
+Deno.test("only UNSEEN ids count toward `want` — a page of already-seen mail does not look like enough", async () => {
+  const seen = new Set(["m1", "m2"]);
+  const pages = [page(["m1", "m2"], "tok-2"), page(["m3"], undefined)];
+  let calls = 0;
+  const fetchPage = () => Promise.resolve(pages[calls++]);
+  const ids = await pagedList(fetchPage, (id) => !seen.has(id), 1);
+  assertEquals(ids, ["m1", "m2", "m3"], "the already-seen page did not satisfy `want` on its own");
+  assertEquals(calls, 2);
+});
+
+Deno.test("a hard ceiling of pages applies even when nextPageToken keeps promising more", async () => {
+  let calls = 0;
+  const fetchPage = () => {
+    calls += 1;
+    return Promise.resolve(page([`m${calls}`], `tok-${calls + 1}`));
+  };
+  const ids = await pagedList(fetchPage, () => true, 1_000_000);
+  assertEquals(calls, MAX_LIST_PAGES, "a mailbox that never says 'no more pages' must still stop");
+  assertEquals(ids.length, MAX_LIST_PAGES);
+});
+
+Deno.test("gmail-read's own call passes READ_CAP as pagedList's `want`, and the handler still caps and dedups after", async () => {
+  // Production wiring lives in index.ts and is not itself unit-tested (no function's index.ts is,
+  // in this codebase) — this proves the handler side of the contract: `api.list` receives the
+  // account's own `unseen` predicate, and whatever it returns is STILL filtered and sliced by the
+  // handler afterward (dedup-before-cap, R-C2-E42), even if a fake ignores `unseen` entirely and
+  // hands back ids the account has already seen.
+  const ids = Array.from({ length: READ_CAP + 10 }, (_, i) => `m${i}`);
+  const { deps, queued, seen } = fakes(
+    Array.from({ length: READ_CAP }, () => TASK_ANSWER),
+    ids,
+  );
+  for (let i = 0; i < 3; i++) seen.add(`gmail:m${i}`);
+  // Read at call time, before the loop below has a chance to mutate the SAME `seen` set the fake
+  // `deps.seen()` hands back as `already` — `already.has(...)` would otherwise report every id
+  // this very run has since processed as "seen", which is true by the end but proves nothing about
+  // what the handler passed api.list before any of that happened.
+  let sawM0 = "unset", sawM3 = "unset";
+  deps.api.list = (_t, _q, unseen) => {
+    sawM0 = unseen("m0") ? "unseen" : "already seen";
+    sawM3 = unseen("m3") ? "unseen" : "already seen";
+    return Promise.resolve(ids);
+  };
+  await readHandler(OK, deps)(post());
+  assertEquals(queued.length, READ_CAP);
+  assertEquals(sawM0, "already seen", "m0 was marked seen above");
+  assertEquals(sawM3, "unseen", "m3 was never marked seen");
+});
+
+// ---------------------------------------------------------------------------------------------
 // R-C2-E44 — the minors: a malformed ack is dropped, and a label carrying a quote is escaped.
 // ---------------------------------------------------------------------------------------------
 
@@ -289,6 +442,18 @@ Deno.test("a malformed ack entry is dropped rather than reaching the delivery fi
   const tracked = { ...deps, deliver: (_a: string, uids: string[]) => { delivered = uids; return Promise.resolve(); } };
   await readHandler(OK, tracked)(post({ ack: ["gmail:m1", "not-an-ack", "gmail:evil; drop table", ""] }));
   assertEquals(delivered, ["gmail:m1"]);
+});
+
+// F-6: a hard ceiling on one round's ack, so a device bug (or a hostile request) cannot build an
+// unbounded `uid=in.(...)` filter.
+Deno.test("an ack past the 500 cap is truncated, and the drop is logged rather than silent", async () => {
+  const { deps } = fakes([TASK_ANSWER]);
+  let delivered: string[] = [];
+  const tracked = { ...deps, deliver: (_a: string, uids: string[]) => { delivered = uids; return Promise.resolve(); } };
+  const ack = Array.from({ length: 600 }, (_, i) => `gmail:m${i}`);
+  await readHandler(OK, tracked)(post({ ack }));
+  assertEquals(delivered.length, 500, "only the first 500 reach deliver");
+  assertEquals(delivered, ack.slice(0, 500));
 });
 
 Deno.test("a label carrying a double quote is escaped, not left to break the query", async () => {

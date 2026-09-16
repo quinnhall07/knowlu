@@ -20,13 +20,17 @@ export function sharedDb(): Db {
 export async function liveDeps(
   kind: Kind,
   origin: JudgmentRow["origin"] = "device",
+  // F-4: `gmail-read` passes its own `PER_CALL_MS` here so the model client's real timeout matches
+  // what its budget check reserves — every other caller leaves this unset and gets
+  // `judge_anthropic.ts`'s own `CALL_TIMEOUT_MS`.
+  modelTimeoutMs?: number,
 ): Promise<PipelineDeps> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (apiKey === undefined || apiKey === "") throw new Error("the function is missing ANTHROPIC_API_KEY");
   const client = sharedDb();
   return {
     row: await modelRow(client, kind),
-    model: new AnthropicModel({ apiKey }),
+    model: new AnthropicModel({ apiKey, timeoutMs: modelTimeoutMs }),
     rules: ruleTable(client),
     caps: capStore(client),
     log: judgmentSink(client),

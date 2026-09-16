@@ -1,4 +1,5 @@
-import { assert, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { insertRequest } from "./judge_db.ts";
 
 const SHARED = new URL(".", import.meta.url);
 /** One level up from `_shared/`: the directory holding every function, `_shared/` included. */
@@ -186,3 +187,26 @@ function catchSync(fn: () => void): unknown {
     return e;
   }
 }
+
+// C2 final review F-2: `gmail-read`'s `markSeen` calls `insert("gmail_seen", row, false)` every
+// round, including for a uid it has already marked — `gmail_seen`'s own read used to truncate
+// silently past PostgREST's row cap, so the same uid could come back around and hit the table's
+// `(account_id, uid)` primary key a second time. A bare POST 409s on that; `onConflict` makes it
+// `resolution=ignore-duplicates` instead, a no-op.
+//
+// `insertRequest` is the pure path/header logic `serviceDb()`'s real `insert` builds from, pulled
+// out on purpose: the CI `deno test` invocation's `--allow-env` list is fixed to four Anthropic
+// variables and carries no `--allow-net`, so a test that reached `serviceDb()` itself (real env
+// vars, a stubbed `fetch`) would need permissions this suite is not run with. Testing the pure
+// function proves the same shape with no permission at all.
+Deno.test("insert's onConflict carries on_conflict in the path and ignore-duplicates in Prefer", () => {
+  assertEquals(
+    insertRequest("gmail_seen", false, "account_id,uid"),
+    { path: "gmail_seen?on_conflict=account_id,uid", prefer: "return=minimal,resolution=ignore-duplicates" },
+  );
+});
+
+Deno.test("insert with no onConflict is unchanged from before F-2: no query string, no resolution clause", () => {
+  assertEquals(insertRequest("gmail_seen", false), { path: "gmail_seen", prefer: "return=minimal" });
+  assertEquals(insertRequest("judgments", true), { path: "judgments", prefer: "return=representation" });
+});

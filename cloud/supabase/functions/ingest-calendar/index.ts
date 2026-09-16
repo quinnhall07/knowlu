@@ -3,7 +3,8 @@ import { importAesKey } from "../_shared/crypto.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { CALENDAR_SCOPE } from "../_shared/google_scopes.ts";
-import { CAL_USER_AGENT, calendarHandler } from "./handler.ts";
+import { guardedFetch, MAX_BODY_BYTES, MAX_REDIRECTS } from "../_shared/guarded_fetch.ts";
+import { calendarHandler } from "./handler.ts";
 
 // Imported once, lazily, and kept: `importAesKey` is a `crypto.subtle` call and re-importing it
 // per request is work for nothing. Built at first use, never at module scope, so a missing secret
@@ -77,10 +78,14 @@ Deno.serve(calendarHandler(requireActiveEntitlement, {
       allDay: item.start.date !== undefined,
     }));
   },
-  async fetchText(url: string): Promise<string> {
-    const response = await fetch(url, { headers: { "User-Agent": CAL_USER_AGENT } });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.text();
+  // C2 final review F-1 (regrading m36): the same guard `/events` and `/ingest-ics` use. The URL
+  // here is the student's secret iCal address, decrypted from `sources` a few lines above — still
+  // a string they pasted, still capable of naming a loopback or a metadata endpoint. A guard
+  // refusal throws exactly as an unfetchable feed does, so the handler's existing named 502 is the
+  // answer and nothing about the URL or the guard comes back. `CAL_USER_AGENT` is not passed:
+  // `guardedFetch` sends its own browser-shaped headers, which is what that constant was for.
+  fetchText(url: string): Promise<string> {
+    return guardedFetch(url, { maxBytes: MAX_BODY_BYTES, timeoutMs: 20_000, maxHops: MAX_REDIRECTS });
   },
   encKey: sourcesKey,
   now: () => new Date(),

@@ -74,13 +74,10 @@ export function icsHandler(entitle: Entitle, deps: IcsDeps): (req: Request) => P
       if (!ics.includes("BEGIN:VCALENDAR")) {
         return Response.json({ error: "the calendar feed is not an ICS response" }, { status: 502 });
       }
-      // A count the wizard can show ("we found 14 events"), and nothing that identifies the feed.
-      const courses = (ics.match(/^BEGIN:VEVENT/gm) ?? []).length;
       // `first_run=1` is sent by the engine when the vault has no `today.md` (R-C2-9).
       const firstRun = new URL(req.url).searchParams.get("first_run") === "1";
       return Response.json({
         ics,
-        courses,
         past_due_uids: firstRun ? pastDueUids(ics, deps.now()) : [],
       });
     } catch (e) {

@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { icsHandler } from "./handler.ts";
+import { guardedFetch } from "../_shared/guarded_fetch.ts";
 
 const FEED = await Deno.readTextFile(
   new URL("../../../../engine/tests/fixtures/blackboard.ics", import.meta.url),
@@ -22,7 +23,6 @@ Deno.test("the account's stored URL is fetched server-side and the URL never com
   assertEquals(response.status, 200);
   const reply = await response.json();
   assert(reply.ics.includes("BEGIN:VCALENDAR"));
-  assert(typeof reply.courses === "number");
   assertEquals(asked, "https://lms.example.invalid/feed/secret-capability.ics");
   // The capability URL is a credential in all but name: it must never come back to the device,
   // into a log, or into an error body (cloud design §3.1, §9 Alabama SPII).
@@ -52,6 +52,25 @@ Deno.test("a feed that will not fetch is a 502 whose body carries no URL", async
   assertEquals((await response.text()).includes("secret-capability"), false);
 });
 
+// C2 final review F-1 (regrading m36): the account's stored feed URL goes through the same
+// `guardedFetch` `/events` uses (`ingest-ics/index.ts`'s `fetchText`) — real `guardedFetch`, no
+// fake, on a loopback host. The guard's refusal must land in the SAME catch as an unfetchable
+// feed: the named 502 the handler already answers for a network failure, with nothing about the
+// URL or which guard fired reflected back.
+Deno.test("a stored URL that resolves to a loopback host is refused by the guard and answers the same 502 as an unfetchable feed", async () => {
+  const handler = icsHandler(OK, {
+    urlFor: () => Promise.resolve("https://127.0.0.1/feed/secret-capability.ics"),
+    fetchText: (url: string) => guardedFetch(url),
+    now: NOW,
+  });
+  const response = await handler(new Request("http://127.0.0.1/ingest-ics"));
+  assertEquals(response.status, 502);
+  const reply = await response.json();
+  assertEquals(reply.error, "the calendar feed could not be fetched");
+  assertEquals(JSON.stringify(reply).includes("secret-capability"), false);
+  assertEquals(JSON.stringify(reply).includes("127.0.0.1"), false);
+});
+
 Deno.test("first_run reports which uids are already past, and otherwise reports none", async () => {
   // R-OB-3's corroborating half. The DEVICE's check is the guarantee — it is the half that works
   // with no account and the half that knows the vault's timezone — and this is what the wizard
@@ -68,7 +87,6 @@ Deno.test("first_run reports which uids are already past, and otherwise reports 
   const first = await (await icsHandler(OK, deps)(new Request("http://127.0.0.1/ingest-ics?first_run=1")))
     .json();
   assertEquals(first.past_due_uids, ["bb-old"]);
-  assertEquals(first.courses, 2);
   const later = await (await icsHandler(OK, deps)(new Request("http://127.0.0.1/ingest-ics"))).json();
   assertEquals(later.past_due_uids, [], "only a first ingest has a past to skip");
 });

@@ -46,3 +46,27 @@ revoke all on public.monthly_spend from anon, authenticated;
 -- at :17, `knowlu-sweep-google-state` at :23) and deliberately not on the same minute as any of
 -- them.
 select cron.schedule('knowlu-sweep-gmail-queue', '31 7 * * *', $$delete from public.gmail_queue where delivered_at is not null and delivered_at < now() - interval '7 days';$$);
+
+-- ---------------------------------------------------------------------------------------------
+-- F-2 — the gmail_seen dedup set is swept, and its read no longer truncates silently.
+--
+-- `gmail_seen` had no sweep at all: every uid a mailbox ever produced stayed forever, one row per
+-- message. `gmail-read/index.ts`'s `seen` read every row for the account with no window, no
+-- order and no limit — a fine query the day an account has a hundred rows, and a silently
+-- truncated one (PostgREST's own `max_rows`) the day it has a hundred thousand. A truncated read
+-- means uids fall OUT of the returned set, `gmail-read` re-judges mail it already judged, tries to
+-- `markSeen` a uid already in the table, and — because `insert` was a bare POST with no conflict
+-- handling — that write 409s on the primary key every single round from then on, forever.
+--
+-- Two independent fixes: the read is windowed and bounded (`gmail-read/index.ts`), and the insert
+-- is idempotent (`judge_db.ts`'s `insert` gains an `onConflict` parameter, used here with
+-- `resolution=ignore-duplicates` against the table's own `(account_id, uid)` primary key — a
+-- second `markSeen` for a uid already seen is a no-op, not a 409). The sweep below is the third
+-- leg: 30 days past `seen_at` is well past `gmail-read`'s own 7-day `WINDOW`, so a swept row could
+-- never still be relevant to the dedup check, and it keeps the table from growing without bound in
+-- the first place — the same problem S-1 fixed for `gmail_queue`, on the table dedup depends on
+-- rather than the one the device pulls from.
+--
+-- 07:33 UTC — beside the other nightly jobs and the :31 gmail_queue sweep just above, on its own
+-- minute so the two never contend for the same lock at once.
+select cron.schedule('knowlu-prune-gmail-seen', '33 7 * * *', $$delete from public.gmail_seen where seen_at < now() - interval '30 days';$$);

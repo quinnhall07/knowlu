@@ -115,3 +115,20 @@ Deno.test("the granted scopes reach storeRefreshToken, not just the token", asyn
   assertEquals(response.status, 200);
   assertEquals(sawScopes, TOKENS.scopes);
 });
+
+// F-6: every page this handler answers is real HTML served to a browser mid-redirect from Google —
+// the one such response in this codebase — so it carries the two headers that keep a hostile
+// network position from doing anything with it beyond reading the fixed text.
+Deno.test("every page carries nosniff and a CSP that allows nothing but its own inline style", async () => {
+  for (
+    const response of [
+      await callbackHandler(deps())(get("state=good&code=abc")),
+      await callbackHandler(deps())(get("code=abc")),
+      await callbackHandler(deps({ exchange: () => Promise.reject(new Error("boom")) }))(get("state=good&code=abc")),
+      await callbackHandler(deps())(get("state=good&error=access_denied")),
+    ]
+  ) {
+    assertEquals(response.headers.get("x-content-type-options"), "nosniff");
+    assertEquals(response.headers.get("content-security-policy"), "default-src 'none'; style-src 'unsafe-inline'");
+  }
+});

@@ -15,7 +15,9 @@ function deps(overrides: Record<string, unknown> = {}) {
   };
 }
 
-Deno.test("GET lists this account's undecided proposals", async () => {
+// F-6: renamed to what it proves — `PROPOSAL.id` is 41, a deliberately non-trivial value, so this
+// fails if the handler ever answered an array position (0) instead of the proposal's own stored id.
+Deno.test("GET lists this account's undecided proposals, each carrying its own stored id, not its array position", async () => {
   const reply = await (await rulesHandler(OK, deps())(new Request("http://127.0.0.1/judge-rules"))).json();
   assertEquals(reply.proposals.length, 1);
   assertEquals(reply.proposals[0].id, 41);

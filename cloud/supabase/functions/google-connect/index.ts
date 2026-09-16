@@ -1,9 +1,8 @@
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
+import { revokeGoogleToken } from "../_shared/google_revoke.ts";
 import { connectHandler } from "./handler.ts";
 import { disconnectGrant } from "./disconnect.ts";
-
-const REVOKE = "https://oauth2.googleapis.com/revoke";
 
 Deno.serve(connectHandler(requireActiveEntitlement, {
   clientId: Deno.env.get("GOOGLE_CLIENT_ID") ?? "",
@@ -24,12 +23,7 @@ Deno.serve(connectHandler(requireActiveEntitlement, {
     const secret = await db.rpc("read_google_grant_any", { p_account: accountId });
     await disconnectGrant({
       token: typeof secret === "string" && secret !== "" ? secret : null,
-      revoke: (token) =>
-        fetch(REVOKE, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ token }),
-        }),
+      revoke: (token) => revokeGoogleToken(fetch, token),
       forget: () => db.rpc("delete_google_grant", { p_account: accountId }).then(() => undefined),
     });
   },
