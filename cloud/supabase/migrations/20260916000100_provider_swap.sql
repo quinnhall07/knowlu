@@ -3,7 +3,14 @@
 --
 -- Forward-only: 20260911000100…000900 are applied and never edited. Two new columns on `models`
 -- and the three rows re-pinned; the training export narrowed. No function here is definer or
--- writing, so nothing to revoke; the guard's counts do not move.
+-- writing, so nothing to revoke.
+--
+-- CORRECTION (comment only, 2026-09-16; the statements below are applied and stay as they are):
+-- this used to end the sentence above "so nothing to revoke; the guard's counts do not move,"
+-- which is wrong — the guard's aggregate parse-count pin (migrations_test.ts) DOES move, by one,
+-- 17 -> 18: `create or replace function export_training_rows` below is one more function
+-- definition the scan parses. "Nothing to revoke" is the only part that stands: the function is
+-- `security invoker` and non-writing, so it needs no new `revoke execute … from …` to go with it.
 --
 -- `route`: the provider-routing object the adapter sends verbatim (OpenRouter's `provider`
 -- preferences: one named upstream, no fallback, zero-retention endpoints only, and every

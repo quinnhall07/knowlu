@@ -18,12 +18,20 @@ export interface CapStore {
  *   longer cap does not change that because the cap is not what is billed.
  *
  * A plausible heavy day is ~10 enrichments, ~20 event verdicts, ~30 emails = 60 calls = $0.084,
- * i.e. **~$2.50 a month** against a $9.99 subscription. The caps below are ~4x that heavy day, so
- * a runaway loop costs at most ~$0.36 a day and ~$11 a month — still above the subscription, which
- * is why `MONTHLY_CEILING_USD` exists and is enforced rather than merely reported.
+ * i.e. **~$2.50 a month** against a $9.99 subscription. The caps below are ~4x that heavy day.
  *
  * (The earlier draft's 200/300/500 permitted 1,000 calls a day, about $45 a month per account —
  * 4.5x the price of the product. Caps and price are chosen together from here on.)
+ *
+ * CORRECTION (comment only, provider swap Task 2 fix 1, 2026-09-16): the paragraph above priced
+ * these caps on Haiku 4.5; on the new OpenRouter pins (Granite 4.2 8B for task/event, Qwen3.5-35B-
+ * A3B for email — see `MONTHLY_CEILING_USD` below) a fully-capped account (60 + 80 + 120 calls a
+ * day, every day) costs about **$1.3 a month**, UNDER the $2 `MONTHLY_CEILING_USD`. The daily caps
+ * therefore no longer bound spend below the monthly ceiling on their own the way "~4x that heavy
+ * day" once did — `DAILY_CAP` now exists to bound REQUEST VOLUME per kind (protecting the upstream
+ * and the database from a hot loop), while `MONTHLY_CEILING_USD` is what actually guards spend, and
+ * it is sized to survive a mispriced or re-pinned row, or the day a heavier model is pinned above
+ * these — not to survive a capped account running flat out on these prices.
  */
 export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120 };
 
@@ -31,15 +39,20 @@ export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120
  * The enforced monthly ceiling per account, in dollars. The provider swap (Quinn's ruling of
  * 2026-09-16 on R8, option 1) re-pinned all three kinds off Haiku 4.5 ($1.00/$5.00 per MTok) onto
  * OpenRouter: Granite 4.2 8B for task/event at $0.10/$0.15, Qwen3.5-35B-A3B for email at
- * $0.14/$1.00 — an order of magnitude cheaper per call. A plausible heavy persona (§5.2's own
- * numbers: ~10 enrichments, ~20 event verdicts, ~30 emails a day, all month) now costs about
- * **$0.87** on the new pins, not the ~$2.50 a month Haiku's pricing implied. The ceiling is
- * therefore no longer sized as a multiple of plausible heavy use — at $2 it sits just above one
- * heavy month, and its job is to be a flat runaway guard cheap enough that even a looping bug
- * cannot approach the $9.99 subscription before it trips, never a budget line the product plans
- * around. Past it the judgment is refused with outcome `capped` and one row lands in
- * `budget_alerts`, which is what makes the overspend visible without querying a view nobody
- * queries.
+ * $0.14/$1.00 — an order of magnitude cheaper per call. Two personas, two different numbers, so
+ * state both rather than pick one:
+ *   - The HEAVY STUDENT of `docs/notes/2026-09-16-inference-provider-and-model-scoping.md` §2 —
+ *     150 calls a day (20 task, 40 event, 90 email), about 950 tokens in and 80 to 130 out per
+ *     call — costs about **$0.87 a month** on the new pins.
+ *   - This file's own LIGHTER estimate just below (~10 enrichments, ~20 event verdicts, ~30
+ *     emails a day, all at ~980 in / ~80 out) costs about **$0.29 a month** on the new pins.
+ * Either way it is a fraction of the ~$2.50 (light) to ~$6.44 (heavy, per the scoping note's own
+ * corrected table) Haiku's pricing implied. The ceiling is therefore no longer sized as a multiple
+ * of plausible heavy use — at $2 it sits comfortably above even the heavy persona's real month —
+ * and its job is to be a flat runaway guard cheap enough that even a looping bug cannot approach
+ * the $9.99 subscription before it trips, never a budget line the product plans around. Past it
+ * the judgment is refused with outcome `capped` and one row lands in `budget_alerts`, which is
+ * what makes the overspend visible without querying a view nobody queries.
  */
 export const MONTHLY_CEILING_USD = 2.0;
 

@@ -238,14 +238,18 @@ Deno.test("excluded_labels_become_negative_label_terms (and the window is seven 
   assertEquals(READ_CAP, 60);
 });
 
-Deno.test("gmail_rows_are_excluded_from_the_training_export", async () => {
-  // A static test over the function's own text: the filter is one predicate and losing it is
-  // silent, so it is pinned where it cannot be lost by an edit that looks like a refactor.
+Deno.test("export_training_rows was ORIGINALLY defined excluding gmail_api rows, as this applied migration still reads", async () => {
+  // This is a historical pin, not a description of the LIVE filter: 20260911000200_google.sql is
+  // applied and forward-only, so its own text never changes and must still read exactly as it did
+  // the day it shipped (cloud design §5.3 and §9's first cut). The provider swap
+  // (20260916000100_provider_swap.sql) later REDEFINES export_training_rows with a wider filter —
+  // `origin not in ('gmail_api', 'events')` — and that corpus-wide "whichever definition is LAST"
+  // guarantee is asserted in migrations_test.ts's own export_training_rows case, not here.
   const sql = await Deno.readTextFile(new URL("../../migrations/20260911000200_google.sql", import.meta.url));
   const body = sql.slice(sql.indexOf("create or replace function export_training_rows"));
   assert(
     body.includes("origin <> 'gmail_api'"),
-    "cloud design §5.3 and §9: gmail-derived rows are excluded by the export filter",
+    "this applied migration's own text must still say what it always said, unedited",
   );
 });
 

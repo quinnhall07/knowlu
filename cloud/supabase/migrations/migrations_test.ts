@@ -653,6 +653,9 @@ Deno.test("C2 never creates a table C1 owns; it only alters one", async () => {
   assert(sql.includes("alter table public.corrections add column if not exists judgment_kind text"));
 });
 
+// The Haiku-era seed pin, below, is superseded by the provider swap section further down this
+// file (`providerSwapFiles`/`lastModelPinBlocks` and the three Deno.test cases after it) — this
+// test still pins what 20260911000100_judgment_service.sql itself seeded, unedited, forward-only.
 Deno.test("the seeded model pins are the cheapest Haiku-class id, one per kind, with their price and sampling", async () => {
   const sql = await Deno.readTextFile(new URL("20260911000100_judgment_service.sql", HERE));
   const rows = [...sql.matchAll(/\('(task|event|email)',\s*'anthropic',\s*'([a-z0-9.-]+)'/g)];
@@ -729,6 +732,7 @@ Deno.test("the last provider_swap migration re-pins all three kinds to OpenRoute
       ),
       `${kind}: route mismatch: ${b}`,
     );
+    assert(b.includes("since = current_date"), `${kind}: since must be re-stamped to current_date: ${b}`);
   };
 
   expectPin("task", "ibm-granite/granite-4.2-8b", "bf16 (CoreWeave)", "task-2", "0.10", "0.15", "CoreWeave");
@@ -736,11 +740,12 @@ Deno.test("the last provider_swap migration re-pins all three kinds to OpenRoute
   expectPin("email", "qwen/qwen3.5-35b-a3b", "fp8 (DeepInfra)", "email-2", "0.14", "1.00", "DeepInfra");
 });
 
-Deno.test("the provider swap never touches max_tokens — the seeded 256/256/640 stand", async () => {
-  // The migration re-pins provider, model, precision, prompt_version, price, sampling and route —
-  // never max_tokens, so the value each kind's row carries is still whatever
-  // 20260911000100_judgment_service.sql seeded: 256 for task and event classifications, 640 for
-  // email's wider schema.
+Deno.test("the seed's max_tokens (256/256/640) are correct, and no *provider_swap* migration sets max_tokens", async () => {
+  // Two separate claims, both checked: (1) the ORIGINAL seed really is 256 for task and event
+  // classifications and 640 for email's wider schema; (2) no migration whose name contains
+  // "provider_swap" touches max_tokens at all. Together they say the seeded value stands — but
+  // this only scans *provider_swap* files, not the full corpus, so it would not catch some OTHER,
+  // differently-named future migration setting max_tokens; it is scoped to what this task changes.
   const seedSql = await Deno.readTextFile(new URL("20260911000100_judgment_service.sql", HERE));
   const seeded = (kind: string): number => {
     const m = seedSql.match(new RegExp(`\\('${kind}',\\s*'[^']*',\\s*'[^']*',\\s*'[^']*',\\s*'[^']*',\\s*(\\d+)\\)`));
