@@ -297,8 +297,11 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // reason on the diff. Ten single functions plus `store_google_grant`'s own `create or replace`
   // in both 20260911000200 and 20260911000300, plus Task 12's three non-definer functions in
   // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`), plus
-  // fix 1's re-issue of the same three in 20260911000500 — counted by hand against today's corpus.
-  assertEquals(parsed, 17, "today's corpus should parse exactly 17 function creations");
+  // fix 1's re-issue of the same three in 20260911000500, plus the provider swap's `create or
+  // replace function export_training_rows` in 20260916000100 (still SECURITY INVOKER,
+  // non-writing, so it needs no new revoke — it is still one more definition this scan parses) —
+  // counted by hand against today's corpus.
+  assertEquals(parsed, 18, "today's corpus should parse exactly 18 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -663,4 +666,118 @@ Deno.test("the seeded model pins are the cheapest Haiku-class id, one per kind, 
   // belongs there too, so a pin above Haiku does not 400 every call.
   assert(sql.includes("usd_per_m_in") && sql.includes("usd_per_m_out"));
   assert(sql.includes("sampling"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The provider swap (Quinn's ruling of 2026-09-16 on R8, option 1): the three kinds re-pinned off
+// Anthropic onto OpenRouter, and the training export narrowed further. Forward-only, so these read
+// the LAST matching definition across the corpus rather than any one file — the same shape as
+// `assertExecuteRevoked`/`assertViewsGuarded` above.
+// ---------------------------------------------------------------------------------------------
+
+/** Every migration whose file name contains "provider_swap", sorted earliest to latest. */
+async function providerSwapFiles(dir: URL = HERE): Promise<Array<[string, string]>> {
+  return (await everyMigrationFile(dir)).filter(([name]) => name.includes("provider_swap"));
+}
+
+/** The LAST `update models set … where kind = '<kind>';` block for each kind, scanning `files` in
+ *  order (earliest to latest) so a later re-pin overwrites an earlier one — exactly what applying
+ *  the migrations in order would do to the row. Group 1 (the block) excludes the `update … set`
+ *  and `where …;` wrapper so a caller can search its assignments alone. */
+function lastModelPinBlocks(files: Array<[string, string]>): Partial<Record<"task" | "event" | "email", string>> {
+  const blocks: Partial<Record<"task" | "event" | "email", string>> = {};
+  const re = /update\s+models\s+set([\s\S]*?)where\s+kind\s*=\s*'(task|event|email)'\s*;/gi;
+  for (const [, sql] of files) {
+    for (const m of sql.matchAll(re)) {
+      blocks[m[2] as "task" | "event" | "email"] = m[1];
+    }
+  }
+  return blocks;
+}
+
+Deno.test("the last provider_swap migration re-pins all three kinds to OpenRouter with their model id, precision, price, prompt version, sampling and route", async () => {
+  const files = await providerSwapFiles();
+  assert(files.length > 0, "expected at least one migration whose name contains 'provider_swap'");
+  const blocks = lastModelPinBlocks(files);
+
+  const expectPin = (
+    kind: "task" | "event" | "email",
+    modelId: string,
+    precision: string,
+    promptVersion: string,
+    usdIn: string,
+    usdOut: string,
+    upstream: string,
+  ) => {
+    const block = blocks[kind];
+    assert(block !== undefined, `no 'update models … where kind = '${kind}'' found in any provider_swap migration`);
+    const b = block!;
+    assert(b.includes("provider = 'openrouter'"), `${kind}: provider must be re-pinned to openrouter: ${b}`);
+    assert(b.includes(`model_id = '${modelId}'`), `${kind}: model_id mismatch: ${b}`);
+    assert(b.includes(`precision = '${precision}'`), `${kind}: precision mismatch: ${b}`);
+    assert(b.includes(`prompt_version = '${promptVersion}'`), `${kind}: prompt_version mismatch: ${b}`);
+    assert(b.includes(`usd_per_m_in = ${usdIn}`), `${kind}: usd_per_m_in mismatch: ${b}`);
+    assert(b.includes(`usd_per_m_out = ${usdOut}`), `${kind}: usd_per_m_out mismatch: ${b}`);
+    assert(
+      b.includes(`sampling = '{"temperature": 0, "reasoning": {"enabled": false}}'::jsonb`),
+      // R-PS-6: only reserved keys (temperature, reasoning) ever go in a row's sampling.
+      `${kind}: sampling mismatch (must carry only temperature and reasoning): ${b}`,
+    );
+    assert(
+      b.includes(
+        `route = '{"order": ["${upstream}"], "allow_fallbacks": false, "zdr": true, "require_parameters": true}'::jsonb`,
+      ),
+      `${kind}: route mismatch: ${b}`,
+    );
+  };
+
+  expectPin("task", "ibm-granite/granite-4.2-8b", "bf16 (CoreWeave)", "task-2", "0.10", "0.15", "CoreWeave");
+  expectPin("event", "ibm-granite/granite-4.2-8b", "bf16 (CoreWeave)", "event-2", "0.10", "0.15", "CoreWeave");
+  expectPin("email", "qwen/qwen3.5-35b-a3b", "fp8 (DeepInfra)", "email-2", "0.14", "1.00", "DeepInfra");
+});
+
+Deno.test("the provider swap never touches max_tokens — the seeded 256/256/640 stand", async () => {
+  // The migration re-pins provider, model, precision, prompt_version, price, sampling and route —
+  // never max_tokens, so the value each kind's row carries is still whatever
+  // 20260911000100_judgment_service.sql seeded: 256 for task and event classifications, 640 for
+  // email's wider schema.
+  const seedSql = await Deno.readTextFile(new URL("20260911000100_judgment_service.sql", HERE));
+  const seeded = (kind: string): number => {
+    const m = seedSql.match(new RegExp(`\\('${kind}',\\s*'[^']*',\\s*'[^']*',\\s*'[^']*',\\s*'[^']*',\\s*(\\d+)\\)`));
+    assert(m, `no seed insert row found for kind '${kind}'`);
+    return Number(m![1]);
+  };
+  assertEquals(seeded("task"), 256);
+  assertEquals(seeded("event"), 256);
+  assertEquals(seeded("email"), 640);
+
+  const blocks = lastModelPinBlocks(await providerSwapFiles());
+  for (const kind of ["task", "event", "email"] as const) {
+    assert(
+      blocks[kind] !== undefined && !/max_tokens/i.test(blocks[kind]!),
+      `${kind}: the re-pin must not set max_tokens — the seeded value must stand untouched`,
+    );
+  }
+});
+
+Deno.test("the last definition of export_training_rows excludes both gmail_api and events origins", async () => {
+  // Google's Limited Use policy binds Calendar-API data exactly as it binds Gmail's, and `origin`
+  // cannot yet tell a Google-Calendar event from an ICS one — so every `events` row is excluded
+  // too, on top of the original `gmail_api` exclusion, until an origin split exists (a C4
+  // refinement). Forward-only: this reads the LAST `create or replace function
+  // export_training_rows` across every migration, not merely the original one, because a later
+  // migration's redefinition is what actually governs the function today.
+  const files = await everyMigrationFile();
+  const marker = "create or replace function export_training_rows";
+  let last: { name: string; body: string } | undefined;
+  for (const [name, sql] of files) {
+    const idx = sql.lastIndexOf(marker);
+    if (idx !== -1) last = { name, body: sql.slice(idx) };
+  }
+  assert(last !== undefined, "no migration defines export_training_rows");
+  assert(
+    last!.body.includes("origin not in ('gmail_api', 'events')"),
+    `${last!.name}: the LAST export_training_rows definition must exclude both origins ` +
+      `(cloud design §5.3/§9, provider swap Task 2)`,
+  );
 });

@@ -28,12 +28,20 @@ export interface CapStore {
 export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120 };
 
 /**
- * The enforced monthly ceiling per account, in dollars. ~3x plausible heavy use, and about a
- * quarter of the subscription — a number the business can absorb for every account at once. Past
- * it the judgment is refused with outcome `capped` and one row lands in `budget_alerts`, which is
- * what makes the overspend visible without querying a view nobody queries.
+ * The enforced monthly ceiling per account, in dollars. The provider swap (Quinn's ruling of
+ * 2026-09-16 on R8, option 1) re-pinned all three kinds off Haiku 4.5 ($1.00/$5.00 per MTok) onto
+ * OpenRouter: Granite 4.2 8B for task/event at $0.10/$0.15, Qwen3.5-35B-A3B for email at
+ * $0.14/$1.00 — an order of magnitude cheaper per call. A plausible heavy persona (§5.2's own
+ * numbers: ~10 enrichments, ~20 event verdicts, ~30 emails a day, all month) now costs about
+ * **$0.87** on the new pins, not the ~$2.50 a month Haiku's pricing implied. The ceiling is
+ * therefore no longer sized as a multiple of plausible heavy use — at $2 it sits just above one
+ * heavy month, and its job is to be a flat runaway guard cheap enough that even a looping bug
+ * cannot approach the $9.99 subscription before it trips, never a budget line the product plans
+ * around. Past it the judgment is refused with outcome `capped` and one row lands in
+ * `budget_alerts`, which is what makes the overspend visible without querying a view nobody
+ * queries.
  */
-export const MONTHLY_CEILING_USD = 7.5;
+export const MONTHLY_CEILING_USD = 2.0;
 
 export function capStore(db: Db): CapStore {
   // One budget check per account per invocation is enough: an edge function handles one request,
