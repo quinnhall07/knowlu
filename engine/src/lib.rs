@@ -105,6 +105,12 @@ pub mod cloudmodel;
 // `agent:knowlu.enrich`, log. The cloud routine's step 3, run locally, so that step starves.
 pub mod enrich;
 
+// Knowlu C3 — journal sync (cloud design §5.5). Every record this device writes goes up sealed with
+// a key that lives only in this machine's Credential Manager; every record another device of the
+// same account wrote comes down and is applied through `write`. Transport, never judgment: `rank`
+// does not reach it, and `sync` always exits 0.
+pub mod sync;
+
 // The console's backup mirror + zip snapshots (Knowlu plan 1, Task 4). The console is the
 // only caller; never read by the engine.
 pub mod backup;
