@@ -2358,11 +2358,13 @@ dependencies = [
 name = "knowlu-engine"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "getrandom 0.2.17",
  "html-escape",
  "jiff",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml_ng",

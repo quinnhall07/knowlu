@@ -51,6 +51,28 @@ fn tls_is_rustls_never_openssl() {
     }
 }
 
+/// The sync envelope's two crates, and why neither is a new thing to audit.
+///
+/// `ring` is what `ureq`'s rustls already links in this binary for TLS — using it for AES-256-GCM
+/// and SHA-256 keeps one implementation of each primitive rather than two. `base64` is already
+/// resolved in this workspace's lockfile through the same graph. Naming them in the manifest adds a
+/// direct edge and no new crate; this test is here so the next person to reach for `aes-gcm`,
+/// `openssl` or a second base64 has to argue with a sentence rather than with a diff.
+#[test]
+fn the_crypto_dependencies_are_the_two_already_in_the_graph() {
+    assert!(MANIFEST.contains("ring = \"0.17\""), "engine/Cargo.toml must name ring for the sync envelope");
+    assert!(MANIFEST.contains("base64 = \"0.22\""), "engine/Cargo.toml must name base64 for the sync envelope");
+    for (name, manifest) in MANIFESTS {
+        for forbidden in ["aes-gcm", "chacha20", "rust-crypto", "sodiumoxide"] {
+            assert!(
+                !manifest.contains(forbidden),
+                "`{forbidden}` must not appear in {name}: the sync envelope uses `ring`, which this \
+                 binary already links for TLS, and two implementations of one primitive is one too many."
+            );
+        }
+    }
+}
+
 /// The release profile is a shipping requirement, not an optimisation.
 ///
 /// The product plan section 5.2 targets a sub-50 MB app with 1-5 MB budgeted for the compiled

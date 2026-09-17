@@ -31,6 +31,14 @@ getrandom = "0.2"
 html-escape = "0.2.15"
 jiff = "0.2.35"
 regex = "1.13.1"
+# Knowlu C3 (cloud design §5.5): AES-256-GCM, SHA-256, HMAC, HKDF and a CSPRNG — the sync envelope
+# and its keyed index. **Already
+# in this workspace's Cargo.lock** — `ureq`'s rustls pulls `ring` and its own base64 — so naming them
+# here adds a direct edge and no new crate to audit and no new version to resolve; cargo unifies them
+# onto what is already there. `ring` rather than a second AES-GCM crate: it is the implementation
+# this binary already links for TLS, and adding another is two implementations of one primitive.
+base64 = "0.22"
+ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml_ng = "0.10.0"
