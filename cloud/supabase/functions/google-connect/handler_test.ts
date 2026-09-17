@@ -31,7 +31,8 @@ Deno.test("the DEFAULT ask is calendar.readonly alone, offline, with consent", a
   assert(!url.searchParams.get("scope")!.includes("calendar.events"), "read-only; write is a third ask");
   assertEquals(url.searchParams.get("access_type"), "offline");
   assertEquals(url.searchParams.get("prompt"), "consent");
-  assertEquals(url.searchParams.get("include_granted_scopes"), "false");
+  // P3 live pass, 2026-09-17: `true` on this ask too — see the "EVERY ask is incremental" test.
+  assertEquals(url.searchParams.get("include_granted_scopes"), "true");
   assertEquals(url.searchParams.get("state"), "state-nonce");
   assertEquals(url.searchParams.get("response_type"), "code");
 });
@@ -45,6 +46,23 @@ Deno.test("the gmail ask is incremental — one API scope, and it widens the exi
   // `include_granted_scopes=true` is what makes this ADD to the grant rather than replace it: a
   // student who connected the calendar in the wizard must not lose it by connecting Gmail later.
   assertEquals(url.searchParams.get("include_granted_scopes"), "true");
+});
+
+Deno.test("EVERY ask is incremental — a calendar re-consent must keep Gmail on the new token", async () => {
+  // Found by the P3 live pass on staging, 2026-09-17, not by any review: with
+  // `include_granted_scopes=false` on the calendar ask, the re-consent Testing mode forces every
+  // seven days (and the one the settings row will offer) made Google issue a refresh token for
+  // `openid email calendar.readonly` ALONE, while `google_accounts.scopes` — a union, by
+  // `store_google_grant`'s design — still claimed Gmail. `read_google_grant` then handed that
+  // calendar-only token to `/gmail-read`, Gmail answered 403, the function answered 500, and the
+  // device printed `gmail: skipped (…)` on every slot with nothing a student could act on. `true`
+  // on every ask makes the new token cover whatever was already granted — which is exactly what
+  // the row says it covers. On a FIRST consent nothing was granted before, so `true` costs nothing.
+  const handler = connectHandler(OK, deps());
+  for (const path of ["/google-connect", "/google-connect?scope=calendar", "/google-connect?scope=gmail"]) {
+    const url = new URL((await (await handler(new Request(`http://127.0.0.1${path}`))).json()).url);
+    assertEquals(url.searchParams.get("include_granted_scopes"), "true", path);
+  }
 });
 
 Deno.test("an unknown scope name is a 400, not a silent calendar grant", async () => {
@@ -154,6 +172,7 @@ Deno.test("calendar_is_asked_for_before_gmail_and_never_together", async () => {
     const api = url.searchParams.get("scope")!.split(" ").filter((s) => s.includes("googleapis.com/auth/"));
     assertEquals(api.length, 1, "exactly one Google API scope per consent");
   }
-  assertEquals(first.searchParams.get("include_granted_scopes"), "false");
+  // Both incremental (P3 live pass, 2026-09-17): the ORDER is what this test pins, not the flag.
+  assertEquals(first.searchParams.get("include_granted_scopes"), "true");
   assertEquals(second.searchParams.get("include_granted_scopes"), "true");
 });

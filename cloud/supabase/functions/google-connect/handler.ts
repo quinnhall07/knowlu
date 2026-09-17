@@ -7,7 +7,9 @@
 // and **no CASA security assessment**. `gmail.readonly` is *restricted*, is asked for later and
 // only if the student takes the Gmail step, and is added **incrementally**
 // (`include_granted_scopes=true`) so the second consent widens the same grant instead of replacing
-// it. Calendar *write* is a third ask, later still, only when the student approves their first
+// it — and since the P3 live pass of 2026-09-17 that flag is on EVERY ask, because a calendar
+// re-consent sent without it drops Gmail from the new token (the comment at the flag says how).
+// Calendar *write* is a third ask, later still, only when the student approves their first
 // calendar-event card (VISION: rare writes behind explicit approval).
 //
 // While the Google project is in Testing (§9), and **for both scopes equally**: at most 100 test
@@ -35,14 +37,12 @@ export const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 export const IDENTITY_SCOPES = ["openid", "email"];
 
 /** `?scope=` -> the scope string this consent asks for — the identity scopes plus exactly ONE
- * Google API scope — and whether it widens an existing grant. */
-export function scopeFor(name: string | null): { scope: string; incremental: boolean } | null {
-  const ask = (apiScope: string, incremental: boolean) => ({
-    scope: [...IDENTITY_SCOPES, apiScope].join(" "),
-    incremental,
-  });
-  if (name === null || name === "" || name === "calendar") return ask(CALENDAR_SCOPE, false);
-  if (name === "gmail") return ask(GMAIL_SCOPE, true);
+ * Google API scope. Every ask widens whatever is already granted (`include_granted_scopes=true`
+ * below), so nothing here says which. */
+export function scopeFor(name: string | null): { scope: string } | null {
+  const ask = (apiScope: string) => ({ scope: [...IDENTITY_SCOPES, apiScope].join(" ") });
+  if (name === null || name === "" || name === "calendar") return ask(CALENDAR_SCOPE);
+  if (name === "gmail") return ask(GMAIL_SCOPE);
   return null;
 }
 
@@ -105,10 +105,15 @@ export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Reque
       // `consent` every time: without it Google returns no refresh token on a re-connect, and a
       // re-connect is the normal case while the project is in Testing and tokens die weekly.
       url.searchParams.set("prompt", "consent");
-      // Incremental only for the second ask: the Gmail consent must WIDEN the calendar grant, not
-      // replace it — a student who connected the calendar in the wizard must not lose it by
-      // connecting Gmail a week later.
-      url.searchParams.set("include_granted_scopes", asked.incremental ? "true" : "false");
+      // Incremental on EVERY ask, not only the Gmail one. The Gmail consent must WIDEN the
+      // calendar grant rather than replace it — and the calendar re-consent (the one Testing mode
+      // forces every seven days, and the one the settings row will offer) must keep Gmail just the
+      // same. Google issues the new refresh token for the scopes of THIS request alone unless this
+      // flag is set; the P3 live pass (2026-09-17) proved what `false` did here: a calendar-only
+      // token under a `google_accounts.scopes` row that still claimed Gmail, `/gmail-read` a 403
+      // from Gmail and a 500 to the device, on every slot. On a first consent nothing was granted
+      // before, so `true` changes nothing there.
+      url.searchParams.set("include_granted_scopes", "true");
       url.searchParams.set("state", await deps.saveState(account_id));
       return Response.json({ url: url.toString() });
     } catch (e) {
