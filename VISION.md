@@ -26,7 +26,7 @@ even if it is otherwise better.
 2. **The account is the source of truth; every desktop holds a plain-text mirror the engine ranks
    offline.** The cloud stores, judges, syncs and bills. Nothing the student sees depends on the
    network being up.
-   *(Amended 2026-09-17 by Quinn's rulings — cloud design, amendment 2026-09-17, ruling 2 — from
+   *(Amended 2026-09-17 by Quinn's rulings, signed the same day — cloud design, amendment 2026-09-17, ruling 2 — from
    "The source of truth is plain text on the user's machine … A user can open the folder, copy it,
    and leave with it", itself the 2026-09-09 amendment of "Local-first. Not a cloud service that
    owns user data." The folder export is struck on Quinn's word.)*

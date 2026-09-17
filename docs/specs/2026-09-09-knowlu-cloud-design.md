@@ -431,13 +431,12 @@ regression past `cloud/eval/thresholds.json` on any PR that touches a prompt, a 
 before this amendment against Anthropic's Haiku 4.5, after it against the two models above, and
 against whatever is pinned next.
 
-## Amendment 2026-09-17 — desktop only, the account vault, the relay fetch (Quinn's rulings of 2026-09-17) — **PROPOSED, awaiting Quinn's signature**
+## Amendment 2026-09-17 — desktop only, the account vault, the relay fetch (Quinn's rulings of 2026-09-17) — **SIGNED by Quinn, 2026-09-17**
 
 Written by the controller from the discussion of 2026-09-17, which began with Quinn's question
 whether the design accounted for a student reaching their data from several devices, and ended
-with six rulings. Quinn signs by replacing **PROPOSED** above with **SIGNED** and the date. Until
-then these are Quinn's spoken decisions of record, every plan argues from them, and the paused C3
-branch does not resume as written. As with the amendment of 2026-09-16, the body of this spec is
+with six rulings. Signed by Quinn on 2026-09-17 ("Signed."), the same day, in the session that wrote it; every
+plan argues from it, and the paused C3 branch does not resume as written. As with the amendment of 2026-09-16, the body of this spec is
 not rewritten: the rows and sentences it supersedes carry a marker pointing here, and this section
 is the correction of record.
 
