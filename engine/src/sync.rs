@@ -618,6 +618,26 @@ mod tests {
     }
 
     #[test]
+    fn rust_opens_the_envelope_deno_sealed() {
+        // The other direction of the same promise. Read by relative path out of `cloud/`, never
+        // copied into `engine/tests/fixtures/`: one file, two readers, no chance of two copies
+        // drifting apart.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("cloud")
+            .join("supabase")
+            .join("functions")
+            .join("_shared")
+            .join("sync_vectors.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("the vector file is JSON");
+        let k = SyncKey::from_base64(v["key"].as_str().expect("key")).expect("a 32-byte test vector");
+        let plain = open(&k, v["deno"]["iv"].as_str().expect("iv"), v["deno"]["ciphertext"].as_str().expect("ct"))
+            .expect("Deno's envelope must open here");
+        assert_eq!(String::from_utf8(plain).expect("utf-8"), v["plaintext"].as_str().expect("plaintext"));
+    }
+
+    #[test]
     fn generate_makes_a_fresh_random_key_each_time() {
         // The suite would stay green if `generate` returned all zeros; this pins that it does not.
         let a = SyncKey::generate().expect("csprng");
