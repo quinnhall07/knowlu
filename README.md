@@ -48,6 +48,14 @@ deployed to Cloudflare Pages at `knowlu.com`, and a GitHub Release carrying the 
 the `.sig` against the public key in `app/tauri.conf.json`; the private half lives only as the
 GitHub secret `TAURI_SIGNING_PRIVATE_KEY`.
 
+One switch exists, and it is a person's decision, never a default: with the repository variable
+`RELEASE_AUTHENTICODE` set to `off`, the Azure steps are skipped and the release ships without an
+Authenticode signature. Windows SmartScreen then warns when the installer first runs (More info,
+then Run anyway), the release notes open by saying so, and the workflow's verify step asserts that
+every binary is unsigned rather than skipping the check. Unset means signing is required, so a
+missing Azure line stops the release instead of shipping unsigned by accident. The updater
+signature is never optional.
+
 Locally, run only `.\scripts\release.ps1 -DryRun`. It builds and bundles a throwaway installer,
 prints `UNSIGNED:` for every file because a laptop holds no signing profile and no updater key,
 and publishes nothing. That is the correct local state, not a degraded one.
