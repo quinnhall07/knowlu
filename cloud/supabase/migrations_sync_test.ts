@@ -94,7 +94,7 @@ Deno.test("the account purge names every sync table", async () => {
   // paragraph is written from, and a table missing from it is a table nobody remembers to mention.
   // **Derived from the migration, not from a hand-typed list**: a fourth table added here later is
   // a fourth table this test demands, with no second place to remember.
-  const index = await Deno.readTextFile(new URL("./functions/account/index.ts", DIR));
+  const index = await Deno.readTextFile(new URL("./functions/account/index.ts", import.meta.url));
   const purge = index.slice(index.indexOf("purge:"), index.indexOf("deleteAuthUser:"));
   const created = (await migrations()).flatMap((m) =>
     [...m.sql.matchAll(/create\s+table\s+public\.(\w+)/gi)].map((c) => c[1])

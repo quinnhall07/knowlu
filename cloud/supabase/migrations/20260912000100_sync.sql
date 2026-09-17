@@ -198,6 +198,10 @@ begin
 end;
 $$;
 
+-- No client ever calls this. `cron.schedule` above runs it as `postgres`, and the service role
+-- keeps `execute` by default — only PostgREST's anon and authenticated roles are named here.
+revoke execute on function public.sync_prune(int) from public, anon, authenticated;
+
 alter table public.sync_records    enable row level security;
 alter table public.sync_notes      enable row level security;
 alter table public.sync_usage      enable row level security;
