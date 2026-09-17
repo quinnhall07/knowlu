@@ -23,9 +23,13 @@ even if it is otherwise better.
    at the boundary — today in Claude, in the product in our judgment service — and its output enters
    the engine as data. *(2026-09-09: "small local models" became "our judgment service" — cloud
    design D3.)*
-2. **The source of truth is plain text on the user's machine.** The cloud judges, syncs and bills;
-   it never owns the vault. A user can open the folder, copy it, and leave with it.
-   *(Amended 2026-09-09 from "Local-first. Not a cloud service that owns user data." — cloud design §10.)*
+2. **The account is the source of truth; every desktop holds a plain-text mirror the engine ranks
+   offline.** The cloud stores, judges, syncs and bills. Nothing the student sees depends on the
+   network being up.
+   *(Amended 2026-09-17 by Quinn's rulings — cloud design, amendment 2026-09-17, ruling 2 — from
+   "The source of truth is plain text on the user's machine … A user can open the folder, copy it,
+   and leave with it", itself the 2026-09-09 amendment of "Local-first. Not a cloud service that
+   owns user data." The folder export is struck on Quinn's word.)*
 3. **The AI never produces anything the user sends externally.** No drafted emails, notes, or
    messages. Its only generative output is internal proposals and info displays.
    *(Added 2026-09-01. This one is new, and it cut a feature — see People, below.)*
@@ -128,8 +132,8 @@ Tracked here because each one forecloses something if decided carelessly.
 |---|---|
 | Hosted accounts vs local profiles only | **Decided 2026-09-09: hosted accounts, required** |
 | Cloud inference provider (zero-retention required) | Anthropic API, cheapest model that passes the eval suite per kind; provider pinned per kind, swappable behind the seam. **Amended 2026-09-16 (Quinn's ruling): OpenRouter pinned per request to one named zero-retention host per kind — see the spec's Amendment section.** |
-| Sync: user's own storage vs our encrypted relay | **Decided 2026-09-09: our storage (Supabase), per account** |
-| Mobile port timing | Revisit against pilot retention — plan §6.3 flags desktop-only as the first hypothesis if the ritual dies |
+| Sync: user's own storage vs our encrypted relay | **Decided 2026-09-09: our storage (Supabase), per account.** **Amended 2026-09-17: the account is the source of truth and the service can read it; client-side encryption reversed** (cloud design, amendment 2026-09-17, ruling 2) |
+| Mobile port timing | **Decided 2026-09-17: desktop only — no web app, no mobile app; the account carries the student between desktops** (cloud design, amendment 2026-09-17, ruling 1). The retention hypothesis of plan §6.3 stays a thing to revisit after the pilot |
 | Price | **Decided 2026-09-09: $9.99/mo, no free tier.** The $69.99/academic-year price is kept as a Stripe option (cloud design §11 R3) |
 | The free/paid boundary | Moot: there is one edition |
 | Summer auto-pause (no billing June–August) | **Decided 2026-09-09: kept** (cloud design §11 R3 — Quinn accepted that it halves summer revenue). Nobody else does it |

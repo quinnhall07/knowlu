@@ -13,14 +13,14 @@
 | D1 | **Build on the cloud, both meanings, CI first.** Releases are built and signed by CI; the backend is hosted. | Plan C0 (CI) is the first plan. The laptop leaves the release path; the updater keypair is regenerated and exists only in CI secrets. |
 | D2 | **No free tier. One edition. $9.99/month. An account is required.** | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
 | D3 | **All three judgments — enrichment, event verdicts, email triage — run in the cloud. No local runs.** Cheapest models that do the job. | Plan 3a's llama.cpp runtime, install UI and digest table are removed (C4). The judge *seam* stays; its tier 3 becomes an HTTP call to our service. |
-| D4 | **The deterministic, offline-capable core stays in the app; everything that depends on the internet moves to the cloud — as much as possible.** | The app keeps: vault, ranking, capacity, rendering, journal, scheduler, the deterministic parsers' *input fetch* for credentialed portals (§4.3). The cloud gets: accounts, entitlement, judgment, email ingestion, event feeds, sync, analytics, updates. |
+| D4 | **The deterministic, offline-capable core stays in the app; everything that depends on the internet moves to the cloud — as much as possible.** *(amended 2026-09-17 — see the amendment at the end)* | The app keeps: vault, ranking, capacity, rendering, journal, scheduler, the deterministic parsers' *input fetch* for credentialed portals (§4.3). The cloud gets: accounts, entitlement, judgment, email ingestion, event feeds, sync, analytics, updates. |
 | D5 | **Analytics:** (a) interaction events and (b) corrections to AI judgments, collected automatically under the ToS; (c) raw content only behind a separate opt-in; issue reports carry diagnostic context. | §6. Gmail-derived content is excluded from (c) by Google policy regardless of opt-in (§9). |
 | D6 | **Deterministic measures:** rule promotion, an eval suite from corrections, grammars on every call, pinned models with logged prompt hashes. | §5.4. |
 | D7 | **Cloudflare + Supabase.** No Firebase. | §3. |
 | D8 | **A new repository, `knowlu`**, with fresh history; `quinn-ops` archived. | §7 — the cut. |
-| D9 | **The vault is wiped, not migrated; Quinn re-onboards fresh at the repo cut.** Real users' vaults are plain folders the app creates. **Obsidian is dropped.** | §4.1, §7.3. Git leaves the product (C3). |
+| D9 | **The vault is wiped, not migrated; Quinn re-onboards fresh at the repo cut.** Real users' vaults are plain folders the app creates. **Obsidian is dropped.** | §4.1, §7.3. Git leaves the product (C3). *(amended 2026-09-17 — see the amendment at the end)* |
 | D10 | **Plan 2 Tasks 9–10, the three-day protocol, plan 3b, 3c and 4b are cancelled**; plan 2 Tasks 11–13 are executed as the repo cut. | Ledger ruling R-P2B-10. |
-| D11 | Portal scraping (zyBooks, VHL) **stays on the device** — Quinn accepted this exception to D4 on the legal briefing's finding. | §4.3 "fetch on device, think in the cloud". |
+| D11 | Portal scraping (zyBooks, VHL) **stays on the device** — Quinn accepted this exception to D4 on the legal briefing's finding. | §4.3 "fetch on device, think in the cloud". *(amended 2026-09-17 — see the amendment at the end)* |
 | D12 | **Email ingestion is Gmail OAuth (`gmail.readonly`), server-side.** Quinn chose it over forwarding on 2026-09-09 knowing the cost: Google restricted-scope verification plus an annual CASA assessment before more than 100 users, and 7-day tokens until then. | §5.3. The verification track starts in C1 (it needs the site, the privacy policy and a verified domain) so C2 can ship it. |
 
 ---
@@ -60,7 +60,7 @@ knowlu-engine.exe (child process per step)            |     Edge Functions: /jud
 
 | Concern | Where | Why |
 |---|---|---|
-| Vault (tasks, approvals, courses, state, config) | device, plain files | VISION commitment 2 as amended; the user can open, edit, back up and leave with it |
+| Vault (tasks, approvals, courses, state, config) | device, plain files *(amended 2026-09-17 — see the amendment at the end)* | VISION commitment 2 as amended; the user can open, edit, back up and leave with it |
 | Ranking, capacity, `today` rendering, journal, IDs, frontmatter surgery | device (`knowlu-engine`) | deterministic, offline; the engine is already this |
 | Scheduler (slots), tray, notifications | device | offline; a slot with no network still ranks and still shows yesterday's judgments |
 | LMS calendar (`.ics` URL) fetch + parse | **cloud** (`/ingest/ics`) | needs the internet, no credential (a capability URL the user pastes once into their account, stored server-side encrypted) |
@@ -114,7 +114,7 @@ The wizard no longer asks for a vault folder. On first run the app creates:
 
 No step asks for a folder. The one-sentence honesty line ("no Gmail/events/enrichment yet") from plan 4a goes away because those are now the service.
 
-### 4.3 Fetch on device, think in the cloud — *decided (D11)*
+### 4.3 Fetch on device, think in the cloud — *decided (D11)* *(amended 2026-09-17 — see the amendment at the end)*
 
 For zyBooks and VHL the device keeps doing exactly what `coursework.rs` does today up to and including the HTTP fetch with the student's own credentials (cookie jar, CAS ticket, `m3a` host — all of it), then **stops before parsing**: the raw assignment JSON / dashboard HTML goes to `POST /ingest/coursework` with the account token, and the response is the reconciled item list the engine writes into the vault through `write` exactly as `sync_coursework` does now. The deterministic parsers move server-side unchanged (they are pure functions over payload + config); the frozen `zybooks-parsed-reference.json` / `vhl-parsed-reference.json` become the service's own oracle tests. A vendor markup change becomes a server deploy, not an app release. Credentials never leave the machine, and our servers never hold a portal password — which is the whole point (§9 Q6).
 
@@ -171,7 +171,7 @@ request {account, kind, item(by value: title, body[:1200], source, due, course?,
 3. **Grammars on every call**, JSON-schema-constrained where the provider supports it, GBNF otherwise; a reply that fails validation is a low-confidence outcome, never a write.
 4. **Reproducibility:** model id + prompt version + grammar version + prompt hash on every judgment row; a judgment can be re-run and compared.
 
-### 5.5 Sync (C3)
+### 5.5 Sync (C3) *(amended 2026-09-17 — see the amendment at the end)*
 
 - **Up:** the journal is already an append-only, per-day, `ts`-ordered ledger. The client uploads new journal records (and the note text they produced) to `/sync/push`; the server stores them per account in Storage (encrypted at rest; client-side encryption with an account-derived key is *recommended* for note bodies — **confirm**, it costs server-side search and nothing else we need today).
 - **Down:** the service's own writes (judgment fields, Gmail-derived notes, event verdicts, rule proposals) are queued as journal-shaped records the client pulls at `/sync/pull` and applies through `write` — so every cloud write is journaled on the device exactly like a local one, with `actor: agent:knowlu.<kind>` and judge-once intact.
@@ -339,7 +339,7 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | R1 | Start the Google verification track in C1 week 1 — domain, privacy policy, consent screen, demo video — so it is not on C2's critical path | yes (default) |
 | R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes (default) |
 | R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
-| R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need |
+| R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need *(amended 2026-09-17 — see the amendment at the end)* — **reversed** |
 | R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
 | R6 | Staging Supabase project + test Stripe from day one | yes (default) |
 | R7 | Replace the three fixture vaults with synthetic ones before any public code release | later; noted in `PROVENANCE.md` |
@@ -369,14 +369,14 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | **C0 — CI release** | `ci.yml`, `release.yml`, Trusted Signing + regenerated updater key in secrets, first tagged release served from Pages, the in-app updater proven end to end from a CI build | the cut |
 | **C1 — accounts and the new wizard** | Supabase project (prod + staging), Auth, Stripe subscription + webhooks + Portal + Tax, `/entitlement` with the 72 h cache, the wizard of §4.2 (no folder step, 18+ attestation, ToS/privacy acceptance), `DELETE /account` and export, telemetry ingest for (a) and (b), issue reports with the preview screen, privacy policy + ToS pages on the site, **the Google OAuth consent screen submitted for restricted-scope verification** | C0 |
 | **C2 — the judgment service** | `/judge/{task,event,email}` with pinned models and grammars, `CloudModel` in the engine, `/ingest/ics` and `/ingest/coursework` (parsers moved, oracles moved), `/events` (feeds + roster server-side, HTML sources working), the Gmail reader (`/gmail/*`; test users until verification, everyone after CASA) and the email tiers, rule promotion + the eval suite seeded from the archive; **closes the judgment gap** | C1 (needs accounts to key everything) |
-| **C3 — sync** | `/sync/push`, `/sync/pull`, journal replay, restore-from-cloud, second-device support; `history.rs`'s git removed; local snapshots kept | C2 |
+| **C3 — sync** | `/sync/push`, `/sync/pull`, journal replay, restore-from-cloud, second-device support; `history.rs`'s git removed; local snapshots kept *(amended 2026-09-17 — see the amendment at the end)* — the order from here is C3′ → C5 → C4 → the pilot | C2 |
 | **C4 — removal** | plan 3a's runtime/inference code, the settings row, the wizard offer, `SUPPORTED_RUNTIMES`, the (c)-toggle UI landing, the pilot widening checklist (lawyer sign-off, UA/UK policy read, Kentucky tax registration) | C3 |
 
 Each plan is written with the writing-plans skill from this spec, carries a fidelity ledger against §1's decisions and §10's amendments, and is executed subagent-driven in the `knowlu` repo — except the cut, which is a procedure with Quinn at the machine.
 
 ---
 
-## 13. What this spec does not decide
+## 13. What this spec does not decide *(amended 2026-09-17 — see the amendment at the end)*
 
 The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); reading grades from the student's signed-in LMS session (wanted — §11a). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
 
@@ -430,3 +430,114 @@ and `docs/plans/2026-09-16-inference-provider-swap-plan.md`, the five-task plan 
 regression past `cloud/eval/thresholds.json` on any PR that touches a prompt, a schema or a pin —
 before this amendment against Anthropic's Haiku 4.5, after it against the two models above, and
 against whatever is pinned next.
+
+## Amendment 2026-09-17 — desktop only, the account vault, the relay fetch (Quinn's rulings of 2026-09-17) — **PROPOSED, awaiting Quinn's signature**
+
+Written by the controller from the discussion of 2026-09-17, which began with Quinn's question
+whether the design accounted for a student reaching their data from several devices, and ended
+with six rulings. Quinn signs by replacing **PROPOSED** above with **SIGNED** and the date. Until
+then these are Quinn's spoken decisions of record, every plan argues from them, and the paused C3
+branch does not resume as written. As with the amendment of 2026-09-16, the body of this spec is
+not rewritten: the rows and sentences it supersedes carry a marker pointing here, and this section
+is the correction of record.
+
+**Ruling 1 — desktop only.** Knowlu is a Windows desktop app, and that is the product. There is no
+web app and no mobile app in the plan; the question "should there be parity across desktop, web and
+mobile" is closed as *no*. What a student needs across machines is the same account on every
+desktop they use — laptop, office, home — and ruling 2 gives them that. §13's "mobile" stays
+undecided and the business plan's "mobile port timing" row stays a hypothesis to revisit after the
+pilot; nothing here builds toward either. Consequence: no engine port to a browser or a phone, no
+device-pairing flow, and the engine stays on the device (ruling 3). The one door deliberately left
+open: because the engine is one Rust crate, a server-run engine for an account with no desktop
+remains possible later without undoing anything built now.
+
+**Ruling 2 — the account is the source of truth for the vault.** §11 R4 (client-side encryption of
+note bodies, "yes (default)") is **reversed**, and C3's precondition P1 is settled as its option (c):
+the service holds each account's notes and journal **readable by the service**, encrypted at rest by
+the platform, purged by `DELETE /account`. Quinn's words: privacy matters "as long as it remains
+legal and doesn't break user trust", and a promise the product cannot keep across a student's own
+machines is not trust. Each desktop keeps a plain-text **mirror** — the folder the app creates
+(D9), on which the engine ranks with the machine unplugged; every write journals locally exactly as
+today and syncs through the account; two desktops moving one field offline still surface an amend
+card, never a silent merge (§5.5's clause, VISION). §3.1's vault row becomes *account (source of
+truth) + device mirror*. What goes: the device sync key, the recovery code, the sync switch and its
+own screen (C3's P2 screen), the key-generation machinery, "restore with your recovery code"
+(restoring is signing in on a new desktop; the mirror fills from the account), and the folder
+export — VISION commitment 2's "open the folder, copy it, and leave with it" is struck on Quinn's
+word ("it just doesn't make sense to do that anymore"); `GET /account/export` stays as the
+data-access right (§9). The local snapshot mirror (`backup.rs`) stays as it is. The published
+privacy sentence — `site/privacy.html`'s "No note bodies" bullet and its three twins (the same
+sentence at the top of that page, `site/index.html`, and the wizard's `PRIVACY` pinned by
+`engine/tests/site.rs` and `app/tests/static_assets.rs`) — is rewritten to say that the service
+stores the student's tasks and notes to keep their desktops in step, encrypted at rest and deleted
+with the account; the lawyer packet (C1's P5 list) gets that delta. §9's categories are unchanged;
+the data inventory gains "notes and journal".
+
+**Ruling 3 — the engine stays on the device, fed and updated by the cloud.** D4 stands: ranking,
+capacity, rendering, the journal and the scheduler run on the device and work offline, and today's
+list exists with no connectivity because it is computed from the mirror. What the engine is
+parameterised by moves to the cloud as data: promoted rules (already server-side, D6), the fetch
+plans of ruling 4, and any ranking parameter or semester calendar that today lives in `config/`.
+The engine refuses to run a slot without a valid entitlement past the 72-hour grace the app already
+caches (a task of C3′ below; today only the app gates). The reason on the record, in Quinn's terms:
+the attacker is a person repurposing the app's code to get its full utility without paying, or a
+competitor shipping a free copy. With the fetch sequence, the parsers, the rules and every judgment
+server-side and entitlement-gated, an orphaned binary ranks a hand-made folder and nothing else.
+The engine is not moved to the cloud: there is no measurable load to take off a desktop (a rank is
+milliseconds), and moving it would trade offline ranking for a cache without buying protection the
+account dependencies do not already give.
+
+**Ruling 4 — the relay fetch; D11 amended.** The standing rule holds: *credentials for the student's
+own portals never leave the student's machine* (VISION), and the cloud never holds a portal
+password. What moves to the cloud is the **fetch sequence** — the login flow, the URLs, the order —
+which today lives in `engine/src/coursework.rs`, `zybooks.rs` and `vhl.rs`. Quinn's words: "we can
+execute our fetch scripts (which will grow as we expand capabilities) without having to give the
+client access". The device becomes a **credential-substituting HTTPS relay**, and the contract is:
+
+- The cloud composes each request — method, URL, headers, body — with placeholders of the form
+  `{{credential:<source>:username}}` and `{{credential:<source>:password}}`. The device substitutes
+  from Credential Manager, sends the request from the student's machine with a per-source cookie
+  jar, and returns the raw response (status, headers, body) to the cloud. The cloud parses (§4.3
+  already put the parsers there) and composes the next step. A run is a short sequence of such
+  steps inside one slot, driven by the device's scheduler, so nothing fetches while the laptop is
+  closed — exactly as today.
+- **Host allow-list per credential, enforced on the device.** A credential saved for a source is
+  substituted only into an HTTPS request to that source's registered hosts (zyBooks:
+  `*.zybooks.com`; VHL: `www.vhlcentral.com` and `m3a.vhlcentral.com`); any other request carrying
+  a placeholder is refused by the device and reported as a run error. The list is a compiled-in
+  table in the app, the way `SUPPORTED_RUNTIMES` pins runtimes — the one portal-specific thing the
+  client keeps, because it is the guarantee that lets the privacy page say a password only ever
+  goes to the site it was given for, and it holds even against our own servers.
+- The device knows no login flow, no URL and no parser. Adding a portal or repairing one after a
+  vendor changes its markup is a cloud change with no release and no user action; the frozen parsed
+  references stay as the server parsers' oracles.
+- Sessions: the device keeps each source's cookie jar between slots, so a portal is logged into once
+  and re-authenticated only when the session expires; a login that fails becomes one card ("your
+  zyBooks password no longer works"), never a retry loop.
+- Raw pages are the student's data under ruling 2: received for the run, parsed, and not retained
+  beyond it (the parsed rows are what persists; the policy says so in one sentence).
+- `coursework-discover` — the wizard's course-mapping read — becomes a relayed cloud job over the
+  same contract.
+- The legal posture of D11 is unchanged: every request originates from the user's device, with the
+  user's credentials, at the user's instruction; the vendor sees the student's own IP and session.
+
+**Ruling 5 — sequence: all of it ships before the pilot.** §12's order from here is: **C3′ — the
+account vault** (sync without encryption on the paused branch's tables; the privacy sentences; the
+export dropped; the entitlement check in the engine; git leaves the product; `ics_url` leaves the
+vault) → **C5 — the relay fetch** (the contract above, replacing the on-device fetchers) → **C4 —
+removal** (the local model runtime, as written) → the pilot. The paused `c3-sync` branch's Tasks 1–3
+are kept where they fit (the two tables with plaintext columns, the row validators) and retired
+where they do not (the envelope, the key, the vectors). Quinn's words: "I want what we've just
+decided shipped before the pilot."
+
+**Ruling 6 — what this amendment does not decide.** Web and mobile (parked, with the door of
+ruling 1); a server-run engine (not needed while desktop only); the exact relay step protocol, the
+per-source host table and the retention window for raw pages (C5's spec); the wording of the
+privacy sentence (C3′'s task, read by Quinn and the lawyer before merge, as C3's P2 already
+required).
+
+**Markers.** D4, D9 and D11 in §1, §3.1's vault row, §4.3, §5.5, §11 R4, §12's C3 and C4 rows and
+§13 carry *(amended 2026-09-17 — see the amendment at the end)*. `VISION.md`'s commitment 2 and its
+"Mobile port timing" and "Sync" rows are amended in the same commit; `HANDOFF.md` §2–§4 record the
+new stream order and close the parity question. Plans: `docs/plans/2026-09-14-c3-sync-plan.md` is
+superseded by a C3′ plan written from this amendment, and C5 gets its own spec section and plan.
