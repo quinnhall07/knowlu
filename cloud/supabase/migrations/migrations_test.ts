@@ -309,9 +309,12 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // and carries a revoke of its own regardless),
   // plus C3's four in 20260912000100 (`sync_ceiling_bytes`, non-writing so no revoke needed;
   // `sync_prune`, writing, revoked from `public, anon, authenticated`; and the two trigger
-  // functions `sync_notes_stamp_rev` and `sync_usage_bump`, exempt by kind) —
+  // functions `sync_notes_stamp_rev` and `sync_usage_bump`, exempt by kind), plus fix round 2's
+  // `create or replace function sync_usage_bump()` in 20260912000200 (the same trigger function
+  // re-issued so a DELETE never inserts a usage row — still exempt by kind, still one more
+  // definition this scan parses) —
   // counted by hand against today's corpus.
-  assertEquals(parsed, 25, "today's corpus should parse exactly 25 function creations");
+  assertEquals(parsed, 26, "today's corpus should parse exactly 26 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -324,9 +327,9 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // reason on the diff: C1's `billing_subscribers` (invoker), `telemetry_daily` and
   // `correction_rates` (revoked, 20260910000400), and C2's `monthly_spend` (revoked,
   // 20260911000900) — counted by hand against today's corpus. R2-5 widened `VIEW_DEFINITION` and
-  // `RAW_VIEW_KEYWORD` to see `create materialized view` too; none of that count is a materialized
-  // view, not because the scan cannot see one — the synthetic case below proves it can. C3's
-  // `sync_limits` (revoked, 20260912000100) is the fifth.
+  // `RAW_VIEW_KEYWORD` to see `create materialized view` too; none of the five is a materialized
+  // view — today's corpus creates none, not because the scan cannot see one: the synthetic case
+  // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth.
   assertEquals(parsed, 5, "today's corpus should parse exactly 5 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.

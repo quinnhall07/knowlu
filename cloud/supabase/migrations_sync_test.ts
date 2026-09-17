@@ -34,7 +34,17 @@ Deno.test("row-level security is on for every table C3 creates, and none has a c
     for (const s of m.sql.matchAll(/alter\s+table\s+public\.(\w+)\s+enable\s+row\s+level\s+security/gi)) {
       secured.push(s[1]);
     }
-    for (const p of m.sql.matchAll(/create\s+policy\s+\w+\s+on\s+public\.\w+\s+for\s+(\w+)/gi)) {
+    // Every `create policy` must spell `for` explicitly: `create policy p on public.x to
+    // authenticated using (…)` with no `for` clause defaults to FOR ALL — a write policy — and
+    // would slip past a scan that only matched the `for`-bearing shape.
+    const everyPolicy = m.sql.match(/create\s+policy\s+\w+\s+on\s+public\.\w+/gi) ?? [];
+    const forPolicies = [...m.sql.matchAll(/create\s+policy\s+\w+\s+on\s+public\.\w+\s+for\s+(\w+)/gi)];
+    assertEquals(
+      forPolicies.length,
+      everyPolicy.length,
+      `${m.name}: a 'create policy' with no explicit 'for' defaults to FOR ALL, which is a write policy`,
+    );
+    for (const p of forPolicies) {
       assertEquals(p[1].toLowerCase(), "select", `${m.name}: only select policies; writes go through an edge function`);
     }
   }
@@ -86,7 +96,9 @@ Deno.test("retention never deletes a record a human wrote", async () => {
   // clause quietly costs a restored machine its attribution.
   const sql = (await migrations()).map((m) => m.sql).join("\n").toLowerCase();
   assert(sql.includes("and not keep"), "sync_prune must exempt the records the device marked `keep`");
-  assert(sql.includes("keep        boolean     not null default false"), "and the column must exist");
+  // A regex, not a whitespace-exact `includes`: the guarantee is the column exists and is typed
+  // `boolean not null default false`, never the exact column alignment of one migration's file.
+  assert(/keep\s+boolean\s+not null default false/.test(sql), "and the column must exist");
 });
 
 Deno.test("the account purge names every sync table", async () => {
