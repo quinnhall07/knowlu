@@ -85,10 +85,24 @@ jobs:
           exit 0
       # Pinned exactly, not "^2". The sidecar's signed path below is read out of tauri-bundler
       # 2.9.4's source, which is what this version pulls in, and it is the version the dev machine
-      # runs - the same reason the compiler is pinned. Bumping it is a one-line change here.
+      # runs - the same reason the compiler is pinned.
+      #
+      # Downloaded prebuilt, never compiled: building the CLI from source with `cargo install` cost
+      # 21 of the first release run's 40 minutes (run 35179886527, 2026-09-17), and it is a tool,
+      # not the product - it does not decide what is built for what target. So the archive is
+      # Tauri's own Windows build and it is verified against the SHA-256 below, the same contract
+      # app\src\inference.rs holds for llama.cpp runtimes: a bump is the VERSION AND THE HASH
+      # together, and a wrong archive stops the run before anything is built.
       - name: tauri-cli
-        run: cargo install tauri-cli --version 2.11.4 --locked
         shell: pwsh
+        env:
+          TAURI_CLI_VERSION: "2.11.4"
+          TAURI_CLI_SHA256: "0743e30a661a35d63339b24cf63828f97ba5389a1d7f13b368a542794dd0a3f3"
+        run: |
+          .\scripts\ci\tauri-cli.ps1 -Version $env:TAURI_CLI_VERSION -Sha256 $env:TAURI_CLI_SHA256
+          # Through cargo's own resolution, not the file: this is the binary `cargo tauri build` will run.
+          $v = (cargo tauri --version | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $v -notmatch [regex]::Escape($env:TAURI_CLI_VERSION)) { throw "cargo tauri resolves to '$($v.Trim())', not $env:TAURI_CLI_VERSION" }
       # The Authenticode signing library. signtool.exe itself comes from the Windows SDK on the
       # runner image (find-signtool.ps1 resolves it through the registry), but /dlib is Microsoft's
       # Trusted Signing client, which is a NuGet package and is not installed anywhere on the image.
