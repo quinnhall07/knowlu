@@ -4,6 +4,14 @@
 # signing identity exist only as repository secrets and a federated credential, so a hand-run
 # `cargo tauri build` cannot ship (C0 Task 3).
 #
+# The one deliberate exception (2026-09-17): with the repository VARIABLE RELEASE_AUTHENTICODE set
+# to the literal `off`, the three Azure steps are skipped, every binary ships without Authenticode
+# (Windows SmartScreen warns on the installer), the verify step asserts exactly that, and the notes
+# say it. Unset, empty, or anything else means signing is required, so a missing Azure line still
+# stops the release rather than shipping unsigned by accident - which is why the switch is a
+# variable a person sets on purpose and never the absence of a secret. The updater signature
+# (minisign, TAURI_SIGNING_PRIVATE_KEY) is never optional. engine/tests/workflows.rs pins all of it.
+#
 # Every `uses:` is pinned to a full commit SHA with its tag as a trailing comment - a floating tag
 # is a supply chain that can change under a signing job. engine/tests/workflows.rs is the judge.
 name: release
@@ -42,6 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - name: release notes
         shell: pwsh
+        env: { RELEASE_AUTHENTICODE: "${{ vars.RELEASE_AUTHENTICODE }}" }
         run: |
           # The previous tag, or - on the first release, when there is none - the root commit, said
           # out loud in the first line so nobody reads a whole-history changelog as one release's.
@@ -64,7 +73,13 @@ jobs:
             $head = "First release - every commit since the root commit $root."
             $log = @(git log --oneline HEAD)
           }
-          $lines = @("Knowlu $env:GITHUB_REF_NAME", "", $head, "") + @($log | ForEach-Object { "- $_" })
+          # The unsigned notice comes first, above the changelog: a person reading the Release
+          # learns what SmartScreen will say before they download anything.
+          $notice = @()
+          if ($env:RELEASE_AUTHENTICODE -eq "off") {
+            $notice = @("**Unsigned build.** This release carries no Authenticode signature (the repository variable RELEASE_AUTHENTICODE is off): Windows SmartScreen warns when the installer first runs - choose More info, then Run anyway. The updater signature is present, and the app verifies it before applying any update.", "")
+          }
+          $lines = @("Knowlu $env:GITHUB_REF_NAME", "") + $notice + @($head, "") + @($log | ForEach-Object { "- $_" })
           [System.IO.File]::WriteAllText("release-notes.md", (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
           Get-Content release-notes.md
           exit 0
@@ -80,6 +95,7 @@ jobs:
       # KNOWLU_SIGN_DLIB is how sign.ps1 - launched by the bundler with a fixed argv - is told where
       # it landed; without it every file would print UNSIGNED: and the check below would fail.
       - name: Trusted Signing client
+        if: vars.RELEASE_AUTHENTICODE != 'off'
         shell: pwsh
         run: |
           nuget install Microsoft.Trusted.Signing.Client -Version 1.0.95 -OutputDirectory "$env:RUNNER_TEMP\tsc"
@@ -103,6 +119,7 @@ jobs:
       # If the `environment:` line above is ever removed, the subject becomes
       # `repo:quinnhall07/knowlu:ref:refs/tags/<tag>` and the credential has to change with it.
       - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c  # v3.0.2
+        if: vars.RELEASE_AUTHENTICODE != 'off'
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -110,6 +127,7 @@ jobs:
       # Endpoint, account and profile are repository VARIABLES, not secrets - they are names, and
       # keeping them out of the secret store keeps the log readable when one is wrong.
       - name: signing profile
+        if: vars.RELEASE_AUTHENTICODE != 'off'
         shell: pwsh
         env: { TS_ENDPOINT: "${{ vars.TS_ENDPOINT }}", TS_ACCOUNT: "${{ vars.TS_ACCOUNT }}", TS_PROFILE: "${{ vars.TS_PROFILE }}" }
         run: .\scripts\ci\write-signing-profile.ps1 -Path "$env:RUNNER_TEMP\trusted-signing.json"
@@ -120,8 +138,13 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE_AUTHENTICODE: ${{ vars.RELEASE_AUTHENTICODE }}
         run: |
-          .\scripts\release.ps1 -SigningProfile "$env:RUNNER_TEMP\trusted-signing.json" 2>&1 | Tee-Object release.log
+          # No profile on the unsigned path: sign.ps1 then prints UNSIGNED: per file and exits 0,
+          # which is the path -DryRun takes on a laptop - with the updater key present this time.
+          $profile = "$env:RUNNER_TEMP\trusted-signing.json"
+          if ($env:RELEASE_AUTHENTICODE -eq "off") { $profile = "" }
+          .\scripts\release.ps1 -SigningProfile $profile 2>&1 | Tee-Object release.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $last = (Get-Content release.log | Where-Object { $_ -like "RELEASE *" } | Select-Object -Last 1)
           if (-not $last) { throw "release.ps1 printed no RELEASE line" }
@@ -131,7 +154,10 @@ jobs:
         run: .\scripts\ci\size-gate.ps1 -Engine target\release\knowlu-engine.exe -Installer $env:REL_INSTALLER
       # The one check that proves signing actually happened. sign.ps1 exits 0 when it cannot sign -
       # it has to, or an unsigned dev build could not bundle - so a silent UNSIGNED: run would
-      # otherwise publish an installer Windows warns on.
+      # otherwise publish an installer Windows warns on. On the unsigned path (the variable, above)
+      # the check inverts rather than disappears: every one of the three files must be NotSigned,
+      # so a half-signed release - one binary signed by some leftover profile, two not - is still
+      # a failed run, and the log says UNSIGNED RELEASE in capitals where the signed lines would be.
       #
       # The sidecar is checked at app\binaries\, NOT at target\release\knowlu-engine.exe. Those are
       # two different files: target\release\knowlu-engine.exe is cargo's own build output, while the
@@ -147,13 +173,19 @@ jobs:
       # file this check has no business reading.
       - name: verify Authenticode
         shell: pwsh
+        env: { RELEASE_AUTHENTICODE: "${{ vars.RELEASE_AUTHENTICODE }}" }
         run: |
+          $want = "Valid"
+          if ($env:RELEASE_AUTHENTICODE -eq "off") {
+            $want = "NotSigned"
+            Write-Output "UNSIGNED RELEASE: RELEASE_AUTHENTICODE is off - every binary must be NotSigned, and the release notes say so"
+          }
           $sidecar = Get-ChildItem "app\binaries" -File | Where-Object { $_.Name -like "knowlu-engine-*.exe" } | Sort-Object LastWriteTime | Select-Object -Last 1
           if (-not $sidecar) { throw "no staged sidecar under app\binaries" }
           foreach ($f in @($env:REL_INSTALLER, "target\release\knowlu.exe", $sidecar.FullName)) {
             $s = Get-AuthenticodeSignature $f
             Write-Output ("{0}: {1} {2}" -f $f, $s.Status, $s.SignerCertificate.Subject)
-            if ($s.Status -ne "Valid") { throw "not validly signed: $f" }
+            if ($s.Status -ne $want) { throw "expected $want, got $($s.Status): $f" }
           }
       # site\releases\ now holds the versioned installer, the stable Knowlu-setup.exe and
       # latest.json - the updater endpoint baked into the app.
