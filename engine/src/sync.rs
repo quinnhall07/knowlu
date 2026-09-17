@@ -60,9 +60,13 @@ pub enum SyncError {
     NoKey,
     /// A typed recovery code is not 32 bytes.
     BadKey,
-    /// A key IS stored and does not decode — hand-edited, or truncated by something. Distinct from
+    /// A key IS stored and does not decode — hand-edited, or truncated by something, or Credential
+    /// Manager refused the read for a reason other than "there is nothing there". Distinct from
     /// `NoKey` on purpose: "not turned on" would hide a real problem behind a normal-looking skip.
-    KeyUnreadable,
+    /// Carries the cause, folded into the message below the fixed label — never any key bytes: the
+    /// only things that can appear here are a credential target name, a `GetLastError` code, or the
+    /// fixed reason string `wincred::CredError::Blob` names.
+    KeyUnreadable(String),
     /// **This machine's key is not the one the account's copy is sealed under.** Another device of
     /// the same account turned the switch off and on again and re-uploaded everything under a fresh
     /// key; this machine's key is fine and its vault is fine, and what it has lost is the ability to
@@ -85,7 +89,7 @@ impl SyncError {
             SyncError::NoAccount => "no account",
             SyncError::NoKey => "not turned on",
             SyncError::BadKey => "that is not a recovery code",
-            SyncError::KeyUnreadable => "the stored key is unreadable; restore with your recovery code",
+            SyncError::KeyUnreadable(_) => "the stored key is unreadable; restore with your recovery code",
             SyncError::StaleKey(_) => "this machine's key is not the account's; enter your recovery code in Settings",
             SyncError::Crypto(_) => "the copy could not be opened with this key",
             SyncError::Shape(_) => "an unreadable row",
@@ -100,6 +104,8 @@ impl std::fmt::Display for SyncError {
             SyncError::Crypto(where_) => write!(f, "{} ({where_})", self.label()),
             SyncError::Shape(what) => write!(f, "{} ({what})", self.label()),
             SyncError::Io(why) => write!(f, "{} ({why})", self.label()),
+            SyncError::KeyUnreadable(cause) if cause.is_empty() => write!(f, "{}", self.label()),
+            SyncError::KeyUnreadable(cause) => write!(f, "{} ({cause})", self.label()),
             SyncError::StaleKey(detail) if detail.is_empty() => write!(f, "{}", self.label()),
             SyncError::StaleKey(detail) => write!(f, "{} ({detail})", self.label()),
             other => write!(f, "{}", other.label()),
@@ -229,16 +235,37 @@ pub fn key_target(cfg: &CloudConfig) -> String {
     }
 }
 
+/// Tells a genuinely missing key from a key that IS stored and did not come back clean.
+///
+/// `wincred::CredError::NotFound { code: 1168, .. }` is `ERROR_NOT_FOUND`, the ordinary
+/// missing-credential case — the switch is off, which is `NoKey`, a normal state and a named skip.
+/// Any other `GetLastError` (permission denied, a locked profile, anything else Credential Manager
+/// can refuse a read for) and a blob that is not valid UTF-16LE are both `KeyUnreadable`: the
+/// credential exists in some form and the read did not come back clean, which `NoKey` must never
+/// hide behind a normal-looking skip. `CredError`'s own `Display` never carries blob bytes — only a
+/// target name, a code, or a fixed reason string — so folding it into `KeyUnreadable`'s message is
+/// safe.
+#[cfg(windows)]
+fn key_error(e: crate::wincred::CredError) -> SyncError {
+    use crate::wincred::CredError;
+    match e {
+        CredError::NotFound { code: 1168, .. } => SyncError::NoKey,
+        other => SyncError::KeyUnreadable(other.to_string()),
+    }
+}
+
 /// The key, or the reason there is none. **Precondition P1 decides this function's body and nothing
 /// else in this plan**: (a) as written, the key was made on this device and kept here; (b) would
 /// derive it from the password at sign-in; (c) would fetch it from the service.
 #[cfg(windows)]
 pub fn load_key(cfg: &CloudConfig) -> Result<SyncKey, SyncError> {
     let target = key_target(cfg);
-    // An absent credential is `NoKey` — the switch is off, which is the normal state and a named
-    // skip. A credential that IS there and does not decode is `KeyUnreadable`, which says so.
-    let credential = crate::wincred::read_credential(&target).map_err(|_| SyncError::NoKey)?;
-    SyncKey::from_base64(credential.password.expose()).map_err(|_| SyncError::KeyUnreadable)
+    // A missing credential (`ERROR_NOT_FOUND`, 1168) is `NoKey` via `key_error` — the switch is
+    // off, the normal state and a named skip. Any other Credential Manager error, or a stored value
+    // that is not a 32-byte base64 key, is `KeyUnreadable`, which names the cause.
+    let credential = crate::wincred::read_credential(&target).map_err(key_error)?;
+    SyncKey::from_base64(credential.password.expose())
+        .map_err(|_| SyncError::KeyUnreadable("stored value is not a 32-byte base64 key".to_string()))
 }
 
 /// The credential store is Windows-only (spec §6.5), so a build for anything else compiles and
@@ -564,5 +591,69 @@ mod tests {
         // slightly odd name.
         let odd = crate::cloudmodel::CloudConfig { session_credential_target: "some/other/target".into(), ..cfg };
         assert_eq!(key_target(&odd), "some/other/target-sync-key");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn key_error_tells_a_missing_credential_from_one_that_did_not_come_back_clean() {
+        use crate::wincred::CredError;
+        // 1168 is `ERROR_NOT_FOUND`: the ordinary missing-credential case, the switch is off.
+        assert_eq!(
+            key_error(CredError::NotFound { target: "knowlu/p/sync-key".into(), code: 1168 }),
+            SyncError::NoKey,
+        );
+        // Any other code means Credential Manager refused the read for some other reason — the
+        // credential exists in some form, so this must not read as "not turned on".
+        let other_code = key_error(CredError::NotFound { target: "knowlu/p/sync-key".into(), code: 5 });
+        assert_eq!(other_code.label(), "the stored key is unreadable; restore with your recovery code");
+        assert!(matches!(other_code, SyncError::KeyUnreadable(_)));
+        let shown = format!("{other_code}");
+        assert!(shown.contains("error 5"), "{shown}");
+        assert!(!shown.contains(SYNC_TEST_KEY_NOT_A_SECRET), "{shown}");
+        // A blob that fails to decode is the same story: something is there, and it is not clean.
+        let blob = key_error(CredError::Blob("not valid UTF-16LE"));
+        assert_eq!(blob.label(), "the stored key is unreadable; restore with your recovery code");
+        assert!(matches!(blob, SyncError::KeyUnreadable(_)));
+        assert!(format!("{blob}").contains("not valid UTF-16LE"));
+    }
+
+    #[test]
+    fn generate_makes_a_fresh_random_key_each_time() {
+        // The suite would stay green if `generate` returned all zeros; this pins that it does not.
+        let a = SyncKey::generate().expect("csprng");
+        let b = SyncKey::generate().expect("csprng");
+        assert_ne!(a.to_base64(), b.to_base64(), "two calls must not repeat");
+        let zero = SyncKey::from_bytes([0u8; 32]);
+        assert_ne!(a, zero, "not all-zero");
+        assert_ne!(b, zero, "not all-zero");
+        assert_eq!(a.to_base64().len(), 44);
+        assert_eq!(b.to_base64().len(), 44);
+        assert_eq!(SyncKey::from_base64(&a.to_base64()).expect("round trip").to_base64(), a.to_base64());
+        assert_eq!(SyncKey::from_base64(&b.to_base64()).expect("round trip").to_base64(), b.to_base64());
+    }
+
+    #[test]
+    fn the_domain_prefixes_are_load_bearing_not_just_the_message_that_happens_to_differ() {
+        // `the_three_index_values_cannot_collide_across_kinds` compares two DIFFERENT messages
+        // ("tasks/a.md" vs a record containing it), so it would keep passing even if the
+        // `record\n`/`note\n`/`device\n` prefixes were deleted entirely — the two messages would
+        // still differ from each other. This test MACs the SAME bytes under two different kinds, so
+        // it fails the moment a prefix is removed and the two calls start hashing identical input.
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let index = key().index();
+
+        let mut rec = crate::ledger::Record::new();
+        rec.insert("ts".into(), serde_json::Value::String("shared".into()));
+        let canonical = crate::ledger::dumps_value(&serde_json::Value::Object(rec.clone()));
+        assert_ne!(
+            record_hash(&index, &rec),
+            note_ref(&index, &canonical),
+            "a record's canonical bytes and a note ref over those same bytes must not collide"
+        );
+
+        let s = "shared-string";
+        let device = device_token(&index, s);
+        let note_first_16 = &note_ref(&index, s)[..16];
+        assert_ne!(device, note_first_16, "a device token and a note ref over the same string must not collide");
     }
 }
