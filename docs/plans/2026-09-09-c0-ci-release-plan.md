@@ -493,6 +493,7 @@ Remove-Item $d -Recurse -Force; $pw = $null
 
 ### Task 6: Close — the laptop leaves the release path
 
+- [ ] **Step 0 (added 2026-09-17):** the two-job split, the pinned prebuilt CLI and `cache-on-failure` — branch `c0-release-speed`; ships with the first tag after it merges.
 - [ ] **Step 1:** On the laptop: delete `%USERPROFILE%\.knowlu\trusted-signing.json`; confirm `cmdkey /list` shows no `knowlu/updater-key*`. `.\scripts\release.ps1 -DryRun` still works and prints `UNSIGNED:` per file — that is now the correct local state.
 - [ ] **Step 2: Branch protection** on `main`: require `ci / test`, require a PR (Quinn may self-approve), no force-push. `gh api -X PUT repos/quinnhall07/knowlu/branches/main/protection …` with the JSON body in this step's commit message.
 - [ ] **Step 3: Docs.** `README.md`: a *Releases* section (tag → CI → Pages + Release; `-DryRun` locally). `CLAUDE.md`: the release bullet becomes *"Releases are CI-only (`.github/workflows/release.yml`, on a `v*` tag). `scripts/release.ps1` is what CI runs; a human runs it only with `-DryRun`, which bundles unsigned and publishes nothing. A hand-run `cargo tauri build` is unsupported. The updater private key exists only as a GitHub secret; if lost, regenerate (one `pubkey` line; installed apps need one manual reinstall)."* `HANDOFF.md`: the ▶ C0 DONE block from Task 5 gains the Task 1 outcome letter and the pinned action SHAs' tags. This plan's status line: **DONE** with the two tags.
