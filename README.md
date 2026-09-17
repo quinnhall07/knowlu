@@ -56,6 +56,13 @@ every binary is unsigned rather than skipping the check. Unset means signing is 
 missing Azure line stops the release instead of shipping unsigned by accident. The updater
 signature is never optional.
 
+The workflow is two jobs joined by an artifact: `build` makes and signs everything and uploads what
+leaves the machine, `publish` downloads it, deploys `site\` and creates the Release, and compiles
+nothing. So a failure at the deploy or at the Release reruns on its own —
+`gh run rerun <id> --failed`, minutes rather than a whole rebuild. The Tauri CLI the build uses is
+downloaded prebuilt for the version the workflow pins and verified against a SHA-256 pinned beside
+it, never compiled; bumping it means changing the version and the hash together.
+
 Locally, run only `.\scripts\release.ps1 -DryRun`. It builds and bundles a throwaway installer,
 prints `UNSIGNED:` for every file because a laptop holds no signing profile and no updater key,
 and publishes nothing. That is the correct local state, not a degraded one.

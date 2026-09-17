@@ -79,6 +79,61 @@ fn release_ships_unsigned_only_on_the_explicit_variable() {
     }
 }
 
+/// C0 (2026-09-17): the first release run spent 21 of its 40 minutes compiling tauri-cli from
+/// source (run 35179886527). The CLI is a tool, not the product: it is downloaded prebuilt for the
+/// exact pinned version and checked against a SHA-256 spelled in the workflow - the contract
+/// `app/src/inference.rs` holds for runtimes - so a bump is the version AND the hash, and a wrong
+/// archive stops the run before anything is built.
+#[test]
+fn release_downloads_tauri_cli_prebuilt_and_pinned_by_sha256_never_compiles_it() {
+    let r = workflow("release.yml");
+    assert!(!r.contains("cargo install tauri-cli"), "release.yml must not compile tauri-cli from source");
+    assert!(r.contains(r"scripts\ci\tauri-cli.ps1"), "the tauri-cli step must run scripts\\ci\\tauri-cli.ps1");
+    let version = regex::Regex::new(r#"TAURI_CLI_VERSION:\s*"(\d+\.\d+\.\d+)""#).unwrap()
+        .captures(&r).map(|c| c[1].to_string()).expect("release.yml must pin TAURI_CLI_VERSION");
+    let sha = regex::Regex::new(r#"TAURI_CLI_SHA256:\s*"([0-9a-f]{64})""#).unwrap()
+        .captures(&r).map(|c| c[1].to_string()).expect("release.yml must pin TAURI_CLI_SHA256 as 64 lowercase hex characters");
+    assert_eq!(sha.len(), 64);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let script = std::fs::read_to_string(root.join("scripts").join("ci").join("tauri-cli.ps1")).expect("scripts/ci/tauri-cli.ps1");
+    assert!(script.contains("Get-FileHash") && script.contains("SHA256"), "the script must verify the archive with Get-FileHash SHA256");
+    assert!(script.contains("mismatch"), "the script must throw on a hash mismatch");
+    assert!(script.contains("cargo-tauri-x86_64-pc-windows-msvc.zip"), "the script must download Tauri's own prebuilt Windows archive");
+    // release.ps1 names the tauri-cli version it was written against; the two pins never drift apart.
+    let release_ps1 = std::fs::read_to_string(root.join("scripts").join("release.ps1")).expect("scripts/release.ps1");
+    assert!(release_ps1.contains(&format!("tauri-cli {version}")), "scripts/release.ps1 must name tauri-cli {version}, the version release.yml pins");
+}
+
+/// C0 (2026-09-17): build and publish are two jobs joined by an artifact, so a publish-only failure
+/// - the first release run's, a wrong Cloudflare token after a 40-minute build - reruns in minutes
+/// with `gh run rerun --failed`; the build's cache is saved even when the build fails; and each job
+/// holds only the permission it uses (OIDC in build, the Release in publish). The publish job never
+/// compiles, signs or reads a signing secret.
+#[test]
+fn release_builds_and_publishes_in_two_jobs_joined_by_an_artifact() {
+    let r = workflow("release.yml");
+    let build = job_block(&r, "build");
+    let publish = job_block(&r, "publish");
+    assert!(publish.contains("needs: build"), "publish must depend on build");
+    assert!(build.contains("actions/upload-artifact@") && !publish.contains("actions/upload-artifact@"), "build uploads the artifact");
+    assert!(publish.contains("actions/download-artifact@") && !build.contains("actions/download-artifact@"), "publish downloads the artifact");
+    assert!(build.contains("cache-on-failure: true"), "the release cache must be saved on failure, as ci.yml's is");
+    assert!(build.contains("id-token: write") && !publish.contains("id-token: write"), "only build needs the OIDC token");
+    assert!(publish.contains("contents: write") && !build.contains("contents: write"), "only publish needs to write the Release");
+    let before_jobs = r.split("\njobs:").next().unwrap();
+    assert!(!before_jobs.lines().any(|l| l.trim() == "permissions:"), "no workflow-level permissions block: each job declares its own");
+    for s in ["release.ps1", "cargo", "azure/login", "verify Authenticode", "TAURI_SIGNING_PRIVATE_KEY"] {
+        assert!(build.contains(s), "build must carry {s}");
+        assert!(!publish.contains(s), "publish must not mention {s} - it never compiles or signs");
+    }
+    for s in ["cloudflare/wrangler-action@", "gh release create"] {
+        assert!(publish.contains(s), "publish must carry {s}");
+        assert!(!build.contains(s), "build must not publish: {s}");
+    }
+    assert_eq!(r.matches("environment: release").count(), 2, "both jobs declare the release environment: build for the OIDC subject, publish for the reviewer gate");
+    assert!(publish.contains("needs.build.outputs.installer"), "publish names the installer through the build job's outputs");
+}
+
 #[test]
 fn ci_enforces_zero_warnings_and_the_eol_contract() {
     let c = workflow("ci.yml");
