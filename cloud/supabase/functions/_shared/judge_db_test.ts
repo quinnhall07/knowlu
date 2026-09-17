@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { insertRequest } from "./judge_db.ts";
+import { rpcReply, insertRequest } from "./judge_db.ts";
 
 const SHARED = new URL(".", import.meta.url);
 /** One level up from `_shared/`: the directory holding every function, `_shared/` included. */
@@ -209,4 +209,17 @@ Deno.test("insert's onConflict carries on_conflict in the path and ignore-duplic
 Deno.test("insert with no onConflict is unchanged from before F-2: no query string, no resolution clause", () => {
   assertEquals(insertRequest("gmail_seen", false), { path: "gmail_seen", prefer: "return=minimal" });
   assertEquals(insertRequest("judgments", true), { path: "judgments", prefer: "return=representation" });
+});
+
+Deno.test("an RPC reply with no body — a function that returns void — is null, not a parse error", async () => {
+  // Found by the P3 live pass on staging, 2026-09-17: `delete_google_grant` returns void, PostgREST
+  // answers with an EMPTY body, and `.json()` on it threw — after the delete had committed — so
+  // `google-connect`'s DELETE answered 502 "Google could not be reached to disconnect; try again"
+  // for a grant that was already revoked at Google and gone from the row, and every retry would
+  // have said the same. Empty means null; a real body is parsed exactly as before.
+  assertEquals(await rpcReply(new Response(null, { status: 204 })), null);
+  assertEquals(await rpcReply(new Response("", { status: 200 })), null);
+  assertEquals(await rpcReply(new Response("true", { status: 200 })), true);
+  assertEquals(await rpcReply(new Response('"7df2ba9c"', { status: 200 })), "7df2ba9c");
+  assertEquals(await rpcReply(new Response('{"a":1}', { status: 200 })), { a: 1 });
 });

@@ -62,6 +62,20 @@ export function insertRequest(
   return { path, prefer: onConflict ? `${base},resolution=ignore-duplicates` : base };
 }
 
+/**
+ * What one RPC reply means — pulled out, like `insertRequest`, so a test can drive it with a
+ * constructed `Response` and no env or network. Found by the P3 live pass on staging, 2026-09-17:
+ * a function that `returns void` (`delete_google_grant`) answers with NO body, and `.json()` on an
+ * empty body throws — AFTER the delete committed. `google-connect`'s DELETE then answered 502
+ * "Google could not be reached to disconnect; try again" for a grant that was already revoked at
+ * Google and gone from the row, and every retry would have said the same. An empty reply is
+ * `null`; anything else is the JSON PostgREST sent.
+ */
+export async function rpcReply(response: Response): Promise<unknown> {
+  const text = await response.text();
+  return text === "" ? null : JSON.parse(text);
+}
+
 function env(name: string): string {
   const value = Deno.env.get(name);
   if (value === undefined || value === "") throw new Error(`the function is missing ${name}`);
@@ -112,7 +126,7 @@ export function serviceDb(): Db {
       });
     },
     async rpc(fn, args) {
-      return await (await call(`rpc/${fn}`, { method: "POST", body: JSON.stringify(args) })).json();
+      return await rpcReply(await call(`rpc/${fn}`, { method: "POST", body: JSON.stringify(args) }));
     },
   };
 }
