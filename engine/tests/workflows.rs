@@ -60,6 +60,25 @@ fn release_runs_only_on_version_tags_and_names_every_secret_the_script_needs() {
     assert!(r.contains("id-token: write"), "release.yml needs id-token: write for Azure OIDC");
 }
 
+/// The unsigned-release switch (C0, 2026-09-17: Quinn cannot complete Trusted Signing's identity
+/// verification for now). Authenticode is skipped ONLY when the repository VARIABLE
+/// `RELEASE_AUTHENTICODE` is the literal `off` — never because a secret or a variable happens to be
+/// missing, which is how an unsigned installer would otherwise ship by accident — and the release
+/// then says so in its notes and asserts it in its check. The updater signature is never optional.
+#[test]
+fn release_ships_unsigned_only_on_the_explicit_variable() {
+    let r = workflow("release.yml");
+    let gate = "if: vars.RELEASE_AUTHENTICODE != 'off'";
+    assert_eq!(r.matches(gate).count(), 3, "azure/login, the signing client and the profile step must each carry `{gate}`");
+    let branch = "$env:RELEASE_AUTHENTICODE -eq \"off\"";
+    assert!(r.matches(branch).count() >= 3, "the notes, the release.ps1 call and the verify step must each branch on `{branch}`");
+    assert!(r.contains("NotSigned"), "the verify step must assert NotSigned on the unsigned path, not skip the check");
+    assert!(r.contains("**Unsigned build.**"), "the release notes must say the build is unsigned");
+    for line in r.lines().map(str::trim).filter(|l| l.starts_with("if:")) {
+        assert!(!line.contains("secrets."), "never key a step on a secret's presence: {line}");
+    }
+}
+
 #[test]
 fn ci_enforces_zero_warnings_and_the_eol_contract() {
     let c = workflow("ci.yml");
