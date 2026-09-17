@@ -12,21 +12,35 @@
 # variable a person sets on purpose and never the absence of a secret. The updater signature
 # (minisign, TAURI_SIGNING_PRIVATE_KEY) is never optional. engine/tests/workflows.rs pins all of it.
 #
+# Two jobs, not one (C0, 2026-09-17). `build` makes and signs the artefacts and hands them to
+# `publish` as one uploaded artifact; `publish` deploys the site and creates the GitHub Release and
+# compiles nothing. The first release run took 40 minutes and died at the deploy on a wrong token,
+# which cost a second full build - now a publish-only failure is `gh run rerun <id> --failed` and a
+# few minutes, with the build's cache and artifact still standing. The same run spent 21 of those 40
+# minutes compiling the Tauri CLI from source, so the CLI is downloaded prebuilt for the pinned
+# version and verified against a SHA-256 spelled here, never compiled.
+#
 # Every `uses:` is pinned to a full commit SHA with its tag as a trailing comment - a floating tag
 # is a supply chain that can change under a signing job. engine/tests/workflows.rs is the judge.
 name: release
 on:
   push: { tags: ['v*'] }
-permissions:
-  contents: write        # the GitHub Release
-  id-token: write        # Azure OIDC
 jobs:
-  build-sign-publish:
+  build:
     runs-on: windows-latest
     timeout-minutes: 90
     # Created by GitHub on the first run. It exists so a required reviewer can be added later
     # without editing this file.
     environment: release
+    # Only what this job uses. Checkout reads the repository; the OIDC token is the federated
+    # credential's. Nothing in this job writes to the repository - `publish` does that.
+    permissions: { contents: read, id-token: write }
+    # The three artefact names, as BASENAMES, for the publish job: the paths below are this
+    # runner's and mean nothing on the next one, but the names inside the artifact are the same.
+    outputs:
+      installer: ${{ steps.release.outputs.installer }}
+      sig: ${{ steps.release.outputs.sig }}
+      manifest: ${{ steps.release.outputs.manifest }}
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -47,7 +61,10 @@ jobs:
           $v = (rustc -vV | Out-String)
           Write-Output $v
           if ($v -notmatch "host: x86_64-pc-windows-gnu") { Write-Output "expected host: x86_64-pc-windows-gnu"; exit 1 }
+      # cache-on-failure, as ci.yml has it: the first release run failed, so the cache saved nothing
+      # and the rerun paid for the whole dependency graph a second time.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with: { cache-on-failure: true }
       - name: release notes
         shell: pwsh
         env: { RELEASE_AUTHENTICODE: "${{ vars.RELEASE_AUTHENTICODE }}" }
@@ -119,9 +136,9 @@ jobs:
       # OIDC, so no client secret exists anywhere: the token is minted for this run only and the
       # Entra app's federated credential is what accepts it.
       #
-      # THE SUBJECT CLAIM IS THE ENVIRONMENT, NOT THE TAG. Because this job declares
-      # `environment: release`, GitHub's default subject substitutes the environment for the ref, so
-      # the token carries exactly:
+      # THE SUBJECT CLAIM IS THE ENVIRONMENT, NOT THE TAG. Because this job declares the `release`
+      # environment, GitHub's default subject substitutes the environment for the ref, so the token
+      # carries exactly:
       #
       #     repo:quinnhall07/knowlu:environment:release
       #
@@ -148,6 +165,7 @@ jobs:
       # The updater key exists as an environment variable for the length of THIS STEP and nowhere
       # else: release.ps1 only checks that it is set and lets `cargo tauri build` inherit it.
       - name: release.ps1
+        id: release
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -162,7 +180,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $last = (Get-Content release.log | Where-Object { $_ -like "RELEASE *" } | Select-Object -Last 1)
           if (-not $last) { throw "release.ps1 printed no RELEASE line" }
-          foreach ($kv in ($last -replace "^RELEASE ", "") -split " ") { $k, $v = $kv -split "=", 2; Add-Content $env:GITHUB_ENV ("REL_" + $k.ToUpper() + "=" + $v) }
+          # The env vars stay absolute - the steps below read files on THIS runner. The job outputs
+          # are the basenames, because that is all the next job can use: it downloads the artifact,
+          # it does not inherit this workspace. `none` stays `none` either way.
+          foreach ($kv in ($last -replace "^RELEASE ", "") -split " ") {
+            $k, $v = $kv -split "=", 2
+            Add-Content $env:GITHUB_ENV ("REL_" + $k.ToUpper() + "=" + $v)
+            $leaf = $v; if ($v -ne "none") { $leaf = Split-Path -Leaf $v }
+            Add-Content $env:GITHUB_OUTPUT ($k + "=" + $leaf)
+          }
       - name: size gate
         shell: pwsh
         run: .\scripts\ci\size-gate.ps1 -Engine target\release\knowlu-engine.exe -Installer $env:REL_INSTALLER
@@ -201,6 +227,52 @@ jobs:
             Write-Output ("{0}: {1} {2}" -f $f, $s.Status, $s.SignerCertificate.Subject)
             if ($s.Status -ne $want) { throw "expected $want, got $($s.Status): $f" }
           }
+      - name: stage for publish
+        shell: pwsh
+        run: |
+          # Exactly the files that leave the machine, and nothing under target\: site\releases\ already
+          # holds the versioned installer, the stable Knowlu-setup.exe and latest.json; the two GitHub
+          # Release inputs that live nowhere under site\ - the detached .sig and the notes - go beside it.
+          New-Item -ItemType Directory -Force publish | Out-Null
+          Copy-Item release-notes.md publish\
+          if ($env:REL_SIG -ne "none") { Copy-Item $env:REL_SIG publish\ }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release
+          path: |
+            site/releases/**
+            publish/**
+          if-no-files-found: error
+          retention-days: 7
+      # The profile file names an Azure account; release.log carries whatever the build printed.
+      # Neither is a secret, and neither has any business outliving the job.
+      - name: scrub
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP\trusted-signing.json" -ErrorAction SilentlyContinue; Remove-Item release.log -ErrorAction SilentlyContinue
+
+  # Nothing here builds or signs anything: it takes the artifact the job above uploaded and puts it
+  # where people get it. That is the point of the split - when a token is wrong or an upload times
+  # out, `gh run rerun <id> --failed` reruns these few minutes instead of the whole build.
+  publish:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # Declared here too, not only above. A required reviewer added to the `release` environment
+    # later is a gate on THIS job - the publish, the half that puts bytes in front of people - and,
+    # because the job above declares the same environment for its OIDC subject claim, on that one
+    # as well; the publish is what the gate is for.
+    environment: release
+    permissions: { contents: write }   # the GitHub Release, and nothing else
+    steps:
+      # fetch-depth: 1 - no notes are generated here, so no tag history is needed. The checkout is
+      # for site\'s static pages, which are this same commit's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 1 }
+      # path: . - the artifact was uploaded from the workspace root, so site/releases and publish
+      # land back at exactly the relative paths they had.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with: { name: release, path: . }
       # site\releases\ now holds the versioned installer, the stable Knowlu-setup.exe and
       # latest.json - the updater endpoint baked into the app.
       - uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
@@ -210,13 +282,15 @@ jobs:
           command: pages deploy site --project-name knowlu --branch main --commit-dirty=true
       - name: GitHub Release
         shell: pwsh
-        env: { GH_TOKEN: "${{ github.token }}" }
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER: ${{ needs.build.outputs.installer }}
+          SIG: ${{ needs.build.outputs.sig }}
+          MANIFEST: ${{ needs.build.outputs.manifest }}
         run: |
-          $files = @($env:REL_INSTALLER, $env:REL_SIG, $env:REL_MANIFEST) | Where-Object { $_ -and $_ -ne "none" }
-          gh release create $env:GITHUB_REF_NAME $files --title "Knowlu $env:GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
-      # The profile file names an Azure account; release.log carries whatever the build printed.
-      # Neither is a secret, and neither has any business outliving the job.
-      - name: scrub
-        if: always()
-        shell: pwsh
-        run: Remove-Item "$env:RUNNER_TEMP\trusted-signing.json" -ErrorAction SilentlyContinue; Remove-Item release.log -ErrorAction SilentlyContinue
+          $files = @()
+          $files += (Join-Path "site\releases" $env:INSTALLER)
+          if ($env:SIG -ne "none") { $files += (Join-Path "publish" $env:SIG) }
+          if ($env:MANIFEST -ne "none") { $files += (Join-Path "site\releases" $env:MANIFEST) }
+          foreach ($f in $files) { if (-not (Test-Path $f)) { throw "release asset missing from the artifact: $f" } }
+          gh release create $env:GITHUB_REF_NAME $files --title "Knowlu $env:GITHUB_REF_NAME" --notes-file publish\release-notes.md --verify-tag
