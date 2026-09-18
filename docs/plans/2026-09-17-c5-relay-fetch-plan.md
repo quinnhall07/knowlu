@@ -2,7 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: WRITTEN 2026-09-17; not started; blocked on C3′.** This plan is written from
+**Status: AMENDED 2026-09-17 (fix round 1 after review), not started; blocked on C3′.** The
+review is `docs/reports/2026-09-17-c5-relay-fetch-plan-review.md` (`5a2ca69`, verdict *execute after
+fix round 1*, findings C1-C5, I1-I14, M1-M12); every one of them is applied here and named in
+**Fix round 1 — resolutions (2026-09-17)** at the end of this file, together with the three
+controller rulings R-C5-plan-1/2/3 that settled the findings which asked for a decision. The spec
+was amended in the same round (its Status line and §6). This plan is written from
 `docs/specs/2026-09-17-c5-relay-fetch-design.md` (valid; Quinn signed the amendment it argues from on
 2026-09-17) and from the cloud design's **Amendment 2026-09-17, ruling 4**
 (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). Ruling 5 puts C5 **after C3′ and
@@ -145,8 +150,16 @@ binds here, with each C5-specific narrowing said out loud.
   for the portal side and **cannot escape into a real build**, which is exactly what
   `engine/tests/relay_allowlist.rs` (an *integration* test, so it links the lib without
   `cfg(test)`) is for.
+- **Every test that aims at a loopback portal lives in `engine/src/relay.rs`'s own
+  `#[cfg(test)] mod tests`** (review C1; spec §9's first bullet, and `coursework.rs:3095-3160` is the
+  precedent it cites). The reason is the row above: Cargo compiles the library **without**
+  `cfg(test)` for an integration test, so a portal suite in `engine/tests/` would see exactly what
+  `relay_allowlist.rs` asserts it sees — `unknown_source` — and every portal test would fail.
+  `engine/tests/relay_allowlist.rs` is the one integration test this stream adds, and it is the
+  guarantee rather than a harness. **There is no `engine/tests/relay_contract.rs`.**
 - **Never launch `knowlu.exe` against a real profile, and never point an engine command at a real
-  vault.** Quinn's vault is `C:\Users\danie\Knowlu\Vault`; tests copy a fixture vault into a temp
+  vault.** Quinn's own vault, whatever `profiles.json` names, is never a target; tests copy a
+  fixture vault into a temp
   directory, and the exit gate's live run uses a **scratch profile** and a scratch vault
   (`scripts\scratch-vault.ps1`), driven by the controller with Quinn at the machine.
   Desktop safety (`CLAUDE.md`): never synthetic keyboard or mouse input, screenshots by `PrintWindow`
@@ -173,10 +186,12 @@ binds here, with each C5-specific narrowing said out loud.
   `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/functions/relay/` —
   nothing C5 writes needs more, because every plan module is pure over an injected cursor and every
   handler test injects its dependencies. A run over **the whole tree** is C2's merged command and
-  must be copied exactly, because a narrower flag set fails on C2's tests rather than on C5's:
+  is **`.github/workflows/ci.yml:84`'s line, verbatim** (review M7 — CI is the gate, so the gate's
+  command is CI's and not a paraphrase of it), and it must be copied exactly, because a narrower
+  flag set fails on C2's tests rather than on C5's:
 
   ```
-  deno test --allow-read --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/
+  deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
   ```
 
 - **A third-party import in an edge function is an `npm:` or `jsr:` specifier on the import line**,
@@ -196,8 +211,10 @@ binds here, with each C5-specific narrowing said out loud.
   2026-09-18**, and uses exactly one file.
 - **The corpus-wide pins in `cloud/supabase/migrations/migrations_test.ts` are bumped by whichever
   stream moves them** (R-C3-exec-4), with the reason in the comment, in that stream's own commit.
-  **C5 creates no function and no view**, so it expects to move **neither** pin; Task 5 step 6 runs
-  that suite and treats a moved count as evidence C5 added something it did not intend. C5's own
+  **C5 creates no function and no view**, so it expects to move **neither** pin. **The two numbers
+  are not quoted anywhere in this plan** (review M6): they are C3′'s to move and this stream forks
+  after it, so the rule is *unchanged from the branch point* and Task 5 step 10 records the observed
+  pair. A literal here that disagreed with the branch would invite an edit to a file C5 does not own. C5's own
   guards live in `cloud/supabase/migrations_relay_test.ts`, filtered to `20260918…` (R-X-8's rule,
   applied from C5's side).
 - **Tests that touch the real Credential Manager are serialised.** Windows races parallel
@@ -222,14 +239,22 @@ binds here, with each C5-specific narrowing said out loud.
   `cloud/supabase/migrations/20260918000100_relay.sql`,
   `cloud/supabase/migrations_relay_test.ts`, `engine/src/relay.rs` (new),
   `engine/src/coursework.rs`, `engine/src/zybooks.rs` and `engine/src/vhl.rs` (both deleted),
-  `engine/Cargo.toml`, `Cargo.lock`, `engine/tests/relay_allowlist.rs` and
-  `engine/tests/relay_contract.rs` (new), `engine/tests/dependency_boundary.rs`,
+  `engine/Cargo.toml`, `engine/tests/relay_allowlist.rs` (new; **and no
+  `engine/tests/relay_contract.rs` — review C1**), `engine/tests/dependency_boundary.rs`,
   `engine/tests/no_console.rs`, `engine/tests/site.rs`, `site/privacy.html`, and this plan file —
   plus **one line each** in `engine/src/cloudmodel.rs` (Task 1: `zybooks::scrub` becomes
   `relay::scrub`) and `app/src/account.rs` (Task 11: `PRIVACY_VERSION`), two files C2 and C1 owned
-  and whose ownership rows retired with their merges, and **tests only** in
+  and whose ownership rows retired with their merges; **one call** in `app/src/onboarding.rs`
+  (Task 8, ruling **R-C5-plan-1**: saving a password closes that source's login card); **two named
+  edits** in `cloud/supabase/functions/ingest-coursework/` — `handler.ts` (Task 5, ruling
+  **R-C5-plan-2**: the per-source policy layer is *extracted* so the relay and `ingestHandler` share
+  one copy) and `parse_vhl.ts` (Task 7, review **I8**: `sectionMapping` becomes an export and
+  `parseDashboard` calls it) — both of which leave `ingestHandler`'s own behaviour byte-identical,
+  pinned by its existing suite and by the two frozen parsed references; and **tests only** in
   `app/tests/{scheduler,onboarding,static_assets}.rs`, which exercise three hand-off files the
-  controller owns. Everything else —
+  controller owns. **`Cargo.lock` is NOT claimed** (review M12): it is a shared-single-owner file
+  (`HANDOFF.md` §2) and enabling a `windows` feature adds no package, so it is expected not to
+  change — which exit-gate item 12 already asserts. Everything else —
   `engine/src/{lib,main,cli}.rs`, `app/src/{scheduler,onboarding,main}.rs`,
   `cloud/supabase/config.toml`, `cloud/supabase/functions/ingest-coursework/**`,
   `scripts/*.py`, `CLAUDE.md`, `HANDOFF.md` — is the controller's and appears under **Controller
@@ -249,11 +274,11 @@ named in the row, and the answer is recorded in that task's report.
 
 | # | Needed by | The question, the recommendation the plan is built to, and what changes on a different answer |
 |---|---|---|
-| **Q1** | Task 5 (the run row), re-read at Task 12 | **Raw-page retention.** Zero beyond the run, or a short diagnostic window (say 24 h on a parse failure) so a vendor markup change can be fixed from the page that broke? **Built to: zero.** The diagnostic path already exists and is consented — the issue report, with its preview-and-scrub screen (`app/src/report.rs`). A page body never enters `relay_runs.cursor`, Storage, a table or a log, and `cursor_holds_no_page_body_after_any_step` is what keeps it true. **On "a window":** a `relay_pages` table with an `expires_at` and its own RLS, a purge entry in `account/index.ts`, a sentence in the privacy policy and a row in §9's data inventory — a day's work and a policy change, not a flag. |
-| **Q2** | Task 8 (the login card) | **Does a rejected login pause the source** until the student saves a new password, or does every slot try again? **Built to: pause**, after one vendor rejection, with the one info card of spec §4. It is the legal note's *"stop on the first sign of a vendor block and never retry through a change of identity"*, and a daily retry with a wrong password is how an account gets locked. **On "retry every slot":** Task 8 step 5's `paused_until` check comes out and the card becomes advisory; the card itself stays either way. |
+| **Q1** | Task 5 (the run row), re-read at Task 12 | **Raw-page retention.** Zero beyond the run, or a short diagnostic window (say 24 h on a parse failure) so a vendor markup change can be fixed from the page that broke? **Built to: zero.** The diagnostic path already exists and is consented — the issue report, with its preview-and-scrub screen (`app/src/report.rs`). A page body never enters `relay_runs.cursor`, `relay_runs.parsed`, Storage, a table or a log, and `cursor_holds_no_page_body_after_any_step` plus `parsed_holds_only_parsed_rows` are what keep it true. **What does persist for the length of a run is the parsed rows** — which is what R4-19 says may persist, and is the whole of ruling **R-C5-plan-2**: the cloud parses each body as it arrives and keeps the rows, never the page. **On "a window":** a `relay_pages` table with an `expires_at` and its own RLS, a purge entry in `account/index.ts`, a sentence in the privacy policy and a row in §9's data inventory — a day's work and a policy change, not a flag. |
+| **Q2** | Task 8 (the login card) | **Does a rejected login pause the source** until the student saves a new password, or does every slot try again? **Built to: pause, and the pause ends when you save a new password** — which is the half the first draft of this plan left out (review **C2**, settled by ruling **R-C5-plan-1**). After one vendor rejection Knowlu opens the one info card of spec §4 and stops trying that source; **the moment the student saves that portal's password in the app, the app closes the card and the source is live again on the next slot**. What must be said to Quinn is exactly that sentence, because "pause" with no answer to "what re-arms it?" is "stop forever", and the card body promises the opposite. It is the legal note's *"stop on the first sign of a vendor block and never retry through a change of identity"*, and a daily retry with a wrong password is how an account gets locked. **On "retry every slot":** Task 8 step 6's paused-source check comes out and the card becomes advisory; the card and the close-on-save both stay either way. |
 | **Q3** | Task 1 (the table) | **VHL's host row**: the two exact hosts ruling 4 names (`www.vhlcentral.com`, `m3a.vhlcentral.com`), or `*.vhlcentral.com`? **Built to: the two exact hosts, as ruled.** Widening is a one-line diff plus a test edit if VHL ever renumbers `m3a`; it is flagged so the choice is made knowingly rather than discovered on a broken slot at 07:00. **On "widen":** one line in `PORTAL_SOURCES` and three assertions in `relay_allowlist.rs`, and the spec's §3 argument gains a sentence. |
 | **Q4** | Task 3 (the session store) | **The TTL for a captured value** — zyBooks' bearer token: 12 h as proposed, or shorter? **Built to: 12 h** (`ttl_s: 43200`), because two slots a day means a token is used at most twice before it is re-minted. **On "shorter":** one number in `plans/zybooks.ts`; the device honours whatever the plan says and pins nothing. |
-| **Q5** | Task 4 (the budgets) | **The run budget of 10 minutes against the scheduler's 20-minute child timeout** (`app/src/scheduler.rs:27`). **Built to: confirm 10.** It is the number that guarantees the relay is never what the scheduler kills, so a relay that overruns says so in a warning instead of dying as an amber tray with no explanation. **On a different number:** one `const` in `relay.rs` and one assertion in `relay_contract.rs`; anything at or above 20 minutes is refused by the test that compares the two, which is the point of having it. |
+| **Q5** | Task 4 (the budgets) | **The run budget of 10 minutes against the scheduler's 20-minute child timeout** (`app/src/scheduler.rs:27`). **Built to: confirm 10.** It is the number that guarantees the relay is never what the scheduler kills, so a relay that overruns says so in a warning instead of dying as an amber tray with no explanation. **On a different number:** one `const` in `relay.rs` and one assertion in its own test module; anything at or above 20 minutes is refused by the test that compares the two — and, since review **C4**, the deadline is also *enforced*, so the number means something. |
 | **Q6** | Task 11, **before merge** | **The two rewritten privacy sentences**, drafted in Task 11 step 1, read by Quinn **and the lawyer** (with the C1 packet's P5 list, `docs/reports/2026-09-10-c1-quinn-packets.md`). `site/privacy.html:37`'s *Your coursework logins* definition and `:22`'s *What stays on your machine* bullet both stop being true the moment `/relay` composes a request, because today's sentence says Knowlu "signs in to zyBooks and VHL from your PC" and after C5 our servers decide what that sign-in is. **Without it:** Tasks 1-10 and 12 all land and the branch does not merge — a published policy describing a mechanism the code no longer has is the one thing on this list that is not recoverable by a later commit. |
 
 Nothing in this stream needs a new Supabase project secret, a new Stripe object, a new Google scope,
@@ -281,10 +306,10 @@ to the spec**, and repeats ruling 4's rows only where this plan narrows the spec
 | R4-1 | Credentials never leave the machine; the cloud never holds a portal password | ruling 4 | Tasks 2, 4, 10 — substitution is the only touch, and after Task 10 there is no column, no field and no code path for one. `the_relay_payload_carries_no_credential` is the successor to C2's `the_coursework_payload_carries_no_credential` and is written in Task 4. |
 | R4-8 | A short sequence inside one slot, driven by the device's scheduler; nothing fetches while the laptop is closed | ruling 4 | Task 4's budgets (40 steps, 24 round trips, 10 minutes) and Task 8's placement inside `coursework`, which is a slot step and nothing else. |
 | R4-15 | "Adding or repairing a portal is a cloud change with no release and no user action" | ruling 4 | **Narrowed, and the narrowing is the spec's (§6):** *repairing* a portal — the flow, the URLs, the order, the parser, the oracle, the reconcile — is a deploy. What still costs a release is **the allow-list row** and **the wizard panel that captures that source's login**. §3 argues the price and Task 1 records it in the module doc, so the next person to add a portal reads it before they discover it. |
-| R4-17 | The device keeps each source's jar between slots; re-authenticate only on expiry | ruling 4 | Task 3, **by recorded `Set-Cookie` replay** rather than `ureq`'s own serialisation. Two measured reasons, both in Task 3 step 1's test: `CookieJar::save_json` writes only *persistent* cookies and a CAS session cookie has no `Expires`/`Max-Age`; and `CookieJar::iter` exposes only `name` and `value`, losing the `Domain` attribute that makes one jar span `www.` and `m3a.vhlcentral.com`. Replaying the vendor's own bytes through `Cookie::parse(line, &uri)` + `jar.insert` puts RFC 6265's rules back where they were and needs no `json` feature. |
+| R4-17 | The device keeps each source's jar between slots; re-authenticate only on expiry | ruling 4 | Task 3, **by recorded `Set-Cookie` replay** rather than `ureq`'s own serialisation — and, since review **I11**, by a session report the cloud can actually decide on: per-cookie **expiry** with no name and no value (`{"cookies": {"count": N, "session_cookies": M, "earliest_expiry": <unix or null>}}`), with expired entries pruned on `load` and on `observe` so the count means something. A bare count could only ever be guessed at, and for VHL — where the session *is* the cookie and there is no capture at all — guessing means being served the login page again on every run, which works and costs a round trip and makes this row an overstatement. `null` is honest: the cloud then knows it must try and may be wrong. Two measured reasons, both in Task 3 step 1's test: `CookieJar::save_json` writes only *persistent* cookies and a CAS session cookie has no `Expires`/`Max-Age`; and `CookieJar::iter` exposes only `name` and `value`, losing the `Domain` attribute that makes one jar span `www.` and `m3a.vhlcentral.com`. Replaying the vendor's own bytes through `Cookie::parse(line, &uri)` + `jar.insert` puts RFC 6265's rules back where they were and needs no `json` feature. |
 | R4-19 | Raw pages: received for the run, parsed, not retained; the parsed rows persist; the policy says so | ruling 4; Q1 | Tasks 5, 11. Zero retention, and the policy sentence is Q6. |
 | R4-20 | `coursework-discover` becomes a relayed cloud job over the same contract | ruling 4 | Task 9, **plus three pre-vault flags** the wizard needs (`--cloud-base`, `--anon-key`, `--session-target`) because the wizard runs before the vault exists and so before `config/cloud.yaml` does. All three carry a public value or a target *name*, never a secret — exactly as `discovery_argv` already passes target names (`app/src/onboarding.rs:74`). |
-| R4-21 | The legal posture is unchanged: the request originates from the device, with the user's credentials, at the user's instruction; the vendor sees the student's IP and session | ruling 4; spec §8 | Nothing in this plan changes the wizard's one-sentence ToS disclosure except to add that Knowlu makes these requests **from the student's own PC on their instruction** — hand-off **H6**, one sentence in `app/static/index.html`'s coursework panel, applied at Task 9. |
+| R4-21 | The legal posture is unchanged: the request originates from the device, with the user's credentials, at the user's instruction; the vendor sees the student's IP and session | ruling 4; spec §8 | Task 9 and hand-off **H6** — **corrected by review I10**. The spec said the wizard's one-sentence ToS disclosure "stays", gaining a clause; the checkout has no such sentence. The coursework panel (`app/static/index.html:131-141`) carries a *credential-storage* lede and nothing about the vendor's terms, and no test pins one. So C5 is **writing** that disclosure, not extending one — which makes it legal copy, which puts it in front of Quinn and the lawyer with **Q6** rather than in a controller's hand-off note. H6 carries the whole sentence once Quinn has it; Task 9 pins both halves; the spec's §8 is corrected in the same round. |
 | Ruling 2 | Raw pages are the student's data | amendment ruling 2 | Task 5's `cursor` guard and Task 11's privacy sentence. The account's copy of the *vault* is C3′'s and is not touched. |
 | Ruling 3 | The engine refuses a slot without entitlement past the 72-hour grace | amendment ruling 3 | **Inherited from C3′ Task 8, not re-decided.** `coursework` is already behind `entitle::gate`, so a relay run cannot start without one; and `/relay` is `requireActiveEntitlement`-gated like every other function, so a 402 mid-run is `CloudError::fatal()` and ends the run with `no entitlement` and nothing changed. Task 8 step 6 asserts both halves. |
 | Ruling 5 | C5 is "the contract above, replacing the on-device fetchers", after C3′ and before C4 | amendment ruling 5 | The status block, and Task 10. C5 does not start before C3′ merges, and C5 does not touch `engine/src/runtime.rs` or `app/src/inference.rs`, which are C4's. |
@@ -302,14 +327,22 @@ to the spec**, and repeats ruling 4's rows only where this plan narrows the spec
 Five things a reader will look for and not find, each with its argument in the fidelity ledger or the
 spec:
 
-1. **`/ingest-coursework` is not retired and its handler is not rewritten.** The relay calls
-   `ingestHandler` **in process** and `done` is byte-identically the reply the device decodes today.
-   The endpoint stays public through C5 and is retired only when no shipped client posts to it — a
-   decision the spec explicitly leaves open (§11).
-2. **The parsers do not move again.** `parse_zybooks.ts` and `parse_vhl.ts` are C2's, are pinned
-   against the two frozen references, and are **read-only to this stream** except for one comment
-   correction in `parse_zybooks_test.ts` that Task 6 makes and hand-off **H7** carries (the BOM now
-   travels; the test's own comment says it never does).
+1. **`/ingest-coursework` is not retired and its behaviour does not change.** The endpoint stays
+   public through C5 and is retired only when no shipped client posts to it — a decision the spec
+   explicitly leaves open (§11). **What does change is where its per-source policy lives** (ruling
+   **R-C5-plan-2**): because the relay parses each body as it arrives rather than holding raw pages
+   across round trips, `pickZybooks`'s loop body, the VHL unmapped-section-to-proposal conversion
+   and the `{name}: ` prefixing are **extracted** out of `ingestHandler` into three exported
+   functions that `ingestHandler` then calls. Its reply is byte-identical and its own suite plus the
+   two frozen references are what prove it — an extraction, not a rewrite, and not a second copy.
+2. **The parsers do not move again.** `parse_zybooks.ts` and `parse_vhl.ts` are C2's and are pinned
+   against the two frozen references. Two edits, both named: the comment correction in
+   `parse_zybooks_test.ts` that Task 6 makes and hand-off **H7** carries (the BOM now travels; the
+   test's own comment says it never does), and `parse_vhl.ts` gaining an exported
+   `sectionMapping(sections, sectionId)` that `parseDashboard` itself calls (review **I8**), so
+   `vhlRows` and the parser share one predicate instead of two readings of "is this section
+   mapped" — the rule `vhl::section_mapping` (`engine/src/vhl.rs:300`) already stated and Task 10
+   deletes.
 3. **No `app/src/relay.rs`, no new Tauri command, no new settings row.** The app's only change is the
    session directory on one argv, the wizard's discovery argv, and one disclosure sentence. The
    command counts stay **43 / 30 (+3) / 62 distinct** and Task 12 re-states them without re-counting,
@@ -357,22 +390,32 @@ spec:
   with exactly the ruled hosts; every pattern is well-formed; the matcher accepts and rejects the
   named hosts; every `name` is a legal credential-target suffix; the wizard offers no source the
   table does not carry.
-- `engine/tests/relay_contract.rs` — the device end of the protocol over a loopback `/relay`: every
-  request shape it sends, every reply it tolerates, the budgets, and the data-minimisation
-  assertions (no credential, no cookie, no captured value, no app-data path, no vault path).
+**And no second integration test.** The device end of the protocol — every request shape it sends,
+every reply it tolerates, the budgets, the redirect chain, the capture redaction and the
+data-minimisation assertions (no credential, no cookie, no captured value, no app-data path, no
+vault path) — lives in `engine/src/relay.rs`'s own `#[cfg(test)] mod tests`, because those tests aim
+at a loopback portal and the row that permits one exists only under `cfg(test)` (review **C1**; spec
+§9). `coursework.rs:3095-3160` is the precedent, and it is in-module for the same reason.
 
 ### Modified — the device
 
 - `engine/src/coursework.rs` — `collect_cloud` calls `relay::run` instead of
   `zybooks::fetch_payloads`/`vhl::login_and_fetch_dashboard`; `discover_json` becomes a relayed job;
   `fetch_zybooks`, `fetch_vhl`, `collect`, `Fetcher`, `route_zybook`, `BookRouting`, `zybooks_rows`,
-  `vhl_rows` and `main_with_fetchers`'s fetcher seam are deleted (Task 10). **Stays:** `Assignment`,
-  `SourceError`, `sync_coursework`, `load_coursework_config`, `resolve_timezone`, `redact`,
-  `yaml_to_json_for_request`, `assignment_from_row`, `coursework_request`, `post_coursework`, the
-  map-card machinery, `FAILURE_MARKERS`, `rank_warnings`.
-- `engine/Cargo.toml`, `Cargo.lock` — the `windows` dependency gains **one feature**,
-  `Win32_Security_Cryptography`; the `ureq` `cookies` comment is rewritten to name `relay.rs`. No
-  crate is added and none is removed.
+  `vhl_rows` and `main_with_fetchers`'s fetcher seam are deleted (Task 10), **and so are
+  `coursework_request` (`:639`), `FetchedSource` (`:630`) and the POST half of `post_coursework`
+  (`:670`)** — review **I7**: after Task 8 nothing outside `#[cfg(test)]` calls them, and an item
+  reachable only from a test module is a `dead_code` warning under a plain `cargo build --workspace`,
+  which is the gate this stream must keep at zero. `post_coursework` is **split**: the POST wrapper
+  goes, and its reply decoder stays as `decode_coursework_reply`, which is what `collect_cloud` calls
+  on `done`. **Stays:** `Assignment`, `SourceError`, `sync_coursework`, `load_coursework_config`,
+  `resolve_timezone`, `redact`, `yaml_to_json_for_request`, `assignment_from_row`,
+  `decode_coursework_reply`, the map-card machinery, `FAILURE_MARKERS`, `rank_warnings`.
+- `engine/Cargo.toml` — the `windows` dependency gains **one feature**,
+  `Win32_Security_Cryptography` (its features are internal to that crate, so no package is added);
+  the `ureq` `cookies` comment is rewritten to name `relay.rs`. No crate is added and none is
+  removed, and **`Cargo.lock` is expected not to change at all** (review M12) — exit-gate item 12 is
+  where that is checked, not claimed.
 - `engine/src/lib.rs` — `pub mod relay;` added; `pub mod zybooks;` and `pub mod vhl;` removed
   (hand-off **H1**, two parts).
 - `engine/src/main.rs` — `coursework` gains `--session-dir`; `coursework-discover` gains
@@ -405,11 +448,12 @@ spec:
 
 ### Deleted
 
-- `engine/src/zybooks.rs` (1,254 lines, parser + network + 44 tests) — Task 10. Its **parser** left
+- `engine/src/zybooks.rs` (1,254 lines, parser + network + its own test module) — Task 10. Its **parser** left
   for `parse_zybooks.ts` in C2; its **network tests** are ported one-for-one into
   `plans/zybooks_test.ts` in Task 6 **before** this deletion, which is why Task 10 comes after Tasks
   6 and 7 and not before them.
-- `engine/src/vhl.rs` (1,275 lines, parser + network + 39 tests) — Task 10, same argument, with
+- `engine/src/vhl.rs` (1,275 lines, parser + network + its own test module) — Task 10, same
+  argument, with
   `parse_user_session_form`, `first_dashboard_link` and `discover_sections` ported into
   `plans/vhl.ts` in Task 7.
 
@@ -482,7 +526,7 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 `post` serialises through `ledger::dumps_value`, sends `Authorization: Bearer <access token>` and
 `apikey: <anon key>`, sets `http_status_as_error(false)` so a 401 and a 402 arrive as a **status and
 a body** rather than an opaque transport error, and scrubs the bearer out of every error string it
-produces (`cloudmodel.rs:251`, which calls `zybooks::scrub` today and calls `relay::scrub` after
+produces (`cloudmodel.rs:252`, which calls `zybooks::scrub` today and calls `relay::scrub` after
 Task 1). **C5 calls `post("/relay", …)` and nothing else.** `CloudError::fatal()` is true for 401,
 402 and 403 — the three answers that would answer every remaining round trip the same way — and that
 is what ends a run instead of retrying it.
@@ -494,7 +538,13 @@ round trip × 24 round trips is 48 minutes, which is past both the run budget an
 `scheduler::CHILD_TIMEOUT`. **The fix is not a second client and not a changed default**: `relay::run`
 enforces its own wall clock across the loop and stops at `RUN_WALL_CLOCK`, so a slow service costs a
 named warning at ten minutes rather than a killed child at twenty. `CloudClient` is not edited at
-all. Task 4 step 1 writes the test that pins this (`the_run_stops_at_its_own_wall_clock_not_the_scheduler_s`).
+all. **And a comparison of two constants is not that test** (review **C4**): `relay::run` carries a
+monotonic `deadline: Instant` set at `RUN_WALL_CLOCK` from the run's first instruction, checks it
+before every step, before every redirect hop and before every round trip, and hands
+`budget.remaining()` to each request as its timeout instead of a fixed 60 seconds — so
+`STEP_TIMEOUT` bounds a **whole step including its redirect chain**, not one HTTP request out of
+six. Task 4 step 1 writes the behavioural test that pins it: a scripted portal that stalls past the
+deadline ends the run as a `budget` warning at under ten minutes.
 
 **5. `cloud/supabase/functions/_shared/entitlement.ts`** — C1's, imported by `relay/index.ts` and
 called first:
@@ -535,24 +585,56 @@ and asserted in the same way.
 `fail(status, message)` (thrown at the call site), `methodNotAllowed(allowed)`,
 `readJson<T>(req, limit?)` (throws 413 over the cap, 400 for non-JSON), `asResponse(e)`. Every error
 body in this codebase is `{"error": "<one sentence>"}`. **`readJson`'s default cap is 1 MiB and C5
-raises it for `/relay` only**, to **10 MiB**, because a `results` batch carries up to eight response
-bodies of up to 2 MiB each — `readJson(req, 10 << 20)` at the one call site, with the reason beside
-it, and `a_results_batch_over_the_cap_is_a_413_not_a_500` pinning it.
+raises it for `/relay` only — to a number it derives rather than chooses** (review **I1**, which
+settles the plan's own second open decision). The derivation, written into the code beside the
+call: the device's whole-run raw budget is `MAX_RUN_BYTES` = 8 MiB, a non-UTF-8 body travels base64
+at 4/3, so one POST's worst case is about 10.7 MiB and the cap is **16 MiB** — `readJson(req, 16 <<
+20)`. **And the device gets a matching outgoing bound so a 413 is unreachable rather than merely
+unlikely**: `RunBudget` charges the serialised size of the `results` body it is about to post, and a
+step that would blow it is `too_large` on the device instead of a 413 from the service.
+`a_results_batch_over_the_cap_is_a_413_not_a_500` pins **the relationship** between the two numbers,
+not either one of them. One thing to say out loud because the next reader will assume otherwise:
+`readJson` does `await req.text()` **before** it measures, and measures `String.length` in UTF-16
+code units (`_shared/http.ts:48-52`) — so the cap is a sanity bound and **not** a memory guard.
 
-**8. `cloud/supabase/functions/ingest-coursework/handler.ts`** — C2's, called in process and **not
-edited**:
+**8. `cloud/supabase/functions/ingest-coursework/handler.ts`** — C2's, and **the one C2 file whose
+body C5 changes**, by extraction rather than rewrite (ruling **R-C5-plan-2**, from review **C3**).
+
+The relay cannot call `ingestHandler` with a whole request, because a coursework run's bodies arrive
+across several round trips and an edge function holds nothing between invocations — so the relay
+parses **each body as it arrives** and keeps only the parsed rows. That means the per-source policy
+layer has to be reachable a piece at a time. Three exports come out of `ingestHandler`'s body, and
+`ingestHandler` is rewritten in terms of them so there is one copy and not two:
 
 ```ts
+// unchanged, still the public endpoint, still byte-identical in and out
 export function ingestHandler(entitle: Entitle): (req: Request) => Promise<Response>;
-// body: { timezone, sources: [{name:"zybooks", config, books:[{code,payload}]}, {name:"vhl", config, html}] }
-// reply: { assignments, warnings, proposals }
+
+// NEW, extracted verbatim from `pickZybooks`'s loop body (handler.ts:78-110)
+export function ingestZybook(book: {code: string, payload: unknown}, cfg: Obj, timeZone: string,
+                            warnings: string[], proposals: MapProposal[]): Assignment[];
+// NEW, extracted verbatim from the VHL arm (handler.ts:133-163): parseDashboard, then the
+// VHL_UNMAPPED-to-proposal conversion with its `seenSections` de-duplication
+export function ingestVhl(html: string, cfg: Obj, warnings: string[],
+                         proposals: MapProposal[]): Assignment[];
+// NEW, extracted verbatim from the tail of the source loop (handler.ts:179-186): the `{name}: `
+// prefixing and the `0 assignments parsed; treating as failure` rule
+export function finishSource(name: string, items: Assignment[], own: string[],
+                            warnings: string[]): Assignment[];
 ```
 
-`Entitle` is `(req: Request) => Promise<{ account_id: string }>` (`_shared/judge_handler.ts`). The
-relay has **already** entitled the caller, so it passes an `entitle` that resolves to the account id
-it already holds — never a no-op that would resolve for anybody, and the difference is the point:
-`the_parse_handoff_passes_the_already_resolved_account_never_an_open_gate` (Task 5) asserts the
-closure returns the run's own `account_id` and is not `async () => ({account_id: ""})`.
+`Entitle` is `(req: Request) => Promise<{ account_id: string }>` (`_shared/judge_handler.ts`) and is
+still how the endpoint gates itself; the relay does not call the handler at all any more, so there
+is no closure to get wrong and `the_parse_handoff_passes_the_already_resolved_account_never_an_open_gate`
+is replaced by `the_relay_never_re_enters_the_public_endpoint` (Task 5), which asserts `handler.ts`
+under `relay/` imports the three named functions and **not** `ingestHandler`.
+
+**What keeps `done` byte-identical.** The three functions are moved code, not re-derived code;
+`ingestHandler`'s own suite (`ingest-coursework/handler_test.ts`) and the two frozen parsed
+references are unchanged and are the oracles; and the relay assembles `done` in the order the device
+used to send — `PORTAL_SOURCES` order (zyBooks, then VHL), and within zyBooks the shelf order the
+item list returned — so `assignments`, `warnings` and `proposals` come out in the same sequence a
+single `ingestHandler` call produced. Task 5 asserts that against the fixture's 24 assignments.
 
 **9. `app/src/scheduler.rs`'s slot, as C3′ leaves it.**
 
@@ -610,9 +692,10 @@ part is a separate commit and each is written out in full below.
 
 ### H1a — `engine/src/lib.rs`, the addition (applied at Task 1; **compile-blocking**)
 
-Beside the other module declarations, in alphabetical place (after `pub mod ranking;`, before
-`pub mod runs;` — read the file and place it where the surrounding order says, rather than where this
-text guesses):
+In the module-declaration block, **after `pub mod ranking;` (`engine/src/lib.rs:72`)**. The
+declarations are not alphabetical — `runs` is at `:62` and `ranking` at `:72` — so the first draft's
+"after `ranking`, before `runs`" named a position that does not exist (review **M3**), and a
+hand-off is applied verbatim:
 
 ```rust
 /// C5 (cloud design, amendment 2026-09-17, ruling 4): the credential-substituting HTTPS relay —
@@ -626,17 +709,17 @@ knowlu_engine::relay`, and `engine/tests/relay_allowlist.rs` cannot see the tabl
 
 ### H1b — `engine/src/lib.rs`, the removal (applied at Task 10)
 
-Delete these two declarations and their doc comments:
+Delete these two declarations and their doc comments. **Both are unconditional** —
+`engine/src/lib.rs:58-59` carries no `cfg` attribute on either, because both modules' parsers are
+platform-independent (review **M3**: the first draft's snippet showed a `#[cfg(windows)]` on `vhl`
+that is not there):
 
 ```rust
-#[cfg(windows)]
 pub mod vhl;
 pub mod zybooks;
 ```
 
-(Read the file for the exact attributes — `zybooks` is unconditional today because its parser is
-platform-independent; `vhl` likewise. Delete whatever is there, both lines and their comments, and
-nothing else.)
+Delete both lines and the doc comments directly above them, and nothing else.
 
 **Compile-blocking together with Task 10's own deletions**, and that is the one non-buildable
 intermediate state in this plan: `lib.rs` still declaring a file that no longer exists, or the files
@@ -665,7 +748,11 @@ and becomes:
     // vault is plain text and syncs to the account (ruling 2), and a cookie must not.
     steps.push((exe.to_path_buf(), vec![
         "coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
-        "--session-dir".into(), crate::scheduler::sessions_dir(&cs_data_dir).to_string_lossy().into_owned(),
+        // `sessions` is the new parameter, already resolved by the caller. The first draft wrote
+        // `sessions_dir(&cs_data_dir)` here, and `cs_data_dir` is a binding that exists nowhere in
+        // `slot_argv` — which has no `ConsoleState` at all (review I9). `sessions_dir(&cs.data_dir)`
+        // belongs at the single call site in `run_slot_inner`, which is where this hand-off puts it.
+        "--session-dir".into(), sessions.to_string_lossy().into_owned(),
     ]));
 ```
 
@@ -726,7 +813,7 @@ pub fn discovery_argv(id: &str, zybooks: bool, vhl: bool) -> Vec<String> {
 ```
 
 `account::api_base()` and `account::anon_key()` honour `KNOWLU_API_BASE` / `KNOWLU_ANON_KEY`
-(`app/src/account.rs:43`, `:47`), which is how a scratch profile is pointed at staging and is
+(`app/src/account.rs:42`, `:46`), which is how a scratch profile is pointed at staging and is
 therefore how the exit gate's live run reaches it. `PENDING_TARGET` is `"knowlu/pending/session"`
 (`app/src/account.rs:32`).
 
@@ -814,21 +901,34 @@ was read and not edited, and re-runs `rank_cannot_reach_a_judgment_endpoint`.
 
 ### H6 — `app/static/index.html`, the coursework panel's disclosure (applied at Task 9)
 
-The wizard's one-sentence ToS disclosure on the coursework panel gains a clause. Find the existing
-sentence (the one `app/tests/static_assets.rs` already pins — read the test for the literal it looks
-for) and append, inside the same element:
+**Corrected by review I10, and this correction changes who writes it.** The spec says the wizard's
+one-sentence disclosure of the ToS tension "stays", gaining a clause. **There is no such sentence in
+the checkout.** The coursework panel (`app/static/index.html:131-141`) carries one lede — *"Optional.
+Stored in Windows Credential Manager on this machine — never in the vault, never in a backup, and
+never sent to us."* — which is about where a credential is kept, not about using a portal login this
+way sitting against the vendor's terms; and no test pins a ToS literal
+(`the_logins_panel_maps_what_it_finds_to_a_course`, `app/tests/static_assets.rs:508-527`, pins the
+mapping block). Nothing in `app/static/` or `site/` contains "terms of service" or "on your behalf"
+for the portals.
+
+So C5 is **writing** this disclosure, not extending one — and a sentence about a vendor's terms is
+legal copy. **It therefore goes to Quinn and the lawyer with Q6 (Task 11 step 1), not appended by a
+controller**, and H6 lands only once Quinn has the words. The draft that goes with Q6, as a **new
+sentence** directly after the existing lede, inside the same element:
 
 ```html
- Knowlu makes these requests from your own PC, on your instruction, with the login you just saved — the site sees you, not us.
+<p class="note">Knowlu signs in to these sites the way you would: the request is made from your own PC, on your instruction, with the login you saved here, and the site sees your computer and your session rather than ours. Some schools' sites ask you not to use an automated tool on them; if yours does, that is between you and them, and you can leave a login blank and add the work by hand.</p>
 ```
 
-The sentence's existing half is not reworded, so the static test's finder still matches; Task 9 adds
-one assertion beside it for the new clause. **Nothing else on that panel changes**, and
-`no_network_reference_in_the_shipped_page` still holds because the clause carries no URL.
+Task 9 pins **both halves** — the existing lede and the new sentence — in
+`app/tests/static_assets.rs`, so neither can drift without the other. `no_network_reference_in_the_shipped_page`
+still holds: the sentence carries no URL.
 
-**Without it:** the disclosure still says what it says today, which is true but no longer complete —
-spec §8's *"the wizard's one-sentence disclosure stays, gaining that Knowlu makes these requests from
-the student's own PC on their instruction."*
+**Without it:** the panel says where the password is stored and nothing about what Knowlu does with
+it, and spec §8's claim that a disclosure "stays" stays false. **If Quinn rules that the existing
+lede is the disclosure**, H6 is withdrawn, Task 9 pins the lede alone, and the spec's §8 says so —
+which is a legitimate outcome and not a gap, as long as the document stops describing a sentence the
+repository does not have.
 
 ### H7 — `cloud/supabase/functions/ingest-coursework/parse_zybooks_test.ts`, the BOM comment (applied at Task 6)
 
@@ -1265,7 +1365,8 @@ pub fn check_host(source: &str, url: &str) -> Result<String, HostRefusal> {
   `relay.rs`, **byte for byte including their doc comments**, make all four `pub(crate)` except
   `scrub` which is `pub` (`cloudmodel.rs` calls it), and cut their four tests into `relay.rs`'s own
   `#[cfg(test)] mod tests` under the names they already have:
-  `scrub_replaces_the_raw_percent_encoded_and_json_escaped_forms` (`zybooks.rs:1075`),
+  `scrub_replaces_the_raw_percent_encoded_and_json_escaped_forms` (`zybooks.rs:1075`, **widened
+  below**),
   `quote_matches_python_urllib_quote_with_no_safe_characters` (`:1093`),
   `json_escape_matches_pythons_ensure_ascii_dumps` (`:1102`), and
   `urlencode_uses_quote_plus_exactly_as_urllib_does` (`vhl.rs:1247`, which becomes
@@ -1277,8 +1378,23 @@ pub fn check_host(source: &str, url: &str) -> Result<String, HostRefusal> {
   `json.dumps(ensure_ascii=True)`. Re-deriving them would be re-deriving a decision, and the tests
   that pin them are the reason nobody has to.
 
+  **The one change to `scrub`, and it is a security fix** (review **I2**). `zybooks.rs:434-451`
+  replaces each secret in **three** forms — raw, `quote` (percent-encoded), `json_escape_ascii` — and
+  the relay adds a **fourth**: `quote_plus`, which renders a space as `+` rather than `%20`. A portal
+  password containing a space, sent in the VHL CAS form POST, reaches a `ureq` transport error as
+  `hun+ter` and survives a three-form scrub untouched — and that string goes into `warnings`, into
+  the run record, into `state/runner-log.md` and into the Runs view. This is a pre-existing gap in
+  `vhl.rs`; C5 is where it stops being incidental and becomes a stated guarantee, because the module
+  doc this task writes claims "all three forms a secret can take". So: add `quote_plus(secret)` to
+  `scrub`'s form list as it moves, rename the doc's "three" to "four", rename the test to
+  `scrub_replaces_the_raw_percent_encoded_plus_encoded_and_json_escaped_forms`, and give it a fourth
+  case with a space-bearing secret. Task 4 adds the other half: a form-body transport failure whose
+  error text carries `hun+ter` and comes back `<redacted>`.
+
   Then, in `engine/src/zybooks.rs` and `engine/src/vhl.rs`, replace the removed definitions with
-  `use crate::relay::{quote, scrub};` / `use crate::relay::scrub;` so both files still compile — they
+  `use crate::relay::{quote, scrub};` and `use crate::relay::{quote_plus, scrub};` respectively —
+  **`quote_plus` too** (review **M4**): `vhl::urlencode` (`engine/src/vhl.rs:534-540`) calls it, and
+  an import of `scrub` alone leaves that file unable to compile. Both still compile because they
   are deleted in Task 10, and a branch that does not build between Task 1 and Task 10 would make
   every task in between untestable.
 
@@ -1490,11 +1606,19 @@ query today) and `engine/src/vhl.rs:534` (`urlencode`, which is what builds the 
     #[test]
     fn the_password_is_exposed_in_exactly_one_place() {
         // `Secret` has no Display, so printing one is a compile error; `expose()` is the one call
-        // that can defeat that, and this is the count that keeps it at one. If this fails, read the
-        // new call site before changing the number.
+        // that can defeat that, and this is the count that keeps it at one.
+        //
+        // **Counted over the pre-`cfg(test)` half only** (review I6). The first draft counted the
+        // whole file, which contains the real call site AND the `".expose()"` literal inside this
+        // very assertion — so it read 2 and failed on the day it was written, and the comment then
+        // invited the implementer to "change the number", which is how a pin gets defeated. The
+        // split is the shape `the_engine_holds_no_portal_url_and_no_login_flow` already uses.
         let src = include_str!("relay.rs");
-        assert_eq!(src.matches(".expose()").count(), 1,
-            "engine/src/relay.rs must reach a password in exactly one function (`substitute_one`)");
+        let code = src.split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(code.matches(".expose()").count(), 1,
+            "engine/src/relay.rs must reach a password in exactly ONE function (`substitute_one`). \
+             This number is a guarantee, not a tally: a second call site is a second place a \
+             password can be printed, and the fix is to route through the first one.");
     }
 ```
 
@@ -1754,14 +1878,14 @@ from.
         // (c) What the store does instead: replay the vendor's own bytes into a fresh jar, and RFC
         //     6265's rules — domain, path, expiry, overwrite — come back with them.
         let mut rec = SessionRecord::default();
-        rec.observe(line, origin);
+        rec.observe(line, origin, now());
         let fresh: ureq::Agent = ureq::Agent::config_builder().build().into();
         rec.replay_into(&fresh);
         let jar = fresh.cookie_jar_lock();
         assert!(jar.get(".vhlcentral.com", "/", "_vhl_session").is_some()
              || jar.get("vhlcentral.com", "/", "_vhl_session").is_some(),
             "the replayed cookie is scoped to the domain the vendor set, so the dashboard GET on \
-             m3a.vhlcentral.com presents it — vhl.rs:17-21's 'single most important line'");
+             m3a.vhlcentral.com presents it — vhl.rs:342-344's 'single most important line'");
     }
 ```
 
@@ -1770,7 +1894,7 @@ from.
     fn the_file_is_dpapi_sealed_and_holds_no_readable_cookie_or_token() {
         let dir = temp_dir("relay-session");
         let mut rec = SessionRecord::default();
-        rec.observe("_vhl_session=abc123; domain=.vhlcentral.com; path=/", "https://www.vhlcentral.com/");
+        rec.observe("_vhl_session=abc123; domain=.vhlcentral.com; path=/", "https://www.vhlcentral.com/", now());
         rec.remember("zybooks_token", "TOKENVALUE", 43_200, now());
         SessionStore::at(&dir).save("vhl", &rec).expect("sealed");
 
@@ -1779,7 +1903,7 @@ from.
         assert!(!as_text.contains("abc123"), "a cookie value is readable in the file");
         assert!(!as_text.contains("TOKENVALUE"), "a captured token is readable in the file");
 
-        let back = SessionStore::at(&dir).load("vhl").expect("unsealed");
+        let back = SessionStore::at(&dir).load("vhl", now()).expect("unsealed");
         assert_eq!(back.cookies.len(), 1);
         assert_eq!(back.captured("zybooks_token", now()), Some("TOKENVALUE".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1791,14 +1915,14 @@ from.
         let mut rec = SessionRecord::default();
         rec.remember("zybooks_token", "TOKENVALUE", 60, now());
         SessionStore::at(&dir).save("zybooks", &rec).expect("sealed");
-        let back = SessionStore::at(&dir).load("zybooks").expect("unsealed");
+        let back = SessionStore::at(&dir).load("zybooks", now()).expect("unsealed");
         assert_eq!(back.captured("zybooks_token", now() + std::time::Duration::from_secs(61)), None);
 
         // A file written by another Windows user, another machine, or a half-finished write: DPAPI
         // refuses it. That is a session this device does not have, which is a LOGIN, not a failure —
         // the alternative is a slot that stops because a cache went bad.
         std::fs::write(dir.join("zybooks.bin"), b"not a sealed blob").unwrap();
-        let back = SessionStore::at(&dir).load("zybooks").expect("an unreadable store is empty, never an error");
+        let back = SessionStore::at(&dir).load("zybooks", now()).expect("an unreadable store is empty, never an error");
         assert!(back.cookies.is_empty() && back.captures.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1810,19 +1934,39 @@ from.
         let mut rec = SessionRecord::default();
         rec.remember("zybooks_token", "TOKENVALUE", 43_200, now());
         store.save("zybooks", &rec).expect("a memory store always succeeds");
-        assert!(store.load("zybooks").unwrap().captures.is_empty(), "nothing persisted");
+        assert!(store.load("zybooks", now()).unwrap().captures.is_empty(), "nothing persisted");
     }
 
     #[test]
     fn the_report_the_cloud_sees_carries_names_and_expiries_and_no_values() {
         let mut rec = SessionRecord::default();
-        rec.observe("_vhl_session=abc123; domain=.vhlcentral.com", "https://www.vhlcentral.com/");
+        rec.observe("_vhl_session=abc123; domain=.vhlcentral.com", "https://www.vhlcentral.com/", now());
+        rec.observe("pref=x; domain=.vhlcentral.com; Max-Age=3600", "https://www.vhlcentral.com/", now());
         rec.remember("zybooks_token", "TOKENVALUE", 43_200, now());
         let json = crate::ledger::dumps_value(&rec.report(now()));
-        assert!(json.contains("\"cookies\": 1"), "{json}");
+        // Review I11: a count alone cannot support "re-authenticate only on expiry" for a portal
+        // whose session IS a cookie, so the report says how many are session cookies and when the
+        // earliest of the rest dies.
+        assert!(json.contains("\"count\": 2"), "{json}");
+        assert!(json.contains("\"session_cookies\": 1"), "{json}");
+        assert!(json.contains("\"earliest_expiry\": "), "{json}");
         assert!(json.contains("\"zybooks_token\""), "{json}");
         assert!(!json.contains("abc123") && !json.contains("TOKENVALUE"), "{json}");
-        assert!(!json.contains("_vhl_session"), "not even a cookie NAME travels: {json}");
+        assert!(!json.contains("_vhl_session") && !json.contains("vhlcentral"),
+            "not a cookie NAME and not a domain: {json}");
+    }
+
+    #[test]
+    fn an_expired_cookie_stops_being_counted_and_a_deleted_one_leaves() {
+        // The other half of I11: `observe` that only ever pushed made the count meaningless, and
+        // the count is what the cloud decides on.
+        let mut rec = SessionRecord::default();
+        rec.observe("a=1; domain=.vhlcentral.com; Max-Age=60", "https://www.vhlcentral.com/", now());
+        rec.observe("b=2; domain=.vhlcentral.com; Max-Age=60", "https://www.vhlcentral.com/", now());
+        rec.observe("b=; domain=.vhlcentral.com; Max-Age=0", "https://www.vhlcentral.com/", now());
+        assert_eq!(rec.report(now())["cookies"]["count"], 1, "Max-Age=0 is a deletion");
+        let later = now() + std::time::Duration::from_secs(61);
+        assert_eq!(rec.report(later)["cookies"]["count"], 0);
     }
 ```
 
@@ -1846,7 +1990,14 @@ pub struct SessionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ObservedCookie { pub line: String, pub origin: String }
+pub struct ObservedCookie {
+    pub line: String,
+    pub origin: String,
+    /// The cookie's own `Expires`/`Max-Age` as Unix seconds, or `None` for a **session** cookie
+    /// (which is what CAS sets). Parsed once, when the line is observed, through the same
+    /// `ureq::Cookie::parse` the replay uses — never re-derived by hand.
+    pub expires_at: Option<i64>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedValue { pub name: String, pub value: String, pub expires_at: i64 }
@@ -1862,7 +2013,11 @@ impl SessionRecord {
     /// `Cookie::parse(line, &origin)` + `jar.insert` puts RFC 6265's rules — expiry, host-only vs
     /// domain, path, overwrite, `Max-Age=0` deletion — back where they were, and needs no `json`
     /// feature.
-    pub fn observe(&mut self, line: &str, origin: &str) { /* … push, bounded at MAX_COOKIES */ }
+    /// Pushes, **replacing** any entry this line supersedes by (name, domain, path) and **dropping**
+    /// one the vendor deleted with `Max-Age=0`, and prunes anything already expired at `now`
+    /// (review **I11**). A list that only ever grows makes the count in [`report`] meaningless,
+    /// and the count is what the cloud decides on. Bounded at `MAX_COOKIES`.
+    pub fn observe(&mut self, line: &str, origin: &str, now: Timestamp) { /* … */ }
 
     pub fn remember(&mut self, name: &str, value: &str, ttl_s: u64, now: Timestamp) { /* … */ }
 
@@ -1870,14 +2025,37 @@ impl SessionRecord {
 
     /// Replay into a fresh agent's jar. A line the vendor's own server wrote and this parser cannot
     /// read is skipped, not fatal: one bad cookie is a re-login, not a dead slot.
-    pub fn replay_into(&self, agent: &ureq::Agent) { /* … Cookie::parse + jar.insert … */ }
+    ///
+    /// **`Cookie::parse` takes an owned string here** (review **M8**): in ureq 3.4.0 it is
+    /// `parse<S: Into<Cow<'a, str>>>(...) -> Cookie<'a>` and `CookieJar::insert` wants
+    /// `Cookie<'static>` (`cookies.rs:63`, `:123`), so a `&String` borrowed out of `&self` yields a
+    /// borrowed cookie that will not insert. `rec.line.clone()`, not `&rec.line`. The test above
+    /// happens to pass a `&'static str` literal and therefore compiles either way, which is exactly
+    /// how this would be discovered late.
+    pub fn replay_into(&self, agent: &ureq::Agent) { /* … Cookie::parse(rec.line.clone(), &uri) … */ }
 
-    /// **Names and expiries only, never values** (spec §2.1). This is what lets the cloud skip a
-    /// plan's login steps while a session is still good — and it is the whole of what the cloud
-    /// learns about a session.
+    /// **Expiries only — capture names, and for cookies not even that** (spec §2.1). This is what
+    /// lets the cloud skip a plan's login steps while a session is still good, and it is the whole
+    /// of what the cloud learns about a session.
+    ///
+    /// **Why a bare count is not enough** (review **I11**). For zyBooks the captured token carries
+    /// its own `expires_at` and the cloud can decide. For VHL there is no capture at all — the
+    /// session *is* the cookie — so a count was the only input, and a count that never falls (an
+    /// `observe` that only pushes) cannot say whether a session is alive. So: how many cookies, how
+    /// many of them are **session** cookies with no expiry at all, and the **earliest** expiry among
+    /// the rest. No name, no value, no domain. `earliest_expiry: null` with `session_cookies > 0` is
+    /// the honest answer "this may be alive and may not" — the cloud then composes the login steps
+    /// and is right or is served the login page again, which is the same cost it pays today.
+    /// Exit-gate 15(c) is what turns that into a measured number.
     pub fn report(&self, now: Timestamp) -> serde_json::Value {
+        let live: Vec<&ObservedCookie> =
+            self.cookies.iter().filter(|c| c.expires_at.is_none_or(|e| e > now.as_second())).collect();
         serde_json::json!({
-            "cookies": self.cookies.len(),
+            "cookies": {
+                "count": live.len(),
+                "session_cookies": live.iter().filter(|c| c.expires_at.is_none()).count(),
+                "earliest_expiry": live.iter().filter_map(|c| c.expires_at).min(),
+            },
             "captures": self.captures.iter().filter(|c| c.expires_at > now.as_second())
                 .map(|c| serde_json::json!({"name": c.name, "expires_at": c.expires_at}))
                 .collect::<Vec<_>>(),
@@ -1901,7 +2079,9 @@ impl SessionStore {
 
     /// `None` is never an error: a store that cannot be read is a session this device does not have,
     /// which is a login.
-    pub fn load(&self, source: &str) -> Option<SessionRecord> { /* … */ }
+    /// Prunes expired cookies and expired captures on the way out (review **I11**), so a record
+    /// read from disk reports the same thing a record built this run would.
+    pub fn load(&self, source: &str, now: Timestamp) -> Option<SessionRecord> { /* … */ }
     pub fn save(&self, source: &str, record: &SessionRecord) -> Result<(), String> { /* … */ }
 }
 
@@ -1941,13 +2121,15 @@ fn seal(plain: &[u8]) -> Result<Vec<u8>, String> {
 Run: `cargo test -p knowlu-engine relay::`, then `cargo test --workspace`.
 
 ```bash
-git add engine/src/relay.rs engine/Cargo.toml Cargo.lock
+git add engine/src/relay.rs engine/Cargo.toml
 git commit -F .git-commit-msg.txt   # "feat(engine): the relay's DPAPI-sealed per-source session store (C5 Task 3)"
 ```
 
   `engine/Cargo.toml`'s only change is the `windows` feature list, which gains
-  `"Win32_Security_Cryptography"`. **No crate is added**, and `dependency_boundary.rs` is re-run in
-  this step's `cargo test --workspace` to prove it.
+  `"Win32_Security_Cryptography"`. **No crate is added, and `Cargo.lock` is expected not to move at
+  all** (review M12 — that crate's features are internal), so it is **not** in the `git add`; if
+  `git status` shows it dirty, stop and say why before staging a shared-single-owner file.
+  `dependency_boundary.rs` is re-run in this step's `cargo test --workspace` to prove the first half.
 
 ---
 
@@ -1963,18 +2145,34 @@ git commit -F .git-commit-msg.txt   # "feat(engine): the relay's DPAPI-sealed pe
   killed child and an amber one. Confirm 10?* Record the answer; the plan is built to 10, and the
   test that compares the two refuses anything at or above 20.
 
-- [ ] **Step 2: Write the failing tests** — `engine/tests/relay_contract.rs`, new. The loopback
-  harness is `engine/tests/cloud_contract.rs`'s, copied verbatim (a second harness would be a second
-  thing to keep true), with a second listener standing in for the portal. Both threads are joined.
+- [ ] **Step 2: Write the failing tests** — appended to **`engine/src/relay.rs`'s own
+  `#[cfg(test)] mod tests`**, not to a file under `engine/tests/`. **This is review C1 and it is not
+  a preference.** Cargo compiles the library **without** `cfg(test)` for an integration test, so a
+  portal suite in `engine/tests/relay_contract.rs` would see exactly what `relay_allowlist.rs`
+  asserts it sees — `check_host("loopback", …) == Err(UnknownSource)` — and every test below would
+  fail with `unknown_source`. Spec §9's first bullet says in-module and cites
+  `coursework.rs:3095-3160` as the precedent; the first draft of this plan moved away from it and
+  contradicted itself in the file's own module doc. **There is no `engine/tests/relay_contract.rs`
+  in this plan**, and `Captures::get_for_test` goes with it: a `pub` accessor on a struct holding
+  captured bearer tokens is a door that should not exist, and an in-module test needs no accessor at
+  all.
+
+  The loopback harness is `engine/tests/cloud_contract.rs:15-60`'s, copied into the module verbatim
+  (a second harness would be a second thing to keep true) — exactly as `coursework.rs:3095-3160`
+  already copies it for `post_coursework` — with a second listener standing in for the portal. Both
+  threads are joined.
 
 ```rust
-//! The device end of the relay protocol, over two real loopback sockets: one standing in for
-//! `POST /relay`, one standing in for a portal. No DNS, no route off the machine; both listener
-//! threads are joined before each test returns.
-//!
-//! The portal side is reachable only because `relay.rs` carries a `#[cfg(test)]` row
-//! `{name: "loopback", hosts: &["127.0.0.1"]}` — and `engine/tests/relay_allowlist.rs`, which links
-//! the same library WITHOUT `cfg(test)`, is what proves that row does not exist in a real build.
+    //! (module-doc comment at the top of `mod tests`)
+    //! The device end of the relay protocol, over two real loopback sockets: one standing in for
+    //! `POST /relay`, one standing in for a portal. No DNS, no route off the machine; both listener
+    //! threads are joined before each test returns.
+    //!
+    //! The portal side is reachable because this module carries a `#[cfg(test)]` row
+    //! `{name: "loopback", hosts: &["127.0.0.1"]}` — which is why these tests are HERE and not in
+    //! `engine/tests/`: an integration test links this library without `cfg(test)` and would not
+    //! see the row. `engine/tests/relay_allowlist.rs` is that integration test, and it asserts the
+    //! row's absence from a real build.
 
 #[test]
 fn a_redirect_chain_is_followed_by_the_device_and_every_hop_is_checked() {
@@ -2041,7 +2239,9 @@ fn a_captured_value_is_kept_here_and_redacted_out_of_the_body_the_cloud_sees() {
     assert!(!r.body.as_deref().unwrap().contains("TOKENVALUE"));
     assert!(r.body.as_deref().unwrap().contains("<captured:tok>"));
     assert!(r.body.as_deref().unwrap().contains("\"user_id\": 7"));
-    assert_eq!(captures.get_for_test("loopback", "tok"), Some("TOKENVALUE"));
+    // In-module (review C1), so this reads `Captures`'s private accessor directly and no `pub`
+    // test door exists on a struct that holds captured bearer tokens.
+    assert_eq!(captures.get("loopback", "tok"), Some("TOKENVALUE"));
 }
 
 #[test]
@@ -2056,17 +2256,49 @@ fn the_relay_payload_carries_no_credential() {
 }
 
 #[test]
-fn the_run_stops_at_its_own_wall_clock_not_the_scheduler_s() {
+fn the_budget_constants_are_the_specs_nine_rows() {
+    // A pin on the numbers, and nothing more than that — which is why the test below exists.
     assert!(RUN_WALL_CLOCK < std::time::Duration::from_secs(20 * 60),
         "the relay must never be what the scheduler kills (app/src/scheduler.rs:27)");
     assert_eq!(RUN_WALL_CLOCK, std::time::Duration::from_secs(10 * 60));
     assert_eq!(STEP_TIMEOUT, std::time::Duration::from_secs(60), "zybooks.rs:402 and vhl.rs:353");
     assert_eq!((MAX_STEPS, MAX_BATCH, MAX_ROUND_TRIPS, MAX_REDIRECTS, MAX_BYTES, MAX_RUN_BYTES),
                (40, 8, 24, 5, 2 << 20, 8 << 20));
+    assert_eq!(MAX_POST_BYTES, (MAX_RUN_BYTES * 4) / 3 + (1 << 20),
+        "the outgoing bound is DERIVED from the run's raw budget and base64's 4/3 (review I1), \
+         and the server's readJson cap is the same number — so a 413 is unreachable, not unlikely");
+}
+
+#[test]
+fn a_stalled_portal_ends_the_run_at_the_deadline_and_never_at_the_scheduler_s() {
+    // Review C4: the constants test above proves nothing about BEHAVIOUR, and exit-gate item 6
+    // states the property as though it did. This is the property.
+    //
+    // The budget is constructed with a deadline a few milliseconds out (`RunBudget::at` is the
+    // test-only constructor that takes one), the portal accepts and never answers, and the run must
+    // come back on its own rather than on ureq's per-request timeout — which is what would have
+    // taken 6 x 60 s per step, 8 steps to a batch.
+    let portal = portal_that_accepts_and_stalls();
+    let started = std::time::Instant::now();
+    let out = run_with_deadline(std::time::Duration::from_millis(250), &portal);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(out.done.is_none(), "a run that ran out of time writes nothing");
+    assert!(out.warnings.iter().any(|w| w.contains("fetch failed") && w.contains("ran out of time")),
+        "{:?}", out.warnings);
+}
+
+#[test]
+fn a_redirect_chain_cannot_outlive_the_step_or_the_run() {
+    // The same property one level down: five hops that each stall must not cost five timeouts.
+    let portal = portal_that_redirects_and_stalls(5);
+    let started = std::time::Instant::now();
+    let r = perform_one_with_deadline(std::time::Duration::from_millis(250), &portal);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    assert_eq!(r.error.unwrap().code, "budget");
 }
 ```
 
-- [ ] **Step 3: Write the protocol tests** — appended to `relay_contract.rs`: the loop, not the step.
+- [ ] **Step 3: Write the protocol tests** — appended to the same `mod tests`: the loop, not the step.
 
 ```rust
 #[test]
@@ -2121,22 +2353,38 @@ fn every_service_failure_shape_is_a_named_line_and_nothing_changed() {
 }
 
 #[test]
-fn a_run_that_blows_a_budget_ends_as_a_warning_never_a_failure() {
-    for (replies, marker) in [(twenty_five_round_trips(), "too many round trips"),
-                              (nine_steps_in_one_batch(), "batch too large"),
-                              (bodies_totalling_nine_mib(), "too much data")] {
+fn a_run_that_blows_a_budget_ends_as_a_warning_that_sorts_to_the_top_of_the_run_log() {
+    // Review I14. Only ONE warning reaches `state/runner-log.md` — the rest collapse into `(+N
+    // more)` — and which one wins is `rank_warnings`, which sorts by `FAILURE_MARKERS`
+    // (coursework.rs:1437). The first draft's phrasings ("too many round trips", "batch too large",
+    // "too much data") contain none of the seven markers, so a blown budget would sort BELOW a
+    // benign "uncategorised; using default importance" and the only durable diagnostic under Task
+    // Scheduler would hide it — the exact failure `rank_warnings`'s own doc comment exists to
+    // prevent. So every budget warning is phrased with an existing marker and NO marker is added,
+    // which also leaves `assert_eq!(FAILURE_MARKERS.len(), 7)` (coursework.rs:2671) alone.
+    let cases = [
+        (twenty_five_round_trips(), "coursework: fetch failed (the run hit its round-trip budget); nothing changed"),
+        (nine_steps_in_one_batch(),  "coursework: fetch failed (the service sent more steps than a batch allows); nothing changed"),
+        (bodies_totalling_nine_mib(), "coursework: fetch failed (the run hit its data budget); nothing changed"),
+        (forty_one_steps(),          "coursework: fetch failed (the run hit its step budget); nothing changed"),
+    ];
+    for (replies, expected) in cases {
         let out = run_with_replies(replies);
-        assert!(out.warnings.iter().any(|w| w.contains(marker)), "{marker}: {:?}", out.warnings);
+        assert!(out.warnings.contains(&expected.to_string()), "{expected}: {:?}", out.warnings);
         assert!(out.done.is_none(), "a blown budget writes nothing");
+        // And it wins the one line that survives.
+        let mut mixed = vec!["zybooks: uncategorised; using default importance".to_string()];
+        mixed.extend(out.warnings.clone());
+        assert_eq!(crate::coursework::rank_warnings(&mixed)[0], expected);
     }
 }
 ```
 
 - [ ] **Step 4: Run them and watch them fail.**
 
-Run: `cargo test -p knowlu-engine --test relay_contract`
+Run: `cargo test -p knowlu-engine relay::tests`
 Expected: FAIL to compile — `cannot find function perform`, `cannot find function run`, `cannot find
-value RUN_WALL_CLOCK`.
+value RUN_WALL_CLOCK`, `cannot find type RunBudget`, `cannot find type SourceContext`.
 
 - [ ] **Step 5: Write the executor.**
 
@@ -2149,8 +2397,63 @@ pub const MAX_ROUND_TRIPS: usize = 24;      // 40 steps / a small batch, plus th
 pub const MAX_REDIRECTS: usize = 5;         // CAS uses two; ten (ureq's default) is a loop
 pub const MAX_BYTES: u64 = 2 << 20;         // ~38x the largest payload measured (zyBooks 54,874 B; VHL 7,495 B)
 pub const MAX_RUN_BYTES: u64 = 8 << 20;
-pub const STEP_TIMEOUT: Duration = Duration::from_secs(60);       // zybooks.rs:402, vhl.rs:353
-pub const RUN_WALL_CLOCK: Duration = Duration::from_secs(10 * 60); // half of scheduler::CHILD_TIMEOUT
+/// A bound on a WHOLE STEP, redirect chain included — not on one HTTP request (review C4). Today's
+/// `timeout_global` (zybooks.rs:402, vhl.rs:353) was per request because the device made one.
+pub const STEP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Half of `scheduler::CHILD_TIMEOUT` (app/src/scheduler.rs:27, 20 minutes), and ENFORCED as a
+/// monotonic deadline rather than compared to it in a test.
+pub const RUN_WALL_CLOCK: Duration = Duration::from_secs(10 * 60);
+/// What the device may put on the wire in one `results` POST, derived from `MAX_RUN_BYTES` and the
+/// base64 expansion (4/3) so the server's `readJson(req, 16 << 20)` cap is unreachable rather than
+/// merely unlikely (review I1). A step that would blow it is `too_large` HERE, not a 413 there.
+pub const MAX_POST_BYTES: u64 = 16 << 20;
+
+/// Everything a run may spend, and the only thing that can end one early.
+///
+/// **The deadline is monotonic and is consulted, not compared** (review C4). The first draft ended
+/// the loop "on `RUN_WALL_CLOCK`" between round trips while `STEP_TIMEOUT` sat on the agent as
+/// `timeout_global` — which bounds ONE request, and the device issues up to `MAX_REDIRECTS + 1 = 6`
+/// per step because it follows the chain itself. One step could take six minutes, a batch of eight
+/// forty-eight, and the deadline was not consulted once inside it: the relay could be exactly what
+/// `scheduler::CHILD_TIMEOUT` killed, which is the outcome this whole budget exists to prevent.
+pub struct RunBudget {
+    /// `Instant::now() + RUN_WALL_CLOCK`, taken once at the run's first instruction.
+    deadline: std::time::Instant,
+    steps_used: usize,
+    round_trips: usize,
+    bytes_used: u64,
+}
+
+impl RunBudget {
+    pub fn new() -> RunBudget { /* … */ }
+    /// What is left, as a `Duration`. Handed to each request as ITS timeout — so a request can
+    /// never outlive the run — clamped at `STEP_TIMEOUT` so one step cannot eat the whole run.
+    pub fn remaining(&self) -> Duration { /* … */ }
+    /// `Err("budget")` when the deadline has passed. Called before every step, before every
+    /// redirect hop and before every round trip.
+    pub fn check_deadline(&self) -> Result<(), StepError> { /* … */ }
+    pub fn charge_step(&mut self) -> Result<(), StepError> { /* … MAX_STEPS */ }
+    pub fn charge_round_trip(&mut self) -> Result<(), StepError> { /* … MAX_ROUND_TRIPS */ }
+    pub fn charge_bytes(&mut self, n: u64) -> Result<(), StepError> { /* … MAX_RUN_BYTES */ }
+    /// The outgoing half of review I1: the serialised `results` body is measured before it is
+    /// posted, and a batch that would exceed `MAX_POST_BYTES` is trimmed to the results that fit
+    /// with the rest reported as `too_large`.
+    pub fn check_post(&self, serialised: usize) -> Result<(), StepError> { /* … */ }
+}
+
+/// One source, as the device describes it to the cloud on a run's first call. Built by
+/// `collect_cloud` (Task 8) and by `discover_json` (Task 9); consumed by [`run`].
+pub struct SourceContext {
+    pub name: String,
+    /// From `PORTAL_SOURCES`, so the cloud composes only for hosts this build would accept.
+    pub hosts: &'static [&'static str],
+    /// `yaml_to_json_for_request(&redact(&cfg, name))` — `credential_target` never travels.
+    pub config: serde_json::Value,
+    /// Whether Credential Manager holds one, so a plan can skip a source it could not fill.
+    pub has_credential: bool,
+    /// `SessionRecord::report(now)` — counts and expiries, no names and no values.
+    pub session: serde_json::Value,
+}
 
 /// One agent per source per run — and therefore **one cookie jar per source per run**.
 ///
@@ -2162,9 +2465,11 @@ pub const RUN_WALL_CLOCK: Duration = Duration::from_secs(10 * 60); // half of sc
 /// `max_redirects(0)` and `max_redirects_will_error(false)`: the device follows the chain itself, so
 /// every hop passes through [`check_host`] and every hop's `Set-Cookie` is seen. ureq's own follower
 /// would do neither — and CAS sets a cookie on a 302.
+/// **No `timeout_global` on the agent** (review C4): a fixed 60 seconds here would bound one HTTP
+/// request out of the six a redirect chain can issue. `perform` sets the timeout per request from
+/// `budget.remaining()` clamped at `STEP_TIMEOUT`, so a step and a run are each bounded once.
 fn agent_for_source(record: &SessionRecord) -> ureq::Agent {
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(STEP_TIMEOUT))
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
@@ -2186,32 +2491,66 @@ pub fn perform(
 
   `perform`'s body, in order, with each line's reason:
 
-  1. `check_host(&step.source, &step.url)` → `host_not_allowed` / `unknown_source`. **Before the
+  1. `budget.check_deadline()` → `budget`. **First**, so a run that is already out of time does not
+     open one more socket (review C4).
+  2. `check_host(&step.source, &step.url)` → `host_not_allowed` / `unknown_source`. **Before the
      credential is read.**
-  2. `fill(step, secrets, captures)` → `bad_step` / `no_credential`.
-  3. `budget.charge_step()` → `budget` when `MAX_STEPS` is spent.
-  4. Send with `agent`, `GET` or `POST`, `Content-Type` from `Filled::content_type` unless the plan
-     set one. On `Err`, `transport` with `scrub(&e.to_string(), &filled.secrets)` — and `scrub`
-     already replaces the raw, percent-encoded and JSON-escaped forms of every secret, which is the
-     three ways one reaches a third party's error text.
-  5. For each `Set-Cookie` in the response, `record.observe(line, &current_url)` — **on every hop**.
-  6. If `3xx` and `follow_redirects` and hops `< MAX_REDIRECTS`: resolve `Location` against the
-     current URL, `check_host` it, push `{status, location}` onto `redirects`, and loop. Past the cap,
-     `transport` naming the hop cap. (`Location` is resolved with `ureq::http::Uri`'s own parts, not
-     string concatenation: a relative `Location` is the common case and `/next` on
-     `m3a.vhlcentral.com` must not become a host change.)
-  7. `body_mut().with_config().limit(step.max_bytes.min(MAX_BYTES) + 1).read_to_vec()`. A read that
+  3. `fill(step, secrets, captures)` → `bad_step` / `no_credential`.
+  3a. **`check_host(&step.source, &filled.url)` again, and assert the two agree** (review **I4**).
+     The URL that was checked must be the URL that is sent. Today the gap is probably not
+     exploitable — a placeholder does not parse as an `http::Uri` authority and `Slot::Url`
+     percent-encodes the delimiters — but "probably not exploitable" is not the standard this module
+     is held to, and neither property was tested. Two cases in step 2: a placeholder in the
+     authority is refused, and a substituted value cannot change the host.
+  4. `budget.charge_step()` → `budget` when `MAX_STEPS` is spent.
+  5. Send with `agent`, `GET` or `POST`, `Content-Type` from `Filled::content_type` unless the plan
+     set one, and **`.config().timeout_global(Some(budget.remaining()))` per request** — not a fixed
+     `STEP_TIMEOUT`, so no request can outlive the run (review C4). On `Err`, `transport` with
+     `scrub(&e.to_string(), &filled.secrets)` — and `scrub` replaces the raw, percent-encoded,
+     **plus-encoded** and JSON-escaped forms of every secret, which is the four ways one reaches a
+     third party's error text (review I2).
+  6. For each `Set-Cookie` in the response, `record.observe(line, &current_url, now)` — **on every
+     hop**.
+  7. If `3xx` and `follow_redirects` and hops `< MAX_REDIRECTS`: `budget.check_deadline()`, resolve
+     `Location` against the current URL, `check_host` it, push `{status, location}` onto `redirects`,
+     and loop; and the whole chain is bounded by `STEP_TIMEOUT` as well as by the run's deadline.
+     Past the hop cap, `transport` naming it. **The resolution rule, stated because there is no
+     library for it** (review **M9**: `http::Uri` has no relative-resolution API and the `url` crate
+     is forbidden by this stream's own dependency test): an **absolute** `Location` is used as-is; a
+     **root-relative** one (`/next`) is a path-and-query swap on the current `Uri`'s scheme and
+     authority; **anything else** — `next`, `../next`, an empty `Location` — is `transport` naming
+     "an unresolvable redirect", and is tested. A refusal here is safe: every hop is re-checked
+     anyway, so the risk of guessing would be a wrong fetch, not a wrong host.
+  8. `body_mut().with_config().limit(step.max_bytes.min(MAX_BYTES) + 1).read_to_vec()`. A read that
      errors with ureq's `BodyExceedsLimit` becomes `too_large` **with no body at all** — over the cap
      is a refusal, not a truncation.
-  8. `budget.charge_bytes(n)` → `budget` past `MAX_RUN_BYTES`.
-  9. Captures: for each `Capture` with `from == "json"`, parse the body as JSON (a body that is not
-     JSON simply captures nothing — it is the plan's error, reported as the step succeeding with an
-     empty `captured`, because the plan is what will notice), `pointer()` it, store it in `captures`
-     under this step's source, and — when `persist` — `record.remember(name, value, ttl_s, now)`.
-  10. Shaping: drop **every** `Set-Cookie` from `headers` (C5-D6) and lower-case the header names
-      that remain; replace each `redact: true` captured value in the body text with
-      `<captured:<name>>`; decode the bytes as UTF-8 — **BOM kept** — into `body`, or, when they are
-      not valid UTF-8, into `body_b64`.
+  9. `budget.charge_bytes(n)` → `budget` past `MAX_RUN_BYTES`.
+  10. Captures: for each `Capture` with `from == "json"`, parse the body as JSON (a body that is not
+      JSON simply captures nothing — it is the plan's error, reported as the step succeeding with an
+      empty `captured`, because the plan is what will notice), `pointer()` it, store it in `captures`
+      under this step's source, and — when `persist` — `record.remember(name, value, ttl_s, now)`.
+  11. Shaping, in this order:
+      - drop **every** `Set-Cookie` from `headers` (C5-D6) and lower-case the header names that
+        remain;
+      - **redact at the pointer, not by text replace** (review **I5**). The captured value came from
+        a JSON pointer into the *parsed* body, so its textual form in the raw bytes may differ — a
+        token containing a slash, a quote or a non-ASCII character is escaped on the wire and a text
+        replace misses it, letting the token travel while `captured: […]` claims it did not; and a
+        short value (a numeric id) matches elsewhere and corrupts what the parser reads. `Capture.from`
+        is a closed set of one, so the body is already known to be JSON: replace the value **in the
+        parsed `serde_json::Value`** and re-serialise through `ledger::dumps_value`. **Re-serialise
+        only when at least one `redact: true` capture actually fired** — otherwise the bytes pass
+        through untouched, which is what keeps the BOM test true. One test with a token carrying a
+        character the serialiser escapes.
+      - **`scrub(&body, &filled.secrets)`** (review **I3**). Nothing scrubbed the body the device
+        returns, and there is a concrete case: VHL's rejected login **serves the login page again**
+        (`vhl.rs:1077`), and a re-served form commonly carries the submitted username back in a
+        `value=` attribute — so a credential half travels to our servers verbatim. `Filled::secrets`
+        exists for exactly this. It breaks byte-for-byte fidelity only when a secret is literally
+        present in the page, which is precisely when breaking it is right; spec §2.4 says so. One
+        test with a portal that echoes the posted form.
+      - decode the bytes as UTF-8 — **BOM kept** — into `body`, or, when they are not valid UTF-8,
+        into `body_b64`.
 
 ```rust
 /// The reply the cloud sees. Spec §2.4's shape, and nothing that is not in it.
@@ -2271,11 +2610,10 @@ pub fn run(
 
 - [ ] **Step 6: Run, then commit.**
 
-Run: `cargo test -p knowlu-engine --test relay_contract --test relay_allowlist`, then
-`cargo test --workspace`.
+Run: `cargo test -p knowlu-engine relay:: --test relay_allowlist`, then `cargo test --workspace`.
 
 ```bash
-git add engine/src/relay.rs engine/tests/relay_contract.rs
+git add engine/src/relay.rs
 git commit -F .git-commit-msg.txt   # "feat(engine): the relay executor, its redirect chain and its budgets (C5 Task 4)"
 ```
 
@@ -2367,9 +2705,23 @@ Expected: FAIL — `C5 owns exactly one migration, stamped 20260918`.
 create table public.relay_runs (
   id uuid primary key default gen_random_uuid(),
   account_id uuid not null references public.accounts (id) on delete cascade,
+  -- The JOB, not a source: one run drives every source the device offered (ruling R-C5-plan-3),
+  -- so 'coursework' and 'coursework-discover' are the only two values there are.
   plan text not null,
-  plan_version int not null,
+  -- A stable COMPOSITE of the per-source module versions (`zybooks@1+vhl@1`), so a deploy that
+  -- changes either module mid-run still fires the 409 the device answers by starting over.
+  plan_version text not null,
+  -- Per source: `{"zybooks": {...}, "vhl": {...}}`. Indices, zybook codes, the scraped form
+  -- fields, the dashboard link, and each source's own `stage`/`failed`/`reauthed` flags.
   cursor jsonb not null default '{}'::jsonb,
+  -- The PARSED rows, and the whole of ruling R-C5-plan-2. An edge function holds nothing between
+  -- invocations and a coursework run spans several round trips, so the rows a body parsed into
+  -- have to live somewhere; raw pages may not (ruling 2, R4-19, Q1) and parsed rows may. This is
+  -- that somewhere: `{"assignments": [...], "warnings": [...], "proposals": [...]}`, appended to
+  -- as each body arrives and deleted with the row at `done`. A twelve-book shelf is about 200 rows
+  -- and a few hundred KB of jsonb, which is why a shelf is not capped and a thirteenth book is not
+  -- a product limit. `parsed_holds_only_parsed_rows` in handler_test.ts is what keeps a page out.
+  parsed jsonb not null default '{"assignments": [], "warnings": [], "proposals": []}'::jsonb,
   seq int not null default 0,
   steps_used int not null default 0,
   round_trips int not null default 0,
@@ -2448,72 +2800,134 @@ export const MAX_STEPS = 40, MAX_BATCH = 8, MAX_ROUND_TRIPS = 24, RUN_TTL_MINUTE
 ```
 
   **`db.ts`** — four calls over C1's `Rest`, every one scoped `account_id=eq.<id>`:
-  `sweepExpired(rest)` (`restDelete(rest, "relay_runs", "expires_at=lt.now()")` — the one call that
-  is deliberately *not* account-scoped, because it is a sweep of everybody's expired rows and is
-  named in Task 12's scan as the one exception, with the reason), `startRun`, `loadRun`, `advanceRun`,
-  `endRun`.
+  `sweepExpired(rest)` (`restDelete(rest, "relay_runs", "expires_at=lt.now")` — **`now`, not
+  `now()`** (review **I13**): PostgREST passes the filter value to Postgres as a literal, and
+  Postgres accepts the special datetime input `now` but not the string `now()`. `restDelete` calls
+  `ok()` (`_shared/db.ts:95-101`), which **throws** on a non-2xx, and this is step 3 of the handler —
+  before `readJson` and before any run logic — so a wrong literal 500s **every** `/relay` call. No
+  function in this repository does a time-filtered PostgREST call, so there is no precedent to copy
+  and Task 5 step 9 gains a fifth staging proof that exercises it. It is also the one call
+  deliberately *not* account-scoped, because it is a sweep of everybody's expired rows; Task 12's
+  scan names it as the one exception, with the reason), `startRun`, `loadRun`, `advanceRun`,
+  `appendParsed`, `endRun`.
 
   **`handler.ts`** — `relayHandler(entitle)`, and its body in order:
   1. `POST` only, else `methodNotAllowed(["POST"])`.
   2. `await entitle(req)` → `{account_id}` (throws 401/402, propagated by `index.ts`'s `asResponse`).
   3. `await sweepExpired(rest)`.
-  4. `readJson(req, 10 << 20)` — **the raised cap**, because a `results` batch carries up to eight
-     bodies of up to 2 MiB each; `readJson`'s 1 MiB default would answer 413 on a healthy run.
-  5. `run === null` → `startRun`: pick the plan from `plans/mod.ts` by `job`, call `plan.start(ctx)`,
-     `checkStep` each step, `checkCursor`, insert the row, reply `{run, steps}`.
+  4. `readJson(req, MAX_POST_BYTES)` — **16 MiB, derived and not chosen** (review **I1**): the
+     device's whole-run raw budget is `MAX_RUN_BYTES` = 8 MiB and a non-UTF-8 body travels base64 at
+     4/3, so one POST's worst case is about 10.7 MiB. The device charges the same bound outgoing, so
+     a 413 is unreachable rather than merely unlikely. Say beside it that `readJson` does
+     `await req.text()` **before** it measures and measures UTF-16 code units
+     (`_shared/http.ts:48-52`) — it is a sanity bound, not a memory guard.
+  5. `run === null` → `startRun`: `PLANS[job]` — **keyed by job, not by source** (ruling
+     **R-C5-plan-3**) — call `plan.start(ctx)`, `checkStep` each step, `checkCursor`, insert the row
+     with the composite `plan_version`, reply `{run, steps}`.
   6. otherwise → `loadRun` (`id=eq.<run>&account_id=eq.<id>`), refuse `404` when absent or expired;
-     refuse **`409 "relay run out of step"`** when `seq` does not match; call `plan.next(ctx, results)`;
-     either `{run, steps}` after `advanceRun`, or `{run, done}` after `endRun` (which deletes the row).
-  7. budgets: `steps_used + steps.length > MAX_STEPS`, `round_trips + 1 > MAX_ROUND_TRIPS` → the run
-     **ends** with `done` carrying the job's own warning channel (`warnings` for coursework, `errors`
-     for discover) and a sentence naming the bound. Never a 500, never a non-zero exit downstream.
+     refuse **`409 "relay run out of step"`** when `seq` **or `plan_version`** does not match (a
+     deploy mid-run changes the composite, and starting over is cheaper than reasoning about a plan
+     that changed under a cursor); call `plan.next(ctx, results)`; `appendParsed` whatever it parsed;
+     either `{run, steps}` after `advanceRun`, or `{run, done}` after `endRun` (which deletes the
+     row and its `parsed` with it).
+  7. **`reauth` is composed by the plan, not by the handler** (review **I12**). `PlanResult`'s
+     `reauth` carries no steps, and `handler.ts` names no source, so nothing could have composed the
+     login steps. The contract, two lines in `mod.ts`: on `{kind: "reauth", source}` the handler
+     writes `reauthed: true` into **that source's** cursor and calls `plan.start(ctx)` again, which
+     fans out to that source's module; the module's own `next` is then responsible for re-issuing the
+     step that failed once the login completes, and for answering `failed` rather than `reauth` the
+     second time. `a_dead_session_on_the_item_list_is_not_an_empty_shelf` then tests a real path
+     rather than a sentinel.
+  8. budgets: `steps_used + steps.length > MAX_STEPS`, `round_trips + 1 > MAX_ROUND_TRIPS`,
+     `steps.length > MAX_BATCH` → the run **ends** with `done` carrying the job's own warning channel
+     (`warnings` for coursework, `errors` for discover) and a sentence **phrased with an existing
+     `FAILURE_MARKER`** — `coursework: fetch failed (the run hit its round-trip budget); nothing
+     changed` and its three siblings (review **I14**), because only one warning reaches
+     `state/runner-log.md` and `rank_warnings` decides which. Never a 500, never a non-zero exit
+     downstream.
 
-- [ ] **Step 7: The parse hand-off, and its own test.** In `handler.ts`, when the coursework plan is
-  done it has accumulated exactly what `coursework_request` (`engine/src/coursework.rs:636`) builds
-  today. It calls C2's handler **in process**:
+- [ ] **Step 7: The incremental parse — ruling R-C5-plan-2, and the finding it answers.**
+
+  **The problem (review C3).** The first draft said the `books` stage accumulated `{code, payload}`
+  "into the payload accumulator the handler holds". **An edge function holds nothing between
+  invocations.** The only state is the `relay_runs` row; `checkCursor` refuses a page body and any
+  string over 4 KiB; Q1 rules zero retention anywhere else. Yet a twelve-book shelf yields eight
+  steps with four more on the next round trip, so eight payloads had to survive a round trip with
+  nowhere to be — and it bites below eight books too, because VHL's three steps are strictly
+  sequential, so `vhl.dashboard`'s HTML lands in a later batch than `zybooks.book:*` on any shelf
+  that fills a batch, and a single `ingestHandler` call needed both.
+
+  **The ruling: parse incrementally.** Each raw body is parsed **as it arrives**, per source, and
+  only the parsed rows are kept — in `relay_runs.parsed`, deleted with the row. Raw bodies are never
+  stored, which is the whole of Q1 and R4-19: *raw pages are received for the run, parsed, and not
+  retained; the parsed rows are what persists.* **A shelf is not capped** — the rejected alternative
+  was "one batch or bust", which makes a thirteenth book a product limit, and a product limit is not
+  something to discover on a student's laptop in week one.
+
+  **What replaces the `ingestHandler` call.** The three functions hand-off-free in
+  `ingest-coursework/handler.ts`, extracted there in this same task (*Interfaces*, contract 8):
 
 ```ts
-import { ingestHandler } from "../ingest-coursework/handler.ts";
+import { finishSource, ingestVhl, ingestZybook } from "../ingest-coursework/handler.ts";
 
 /**
- * The parse hand-off. `/ingest-coursework` keeps its parsers, its warnings, its `proposals` and its
- * frozen oracles, and `done` is byte-identically the reply the device decodes today — which is why
- * `post_coursework` (coursework.rs:671) is untouched by this whole stream.
+ * One body, parsed the moment it arrives, appended to the run's parsed rows (ruling R-C5-plan-2).
  *
- * The `entitle` closure resolves to the account THIS RUN already entitled. It is not a no-op: a
- * no-op would be a handler that entitles anybody, sitting one import away from a function that is
- * exposed. `the_parse_handoff_passes_the_already_resolved_account_never_an_open_gate` pins it.
+ * Nothing here stores a page. `own` is this source's own warnings, accumulated across round trips
+ * in `parsed.own[source]` so `finishSource`'s `{name}: ` prefixing and its
+ * `0 assignments parsed; treating as failure` rule see exactly what one `ingestHandler` call saw.
  */
-async function parseCoursework(accountId: string, payload: unknown): Promise<unknown> {
-  const res = await ingestHandler(async () => ({ account_id: accountId }))(
-    new Request("https://relay.internal/ingest-coursework", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    }),
-  );
-  return await res.json();
+function parseArrival(run: RunRow, source: string, result: StepResult): Parsed {
+  const cfg = run.cursor.sources[source].config;
+  const own: string[] = [], proposals: MapProposal[] = [];
+  const items = source === "zybooks"
+    ? ingestZybook({ code: codeOf(result.id), payload: decodeJson(result) }, cfg, run.cursor.timezone, own, proposals)
+    : ingestVhl(result.body ?? "", cfg, own, proposals);
+  return { items, own, proposals };
+}
+
+/**
+ * `done`, assembled from the parsed rows at the end of the run.
+ *
+ * **The order is the contract.** One `ingestHandler` call produced sources in the order the device
+ * sent them, which was always `["zybooks", "vhl"]`, and within zyBooks the shelf order the item
+ * list returned. Round-robin execution must not change that, so this concatenates by
+ * `PORTAL_SOURCES` order and, within a source, by arrival index — not by completion time.
+ */
+function finishRun(run: RunRow): { assignments: Assignment[]; warnings: string[]; proposals: MapProposal[] } {
+  /* … finishSource(name, items, own, warnings) per source, in PORTAL_SOURCES order … */
 }
 ```
 
-  and the test, in `handler_test.ts`:
+  and the tests, in `handler_test.ts`:
 
 ```ts
-Deno.test("the parse hand-off passes the already resolved account, never an open gate", async () => {
+Deno.test("the relay never re-enters the public endpoint", async () => {
+  // It calls the three extracted functions, not `ingestHandler` — so there is no synthetic Request,
+  // no entitle closure to get wrong, and no second door into a public handler.
   const src = await Deno.readTextFile(new URL("./handler.ts", import.meta.url));
-  assert(src.includes("async () => ({ account_id: accountId })"), "the closure carries the run's own account");
-  assert(!/account_id:\s*""/.test(src) && !/ingestHandler\(\s*\)/.test(src));
+  assert(!src.includes("ingestHandler"), "the relay must not call the endpoint's own handler");
+  for (const f of ["ingestZybook", "ingestVhl", "finishSource"]) assert(src.includes(f), f);
 });
 
-Deno.test("done is the ingest reply, unchanged, and the device's decoder is untouched", async () => {
-  const out = await driveWholeRun(scriptedZybooksResults());
+Deno.test("done is byte-identical to what one ingest call produced, on a shelf that spans round trips", async () => {
+  // TWELVE books, so the shelf crosses MAX_BATCH and VHL's dashboard lands in a later batch than
+  // some of the books — which is the case C3 says the first draft could not represent at all.
+  const out = await driveWholeRun(scriptedTwelveBookShelfAndVhl());
   assertEquals(Object.keys(out.done).sort(), ["assignments", "proposals", "warnings"]);
-  assertEquals(out.done.assignments.length, 24);   // the fixture's own count, C2's smoke number
+  const oneShot = await ingestAllAtOnce(sameBodies());     // the C2 path, same inputs, one call
+  assertEquals(out.done, oneShot, "the incremental parse must produce the same object, in order");
 });
 
-Deno.test("the cursor holds no page body after any step of either plan", async () => {
+Deno.test("the fixture still yields its 24 assignments through the incremental path", async () => {
+  const out = await driveWholeRun(scriptedZybooksResults());
+  assertEquals(out.done.assignments.length, 24);   // the frozen reference is the oracle behind it
+});
+
+Deno.test("the cursor holds no page body, and neither does parsed", async () => {
   for (const plan of ["coursework", "coursework-discover"]) {
     for (const cursor of await everyCursorOf(plan)) checkCursor(cursor);   // throws on a body
+    for (const parsed of await everyParsedOf(plan)) checkParsed(parsed);   // rows only, never bytes
   }
 });
 
@@ -2533,17 +2947,31 @@ supabase db push --include-all --workdir cloud
 supabase functions deploy relay --use-api --workdir cloud
 ```
 
-  Then read it back, four proofs, appended to the task report: `relay_runs` exists with RLS on and
-  exactly one policy; `POST /relay` with no bearer answers **401** in our shape
+  Then read it back, **five** proofs, appended to the task report: `relay_runs` exists with RLS on
+  and exactly one policy; `POST /relay` with no bearer answers **401** in our shape
   (`{"error":"…"}`), with a session but no subscription **402**, with `{"protocol":2}` **400**, and
   with a `run` nobody owns **404**. Nothing is inserted by any of those four.
+
+  **The fifth is the sweep** (review **I13**), and it is the one the other four cannot catch: 401
+  and 402 both return *before* the sweep runs, and `restDelete` throws on a non-2xx, so a wrong
+  filter literal 500s every entitled call and only an entitled call would show it. Insert a row by
+  hand with `expires_at` in the past, call `/relay` once with a valid session, and read the row
+  **gone** — and the call itself answering 200 rather than 500:
+
+```
+insert into public.relay_runs (account_id, plan, plan_version, expires_at)
+values ('<the staging test account>', 'coursework', 'zybooks@1+vhl@1', now() - interval '1 hour');
+```
 
 - [ ] **Step 10: Run both Deno suites and commit.**
 
 Run: C5's own line, then C2's full flag set over `cloud/supabase/`, then
 `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/migrations/migrations_test.ts`
-— and confirm its two parse counts are **unchanged** (24 functions, 5 views as C3′ Task 1 step 4 left
-them). A moved count is evidence C5 created something it did not intend; stop and read the diff.
+— and confirm its two parse counts are **unchanged from the branch point** (review **M6**: read the
+pair off `migrations_test.ts` at the fork commit and record **that** in the task report; do not
+quote a literal here, because the numbers are C3′'s to move and a stale one invites an edit to a
+file C5 does not own). A moved count is evidence C5 created a function or a view it did not intend;
+stop and read the diff.
 
 ```bash
 git add cloud/supabase/migrations/20260918000100_relay.sql cloud/supabase/migrations_relay_test.ts \
@@ -2559,6 +2987,57 @@ git commit -F .git-commit-msg.txt   # "feat(cloud): POST /relay — the step pro
 603, 629, 651 and its whole `mod tests` from `:1008` down — because **every network-layer test in
 that module ports here, one for one**, and this is the task where that record is preserved before
 Task 10 deletes the file.
+
+**The composite driver, first** (ruling **R-C5-plan-3**, from review **C5**). A `relay_runs` row
+holds one `plan`, the handler selects by **job**, and a coursework run drives **two** sources with
+interleaved steps and a shared batch budget — so `PLANS` cannot be keyed by source, and the first
+draft's `{ zybooks: zybooksPlan, vhl: vhlPlan }` made `PLANS[job]` undefined for both jobs. What
+this task builds, in `plans/mod.ts`, before the zyBooks module itself:
+
+- **`PLANS` is keyed by job**: `{ "coursework": courseworkPlan, "coursework-discover": discoverPlan }`.
+- **`courseworkPlan` fans out** to the per-source modules (`SOURCE_PLANS = { zybooks, vhl }`), which
+  keep the `Plan` shape and know nothing about each other.
+- **`cursor.sources = { zybooks: {…}, vhl: {…} }`**, one sub-cursor per source, plus `timezone` and
+  each source's redacted `config` taken from the first call's `client` block.
+- **A batch is filled round-robin** across the sources that still have steps, up to `MAX_BATCH` — so
+  a twelve-book shelf never starves VHL's three sequential steps, and VHL never starves the shelf.
+- **A per-source `{kind: "failed"}` is a warning that retires that source**, not the run: it is
+  appended to `parsed.own[source]`, that source's sub-cursor is marked done, and the other source
+  keeps going. The run ends when every source is done or retired. (Task 9 step 4 requires exactly
+  this for discover — *"a source that fails contributes an `errors` entry and never stops the
+  other"* — and it is the same rule for coursework, because `collect` has always had it:
+  *one source's failure never stops another* (`coursework.rs:1383`).)
+- **`plan_version` is a stable composite** of the per-source module versions — `zybooks@1+vhl@1`,
+  sources in `PORTAL_SOURCES` order — so a deploy that changes either module mid-run changes the
+  string, the 409 fires, and the device starts a new run next slot (which is M4's case, and is why
+  the column is `text`).
+
+Its own tests, in `plans/mod_test.ts`:
+
+```ts
+Deno.test("PLANS is keyed by job, and every job the device can send resolves", () => {
+  for (const job of ["coursework", "coursework-discover"]) assert(PLANS[job], job);
+  assertEquals(PLANS["zybooks"], undefined, "keyed by JOB, not by source (review C5)");
+});
+
+Deno.test("one run drives both sources, round-robin, within one batch budget", () => {
+  const r = courseworkPlan.start(ctxBothSources());
+  assertEquals(r.steps.map((s) => s.id), ["zybooks.signin", "vhl.home"]);
+  const shelf = courseworkPlan.next(ctxAfter({ zybooks: "items", vhl: "home" }), twelveBooksAndAForm());
+  assert(shelf.steps.length <= 8, "MAX_BATCH is shared, not per source");
+  assert(shelf.steps.some((s) => s.source === "vhl"), "a full shelf must not starve VHL");
+});
+
+Deno.test("a source that fails retires and the other finishes", () => {
+  const r = courseworkPlan.next(ctxBothSources(), [vhlLoginRejectedTwice(), zybooksItemsOk()]);
+  assert(r.steps.every((s) => s.source === "zybooks"), "VHL retired, zyBooks continues");
+  assert(r.parsed.own.vhl.some((w: string) => w.includes("session invalid")));
+});
+
+Deno.test("plan_version is a stable composite and moves when a module moves", () => {
+  assertEquals(courseworkPlan.version(), `zybooks@${zybooksPlan.version}+vhl@${vhlPlan.version}`);
+});
+```
 
 - [ ] **Step 1: Write the failing plan tests** — `cloud/supabase/functions/relay/plans/zybooks_test.ts`.
   A plan is pure over its cursor and the step results, so every test is: give it a cursor and a
@@ -2658,9 +3137,19 @@ Deno.test("a full shelf is batched, never one round trip per book", () => {
   assertEquals(r.steps.length, 8, "MAX_BATCH — the rest come on the next round trip");
 });
 
-Deno.test("the plan carries a version, and it is in the run row", () => {
+Deno.test("the plan carries a version, and it is a term of the run row's composite", () => {
   assertEquals(typeof zybooksPlan.version, "number");
   assert(zybooksPlan.version >= 1);
+  assert(courseworkPlan.version().includes(`zybooks@${zybooksPlan.version}`), "ruling R-C5-plan-3");
+});
+
+Deno.test("a book's payload is parsed the moment it arrives and never held as bytes", () => {
+  // Ruling R-C5-plan-2. The rows come back for `appendParsed`; the cursor keeps codes and an index.
+  const r = zybooksPlan.next(ctx({ stage: "books", codes: ["UACS100Fall2026"], index: 0 }),
+                             [jsonResult(fixturePayload())]);
+  assert(r.parsed!.items.length > 0, "parsed rows, not a payload");
+  checkCursor(r.cursor);
+  assert(!JSON.stringify(r.cursor).includes("assignments"), "no page and no payload in the cursor");
 });
 ```
 
@@ -2714,23 +3203,52 @@ const HEADERS: Array<[string, string]> = [
 export const zybooksPlan: Plan = { name: "zybooks", version: 1, start, next };
 ```
 
-  `start` returns the signin step. `next` switches on `cursor.stage`:
+  `start` returns the signin step. `next` switches on this source's own `cursor.sources.zybooks.stage`:
   `signin` → read `/session/auth_token` presence from `captured` and `/user/user_id` from the body,
   then the items step; `items` → `requireSuccess`, then one `zybooks.book:<code>` step per routed
-  code, batched at `MAX_BATCH`; `books` → accumulate `{code, payload}` into the **payload
-  accumulator the handler holds, not the cursor** (the cursor keeps only the codes and the index —
-  `checkCursor` enforces it), and when the last code is in, return `{kind: "done", payload}`.
+  code, batched at whatever the composite driver's round-robin left of `MAX_BATCH`; `books` →
+  **parse each arriving payload immediately** with `ingestZybook` and return its rows for
+  `appendParsed` (ruling **R-C5-plan-2**), keeping only the codes and the index in the cursor —
+  `checkCursor` enforces that and `checkParsed` enforces that the rows are rows — and when the last
+  code is in, mark this source done.
 
-  **`plans/mod.ts`** is the `Plan` interface (`{name, version, start(ctx), next(ctx, results)}`), the
-  `PlanResult` union (`{kind:"steps"} | {kind:"reauth"} | {kind:"failed", warning} | {kind:"done"}`),
-  and the registry — `export const PLANS = { zybooks: zybooksPlan, vhl: vhlPlan }` — so `handler.ts`
-  names no source and adding one is a new file plus one line.
+  **`plans/mod.ts`** is the `Plan` interface, the `PlanResult` union, the composite `courseworkPlan`
+  and `discoverPlan`, and the two registries:
+
+```ts
+export interface Plan {
+  name: string;
+  /** A number on a source module; a composite STRING on a job plan (`zybooks@1+vhl@1`). */
+  version: number | (() => string);
+  start(ctx: PlanCtx): PlanResult;
+  next(ctx: PlanCtx, results: StepResult[]): PlanResult;
+}
+
+export type PlanResult =
+  | { kind: "steps"; steps: PlanStep[]; parsed?: Parsed }
+  /** Review I12: `reauth` NAMES ITS SOURCE, and the handler answers it by writing `reauthed: true`
+   *  into that source's sub-cursor and calling `plan.start(ctx)` again — the module composes its
+   *  own login steps, because `handler.ts` names no source and could not. The module's `next` then
+   *  re-issues the step that failed, and answers `failed` rather than `reauth` the second time:
+   *  once, never twice (spec §4). */
+  | { kind: "reauth"; source: string }
+  | { kind: "failed"; source: string; warning: string }
+  | { kind: "done"; parsed?: Parsed };
+
+/** Keyed by JOB (ruling R-C5-plan-3). `PLANS[job]`, never `PLANS[source]`. */
+export const PLANS: Record<string, Plan> = {
+  "coursework": courseworkPlan,
+  "coursework-discover": discoverPlan,
+};
+/** What the two job plans fan out to. Adding a portal is a new file plus one line HERE. */
+export const SOURCE_PLANS: Record<string, Plan> = { zybooks: zybooksPlan, vhl: vhlPlan };
+```
 
 - [ ] **Step 4: Apply hand-off H7** (`parse_zybooks_test.ts`'s BOM comment), then run and commit.
 
 ```bash
-git add cloud/supabase/functions/relay/plans/{mod.ts,zybooks.ts,zybooks_test.ts} \
-        cloud/supabase/functions/relay/handler.ts
+git add cloud/supabase/functions/relay/plans/{mod.ts,mod_test.ts,zybooks.ts,zybooks_test.ts} \
+        cloud/supabase/functions/relay/handler.ts cloud/supabase/functions/ingest-coursework/handler.ts
 git commit -F .git-commit-msg.txt   # "feat(cloud): the zyBooks fetch plan, step for step from the module it replaces (C5 Task 6)"
 ```
 
@@ -2839,6 +3357,30 @@ Deno.test("the dashboard html is handed to the parser unchanged and the plan is 
   - `discoverSections(html)` — `/courses/(\d+)/sections/(\d+)/`, first-seen order, deduplicated
     (`vhl.rs:319`). Used by Task 9, written here.
 
+  **And one edit to a C2 file** (review **I8**), because the first draft named an export that does
+  not exist. `parse_vhl.ts` exports `MOUNT_MARKER`, `parseDurationHours` and `parseDashboard` only,
+  and does the section lookup **inline** at `:81` and `:99`; there is no `sectionMapping` in any
+  form, and the Rust original (`vhl::section_mapping`, `engine/src/vhl.rs:300`) is deleted by Task
+  10. So this task adds it, in `parse_vhl.ts`, and has `parseDashboard` call it:
+
+```ts
+/**
+ * The ONE predicate for "is this section mapped" — `parseDashboard` and `vhlRows` both call it,
+ * rather than each keeping its own reading of "an empty mapping is falsy" to drift apart later.
+ * The port of `vhl::section_mapping` (engine/src/vhl.rs:300), which said exactly this and which
+ * C5 deletes; mirrors `routeZybook`'s role on the zyBooks side.
+ */
+export function sectionMapping(sections: Obj, sectionId: string): Obj | null {
+  const inner = sections[sectionId];
+  return inner !== null && typeof inner === "object" && !Array.isArray(inner) &&
+    Object.keys(inner).length > 0 ? inner as Obj : null;
+}
+```
+
+  `parseDashboard`'s two inline lookups become calls to it, so the behaviour is unchanged and the
+  frozen `vhl-parsed-reference.json` proves it. Task 9's `vhlRows` imports the same function. **Do
+  not let Task 9 discover this at the import line** — which is what would have happened.
+
   The plan's own doc comment carries `vhl.rs`'s three live-rollout facts verbatim, plus a fourth that
   is now the relay's: **steps 2 and 3 depend on one jar spanning both hosts**, which the device gives
   them because a step uses its source's jar always and `relay::agent_for_source` builds exactly one
@@ -2847,7 +3389,8 @@ Deno.test("the dashboard html is handed to the parser unchanged and the plan is 
 - [ ] **Step 4: Run, then commit.**
 
 ```bash
-git add cloud/supabase/functions/relay/plans/{vhl.ts,vhl_test.ts,mod.ts}
+git add cloud/supabase/functions/relay/plans/{vhl.ts,vhl_test.ts,mod.ts} \
+        cloud/supabase/functions/ingest-coursework/parse_vhl.ts
 git commit -F .git-commit-msg.txt   # "feat(cloud): the VHL fetch plan — CAS, the lt ticket and the host change (C5 Task 7)"
 ```
 
@@ -2860,15 +3403,28 @@ git commit -F .git-commit-msg.txt   # "feat(cloud): the VHL fetch plan — CAS, 
 (`FAILURE_MARKERS`); `engine/src/info.rs:27` (`KINDS`), `:56` (`NewInfo`), `:69` (`open_info`),
 `:108` (`list_info`), `:157` (`close_info`).
 
-- [ ] **Step 1: Ask Quinn (Q2)**, in one message: *When a portal rejects the saved password —
-  not a network problem, the vendor saying no — Knowlu opens one info card, "Your zyBooks password no
-  longer works", and then **stops trying that source** until the student saves a new password. The
-  alternative is trying again every slot. I recommend the pause: it is the legal briefing's "stop on
-  the first sign of a vendor block and never retry through a change of identity", and a wrong
-  password retried twice a day is how an account gets locked out. Pause, or retry?* Record the
-  answer; the plan is built to pause.
+- [ ] **Step 1: Ask Quinn (Q2)**, in one message: *When a portal rejects the saved password — not a
+  network problem, the vendor saying no — Knowlu opens one info card, "Your zyBooks password no
+  longer works", and then **stops trying that source**. **It starts again the moment you save that
+  portal's password in the app**: saving is what closes the card and un-pauses the source, and the
+  card says so. The alternative is trying again every slot. I recommend the pause: it is the legal
+  briefing's "stop on the first sign of a vendor block and never retry through a change of
+  identity", and a wrong password retried twice a day is how an account gets locked out. Pause with
+  that exit, or retry every slot?* Record the answer; the plan is built to pause.
 
-- [ ] **Step 2: Write the failing tests** — appended to `engine/tests/relay_contract.rs`.
+  **Why the exit has to be named, and where it lives** (review **C2**, settled by ruling
+  **R-C5-plan-1**). The first draft skipped a paused source before the relay ran and closed the card
+  only "for each source that authenticated" — so a paused source could never authenticate, the card
+  could never close, and the pause was permanent. `info::list_info` returns open items only
+  (`engine/src/info.rs:108`), so nothing else re-opened the path either; the card body promised the
+  opposite; and `a_later_run_that_authenticates_closes_the_card_and_unpauses` was unsatisfiable as
+  written. The exit is the write the student actually performs: **`onboarding::store_credentials`**
+  (`app/src/onboarding.rs:850-856`) already knows the vault and the source, so it closes the card
+  through the engine's `write` with `console_ctx()` — the existing shape — on
+  `close_key: login:<source>`. Step 5 below is that call.
+
+- [ ] **Step 2: Write the failing tests** — appended to `engine/src/relay.rs`'s `mod tests` (review
+  **C1**: they drive a loopback portal, so they live where the `loopback` row is visible).
 
 ```rust
 #[test]
@@ -2890,12 +3446,34 @@ fn a_rejected_login_opens_exactly_one_card_and_pauses_that_source() {
 }
 
 #[test]
-fn a_later_run_that_authenticates_closes_the_card_and_unpauses() {
+fn saving_the_password_closes_the_card_and_un_pauses_the_source() {
+    // Ruling R-C5-plan-1, and the property the first draft could not have: the pause has an exit,
+    // and the exit is the thing the card tells the student to do. The engine half is here; the app
+    // half (`store_credentials` calling it) is `app/tests/onboarding.rs`'s case in step 5.
     let vault = scratch_vault();
     let _ = collect_cloud_against(&vault, relay_that_reports("zybooks", "login rejected"));
-    save_a_new_password(&vault, "zybooks");      // the seam: `Secrets` returns a different password
+    assert_eq!(open_cards_for(&vault, "login:zybooks"), 1);
+    assert!(sources_offered_to_the_relay(&vault).iter().all(|s| s != "zybooks"));
+
+    // What the app does when the student saves a new password for that source.
+    knowlu_engine::info::close_info(&vault, Some("login:zybooks"), None, "dashboard",
+                                    &console_ctx(), None, None).expect("closed");
+
+    assert_eq!(open_cards_for(&vault, "login:zybooks"), 0);
+    assert!(sources_offered_to_the_relay(&vault).iter().any(|s| s == "zybooks"),
+        "the source is live again on the next slot");
     let _ = collect_cloud_against(&vault, relay_that_succeeds());
     assert_eq!(open_cards_for(&vault, "login:zybooks"), 0);
+}
+
+#[test]
+fn a_paused_source_never_stops_the_other_one() {
+    // `collect`'s oldest rule (coursework.rs:1383) and ruling R-C5-plan-3's per-source retirement,
+    // at the device end: VHL paused must not cost the student their zyBooks.
+    let vault = scratch_vault();
+    let _ = collect_cloud_against(&vault, relay_that_reports("vhl", "login rejected"));
+    let offered = sources_offered_to_the_relay(&vault);
+    assert!(offered.iter().any(|s| s == "zybooks") && offered.iter().all(|s| s != "vhl"));
 }
 
 #[test]
@@ -2943,16 +3521,25 @@ fn the_session_dir_is_used_when_given_and_nothing_is_written_when_not() {
   1. Read the coursework block and `resolve_timezone` exactly as today.
   2. For each of `["zybooks", "vhl"]` that is `enabled`, build a `SourceContext`:
      `{name, hosts: relay::source_named(name).hosts, config: yaml_to_json_for_request(&redact(&cfg, name)),
-       has_credential: <the target reads>, session: store.load(name).report(now)}` — and **skip a
-     source that is paused** by an open `info` item with `close_key: login:<name>` (Q2).
+       has_credential: <the target reads>, session: store.load(name, now).report(now)}` — and **skip
+     a source that is paused** by an open `info` item with `close_key: login:<name>` (Q2, and the
+     pause's exit is step 5's app-side call).
   3. `relay::run(client, Job::Coursework, &sources, &secrets, &store, &tz_name)`.
-  4. On `done`, decode with `post_coursework`'s existing body handling — **unchanged**: `done` *is*
+  4. On `done`, decode with **`decode_coursework_reply`** — the surviving half of `post_coursework`
+     (review **I7**: the POST wrapper loses its only non-test caller here and is deleted in Task 10
+     with `coursework_request` and `FetchedSource`; the decoder is renamed and kept). `done` *is*
      the `/ingest-coursework` reply, so `assignment_from_row`, the `warnings` clip through
-     `judge::one_line`, and the `proposals` decode all stay where they are.
+     `judge::one_line`, and the `proposals` decode all stay exactly where they are.
   5. `propose_map_cards(vault, &result.proposals, today, ctx, dry_run, warnings)` — unchanged.
   6. For each source the run reported as login-rejected: `open_login_card`, which checks `list_info`
      for an open item with the same `close_key` first, exactly as `propose_map_cards` checks
-     `asked_map_keys`. For each source that authenticated: `close_info(key = "login:<source>")`.
+     `asked_map_keys`. For each source that **authenticated**: `close_info(key = "login:<source>")` —
+     which is the belt to step 5's braces, and covers the case where the student fixed the password
+     outside the app.
+
+  **Both `cfg` arms** (review **M11**). `collect_cloud` has a `#[cfg(not(windows))]` twin at
+  `coursework.rs:872` whose signature must change with the `#[cfg(windows)]` one, or the non-Windows
+  build breaks. It stays what it is — one warning, an empty list — and only its parameter list moves.
 
 ```rust
 /// One card, never a retry loop (ruling 4; spec §4; Q2).
@@ -2988,20 +3575,39 @@ fn open_login_card(vault: &Path, source: &str, ctx: &WriteContext, warnings: &mu
   **`session invalid` is already a `FAILURE_MARKER`** (`coursework.rs:1437`), so this line sorts to
   the top of `state/runner-log.md` with no new marker — which is why the phrasing is not free.
 
-- [ ] **Step 5: Apply hand-offs H4a and H2**, then re-run `cargo test --workspace`. `coursework::main`
+- [ ] **Step 5: The pause's exit — the app closes the card when the password is saved** (ruling
+  **R-C5-plan-1**). In `app/src/onboarding.rs`'s `store_credentials` (`:850-856`), after the
+  credential is written and for **that source only**:
+
+```rust
+    // C5 (review C2, ruling R-C5-plan-1): a rejected login pauses that source and opens one info
+    // card; saving a new password is what ends the pause, because the engine cannot see a
+    // Credential Manager write and a paused source never runs again to discover it worked. This is
+    // the ONE app-side write C5 adds, it goes through the engine's `write` like every other console
+    // write (`console_ctx()`, `via: "dashboard"`), and closing a key with no open item is a no-op.
+    let _ = knowlu_engine::info::close_info(
+        vault, Some(&format!("login:{source}")), None, "dashboard", &console_ctx(), None, None);
+```
+
+  and one case in `app/tests/onboarding.rs`: a vault with an open `login:zybooks` card, a
+  `store_credentials` for `zybooks`, the card closed and a `login:vhl` card left alone. **This is
+  the one file outside the engine and the cloud that C5 changes**, it is named in the ownership
+  list, and it is one call.
+
+- [ ] **Step 6: Apply hand-offs H4a and H2**, then re-run `cargo test --workspace`. `coursework::main`
   gains its fifth parameter; `slot_argv` gains `--session-dir`; `app/tests/scheduler.rs`'s five
   `slot_argv` call sites gain the argument and one new case asserts the flag is on the `coursework`
   step and on no other.
 
-- [ ] **Step 6: Assert the two entitlement halves** in the task report rather than assuming them:
+- [ ] **Step 7: Assert the two entitlement halves** in the task report rather than assuming them:
   `git grep -n "entitle::gate" engine/src/main.rs` shows `coursework` behind C3′'s gate, and
-  `relay_contract.rs`'s `every_service_failure_shape_is_a_named_line_and_nothing_changed` covers the
+  `relay::tests`' `every_service_failure_shape_is_a_named_line_and_nothing_changed` covers the
   402 mid-run. **Neither is re-implemented here.**
 
-- [ ] **Step 7: Run, then commit.**
+- [ ] **Step 8: Run, then commit.**
 
 ```bash
-git add engine/src/coursework.rs engine/src/relay.rs engine/tests/relay_contract.rs app/tests/scheduler.rs
+git add engine/src/coursework.rs engine/src/relay.rs app/src/onboarding.rs app/tests/scheduler.rs app/tests/onboarding.rs
 git commit -F .git-commit-msg.txt   # "feat(engine): coursework drives the relay; a rejected login is one card (C5 Task 8)"
 ```
 
@@ -3019,11 +3625,11 @@ git commit -F .git-commit-msg.txt   # "feat(engine): coursework drives the relay
 three flags are what stand in for that file, and every one of them carries a public value or a target
 *name*.
 
-- [ ] **Step 1: Write the failing tests** — in `engine/tests/relay_contract.rs` and
-  `app/tests/onboarding.rs`.
+- [ ] **Step 1: Write the failing tests** — in `engine/src/relay.rs`'s `mod tests` (review **C1**)
+  and `app/tests/onboarding.rs`.
 
 ```rust
-// engine/tests/relay_contract.rs
+// engine/src/relay.rs, in `mod tests`
 #[test]
 fn discover_is_one_json_object_on_stdout_with_the_shape_the_wizard_reads() {
     let out = discover_against(relay_that_returns_discover_rows());
@@ -3070,9 +3676,16 @@ fn the_discovery_argv_carries_a_public_base_a_public_key_and_a_target_name_and_n
 }
 
 #[test]
-fn the_coursework_panel_says_the_requests_come_from_this_pc() {
+fn the_coursework_panel_carries_both_halves_of_its_copy() {
+    // Review I10: the first draft assumed a ToS-tension sentence already existed and that H6 would
+    // "append a clause" to it. There is none — the panel has a credential-STORAGE lede and nothing
+    // else — so C5 writes the disclosure, it goes to Quinn and the lawyer with Q6, and this pins
+    // both halves so neither can drift without the other.
     let html = include_str!("../static/index.html");
-    assert!(html.contains("from your own PC, on your instruction"), "hand-off H6");
+    assert!(html.contains("Stored in Windows Credential Manager on this machine"),
+        "the existing lede, unchanged");
+    assert!(html.contains("the request is made from your own PC, on your instruction"),
+        "hand-off H6, once Quinn has approved the wording (Q6)");
 }
 ```
 
@@ -3108,13 +3721,28 @@ pub fn discover_json(
   **Still read-only, still exit 0, still one JSON object on stdout.** `rows_from_discovery` and
   `errors_from_discovery` in the app are not edited, and that is the test above.
 
+  **Both `cfg` arms** (review **M11**). `discover_json` has a `#[cfg(windows)]` body at
+  `coursework.rs:1290` and a `#[cfg(not(windows))]` twin at `:1366`, and both take three parameters
+  today. **Both gain the fourth**, or the non-Windows build breaks — the twin keeps its one-line
+  body (`"credential store unavailable on this platform"` in `errors`) and only its signature moves.
+  Hand-off **H4b** supplies one dispatch arm and the crate must match it on every target.
+
 - [ ] **Step 4: Write the discover plan's server half.** In `plans/mod.ts`, the `discover` job runs
   zyBooks steps 1-2 and VHL steps 1-3 from the **same two plan modules** — no third plan, no second
   interpretation of how to log in — and its `done` is `{zybooks, vhl, errors}` shaped by
   `zybooksRows`/`vhlRows`, ported from `coursework.rs:1231`/`:1259` into `plans/zybooks.ts` and
   `plans/vhl.ts` beside the flows they belong to. `routeZybook` and `sectionMapping` are the **one**
   predicate each caller shares, imported from `parse_zybooks.ts` and `parse_vhl.ts`, never
-  re-implemented — the rule `coursework.rs:1255`'s doc comment already states.
+  re-implemented — the rule `vhl_rows`'s own doc comment already states
+  (`coursework.rs:1255-1257`), and which **I8** makes true on the VHL side by exporting
+  `sectionMapping` from `parse_vhl.ts` and having `parseDashboard` call it (Task 7).
+
+  **`discoverPlan` is a job plan like `courseworkPlan`** (ruling **R-C5-plan-3**): the same composite
+  driver, the same `cursor.sources`, the same round-robin batch, and the same rule that a per-source
+  `failed` is a warning which retires that source and lets the other finish — which is the behaviour
+  discovery has always needed and which the first draft named here without a mechanism to deliver
+  it. `done` for this job is `{zybooks, vhl, errors}`, and a retired source contributes its sentence
+  to `errors`.
 
   Its Deno test drives the whole job and asserts the rows, the `mapped` computation with a config and
   without one, and that a source that fails contributes an `errors` entry and never stops the other.
@@ -3125,7 +3753,7 @@ pub fn discover_json(
 - [ ] **Step 6: Run, then commit.**
 
 ```bash
-git add engine/src/coursework.rs engine/tests/relay_contract.rs app/tests/onboarding.rs \
+git add engine/src/coursework.rs engine/src/relay.rs app/tests/onboarding.rs \
         cloud/supabase/functions/relay/plans/{mod.ts,zybooks.ts,vhl.ts,zybooks_test.ts,vhl_test.ts}
 git commit -F .git-commit-msg.txt   # "feat: coursework-discover becomes a relayed cloud job (C5 Task 9)"
 ```
@@ -3196,6 +3824,22 @@ git rm engine/src/zybooks.rs engine/src/vhl.rs
   `fetchers` parameter — `main` calls the body directly, and the `(fetchers, resolve(vault).ok())`
   match at `:1540` collapses to `resolve(vault)` with a named skip on `Err`.
 
+  **And the three review I7 named**, which lose their only non-test callers at Task 8 and would
+  otherwise be `dead_code` warnings under a plain `cargo build --workspace` — the gate this stream
+  keeps at zero, and one that `#[cfg(test)]` suppresses nothing for:
+  - `coursework_request` (`:639`) — deleted. The relay composes nothing; the cloud does.
+  - `FetchedSource` (`:630`) — deleted with it.
+  - `post_coursework` (`:670`) — **split, not deleted**: the POST wrapper goes, the reply decoder
+    stays as `decode_coursework_reply(reply, warnings) -> PostCourseworkResult`, which Task 8's
+    `collect_cloud` already calls on `done`. `PostCourseworkResult` keeps its name and its fields.
+
+  The tests at `coursework.rs:3262` and its neighbours move with the half they exercise: the ones
+  that assert the **request** shape (`the_coursework_payload_carries_no_credential` and its
+  loopback harness) are superseded by `relay.rs`'s own `the_relay_payload_carries_no_credential`
+  and go; the ones that assert the **reply** decoding stay and call `decode_coursework_reply`
+  directly, which needs no socket at all. Say in the task report which test went where, because a
+  reader of the diff will see a loopback harness disappear and should not have to guess why.
+
   **`main_with_fetchers` keeps its name and its other four parameters.** It is the seam the run-log
   summary is tested through, and renaming it would churn tests that have nothing to do with C5; what
   goes is the one parameter that no longer has a meaning.
@@ -3208,7 +3852,9 @@ git rm engine/src/zybooks.rs engine/src/vhl.rs
   - `engine/tests/no_console.rs`'s `with_spawns >= 3` was lowered to `>= 2` by C3′ when `history.rs`
     went. **Neither file C5 deletes spawns a child process** (`git grep -n "Command::new"
     engine/src/zybooks.rs engine/src/vhl.rs` is empty at HEAD), so the floor stays at 2 and the file
-    is **not edited**. Record the grep's output in the task report.
+    is **not edited**. Record the grep's output in the task report. **If C3′ has not in fact lowered
+    it** — it is `>= 3` on `main` today and this stream forks after C3′ — that is a finding about the
+    branch point, not a licence to edit the file: report it and stop.
   - `engine/tests/dependency_boundary.rs`'s `ureq` assertion from Task 1 still passes: the `cookies`
     feature is still needed, for `relay.rs` now instead of `vhl.rs`, and Task 12's `CLAUDE.md` edit
     (H9) rewrites the sentence that says why.
@@ -3230,7 +3876,9 @@ ureq = { version = "3.4.0", features = ["cookies"] }
 - [ ] **Step 7: Run everything, then commit.**
 
 Run: `cargo test --workspace` at 0 warnings — and record the pass count, which **falls** by roughly
-83 (44 tests in `zybooks.rs`, 39 in `vhl.rs`) and rises by whatever Tasks 1-9 added. A falling count
+the number of `#[test]`s in the two deleted files — **count them at the branch point rather than
+quoting a literal** (review M1: the plan's first draft said 44 and 39 and the real numbers at
+`141b12d` were 38 and 36) — and rises by whatever Tasks 1-9 added. A falling count
 is expected here and nowhere else in this plan; the task report states both numbers and the net.
 Then `git status --porcelain --untracked-files=all engine/tests/fixtures/` → **empty**.
 
@@ -3244,8 +3892,9 @@ git commit -F .git-commit-msg.txt   # "refactor(engine): the on-device fetchers 
 
 ### Task 11: The published promise
 
-**Read first:** spec §5's last bullet; `site/privacy.html:22` (the *What stays on your machine*
-bullet) and `:37` (the *Your coursework logins* definition) and `:108` (*Security*); C3′ Task 11,
+**Read first:** spec §5's last bullet; `site/privacy.html:24` (the *Coursework logins* bullet under
+*What stays on your machine*), `:38` (the `<dd>` of the *Your coursework logins* definition — the
+`<dt>` above it is `:37` and does not change) and `:108` (*Security*); C3′ Task 11,
 which moved **four different copies of a different sentence** and is not re-opened here.
 
 **What is C3′'s and not C5's, stated first so nobody moves it twice.** The one-line promise at
@@ -3256,7 +3905,7 @@ must still pass unchanged.
 
 - [ ] **Step 1 (Q6): draft the two sentences and ask Quinn.** The drafts, for Quinn and the lawyer:
 
-  **`site/privacy.html:37`, *Your coursework logins*** — today:
+  **`site/privacy.html:38`, the `<dd>` of *Your coursework logins*** — today:
 
   > **On your machine only, in Windows Credential Manager, never on our servers.** Knowlu signs in to
   > zyBooks and VHL from your PC, with your credentials, and reads the assignment list that comes
@@ -3273,7 +3922,7 @@ must still pass unchanged.
   > parser can serve everyone, and is thrown away as soon as it has been read. The password stays on
   > the machine, and there is no column in our database for one.
 
-  **`site/privacy.html:22`, the *Coursework logins* bullet under *What stays on your machine*** —
+  **`site/privacy.html:24`, the *Coursework logins* bullet under *What stays on your machine*** —
   today it names the Credential Manager path; it gains its second half:
 
   > **Coursework logins** — Windows Credential Manager, under `knowlu/<profile>/<source>`. Never in
@@ -3330,8 +3979,10 @@ git commit -F .git-commit-msg.txt   # "docs(site): the privacy page says who com
 
 - [ ] **Step 1: The whole gate, twice.** `cargo test --workspace` at 0 warnings — record the pass
   count and the exact `warnings: N accepted (.rsrc), N tallies, N other` line, which must end in
-  `0 other`. Then `deno check`, `deno lint` and `deno test` over `cloud/supabase/` **with C2's full
-  flag set**, recording each count. Then `git ls-files --eol cloud/ engine/ app/ site/ docs/` and
+  `0 other`. Then `deno check`, `deno lint` and `deno test` **with CI's own line, verbatim**
+  (`.github/workflows/ci.yml:84` — review **M7**: CI is the gate, so the gate's command is CI's and
+  not a paraphrase of it; the plan's first draft dropped `--allow-write=cloud/eval` and the
+  `cloud/eval/` path), recording each count. Then `git ls-files --eol cloud/ engine/ app/ site/ docs/` and
   confirm every `.ts`, `.sql`, `.rs`, `.html`, `.css`, `.js` and `.md` is `i/lf`, every `.ps1` is
   `i/crlf`, and every fixture is `attr/-text`. Then `.\scripts\ci\eol-check.ps1`. Then
   `python scripts/wizard-check.py` → `ok` (hand-off **H10**, verified) and
@@ -3448,9 +4099,13 @@ git commit -F .git-commit-msg.txt   # "docs: C5 closed — the cloud composes, t
    a password, a username, a captured token, a cookie, a credential-target shape and an app-data
    path, and finds none; and `check_host` runs **before** `fill`, so a refused host never touches a
    password.
-4. **The cloud never sees a session cookie or a captured token.** Every `Set-Cookie` is stripped from
-   the reply (C5-D6) and recorded on the device instead; every `redact: true` capture is replaced in
-   the returned body with `<captured:<name>>` while the fields the plan must read stay readable
+4. **The cloud never sees a session cookie, a captured token or a credential echoed back at us.**
+   Every `Set-Cookie` is stripped from the reply (C5-D6) and recorded on the device instead; every
+   `redact: true` capture is replaced **at its JSON pointer and re-serialised** — not by a text
+   replace, which misses an escaped token and corrupts a body on a short one (review **I5**) — and
+   the reply is then run through `scrub` against the request's own secrets, because a vendor that
+   serves the login page again commonly echoes the submitted username back in a `value=` attribute
+   (review **I3**); while the fields the plan must read stay readable
    (C5-D5). Both are tested against a body that carries `success`, `user_id` and the token together.
 5. **The device follows redirects itself and checks every hop.** A 302 to a host off the list is
    `host_not_allowed` naming that host; a `Set-Cookie` set on a 302 is recorded, which is the case
@@ -3458,8 +4113,16 @@ git commit -F .git-commit-msg.txt   # "docs: C5 closed — the cloud composes, t
    loop.
 6. **Every budget ends a run as a named warning, never a 500 and never a non-zero exit.** 40 steps,
    8 per batch, 24 round trips, 5 hops, 2 MiB per response (a refusal, not a truncation), 8 MiB per
-   run, 60 s per step, 10 minutes per run — and `RUN_WALL_CLOCK < CHILD_TIMEOUT` is a test, so the
-   relay can never be what the scheduler kills.
+   run, 60 s per **whole step including its redirect chain**, 10 minutes per run, and 16 MiB per
+   outgoing POST — the last **derived** from `MAX_RUN_BYTES` and base64's 4/3 and matched by the
+   server's `readJson` cap, so a 413 is unreachable rather than unlikely (review **I1**).
+   **And the ten minutes is enforced, not compared** (review **C4**): the deadline is monotonic and
+   is checked before every step, every redirect hop and every round trip, each request's timeout is
+   `budget.remaining()`, and `a_stalled_portal_ends_the_run_at_the_deadline_and_never_at_the_scheduler_s`
+   proves a portal that accepts and never answers ends the run in under ten minutes of simulated
+   time — not six requests of sixty seconds per step, eight steps to a batch. **Every budget warning
+   carries an existing `FAILURE_MARKER`** and is asserted to sort first through `rank_warnings`
+   (review **I14**), because only one warning reaches `state/runner-log.md`.
 7. **`knowlu-engine coursework` still always exits 0** on every one of: no `config/cloud.yaml`, no
    session, no entitlement, no network, 401, 402, 409, 413, 429, 5xx, timeout, a refused host, a blown
    budget — each as a distinct named line, with `session invalid` / `fetch failed` / `the service is
@@ -3467,10 +4130,14 @@ git commit -F .git-commit-msg.txt   # "docs: C5 closed — the cloud composes, t
    `FAILURE_MARKERS`. **A run that does not reach `done` writes nothing** — no note, no journal
    record, no partial ingest.
 8. **The parsers, their oracles and the reply shape are untouched.** `done` for a coursework job is
-   byte-identically `{assignments, warnings, proposals}` from C2's `ingestHandler`, called in process
-   with the run's own already-entitled account; `post_coursework`, `assignment_from_row`,
-   `propose_map_cards` and `asked_map_keys` are unchanged; the 15-a-day proposal cap still applies;
-   `zybooks-parsed-reference.json` and `vhl-parsed-reference.json` are byte-identical to `main`.
+   `{assignments, warnings, proposals}` and is **byte-identical to what one `ingestHandler` call
+   produced from the same bodies** — asserted on a **twelve-book shelf that spans round trips**, the
+   case ruling **R-C5-plan-2** exists for and the one the first draft could not represent at all;
+   `ingestHandler`'s own suite passes unchanged after the three-function extraction;
+   `assignment_from_row`, `decode_coursework_reply`, `propose_map_cards` and `asked_map_keys` are
+   unchanged; the 15-a-day proposal cap still applies; `zybooks-parsed-reference.json` and
+   `vhl-parsed-reference.json` are byte-identical to `main`. **A shelf is not capped**, and a
+   thirteenth book is not a product limit.
 9. **Every network-layer test in `zybooks.rs` and `vhl.rs` has a successor**, named in Tasks 6 and 7,
    including `signin_returns_the_token_and_user_id`,
    `a_dead_session_on_the_item_list_is_not_an_empty_shelf`,
@@ -3484,6 +4151,20 @@ git commit -F .git-commit-msg.txt   # "docs: C5 closed — the cloud composes, t
     for `zybooks.com`, `vhlcentral.com`, `auth_token`, `user_session`, `authenticity_token`,
     `data-schools-payload` and `js-student-dashboard-app`, and allows only the two host patterns in
     `relay.rs`. `engine/src/zybooks.rs` and `engine/src/vhl.rs` do not exist.
+10a. **One run drives both sources, and the run row says which job it is.** `PLANS` is keyed by job;
+    `courseworkPlan` and `discoverPlan` fan out to the two source modules; `cursor.sources` holds a
+    sub-cursor each; a batch is filled round-robin inside one `MAX_BATCH`; a per-source failure is a
+    warning that retires that source and lets the other finish; and `plan_version` is a stable
+    composite so a mid-run deploy still fires the 409 (ruling **R-C5-plan-3**, review **C5**).
+    **`reauth` names its source** and is answered by the handler re-entering `plan.start` with
+    `reauthed: true` in that source's sub-cursor, so the module composes its own login steps — once,
+    never twice (review **I12**).
+10b. **Raw pages live for one parse and nowhere else.** Each body is parsed as it arrives and only
+    the rows are kept, in `relay_runs.parsed`, deleted with the row; `checkCursor` refuses a
+    raw-page key in the cursor and `checkParsed` refuses bytes in `parsed` (ruling **R-C5-plan-2**,
+    review **C3**). The sweep is `expires_at=lt.now` — **`now`, not `now()`** — and a fifth staging
+    proof inserts an expired row, calls `/relay` once and reads it gone, because `restDelete` throws
+    on a non-2xx and the sweep runs before any run logic (review **I13**).
 11. **The session store is sealed, device-local, and never in the vault.** The file is DPAPI-sealed at
     current-user scope with `CRYPTPROTECT_UI_FORBIDDEN`; no cookie value or captured token is readable
     in it; a corrupt or foreign file reads as an empty session and never as a failure; a TTL past its
@@ -3524,13 +4205,23 @@ Credential Manager entries themselves; this session never sees one.
   statuses, byte counts and milliseconds — and **no page body, no cookie, no URL carrying a token, no
   credential, and no error message from a third party**. A log line that carries any of those is a
   stop, not a note.
-- (c) **The spec's own open question, answered here: how long does each portal's session actually
-  last?** Run a second slot **immediately** and confirm from the logs that the plan **skipped its
-  login steps** on the strength of the session report. Then run a third the **next morning**, and
-  record for each portal whether it skipped or re-authenticated. That number is what Q4's 12 hours
-  and the whole "logged into once" claim rest on, and it cannot be learned offline. Write it into
-  `HANDOFF.md` whatever it turns out to be — including "zyBooks re-authenticated every time", which
-  would be a finding and not a failure.
+- (c) **The spec's own open question, answered here, and this item is BLOCKING for Task 12** — not a
+  note (review's *planner decision 1*): **how long does each portal's session actually last?** Q4's
+  `ttl_s: 43200` and the privacy draft's "signs in to a site once rather than on every run" both
+  rest on it, and a published promise that outruns the measurement is the one thing on this list a
+  later commit cannot fix.
+
+  **Do it after I11's report shape is in, not before.** The measurement only means anything if the
+  cloud's skip decision is expiry-driven; with a bare cookie *count* the plan would compose the
+  login steps every time and both runs would measure the re-auth path and tell you nothing.
+
+  Run a second slot **immediately** and confirm from the logs that the plan **skipped its login
+  steps** on the strength of the session report — and, for VHL, that the report said
+  `session_cookies > 0` with `earliest_expiry: null` and the plan tried anyway and was right. Then
+  run a third the **next morning**, and record for each portal whether it skipped or
+  re-authenticated. Write it into `HANDOFF.md` whatever it turns out to be — including "zyBooks
+  re-authenticated every time", which would be a finding and not a failure, and would send Q4 back
+  to Quinn with a real number.
 - (d) **A wrong password, once.** With Quinn's consent and one of their own accounts, save a
   deliberately wrong password, run one slot, and confirm: exit 0, **one** info card titled *Your
   zyBooks password no longer works*, the source paused, and **no second attempt** — then save the
@@ -3590,3 +4281,98 @@ Credential Manager entries themselves; this session never sees one.
 | M6 | `perform` re-parses the body as JSON once per `Capture` | One capture exists today. If a plan ever wants four, parse once and pointer four times; it is three lines and a measurement nobody has needed yet. |
 | M7 | A vendor that answers 200 with a login page on a step the plan does not recognise as a login page reads as a parse failure | This is exactly the failure `require_success` and `parse_user_session_form` were written for, and both ports carry their recognisers. A third portal will need its own, and §6 says the plan is where it goes. |
 | M8 | The commit trailer hard-codes a model name | **Ruled not a defect** (R-C2-6): the trailers name the model and session that *execute* the plan; the literal in Global Constraints is the writing session's. |
+
+---
+
+## Fix round 1 — resolutions (2026-09-17)
+
+Against `docs/reports/2026-09-17-c5-relay-fetch-plan-review.md` (`5a2ca69`, 600 lines, verdict
+*execute after fix round 1*). **Every finding is applied**; three asked for a decision and were
+settled by the controller as **R-C5-plan-1/2/3**, recorded first because they are what changed the
+shape of the plan rather than its wording. The spec was amended in the same round (its Status line,
+§2.4, §6, §8 and two §12 rows).
+
+### The three rulings
+
+**R-C5-plan-1 — the pause has an exit, and the app is what opens it (from C2).** A rejected login
+pauses that source; **saving that portal's password closes the card and un-pauses it**.
+`onboarding::store_credentials` (`app/src/onboarding.rs:850-856`) calls `info::close_info` on
+`close_key: login:<source>` through the engine's `write` with `console_ctx()` — the existing shape.
+Task 8 step 5 is that call and its test; `app/src/onboarding.rs` enters the ownership list for that
+one call; Q2's text to Quinn now says what re-arms the source, because "pause" with no answer to that
+is "stop forever". *Cost if wrong: one call.*
+
+**R-C5-plan-2 — parse incrementally; parsed rows only between round trips; no shelf cap (from C3).**
+The cloud parses each raw body **as it arrives**, per source, and keeps only the parsed rows — in
+`relay_runs.parsed`, deleted with the row. Raw bodies are never stored, which is Q1 and R4-19 exactly.
+`done` is assembled from those rows at the end. **Option (b), "one batch or bust", is refused: a
+thirteenth book must not be a product limit**, and the spec's §6 now says so. The `ingestHandler`
+hand-off is restructured: three functions — `ingestZybook`, `ingestVhl`, `finishSource` — are
+**extracted** from `ingest-coursework/handler.ts` and `ingestHandler` is rewritten in terms of them,
+so there is one copy and not two; `warnings` and `proposals` stay byte-identical because the code is
+moved rather than re-derived, the endpoint's own suite is unchanged, the two frozen parsed references
+are the oracles, and `finishRun` concatenates in `PORTAL_SOURCES` order (zyBooks, then VHL) and, within
+a source, by arrival index — which is the order one `ingestHandler` call produced. A twelve-book shelf
+spanning round trips is a test, and so is equality with the one-shot path.
+
+**R-C5-plan-3 — the composite driver (from C5).** `PLANS` is keyed by **job**;
+`courseworkPlan` and `discoverPlan` fan out to `SOURCE_PLANS = {zybooks, vhl}`;
+`cursor.sources = {zybooks: {…}, vhl: {…}}`; a batch is filled **round-robin** across the sources that
+still have steps, inside one shared `MAX_BATCH`; a per-source `{kind:"failed"}` is a warning that
+**retires that source and lets the other finish** (which is `collect`'s oldest rule, `coursework.rs:1383`);
+and `plan_version` is a stable composite string (`zybooks@1+vhl@1`), so a mid-run deploy still fires
+the 409. Spec §6 states it; Tasks 5 and 6 implement it.
+
+### Critical
+
+| # | Finding | Resolution |
+|---|---|---|
+| **C1** | The loopback portal row is invisible to the file that needs it — `relay_contract.rs` is an integration test and links the lib without `cfg(test)`, so every portal test would fail `unknown_source` | **`engine/tests/relay_contract.rs` does not exist.** Every test that aims at a loopback portal moved into `engine/src/relay.rs`'s own `#[cfg(test)] mod tests`, which is what spec §9 said and what `coursework.rs:3095-3160` precedes. `engine/tests/relay_allowlist.rs` is unchanged and is the one integration test this stream adds. `Captures::get_for_test` is gone with the file — an in-module test reads the private accessor, and a `pub` door on a struct holding bearer tokens should not exist. Global Constraints, the ownership list, *File structure*, Tasks 4, 8 and 9 and every command line all follow. |
+| **C2** | The rejected-login pause has no exit; Task 8's own test was unsatisfiable | **R-C5-plan-1.** Task 8 step 5 adds the app-side close; the test is rewritten as `saving_the_password_closes_the_card_and_un_pauses_the_source` and a second case proves a paused source never stops the other; exit-gate 15(d) is now demonstrable. |
+| **C3** | Accumulated page payloads had nowhere to live between round trips | **R-C5-plan-2.** The migration gains a `parsed` column with its own guard (`checkParsed`), `checkCursor`'s ban on raw-page keys stays, and *Interfaces* contract 8 carries the three extracted functions. |
+| **C4** | The ten-minute budget was checked only between round trips and `STEP_TIMEOUT` bounded one HTTP request out of six; the test compared two constants | `RunBudget` gains a monotonic `deadline`, `remaining()` is each request's timeout, `STEP_TIMEOUT` bounds a **whole step including its chain**, the agent carries no `timeout_global`, and two behavioural tests (a stalled portal, a stalled chain) replace the comparison — which is kept beside them as a pin on the numbers and renamed so it does not claim more than it proves. Exit-gate item 6 restated. |
+| **C5** | One run, one `plan` column, two sources: `PLANS[job]` was undefined for both jobs | **R-C5-plan-3.** Task 6 builds the composite driver before the zyBooks module, with `plans/mod_test.ts` proving the key, the round-robin, the per-source retirement and the composite version. |
+
+### Important
+
+| # | Finding | Resolution |
+|---|---|---|
+| **I1** | The 10 MiB `readJson` cap was below what the device's own budgets let it send | Derived, not chosen: `MAX_POST_BYTES = MAX_RUN_BYTES * 4/3 + 1 MiB` = **16 MiB**, the same number on both sides; the device charges it outgoing so a 413 is unreachable rather than unlikely; `a_results_batch_over_the_cap_is_a_413_not_a_500` pins the **relationship**; and both *Interfaces* contract 7 and Task 5 step 6 now say that `readJson` reads the whole body before it measures, in UTF-16 code units — a sanity bound, not a memory guard. **This settles the plan's own open decision 2.** |
+| **I2** | `scrub` knew three encodings and the relay adds a fourth (`quote_plus`) | `quote_plus(secret)` joins `scrub`'s form list as it moves in Task 1, the test is renamed and gains a fourth case with a space-bearing secret, the module doc says "four", and Task 4 adds a form-body transport failure whose error text carries `hun+ter`. A pre-existing gap in `vhl.rs`; C5 is where it becomes a stated guarantee. |
+| **I3** | The body the device returns was never scrubbed of the request's own secrets — and VHL's rejected login serves the login page back, commonly echoing the username | `scrub(&body, &filled.secrets)` is the last shaping step, after the capture redaction and before the UTF-8 decision, with a test against a portal that echoes the posted form. Spec §2.4's "byte for byte" is amended to say when it is not. **Taken in full as a security finding.** |
+| **I4** | The URL that was checked was not the URL that was sent | `perform` step 3a: `check_host` again on `filled.url`, asserting the two agree, with two cases — a placeholder in the authority is refused, and a substituted value cannot change the host. |
+| **I5** | Capture redaction was a text replace, so it could miss an escaped token or corrupt a body | Redact **at the pointer** in the parsed `serde_json::Value` and re-serialise through `dumps_value`, **only when a `redact: true` capture actually fired** — so the non-redacting case keeps its bytes and the BOM test stays true. One test with a token carrying a character the serialiser escapes. **Taken in full as a security finding.** |
+| **I6** | `the_password_is_exposed_in_exactly_one_place` counted its own source and could never pass | Counted over the pre-`cfg(test)` half, the shape `the_engine_holds_no_portal_url_and_no_login_flow` already uses, and the message now says the number is a guarantee and not a tally. |
+| **I7** | Three symbols listed under "Stays" lose their only non-test callers, so 0 warnings goes red | `coursework_request` and `FetchedSource` are deleted in Task 10; `post_coursework` is **split** — the POST wrapper goes, the decoder stays as `decode_coursework_reply` and is what `collect_cloud` calls on `done`. The "Stays" list is corrected, and Task 10 says which of `coursework.rs`'s tests move with which half and why a loopback harness disappears from the diff. |
+| **I8** | `sectionMapping` is not an export of `parse_vhl.ts` — it does not exist in any form | Task 7 adds it, `parseDashboard`'s two inline lookups call it, and the frozen `vhl-parsed-reference.json` proves the behaviour did not move. Named as one of C5's two edits to `ingest-coursework/`, in the ownership list and in *File structure*, so Task 9 does not discover it at the import line. |
+| **I9** | Hand-off H2's code did not compile (`cs_data_dir` exists nowhere in `slot_argv`) | The line is `sessions.to_string_lossy().into_owned()`; `sessions_dir(&cs.data_dir)` stays at the one call site in `run_slot_inner`, where the hand-off already put it. The comment says what went wrong, because hand-offs are applied verbatim. |
+| **I10** | H6 asked the controller to find a sentence the repository does not have | The disclosure is being **written**, not extended — so it is legal copy: it goes to Quinn and the lawyer with **Q6**, H6 carries the whole sentence and lands only after that, and Task 9 pins **both halves** of the panel's copy. The ledger row and spec §8 are corrected; if Quinn rules the existing lede is the disclosure, H6 is withdrawn and the spec says so. |
+| **I11** | The session report could not support "re-authenticate only on expiry" for a cookie session | The report becomes `{"cookies": {"count", "session_cookies", "earliest_expiry"}, "captures": [{name, expires_at}]}` — no name, no value, no domain; `observe` supersedes, honours `Max-Age=0` and prunes, and `load` prunes on the way out. `ObservedCookie` gains `expires_at`. Two tests. The R4-17 ledger row says what is now true rather than "yes". **This settles the plan's own open decision 1**, together with 15(c) becoming blocking. |
+| **I12** | `{kind:"reauth"}` carried no steps and the handler names no source, so nothing could compose the login | The `Plan` contract is explicit: `reauth` **names its source**, and the handler answers it by writing `reauthed: true` into that source's sub-cursor and re-entering `plan.start(ctx)`, so the module composes its own login steps and its `next` re-issues the failed step — once, never twice. Two lines of interface, written out in Task 6. |
+| **I13** | `expires_at=lt.now()` is unverified PostgREST and a wrong literal 500s every call | **`expires_at=lt.now`**, with the reason (Postgres accepts the datetime input `now`, not the string `now()`), and a **fifth** staging proof that inserts an expired row, calls `/relay` once and reads it gone — because 401 and 402 both return before the sweep and only an entitled call would show it. |
+| **I14** | A blown budget could be the warning that loses the run log | Every budget warning is phrased with an existing `FAILURE_MARKER` — `coursework: fetch failed (the run hit its round-trip budget); nothing changed` and three siblings — so **no marker is added** and `assert_eq!(FAILURE_MARKERS.len(), 7)` is untouched; the test asserts each one sorts first through `rank_warnings` against a benign per-item note. **This settles the plan's own open decision 3**, which the review agreed with and corrected. |
+
+### Minor
+
+| # | Resolution |
+|---|---|
+| **M1** | The two test-count literals (44, 39) and the predicted fall of "roughly 83" are gone; Task 10 counts `#[test]`s at the branch point and records the real number, and the review's own measurement (38 and 36 at `141b12d`) is cited as why. |
+| **M2** | Corrected throughout both documents: `coursework_request` `:639`; `post_coursework` `:670`; `cloudmodel.rs` `:252`; `account::api_base` `:42` and `anon_key` `:46`; `privacy.html` `:24` (bullet) and `:38` (the `<dd>`, with `:37` named as the `<dt>` that does not move); `onboarding.rs:74`; the "one predicate" doc as `vhl_rows`'s own comment at `coursework.rs:1255-1257`; and `vhl.rs:342-344` for the "single most important line". |
+| **M3** | H1a places `pub mod relay;` after `pub mod ranking;` (`lib.rs:72`) and says why the first draft's "before `pub mod runs;`" named a position that does not exist; H1b's snippet drops the `#[cfg(windows)]` that is not on either declaration. |
+| **M4** | `vhl.rs` gets `use crate::relay::{quote_plus, scrub};` — `urlencode` calls `quote_plus` and an import of `scrub` alone leaves the file unable to compile. |
+| **M5** | `RunBudget` and `SourceContext` are declared in full in Task 4, with every field and the reason for each. |
+| **M6** | The corpus pins are no longer quoted as literals anywhere: the rule is "unchanged from the branch point", read off `migrations_test.ts` at the fork and recorded in Task 5's report. |
+| **M7** | Task 12 step 1 and Global Constraints both use `.github/workflows/ci.yml:84`'s line verbatim, `--allow-write=cloud/eval` and `cloud/eval/` included. |
+| **M8** | `replay_into` passes `rec.line.clone()`: `Cookie::parse` yields `Cookie<'a>` and `CookieJar::insert` wants `Cookie<'static>`, and the doc says the test compiles either way, which is how this would be found late. |
+| **M9** | The `Location` rule is stated and tested: absolute is used as-is, root-relative is a path-and-query swap, **anything else** is `transport` naming "an unresolvable redirect". A refusal is safe because every hop is re-checked anyway. |
+| **M10** | The real user path is gone: *"Quinn's own vault, whatever `profiles.json` names, is never a target."* Both documents were grepped for `danie`, `C:\Users`, `USERPROFILE` and a named home directory; that line was the only hit and there are none now. |
+| **M11** | Both `cfg` arms named for `discover_json` (`:1290` / `:1366`) and for `collect_cloud` (`:745` / `:872`) — the non-Windows twins keep their one-line bodies and only their signatures move. |
+| **M12** | `Cargo.lock` is out of the ownership list and out of Task 3's `git add`: it is a shared-single-owner file and the `windows` feature adds no package, so it is **expected not to change** and exit-gate item 12 is where that is checked. |
+
+### The planner's three open decisions
+
+Settled exactly as the review settled them: **decision 1** (session lifetime measured at the exit
+gate) by **I11** plus making 15(c) blocking for Task 12 and ordering it after the report shape lands;
+**decision 2** (the `readJson` cap) by **I1**, derived on both sides; **decision 3** (budget warnings
+folded into `done.warnings`/`done.errors`) agreed, with **I14**'s correction to the phrasing so the
+one durable log line is the budget line and not a benign per-item note.
