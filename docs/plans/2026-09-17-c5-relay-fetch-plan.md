@@ -4365,7 +4365,7 @@ the 409. Spec §6 states it; Tasks 5 and 6 implement it.
 | **M7** | Task 12 step 1 and Global Constraints both use `.github/workflows/ci.yml:84`'s line verbatim, `--allow-write=cloud/eval` and `cloud/eval/` included. |
 | **M8** | `replay_into` passes `rec.line.clone()`: `Cookie::parse` yields `Cookie<'a>` and `CookieJar::insert` wants `Cookie<'static>`, and the doc says the test compiles either way, which is how this would be found late. |
 | **M9** | The `Location` rule is stated and tested: absolute is used as-is, root-relative is a path-and-query swap, **anything else** is `transport` naming "an unresolvable redirect". A refusal is safe because every hop is re-checked anyway. |
-| **M10** | The real user path is gone: *"Quinn's own vault, whatever `profiles.json` names, is never a target."* Both documents were grepped for `danie`, `C:\Users`, `USERPROFILE` and a named home directory; that line was the only hit and there are none now. |
+| **M10** | The real user path is gone: *"Quinn's own vault, whatever `profiles.json` names, is never a target."* Both documents were grepped for this machine's user name, `C:\Users`, `USERPROFILE` and a named home directory; that line was the only hit and there are none now. |
 | **M11** | Both `cfg` arms named for `discover_json` (`:1290` / `:1366`) and for `collect_cloud` (`:745` / `:872`) — the non-Windows twins keep their one-line bodies and only their signatures move. |
 | **M12** | `Cargo.lock` is out of the ownership list and out of Task 3's `git add`: it is a shared-single-owner file and the `windows` feature adds no package, so it is **expected not to change** and exit-gate item 12 is where that is checked. |
 
