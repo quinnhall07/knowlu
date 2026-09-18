@@ -1226,6 +1226,7 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(page.contains(&format!("This page is version <strong>{version}</strong>")), "…and so is its version line");
     // Spec §10: the policy must not describe a password the product no longer has.
     assert!(!page.contains("password hash"), "the password-hash clause is gone");
+    assert!(!page.contains("your password, which Supabase holds"), "…and the account-clause's own password mention is gone");
     assert!(page.contains("There is no password on a Knowlu account at all"), "…and the page says so");
     assert!(page.contains("Signing in with Google tells us three things"), "Google sign-in is disclosed");
 }
