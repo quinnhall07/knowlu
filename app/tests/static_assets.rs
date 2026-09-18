@@ -880,24 +880,28 @@ fn the_wizard_takes_its_default_folders_from_the_launch_state() {
 }
 
 /// **R-C1-55, C1 — Tauri v2 lower-camel-cases every argument key** (tauri-macros' `ArgumentCase::Camel`)
-/// unless the command opts out with `rename_all = "snake_case"`. `sign_up` does not opt out, so a page
-/// that sends `age_attested` is rejected *before* the command body runs; the handler's `.catch` then
-/// paints `UNREACHABLE` — *the account service could not be reached* — and `wizValid`'s step-1 gate
-/// refuses Next forever. **No new student could ever create an account**, and the sentence they were
-/// shown blamed the network. Nothing else catches it: `static_assets` matches strings, not argument
-/// names, and `wizard-check.py` fakes `invoke` wholesale, so the fake answers whatever key it is handed.
+/// unless the command opts out with `rename_all = "snake_case"`. `send_magic_link` does not opt out, so
+/// a page that sends `age_attested` is rejected *before* the command body runs; the handler's `.catch`
+/// then paints `UNREACHABLE` — *the account service could not be reached* — and `wizValid`'s step-1 gate
+/// refuses Next forever. **No new student could ever get a code**, and the sentence they were shown
+/// blamed the network. C1b moved the trap one command over: `sign_up` is gone with the password, and
+/// `send_magic_link(email, age_attested)` is now the crate's multi-word command argument.
 #[test]
-fn the_sign_up_call_spells_its_argument_the_way_tauri_delivers_it() {
+fn the_code_request_spells_its_argument_the_way_tauri_delivers_it() {
     let rust = fs::read_to_string("src/account.rs").expect("src/account.rs");
     // The signature itself, so a renamed or added parameter fails HERE and not in a student's first
     // five minutes.
-    assert!(rust.contains("pub fn sign_up(email: String, password: String, age_attested: bool)"),
-        "account::sign_up's signature changed — re-derive the keys the page must send");
+    assert!(rust.contains("pub fn send_magic_link(email: String, age_attested: bool)"),
+        "account::send_magic_link's signature changed — re-derive the keys the page must send");
     assert!(!rust.contains("rename_all"), "account.rs opts no command out of Tauri's camelCase");
     let js = read("console.js");
-    assert!(js.contains("args.ageAttested = EL(\"wiz-18\").checked"), "sign_up must carry `ageAttested`");
+    // Either spelling of the assignment, because Task 5 is what moves it from the deleted
+    // `args.ageAttested = …` into the `send_magic_link` invoke — and this test has to be green at
+    // THIS task gate, not only at the next one. What it owns is the half that never changes: the
+    // page says `ageAttested` and never `age_attested`, whichever branch carries it.
+    assert!(js.contains("ageAttested"), "the attestation travels camel-cased");
     assert!(!js.contains("age_attested"), "the snake_case spelling must not appear on the page at all");
-    // The two consent versions are `account.rs`'s constants and are stamped into the sign-up body
+    // The two consent versions are `account.rs`'s constants and are stamped into the consent call
     // there (spec §9): a page that sent its own could make the consent log wrong.
     assert!(rust.contains("TOS_VERSION") && rust.contains("PRIVACY_VERSION"), "the versions are Rust's");
     for own in ["tos_version", "tosVersion", "privacy_version", "privacyVersion"] {

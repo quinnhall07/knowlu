@@ -3,8 +3,8 @@
 //!
 //! **Two rules from `credentials.rs` carry over unchanged.** A secret is never logged, never in a run
 //! record, a backup, a fixture, a test name or an error message; and the page never sees one — a
-//! command takes a password in and gives an envelope back, and the token that comes out of it goes
-//! straight into Credential Manager without passing through the webview.
+//! command takes an email address or a six-digit code in and gives an envelope back, and the token
+//! that comes out of it goes straight into Credential Manager without passing through the webview.
 use serde_json::{json, Value};
 
 /// The Supabase project this build talks to. **Both values are public**: Supabase publishes the
@@ -132,8 +132,8 @@ pub fn load_session(target: &str) -> Result<(String, Session), String> {
 }
 
 /// Read, write the new one, delete the old — in that order, never delete-then-write: a failure in
-/// between would leave the user signed out with no way back but retyping a password they may have
-/// generated. `retarget_credentials` makes the same argument about the coursework logins.
+/// between would leave the user signed out with no way back but another emailed code or another trip
+/// through the browser. `retarget_credentials` makes the same argument about the coursework logins.
 ///
 /// Idempotent both ways: a `from` that is already gone with a `to` that already holds a session is
 /// **not** an error — the move already happened, most likely on an earlier call this one is
@@ -170,7 +170,7 @@ pub const UNREACHABLE: &str = "the account service could not be reached";
 
 /// One GoTrue POST. Returns the parsed body and the status; the caller decides what a status means.
 /// **The transport failure has a stable first clause**, [`UNREACHABLE`], because the page has to
-/// tell "your password is wrong" from "there is no network" — the first is something a user can fix
+/// tell "that code is wrong" from "there is no network" — the first is something a user can fix
 /// on the panel, the second is what stands the upgrade overlay down instead of trapping someone
 /// behind it. Everything else is the provider's own sentence.
 ///
@@ -178,9 +178,9 @@ pub const UNREACHABLE: &str = "the account service could not be reached";
 /// which `app/Cargo.toml` does not enable (it carries the engine's `cookies` feature and no other) —
 /// but the choice is not free of behaviour either way: `RequestBuilder::send_json` pretty-prints
 /// with embedded newlines, and this crate's own loopback tests assert exact substrings like
-/// `"type":"magiclink"` and `"password"` against the raw request text, which a pretty-printed body
-/// would break. Serializing with `serde_json::to_string` — already a dependency — and sending the
-/// compact result as a plain string is **required**, not merely equivalent.
+/// `"type":"magiclink"` and `"create_user":true` against the raw request text, which a pretty-printed
+/// body would break. Serializing with `serde_json::to_string` — already a dependency — and sending
+/// the compact result as a plain string is **required**, not merely equivalent.
 fn post_json(url: &str, anon: &str, body: &Value) -> Result<(u16, Value), String> {
     let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
     let mut res = agent()
@@ -421,44 +421,13 @@ pub fn serve_one_callback(listener: std::net::TcpListener, wait: std::time::Dura
     }
 }
 
-/// Email + password, with the three things migration `20260910000100`'s trigger insists on. A sign-up
-/// missing any of them is refused **by the database**, so sending them is not politeness.
-pub fn sign_up_at(
-    auth_base: &str,
-    anon: &str,
-    email: &str,
-    password: &str,
-    tos_version: &str,
-    privacy_version: &str,
-    now_unix: i64,
-) -> Result<(String, Session), String> {
-    let body = json!({
-        "email": email,
-        "password": password,
-        "data": { "age_attested": "true", "tos_version": tos_version, "privacy_version": privacy_version },
-    });
-    let (status, v) = post_json(&format!("{auth_base}/signup"), anon, &body)?;
-    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
-    // With email confirmation on, a sign-up returns the user and NO session until the link is
-    // clicked. GoTrue did not refuse anything — this `Err` is not reporting a fault, it is the one
-    // channel this function has for handing the wizard a sentence to show while it waits; the
-    // caller reads the string, not the variant, so "check your email" travels the same path a real
-    // failure would without being one.
-    if v.get("access_token").is_none() {
-        return Err("check your email and click the link, then sign in".to_string());
-    }
-    session_from(&v, now_unix)
-}
-
-pub fn sign_in_at(auth_base: &str, anon: &str, email: &str, password: &str, now_unix: i64) -> Result<(String, Session), String> {
-    let (status, v) = post_json(&format!("{auth_base}/token?grant_type=password"), anon, &json!({ "email": email, "password": password }))?;
-    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
-    session_from(&v, now_unix)
-}
-
-/// A magic link never returns a session — it sends mail. Success is "we sent it", nothing more.
+/// One button: the code that both creates the account and signs in. `create_user: true` is the whole
+/// difference from C1's version — and **nothing about consent travels with it** (R-C1b-3). `data`
+/// would land as `raw_user_meta_data`, and migration `20260917000100` stopped the trigger reading
+/// it, precisely because this request is one anyone holding the public anon key can send for any
+/// address they like. The attestation is recorded after the code is typed, by `POST /account/consent`.
 pub fn magic_link_at(auth_base: &str, anon: &str, email: &str) -> Result<(), String> {
-    let (status, v) = post_json(&format!("{auth_base}/otp"), anon, &json!({ "email": email, "create_user": false }))?;
+    let (status, v) = post_json(&format!("{auth_base}/otp"), anon, &json!({ "email": email, "create_user": true }))?;
     if (200..300).contains(&status) { Ok(()) } else { Err(provider_error(status, &v)) }
 }
 
@@ -509,38 +478,14 @@ fn ok_account(account_id: &str, email: &str) -> Value {
     json!({ "ok": true, "error": Value::Null, "account_id": account_id, "email": email })
 }
 
-/// Create the account. **The three acceptances are Rust's, not the page's**: the versions are
-/// constants here and the attestation is refused here, so a page that forgot a checkbox cannot make
-/// an account that the consent log then describes wrongly.
+/// The attestation is still refused **here**, before a single mail is sent — it is the consent the
+/// wizard's two checkboxes stand for. What changed is where it is recorded: in the account, by the
+/// route, once the code has proved the address.
 #[tauri::command(async)]
-pub fn sign_up(email: String, password: String, age_attested: bool) -> Value {
+pub fn send_magic_link(email: String, age_attested: bool) -> Value {
     if !age_attested {
-        return json!({ "ok": false, "error": "Knowlu is for people 18 or older.", "account_id": Value::Null });
+        return json!({ "ok": false, "error": "Knowlu is for people 18 or older." });
     }
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
-    match sign_up_at(&auth, &anon, email.trim(), &password, TOS_VERSION, PRIVACY_VERSION, now_unix()) {
-        Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
-            Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-        },
-        Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-    }
-}
-
-#[tauri::command(async)]
-pub fn sign_in(email: String, password: String) -> Value {
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
-    match sign_in_at(&auth, &anon, email.trim(), &password, now_unix()) {
-        Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
-            Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-        },
-        Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-    }
-}
-
-#[tauri::command(async)]
-pub fn send_magic_link(email: String) -> Value {
     let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e }) };
     match magic_link_at(&auth, &anon, email.trim()) {
         Ok(()) => json!({ "ok": true, "error": Value::Null }),
@@ -551,10 +496,19 @@ pub fn send_magic_link(email: String) -> Value {
 /// The other half of the magic link: the code from the mail, traded for a session on this machine.
 #[tauri::command(async)]
 pub fn verify_email_code(email: String, code: String) -> Value {
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
+    let (auth, anon, base) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
     match verify_email_code_at(&auth, &anon, email.trim(), &code, now_unix()) {
         Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
+            Ok(()) => {
+                // The same call `google_sign_in` makes, for the same reason and with the same
+                // handling: the trigger records no consent on either path any more, this is the one
+                // writer, and a failure is logged rather than swallowed — `open_checkout` retries it
+                // and `billing-checkout` refuses an account that still has no attestation.
+                if let Err(e) = record_consent_at(&base, &s.access_token, TOS_VERSION, PRIVACY_VERSION) {
+                    eprintln!("Knowlu: the sign-up consent could not be recorded ({e})");
+                }
+                ok_account(&id, &s.email)
+            }
             Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
         },
         Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),

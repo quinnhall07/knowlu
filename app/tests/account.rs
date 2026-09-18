@@ -1,6 +1,6 @@
 //! `account.rs` against a loopback server, never the network (the 3a rule: `127.0.0.1` only, and the
 //! serving thread is joined before the test returns, so a test can never outlive its own socket).
-use knowlu::account::{auth_base, check_api_base, sign_in_at, sign_up_at, Session};
+use knowlu::account::{auth_base, check_api_base, Session};
 use std::io::{Read, Write};
 
 /// Serves exactly `responses.len()` requests on `127.0.0.1:0`, then stops. Returns the base URL and
@@ -99,24 +99,44 @@ fn only_https_and_the_loopback_test_seam_are_accepted_as_an_api_base() {
 }
 
 #[test]
-fn a_successful_sign_in_returns_a_session_and_sends_the_anon_key() {
-    let body = r#"{"access_token":"at1","refresh_token":"rt1","expires_in":3600,"user":{"id":"acc-1","email":"a@example.invalid"}}"#;
-    let (base, handle) = loopback(vec![(200, body.to_string())]);
-    let out = sign_in_at(&format!("{base}/auth/v1"), "anon-key", "a@example.invalid", "pw", 1_760_000_000);
+fn the_code_request_creates_the_account_and_carries_no_consent_key_at_all() {
+    use knowlu::account::magic_link_at;
+    let (base, handle) = loopback(vec![(200, "{}".to_string())]);
+    let out = magic_link_at(&format!("{base}/auth/v1"), "anon-key", "n@example.invalid");
     let seen = handle.join().expect("server thread");
-    let s: (String, Session) = out.expect("sign in");
-    assert_eq!(s.0, "acc-1");
-    assert_eq!(s.1.access_token, "at1");
-    assert_eq!(s.1.refresh_token, "rt1");
-    assert_eq!(s.1.email, "a@example.invalid");
-    assert_eq!(s.1.expires_at, 1_760_000_000 + 3600);
+    assert!(out.is_ok(), "{out:?}");
     let req = &seen[0];
-    assert!(req.starts_with("POST /auth/v1/token?grant_type=password "), "{req}");
-    assert!(req.to_lowercase().contains("apikey: anon-key"), "{req}");
-    assert!(req.to_lowercase().contains("content-type: application/json"), "{req}");
-    // The password is on the wire because that is what signing in is — but it is never in a log,
-    // a message or this assertion. Only the field NAME is checked.
-    assert!(req.contains("\"password\""), "{req}");
+    assert!(req.starts_with("POST /auth/v1/otp "), "{req}");
+    // `create_user: false` is what made a new student's first press answer "Signups not allowed for
+    // otp". One field, one button, one code — there is no separate create step to fall back to.
+    assert!(req.contains("\"create_user\":true"), "{req}");
+    // R-C1b-3: nothing about consent travels with a request that anyone holding the public anon key
+    // can send. `data` would land as `raw_user_meta_data`, and after migration 20260917000100 the
+    // trigger reads none of it — the attestation is recorded by `POST /account/consent` once the
+    // code has proved the address, on this path exactly as on Google's.
+    for key in ["age_attested", "tos_version", "privacy_version", "\"data\""] {
+        assert!(!req.contains(key), "{key} must not travel with /otp: {req}");
+    }
+    // And nothing that smells of a password, on any path in this file any more.
+    assert!(!req.to_lowercase().contains("password"), "{req}");
+}
+
+/// The deletion, pinned. A dead command that can still make a password account is a second door.
+#[test]
+fn there_is_no_password_path_left_in_the_crate() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    for gone in ["fn sign_up_at", "fn sign_in_at", "pub fn sign_up(", "pub fn sign_in(", "grant_type=password", "/signup"] {
+        assert!(!src.contains(gone), "{gone} must be gone with the password");
+    }
+    // **NOT a ban on the word** (review C2). `load_session` reads `cred.password.expose()`
+    // (`account.rs:130`) and `password` there is a field name on `knowlu_engine::wincred`'s
+    // credential struct — engine-owned, and `engine/**` is not this stream's to edit, so the old
+    // catch-all could never pass without deleting the one function that reads a stored session.
+    // Two claims that are true AND load-bearing instead: no request body carries a password field,
+    // and no function in this file takes one.
+    assert!(!src.contains("\"password\""), "no request body may carry a password field");
+    assert!(!src.contains("password: &str") && !src.contains("password: String"),
+        "no function in account.rs takes a password");
 }
 
 /// The magic link's second half, which is what makes the button on the panel honest.
@@ -135,30 +155,6 @@ fn a_six_digit_code_from_the_email_becomes_a_session_on_this_machine() {
     assert!(req.contains("\"type\":\"magiclink\""), "{req}");
     // Trimmed: a code pasted out of a mail client arrives with whitespace around it more often than not.
     assert!(req.contains("\"token\":\"123456\""), "{req}");
-}
-
-#[test]
-fn a_refused_sign_in_is_the_providers_sentence_and_never_a_status_code() {
-    let (base, handle) = loopback(vec![(400, r#"{"error_description":"Invalid login credentials"}"#.to_string())]);
-    let out = sign_in_at(&format!("{base}/auth/v1"), "anon-key", "a@example.invalid", "pw", 0);
-    let _ = handle.join().expect("server thread");
-    assert_eq!(out.unwrap_err(), "Invalid login credentials");
-}
-
-#[test]
-fn signing_up_sends_the_attestation_and_both_policy_versions_as_user_metadata() {
-    let body = r#"{"access_token":"at1","refresh_token":"rt1","expires_in":3600,"user":{"id":"acc-2","email":"b@example.invalid"}}"#;
-    let (base, handle) = loopback(vec![(200, body.to_string())]);
-    let out = sign_up_at(&format!("{base}/auth/v1"), "anon-key", "b@example.invalid", "pw", "2026-09-10", "2026-09-10", 0);
-    let seen = handle.join().expect("server thread");
-    assert!(out.is_ok(), "{:?}", out.err());
-    let req = &seen[0];
-    assert!(req.starts_with("POST /auth/v1/signup "), "{req}");
-    // The trigger in migration 20260910000100 refuses a sign-up without all three, so a client that
-    // forgot one would fail at the database with a message nobody could act on. This is the pin.
-    assert!(req.contains("\"age_attested\":\"true\""), "{req}");
-    assert!(req.contains("\"tos_version\":\"2026-09-10\""), "{req}");
-    assert!(req.contains("\"privacy_version\":\"2026-09-10\""), "{req}");
 }
 
 #[test]
@@ -1130,6 +1126,28 @@ fn the_consent_call_carries_the_attestation_and_both_compiled_in_versions() {
     assert!(req.contains("\"age_attested\":true"), "{req}");
     assert!(req.contains("\"tos_version\":\"2026-09-10\""), "{req}");
     assert!(req.contains("\"privacy_version\":\"2026-09-17\""), "{req}");
+}
+
+/// R-C1b-3: one route, both paths. A `verify_email_code` that saved a session and recorded nothing
+/// would leave the emailed-code student with a null attestation and a 403 at the subscribe step.
+///
+/// **The owner strings are built, not written literally** (`owner_of`, below): a bare
+/// `"pub fn verify_email_code("` in this file's own source text is exactly the shape
+/// `no_test_in_this_file_can_reach_the_compiled_in_project`'s scan reads as a real call to a
+/// risky function — `verify_email_code` calls `env_pair`, which reads the compiled-in `api_base()`
+/// — and that meta-test would then demand an `ApiBase::set` seam this test has no reason to hold: it
+/// touches no network and no environment variable, only `src/account.rs`'s own text.
+fn owner_of(name: &str) -> String { format!("pub fn {name}(") }
+
+#[test]
+fn both_sign_in_paths_record_the_consent() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    for name in ["google_sign_in", "verify_email_code"] {
+        let owner = owner_of(name);
+        let body = src.split(&owner).nth(1).expect(&owner);
+        let body = body.split("\n#[tauri::command").next().unwrap_or(body);
+        assert!(body.contains("record_consent_at("), "{owner} must record the consent it just took");
+    }
 }
 
 /// **Review I4.** The consent call after a sign-in is best effort, so `open_checkout` retries it
