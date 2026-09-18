@@ -1212,3 +1212,20 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         assert!(js.contains(sentence), "the refusal names what is missing: {sentence}");
     }
 }
+
+/// The version constant and the page's own date are one fact in two files (`account.rs`'s rule).
+#[test]
+fn the_privacy_version_constant_is_the_published_pages_date() {
+    let rust = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let version = rust
+        .split("pub const PRIVACY_VERSION: &str = \"").nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const PRIVACY_VERSION: &str = \"…\";`");
+    let page = std::fs::read_to_string("../site/privacy.html").expect("site/privacy.html");
+    assert!(page.contains(&format!("Effective {version}.")), "the page's Effective date is {version}");
+    assert!(page.contains(&format!("This page is version <strong>{version}</strong>")), "…and so is its version line");
+    // Spec §10: the policy must not describe a password the product no longer has.
+    assert!(!page.contains("password hash"), "the password-hash clause is gone");
+    assert!(page.contains("There is no password on a Knowlu account at all"), "…and the page says so");
+    assert!(page.contains("Signing in with Google tells us three things"), "Google sign-in is disclosed");
+}

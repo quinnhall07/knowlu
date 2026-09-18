@@ -3,7 +3,7 @@
 //!
 //! **Two rules from `credentials.rs` carry over unchanged.** A secret is never logged, never in a run
 //! record, a backup, a fixture, a test name or an error message; and the page never sees one — a
-//! command takes an email address or a six-digit code in and gives an envelope back, and the token
+//! command takes an email address or a one-time code in and gives an envelope back, and the token
 //! that comes out of it goes straight into Credential Manager without passing through the webview.
 use serde_json::{json, Value};
 
@@ -22,7 +22,7 @@ pub const DEFAULT_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3M
 /// a reader comparing the two should not have to hold a mapping in their head. Bump BOTH the constant
 /// and the page's date in the same commit, or the consent log points at text nobody can find.
 pub const TOS_VERSION: &str = "2026-09-10";
-pub const PRIVACY_VERSION: &str = "2026-09-16";
+pub const PRIVACY_VERSION: &str = "2026-09-17";
 
 /// Where a session lives before there is a vault to key it to. The wizard signs in on panel 2 and
 /// creates the vault on panel 9, so for those seven panels the profile id does not exist yet — and it
@@ -433,7 +433,7 @@ pub fn magic_link_at(auth_base: &str, anon: &str, email: &str) -> Result<(), Str
 
 /// …and this is how a **desktop** app finishes one. The link in the mail redirects to
 /// `https://knowlu.com/signed-in.html` with the session in the URL fragment, **in the user's
-/// browser** — a place this process will never see. So the mail carries a six-digit code beside the
+/// browser** — a place this process will never see. So the mail carries a one-time code beside the
 /// link (`config.toml`'s `[auth.email.template.magic_link]`, GoTrue's own `{{ .Token }}`), the panel
 /// asks for it, and `/verify` trades it for the same session the link would have given.
 ///

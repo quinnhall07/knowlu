@@ -9,7 +9,7 @@
 <body>
 <main class="doc">
   <h1>Privacy policy</h1>
-  <p class="date">Effective 2026-09-16. This page is version <strong>2026-09-16</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
+  <p class="date">Effective 2026-09-17. This page is version <strong>2026-09-17</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
   <p>Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.</p>
   <p>That is the whole policy in one line. The rest of this page is the same promise said slowly, so you can check it.</p>
 
@@ -29,7 +29,7 @@
   <p>By category, with the reason it exists. If a category is not on this list, we are not collecting it.</p>
   <dl>
     <dt>Your account</dt>
-    <dd>The email address you sign up with; your password, which Supabase holds as a hash and which we never see; the fact that you attested you are 18 or older, as a yes and a timestamp; and which version of these two policies you accepted, and when. Without it there is nobody for a subscription or a judgment to belong to.</dd>
+    <dd>The email address you sign up with; and, if you choose Continue with Google, the fact that this account signs in with Google and the Google account id that identifies it — Knowlu never sees your Google password and never asks for one. There is no password on a Knowlu account at all: you sign in with Google, or with a code we email you. The fact that you attested you are 18 or older, as a yes and a timestamp; and which version of these two policies you accepted, and when. Without it there is nobody for a subscription or a judgment to belong to.</dd>
     <dt>Your subscription</dt>
     <dd>Stripe takes the payment and holds the card. <strong>We never see a card number.</strong> Stripe also asks for your billing address, because whether a state charges sales tax on Knowlu depends on where you are; Stripe holds that too. What we keep is a Stripe customer id, which plan you are on, whether it is active, and when the current period ends. We also keep a record of the agreement itself — the price, the version of the terms, the moment, and the IP address it came from — because California requires a subscription seller to be able to show what the customer agreed to.</dd>
     <dt>Your calendar links</dt>
@@ -57,7 +57,7 @@
   <h2>Who else touches it</h2>
   <p>Six companies, each doing one job, and only two of them ever have any content of yours read by a model.</p>
   <ul>
-    <li><strong>Supabase</strong> — hosting, the database and the sign-in system. Your account row, your password hash and every row above live there.</li>
+    <li><strong>Supabase</strong> — hosting, the database and the sign-in system. Your account row and every row above live there, and it is what checks the code we email you or the sign-in Google confirms.</li>
     <li><strong>Stripe</strong> — payments and the subscription. Stripe sees your card; we do not.</li>
     <li><strong>Cloudflare</strong> — this website and the downloads.</li>
     <li><strong>OpenRouter</strong> — the router every judgment request goes through on its way to a model. It carries the text but does not itself run a model on it, sends every request under zero data retention — never as a default it could quietly lose — and trains nothing on what passes through. Each request names the one company allowed to answer it and is <strong>refused outright, never sent somewhere else,</strong> if that company cannot meet every requirement we set.</li>
@@ -71,6 +71,7 @@
   <p>We do not sell it, we do not rent it, and we do not share it for anyone's advertising — not for money and not for anything else of value. There is no opt-out link on this site because there is nothing to opt out of, and a Global Privacy Control signal has nothing to switch off. If that ever changed it would be a new version of this policy and a question asked in the app, not a quiet edit to this paragraph.</p>
 
   <h2>Gmail</h2>
+  <p>Signing in with Google tells us three things and only three: your email address, your name, and a link to your profile picture. It asks Google for nothing else — not your mail, not your calendar, not your files — and it is a different permission from the Calendar and Gmail connections below, which you grant separately and can refuse.</p>
   <p>Connecting Gmail is optional, it is off until you turn it on, and you can disconnect it in Settings at any time — which revokes our access at Google and deletes the stored connection. (Gmail is not connected in this version of Knowlu; the app will say when it is.)</p>
   <p>Knowlu's use and transfer of information received from Google APIs to any other app will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. In plain words:</p>
   <ul>
