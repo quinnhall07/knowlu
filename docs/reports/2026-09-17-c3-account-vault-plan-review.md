@@ -452,3 +452,77 @@ Nothing else in the fix round broke: no Global Constraint is contradicted, no pl
 untouched by every task, `rank` still reaches no `/judge-*`, no child process is added, `ring` is the TLS
 crate the engine already links and no OpenSSL enters, and nothing new is named after a person, a machine or
 a credential.
+
+## Re-review after fix round 2 (2026-09-17)
+
+**Verdict: Execute after fix round 3 (one new finding, S1; every item below it is closed).**
+
+- **R1 — resolved.** H9a's removal list (`plan.md:537-561`) now names both `sync_step` call sites — the pull at
+  `scheduler.rs:582-584` and the push at `:630` — and H8b keeps only the three `refresh_*` calls (`:578,
+  656-657`). Verified against the live file: those are exactly the lines present.
+- **R2 — resolved.** `cloudmodel.rs:224-296` has no `account_id()`; `CloudConfig::account_id` is the field
+  (`:55`). *Interfaces* contract 4 drops the invented accessor, and `run_lines_with` (`plan.md:3508-3516`) now
+  binds `cfg` at check one and passes `&cfg.account_id` to `build_push`.
+- **R3 — resolved, and it typechecks.** `write.rs:18` imports `Value` from `serde_yaml_ng`; `to_literal`
+  (`:166`) and `propose_amendment`'s `changes` (`:626`) are both that type. `reconcile.rs:24`'s
+  `Resolution::apply` is `BTreeMap<String, serde_json::Value>`. `yaml::from_json` (`yaml.rs:118`) is
+  `&serde_json::Value -> serde_yaml_ng::Value` and `yaml::get` (`:19`) returns `Option<&serde_yaml_ng::Value>`.
+  `plan.md:414` (`to_literal(&yaml::from_json(value))`) and `:442-444` (`from`/`to` both converted or read as
+  YAML) line up on both sides.
+- **R4 — resolved by the ruling (perform the move).** `plan.md:375-390` calls
+  `write::move_note(vault, &from, &dest, ctx, journal)`, matching `write.rs:472`'s signature exactly, and
+  folds `WriteError::Exists` into a warning. New test at `plan.md:217-242`. Raises a design question the
+  planner asked about directly — answered below, and it is what produces S1.
+- **R5 — resolved.** `plan.md:559` names the `cs.auto_sync` condition in H9a's removal list; the `due_write`
+  block becomes `if !slot_running && due_write {`, matching the gate actually present at `scheduler.rs:785`.
+- **R6 — resolved.** `Pulled`/`PulledNote` declared at `plan.md:261-284` with the derives their call sites
+  need (`Default` for `Pulled`, used at `..Default::default()` and `Pulled::default()`).
+- **The I3 nit — resolved.** `plan.md:3798` now quotes H4b's own `println!("{} ({reason})",
+  name_of(&cli.command));` verbatim, matching `plan.md:456` and the test's assertion at `:3694`.
+- **The I1 slip — resolved.** `sha2 = "0.10"` is confirmed at `app/Cargo.toml:69`, a direct app edge, not a
+  transitive of `tauri-codegen`/`wry`; `dependency_boundary.rs:16`'s `MANIFESTS` scans only
+  `engine/Cargo.toml` and the workspace root, so the correction changes no conclusion.
+
+**On R4(a) — is the echo consistent with the tombstone case, and does the push filter catch it?**
+Consistent: `write::move_note`'s echo (`plan.md:372-390`) takes exactly the shape `write::delete`'s
+pre-existing tombstone-settle echo already takes at `plan.md:3203` (unmodified by this round) — both call a
+`write::` path function with `ctx.actor = sync::ACTOR`, journalling a second, locally-authored record beside
+the foreign one already appended verbatim. R4 extends an established pattern rather than inventing a new one.
+But the load-bearing half fails: `build_push` (`plan.md:2462-2511`) dedupes only by content hash already in
+`cursor.boundary` from an earlier push of its own (`:2472`) — it carries no actor or `via` filter at all. The
+echo record `write::move_note`/`write::delete` files has a new `ts`, this device's own `device_name()`, and
+consequently a hash distinct from the foreign record it mirrors, so nothing in `build_push` recognizes it as
+already-known. It is pushed, stored server-side as a genuinely new row — P4 (`plan.md:79`) already documents
+that the pull side is filtered by the device's own hash memory rather than by device identity, so nothing
+downstream catches it either — and it is pulled by every other desktop as a record it has never seen. The
+effect is bounded (the receiving desktop's own existence guard stops it performing the move or delete a
+second time, so there is no incorrect write and no unbounded bounce), but every cross-device move or settle
+now permanently doubles in the journal, credited to `agent:knowlu.sync` rather than the desktop that acted.
+That is a real echo, not a hypothetical one, so by the rule this question was asked under, it is blocking.
+
+**On R4(b) — a move onto an occupied destination, warned and never retried: pilot-acceptable, or a finding?**
+Acceptable for the pilot, not blocking. The record is still journalled (`report.records` counts it) so
+nothing is silently lost; only the rename is skipped, with a warning naming both paths, so a reader of the
+Runs view sees exactly what happened. The note stays at its old path — discoverable, not deleted, and never
+overwrites whatever already occupies the destination — so the failure mode is safe rather than corrupting.
+`Cursor` carrying no retry-queue field means the plan does not notice if the destination frees up later, but
+that needs two desktops independently landing on the same destination filename, a case the plan itself says
+has never been exercised by two real pushes even once. A retry queue is a real feature, not a one-line fix,
+and is properly a follow-up; the plan should say so explicitly in Task 6 or the fidelity ledger rather than
+leave it implicit in a code comment, but that is a minor, not a blocker.
+
+### New findings
+
+**S1. `plan.md:2462-2511` (`build_push`) versus `:372-390` (the move echo) and `:3203` (the pre-existing
+tombstone echo) — a locally-authored echo of a foreign move or delete is not excluded from the next push, so
+the account and every other desktop see it as a new event.**
+`build_push` has no actor or `via` filter; `write::move_note`/`write::delete` (`write.rs:459, 472-497`) stamp
+the echo with `ctx.actor = sync::ACTOR`, a fresh `ts` and this device's own `device_name()`, so its hash is
+new and the next `build_push` picks it up. *Fix:* exclude a record whose `actor` is `sync::ACTOR` and whose
+`op` is `move` or `delete` from `build_push`'s record loop — that pair is reserved to `apply`'s own mirroring
+and no other device needs to learn about it twice — or mark it un-pushable at creation and have `build_push`
+honor that flag.
+
+Nothing else in this round broke: no placeholder was introduced, no Global Constraint is contradicted (the
+echo record is a valid, already-registered `op`/`via` pair, so "no new op, no new via" still holds even
+though S1 stands), and nothing new is named after a person, a machine or a credential.
