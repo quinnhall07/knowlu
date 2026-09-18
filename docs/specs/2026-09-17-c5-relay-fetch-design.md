@@ -411,11 +411,14 @@ create table relay_runs (
   plan text not null,               -- the JOB: 'coursework' or 'coursework-discover'
   plan_version text not null,       -- the composite: 'zybooks@1+vhl@1'
   cursor jsonb not null,            -- per source: indices, zybook codes, scraped form fields, the dashboard link
-  -- {assignments, own, proposals}: `own` is a MAP of source name to that source's own un-prefixed
-  -- warnings, which is what the handler accumulates and what `finishSource` turns into the reply's
-  -- prefixed `warnings` at the end. Its size is bounded by `MAX_RUN_BYTES` (8 MiB of raw body per
-  -- run), which bounds everything that can ever be parsed into it.
-  parsed jsonb not null default '{"assignments": [], "own": {}, "proposals": []}'::jsonb,
+  -- {assignments, own, proposals}, and ALL THREE are MAPS of source name to that source's rows, in
+  -- arrival order within a source. `finishSource` turns `own[source]` into the reply's prefixed
+  -- `warnings`; `finishRun` flattens the other two in PORTAL_SOURCES order. The partition is what
+  -- lets a source that fails on a later round trip lose the rows it contributed on earlier ones,
+  -- which is what a single `ingestHandler` call did and what the relay must reproduce. Its size is
+  -- bounded by `MAX_RUN_BYTES` (8 MiB of raw body per run), which bounds everything that can ever
+  -- be parsed into it.
+  parsed jsonb not null default '{"assignments": {}, "own": {}, "proposals": {}}'::jsonb,
   seq int not null default 0, steps_used int not null default 0, bytes_used bigint not null default 0,
   started_at timestamptz not null default now(),
   expires_at timestamptz not null default now() + interval '15 minutes');

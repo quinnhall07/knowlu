@@ -2,13 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix rounds 1 and 2 after review), not started; blocked on C3′.** The
+**Status: AMENDED 2026-09-17 (fix rounds 1-3 after review), not started; blocked on C3′.** The
 review is `docs/reports/2026-09-17-c5-relay-fetch-plan-review.md` — `5a2ca69` (verdict *execute after
 fix round 1*, findings C1-C5, I1-I14, M1-M12) and its appended **Re-review after fix round 1**
 (`9f186c7`, verdict *execute after fix round 2*, findings R1-R10 plus rulings on the author's five
-concerns). Every finding of both rounds is applied here and named in **Fix round 1 — resolutions**
-and **Fix round 2 — resolutions** at the end of this file, together with the five controller
-rulings — R-C5-plan-1/2/3 from the first round and **R-C5-plan-4** (the console gets a Logins row,
+concerns) and **Re-review after fix round 2** (`cca7699`, verdict *execute after fix round 3*, which
+closed R1-R10 and found one gap, **S1**). Every finding of all three rounds is applied here and
+named in **Fix round 1 — resolutions**, **Fix round 2 — resolutions** and **Fix round 3 —
+resolutions** at the end of this file, together with the five controller rulings — R-C5-plan-1/2/3 from the first round and **R-C5-plan-4** (the console gets a Logins row,
 so the pause's exit is reachable after onboarding) and **R-C5-plan-5** (`Expires`/`Max-Age` are
 parsed off the raw `Set-Cookie` line, because `ureq::Cookie` exposes neither) from the second. The
 spec was amended in both rounds (its Status line, §2.4, §2.5, §4, §6, §8 and four §12 rows). This plan is written from
@@ -646,20 +647,28 @@ export function finishSource(name: string, items: Assignment[], own: string[],
 // `NotLoggedIn` becomes `<name>: session invalid (<msg>); nothing changed`, anything else becomes
 // `<name>: parse failed (<msg>); nothing changed`, that source's `own` is DISCARDED, the proposals
 // already pushed are KEPT, and the `0 assignments parsed` line is skipped.
+// It returns `{source: name, items: [], own: [], proposals: <kept>, failed: "<the one warning>"}`,
+// and `appendParsed` reads `failed` as this source's retirement (review S1).
 export function sourceFailure(name: string, e: unknown, proposals: MapProposal[]): Parsed;
 ```
 
 **The rule the fourth function carries, stated because incremental parsing changes when it fires**
 (review **R7**). One `ingestHandler` call saw a whole source at once, so a throw retired it there
 and then. The relay sees book 7 of 12 throw on a **later round trip**, with six books' rows already
-in `parsed`. The rule, and Task 5 asserts each clause:
+in `parsed`. The rule, and Task 5 asserts each clause — including this one, which needs a source
+that **succeeds on an earlier round trip and fails on a later one** and therefore cannot be tested
+by a source that fails on its first step:
 
 - a throw **retires that source for the rest of the run** — no further steps are composed for it,
   and the other source finishes (ruling R-C5-plan-3);
 - the source's accumulated `own` warnings are **discarded** and its accumulated `proposals` are
   **kept**, which is what `ingestHandler` does and is not obvious;
 - **its already-parsed items are discarded too**, because that is what a one-shot call did: a source
-  that threw contributed nothing. Six books' rows do not survive book 7's dead session;
+  that threw contributed nothing. Six books' rows do not survive book 7's dead session — and the
+  **mechanism** is that `parsed.assignments` is a map keyed by source (review **S1**), so
+  `delete parsed.assignments[source]` is the whole of it. A flat unsourced array, which is what the
+  second round left here, cannot identify the failing source's rows and so cannot remove them: the
+  clause had a rule and no way to keep it;
 - the `0 assignments parsed` line is **not** added on top of the failure line, which is the endpoint's
   own `continue`;
 - and a `NotLoggedIn` on a step the plan **recognises as re-authenticable** is `reauth` (review
@@ -2924,18 +2933,22 @@ create table public.relay_runs (
   -- have to live somewhere; raw pages may not (ruling 2, R4-19, Q1) and parsed rows may. This is
   -- that somewhere, appended to as each body arrives and deleted with the row at `done`.
   --
-  -- The shape is `{assignments, own, proposals}` and `own` is a MAP of source name to that
-  -- source's own un-prefixed warnings (review R8: the first draft's default said `warnings` while
-  -- the handler wrote `own[source]`, and a default that disagrees with the writer is a column that
-  -- silently starts life wrong). `finishSource` is what turns `own[source]` into the prefixed
-  -- `warnings` of the reply, once per source, at the end.
+  -- The shape is `{assignments, own, proposals}` and ALL THREE are MAPS of source name to that
+  -- source's rows (review R8 for `own`, review S1 for the other two: a flat `assignments` array
+  -- could not be un-merged when a source is retired, and could not be ordered by PORTAL_SOURCES
+  -- once two sources' round trips interleave. A default that disagrees with the writer is a column
+  -- that silently starts life wrong.) `finishSource` turns `own[source]` into the prefixed
+  -- `warnings` of the reply, once per source, at the end; `finishRun` flattens the other two.
+  --
+  -- WITHIN A SOURCE the array is in arrival order — append, never splice — because that is the
+  -- order the vendor returned the shelf in, and `done` has to reproduce it.
   --
   -- ITS SIZE IS ALREADY BOUNDED, and by the budget that matters: `MAX_RUN_BYTES` (8 MiB of raw
   -- body per run) bounds everything that can ever be parsed into it. A twelve-book shelf is about
   -- 200 rows and a few hundred KB of jsonb. That is why a shelf is not capped and a thirteenth book
   -- is not a product limit. `parsed_holds_only_parsed_rows` (Task 5 step 5) is what keeps a page
   -- out, and it caps every string at 4 KiB for the same reason `checkCursor` does.
-  parsed jsonb not null default '{"assignments": [], "own": {}, "proposals": []}'::jsonb,
+  parsed jsonb not null default '{"assignments": {}, "own": {}, "proposals": {}}'::jsonb,
   seq int not null default 0,
   steps_used int not null default 0,
   round_trips int not null default 0,
@@ -3088,9 +3101,24 @@ export const MAX_RUN_BYTES = 8 << 20, MAX_POST_BYTES = MAX_RUN_BYTES * 2;
   6. otherwise → `loadRun` (`id=eq.<run>&account_id=eq.<id>`), refuse `404` when absent or expired;
      refuse **`409 "relay run out of step"`** when `seq` **or `plan_version`** does not match (a
      deploy mid-run changes the composite, and starting over is cheaper than reasoning about a plan
-     that changed under a cursor); call `plan.next(ctx, results)`; `appendParsed` whatever it parsed;
-     either `{run, steps}` after `advanceRun`, or `{run, done}` after `endRun` (which deletes the
-     row and its `parsed` with it).
+     that changed under a cursor); call `plan.next(ctx, results)`; **`appendParsed`** (below); either
+     `{run, steps}` after `advanceRun`, or `{run, done}` after `endRun` (which deletes the row and
+     its `parsed` with it).
+  6a. **`appendParsed`, stated rather than implied** (review **S1**: the first draft said "whatever
+     it parsed", which is not a rule and left R7's retirement clause with nothing to act on). For
+     each `Parsed` the arrival produced, keyed by **its own `source` field** — never by position and
+     never by a literal source name:
+     - `parsed.assignments[source].push(...items)`, `parsed.own[source].push(...own)` and
+       `parsed.proposals[source].push(...proposals)` — **append, never splice**, so within a source
+       the order is arrival order, which is the order the vendor returned the shelf in;
+     - when `failed` is set, **`delete parsed.assignments[source]` and `delete parsed.own[source]`,
+       and keep `parsed.proposals[source]`** — which is R7's rule, and is now a line of code rather
+       than a paragraph: a source that threw contributed no items and no warnings to a single
+       `ingestHandler` call, and the proposals it had already pushed survived. Six books' rows do
+       not survive book 7's dead session, and the partition is what makes "six books' rows"
+       identifiable at all;
+     - the failure sentence itself goes into `parsed.own[source]` **after** the delete, as that
+       source's one remaining line, so `finishSource` reports it and nothing else.
   7. **`reauth` is composed by the plan, not by the handler** (review **I12**). `PlanResult`'s
      `reauth` carries no steps, and `handler.ts` names no source, so nothing could have composed the
      login steps. The contract, two lines in `mod.ts`: on `{kind: "reauth", source}` the handler
@@ -3155,8 +3183,11 @@ function parseArrival(run: RunRow, source: string, result: StepResult): Parsed {
   try {
     return SOURCE_PLANS[source].parse(planCtx(run, source), result);
   } catch (e) {
-    // `{items: [], own: [], proposals: <kept>, failed: "<the one warning>"}` — exactly what the
-    // endpoint's own catch produces, and the driver reads `failed` as this source's retirement.
+    // `{source, items: [], own: [], proposals: <kept>, failed: "<the one warning>"}` — exactly what
+    // the endpoint's own catch produces, and `appendParsed` reads `failed` as this source's
+    // retirement: it deletes `parsed.assignments[source]` and `parsed.own[source]`, keeps
+    // `parsed.proposals[source]`, and records the one warning. `source` is on the `Parsed` itself
+    // (review S1) so no caller has to remember which arrival it came from.
     return sourceFailure(source, e, sub.proposals);
   }
 }
@@ -3166,11 +3197,26 @@ function parseArrival(run: RunRow, source: string, result: StepResult): Parsed {
  *
  * **The order is the contract.** One `ingestHandler` call produced sources in the order the device
  * sent them, which was always `["zybooks", "vhl"]`, and within zyBooks the shelf order the item
- * list returned. Round-robin execution must not change that, so this concatenates by
- * `PORTAL_SOURCES` order and, within a source, by arrival index — not by completion time.
+ * list returned. Round-robin execution must not change that.
+ *
+ * **This is the ONLY place `parsed` is flattened** (review **S1**). Everywhere else it stays
+ * partitioned by source, because a flat array cannot be un-merged when a source is retired and
+ * cannot be ordered by `PORTAL_SOURCES` once two sources' round trips interleave. Here the map is
+ * read in table order and each source's array is already in arrival order, so the concatenation is
+ * the order one `ingestHandler` call produced — by construction, not by sorting.
  */
 function finishRun(run: RunRow): { assignments: Assignment[]; warnings: string[]; proposals: MapProposal[] } {
-  /* … finishSource(name, items, own, warnings) per source, in PORTAL_SOURCES order … */
+  const assignments: Assignment[] = [], warnings: string[] = [], proposals: MapProposal[] = [];
+  for (const { name } of PORTAL_SOURCES) {                 // table order, never Object.keys order
+    if (!(name in run.parsed.own)) continue;               // a source this run never offered
+    // `finishSource` applies the `{name}: ` prefixing and the `0 assignments parsed` rule to what
+    // is left after any retirement — which for a retired source is an empty item list and its one
+    // failure line, exactly as the endpoint's own `continue` produced.
+    assignments.push(...finishSource(name, run.parsed.assignments[name] ?? [],
+                                     run.parsed.own[name] ?? [], warnings));
+    proposals.push(...(run.parsed.proposals[name] ?? []));
+  }
+  return { assignments, warnings, proposals };
 }
 ```
 
@@ -3192,6 +3238,13 @@ Deno.test("done is byte-identical to what one ingest call produced, on a shelf t
   assertEquals(Object.keys(out.done).sort(), ["assignments", "proposals", "warnings"]);
   const oneShot = await ingestAllAtOnce(sameBodies());     // the C2 path, same inputs, one call
   assertEquals(out.done, oneShot, "the incremental parse must produce the same object, in order");
+  // And the ORDER is what the partition buys (review S1): zyBooks' twelve books first, in shelf
+  // order, then VHL's — even though VHL's dashboard arrived in an earlier round trip than books
+  // 9-12. A flat array appended to as arrivals landed would interleave them.
+  const sources = out.done.assignments.map((a: Assignment) => a.uid.split(":")[0]);
+  assertEquals(sources, [...sources].sort((x, y) =>
+    PORTAL_SOURCES.findIndex((s) => s.name === x) - PORTAL_SOURCES.findIndex((s) => s.name === y)),
+    "PORTAL_SOURCES order, then arrival order within a source");
 });
 
 Deno.test("the fixture still yields its 24 assignments through the incremental path", async () => {
@@ -3316,10 +3369,55 @@ Deno.test("one run drives both sources, round-robin, within one batch budget", (
   assert(shelf.steps.some((s) => s.source === "vhl"), "a full shelf must not starve VHL");
 });
 
-Deno.test("a source that fails retires and the other finishes", () => {
+Deno.test("a source that fails on its first step retires and the other finishes", () => {
   const r = courseworkPlan.next(ctxBothSources(), [vhlLoginRejectedTwice(), zybooksItemsOk()]);
   assert(r.steps.every((s) => s.source === "zybooks"), "VHL retired, zyBooks continues");
   assert(r.parsed.own.vhl.some((w: string) => w.includes("session invalid")));
+});
+
+Deno.test("a source that fails on a LATER round trip loses the rows it contributed on earlier ones", async () => {
+  // Review S1, and R7's own example — which the test above cannot reach, because VHL fails on its
+  // very first step, before it has contributed a single row. This is the clause that needed the
+  // partition: a flat `assignments` array could not say which six rows were zyBooks'.
+  //
+  // Round trip 1: zyBooks signs in and lists twelve books; VHL reaches its login form.
+  // Round trip 2: books 1-6 come back parsed, VHL logs in.
+  // Round trip 3: book 7 answers `success: false` TWICE (so it is `failed`, not `reauth`), VHL's
+  //               dashboard comes back.
+  const out = await driveWholeRun(zybooksSixBooksThenDeadOnSeven_andVhlFinishes());
+
+  // Every zyBooks row is gone — all six, not just book 7's — and VHL's are all there.
+  assert(out.done.assignments.length > 0, "VHL contributed");
+  assert(out.done.assignments.every((a: Assignment) => a.uid.startsWith("vhl:")),
+    "six books' rows do not survive book 7's dead session: " +
+    JSON.stringify(out.done.assignments.map((a: Assignment) => a.uid)));
+
+  // zyBooks reports exactly one line, and it is the failure — not six books' worth of per-item
+  // notes, and not a `0 assignments parsed` line on top of it.
+  const zy = out.done.warnings.filter((w: string) => w.startsWith("zybooks: "));
+  assertEquals(zy.length, 1, JSON.stringify(zy));
+  assert(zy[0].includes("session invalid"), zy[0]);
+  assert(!zy.some((w: string) => w.includes("0 assignments parsed")));
+
+  // ...and the proposals it pushed before it died survive, which is what `ingestHandler`'s own
+  // catch does and is the half of the rule that is not obvious.
+  assert(out.done.proposals.some((p: MapProposal) => p.source === "zybooks"),
+    "a retired source keeps the proposals it had already pushed");
+});
+
+Deno.test("parsed is partitioned by source, and only finishRun flattens it", async () => {
+  // The structural half of S1: if `appendParsed` ever writes a flat array again, the retirement
+  // above becomes untestable and this fails first, where the cause is visible.
+  for (const row of await everyRunRowOf("coursework")) {
+    assert(!Array.isArray(row.parsed.assignments), "a map keyed by source, never a flat array");
+    assert(!Array.isArray(row.parsed.proposals));
+    for (const key of Object.keys(row.parsed.assignments)) {
+      assert(PORTAL_SOURCES.some((s) => s.name === key), `parsed is keyed by source: ${key}`);
+    }
+  }
+  const src = await Deno.readTextFile(new URL("../handler.ts", import.meta.url));
+  assertEquals([...src.matchAll(/\.assignments\.push\(/g)].length, 1,
+    "exactly one flattener, and it is `finishRun`");
 });
 
 Deno.test("plan_version is a stable composite and moves when a module moves", () => {
@@ -3559,8 +3657,17 @@ export interface PlanStep {
   follow_redirects?: boolean; max_bytes?: number;
 }
 
-/** What one arrival parsed into, and what `appendParsed` merges. Rows only — never bytes. */
+/**
+ * What one arrival parsed into, and what `appendParsed` merges. Rows only — never bytes.
+ *
+ * **It names its source** (review **S1**). R7's hardest clause is that a source which throws on
+ * round trip N loses the items it contributed on round trips 1..N-1, and nothing can remove rows it
+ * cannot identify. `own` was partitioned by source in round 2 and `items` was not, which left that
+ * clause with a rule and no mechanism.
+ */
 export interface Parsed {
+  /** The source this arrival belongs to — `parseArrival`'s own argument, carried through. */
+  source: string;
   items: Assignment[];
   own: string[];
   proposals: MapProposal[];
@@ -3572,7 +3679,18 @@ export interface Parsed {
 export interface RunRow {
   id: string; account_id: string; plan: string; plan_version: string;
   cursor: { timezone: string; sources: Record<string, Record<string, unknown>> };
-  parsed: { assignments: Assignment[]; own: Record<string, string[]>; proposals: MapProposal[] };
+  /**
+   * **Partitioned by source, all three of them** (review **S1**). `assignments` was one flat,
+   * unsourced array while `own` was already a map, so a retirement could not find the failing
+   * source's rows to drop and `finishRun` could not order by `PORTAL_SOURCES` then arrival once two
+   * sources' round trips interleave. Within a source the array is in **arrival order**, which is
+   * the order the shelf came back — push, never splice.
+   */
+  parsed: {
+    assignments: Record<string, Assignment[]>;
+    own: Record<string, string[]>;
+    proposals: Record<string, MapProposal[]>;
+  };
   seq: number; steps_used: number; round_trips: number; bytes_used: number;
 }
 
@@ -4562,7 +4680,12 @@ git commit -F .git-commit-msg.txt   # "docs: C5 closed — the cloud composes, t
 10b. **Raw pages live for one parse and nowhere else.** Each body is parsed as it arrives and only
     the rows are kept, in `relay_runs.parsed`, deleted with the row; `checkCursor` refuses a
     raw-page key in the cursor and `checkParsed` refuses bytes in `parsed` (ruling **R-C5-plan-2**,
-    review **C3**). The sweep is `expires_at=lt.now` — **`now`, not `now()`** — and a fifth staging
+    review **C3**). **`parsed` is partitioned by source** — `assignments`, `own` and `proposals` are
+    each a map keyed by a `PORTAL_SOURCES` name, appended to in arrival order and flattened only by
+    `finishRun` — which is what lets a source that fails on round trip N lose the rows it
+    contributed on 1..N-1, the way a single `ingestHandler` call did (review **S1**). `a source that
+    fails on a LATER round trip loses the rows it contributed on earlier ones` is the test, and it
+    is a different test from the one that fails a source on its first step. The sweep is `expires_at=lt.now` — **`now`, not `now()`** — and a fifth staging
     proof inserts an expired row, calls `/relay` once and reads it gone, because `restDelete` throws
     on a non-2xx and the sweep runs before any run logic (review **I13**).
 11. **The session store is sealed, device-local, and never in the vault.** The file is DPAPI-sealed at
@@ -4845,7 +4968,7 @@ rejected) and (c) (an extra round trip for VHL forever) were refused.
 | **R4** | `budget.remaining()` clamped at `STEP_TIMEOUT` is a bound on one **request**, so six hops of 59 s is a six-minute step; "the whole chain is bounded by `STEP_TIMEOUT`" had no mechanism; and both new tests passed a *run* deadline, so neither tested the step bound | A second deadline: `StepClock::start()` at `now + STEP_TIMEOUT`, opened as `perform`'s step 0, checked on every hop beside `budget.check_deadline()`, and every request gets `min(step.remaining(), budget.remaining())`. Its failure code is `timeout`, distinct from the run's `budget`, because "this portal stalled" and "the slot ran out of time" are different problems. The chain test now passes a **ten-minute run deadline and a 250 ms step deadline**, so only the step bound can stop it. |
 | **R5** | `src.split("#[cfg(test)]").next()` truncates `relay.rs` at Task 1's own mid-file `#[cfg(test)] fn extra_source`, so the `.expose()` count reads 0 and fails — I6's defect one task over — and the portal-URL scan would read only the head of the one file that could hold a portal host | `split_before_test_module(src)` splits on the attribute **followed by `mod tests`**, tolerant of the whitespace rustfmt emits, declared in Task 1 beside the matcher and used by both scans. Both call sites carry the reason in a comment, because the failure mode is a scan that stops meaning anything without failing. |
 | **R6** | `PlanCtx`, `PlanStep`, `Parsed` and `RunRow` were consumed in four places and declared nowhere — M5's shape reintroduced in TypeScript — `next()` carried no batch budget while the zyBooks module was told to batch "at whatever the round-robin left", and `parseArrival` switched on `source === "zybooks"` against the rule stated three times that the handler names no source | All four declared in full in `plans/mod.ts`, with `PlanCtx.budget` carrying **how many steps this module may return right now** and the module advancing its cursor by exactly what it returns — so the driver never trims past a cursor a module has advanced, which would drop a book silently. `SourcePlan extends Plan` with a `parse(ctx, result)`, and `parseArrival` calls `SOURCE_PLANS[source].parse`: a third portal is a file and a line, not an edit to the driver. |
-| **R7** | The extraction took the happy path and left `ingestHandler`'s per-source `try/catch` behind — which turns `NotLoggedIn` into `session invalid (…)` and anything else into `parse failed (…)`, **discards that source's `own` while keeping its proposals**, and skips the `0 assignments parsed` line — and incrementally a dead session on book 7 of 12 must do all of that across round trips | The catch is the **fourth** extracted function, `sourceFailure(name, e, proposals) -> Parsed`, and the rule it carries across round trips is written out in five clauses: the source is retired for the run, its `own` is discarded, its proposals are kept, **its already-parsed items are discarded too** (a source that threw contributed nothing to a one-shot call), no `0 assignments parsed` line is added on top, and a re-authenticable `NotLoggedIn` is `reauth` and never reaches it. Task 5 asserts each clause, because the equality test cannot see any of them. |
+| **R7** | The extraction took the happy path and left `ingestHandler`'s per-source `try/catch` behind — which turns `NotLoggedIn` into `session invalid (…)` and anything else into `parse failed (…)`, **discards that source's `own` while keeping its proposals**, and skips the `0 assignments parsed` line — and incrementally a dead session on book 7 of 12 must do all of that across round trips | The catch is the **fourth** extracted function, `sourceFailure(name, e, proposals) -> Parsed`, and the rule it carries across round trips is written out in five clauses: the source is retired for the run, its `own` is discarded, its proposals are kept, **its already-parsed items are discarded too** (a source that threw contributed nothing to a one-shot call), no `0 assignments parsed` line is added on top, and a re-authenticable `NotLoggedIn` is `reauth` and never reaches it. **Corrected in round 3 (review S1):** this row claimed "Task 5 asserts each clause", which was **not true of the third** — `parsed.assignments` was a flat unsourced array, so nothing could identify a retired source's earlier rows to drop, and the one retirement test failed VHL on its first step, before it had contributed a row. Round 3 partitions `parsed` by source and adds the test the clause's own example names. |
 | **R8** | `parsed`'s default said `{assignments, warnings, proposals}` while the handler writes `parsed.own[source]`, and `checkParsed` was "rows only, never bytes" with no length rule — so a `parse failed (<vendor message>)` warning could carry page text into the column and from there into `state/runner-log.md` | The column's default and the `RunRow` type both say `{assignments, own, proposals}` with `own` a map of source to un-prefixed warnings; `checkParsed` gets **`checkCursor`'s 4 KiB string cap** and a real test in Task 5 step 5 (a shape check, an over-long warning, a page-shaped key, and the wrong-shape default) — the first round named `parsed_holds_only_parsed_rows` in the migration comment and wrote it into no task. |
 | **R9** | I3's scrub ran on the decoded `String`, so a body that is not valid UTF-8 travelled base64 **unscrubbed** — a vendor re-serving a login page in a legacy encoding being I3's own case | The scrub moves **before** the decode decision and runs over the **bytes**: for each secret and each of `scrub`'s four encodings, the raw slice is searched and replaced. Two tests — a portal echoing the posted form as UTF-8, and one echoing it as Latin-1, where the assertion is that the base64 does not contain the username. |
 | **R10** | Three residual cites | `privacy.html:37`/`:22` in Q6's row → `:38`/`:24`; `handler.ts:78-110` → `:84-109`, `:179-186` → `:177-182`, the VHL arm `:133` → `:137`; `parse_vhl.ts:81` → `:99-101` (`:81` is the `sections` extraction, not the lookup). |
@@ -4872,3 +4995,69 @@ rejected) and (c) (an extra round trip for VHL forever) were refused.
    signature, API call and count here is read, not observed; two rounds have already found four
    defects of exactly that kind; a step that will not compile is expected traffic, to be fixed and
    recorded in the task report.
+
+---
+
+## Fix round 3 — resolutions (2026-09-17)
+
+Against the **Re-review after fix round 2** appended to
+`docs/reports/2026-09-17-c5-relay-fetch-plan-review.md` (`cca7699`, verdict *execute after fix round
+3*). That round closed **R1-R10**, both controller rulings and concern 3, each checked against the
+code it names — `commands::save_portal_login` registered console-only and the 30/43 → 29/42 → 29/43
+arithmetic verified against C1b's own plan; `ureq::Cookie`'s public surface confirmed against the
+vendored source; `MAX_POST_BYTES` matched to `readJson`'s actual `text.length` behaviour and its
+"body over N characters" message; `StepClock`; `split_before_test_module`; the four declared
+interfaces; `checkParsed`'s cap; the byte-level scrub; all four citations. **One gap remained.**
+
+### S1 — R7's hardest clause had a rule and no mechanism, and no test
+
+**The finding.** R7's third clause says that when a source throws on round trip N, the items it
+contributed on round trips 1..N-1 — already merged into `relay_runs.parsed` — are **removed**,
+because that is what a single `ingestHandler` call did. Round 2 wrote the rule and did not build it:
+
+- `RunRow.parsed.assignments` was one **flat, unsourced `Assignment[]`**, and `Parsed.items` carried
+  no source tag, so nothing in the merge — described only as "`appendParsed` whatever it parsed" —
+  could say which entries were the failing source's. `own` had been partitioned in round 2;
+  `assignments` had not.
+- `finishRun`'s own comment promised to "concatenate by `PORTAL_SOURCES` order and, within a source,
+  by arrival index", which a flat array cannot do once two sources' round trips interleave — and they
+  do, by construction, because the batch is filled round-robin.
+- The one retirement test failed VHL on its **very first step**, before it had contributed a row, so
+  it could not and did not exercise "six books' rows do not survive book 7" — the rule's own example.
+- And the round-2 R7 resolution row claimed "Task 5 asserts each clause", which was untrue of this
+  one.
+
+**The fix, as the reviewer wrote it.**
+
+1. **`parsed` is partitioned by source, all three of it.** `assignments`, `own` and `proposals` are
+   each `Record<string, …>` keyed by a `PORTAL_SOURCES` name — the shape `own` already had. The
+   column default and the `RunRow` type say so in the plan and in the spec's §6 SQL block, and the
+   migration comment says why.
+2. **`Parsed` names its source.** A `source: string` field, set by `parseArrival` from its own
+   argument and by `sourceFailure` from its `name`, so no caller has to remember which arrival a
+   result came from.
+3. **`appendParsed` is stated rather than implied.** It appends each `Parsed` under its own `source`
+   — never by position, never by a literal name — and on `failed` it **deletes
+   `parsed.assignments[source]` and `parsed.own[source]`, keeps `parsed.proposals[source]`**, then
+   records the one failure sentence. R7's clause is now a line of code.
+4. **`finishRun` is the only flattener**, and it is written out: `PORTAL_SOURCES` order for the outer
+   loop, each source's array already in arrival order, `finishSource` per source. The order is right
+   by construction rather than by sorting.
+5. **The test the rule's own example names** — `a source that fails on a LATER round trip loses the
+   rows it contributed on earlier ones`: zyBooks signs in and lists twelve books, books 1-6 come back
+   parsed over two round trips, book 7 answers `success: false` twice (so it is `failed`, not
+   `reauth`), and VHL finishes. The reply carries VHL's rows and **none** of zyBooks'; zyBooks
+   reports exactly one warning and it is the failure, with no `0 assignments parsed` line on top; and
+   the proposals zyBooks had already pushed survive. The first-step failure keeps its own test, under
+   a name that now says which case it is.
+6. **Two structural guards beside it**: `parsed is partitioned by source, and only finishRun flattens
+   it` (every key is a `PORTAL_SOURCES` name, neither map is an array, and exactly one
+   `.assignments.push(` exists in `handler.ts`), and an order assertion added to the twelve-book
+   equality test — zyBooks' rows first, then VHL's, even though VHL's dashboard arrived in an earlier
+   round trip than books 9-12, which a flat array appended to as arrivals landed would interleave.
+7. **The round-2 R7 resolution row is corrected on the record** rather than quietly rewritten: it
+   says which clause its "Task 5 asserts each clause" did not cover, and what round 3 did about it.
+8. **Exit-gate item 10b** now states the partition and names the new test beside the old one.
+
+Nothing else in the plan or the spec changed in this round. The spec's §6 was touched only where its
+SQL block spelled the flat default.
