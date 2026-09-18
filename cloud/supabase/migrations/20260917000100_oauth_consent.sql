@@ -20,6 +20,11 @@
 --
 -- Nothing else changes: no table, no policy, no column. The three rules `migrations_test.ts` pins
 -- are untouched.
+--
+-- "Never raises" is true of this body, not of the insert it makes: `accounts.email` is `not null`
+-- (`20260910000100_accounts.sql`), so a sign-up with no email — anonymous or phone auth, neither
+-- enabled today — would still abort at that constraint, not at a `raise` this function wrote. Worth
+-- one line here so a future provider switch does not have to rediscover it (nit 9).
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public, extensions as $$
 begin

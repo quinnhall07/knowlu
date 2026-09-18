@@ -154,9 +154,13 @@ Deno.test("an unknown path is 404 and an unknown method on a known path is 405",
 
 Deno.test("every route needs a bearer token", async () => {
   // PUT is not in this loop: the deps() stub's requireEntitled resolves regardless of the token, so
-  // a PUT here would not exercise deps.verify the way DELETE/GET/GET do — its own 401 is not pinned
-  // by this loop, and it is production's requireActiveEntitlement that actually calls requireUser.
-  for (const [m, p] of [["DELETE", ""], ["GET", "/export"], ["GET", "/sources"]] as const) {
+  // a PUT here would not exercise deps.verify the way DELETE/GET/GET/POST do — its own 401 is not
+  // pinned by this loop, and it is production's requireActiveEntitlement that actually calls
+  // requireUser. POST /consent calls requireUser directly, same as the other three, so it belongs
+  // here: `config.toml`'s `verify_jwt = false` is a platform-level setting, not this handler's own.
+  for (
+    const [m, p] of [["DELETE", ""], ["GET", "/export"], ["GET", "/sources"], ["POST", "/consent"]] as const
+  ) {
     const res = await handle(req(m, p, undefined, "Basic nope"), deps()).catch((e) => e as Response);
     assertEquals(res.status, 401, `${m} ${p}`);
   }
@@ -445,6 +449,23 @@ Deno.test("age_attested false, or a missing version, is 400 and writes nothing",
     assertEquals(res.status, 400);
     assertEquals(recorded.length, 0);
   }
+});
+
+Deno.test("POST /account/consent — a null JSON body is 400, not 500", async () => {
+  // A body of literal `null` is valid JSON, so `readJson` does not throw; without the `?? {}` guard
+  // in `recordConsent`, `body.age_attested` would throw a bare TypeError that `asResponse` turns
+  // into a 500 — the same class of bug `putSource`'s own null-body test pins for that route.
+  const recorded: unknown[] = [];
+  const res = await handle(
+    new Request("http://127.0.0.1:1/account/consent", {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: "null",
+    }),
+    consentDeps(recorded, false),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 400);
+  assertEquals(recorded.length, 0);
 });
 
 Deno.test("GET /account/consent is 405, not 404 — the route exists", async () => {

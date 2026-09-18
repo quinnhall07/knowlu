@@ -122,6 +122,14 @@ Deno.serve(async (req) => {
         // `sha256Hex` lower-cases, exactly as the C1 trigger's `lower(new.email)` did, so a row
         // written here and a row written before this migration hash the same address the same way.
         const hash = await sha256Hex(c.email);
+        // A plain INSERT, not an upsert: `consents.id` is a `generated always as identity` column
+        // this payload never carries, so `restUpsert` (no `on_conflict`) can never find a row to
+        // conflict on. Two sign-ins racing past `hasConsent` therefore write six rows, not three —
+        // a check-then-act with nothing behind it. Left as is, on purpose (review finding 5): there
+        // is no unique index on `(account_id, kind)` because `billing-checkout` writes its own
+        // `auto_renew` row per checkout, and the app calls this route once per sign-in and retries
+        // once on failure, so a duplicate identical row from a concurrent double-call is harmless —
+        // it changes no entitlement decision and `hasConsent`'s `limit=1` reads past it either way.
         await restUpsert(rest, "consents", [
           { account_id: c.account_id, subject_hash: hash, kind: "tos", version: c.tos_version },
           { account_id: c.account_id, subject_hash: hash, kind: "privacy", version: c.privacy_version },

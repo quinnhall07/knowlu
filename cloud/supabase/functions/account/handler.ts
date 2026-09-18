@@ -1,10 +1,11 @@
 /**
- * One function, four routes (spec §5.1 and §4.1):
+ * One function, five routes (spec §5.1 and §4.1):
  *
  *   DELETE /account         the deletion right, and the app's *Delete my data*
  *   GET    /account/export  the access and portability rights
  *   GET    /account/sources what sources are connected (Task 7) — never their URLs
  *   PUT    /account/sources connect one (Task 7)
+ *   POST   /account/consent record the terms/privacy/18+ attestation (Task 1, C1b) — idempotent
  *
  * The order inside `DELETE` is the whole of its correctness: Stripe first (a cancelled card is
  * better than a deleted account still being billed), then the rows, then the tombstone, and the
@@ -96,6 +97,9 @@ const SOURCE_KINDS = ["lms_ics", "calendar_ics", "google_calendar"];
 // for a genuinely unknown kind must not advertise it as something worth trying.
 const CLIENT_SOURCE_KINDS = SOURCE_KINDS.filter((k) => k !== "google_calendar");
 const MAX_URL = 2048;
+// A version string (`tos_version`, `privacy_version`) is a date stamp like "2026-09-10", never a
+// document — this is a defensive bound on the consent log, not a real format check (nit 7).
+const MAX_VERSION = 64;
 
 async function putSource(req: Request, deps: Deps): Promise<Response> {
   // The gate C2 imports, exercised here in C1 so the contract is proved by something that ships.
@@ -131,13 +135,15 @@ async function getSources(req: Request, deps: Deps): Promise<Response> {
 }
 
 /**
- * **The attestation, after the fact — and the only place a consent row is ever written.** Migration
- * `20260917000100` stopped the auth trigger reading the sign-up's own metadata at all, on BOTH
- * paths, because `/otp` with `create_user: true` is reachable by anyone holding the public anon key:
- * an attestation taken out of that request would be an `age_18` row the address's owner never made.
- * So every new account arrives here with its four consent columns null, and the app calls this route
- * after EVERY sign-in — `google_sign_in` and `verify_email_code` alike — which is why a second call
- * must be silent rather than a conflict.
+ * **The attestation, after the fact — and the only place a `tos`, `privacy` or `age_18` consent row
+ * is written.** (`billing-checkout` still writes its own `auto_renew` row; the two never collide —
+ * `hasConsent`'s `kind=eq.tos` filter cannot see a checkout's row.) Migration `20260917000100`
+ * stopped the auth trigger reading the sign-up's own metadata at all, on BOTH paths, because `/otp`
+ * with `create_user: true` is reachable by anyone holding the public anon key: an attestation taken
+ * out of that request would be an `age_18` row the address's owner never made. So every new account
+ * arrives here with its four consent columns null, and the app calls this route after EVERY
+ * sign-in — `google_sign_in` and `verify_email_code` alike — which is why a second call must be
+ * silent rather than a conflict.
  *
  * The 18+ gate has not moved off the server: `billing-checkout` refuses an account whose
  * `age_attested_at` is still null, so a client that skips this route gets an account that can never
@@ -145,15 +151,25 @@ async function getSources(req: Request, deps: Deps): Promise<Response> {
  */
 async function recordConsent(req: Request, deps: Deps): Promise<Response> {
   const user = await requireUser(req, deps.verify);
-  const body = await readJson<{ tos_version?: string; privacy_version?: string; age_attested?: boolean }>(
-    req,
-  );
+  // A body of `null` is valid JSON, so `readJson` does not throw — without the `?? {}` and the
+  // `String(...)` coercions below, a null body or a non-string version reaches `.trim()` and throws
+  // a bare TypeError that `asResponse` turns into a 500, not the 400 a bad request should get.
+  // `putSource` at `:107-111` carries this same guard for the same reason.
+  const body =
+    await readJson<{ tos_version?: string; privacy_version?: string; age_attested?: boolean } | null>(
+      req,
+    ) ?? {};
   if (body.age_attested !== true) {
     throw fail(400, "age attestation required: Knowlu is for people 18 or older");
   }
-  const tos = (body.tos_version ?? "").trim();
-  const priv = (body.privacy_version ?? "").trim();
+  const tos = String(body.tos_version ?? "").trim();
+  const priv = String(body.privacy_version ?? "").trim();
   if (!tos || !priv) throw fail(400, "the terms and the privacy policy must be accepted at sign-up");
+  // A version string is a record kept as evidence, so a value too long to have come from our own
+  // client is refused rather than silently truncated into something that still looks valid.
+  if (tos.length > MAX_VERSION || priv.length > MAX_VERSION) {
+    throw fail(400, `a version string is longer than ${MAX_VERSION} characters`);
+  }
   if (await deps.hasConsent(user.id)) return json(200, { ok: true });
   const account = await deps.getAccount(user.id);
   if (!account) throw fail(404, "no such account");

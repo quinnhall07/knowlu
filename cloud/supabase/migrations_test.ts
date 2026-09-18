@@ -150,8 +150,11 @@ Deno.test("the OAuth migration adds no table, no policy, no birthdate column —
   // Asserted over the SOURCE of the values, never their names: `age_attested_at` and `tos_version`
   // are columns this migration still writes (as nulls), so banning those words would ban the insert.
   assert(!code.includes("raw_user_meta_data"), "the trigger reads none of the sign-up's own metadata");
+  // A word boundary, not `.includes("public.consents")`: this function's own `search_path` is
+  // `public, extensions`, so an unqualified `insert into consents` would resolve to the same table
+  // and pass a check that only banned the schema-qualified spelling (nit 8).
   assert(
-    !code.includes("public.consents"),
+    !/\bconsents\b/i.test(code),
     "…and writes no consent row: that is the route's, behind a session",
   );
 });
