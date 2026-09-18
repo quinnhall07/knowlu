@@ -456,6 +456,8 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 #wiz-slot1, #wiz-slot2 { width: 11ch; min-width: 11ch; }
 .wiz-panel .meta { color: var(--t4); font: 500 11px/1.5 var(--mono); }
 .wiz .crit { color: var(--crit); margin-right: auto; }
+.wiz .crit.flash { animation: wiz-flash 420ms ease-out; }
+@keyframes wiz-flash { 0% { opacity: 0; transform: translateY(-2px); } 100% { opacity: 1; transform: none; } }
 
 /* ---- Plan 4a Task 7: the settings overlay — a panel in the page, never a view ---- */
 /* `display` is stated TWICE on purpose. The panel is an <aside>, and the 1180px breakpoint turns

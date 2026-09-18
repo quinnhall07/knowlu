@@ -494,9 +494,9 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
     // R2-3: the button is disabled as the FIRST statement of wizFinish, before the `google_connected`
     // await — not after it. Two Finish clicks landing in that window used to start two
     // `retarget_credentials`/`wizRegister` flows racing each other.
-    let disabled_write = finish.find("EL(\"wiz-next\").disabled = true").expect("wizFinish disables wiz-next");
+    let busy_write = finish.find("WIZ.busy = true").expect("wizFinish latches WIZ.busy");
     assert!(
-        disabled_write < google_connected_call.unwrap(),
+        busy_write < google_connected_call.unwrap(),
         "wiz-next is disabled before the google_connected await, not after it"
     );
 }
@@ -522,7 +522,7 @@ fn the_logins_panel_maps_what_it_finds_to_a_course() {
     // panel between them. Asserted inside `wizGo` itself, so `wizFinish`'s own disable cannot stand in.
     let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
     assert!(go.contains("WIZ.discovering"), "a second Next must not start a second coursework-discover");
-    assert!(go.contains("EL(\"wiz-next\").disabled = true") && go.contains("EL(\"wiz-next\").disabled = false"),
+    assert!(go.contains("WIZ.busy = true") && go.contains("WIZ.busy = false"),
         "Next is disabled while discovery is in flight and re-enabled when it settles");
 }
 
@@ -1167,4 +1167,48 @@ fn the_upgrade_overlays_field_and_labels_are_styled_like_the_rest_of_the_panel()
     assert!(css.contains(".set-row input[type=\"text\"], .set-row input[type=\"password\"]"),
         "a password field in a settings row must look like the text field beside it");
     assert!(css.contains(".setpanel label {"), "a consent checkbox needs a line of its own");
+}
+
+/// Spec §7. Quinn, 2026-09-17: "why are there even back and next buttons if they don't work?"
+/// Three answers, and this pins all three.
+#[test]
+fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("\n  }").next()).expect("renderWizard");
+    // (a) Back is never `disabled` — at step 0 it is simply not there, so there is no dead control
+    // to press. `hidden` on a button the UA stylesheet hides is enough; `disabled` was the bug.
+    assert!(render.contains("EL(\"wiz-back\").hidden = WIZ.step === 0"), "Back is hidden at step 0, never disabled");
+    assert!(!render.contains("EL(\"wiz-back\").disabled"), "Back is never disabled anywhere");
+    // (b) Next's disabled state is a WIZ field renderWizard paints, like every other wizard field.
+    // Set only by a direct DOM write, it survived every re-render that did not re-set it — which is
+    // a Finish that resolved without relaunching leaving Next dead forever.
+    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy"), "Next's disabled state is rendered from WIZ.busy");
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
+    let fin = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
+    for (name, body) in [("wizGo", go), ("wizFinish", fin)] {
+        assert!(!body.contains("EL(\"wiz-next\").disabled"), "{name} sets WIZ.busy, never the DOM property directly");
+        assert!(body.contains("WIZ.busy"), "{name} still latches re-entry, through WIZ.busy");
+    }
+    // …and one count over the WHOLE file, because the two slices above do not cover the file
+    // (review R5). `credentialsStranded` (`console.js:1617-1626`) sits between `wizGo` and
+    // `wizFinish`, so its write at `:1623` is in neither slice — and a missed one is the worst of
+    // the six: `renderWizard()` fires on the very next line and repaints `disabled = WIZ.busy`, so a
+    // stranded-credentials recovery would re-enable Next and then immediately kill it again.
+    assert_eq!(
+        js.matches("EL(\"wiz-next\").disabled").count(),
+        1,
+        "renderWizard is the ONLY writer of Next's disabled state"
+    );
+    // (c) A refused Next says what is missing, in a sentence, and says it again on a second press —
+    // a red line that was already on screen does not read as a new answer.
+    // Review M7: the gates themselves, not merely the name — a `wizValid` that still exists and no
+    // longer refuses an unsigned-in step is exactly the regression this is here to catch.
+    let valid = js.split("function wizValid(").nth(1).and_then(|s| s.split("function wizGo(").next()).expect("wizValid");
+    assert!(valid.contains("WIZ.step === 1 && !WIZ.accountId"), "step 1 is still gated on a session");
+    assert!(valid.contains("WIZ.step === 2 && !WIZ.entitled"), "…and step 2 on an entitlement");
+    assert!(go.contains("!wizValid()"), "wizGo refuses a forward step wizValid refuses");
+    assert!(js.contains("flashError("), "a repeated refusal is re-announced, not silently unchanged");
+    for sentence in ["Sign in first.", "Finish the payment page in your browser, then come back."] {
+        assert!(js.contains(sentence), "the refusal names what is missing: {sentence}");
+    }
 }

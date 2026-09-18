@@ -1498,8 +1498,15 @@
   function renderWizard() {
     PANELS.forEach(function (p, i) { EL("wiz-" + p).hidden = i !== WIZ.step; });
     EL("wiz-step").textContent = "step " + (WIZ.step + 1) + " of " + PANELS.length;
-    EL("wiz-back").disabled = WIZ.step === 0;
+    // Spec §7 (a): hidden, not disabled. A greyed Back that does nothing is the control Quinn
+    // pressed; a Back that is not on screen at step 0 asks no question.
+    EL("wiz-back").hidden = WIZ.step === 0;
     EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
+    // Spec §7 (b): the ONE writer of this property. `wizGo`'s discovery latch and `wizFinish`'s
+    // re-entry guard both set `WIZ.busy` and call renderWizard, so a path that forgets to clear it
+    // is a path renderWizard still recovers from on the next render — which a direct DOM write was
+    // not. The file's own A-5 rule, applied to the last field that escaped it.
+    EL("wiz-next").disabled = WIZ.busy;
     EL("wiz-error").textContent = WIZ.error;
     EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
     EL("wiz-google-signin").disabled = WIZ.busy;
@@ -1570,9 +1577,20 @@
     WIZ.autostart = EL("wiz-autostart").checked;
   }
 
+  // A refusal belongs on screen AND has to register as an answer to THIS press. `#wiz-error` sits
+  // at the left of the nav row, so a second Next against the same unmet gate rewrote the same red
+  // sentence and looked like nothing happened at all. One re-flow, one animation frame, and the
+  // sentence arrives again.
+  function flashError() {
+    var el = EL("wiz-error");
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+  }
+
   function wizValid() {
     WIZ.error = "";
-    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Create an account or sign in first."; }
+    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
     if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
     if (WIZ.step === 3) {
       var n = WIZ.name.trim();
@@ -1591,7 +1609,7 @@
   }
 
   function wizGo(n) {
-    if (n > WIZ.step && !wizValid()) { renderWizard(); return Promise.resolve(); }
+    if (n > WIZ.step && !wizValid()) { renderWizard(); flashError(); return Promise.resolve(); }
     // A refusal belongs to the panel that raised it: stepping back clears it rather than carrying
     // a red line about a field that is no longer on screen.
     if (n < WIZ.step) { WIZ.error = ""; }
@@ -1628,7 +1646,7 @@
         if (WIZ.map.length) { renderWizard(); return; }
         WIZ.step = leaving;
         WIZ.discovering = true;
-        EL("wiz-next").disabled = true;
+        WIZ.busy = true;
         EL("wiz-map").hidden = false;
         EL("wiz-map-note").textContent = "Looking up your books and sections…";
         renderWizard();
@@ -1643,9 +1661,12 @@
           EL("wiz-map-note").textContent = "We could not look those up — fill them in below.";
         }).then(function () {
           // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
-          // comes back.
+          // comes back. Repainted here rather than left for a later render: nothing else touches the
+          // DOM once this chain settles, and a WIZ field nobody repaints is a Next button nobody can
+          // press.
           WIZ.discovering = false;
-          EL("wiz-next").disabled = false;
+          WIZ.busy = false;
+          renderWizard();
         });
       });
     }
@@ -1667,7 +1688,7 @@
     WIZ.vhl = false;
     WIZ.credVault = "";
     WIZ.step = 5;
-    EL("wiz-next").disabled = false;
+    WIZ.busy = false;
     renderWizard();
   }
 
@@ -1675,7 +1696,11 @@
     // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
     // second Finish click landing in that window used to start a second `retarget_credentials`/
     // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
-    EL("wiz-next").disabled = true;
+    // Painted immediately, synchronously, before readSlotsPanel or any await: the DOM `disabled`
+    // property is what actually stops a second physical click from ever reaching this function again
+    // — `WIZ.busy` alone is an in-memory flag nothing reads at the door.
+    WIZ.busy = true;
+    renderWizard();
     readSlotsPanel();
     // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
     // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
@@ -1720,7 +1745,7 @@
         if (!rt || !rt.ok) { credentialsStranded(); return; }
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
-          if (!r.ok) { WIZ.error = r.error; EL("wiz-next").disabled = false; renderWizard(); return; }
+          if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
           // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
           // from the pending target onto this profile, so this is the first moment the cache can be
           // written where the console will look for it — and the console relaunches into a vault whose
@@ -1732,7 +1757,7 @@
           });
         });
       });
-    }).catch(function (e) { WIZ.error = String(e.message || e); EL("wiz-next").disabled = false; renderWizard(); });
+    }).catch(function (e) { WIZ.error = String(e.message || e); WIZ.busy = false; renderWizard(); });
   }
 
   // The Checkout page is in the system browser, so the app cannot be told when it is done: it asks.
