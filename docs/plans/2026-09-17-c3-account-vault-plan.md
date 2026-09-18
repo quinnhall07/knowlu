@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix round 1 — the review's C1, C2, I1–I6; Minors taken: M1, M2, M3, M4, M5, M6, M8, M9, M10, M11, M12, M13, and M7 in part; refused: M7's shared `refusal()` helper, because a test-only module under `engine/tests/` compiles as its own integration crate and one under `cloud/supabase/functions/_shared/` would be a production file existing for two suites — the three-line duplication is the cheaper of the two and is now named as a decision). Originally WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
+**Status: AMENDED 2026-09-17 (fix rounds 1 and 2 — round 1: the review's C1, C2, I1–I6; round 2: the scoped re-review's R1–R6, the I3 nit and the I1 slip of fact, with R4 ruled by the controller as *perform the move*; Minors taken: M1, M2, M3, M4, M5, M6, M8, M9, M10, M11, M12, M13, and M7 in part; refused: M7's shared `refusal()` helper, because a test-only module under `engine/tests/` compiles as its own integration crate and one under `cloud/supabase/functions/_shared/` would be a production file existing for two suites — the three-line duplication is the cheaper of the two and is now named as a decision). Originally WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
 
 Execute on the **existing** branch `c3-sync` in its existing worktree (`C:\Users\danie\GitHub\knowlu\.claude\worktrees\c3-sync`), forked from `origin/main` at `7585ec6`. **Rebase it on `main` first** (`main` has moved: PR #8, `274e137`), then Task 1. The nine commits already on it stay; this plan reuses some and retires the rest, and says which in every task.
 
@@ -19,7 +19,7 @@ Execute on the **existing** branch `c3-sync` in its existing worktree (`C:\Users
 
 **Architecture.** One plaintext row store, two endpoints, one engine module. On the **device**, `engine/src/sync.rs` collects each new journal record and each changed note, posts them to `/sync-push`, pulls what it has not seen from `/sync-pull`, appends foreign journal records to the local ledger **verbatim** — they carry their own `ts`, `device` and `seq`, and rewriting those would destroy the attribution judge-once reads — and settles the note-level effect through the existing pure `reconcile::resolve`, writing the winners through `write` and filing an amend card for every field both sides moved. On the **server**, two thin Deno handlers over two Postgres tables that hold the record's canonical JSON and the note's text under RLS, with an opaque 16-hex device token, a 64-hex content hash and a receive timestamp beside them. The cursor is a per-account identity column; a retried push is idempotent on the content hash, which the server **re-derives from the body it was given** rather than trusting. `knowlu-engine sync` is one more slot step with the same discipline as `judge` — **it always exits 0** — and it runs **first**, so the day ranks on what came down.
 
-**Tech Stack:** Supabase (Postgres 15 + Edge Functions on Deno) for the two endpoints, reusing C1's `_shared/{auth,db,entitlement,http}.ts` and C2's `CloudClient` — **no second HTTP client anywhere**; Rust 1.98 `stable-x86_64-pc-windows-gnu` with **`ring` 0.17** for the content hash — `ring::digest::SHA256`, the same crate this binary already links through `ureq` → `rustls`, so the hash costs **no new crate at all**; `base64` leaves in Task 2 with the envelope and `ring` stays for the one primitive that is still needed (`sha2` is deliberately **not** used: it is absent from `knowlu-engine`'s own dependency graph and would pull `digest 0.10` beside the engine's existing `sha1`/`digest 0.11`, two majors of two crates into a binary with a 6 MiB CI size gate); `deno test` for every pure module and one request/response contract test per function; `std::net::TcpListener` on `127.0.0.1:0` for every Rust test that exercises a client.
+**Tech Stack:** Supabase (Postgres 15 + Edge Functions on Deno) for the two endpoints, reusing C1's `_shared/{auth,db,entitlement,http}.ts` and C2's `CloudClient` — **no second HTTP client anywhere**; Rust 1.98 `stable-x86_64-pc-windows-gnu` with **`ring` 0.17** for the content hash — `ring::digest::SHA256`, the same crate this binary already links through `ureq` → `rustls`, so the hash costs **no new crate at all**; `base64` leaves in Task 2 with the envelope and `ring` stays for the one primitive that is still needed (`sha2` is deliberately **not** used: it is absent from `knowlu-engine`'s own dependency graph — the workspace's copy is the app's own edge for `inference.rs` — and would pull `digest 0.10` beside the engine's existing `sha1`/`digest 0.11`, two majors of two crates into a binary with a 6 MiB CI size gate); `deno test` for every pure module and one request/response contract test per function; `std::net::TcpListener` on `127.0.0.1:0` for every Rust test that exercises a client.
 
 **Spec.** `docs/specs/2026-09-09-knowlu-cloud-design.md` — read the **Amendment 2026-09-17 whole** before Task 1, then **§5.5** (the section this plan implements, as amended), §3.1, §4.4 and §9; `VISION.md`'s commitment 2 **as amended** is the sentence the whole plan serves. The parent design for the vault, the journal and `write` is `docs/specs/2026-08-11-personal-ops-system-design.md`. The superseded plan is `docs/plans/2026-09-14-c3-sync-plan.md` and its review is `docs/reports/2026-09-14-c3-sync-plan-review.md`; **the review's resolutions are rulings this plan inherits** and are carried in the fidelity ledger and in the tasks that hold them (B1's seed allowlist, B2's thrown-`Response` convention, B3's three `state/` inputs, B5's startup thread, I3's read lag, I4's check order, I5's empty-copy rule, I7's two guards, I9's hand-off rule, I10's one `materialise`). The paused branch's own ledger is `.superpowers/sdd/2026-09-14-c3-sync-plan/progress.md`; **R-C3-exec-4** (the corpus-wide pins are bumped by whichever stream moves them) and **R-C3-exec-5** (`db push --include-all` for every C3 migration) still bind and are stated again below.
 
@@ -114,7 +114,7 @@ One row per ruling, spec sentence or inherited resolution C3′ carries or narro
 | §11a | "the personal calendar … C1 delivers it by its secret iCal address … written to the vault's `calendars:`" | cloud design §11a | Task 11, the same removal and the same argument: `- name: personal` / `ics_url:` in `config/ingest.yaml` becomes `- name: personal` / `ics_url: 'cloud:personal'`, which C2's hand-off H4 already routes to `/ingest-calendar?name=personal`. |
 | `CLAUDE.md` | Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted | `CLAUDE.md`; `approvals::defer_over_budget` | Task 7 files conflict cards through the ordinary `propose_amendment` path, so the existing cap applies unchanged and a hundred-conflict first pull spreads over days rather than burying the deck. |
 | `CLAUDE.md` | `journal::VIAS` does not grow | `CLAUDE.md` | The slot's sync step runs `--via local-runner`; the console's *Sync now* runs `via: "dashboard"`. Both are already in `VIAS`. |
-| §8 | `dependency_boundary.rs` pins the engine's dependency budget; TLS is rustls/ring, never OpenSSL | cloud design §8 | Task 2. The crypto test that named `ring` and `base64` is **replaced**, not deleted. **`base64` leaves; `ring` stays**, and the reason is the lockfile rather than taste: `ring` is already in `knowlu-engine`'s graph through `ureq` → `rustls`, so `ring::digest::SHA256` is a hash with **no new crate**, while `sha2` is absent from that graph (`Cargo.lock`'s `sha2 0.10.9` is the app's, through `tauri-codegen` and `wry`) and adding it would pull `digest 0.10`, `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` beside the engine's existing `sha1 0.11`/`digest 0.11` — two majors of two crates, into the binary the CI size gate holds under 6 MiB. The replacement test **names `ring` as the hash** and refuses `sha2`, `base64`, `aes-gcm`, `chacha20`, `rust-crypto`, `sodiumoxide` and `hkdf`. |
+| §8 | `dependency_boundary.rs` pins the engine's dependency budget; TLS is rustls/ring, never OpenSSL | cloud design §8 | Task 2. The crypto test that named `ring` and `base64` is **replaced**, not deleted. **`base64` leaves; `ring` stays**, and the reason is the lockfile rather than taste: `ring` is already in `knowlu-engine`'s graph through `ureq` → `rustls`, so `ring::digest::SHA256` is a hash with **no new crate**, while `sha2` is absent from that graph (`Cargo.lock`'s `sha2 0.10.9` is the **app's own direct edge**, `app/Cargo.toml:69`, for `inference.rs`'s runtime digest check — and `dependency_boundary.rs`'s `MANIFESTS` scans `engine/Cargo.toml` and the workspace root, neither of which names it, so forbidding the string costs the app nothing) and adding it would pull `digest 0.10`, `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` beside the engine's existing `sha1 0.11`/`digest 0.11` — two majors of two crates, into the binary the CI size gate holds under 6 MiB. The replacement test **names `ring` as the hash** and refuses `sha2`, `base64`, `aes-gcm`, `chacha20`, `rust-crypto`, `sodiumoxide` and `hkdf`. |
 | §5.6 | Judgment logs never enter the vault | cloud design §5.6; `CLAUDE.md` | Unchanged: `sync` writes no judgment log, and `state/sync-cursor.json` is a cursor, not a log — it holds two integers, one timestamp and a map of note path → content hash, all of which are already in the vault in plainer form. |
 | §13 | "the console's visual redesign (parked)" | cloud design §13 | Task 10 rewrites exactly one line of the page — the sync line — because the facts behind it no longer exist. Nothing else in the console's appearance is touched, and no settings row is added. |
 | Review resolutions | B2 (thrown `Response`), B3 (three `state/` inputs a restore does not carry), B5 (`main.rs`'s startup thread), I3 (the ten-second read lag), I4 (the check order), I7 (`is_note_path` + `record_is_well_formed`), I9 (the hand-off rule) | `docs/reports/2026-09-14-c3-sync-plan-review.md` | **Inherited whole.** B2 is *Interfaces* contract 5 and the `refusal()` helper in both handler suites; B3 is Task 9's rank comparison; B5 is hand-off **H10**; I3 is `READ_LAG_SECONDS` in Tasks 3 and 4; I4 is `run_lines_with`'s check order in Task 7; I7 is the two guards in Task 6; I9 is the *Controller hand-offs* preamble. |
@@ -222,14 +222,13 @@ pub enum CloudError { Transport(String), Status { code: u16, detail: String }, B
                                                                // .label() -> &'static str, .fatal() -> bool
 impl CloudClient {
     pub fn new(cfg: &CloudConfig, token: &str) -> CloudClient;
-    pub fn account_id(&self) -> &str;
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, CloudError>;
     pub fn get(&self, path: &str) -> Result<Value, CloudError>;
 }
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 ```
 
-`post` serialises through `ledger::dumps_value`, sends `Authorization: Bearer <the session's access token>` and `apikey: <anon key>`, and scrubs the bearer out of every error string it produces. C3′ calls `post("/sync-push", …)` and `get("/sync-pull?…")` and nothing else. `CloudError::label()` maps 401 to `no session`, 402 to `no entitlement`, 403 to `not allowed`, 429 to `rate limited`, a transport failure to `no network`, anything else to `the service refused` — the same words the `sync` step prints, so a student reads the same sentence whichever cloud step hit it first.
+`post` serialises through `ledger::dumps_value`, sends `Authorization: Bearer <the session's access token>` and `apikey: <anon key>`, and scrubs the bearer out of every error string it produces. C3′ calls `post("/sync-push", …)` and `get("/sync-pull?…")` and nothing else. **There is no `CloudClient::account_id()`** (review R2): the struct is `{ base, anon_key, token, agent }` and the account id is `CloudConfig`'s field, so `run_lines_with` keeps the `CloudConfig` it got from check one and passes `&cfg.account_id` to `build_push`. `cloudmodel.rs` is outside C3′'s ownership and adding an accessor would be a hand-off for one caller's convenience. `CloudError::label()` maps 401 to `no session`, 402 to `no entitlement`, 403 to `not allowed`, 429 to `rate limited`, a transport failure to `no network`, anything else to `the service refused` — the same words the `sync` step prints, so a student reads the same sentence whichever cloud step hit it first.
 
 **5. `cloud/supabase/functions/_shared/entitlement.ts`** — C1's, imported by both C3′ functions and called first:
 
@@ -521,17 +520,9 @@ pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan) -> Vec<(PathBuf, V
     state::refresh_history(cs);
 ```
 
-and
-
-```rust
-    if lock(&cs.history).has_remote {
-        steps.push(sync_step(cs, "pull"));
-    }
-```
-
 and the trailing `state::refresh_head(cs); state::refresh_history(cs);` pair.
 
-**What is NOT here, and why** (review C1). `fn sync_step`, the `steps.push(sync_step(cs, "push"));` at the end of `run_slot_inner`, and the two debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop are **H9a's**, at Task 7 — not this hand-off's, at Task 10. They are the callers of `state::run_sync`, and H9a **replaces** that function rather than adding a second one beside it; a caller left behind for three tasks would be a caller of a function whose return type had changed under it. H9a lists them and removes them in its own commit. This hand-off is the `history`-shaped remainder: the `has_remote` gate, the pull step and the two refreshes.
+**What is NOT here, and why** (review C1, R1). `fn sync_step`, **both** of its call sites in `run_slot_inner`, the two debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop and the `cs.auto_sync` condition beside them are **H9a's**, at Task 7 — not this hand-off's, at Task 10. They are the callers of `state::run_sync` and of `sync_step`, and H9a **replaces** the first and deletes the second; a caller left behind for three tasks would be a caller of a function whose return type had changed under it, or of one that no longer exists at all. H9a lists them and removes them in its own commit. This hand-off is the `history`-shaped remainder: the three `refresh_*` calls, and nothing else in this file.
 
 ### H8c — `app/src/scheduler.rs`, `ics_state` (verified at Task 11; no edit, and this corrects the superseded plan too)
 
@@ -543,7 +534,21 @@ The superseded plan's H7c added an `IcsState::Cloud` arm so a cloud vault with n
 
 **Removed by this hand-off, named exactly:**
 
-- `app/src/scheduler.rs` — `fn sync_step` whole, the `steps.push(sync_step(cs, "push"));` at the end of `run_slot_inner`, and **both** debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop, including the `lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst)` gate around the second:
+- `app/src/scheduler.rs` — `fn sync_step` whole **and both of its call sites**, because a function deleted here with a caller left for Task 10 is `error[E0425]` for three tasks (review R1, C1 in mirror image). That is the push call at the end of `run_slot_inner`:
+
+```rust
+    steps.push(sync_step(cs, "push"));
+```
+
+  **and the pull call above it**, which the slot's own `sync` step (H8a, this same task) replaces:
+
+```rust
+    if lock(&cs.history).has_remote {
+        steps.push(sync_step(cs, "pull"));
+    }
+```
+
+  Then **both** debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop. The second goes whole, gate included:
 
 ```rust
             if !slot_running && n % 30 == 0 && lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst) {
@@ -551,7 +556,9 @@ The superseded plan's H7c added an `IcsState::Cloud` arm so a cloud vault with n
             }
 ```
 
-  goes whole, and the `due_write` block above it keeps its backup and loses its `run_sync` line. (The `if lock(&cs.history).has_remote { steps.push(sync_step(cs, "pull")); }` block and the `state::refresh_history(cs);` before it are **H8b's**, at Task 10: they read `history` rather than call `run_sync`, and the pull step is replaced by the slot's own `sync` step in H8a, which lands in this same task.)
+  and the `due_write` block above it keeps its backup, loses its `run_sync` line **and loses its `cs.auto_sync` condition** — `if !slot_running && due_write {` — because H9b deletes that field at Task 10 and a condition reading it would be `error[E0609]` (review R5, which predates this round and which the first review missed).
+
+  **What stays for H8b**, and needs no `sync_step`: `state::refresh_history(cs);` before the deleted pull, and the trailing `state::refresh_head(cs); state::refresh_history(cs);` pair. They read `history` rather than call `run_sync`.
 - `app/src/state.rs` — `quit_flush`'s git branch, rewritten here rather than at H9b, because it is the third caller:
 
 ```rust
@@ -1194,7 +1201,8 @@ A pure removal, and the smallest task in the plan. Everything ruling 2 struck le
 /// `ring::digest::SHA256` costs **nothing**: `ring` is already compiled into this binary through
 /// `ureq` to `rustls`, so keeping the direct edge adds no crate, no version and nothing to audit.
 /// `sha2` would: `knowlu-engine`'s own dependency graph has none (the workspace's `sha2 0.10.9` is
-/// the app's, through `tauri-codegen` and `wry`), so adding it pulls `sha2`, `digest 0.10`,
+/// the APP's own direct edge, `app/Cargo.toml:69`, for `inference.rs`'s runtime digest check — and
+/// this scan reads only `engine/Cargo.toml` and the workspace root), so adding it pulls `digest 0.10`,
 /// `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` in beside the
 /// engine's existing `sha1 0.11`, which resolves `digest 0.11` and `cpufeatures 0.3` — two majors of
 /// two crates, into the binary CI holds under 6 MiB. `sha1` itself stays and is a different thing
@@ -2550,7 +2558,7 @@ The half the whole feature is for. A record another desktop wrote is appended to
 
 **Files:**
 - Modify: `engine/src/sync.rs` (the pull and apply sections)
-- Test: `engine/tests/sync_contract.rs` (twelve new cases)
+- Test: `engine/tests/sync_contract.rs` (thirteen new cases)
 
 **Interfaces:**
 - Consumes: `reconcile::resolve`, `write::{write_literals, create, delete, move_note, propose_amendment, find_pending_amendment, WriteContext, WriteOpts}`, `approvals::{AMENDABLE_FIELDS, AMENDABLE_FOLDERS}`, `models::split_frontmatter`, `ids::{read_meta, inside_vault, is_id, NOTE_FOLDERS}`, `journal::{Journal, OPS, VIAS}`, Task 5's `is_note_path`, `sha256_hex`.
@@ -2575,7 +2583,7 @@ The half the whole feature is for. A record another desktop wrote is appended to
 
 Read the function with that substitution and it does exactly the right thing: `chains` becomes the set of fields the *other* desktop changed; a field whose on-disk value equals that chain's first `old` means this device never touched it, so the foreign value applies cleanly and **no supersede record is produced**; anything else is a two-sided change, `wins()` decides by later `ts`, and a supersede record names the loser. **A field with a supersede record is this plan's definition of a conflict**, and that is what becomes a card.
 
-- [ ] **Step 1: Write the failing tests** — **twelve** cases appended to `engine/tests/sync_contract.rs`, every one written out (review I5: an outline is what let the apply/card contradiction survive the first draft).
+- [ ] **Step 1: Write the failing tests** — **thirteen** cases appended to `engine/tests/sync_contract.rs`, every one written out (review I5: an outline is what let the apply/card contradiction survive the first draft).
 
 ```rust
 /// A foreign `set` record: another desktop, another `seq`, a chosen `ts`.
@@ -2810,6 +2818,33 @@ fn a_pulled_tombstone_settles_the_note_rather_than_unlinking_it() {
 }
 
 #[test]
+fn a_valid_pulled_move_relocates_the_note_and_counts_it() {
+    // **The move is performed, not only journalled** (review R4, ruled). A rename that was recorded
+    // and not carried out would leave the old file in place while the renamed note's text arrived at
+    // the new path as a note this device had never seen — one note in two places.
+    let dir = fixture("move-applied");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let from = "tasks/cs-100-hw-01.md";
+    let dest = "tasks/cs-100-homework-01.md";
+    let mut spec = knowlu_engine::journal::NewRecord::new("move", from, "quinn", "dashboard");
+    spec.id = Some("task_0000000001");
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    spec.new = serde_json::json!(dest);
+    let rec = knowlu_engine::journal::make_record(spec).expect("a record");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.records, report.moved, report.refused), (1, 1, 0), "{report:?}");
+    assert!(!dir.join(from).exists(), "the old path is empty");
+    assert!(dir.join(dest).exists(), "and the note is at the new one");
+    // A second pull of the same record changes nothing: the record dedupes by hash, and the move
+    // pass finds no file at the old path.
+    let again = sync::apply(&dir, &pulled(vec![], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((again.records, again.moved), (0, 0), "{again:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_pulled_move_may_not_escape_the_vault() {
     // A `move` record carries a destination, and the destination is a string another machine sent.
     // It is checked with the same `is_note_path` every other path goes through, BEFORE
@@ -2852,6 +2887,31 @@ fn a_pull_reads_the_two_cursors_and_the_more_flag_from_the_reply() {
 /// records keep their own actor; this is the actor of the local effect — the supersede record, the
 /// amend card, the note write — so the Runs view and the journal both say a sync did it.
 pub const ACTOR: &str = "agent:knowlu.sync";
+
+/// One note as the account holds it. `text: None` is a tombstone: the account knows the path is
+/// settled and carries no bytes for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulledNote {
+    /// Which desktop pushed it — the opaque sixteen-hex token, never a hostname.
+    pub device: String,
+    pub path: String,
+    pub text: Option<String>,
+}
+
+/// One page of `/sync-pull`, opened. `Default` is what `pulled_from_reply` builds from and what a
+/// restore test starts from, so it is derived rather than hand-written (review R6).
+#[derive(Debug, Clone, Default)]
+pub struct Pulled {
+    /// `(device token, the record)`. The record is the journal record itself, parsed out of the
+    /// row's `body` and checked against the row's own hash before it ever gets here.
+    pub records: Vec<(String, Record)>,
+    pub notes: Vec<PulledNote>,
+    pub record_cursor: i64,
+    pub note_cursor: i64,
+    pub more: bool,
+    /// Rows this device refused on the way in, as lines the run prints. Never a path, never a value.
+    pub warnings: Vec<String>,
+}
 
 /// Is this a journal record at all? **Six checks, and every one of them is a shape a malformed or
 /// hostile row could otherwise slip through into `state/journal/`** (review I7).
@@ -2920,6 +2980,8 @@ pub struct ApplyReport {
     pub applied: usize,
     pub cards: usize,
     pub superseded: usize,
+    /// Notes this pull **relocated or settled** — a performed `move` and a tombstone both land here,
+    /// because to a reader of the Runs view they are the same fact: a note is no longer where it was.
     pub moved: usize,
     pub refused: usize,
     pub warnings: Vec<String>,
@@ -2953,6 +3015,7 @@ pub fn apply(
     //    record made on 15 September lands in `state/journal/2026-09-15.jsonl` and not in today's.
     let ledger = crate::ledger::JsonlLedger::new(vault.join("state").join("journal"));
     let mut touched: std::collections::BTreeMap<String, Vec<Record>> = std::collections::BTreeMap::new();
+    let mut moves: Vec<(String, String)> = Vec::new();
     for (_, record) in &page.records {
         let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
         if known.contains(&sha256_hex(body.as_bytes())) {
@@ -2971,6 +3034,11 @@ pub fn apply(
         }
         // A `move`'s destination is a string another machine sent, and it is checked BEFORE
         // `write::move_note` is called — not after, when the file would already be somewhere else.
+        // The move itself is **performed**, in its own pass below (review R4): a foreign rename that
+        // was only journalled would leave the old file sitting where it was, and the renamed note's
+        // text would arrive at the new path as a note this device had never seen — one note in two
+        // places, which is the silent divergence this whole module exists to prevent.
+        let mut pending_move: Option<(String, String)> = None;
         if record.get("op").and_then(Value::as_str) == Some("move") {
             let dest = record.get("new").and_then(Value::as_str).unwrap_or_default();
             if !is_note_path(vault, dest) {
@@ -2978,15 +3046,42 @@ pub fn apply(
                 report.warnings.push("sync: a pulled move named a destination outside the vault's notes".to_string());
                 continue;
             }
+            pending_move = Some((path.to_string(), dest.to_string()));
         }
         if let Err(e) = ledger.append(record) {
             report.warnings.push(format!("sync: a pulled record could not be journalled ({e})"));
             continue;
         }
         report.records += 1;
+        if let Some(pair) = pending_move {
+            moves.push(pair);
+        }
         let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         if !id.is_empty() {
             touched.entry(id).or_default().push(record.clone());
+        }
+    }
+    journal.invalidate();
+
+    // 3a. **Perform the moves, after the whole record pass and before any reconcile.** After,
+    //     because a move mid-loop would move a file out from under a later record's `path`; before,
+    //     because the per-note pass below reads the note through `ids::read_meta` and has to find it
+    //     where it now is. `write::move_note` journals this device's own `move` record under `ACTOR`
+    //     beside the foreign one — which is right and is the same shape a tombstone takes below: the
+    //     foreign record is the other desktop's history, and this one is what happened here.
+    for (from, dest) in moves {
+        if !vault.join(&from).exists() {
+            // Already where it should be (a re-pull, or this device made the same move itself).
+            continue;
+        }
+        match crate::write::move_note(vault, &from, &dest, ctx, journal) {
+            Ok(_) => report.moved += 1,
+            // The destination is taken. Not a failure of the sync and not something a retry fixes:
+            // the note stays where it is, named, and the student sees both.
+            Err(crate::write::WriteError::Exists(_)) => {
+                report.warnings.push(format!("sync: {from} could not be renamed to {dest} — a note is already there"));
+            }
+            Err(e) => report.warnings.push(format!("sync: {from} could not be renamed ({e})")),
         }
     }
     journal.invalidate();
@@ -3045,7 +3140,11 @@ pub fn apply(
                 // is named, so the losing value is visible and nothing is dropped in silence.
                 report.warnings.push(format!("sync: {path} — both machines set `{field}`; the later write won and the other is in the journal"));
             }
-            literals.push((field.clone(), crate::write::to_literal(value)));
+            // `write::to_literal` takes a **serde_yaml_ng** `Value` (`write.rs:18` imports `Value`
+            // from `serde_yaml_ng`), and `Resolution::apply` holds **serde_json** values
+            // (`reconcile.rs:24`). `yaml::from_json` is the one conversion, and it is the same one
+            // `write_literals` does internally with `parse_literal` (review R3).
+            literals.push((field.clone(), crate::write::to_literal(&crate::yaml::from_json(value))));
             report.applied += 1;
         }
         for record in &resolution.supersede {
@@ -3069,11 +3168,15 @@ pub fn apply(
         let carded: std::collections::BTreeSet<String> =
             superseded_fields.iter().filter(|f| cardable(f)).cloned().collect();
         if !carded.is_empty() && crate::write::find_pending_amendment(vault, &path, &carded).is_none() {
-            let changes: Vec<(String, Value, Value)> = carded
+            // **YAML values on both sides** (review R3): `propose_amendment`'s `changes` is
+            // `&[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]`. `from` comes straight out of
+            // the note's own frontmatter mapping — no round trip through JSON — and `to` is the
+            // foreign value converted once.
+            let changes: Vec<(String, serde_yaml_ng::Value, serde_yaml_ng::Value)> = carded
                 .iter()
                 .filter_map(|field| {
-                    let to = resolution.apply.get(field)?.clone();
-                    let from = crate::yaml::get(&meta, field).map(crate::yaml::to_json).unwrap_or(Value::Null);
+                    let to = crate::yaml::from_json(resolution.apply.get(field)?);
+                    let from = crate::yaml::get(&meta, field).cloned().unwrap_or(serde_yaml_ng::Value::Null);
                     Some((field.clone(), from, to))
                 })
                 .collect();
@@ -3351,11 +3454,16 @@ pub fn run_lines_with(
 
     // 1. No account. Every fixture vault in this repository takes this path, which is why
     //    `oracle.rs` and `surface_oracle.rs` cannot move.
-    if crate::cloudmodel::load(vault).is_none() {
+    //
+    //    **The config is kept, not discarded** (review R2): `CloudClient` is `{ base, anon_key,
+    //    token, agent }` and has no `account_id()` accessor — the account id is `CloudConfig`'s
+    //    field. `cloudmodel.rs` is outside this stream's ownership, so the value travels from here
+    //    rather than through an accessor added for one caller.
+    let Some(cfg) = crate::cloudmodel::load(vault) else {
         totals.skipped = Some("no account".to_string());
         lines.push("sync (skipped: no account)".to_string());
         return (0, lines, totals);
-    }
+    };
     // 2. No session. C1 owns the refresh; this only reads, and waits for the app's next slot.
     let client = match crate::cloudmodel::resolve(vault) {
         Ok(c) => c,
@@ -3405,7 +3513,7 @@ pub fn run_lines_with(
     // 4. **Push second, and the cursor moves only on a 200.** A cursor advanced over a batch the
     //    service never received is the one bug in this module that loses a record for good.
     if direction.pushes() {
-        let (batch, next) = build_push(vault, &cursor, client.account_id(), &mut journal);
+        let (batch, next) = build_push(vault, &cursor, &cfg.account_id, &mut journal);
         lines.extend(batch.warnings.iter().cloned());
         match push(&client, &batch) {
             Ok((records, notes)) => {
@@ -3687,7 +3795,7 @@ pub fn gate(vault: &Path) -> Option<String> {
 }
 ```
 
-**`main.rs` composes the line**, so the word `sync` or `judge` is the caller's, not this module's: hand-off **H4b** prints `format!("{} ({})", name_of(&cli.command), line)` — `sync (skipped: no entitlement)`, `judge (skipped: no entitlement)` — which is the same shape `JudgePlan::Skip` already produces and the same words `CloudError::label()` uses, so a student reads one sentence whichever step hit it first.
+**`main.rs` composes the line**, so the word `sync` or `judge` is the caller's, not this module's: hand-off **H4b** prints `println!("{} ({reason})", name_of(&cli.command));` — `sync (skipped: no entitlement)`, `judge (skipped: no entitlement)` — which is the same shape `JudgePlan::Skip` already produces and the same words `CloudError::label()` uses, so a student reads one sentence whichever step hit it first.
 
 - [ ] **Step 5: Apply H3a and H4b**, then run `cargo test --workspace`. The three fixture vaults have no `config/cloud.yaml`, so `oracle.rs` and `surface_oracle.rs` are untouched; assert that in the task report rather than assuming it.
 
@@ -4387,7 +4495,7 @@ git commit -F .git-commit-msg.txt   # "cloud+docs: the account-scoping scan, and
 5. **`keep` is the server's, not the client's.** `sync_records.keep` is a stored generated column over the record's own `op` and `actor`; `sync_rows.ts` refuses a push that carries one; `sync_prune` deletes only `and not keep`. `retention never deletes a record a human wrote, and the SERVER is what decides that` passes, and judge-once survives a restore for the reason P3 was asked.
 6. **A vault's notes and journal replay into an empty folder**: every note byte for byte at the same path, every journal record present as a record, and `a_restored_vault_ranks_the_same_day_as_the_one_it_came_from` green (it copies `state/{calendar,events,events-seen}.md` alongside `config/` and `profile/`, because those three are `rank` **inputs** a restore does not carry and `golden-today-full.md` proves both reach the rendered day). A restore refuses any note its caller did not name in the seed allowlist, **and the wizard's own path passes exactly what is on disk**, so it runs rather than refusing itself.
 7. **A restore is `/sync-pull` from zero**, paged to the end. There is no third endpoint, no restore code to type, no picker link for the account's copy, and no second code path that writes a note file except the two in `sync.rs` that say so in their own doc comments.
-8. **Nothing malformed reaches `state/journal/`.** Every pulled record is checked before it is appended — `op` in `journal::OPS`, `via` in `journal::VIAS`, a parseable `ts`, an `actor`, a `device`, an `id` matching `ids::ID_RE` when present, and a `path` that passes `is_note_path` — and a `move`'s destination is checked the same way before `write::move_note` sees it. `a_pulled_record_that_is_not_a_record_never_reaches_the_ledger` and `a_pulled_move_may_not_escape_the_vault` pass, and `is_note_path_and_the_servers_regex_agree` pins the one rule across Rust, TypeScript and the column check.
+8. **Nothing malformed reaches `state/journal/`.** Every pulled record is checked before it is appended — `op` in `journal::OPS`, `via` in `journal::VIAS`, a parseable `ts`, an `actor`, a `device`, an `id` matching `ids::ID_RE` when present, and a `path` that passes `is_note_path` — and a `move`'s destination is checked the same way **before `write::move_note` performs it** — a valid foreign rename relocates the note and counts in `report.moved`, a bad one is refused and the note does not move. `a_pulled_record_that_is_not_a_record_never_reaches_the_ledger`, `a_valid_pulled_move_relocates_the_note_and_counts_it` and `a_pulled_move_may_not_escape_the_vault` pass, and `is_note_path_and_the_servers_regex_agree` pins the one rule across Rust, TypeScript and the column check.
 9. **A field both desktops moved is a `kind: amend` card**, filed through `write::propose_amendment` so the fifteen-a-day cap applies; a second pull of the same field set does not mint a second card; the note keeps this device's value until the card is answered; and a conflict on a field no card could ever apply takes reconcile's rule, keeps its supersede record and says so in one named line. **A foreign record is journalled verbatim** — its own `ts`, `device` and `actor` — and a record this device already has is not applied twice.
 10. **Two desktops cannot strand a row between them.** `/sync-pull` reads only rows that settled at least `READ_LAG_SECONDS` ago, so a cursor cannot step past a push that has taken its `seq` and not yet committed; `the clock the read lag uses is the handler's, and it reaches both readers` pins the wiring and Task 4's smoke step observes **both** pulls — the empty one and the one with the row.
 11. **The engine gates itself** (ruling 3). `coursework`, `ingest`, `judge` and `sync` on a vault with an account whose cached entitlement is absent, inactive or older than 72 hours print one named line and exit 0; a vault with **no** `config/cloud.yaml` is not gated at all; `surface`, `write`, `runs`, `info`, `issues` and `coursework-discover` are never gated; and `the_engines_grace_is_the_apps_grace_and_the_path_is_the_apps_path` pins the two constants that cannot be linked. **P5's answer is recorded** — whether `rank` joins them.
@@ -4484,3 +4592,29 @@ Against `docs/reports/2026-09-17-c3-account-vault-plan-review.md`. **Nothing in 
 - **The task count, the task order and the hand-off set.** Every finding was a defect inside a task, not a defect of the shape; the review says the same.
 - **P1–P5.** No finding touched a Quinn-owned question. P1 remains the merge blocker.
 - **The migration.** The review checked it against staging and found it correct; M5 is the only change to it, and it is a `coalesce` and two sentences.
+
+---
+
+## Fix round 2 — resolutions (2026-09-17)
+
+Against the *Re-review after fix round 1* section of `docs/reports/2026-09-17-c3-account-vault-plan-review.md` (`68ec416`). It resolves all eight original findings and twelve of the thirteen Minors, **accepts M7's refusal**, and raises six new findings plus one nit. **Nothing in it is disputed.** Five of the six are compile errors that only appeared because fix round 1 wrote `apply`, `run_lines_with` and the restore section out as code — which is the argument for having written them.
+
+One finding needed a decision rather than a correction, and the controller made it.
+
+- **R4 — ruled: *perform the move*.** A valid pulled `move` record now calls `write::move_note(vault, from, dest, ctx, journal)`, counts in `report.moved`, and folds `WriteError::Exists` into a named warning. The alternative the reviewer offered — treat a foreign rename as a tombstone plus a new note — would leave the old file sitting where it was while the renamed note's text arrived at the new path as a note this device had never seen: **one note in two places**, which is the silent divergence this whole module exists to prevent. Cost if wrong: one branch.
+
+### The six, and the two smaller corrections
+
+- **R1 — resolved.** C1 in mirror image: H9a deleted `fn sync_step` but left the pull call for H8b at Task 10, so `run_slot_inner` would have called a function that did not exist for three tasks. H9a's removal list now takes **both** call sites — the `push` at the end of `run_slot_inner` and the `if lock(&cs.history).has_remote { steps.push(sync_step(cs, "pull")); }` block above it, which H8a's own `sync` step replaces in the same task. H8b keeps only the three `refresh_*` calls, and its preamble and remainder sentence say so.
+- **R2 — resolved.** `CloudClient` is `{ base, anon_key, token, agent }` with no accessor; `account_id` is `CloudConfig`'s field. `run_lines_with` now binds the config at check one (`let Some(cfg) = crate::cloudmodel::load(vault) else { …the skip line… };`) and passes `&cfg.account_id` to `build_push`. *Interfaces* contract 4 drops the invented `pub fn account_id(&self) -> &str;` and says in prose why no accessor is added: `cloudmodel.rs` is outside this stream's ownership and widening it for one caller would be a hand-off.
+- **R3 — resolved.** `write.rs` imports `Value` from `serde_yaml_ng`, and `Resolution::apply` holds `serde_json` values. The applied field is now `crate::write::to_literal(&crate::yaml::from_json(value))`, and the card's triples are `(String, serde_yaml_ng::Value, serde_yaml_ng::Value)` with `from` read straight out of the note's own frontmatter (`yaml::get(&meta, field).cloned()`) and `to` converted once. Both sites carry the reason in a comment so the next reader does not convert them back.
+- **R4 — resolved by the ruling above.** The move is collected during the record pass and performed in its own pass **after** the whole pass (a move mid-loop would move a file out from under a later record's `path`) and **before** the per-note reconcile (which reads the note where it now is). `write::move_note` journals this device's own `move` under `ACTOR` beside the foreign one, which is the same shape a tombstone already takes: the foreign record is the other desktop's history, this one is what happened here. A second pull is idempotent — the record dedupes by hash and the pass finds no file at the old path. `ApplyReport::moved` now documents that it counts a relocation **or** a settlement. New test `a_valid_pulled_move_relocates_the_note_and_counts_it`, so Task 6 step 1 is **thirteen** cases; exit-gate item 8 says the move is performed rather than merely guarded.
+- **R5 — resolved.** The `due_write` housekeeping block's condition reads `cs.auto_sync`, a field H9b deletes at Task 10 (`error[E0609]`). H9a's removal list now names it: the block becomes `if !slot_running && due_write {`. The re-review notes this predates the round and that the first review missed it; it is fixed here rather than carried.
+- **R6 — resolved.** `Pulled` and `PulledNote` are declared at the head of Task 6 step 3, beside `ACTOR`, with the derives their uses need — `#[derive(Debug, Clone, Default)]` on `Pulled`, because `pulled_from_reply` builds from `..Default::default()` and Task 9 calls `sync::Pulled::default()` — and with each field commented. Every other new type in this plan was already declared; these two were not.
+- **The I3 nit — taken.** The prose at Task 8's `entitle` section narrated the composition as `format!("{} ({})", name_of(&cli.command), line)` while H4b binds `reason`. It now quotes H4b's own `println!("{} ({reason})", name_of(&cli.command));`, so the prose, the verbatim hand-off and the test all say one thing.
+- **The I1 slip of fact — corrected in three places.** The workspace's `sha2 0.10.9` is **the app's own direct edge** (`app/Cargo.toml:69`, for `inference.rs`'s runtime digest check), not a transitive of `tauri-codegen` and `wry`. The conclusion is unchanged and is now better supported: `dependency_boundary.rs`'s `MANIFESTS` scans `engine/Cargo.toml` and the workspace root, neither of which names `sha2`, so forbidding the string costs the app nothing.
+
+### What did not change
+
+- **The task count, the task order, the hand-off set and every Quinn-owned precondition.** Every finding was a defect inside a function or a hand-off list; the re-review says the same and raises no design change.
+- **M7's refusal**, which the re-review accepts with its own argument: a `_shared/` module would be a production file existing for tests, and a `*_test.ts` imported by another suite re-registers its `Deno.test` cases inside the importing run.
