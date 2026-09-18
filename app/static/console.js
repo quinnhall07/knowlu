@@ -1276,7 +1276,9 @@
       }
       upBusy(true);
       EL("up-error").textContent = "Finish signing in, in your browser…";
-      invoke("google_sign_in", {}).then(function (r) {
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and this
+      // is the checkbox `google_sign_in` now refuses on before it binds a listener (F2).
+      invoke("google_sign_in", { ageAttested: EL("up-18").checked }).then(function (r) {
         upBusy(false);
         // A dead network stands the overlay down rather than trapping someone behind it (D4).
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
@@ -1293,7 +1295,7 @@
       upBusy(true);
       // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and the
       // wizard's own call carries the same comment for the same reason.
-      invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: true }).then(function (r) {
+      invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: EL("up-18").checked }).then(function (r) {
         upBusy(false);
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
         EL("up-error").textContent = r.ok ? "We emailed you a code. Type it below." : r.error;
@@ -1510,6 +1512,10 @@
     EL("wiz-error").textContent = WIZ.error;
     EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
     EL("wiz-google-signin").disabled = WIZ.busy;
+    // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
+    // presses are worth the same guard.
+    EL("wiz-magic").disabled = WIZ.busy;
+    EL("wiz-code-go").disabled = WIZ.busy;
     // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
     // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
     EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
@@ -1790,7 +1796,9 @@
       }
       WIZ.busy = true; WIZ.error = ""; WIZ.accountNote = "Finish signing in, in your browser…";
       renderWizard();
-      invoke("google_sign_in", {}).then(function (r) {
+      // **`ageAttested`, not the Rust spelling** — the checkbox `google_sign_in` now refuses on
+      // before it binds a listener (F2), the same gate `send_magic_link` has always had.
+      invoke("google_sign_in", { ageAttested: EL("wiz-18").checked }).then(function (r) {
         WIZ.busy = false; WIZ.accountNote = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
@@ -1799,27 +1807,33 @@
       return;
     }
     if (e.target.closest("#wiz-magic")) {
+      if (WIZ.busy) { return; }
       if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
         WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
       }
       // **`ageAttested`, not the Rust spelling.** Tauri v2 camel-cases every argument key; sent
       // snake_case the invoke is rejected before the command's body runs.
-      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: true }).then(function (r) {
+      WIZ.busy = true; renderWizard();
+      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: EL("wiz-18").checked }).then(function (r) {
+        WIZ.busy = false;
         WIZ.error = r.ok ? "" : r.error;
         EL("wiz-code-row").hidden = !r.ok;
         WIZ.accountNote = r.ok ? "We emailed you a code. Type it below." : "";
         renderWizard();
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-code-go")) {
+      if (WIZ.busy) { return; }
+      WIZ.busy = true; renderWizard();
       invoke("verify_email_code", { email: EL("wiz-email").value.trim(), code: EL("wiz-code").value }).then(function (r) {
+        WIZ.busy = false;
         EL("wiz-code").value = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         EL("wiz-code-row").hidden = true;
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     // **The two policies open in the system browser, not in this window.** `app/static/` holds four

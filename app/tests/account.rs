@@ -141,7 +141,7 @@ fn there_is_no_password_path_left_in_the_crate() {
 
 /// The magic link's second half, which is what makes the button on the panel honest.
 #[test]
-fn a_six_digit_code_from_the_email_becomes_a_session_on_this_machine() {
+fn a_code_from_the_email_becomes_a_session_on_this_machine() {
     use knowlu::account::verify_email_code_at;
     let body = r#"{"access_token":"at9","refresh_token":"rt9","expires_in":3600,"user":{"id":"acc-9","email":"c@example.invalid"}}"#;
     let (base, handle) = loopback(vec![(200, body.to_string())]);
@@ -995,7 +995,7 @@ fn the_callback_request_line_yields_the_code_or_the_providers_own_sentence() {
     assert!(code_from_request_line("garbage").is_err());
 }
 
-use knowlu::account::{serve_one_callback, CALLBACK_PAGE, NOT_FOUND_PAGE};
+use knowlu::account::{serve_one_callback, CALLBACK_FAILED_PAGE, CALLBACK_PAGE, NOT_FOUND_PAGE};
 
 /// A loopback listener on `127.0.0.1:0` is not the network: the same machine, the same process
 /// tree, nothing that leaves it. The serving side is the production code; the client side is this
@@ -1039,6 +1039,10 @@ fn a_refusal_in_the_query_is_the_providers_sentence_and_the_browser_still_gets_a
     assert!(err.contains("You said no"), "{err}");
     // A browser left staring at a connection reset is a worse answer than a sentence.
     assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+    // F1: a declined consent screen must never be told "You are signed in" — that sentence is only
+    // true once `code_from_request_line` returned `Ok`.
+    assert!(page.contains(CALLBACK_FAILED_PAGE), "the served body is the failure constant, not the success one: {page}");
+    assert!(!page.contains("You are signed in to Knowlu."), "{page}");
 }
 
 #[test]
@@ -1148,6 +1152,36 @@ fn both_sign_in_paths_record_the_consent() {
         let body = body.split("\n#[tauri::command").next().unwrap_or(body);
         assert!(body.contains("record_consent_at("), "{owner} must record the consent it just took");
     }
+}
+
+/// **F2.** `google_sign_in` now takes the attestation the page's checkbox stands for, and refuses on
+/// it the same way `send_magic_link` does — the belt the C1 static test used to describe is back.
+/// The order is the point: the check must be the first thing the function does, before `api_base()`,
+/// before the loopback listener is bound and before a browser ever opens. A source-text pin, in the
+/// same style `owner_of` above already uses for this file.
+#[test]
+fn google_sign_in_gates_the_attestation_before_any_listener_is_bound() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let owner = owner_of("google_sign_in");
+    let body = src.split(&owner).nth(1).expect(&owner);
+    let body = body.split("\n#[tauri::command").next().unwrap_or(body);
+    let gate = body.find("!age_attested").expect("google_sign_in must gate on age_attested");
+    let bind = body.find("TcpListener::bind").expect("google_sign_in must still bind the loopback listener");
+    assert!(gate < bind, "the attestation must be refused before the listener is bound");
+}
+
+/// The same claim, proved by calling the function rather than reading it: `ApiBase::set` points the
+/// compiled-in base at a closed loopback port for the call, so if the gate above ever moved past the
+/// listener bind or the browser open, this call would hang on a dead connection (or open a real
+/// browser tab in CI) instead of returning the refusal sentence instantly.
+#[test]
+fn google_sign_in_refuses_with_no_attestation_and_opens_nothing() {
+    let _api = ApiBase::set(&closed_loopback_base());
+    use knowlu::account::google_sign_in;
+    let out = google_sign_in(false);
+    assert_eq!(out["ok"], false);
+    assert_eq!(out["error"], "Knowlu is for people 18 or older.");
+    assert!(out["account_id"].is_null(), "{out:?}");
 }
 
 /// **Review I4.** The consent call after a sign-in is best effort, so `open_checkout` retries it

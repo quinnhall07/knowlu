@@ -589,6 +589,32 @@ fn the_upgrade_overlay_offers_the_same_two_doors_and_no_password() {
     assert!(before.contains("var UP_BUSY"), "UP_BUSY must be declared at IIFE scope, not inside the click handler");
 }
 
+/// **F10.** The overlay got `UP_BUSY` and the wizard's Google button gets `WIZ.busy`, but the
+/// wizard's two emailed-code doors got neither — two quick presses on `#wiz-magic` spend two of the
+/// twenty emails an hour `config.toml`'s comment calls the whole of the cap. Both doors now get the
+/// same guard: refuse a second press while one is in flight, latch `WIZ.busy` before the `invoke`,
+/// release it on every outcome, and `renderWizard` paints both as disabled while it is set — the
+/// same pattern `#wiz-google-signin` and `#wiz-next` already use.
+#[test]
+fn the_wizards_email_doors_get_the_same_busy_guard_the_google_button_has() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("\n  }").next()).expect("renderWizard");
+    assert!(render.contains("EL(\"wiz-magic\").disabled = WIZ.busy"), "the email door is painted from WIZ.busy");
+    assert!(render.contains("EL(\"wiz-code-go\").disabled = WIZ.busy"), "the code door is painted from WIZ.busy");
+    let listener = js.split("EL(\"wizard\").addEventListener(\"click\"").nth(1)
+        .and_then(|s| s.split("function renderCourses(").next())
+        .expect("the wizard's click listener");
+    for id in ["#wiz-magic", "#wiz-code-go"] {
+        let marker = format!("e.target.closest(\"{id}\")");
+        let handler = listener.split(&marker).nth(1)
+            .and_then(|s| s.split("if (e.target.closest(").next())
+            .unwrap_or_else(|| panic!("the {id} handler"));
+        assert!(handler.contains("if (WIZ.busy) { return; }"), "{id} must refuse a second press while one is in flight");
+        assert!(handler.contains("WIZ.busy = true"), "{id} must latch WIZ.busy before its invoke");
+        assert!(handler.contains("WIZ.busy = false"), "{id} must release WIZ.busy on the outcome");
+    }
+}
+
 /// Legal note §9: the report is shown, editable, before anything is sent — and what is sent is what
 /// was shown, not something rebuilt after the user looked away.
 #[test]
@@ -1229,4 +1255,11 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(!page.contains("your password, which Supabase holds"), "…and the account-clause's own password mention is gone");
     assert!(page.contains("There is no password on a Knowlu account at all"), "…and the page says so");
     assert!(page.contains("Signing in with Google tells us three things"), "Google sign-in is disclosed");
+    // F3: the "Your account" collection entry must not be narrower than the page's own Google
+    // paragraph — both must name the same three things Google hands over at sign-in.
+    let account_entry = page.split("<dt>Your account</dt>").nth(1).and_then(|s| s.split("<dt>").next())
+        .expect("the Your account entry");
+    assert!(account_entry.contains("the Google account id that identifies it"), "{account_entry}");
+    assert!(account_entry.contains("your name") && account_entry.contains("a link to your profile picture"),
+        "the Your account entry must agree with the Google paragraph: {account_entry}");
 }

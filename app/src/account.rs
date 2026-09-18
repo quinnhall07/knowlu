@@ -332,6 +332,13 @@ pub const CALLBACK_PAGE: &str =
     "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
      <p style=\"font:16px system-ui;margin:3rem\">You are signed in to Knowlu. You can close this window.</p>";
 
+/// What the browser is left looking at when the callback carried no code — a consent screen the
+/// student declined, or any other provider refusal (F1). Never `CALLBACK_PAGE`: that sentence is
+/// only true once `code_from_request_line` has returned `Ok`.
+pub const CALLBACK_FAILED_PAGE: &str =
+    "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
+     <p style=\"font:16px system-ui;margin:3rem\">Knowlu did not get a sign-in. Go back to the Knowlu window and try again.</p>";
+
 /// The other page: anything on this machine that is not the sign-in.
 pub const NOT_FOUND_PAGE: &str =
     "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
@@ -416,8 +423,16 @@ pub fn serve_one_callback(listener: std::net::TcpListener, wait: std::time::Dura
             let _ = write_page(&mut stream, "404 Not Found", NOT_FOUND_PAGE);
             continue;
         }
-        let _ = write_page(&mut stream, "200 OK", CALLBACK_PAGE);
-        return code_from_request_line(&line);
+        let result = code_from_request_line(&line);
+        match &result {
+            Ok(_) => {
+                let _ = write_page(&mut stream, "200 OK", CALLBACK_PAGE);
+            }
+            Err(_) => {
+                let _ = write_page(&mut stream, "200 OK", CALLBACK_FAILED_PAGE);
+            }
+        }
+        return result;
     }
 }
 
@@ -1035,8 +1050,15 @@ pub fn checkout_url_at(api_base: &str, token: &str, plan: &str) -> Result<String
 /// **Nothing here reaches the page.** The verifier, the code and both tokens stay in this function
 /// and in Credential Manager; what crosses the IPC is an account id and an email address, the same
 /// envelope `verify_email_code` returns.
+///
+/// The attestation is refused **here**, before a single listener is bound — the same sentence and
+/// the same reason `send_magic_link` refuses on (F2). The page gate (`console.js`) is not the only
+/// strap any more.
 #[tauri::command(async)]
-pub fn google_sign_in() -> Value {
+pub fn google_sign_in(age_attested: bool) -> Value {
+    if !age_attested {
+        return json!({ "ok": false, "error": "Knowlu is for people 18 or older.", "account_id": Value::Null });
+    }
     let api = api_base();
     let out = (|| -> Result<(String, Session), String> {
         let auth = auth_base(&api)?;

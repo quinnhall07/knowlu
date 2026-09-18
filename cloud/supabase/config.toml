@@ -12,7 +12,9 @@ max_rows = 1000
 
 [db]
 port = 54322
-major_version = 15
+# Both projects run Postgres 17 (R-C1b-exec-4) — this declaration of record must agree, or a
+# `supabase config push` from this file carries an unintended third update.
+major_version = 17
 
 [auth]
 enabled = true
@@ -89,7 +91,7 @@ pass = "env(SMTP_PASSWORD)"
 admin_email = "hello@knowlu.com"
 sender_name = "Knowlu"
 
-# The magic link's mail carries a **six-digit code as well as a link**, because a desktop app cannot
+# The magic link's mail carries a one-time code as well as a link, because a desktop app cannot
 # receive the link's redirect: `site/signed-in.html` says so, and the wizard asks for the code
 # (`account::verify_email_code`). `{{ .Token }}` is GoTrue's own placeholder for it.
 [auth.email.template.magic_link]
