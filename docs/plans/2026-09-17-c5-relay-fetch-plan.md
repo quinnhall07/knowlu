@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix rounds 1-3 after review), not started; blocked on C3′.** The
+**Status: REVIEWED 2026-09-17 — execute after C3′** (the re-review after fix round 3 returned
+*Execute*; its one minor, **T1**, is folded in). **AMENDED 2026-09-17 (fix rounds 1-3 after
+review), not started; blocked on C3′.** The
 review is `docs/reports/2026-09-17-c5-relay-fetch-plan-review.md` — `5a2ca69` (verdict *execute after
 fix round 1*, findings C1-C5, I1-I14, M1-M12) and its appended **Re-review after fix round 1**
 (`9f186c7`, verdict *execute after fix round 2*, findings R1-R10 plus rulings on the author's five
@@ -3105,9 +3107,11 @@ export const MAX_RUN_BYTES = 8 << 20, MAX_POST_BYTES = MAX_RUN_BYTES * 2;
      `{run, steps}` after `advanceRun`, or `{run, done}` after `endRun` (which deletes the row and
      its `parsed` with it).
   6a. **`appendParsed`, stated rather than implied** (review **S1**: the first draft said "whatever
-     it parsed", which is not a rule and left R7's retirement clause with nothing to act on). For
-     each `Parsed` the arrival produced, keyed by **its own `source` field** — never by position and
-     never by a literal source name:
+     it parsed", which is not a rule and left R7's retirement clause with nothing to act on). Its
+     input is the result's **`parsed?: Parsed[]`** — one entry per arrival, because a round-robin
+     batch can carry arrivals from more than one source and a job plan must be able to report both
+     (**T1**). For each entry, keyed by **its own `source` field** — never by position and never by
+     a literal source name:
      - `parsed.assignments[source].push(...items)`, `parsed.own[source].push(...own)` and
        `parsed.proposals[source].push(...proposals)` — **append, never splice**, so within a source
        the order is arrival order, which is the order the vendor returned the shelf in;
@@ -3372,7 +3376,13 @@ Deno.test("one run drives both sources, round-robin, within one batch budget", (
 Deno.test("a source that fails on its first step retires and the other finishes", () => {
   const r = courseworkPlan.next(ctxBothSources(), [vhlLoginRejectedTwice(), zybooksItemsOk()]);
   assert(r.steps.every((s) => s.source === "zybooks"), "VHL retired, zyBooks continues");
-  assert(r.parsed.own.vhl.some((w: string) => w.includes("session invalid")));
+  // T1: `PlanResult.parsed` is `Parsed[]`, one entry per arrival, each naming its own source — NOT
+  // `RunRow.parsed`'s `Record<string, string[]>`, which is what the pre-S1 version of this line
+  // reached for. The source is named by the entry, not by a key.
+  const vhl = r.parsed!.find((p: Parsed) => p.source === "vhl")!;
+  assert(vhl.failed !== undefined, "VHL is retired, and `failed` is what appendParsed reads");
+  assert(vhl.own.some((w: string) => w.includes("session invalid")));
+  assert(vhl.items.length === 0, "a source that threw contributed no items");
 });
 
 Deno.test("a source that fails on a LATER round trip loses the rows it contributed on earlier ones", async () => {
@@ -3533,7 +3543,9 @@ Deno.test("a book's payload is parsed the moment it arrives and never held as by
   // Ruling R-C5-plan-2. The rows come back for `appendParsed`; the cursor keeps codes and an index.
   const r = zybooksPlan.next(ctx({ stage: "books", codes: ["UACS100Fall2026"], index: 0 }),
                              [jsonResult(fixturePayload())]);
-  assert(r.parsed!.items.length > 0, "parsed rows, not a payload");
+  assertEquals(r.parsed!.length, 1, "one arrival, one `Parsed` — a source module returns 0 or 1");
+  assertEquals(r.parsed![0].source, "zybooks");
+  assert(r.parsed![0].items.length > 0, "parsed rows, not a payload");
   checkCursor(r.cursor);
   assert(!JSON.stringify(r.cursor).includes("assignments"), "no page and no payload in the cursor");
 });
@@ -3612,8 +3624,24 @@ export interface Plan {
   next(ctx: PlanCtx, results: StepResult[]): PlanResult;
 }
 
+/**
+ * **`parsed` is a LIST, and that is T1's fix** (re-review after fix round 3).
+ *
+ * `Parsed` is per **one** source — S1 gave it `source: string` and `own: string[]` for exactly that
+ * reason. But a batch is filled round-robin across sources, so one `courseworkPlan.next(ctx,
+ * results)` call can be handed arrivals from zyBooks *and* VHL and must be able to report rows for
+ * both. A single optional `Parsed` could carry one of them, which is why Task 6's own test reached
+ * for `r.parsed.own.vhl` — `RunRow.parsed.own`'s map shape, on an object that does not have it.
+ *
+ * So: `parsed?: Parsed[]`, **one entry per arrival**, each naming its own source. A source module
+ * returns zero or one; a job plan returns zero to `MAX_BATCH`. `appendParsed` already reads it that
+ * way — *"for each `Parsed` the arrival produced, keyed by its own `source` field"* — so this is
+ * the declaration catching up with the rule, not a new rule. The alternative, a second
+ * `CompositePlanResult` shape for job plans, would put two unions in front of one `appendParsed`
+ * and buy nothing.
+ */
 export type PlanResult =
-  | { kind: "steps"; steps: PlanStep[]; parsed?: Parsed }
+  | { kind: "steps"; steps: PlanStep[]; parsed?: Parsed[] }
   /** Review I12: `reauth` NAMES ITS SOURCE, and the handler answers it by writing `reauthed: true`
    *  into that source's sub-cursor and calling `plan.start(ctx)` again — the module composes its
    *  own login steps, because `handler.ts` names no source and could not. The module's `next` then
@@ -3621,7 +3649,7 @@ export type PlanResult =
    *  once, never twice (spec §4). */
   | { kind: "reauth"; source: string }
   | { kind: "failed"; source: string; warning: string }
-  | { kind: "done"; parsed?: Parsed };
+  | { kind: "done"; parsed?: Parsed[] };
 
 /**
  * What a plan is handed. **Declared, not assumed** (review **R6**: `PlanCtx`, `PlanStep`, `Parsed`
@@ -5061,3 +5089,43 @@ because that is what a single `ingestHandler` call did. Round 2 wrote the rule a
 
 Nothing else in the plan or the spec changed in this round. The spec's §6 was touched only where its
 SQL block spelled the flat default.
+
+### T1 — `PlanResult.parsed` is a list, because a batch carries more than one source
+
+The **Re-review after fix round 3** (`ecd8a97`) returned **Execute** and found one minor, folded in
+here rather than left for the implementer to hit at compile time.
+
+**The finding.** Task 6's `a source that fails on its first step retires and the other finishes`
+asserted `r.parsed.own.vhl` — `RunRow.parsed.own`'s `Record<string, string[]>` shape — on a
+`PlanResult`, whose `parsed?: Parsed` is the per-**one**-source interface S1 gave `own: string[]`.
+The test was stale from before `own` moved onto `Parsed`; it was pre-existing rather than a round-3
+regression, and it is the kind of thing concern 5's paragraph calls expected traffic — but the
+reviewer is right that Task 6 should not start without the shape being decided.
+
+**The fix, the honest way round.** The composite `next()` genuinely can be handed arrivals from two
+sources in one call — the batch is filled round-robin, which is ruling R-C5-plan-3's whole point —
+so a single optional `Parsed` was the wrong shape for a job plan, not merely the wrong shape for
+that assertion. `PlanResult` now carries **`parsed?: Parsed[]`**, one entry per arrival, each naming
+its own source: a source module returns zero or one, a job plan zero to `MAX_BATCH`. That is what
+`appendParsed`'s rule already described (*"for each `Parsed` the arrival produced, keyed by its own
+`source` field"*), so this is the declaration catching up with the rule. The alternative — a second
+`CompositePlanResult` for job plans — would put two unions in front of one `appendParsed` and buy
+nothing. `SourcePlan.parse(ctx, result): Parsed` is unchanged: one arrival, one `Parsed`.
+
+**Everywhere corrected**, found by grepping the plan for every `parsed.own.`, `parsed.own[`,
+`parsed.assignments.`, `parsed.assignments[` and `.parsed!` access and sorting them by whether they
+run on a `Parsed` or on a `RunRow`:
+
+| Where | Was | Now |
+|---|---|---|
+| `PlanResult`'s `steps` arm | `parsed?: Parsed` | `parsed?: Parsed[]`, with the argument in a doc comment |
+| `PlanResult`'s `done` arm | `parsed?: Parsed` | `parsed?: Parsed[]` |
+| Task 6, `a source that fails on its first step…` | `r.parsed.own.vhl.some(…)` | `r.parsed!.find((p) => p.source === "vhl")`, then its `failed`, its `own` and its empty `items` |
+| Task 6, `a book's payload is parsed the moment it arrives…` | `r.parsed!.items` | `r.parsed!.length === 1`, `r.parsed![0].source === "zybooks"`, `r.parsed![0].items` |
+| Task 5 step 6a, `appendParsed`'s input | "each `Parsed` the arrival produced" | named as the result's `parsed?: Parsed[]`, with the round-robin reason |
+
+**Checked and left alone**, because they run on a `RunRow` and the map shape is right there:
+`appendParsed`'s own `parsed.assignments[source]` / `parsed.own[source]` / `parsed.proposals[source]`
+(Task 5 step 6a and `parseArrival`'s comment), `finishRun`'s `run.parsed.assignments[name]` and
+`run.parsed.own[name]`, the R7 rule's `delete parsed.assignments[source]`, and the R8 resolution
+row's description of the column.
