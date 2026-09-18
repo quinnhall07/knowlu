@@ -307,3 +307,148 @@ The plan's own fidelity ledger is its claim; this is that claim checked against 
 The Minor list is polish and can ride the same round or the task reports. C2 must be fixed before Task 6 is
 written, C1 before Task 7's hand-offs land, and I2/I3 before Task 8 closes; I1 is a Task 2 decision and should
 be settled before the manifest is touched. P1 remains the merge blocker the plan says it is.
+
+## Re-review after fix round 1 (2026-09-17)
+
+Scope: the eight findings and the thirteen Minors, read against the fix diff (1,912 lines) and against the
+code each resolution cites — `engine/src/{write,reconcile,approvals,journal,ledger,yaml,ids,cloudmodel,main}.rs`,
+`app/src/{state,scheduler,commands,account}.rs`, `engine/Cargo.toml`, `Cargo.lock`. Nothing was executed;
+every compile claim below is name- and type-level and does not need a run.
+
+**Verdict: Execute after fix round 2 (new findings R1, R2, R3, R4; R5 and R6 are minor).**
+All eight original findings are resolved as the review asked or by an equivalent I accept, and twelve of the
+thirteen Minors are taken. What decides the verdict is I5 itself: writing `apply`, `run_lines_with` and the
+restore section out as real code is what the review wanted, and it is what exposes three compile errors and
+one missing behaviour that six numbered sentences had hidden. None needs a design change; each is a line or two.
+
+### The eight findings
+
+- **C1 — resolved for `run_sync`, and re-created one function over (see R1).** H9a is now a replacement:
+  `plan.md:540-575` rewrites `state::run_sync` in place and removes its callers in the same commit. I
+  enumerated every caller — `app/src/commands.rs:265`, `app/src/scheduler.rs:520,786,793`,
+  `app/src/state.rs:241` — and after H9a exactly one `state::run_sync` exists with one shape. The quoted
+  "before" block for `quit_flush` matches `app/src/state.rs:239-242` exactly. H9b's list is corrected and
+  carries the stop-and-report. What remains broken is the other name H9a deletes, not this one.
+- **C2 — resolved, and the rule is the right one.** Verified against `engine/src/reconcile.rs:96-150`:
+  `res.apply` is filled only when the side passed as `local_records` wins (or when upstream never moved,
+  where no supersede record is produced), so under the reversal the withheld set is exactly the set that
+  needs it. `plan.md:3041-3050` withholds a superseded card-eligible field before `write_literals` sees it;
+  `plan.md:2653-2659` asserts `report.applied == 0` beside `cards == 1`; `a_conflict_this_device_won...`
+  files no card because `resolution.apply` has no entry for that field, which is self-consistent; the
+  unamendable branch keeps reconcile's rule, applies and warns, and its test's premise (`notes_link` is not
+  in `AMENDABLE_FIELDS`, `approvals.rs:42-52`) holds. The card's *construction* does not compile (R3), but
+  the rule, stated in three places, is right.
+- **I1 — resolved, and the lockfile agrees.** `ring 0.17.14` is in `knowlu-engine`'s graph through
+  `ureq 3.4.0` to `rustls 0.23.43` (`Cargo.lock`), and `knowlu-engine`'s own dependency array has no `sha2`.
+  The new forbidden entry `"sha2"` is safe: `dependency_boundary.rs:16`'s `MANIFESTS` is `engine/Cargo.toml`
+  plus the workspace root, and the root names no `sha2` (`app/Cargo.toml:69` does, and is not scanned). One
+  slip of fact, harmless to the conclusion: the plan says the workspace's `sha2` is the app's "through
+  `tauri-codegen` and `wry`"; it is the app's own direct edge at `app/Cargo.toml:69`, for `inference.rs`'s
+  runtime digest check.
+- **I2 — resolved.** Two files, each assertion naming its own: `from_secs(72 * 60 * 60)` is
+  `app/src/account.rs:479`, `data_dir.join("entitlement.json")` is `:485`, `base.join("knowlu")` is
+  `app/src/state.rs:190`. All three confirmed at those lines.
+- **I3 — resolved in the hand-off and tested.** H4b composes the line; `name_of` (`plan.md:465-474`) matches
+  `gated_vault`'s four arms, and all four are struct variants of `Command` (`engine/src/main.rs:25+`), so the
+  `{ .. }` patterns and the reachable `_` catch-all are both legal. The new test asserts H4b's literal
+  `println!` string, so a drift fails. Nit only: `plan.md:3690` still narrates the composition as
+  `format!("{} ({})", name_of(&cli.command), line)` — `line` where H4b binds `reason`; prose, and the
+  verbatim hand-off plus the test are the authority.
+- **I4 — resolved.** Global Constraints says two recorded exceptions and names both (`plan.md:43`); the new
+  ledger row argues the `apply` case with the restore's own argument and states the bound the code enforces;
+  `a_pulled_note_never_overwrites_a_note_this_device_already_has` is real, and the code's
+  `if file.exists() { continue; }` is what makes it pass.
+- **I5 — resolved in extent.** `apply` (about 150 lines), `Direction`/`Totals`/`SyncStatus`/`run_lines_with`,
+  and `Restored`/`unexpected_notes`/`materialise`/`restore`/`restore_all`/`restore_into` are code, and Task 6
+  step 1 is twelve `#[test]` cases — I counted twelve. The types I could check against their consumers hold:
+  `WriteOpts: Default` (`write.rs:217`), `find_pending_amendment(vault, &str, &BTreeSet<String>)` (`:545`),
+  `propose_amendment`'s eight parameters and `today: jiff::civil::Date` (`:622`), `JsonlLedger::{new,append}`
+  (`ledger.rs:77,93`), `Journal::{read,records_for,invalidate}` (`journal.rs:243,253,311`),
+  `ids::read_meta -> Option<Mapping>` (`ids.rs:98`), and the `starts_with("sync (skipped: no session")`
+  assertion against `Unavailable`'s `Display` (`cloudmodel.rs:77-84`). Three do not: R2, R3, R4. And the two
+  types the pull hinges on are still only a Produces line (R6).
+- **I6 — resolved.** The preamble says it once (`plan.md:124`), step 6 authors the text without editing the
+  three files, and step 8's `git add` no longer names them.
+
+### The Minors
+
+Twelve taken and verified in the diff: M1 (the bound `[&str; 3]` compiles), M2 (`gate_in` in Produces),
+M3 (correct: `CLAUDE.md` puts the events pass in `enrich.rs`'s `run_lines_with`, and the call itself is
+`cloudmodel.rs:445` reached from `enrich.rs:1704`), M4 (test weakened and renamed, gate strengthened to
+`git diff --quiet`), M5 (the `coalesce` is placed right — `NULL and true` is NULL, `NULL and false` is false,
+so only the whole predicate needs it — and the unguarded 22P02 is said out loud), M6, M8 (both `index.ts`
+written out), M9, M10, M11, M12 (twenty, and I counted twenty), M13.
+
+**M7's refusal is sound.** The two homes it names are the only two a Deno suite has: a module under
+`_shared/` is a production file existing for tests, and a `*_test.ts` imported by another suite re-registers
+its own `Deno.test` cases inside the importing run. Three lines duplicated twice is the cheaper trade, and
+the plan now records it rather than leaving it unargued. `sha256Hex` moving into `sync_rows.ts` is the right
+half to share: the handler itself calls it.
+
+### New findings
+
+**R1. `plan.md:546` (H9a) versus `plan.md:526-530` (H8b) — C1 in mirror image: `fn sync_step` is deleted at
+Task 7 and one of its two callers survives to Task 10.**
+H9a removes `fn sync_step` whole plus the push call, but the pull call
+`if lock(&cs.history).has_remote { steps.push(sync_step(cs, "pull")); }` (`app/src/scheduler.rs:582-584`) is
+left to H8b at Task 10. From Task 7 to Task 10 `run_slot_inner` calls a function that no longer exists:
+`error[E0425]: cannot find function sync_step in this scope`. H9a's own parenthetical (`plan.md:554`) says
+"the pull step is replaced by the slot's own `sync` step in H8a" — but H8a (`plan.md:488-512`) edits
+`slot_argv` only and never touches `run_slot_inner`, so nothing removes it.
+*Fix:* move that three-line block into H9a's removal list. H8b then keeps `state::refresh_history(cs);`
+(`app/src/scheduler.rs:575-578`) and the trailing `refresh_head`/`refresh_history` pair, neither of which
+needs `sync_step`.
+
+**R2. `plan.md:3408` and `plan.md:225` — `CloudClient::account_id()` does not exist, so `run_lines_with` does
+not compile.**
+The push arm calls `build_push(vault, &cursor, client.account_id(), &mut journal)`, and the Interfaces block
+asserts `pub fn account_id(&self) -> &str;`. `engine/src/cloudmodel.rs:224-296` declares
+`CloudClient { base, anon_key, token, agent }` with `new`, `scrub`, `finish`, `post` and `get` and no
+accessor of any kind; `account_id` is a field of `CloudConfig` (`cloudmodel.rs:55`). `cloudmodel.rs` is not
+in C3's file ownership, so adding one would need a hand-off.
+*Fix:* keep the config from check one — `let Some(cfg) = crate::cloudmodel::load(vault) else { ...the skip
+line... };` — and pass `&cfg.account_id`. Correct `plan.md:225` in the same edit.
+
+**R3. `plan.md:3048` and `plan.md:3075-3076` — the card path passes `serde_json::Value` to two functions that
+take `serde_yaml_ng::Value`.**
+`engine/src/write.rs:18` is `use serde_yaml_ng::{Mapping, Value}`, so `to_literal(value: &Value)` (`:166`)
+and `propose_amendment(..., changes: &[(String, Value, Value)], ...)` (`:622`) are both YAML values —
+`write_literals` builds its own triples with `yaml::get(...).cloned()` and `parse_literal(...)` (`:243-246`).
+But `Resolution::apply` is `BTreeMap<String, serde_json::Value>` (`reconcile.rs:16,24`), and the plan's
+`from` is `yaml::get(&meta, field).map(yaml::to_json)`, which is JSON too. Both
+`crate::write::to_literal(value)` and the `changes` vector are `error[E0308]`.
+*Fix:* `to_literal(&crate::yaml::from_json(value))` (`yaml.rs:118`), and build the triple as
+`from = crate::yaml::get(&meta, field).cloned().unwrap_or(serde_yaml_ng::Value::Null)` and
+`to = crate::yaml::from_json(resolution.apply.get(field)?)`.
+
+**R4. `plan.md:2965-2975` versus `plan.md:2556` and exit-gate item 8 — `apply` guards a `write::move_note`
+call it never makes.**
+The record loop checks a `move`'s destination with `is_note_path` and refuses a bad one, but no branch in
+`apply` calls `write::move_note`, so a *valid* pulled `move` is journalled verbatim and the local file stays
+where it was — while the same note's text may arrive at the new path and be written as a note this device
+has never seen. The guard's comment ("checked BEFORE `write::move_note` is called"), the Consumes list at
+`plan.md:2556` and exit-gate item 8 all read as though the move is performed. `op: "move"` is real
+(`journal.rs:27`) and `write::move_note` exists (`write.rs:472`), so this is a gap, not a misnaming.
+*Fix:* either perform the move for a valid record (`write::move_note(vault, from, dest, ctx, journal)`,
+counted in `report.moved`, with `WriteError::Exists` folded into a warning) and test it, or state that a
+foreign move arrives as a tombstone plus a new note, drop `move_note` from Consumes, and reword the guard
+and item 8 to say the check exists only so a record cannot name a path outside the vault.
+
+**R5 (minor). `app/src/scheduler.rs:785` — nothing removes the `cs.auto_sync` gate whose field H9b deletes.**
+H9a keeps the `due_write` block "with its backup" (`plan.md:554`) and H8b's list does not name it, but that
+block's condition reads `cs.auto_sync.load(Ordering::SeqCst)` while H9b removes the field at Task 10:
+`error[E0609]`. It predates this round — the first review missed it — but H9a now preserves it explicitly.
+*Fix:* name that condition in H9a's removal list; the block becomes `if !slot_running && due_write {`.
+
+**R6 (minor). `plan.md:2558-2560` — `Pulled` and `PulledNote` are never declared.** They appear only in the
+Produces list, yet `pulled_from_reply` uses `..Default::default()` (`plan.md:2877`) and Task 9 calls
+`sync::Pulled::default()`, so `Pulled` must carry `#[derive(Debug, Clone, Default)]` and both must have
+public fields. Every other new type in the plan — `ApplyReport`, `Totals`, `SyncStatus`, `Direction`,
+`Restored`, `Cursor`, `PushBatch` — is declared with its derives.
+*Fix:* declare both at the head of Task 6 step 3, beside `ACTOR`.
+
+Nothing else in the fix round broke: no Global Constraint is contradicted, no placeholder was introduced
+(no "TBD", no "the same shape and are named", no test that asserts nothing), the frozen references are still
+untouched by every task, `rank` still reaches no `/judge-*`, no child process is added, `ring` is the TLS
+crate the engine already links and no OpenSSL enters, and nothing new is named after a person, a machine or
+a credential.
