@@ -29,7 +29,7 @@ DEST_NEW = "C:\\Users\\Ada\\Knowlu\\Spring 2027"
 # are the ones that READ, the ones that make the ACCOUNT (which is not this machine's disk), the two
 # that write a credential, and the sign-in window's own three. Anything else here would mean
 # something reached this machine's disk before the user said go.
-BEFORE_FINISH_OK = {"launch_state", "pick_folder", "sign_up", "sign_in", "send_magic_link",
+BEFORE_FINISH_OK = {"launch_state", "pick_folder", "google_sign_in", "send_magic_link",
                     "verify_email_code", "entitlement_now", "open_checkout", "open_policy",
                     "open_lms_window", "capture_calendar_link", "capture_courses",
                     "paste_calendar_link", "close_lms_window", "discover_coursework",
@@ -43,10 +43,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       tz: 'America/Chicago', default_parent: 'C:\\Users\\Ada\\Knowlu',
       default_backup: 'C:\\Users\\Ada\\Knowlu\\Backups',
       }); }
-  if (cmd === 'sign_up' || cmd === 'sign_in') {
-    return (args.email || '').indexOf('fail') === 0
-      ? Promise.resolve({ ok: false, error: 'Invalid login credentials', account_id: null })
-      : Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: args.email }); }
+  if (cmd === 'google_sign_in') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'send_magic_link') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'verify_email_code') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'open_checkout') { return Promise.resolve({ ok: true, error: null }); }
@@ -113,22 +110,19 @@ def check(page) -> list:
     if page.is_hidden("#wizard") or page.is_hidden("#wiz-welcome"): bad.append("wizard did not open on panel 1")
     if "of 9" not in page.inner_text("#wiz-step"): bad.append(f"step counter says {page.inner_text('#wiz-step')!r}")
 
-    # 2. Panel 2 is the account, and it refuses to make one until BOTH boxes are ticked (spec §9).
+    # 2. Panel 2 is the account. Continue with Google leads it, there is no password field anywhere,
+    #    and neither door opens until both boxes are ticked (spec §9's minors row).
     page.click("#wiz-next"); page.wait_for_timeout(120)
     if page.is_hidden("#wiz-account"): bad.append("Next did not reach the account panel")
-    page.fill("#wiz-email", "a@example.invalid"); page.fill("#wiz-pw", "not-a-real-password")
-    page.click("#wiz-create"); page.wait_for_timeout(200)
-    if "sign_up" in names(page): bad.append("an account was created with the boxes unticked")
+    if page.query_selector("#wiz-pw"): bad.append("the account panel still has a password field")
+    if not page.query_selector("#wiz-google-signin"): bad.append("there is no Continue with Google button")
+    page.click("#wiz-google-signin"); page.wait_for_timeout(200)
+    if "google_sign_in" in names(page): bad.append("a Google sign-in ran with the boxes unticked")
     if "Tick both" not in page.inner_text("#wiz-error"): bad.append("the refusal said nothing about the boxes")
     page.check("#wiz-18"); page.check("#wiz-terms")
-    page.click("#wiz-create"); page.wait_for_timeout(300)
-    if "sign_up" not in names(page): bad.append("sign_up was not invoked")
-    if page.input_value("#wiz-pw") != "": bad.append("the password field was not cleared")
-    su = first_args(page, "sign_up") or {}
-    # Tauri v2 lower-camel-cases argument keys (tauri-macros' ArgumentCase::Camel); `age_attested`
-    # here would pass the fake and fail the real command with a missing argument.
-    if su.get("ageAttested") is not True: bad.append("sign_up did not carry the attestation")
-    if page.is_hidden("#wiz-subscribe"): bad.append("a created account did not advance to the subscribe panel")
+    page.click("#wiz-google-signin"); page.wait_for_timeout(300)
+    if "google_sign_in" not in names(page): bad.append("google_sign_in was not invoked")
+    if page.is_hidden("#wiz-subscribe"): bad.append("a signed-in account did not advance to the subscribe panel")
 
     # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled.
     page.click("#wiz-sub-month"); page.wait_for_timeout(3600)
