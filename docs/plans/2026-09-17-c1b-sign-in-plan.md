@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix rounds 1 and 2 after review), not started.** Execute on a branch `c1b-sign-in` in a worktree of this repository, merged into `main` before C3', C5 and C4 (HANDOFF §3: Quinn, 2026-09-17, "as soon as possible", before every other stream). Written against `docs/specs/2026-09-17-c1b-sign-in-design.md`.
+**Status: REVIEWED 2026-09-17 — EXECUTE** (the re-review after fix round 2: *Execute*, no new findings; the review and its two re-reviews are `docs/reports/2026-09-17-c1b-sign-in-plan-review.md`). AMENDED 2026-09-17 (fix rounds 1 and 2 after review). Execute on a branch `c1b-sign-in` in a worktree of this repository, merged into `main` before C3', C5 and C4 (HANDOFF §3: Quinn, 2026-09-17, "as soon as possible", before every other stream). Written against `docs/specs/2026-09-17-c1b-sign-in-design.md`.
 
 **Goal:** A student who has never heard of Knowlu presses **Continue with Google**, picks their account in the browser they are already signed in to, and comes back to a wizard that has moved on — no password, no code, nothing pasted. A student who would rather not use Google types their address, presses **Email me a code** once, types the code, and is in. Whichever they chose, **Back always goes back and Next either moves or says in one sentence what is missing**. And the founder can finish the subscribe step with a 100-percent promotion code and no card.
 

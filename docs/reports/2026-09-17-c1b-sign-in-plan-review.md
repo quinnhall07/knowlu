@@ -449,3 +449,47 @@ command was run but `grep`, `sed` and one Python count of the two `generate_hand
 `deno` or `supabase` — so every red/green claim is still read from assertions. Unchecked from here, and
 ruled: that the CLI pushes only declared properties, that the dashboard provider is live on both
 projects, and Stripe's `if_required` semantics.
+
+## Re-review after fix round 2 (2026-09-17)
+
+**Verdict: Execute.** All six findings are resolved as written; no new findings.
+
+- **R1 resolved.** `plan.md:1832` (Task 7 step 4) now reads "confirm **Stripe still asks for a
+  card**…, the total reads $0.00, nothing is charged, the webhook writes `entitlements`…" and adds
+  "a Checkout that asked for no card would mean the form value moved: stop and report it." Matches
+  `handler.ts:55`'s `payment_method_collection: "always"`, untouched. `grep` for "no card"/"card-free"
+  across the plan finds only the Goal line, the deferred-option discussion (§ "A card-free trial for
+  everyone") and this section's own resolution note — no other survivor of the (b)-world.
+- **R2 resolved, and the pin behaves as intended.** Step 3 now splits the replacement: (a) `var
+  UP_BUSY`, `upBusy()`, `afterUpgradeSignIn()` at IIFE scope beside `upgradeUnreachable()`
+  (`console.js:1237`, confirmed present); (b) only the three branches inside
+  `EL("upgrade").addEventListener("click"`, which occurs exactly once in `console.js` (line 1242,
+  confirmed), so the split is unambiguous. The new assertion — `js.split("EL(\"upgrade\")..."
+  .next()` must `.contains("var UP_BUSY")` — fails when the declaration sits inside the listener
+  (it would be in the second half of the split, not the first) and passes when it sits outside, as
+  required.
+- **R3 resolved, and the resulting file is valid TOML applied in the stated order.** `config.toml`
+  today has `double_confirm_changes = true` at line 29, a blank line, then the SMTP comment at
+  `:31` — exactly what the plan cites. Step 3's two edits (comment reword at `:31-35`, `[auth.rate_limit]`
+  insertion after `:29`/before `:31`) are both keyed to the current file, and TOML tables need not be
+  textually adjacent to sibling or parent tables — `[auth.rate_limit]` between `[auth.email]`'s keys
+  and the later `[auth.email.smtp]` header is syntactically fine regardless of which of the two edits
+  an executor applies first. The new assertion `double_confirm_changes` index `<` `[auth.rate_limit]`
+  index holds either way.
+- **R4 resolved.** `plan.md:1350` now runs `deno test --allow-read --config cloud/supabase/deno.json
+  cloud/supabase/` and `deno lint` beside `cargo test --workspace` and `deno fmt --check`, matching
+  Task 1's gate at `plan.md:396` verbatim; `cloud/supabase/deno.json` exists.
+- **R5 resolved.** `console.js` today has exactly six `EL("wiz-next").disabled` writers —
+  `:1584`, `:1601` (`wizGo`), `:1623` (`credentialsStranded`, confirmed at `:1617-1626`, outside both
+  named slices), `:1631`, `:1676`, `:1688` (`wizFinish`) — all six tabled in the plan and all six
+  converted to `WIZ.busy`. The new whole-file count assertion (`== 1`, `renderWizard`'s) only holds
+  post-edit if every one of the six is converted, `credentialsStranded` included, so it enforces what
+  the old two-slice check missed.
+- **R6 resolved.** (a) `static_assets.rs:384` today reads `const OURS: [&str; 4] = ["wiz-pw",
+  "up-pw", "wiz-zy-pass", "wiz-vhl-pass"];`, matching the plan's pre-edit citation exactly; the fix
+  moves the annotation to `[&str; 2]` with the list. (b) The comment reword keeps "R-C1-3, second
+  half" and the Resend/domain/`SMTP_PASSWORD` sentences word for word, replacing only the stale
+  `enable_confirmations = true` clause with the CODE-mail one.
+
+No placeholder, no contradiction with Global Constraints, and nothing named after a person, machine,
+address, port, code or client id appears in the round-2 diff.
