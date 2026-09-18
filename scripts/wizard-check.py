@@ -122,6 +122,10 @@ def check(page) -> list:
     page.check("#wiz-18"); page.check("#wiz-terms")
     page.click("#wiz-google-signin"); page.wait_for_timeout(300)
     if "google_sign_in" not in names(page): bad.append("google_sign_in was not invoked")
+    ga = first_args(page, "google_sign_in") or {}
+    # Tauri v2 lower-camel-cases argument keys; `age_attested` here would pass the fake and fail the
+    # real command with a missing argument (R-C1b-exec-6: the Rust-side gate is back on the Google path).
+    if ga.get("ageAttested") is not True: bad.append("google_sign_in did not carry the attestation")
     if page.is_hidden("#wiz-subscribe"): bad.append("a signed-in account did not advance to the subscribe panel")
 
     # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled.
