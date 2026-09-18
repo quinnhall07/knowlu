@@ -747,3 +747,65 @@ keep a test each. No password reaches a log, a card, a warning or a non-allow-li
 one `.expose()`, error text through a four-form `scrub`, no column for one. Two narrow residues — **R9** and
 **R8**; raw bodies survive nowhere else (`checkCursor` bans them, `parsed` holds rows, `done` is assembled from
 rows, nothing logs a body). **R5** is a security finding too.
+
+## Re-review after fix round 2 (2026-09-17)
+
+**Execute after fix round 3.** One gap: **R7**'s "already-parsed items are discarded too" clause has
+no mechanism and no test. Everything else — both rulings, R1-R6, R8-R10, and concern 3 — is resolved
+as written and checks out against the code.
+
+- **R-C5-plan-4 (R1) — resolved.** `commands::save_portal_login` (plan:3968-3980) is registered by
+  H11 (plan:1058) in the **console** list only (`app/src/main.rs:186`, confirmed 43 entries today by
+  parsing both `generate_handler!` lists); it closes `login:<source>` for the exact `source` argument
+  it was called with, so a save for A cannot close B's card. The row lands in `app/static/index.html`,
+  which only the console window (an existing vault) renders — confirmed today's Settings has ten rows
+  and none is a login (`index.html:156-166`). H11's recount is right and stated as after C1b: `main`
+  is 30/43 today (verified), C1b's own plan computes 29/42 (`docs/plans/2026-09-17-c1b-sign-in-plan.md:79`,
+  "29+42, 61 distinct"), and C5 adds one console-only command to reach 29/43.
+- **R-C5-plan-5 (R3) — resolved.** Checked against the vendored `ureq-3.4.0/src/cookies.rs`:
+  `Cookie`'s public surface really is `parse`/`name`/`value`, `as_cookie_store` really is
+  `#[cfg(test)]`. `Expires`/`Max-Age` are parsed off the raw line under RFC 6265 §5.2.1/§5.2.2,
+  `Max-Age` winning, unreadable ignored, case-insensitive, tested five ways (plan:2054-2075). `cookie_store`
+  is forbidden by a case **Task 1 itself adds** to `dependency_boundary.rs` (plan:1526) — that file
+  carries no such case today, so "this stream's own case" correctly names the plan's own addition.
+- **R2 — resolved.** `MAX_POST_BYTES = MAX_RUN_BYTES * 2` = 16 MiB (plan:2573), matching `readJson`'s
+  actual behaviour (`cloud/supabase/functions/_shared/http.ts:48-52`: measures `text.length`, throws
+  "body over N characters" — plan:2978-2988 tests exactly that string). `protocol.ts` exports both
+  constants; `check_post` is replaced by `split_post`, which posts overflow as a further call.
+- **R4 — resolved.** `StepClock` (plan:2597-2616) opens at `perform`'s step 0; every request gets
+  `min(step.remaining(), budget.remaining())` (plan:2703); every redirect hop re-checks it; the chain
+  test now holds the run deadline open (10 min) and only the step deadline (250 ms) can stop it.
+- **R5 — resolved.** `split_before_test_module` (plan:1378) splits on the attribute followed by
+  `mod tests`, used by both the `.expose()` count (plan:1720) and the login-flow scan (plan:4186).
+- **R6 — resolved.** `PlanCtx`, `PlanStep`, `Parsed`, `RunRow`, `SourcePlan` all declared in
+  `plans/mod.ts` (from plan:3533); `PlanCtx.budget` carries what the round-robin left, and
+  `parseArrival` dispatches through `SOURCE_PLANS[source].parse` rather than a literal source name.
+- **R7 — not fully resolved.** See **S1**.
+- **R8 — resolved.** The column default and `RunRow.parsed` both say `{assignments, own, proposals}`
+  (plan:2938, :3573); `checkParsed` gets `checkCursor`'s 4 KiB cap and a real test (plan:2996-3007).
+- **R9 — resolved.** The scrub now runs over the raw bytes, per secret, per `scrub`'s four encodings,
+  before the UTF-8/base64 decode decision.
+- **R10 — resolved.** All four citations corrected (plan:292 privacy.html; plan:634, :641 handler.ts;
+  parse_vhl.ts per plan:4851).
+- **Concern 3 (edge body ceiling) — resolved.** Measured at Task 5 step 9 (plan:3076) by the
+  controller on staging; fallback named (`MAX_BYTES` 2 MiB → 1 MiB, `MAX_POST_BYTES` with it), and
+  the device gets a runtime halve-and-continue on a 413 (plan:3082).
+
+### New findings
+
+**S1 — R7's hardest clause has no mechanism and no test.** The rule (plan:655-666) requires that when
+a source throws on round trip N, its items from round trips 1..N-1 — already merged into
+`relay_runs.parsed` — are **removed**. But `RunRow.parsed.assignments` is one flat, unsourced
+`Assignment[]` (plan:3573), and `Parsed.items` (plan:3562) carries no per-arrival source or index tag,
+so nothing in the merge — described only as "`appendParsed` whatever it parsed" (plan:3091) — can
+identify which entries belong to the failing source to remove them. `own` got exactly this fix
+(`Record<string, string[]>`, plan:2924) but `assignments` did not. `finishRun`'s own comment
+(plan:3172-3178) needs the same partition to "concatenate by `PORTAL_SOURCES` order and, within a
+source, by arrival index," which a flat array also cannot do once two sources' round trips interleave.
+The one retirement test, `a source that fails retires and the other finishes` (plan:3319-3323), fails
+VHL on its very first step (`vhlLoginRejectedTwice()`) — before it has contributed any item — so it
+cannot and does not exercise "six books' rows do not survive book 7," the rule's own example. The R7
+resolution row's claim that "Task 5 asserts each clause" (plan:4848) is not true for this one.
+**Fix:** partition `parsed` the same way `own` already is — e.g. `assignments: Record<string,
+Assignment[]>` — flattened into `PORTAL_SOURCES` + arrival order only by `finishRun`, and add a test
+where a source succeeds on an earlier round trip and fails on a later one.
