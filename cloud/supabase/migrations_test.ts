@@ -123,3 +123,35 @@ Deno.test("a view is defined after the columns it reads (R-C1-34)", async () => 
     }
   }
 });
+
+Deno.test("the OAuth migration adds no table, no policy, no birthdate column — and no raise", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260917000100_oauth_consent.sql", import.meta.url),
+  );
+  // **The `--` lines come off first.** This migration's comment block explains at length what the
+  // function no longer reads, so an assertion over the raw text would be an assertion about the
+  // prose. `migrations/migrations_test.ts` strips comments before scanning for the same reason.
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+  // C1's three rules are pinned over the whole directory elsewhere; this one is about THIS file:
+  // it replaces one function and nothing else, so a reviewer never has to diff schema to be sure.
+  assert(!/create\s+table/i.test(code), "this migration creates no table");
+  assert(!/create\s+policy/i.test(code), "…and no policy: RLS is C1's and stays as it is");
+  assert(!/\bbirth|\bdob\b|date_of_birth/i.test(code), "no birthdate column, in this file or any other");
+  assert(
+    code.includes("create or replace function public.handle_new_user()"),
+    "the trigger's function is replaced",
+  );
+  // R-C1b-3. The function reads NOTHING out of the sign-up's metadata and raises nothing: `/otp`
+  // with `create_user: true` is reachable by anyone holding the public anon key, so a trigger that
+  // believed that request's `data` would stamp an `age_18` consent row for an address whose owner
+  // never attested to anything. The consent row is `POST /account/consent`'s to write, behind a
+  // session, and the 18+ tooth is `billing-checkout`'s 403.
+  assert(!/raise\s+exception/i.test(code), "no raise survives in the replaced function");
+  // Asserted over the SOURCE of the values, never their names: `age_attested_at` and `tos_version`
+  // are columns this migration still writes (as nulls), so banning those words would ban the insert.
+  assert(!code.includes("raw_user_meta_data"), "the trigger reads none of the sign-up's own metadata");
+  assert(
+    !code.includes("public.consents"),
+    "…and writes no consent row: that is the route's, behind a session",
+  );
+});

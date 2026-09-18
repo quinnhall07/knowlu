@@ -20,6 +20,14 @@ export interface SourceRow {
   added_at: string;
 }
 
+export interface ConsentWrite {
+  account_id: string;
+  email: string;
+  tos_version: string;
+  privacy_version: string;
+  at: string;
+}
+
 export interface Deps {
   verify: VerifyToken;
   /** The C2 gate, injected so this handler stays testable: `requireActiveEntitlement`. */
@@ -35,6 +43,10 @@ export interface Deps {
   hashEmail: (email: string) => Promise<string>;
   getSources: (accountId: string) => Promise<SourceRow[]>;
   putSource: (accountId: string, kind: string, url: string) => Promise<void>;
+  /** True when this account already has a `tos` consent row — the idempotence test. */
+  hasConsent: (accountId: string) => Promise<boolean>;
+  /** Fills the four null columns on `accounts` and inserts the three `consents` rows. */
+  recordAccountConsent: (c: ConsentWrite) => Promise<void>;
   now: () => Date;
 }
 
@@ -118,6 +130,43 @@ async function getSources(req: Request, deps: Deps): Promise<Response> {
   return json(200, { sources: await deps.getSources(user.id) });
 }
 
+/**
+ * **The attestation, after the fact — and the only place a consent row is ever written.** Migration
+ * `20260917000100` stopped the auth trigger reading the sign-up's own metadata at all, on BOTH
+ * paths, because `/otp` with `create_user: true` is reachable by anyone holding the public anon key:
+ * an attestation taken out of that request would be an `age_18` row the address's owner never made.
+ * So every new account arrives here with its four consent columns null, and the app calls this route
+ * after EVERY sign-in — `google_sign_in` and `verify_email_code` alike — which is why a second call
+ * must be silent rather than a conflict.
+ *
+ * The 18+ gate has not moved off the server: `billing-checkout` refuses an account whose
+ * `age_attested_at` is still null, so a client that skips this route gets an account that can never
+ * subscribe. That refusal is the whole of the tooth the migration's `raise` used to be.
+ */
+async function recordConsent(req: Request, deps: Deps): Promise<Response> {
+  const user = await requireUser(req, deps.verify);
+  const body = await readJson<{ tos_version?: string; privacy_version?: string; age_attested?: boolean }>(
+    req,
+  );
+  if (body.age_attested !== true) {
+    throw fail(400, "age attestation required: Knowlu is for people 18 or older");
+  }
+  const tos = (body.tos_version ?? "").trim();
+  const priv = (body.privacy_version ?? "").trim();
+  if (!tos || !priv) throw fail(400, "the terms and the privacy policy must be accepted at sign-up");
+  if (await deps.hasConsent(user.id)) return json(200, { ok: true });
+  const account = await deps.getAccount(user.id);
+  if (!account) throw fail(404, "no such account");
+  await deps.recordAccountConsent({
+    account_id: user.id,
+    email: account.email,
+    tos_version: tos,
+    privacy_version: priv,
+    at: deps.now().toISOString(),
+  });
+  return json(200, { ok: true });
+}
+
 export async function handle(req: Request, deps: Deps): Promise<Response> {
   const path = subPath(req.url, "account");
   switch (path) {
@@ -127,6 +176,9 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     case "/export":
       if (req.method !== "GET") return methodNotAllowed(["GET"]);
       return await exportAccount(req, deps);
+    case "/consent":
+      if (req.method !== "POST") return methodNotAllowed(["POST"]);
+      return await recordConsent(req, deps);
     case "/sources":
       if (req.method === "PUT") return await putSource(req, deps);
       if (req.method === "GET") return await getSources(req, deps);

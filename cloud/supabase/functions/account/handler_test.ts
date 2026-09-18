@@ -27,6 +27,10 @@ function deps(over: Partial<Deps> = {}): Deps {
     getSources: () => Promise.resolve([]),
     putSource: () => Promise.resolve(),
     now: () => NOW,
+    // Task 1: the two consent fields. Default to "this account has not consented and the write is a
+    // no-op", so every DELETE/export/sources test in this file is untouched by the new route.
+    hasConsent: () => Promise.resolve(false),
+    recordAccountConsent: () => Promise.resolve(),
     ...over,
   };
 }
@@ -373,4 +377,83 @@ Deno.test("the purge strips both the account id and the IP from every consent ro
     !/subject_hash|price_cents|version|accepted_at/.test(call),
     "the PATCH must leave the hash, the price, the terms version and the date exactly as they were",
   );
+});
+
+function consentDeps(recorded: unknown[], already: boolean): Deps {
+  return deps({
+    hasConsent: () => Promise.resolve(already),
+    recordAccountConsent: (c) => {
+      recorded.push(c);
+      return Promise.resolve();
+    },
+    now: () => new Date("2026-09-17T12:00:00Z"),
+  });
+}
+
+Deno.test("POST /account/consent records the attestation and both versions", async () => {
+  const recorded: unknown[] = [];
+  const res = await handle(
+    new Request("http://127.0.0.1:1/account/consent", {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ tos_version: "2026-09-10", privacy_version: "2026-09-17", age_attested: true }),
+    }),
+    consentDeps(recorded, false),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(recorded, [{
+    account_id: "acc-1",
+    email: "a@example.invalid",
+    tos_version: "2026-09-10",
+    privacy_version: "2026-09-17",
+    at: "2026-09-17T12:00:00.000Z",
+  }]);
+});
+
+Deno.test("a second call is a no-op — the app calls it after every sign-in", async () => {
+  const recorded: unknown[] = [];
+  const res = await handle(
+    new Request("http://127.0.0.1:1/account/consent", {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ tos_version: "2026-09-10", privacy_version: "2026-09-17", age_attested: true }),
+    }),
+    consentDeps(recorded, true),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(recorded.length, 0, "an account that already consented is not written again");
+});
+
+Deno.test("age_attested false, or a missing version, is 400 and writes nothing", async () => {
+  for (
+    const body of [
+      { tos_version: "2026-09-10", privacy_version: "2026-09-17", age_attested: false },
+      { tos_version: "", privacy_version: "2026-09-17", age_attested: true },
+      { tos_version: "2026-09-10", age_attested: true },
+    ]
+  ) {
+    const recorded: unknown[] = [];
+    const res = await handle(
+      new Request("http://127.0.0.1:1/account/consent", {
+        method: "POST",
+        headers: { authorization: "Bearer good" },
+        body: JSON.stringify(body),
+      }),
+      consentDeps(recorded, false),
+    ).catch((e) => e as Response);
+    assertEquals(res.status, 400);
+    assertEquals(recorded.length, 0);
+  }
+});
+
+Deno.test("GET /account/consent is 405, not 404 — the route exists", async () => {
+  const res = await handle(
+    new Request("http://127.0.0.1:1/account/consent", {
+      method: "GET",
+      headers: { authorization: "Bearer good" },
+    }),
+    consentDeps([], false),
+  );
+  assertEquals(res.status, 405);
 });

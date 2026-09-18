@@ -299,9 +299,11 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // 20260911000400 (`judgment_features`, `backfill_correction_judgments`, `promote_rules`), plus
   // fix 1's re-issue of the same three in 20260911000500, plus the provider swap's `create or
   // replace function export_training_rows` in 20260916000100 (still SECURITY INVOKER,
-  // non-writing, so it needs no new revoke — it is still one more definition this scan parses) —
+  // non-writing, so it needs no new revoke — it is still one more definition this scan parses),
+  // plus C1b's `create or replace function public.handle_new_user()` in 20260917000100 (a trigger
+  // function, so exempt from the revoke by kind — and still one more definition parsed) —
   // counted by hand against today's corpus.
-  assertEquals(parsed, 18, "today's corpus should parse exactly 18 function creations");
+  assertEquals(parsed, 19, "today's corpus should parse exactly 19 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {

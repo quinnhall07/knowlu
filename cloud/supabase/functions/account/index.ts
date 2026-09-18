@@ -97,6 +97,40 @@ Deno.serve(async (req) => {
       },
       hashEmail: sha256Hex,
       getSources: async (id) => await restSelect(rest, "sources", `${eq(id)}&select=kind,added_at`),
+      hasConsent: async (id) => {
+        const rows = await restSelect<{ id: number }>(
+          rest,
+          "consents",
+          `account_id=eq.${encodeURIComponent(id)}&kind=eq.tos&select=id&limit=1`,
+        );
+        return rows.length > 0;
+      },
+      recordAccountConsent: async (c) => {
+        // `age_attested_at=is.null` in the filter, not just in the handler's guard: two sign-ins
+        // racing each other must not restamp an attestation this account already made.
+        await restPatch(
+          rest,
+          "accounts",
+          `id=eq.${encodeURIComponent(c.account_id)}&age_attested_at=is.null`,
+          {
+            tos_version: c.tos_version,
+            tos_accepted_at: c.at,
+            privacy_version: c.privacy_version,
+            age_attested_at: c.at,
+          },
+        );
+        // `sha256Hex` lower-cases, exactly as the C1 trigger's `lower(new.email)` did, so a row
+        // written here and a row written before this migration hash the same address the same way.
+        const hash = await sha256Hex(c.email);
+        await restUpsert(rest, "consents", [
+          { account_id: c.account_id, subject_hash: hash, kind: "tos", version: c.tos_version },
+          { account_id: c.account_id, subject_hash: hash, kind: "privacy", version: c.privacy_version },
+          // `'1'` — the literal the C1 trigger stamped an `age_18` row with. The attestation has no
+          // document and no date to version, and the log has to read the same on both sides of this
+          // migration (review M6).
+          { account_id: c.account_id, subject_hash: hash, kind: "age_18", version: "1" },
+        ]);
+      },
       putSource: async (id, kind, url) => {
         const keyB64 = Deno.env.get("SOURCES_ENC_KEY");
         if (!keyB64) throw fail(500, "the function is not configured");
