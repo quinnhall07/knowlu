@@ -84,11 +84,12 @@
     <p class="meta">Knowlu costs $9.99 a month after a 7-day trial. You can cancel any time, in Settings.</p>
   </div>
   <div class="wiz-panel" id="wiz-account" hidden><h2>Your account</h2>
-    <div class="wiz-row"><input type="text" id="wiz-email" placeholder="Email"><input type="password" id="wiz-pw" placeholder="Password"></div>
     <label><input type="checkbox" id="wiz-18"> I am 18 or older</label>
     <label><input type="checkbox" id="wiz-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms" id="wiz-terms-link">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy" id="wiz-privacy-link">privacy policy</a></label>
-    <div class="wiz-row"><button class="b pri y" id="wiz-create">Create account</button><button class="b" id="wiz-signin">I already have one</button><button class="b" id="wiz-magic">Email me a link</button></div>
-    <div class="wiz-row" id="wiz-code-row" hidden><input type="text" id="wiz-code" placeholder="The 6-digit code from the email"><button class="b pri y" id="wiz-code-go">Sign in with the code</button></div>
+    <div class="wiz-row"><button class="b pri y" id="wiz-google-signin">Continue with Google</button></div>
+    <p class="meta">Knowlu asks Google for your email address and your name, and nothing else. Your calendar and your mail are separate permissions, asked for later, and you can say no to both.</p>
+    <div class="wiz-row"><input type="text" id="wiz-email" placeholder="Or use your email address"><button class="b" id="wiz-magic">Email me a code</button></div>
+    <div class="wiz-row" id="wiz-code-row" hidden><input type="text" id="wiz-code" placeholder="The code from the email"><button class="b pri y" id="wiz-code-go">Sign in with the code</button></div>
     <p class="meta" id="wiz-account-note"></p>
   </div>
   <div class="wiz-panel" id="wiz-subscribe" hidden><h2>Subscribe</h2>
@@ -173,11 +174,12 @@
 </aside>
 <aside class="setpanel" id="upgrade" hidden>
   <div class="set-hd"><h2>Knowlu now needs an account</h2><button class="b" id="up-later">Not now</button></div>
-  <p class="meta">Your work stays exactly where it is. Sign in, or make an account, and Knowlu picks up where it left off. Today&rsquo;s page is underneath and still works &mdash; ranking never needed an account.</p>
-  <div class="set-row"><input type="text" id="up-email" placeholder="Email"><input type="password" id="up-pw" placeholder="Password"></div>
+  <p class="meta">Your work stays exactly where it is. Sign in and Knowlu picks up where it left off. Today&rsquo;s page is underneath and still works &mdash; ranking never needed an account.</p>
   <label><input type="checkbox" id="up-18"> I am 18 or older</label>
   <label><input type="checkbox" id="up-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy">privacy policy</a></label>
-  <div class="set-row"><button class="b pri y" id="up-create">Create account</button><button class="b" id="up-signin">I already have one</button></div>
+  <div class="set-row"><button class="b pri y" id="up-google">Continue with Google</button></div>
+  <div class="set-row"><input type="text" id="up-email" placeholder="Or use your email address"><button class="b" id="up-magic">Email me a code</button></div>
+  <div class="set-row" id="up-code-row" hidden><input type="text" id="up-code" placeholder="The code from the email"><button class="b pri y" id="up-code-go">Sign in with the code</button></div>
   <div class="set-row"><button class="b pri y" id="up-subscribe" hidden>Subscribe</button><span class="crit" id="up-error"></span></div>
 </aside>
 <script src="console.js"></script>

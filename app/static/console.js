@@ -1239,6 +1239,26 @@
     EL("up-error").textContent = "";
     EL("upgrade").hidden = true;
   }
+  /** The overlay is the console window's own surface and nothing paints it, so its busy state is one
+   *  flag and two writes rather than a `WIZ` field. Without it, two presses on Continue with Google
+   *  are two commands, two loopback listeners and two browser tabs — and the second callback meets a
+   *  closed port. */
+  var UP_BUSY = false;
+  function upBusy(on) {
+    UP_BUSY = on;
+    EL("up-google").disabled = on;
+    EL("up-magic").disabled = on;
+  }
+  /** What both doors do once a session exists — the tail the old branch ended with, now that two
+   *  branches share it. */
+  function afterUpgradeSignIn() {
+    EL("up-error").textContent = "";
+    EL("up-code-row").hidden = true;
+    EL("up-subscribe").hidden = false;
+    return invoke("entitlement_now", {}).then(function (ent) {
+      if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
+    });
+  }
   EL("upgrade").addEventListener("click", function (e) {
     // The same branch the wizard has, and it matters more here: this window has a working console to
     // lose, and a plain navigation to `terms.html` would lose it while the user is ticking the box
@@ -1249,26 +1269,47 @@
       invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
       return;
     }
-    var creating = !!e.target.closest("#up-create");
-    if (creating || e.target.closest("#up-signin")) {
-      if (creating && !(EL("up-18").checked && EL("up-terms").checked)) {
+    if (e.target.closest("#up-google")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
         EL("up-error").textContent = "Tick both boxes to create an account."; return;
       }
-      var args = { email: EL("up-email").value.trim(), password: EL("up-pw").value };
-      // `ageAttested`, not the Rust spelling: Tauri v2 lower-camel-cases every argument key, and
-      // `sign_up` opts out of nothing (R-C1-55, C1 — the wizard's own call carries the same comment).
-      if (creating) { args.ageAttested = EL("up-18").checked; }
-      invoke(creating ? "sign_up" : "sign_in", args).then(function (r) {
-        EL("up-pw").value = "";
-        // A dead network is not something to hold someone behind a panel for; a wrong password is.
+      upBusy(true);
+      EL("up-error").textContent = "Finish signing in, in your browser…";
+      invoke("google_sign_in", {}).then(function (r) {
+        upBusy(false);
+        // A dead network stands the overlay down rather than trapping someone behind it (D4).
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
         if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        EL("up-subscribe").hidden = false;
-        return invoke("entitlement_now", {}).then(function (ent) {
-          if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-        });
-      }).catch(upgradeUnreachable);
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-magic")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
+        EL("up-error").textContent = "Tick both boxes to create an account."; return;
+      }
+      upBusy(true);
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and the
+      // wizard's own call carries the same comment for the same reason.
+      invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: true }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        EL("up-error").textContent = r.ok ? "We emailed you a code. Type it below." : r.error;
+        EL("up-code-row").hidden = !r.ok;
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-code-go")) {
+      if (UP_BUSY) { return; }
+      upBusy(true);
+      invoke("verify_email_code", { email: EL("up-email").value.trim(), code: EL("up-code").value.trim() }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        if (!r.ok) { EL("up-error").textContent = r.error; return; }
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
       return;
     }
     if (e.target.closest("#up-subscribe")) {
@@ -1379,6 +1420,11 @@
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+              // The Google round trip runs in the system browser and can take a minute; `busy` is
+              // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
+              // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
+              // written to the DOM straight from inside a click handler).
+              busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
               // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
               // `renderWizard()` like every other wizard field — a direct DOM write from inside
@@ -1455,7 +1501,8 @@
     EL("wiz-back").disabled = WIZ.step === 0;
     EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
     EL("wiz-error").textContent = WIZ.error;
-    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : "";
+    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
+    EL("wiz-google-signin").disabled = WIZ.busy;
     // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
     // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
     EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
@@ -1709,38 +1756,35 @@
   EL("wizard").addEventListener("click", function (e) {
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
-    if (e.target.closest("#wiz-create") || e.target.closest("#wiz-signin")) {
-      var creating = !!e.target.closest("#wiz-create");
-      if (creating && !(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+    // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
+    // are Rust's, and the page never sees any of them. The browser round trip can take a minute, so
+    // the button says what is happening — `WIZ.busy` is what renderWizard paints (Task 6).
+    if (e.target.closest("#wiz-google-signin")) {
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
         WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
       }
-      var cmd = creating ? "sign_up" : "sign_in";
-      var args = { email: EL("wiz-email").value.trim(), password: EL("wiz-pw").value };
-      // **`ageAttested`, not the Rust spelling** (R-C1-55, C1). Tauri v2 lower-camel-cases every
-      // argument key (tauri-macros' `ArgumentCase::Camel`) unless the command opts out with
-      // `rename_all = "snake_case"` — which exactly one command in this crate does
-      // (`onboarding::retarget_credentials`, and its own comment says why). Sent snake_case, the
-      // invoke is rejected before `sign_up`'s body runs, the `.catch` below paints UNREACHABLE,
-      // and `wizValid`'s step-1 gate then refuses Next forever: no new account, ever.
-      if (creating) { args.ageAttested = EL("wiz-18").checked; }
-      invoke(cmd, args).then(function (r) {
-        EL("wiz-pw").value = "";                     // the password leaves page memory at once
+      WIZ.busy = true; WIZ.error = ""; WIZ.accountNote = "Finish signing in, in your browser…";
+      renderWizard();
+      invoke("google_sign_in", {}).then(function (r) {
+        WIZ.busy = false; WIZ.accountNote = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.accountNote = ""; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-magic")) {
-      invoke("send_magic_link", { email: EL("wiz-email").value.trim() }).then(function (r) {
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+        WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
+      }
+      // **`ageAttested`, not the Rust spelling.** Tauri v2 camel-cases every argument key; sent
+      // snake_case the invoke is rejected before the command's body runs.
+      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: true }).then(function (r) {
         WIZ.error = r.ok ? "" : r.error;
-        // The link in the mail lands in the BROWSER, which this process never sees — so the mail also
-        // carries a six-digit code, and this is where it is typed. `verify_email_code` trades it for
-        // the same session the link would have given.
         EL("wiz-code-row").hidden = !r.ok;
+        WIZ.accountNote = r.ok ? "We emailed you a code. Type it below." : "";
         renderWizard();
-        EL("wiz-account-note").textContent = r.ok ? "We emailed you a 6-digit code. Type it below." : "";
-      }).catch(function () {});
+      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-code-go")) {

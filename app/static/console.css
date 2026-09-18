@@ -482,6 +482,20 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    row, and the rule stands for any row control a command turns off.) */
 .set-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
 .set-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
+/* Spec §7 defect 1: the wizard's nav had NO disabled rule, so a disabled Back or Next was full
+   contrast, full colour and silently inert — which is what "why are there even back and next
+   buttons if they don't work" was looking at. */
+.wiz-nav button.b[disabled], .wiz-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
+.wiz-nav button.b[disabled]:hover, .wiz-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
+/* Task 6 hides Back at step 0 instead of disabling it, and `button.b` (line 180) sets no `display` —
+   so the UA stylesheet's `[hidden]` is enough today. This rule is here anyway, because this file has
+   taught the same lesson three times (`.app[hidden]`, `.drawer[hidden]`, `.wiz-row[hidden]`): the
+   day someone gives `.wiz-nav button` a `display`, a hidden Back comes back. (Review M8.) */
+.wiz-nav button.b[hidden] { display: none; }
+/* …and the same lesson, live rather than pre-emptive: `.set-row` IS `display: flex` (line 470) and
+   the sheet has no `.set-row[hidden]` rule, so the overlay's new `#up-code-row` would show through
+   its own `hidden` attribute without this. */
+.set-row[hidden] { display: none; }
 /* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is every US institution and the panel shows ten. */
 .wiz-hits { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair); }
 .wiz-hits:empty { display: none; }

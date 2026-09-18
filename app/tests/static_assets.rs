@@ -377,19 +377,19 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
 fn the_page_has_no_lms_credential_field_anywhere() {
     let html = read("index.html");
     let js = read("console.js");
-    // Every password field on the page is one of ours, by id: the wizard's account password, the
-    // upgrade overlay's (Task 18), and the two coursework logins the student chose to store (D11).
-    // Counted by allow-list rather than by number, so adding one of ours is fine and adding
-    // anybody else's is not.
-    const OURS: [&str; 4] = ["wiz-pw", "up-pw", "wiz-zy-pass", "wiz-vhl-pass"];
+    // Every password field on the page is one of ours, by id: the two coursework logins the
+    // student chose to store (D11). The account panel and the upgrade overlay carry no password
+    // at all any more (spec D4). Counted by allow-list rather than by number, so adding one of
+    // ours is fine and adding anybody else's is not.
+    const OURS: [&str; 2] = ["wiz-zy-pass", "wiz-vhl-pass"];
     let mut seen = 0usize;
     for (i, _) in html.match_indices("type=\"password\"") {
         let around = &html[i.saturating_sub(200)..(i + 200).min(html.len())];
         assert!(OURS.iter().any(|id| around.contains(&format!("id=\"{id}\""))), "an unknown password field near: {around}");
         seen += 1;
     }
-    assert!(seen >= 3, "the account password and the two coursework logins are all still there");
-    for id in ["wiz-pw", "wiz-zy-pass", "wiz-vhl-pass"] {
+    assert_eq!(seen, 2, "the two coursework logins are the only passwords Knowlu ever asks for");
+    for id in ["wiz-zy-pass", "wiz-vhl-pass"] {
         assert!(html.contains(&format!("id=\"{id}\"")), "password field {id}");
     }
     // The LMS panel holds a button, a status line and a paste field — and nothing to type a school
@@ -528,23 +528,65 @@ fn the_logins_panel_maps_what_it_finds_to_a_course() {
 
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
 #[test]
-fn the_account_panel_gates_on_eighteen_and_links_both_policies() {
+fn the_account_panel_leads_with_google_asks_for_no_password_and_still_gates_on_eighteen() {
     let html = read("index.html");
     let panel = html.split("id=\"wiz-account\"").nth(1).and_then(|s| s.split("id=\"wiz-subscribe\"").next()).expect("the account panel");
-    assert!(panel.contains("id=\"wiz-18\""), "the 18+ attestation checkbox");
-    assert!(panel.contains("id=\"wiz-terms\""), "the terms + privacy acceptance checkbox");
-    assert!(panel.contains("18 or older"), "the attestation says what it means");
-    // The two policies are named where they are accepted, as relative names — the page still carries
-    // no `http(s)://` literal, and `open_policy` is what turns them into a published URL.
-    assert!(panel.contains("terms.html") && panel.contains("privacy.html"), "both policies are linked");
+    // Spec D1: the Google button is the FIRST control on the panel, not an alternative buried
+    // under a form. Proved by position, because "present" is not the claim.
+    let g = panel.find("id=\"wiz-google-signin\"").expect("the Google button");
+    let e = panel.find("id=\"wiz-email\"").expect("the email field");
+    assert!(g < e, "Continue with Google comes before the email field");
+    assert!(panel.contains("Continue with Google"), "…and says so in words");
+    // Spec D4: no password, anywhere on this panel or in the overlay.
+    assert!(!panel.contains("password"), "the account panel must never carry a password field again");
+    assert!(!html.contains("id=\"wiz-pw\"") && !html.contains("id=\"up-pw\""), "both account passwords are gone");
+    // One button for the email path. The create/sign-in split went with the password.
+    assert!(panel.contains("id=\"wiz-magic\"") && panel.contains("Email me a code"), "one button, and it says what it does");
+    assert!(!panel.contains("id=\"wiz-create\"") && !panel.contains("id=\"wiz-signin\""), "no create/sign-in split");
+    assert!(panel.contains("id=\"wiz-code-row\"") && panel.contains("id=\"wiz-code-go\""), "the code row stays");
+    // §9's minors row and the consent log are unchanged: both boxes, both policies, both gates.
+    assert!(panel.contains("id=\"wiz-18\"") && panel.contains("18 or older"));
+    assert!(panel.contains("id=\"wiz-terms\"") && panel.contains("terms.html") && panel.contains("privacy.html"));
     let js = read("console.js");
-    // …and a click on either **must not navigate this window**: `app/static/` has four files, so a
-    // plain navigation would lose the only window the app has, mid-consent.
-    assert!(js.contains("a.policy") && js.contains("preventDefault()") && js.contains("\"open_policy\""),
-        "the policy links must open in the system browser, not in this webview");
-    assert!(js.contains("\"sign_up\"") && js.contains("\"sign_in\"") && js.contains("\"send_magic_link\"") && js.contains("\"verify_email_code\""));
-    // Next is refused until both boxes are ticked — said on the panel, and enforced again in Rust.
-    assert!(js.contains("Tick both boxes"), "the page says why Next is refused");
+    assert!(js.contains("\"google_sign_in\"") && js.contains("\"send_magic_link\"") && js.contains("\"verify_email_code\""));
+    assert!(!js.contains("\"sign_up\"") && !js.contains("\"sign_in\""), "the password commands are gone from the page too");
+    // Tauri v2 camel-cases argument keys; `age_attested` here is a rejected invoke and a wizard
+    // whose Next never unlocks.
+    assert!(js.contains("ageAttested:"), "send_magic_link carries the attestation as ageAttested");
+    assert!(js.contains("Tick both boxes"), "the page still says why a sign-in was refused");
+}
+
+/// Spec §6, last line: the upgrade overlay gets the same two doors. It is a **second** sign-in
+/// surface, in the console window, over an existing vault — and it is not painted by `renderWizard`,
+/// so the `WIZ.busy` guard that protects `#wiz-google-signin` does not reach it.
+#[test]
+fn the_upgrade_overlay_offers_the_same_two_doors_and_no_password() {
+    let html = read("index.html");
+    let panel = html.split("id=\"upgrade\"").nth(1).and_then(|s| s.split("</aside>").next()).expect("the upgrade overlay");
+    let g = panel.find("id=\"up-google\"").expect("the overlay's Google button");
+    let e = panel.find("id=\"up-email\"").expect("the overlay's email field");
+    assert!(g < e, "Continue with Google comes first here too");
+    assert!(!panel.contains("password"), "the overlay must never carry a password field again");
+    for id in ["up-magic", "up-code-row", "up-code", "up-code-go"] {
+        assert!(panel.contains(&format!("id=\"{id}\"")), "the overlay needs #{id}");
+    }
+    assert!(!html.contains("id=\"up-create\"") && !html.contains("id=\"up-signin\""), "no create/sign-in split");
+    let js = read("console.js");
+    let listener = js.split("EL(\"upgrade\").addEventListener(\"click\"").nth(1)
+        .and_then(|s| s.split("function finishUpgrade(").next()).expect("the upgrade listener");
+    for sel in ["#up-google", "#up-magic", "#up-code-go"] {
+        assert!(listener.contains(sel), "the overlay's listener must handle {sel}");
+    }
+    // Two presses on a button that opens a browser are two listeners, two loopback ports and two
+    // tabs. The wizard's guard is `WIZ.busy`, painted by renderWizard; the overlay carries its own.
+    assert!(js.contains("function upBusy("), "the overlay has a busy guard of its own");
+    assert!(listener.contains("UP_BUSY"), "…and the listener reads it before starting a sign-in");
+    // **And the flag is declared OUTSIDE the listener** (review R2). Declared inside, it is
+    // re-initialised to `false` on every press and guards nothing — while both assertions above
+    // still pass. So the claim is about position: `var UP_BUSY` appears in the text BEFORE
+    // `EL("upgrade").addEventListener`, where `UPGRADE_DISMISSED` and `UPGRADE_UNREACHABLE` live.
+    let before = js.split("EL(\"upgrade\").addEventListener(\"click\"").next().expect("the file before the listener");
+    assert!(before.contains("var UP_BUSY"), "UP_BUSY must be declared at IIFE scope, not inside the click handler");
 }
 
 /// Legal note §9: the report is shown, editable, before anything is sent — and what is sent is what
@@ -981,7 +1023,7 @@ fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
         "wiz-course-add-go", "wiz-map-note", "wiz-sub-note", "wiz-account-note",
         // Task 18's upgrade overlay. `upgrade` and `up-later` are bound at IIFE top level too, so
         // they carry the same "delete one and every window renders blank" weight the six above do.
-        "upgrade", "up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin",
+        "upgrade", "up-email", "up-google", "up-magic", "up-code-row", "up-code", "up-code-go", "up-18", "up-terms",
         "up-subscribe", "up-later", "up-error",
     ] {
         assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
@@ -1033,7 +1075,7 @@ fn deleting_my_data_leaves_another_profiles_snapshots_alone() {
 fn the_console_can_sign_an_existing_install_in_without_re_onboarding_it() {
     let html = read("index.html");
     assert!(html.contains("id=\"upgrade\""), "the upgrade overlay");
-    for id in ["up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin", "up-subscribe", "up-later", "up-error"] {
+    for id in ["up-email", "up-google", "up-magic", "up-code-row", "up-code", "up-code-go", "up-18", "up-terms", "up-subscribe", "up-later", "up-error"] {
         assert!(html.contains(&format!("id=\"{id}\"")), "the upgrade overlay needs {id}");
     }
     let panel = html.split("id=\"upgrade\"").nth(1).and_then(|s| s.split("</aside>").next()).expect("the upgrade overlay");
