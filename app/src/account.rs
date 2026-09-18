@@ -364,11 +364,17 @@ fn write_page(stream: &mut std::net::TcpStream, status: &str, body: &str) -> std
 /// first real callback returns, and the guarantee is unchanged, because the listener dies with this
 /// call.
 ///
-/// **The compensating control against a *forged* callback is the verifier, not the socket.** GoTrue
-/// owns `state` — a client-supplied one is stripped (`reservedOAuthParams`) — so this cannot carry a
-/// nonce of its own, and it does not need one: the verifier is minted per attempt and never leaves
-/// the process, so a code minted under any other challenge fails the exchange. A local process that
-/// guesses the port can therefore end a sign-in with a refusal sentence, and can never take one over.
+/// **The compensating control against a *forged or replayed* callback is the verifier, not the
+/// socket.** GoTrue owns `state` — a client-supplied one is stripped (`reservedOAuthParams`) — so
+/// this cannot carry a nonce of its own, and it does not need one: the verifier is minted per
+/// attempt and never leaves the process, so a code minted under any other challenge fails the
+/// exchange. That is the actual guarantee (review finding 3) — it is not a claim that a same-user
+/// process is locked out. The challenge itself is not secret: it travels as an argument on the
+/// browser's command line (`open_in_browser`), readable by anything running as the same Windows
+/// account, which could equally well read `knowlu/pending/session` out of Credential Manager once a
+/// sign-in lands. Same-user code execution is outside this function's threat model; a local process
+/// that only guesses the port, with no challenge of its own, can end a sign-in with a refusal
+/// sentence and nothing more.
 ///
 /// The reply is sent on **every** path. A refusal is still a browser window a person is looking at,
 /// and a connection reset is not an explanation.
@@ -377,12 +383,17 @@ pub fn serve_one_callback(listener: std::net::TcpListener, wait: std::time::Dura
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = std::time::Instant::now() + wait;
     loop {
+        // Checked at the top of every iteration, not only in the `WouldBlock` arm below (review
+        // finding 1): a peer that connects and disconnects in a loop without ever sending
+        // `/callback` takes the `Ok` arm every time, `continue`s past the check that used to live
+        // only in `WouldBlock`, and never hit the deadline — holding the port, and the Tauri
+        // async-runtime worker with it, open indefinitely.
+        if std::time::Instant::now() >= deadline {
+            return Err("the Google sign-in was not finished — try again".to_string());
+        }
         let mut stream = match listener.accept() {
             Ok((s, _)) => s,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= deadline {
-                    return Err("the Google sign-in was not finished — try again".to_string());
-                }
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 continue;
             }
@@ -392,6 +403,10 @@ pub fn serve_one_callback(listener: std::net::TcpListener, wait: std::time::Dura
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         // The request LINE is all this needs, and a browser sends it in the first packet. Reading to
         // the first newline rather than to EOF is also what keeps a keep-alive connection from hanging.
+        // A fixed 4096-byte buffer (review finding 4): a request line split across TCP segments would
+        // be mis-parsed, but a loopback browser sends the header block in one segment, so the risk is
+        // theoretical — and the fixed size is also what makes an oversized request line harmless (no
+        // growth, no allocation). Any future loop reading to a terminator must keep this same cap.
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf).unwrap_or(0);
         let head = String::from_utf8_lossy(&buf[..n]).to_string();

@@ -999,7 +999,7 @@ fn the_callback_request_line_yields_the_code_or_the_providers_own_sentence() {
     assert!(code_from_request_line("garbage").is_err());
 }
 
-use knowlu::account::{serve_one_callback, CALLBACK_PAGE};
+use knowlu::account::{serve_one_callback, CALLBACK_PAGE, NOT_FOUND_PAGE};
 
 /// A loopback listener on `127.0.0.1:0` is not the network: the same machine, the same process
 /// tree, nothing that leaves it. The serving side is the production code; the client side is this
@@ -1080,6 +1080,8 @@ fn a_stray_local_connection_gets_404_and_the_real_callback_still_lands() {
     let (probe_got, page) = noise_then_browser.join().expect("the client thread");
     assert_eq!(code, "late123", "the stray request must not consume the sign-in");
     assert!(probe_got.starts_with("HTTP/1.1 404"), "{probe_got}");
+    // Review finding 5: the 404 body is the constant, not a second copy of the same sentence.
+    assert!(probe_got.contains(NOT_FOUND_PAGE), "{probe_got}");
     assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
     assert!(page.contains("You are signed in to Knowlu."), "{page}");
 }
@@ -1148,4 +1150,47 @@ fn the_checkout_retries_the_consent_first_and_a_failed_retry_still_reaches_strip
     assert_eq!(out.expect("a checkout link"), "https://checkout.example.invalid/c/cs_1");
     assert!(seen[0].starts_with("POST /functions/v1/account/consent "), "the retry comes first: {}", seen[0]);
     assert!(seen[1].starts_with("POST /functions/v1/billing-checkout "), "{}", seen[1]);
+}
+
+/// **Review finding 1.** The deadline used to be tested only inside the `WouldBlock` arm, so a peer
+/// that connects and immediately closes (`n == 0`, no `/callback`, no sleep) took the `Ok` arm every
+/// time and never re-tested it — holding the call, the loopback port and a Tauri async-runtime
+/// worker open past the deadline indefinitely. This pins the fix: the deadline is now checked at the
+/// top of every iteration, so a connect-and-close spin still meets it.
+#[test]
+fn a_peer_that_keeps_connecting_without_callback_still_meets_the_deadline() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("addr").port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spinner_stop = stop.clone();
+    let spinner = std::thread::spawn(move || {
+        while !spinner_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // Connect and drop immediately: the server's `read` sees `n == 0`, the target is empty
+            // (never `/callback`), and the old code's `continue` skipped the deadline check entirely.
+            if let Ok(s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                drop(s);
+            }
+        }
+    });
+    let start = std::time::Instant::now();
+    let out = serve_one_callback(listener, std::time::Duration::from_millis(200));
+    let elapsed = start.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = spinner.join();
+    let err = out.expect_err("no real callback ever arrived");
+    assert!(err.contains("not finished"), "{err}");
+    assert!(elapsed < std::time::Duration::from_secs(2), "the connect spin must not hold the call open past its deadline: {elapsed:?}");
+}
+
+/// **Review finding 2.** The bind address is this feature's whole security boundary — `127.0.0.1`
+/// and never `0.0.0.0` — and it lives only in `google_sign_in`, which is not unit-testable;
+/// `serve_one_callback` takes a listener by value, so every listener test above binds its own and
+/// none of them would catch a regression to the wildcard address, which would put the OAuth callback
+/// port on the LAN while every other test in the workspace kept passing. A source-text test, the
+/// pattern this repo already uses for a security-relevant literal (`app/tests/static_assets.rs`).
+#[test]
+fn the_only_bind_in_account_rs_is_the_loopback_and_never_the_wildcard() {
+    let rust = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    assert!(rust.contains("bind(\"127.0.0.1:0\")"), "the loopback bind must still be there, verbatim");
+    assert!(!rust.contains("0.0.0.0"), "the OAuth callback port must never listen on the wildcard address");
 }
