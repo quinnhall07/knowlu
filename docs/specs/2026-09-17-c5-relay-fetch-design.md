@@ -1,14 +1,19 @@
 # C5 — the relay fetch: design
 
-**Status: valid; amended 2026-09-17 after the plan review (R-C5-plan-1/2/3).** The review of the
-implementation plan (`docs/reports/2026-09-17-c5-relay-fetch-plan-review.md`, `5a2ca69`) found two
-places where this spec's §6 was underspecified rather than merely unimplemented — how one run drives
-two sources, and where a parsed body lives between round trips — and one place where §8 asserts
-something the repository does not contain. **§6 is rewritten below** (not marked: it is the
-correction of record), **§2.4 and §8 each gain a paragraph**, and two §12 rows are restated. The
-controller's rulings are R-C5-plan-1 (the pause has an exit), R-C5-plan-2 (parse incrementally; no
-shelf cap) and R-C5-plan-3 (the composite driver); the plan's *Fix round 1 — resolutions* section
-carries them in full. This spec is written from the cloud design's *Amendment 2026-09-17*
+**Status: valid; amended 2026-09-17 after the plan review, in two rounds
+(R-C5-plan-1/2/3/4/5).** The review of the implementation plan
+(`docs/reports/2026-09-17-c5-relay-fetch-plan-review.md`, `5a2ca69`, and its appended re-review,
+`9f186c7`) found places where this spec was underspecified rather than merely unimplemented — how
+one run drives two sources, where a parsed body lives between round trips, what makes the paused
+source's card true, and what `ureq` can actually tell us about a cookie — and one place where §8
+asserts something the repository does not contain. **§6 is rewritten below** (not marked: it is the
+correction of record), **§2.4, §2.5, §4 and §8 each gain a paragraph**, and four §12 rows are
+restated. The controller's rulings are R-C5-plan-1 (the pause has an exit), R-C5-plan-2 (parse
+incrementally; no shelf cap), R-C5-plan-3 (the composite driver), **R-C5-plan-4** (that exit is a
+console *Settings → Logins* row, because the wizard's own command is unreachable after onboarding)
+and **R-C5-plan-5** (`Expires`/`Max-Age` are parsed off the raw `Set-Cookie` line, because
+`ureq::Cookie` exposes neither); the plan's two *Fix round … resolutions* sections carry them in
+full. This spec is written from the cloud design's *Amendment 2026-09-17*
 (`docs/specs/2026-09-09-knowlu-cloud-design.md`). It was drafted while that amendment stood
 **PROPOSED**, and was written to be valid on signature; Quinn **signed it on 2026-09-17**, so this
 spec is valid now and its decisions stand. Ruling 4 is the binding text here, with rulings 1–3 and 5
@@ -181,10 +186,11 @@ a bearer token for the student's zyBooks account.
 | steps per run | 40 | today's worst realistic run is 2 + *n* zyBooks calls + 3 VHL calls; 40 leaves room for a third portal and still bounds abuse |
 | steps per reply (a batch) | 1–8 | one round trip per book would double a slot's latency on student wifi; 8 covers a full shelf in one |
 | round trips per run | 24 | 40 steps ÷ a small batch, plus the final `done` |
-| per-step wall clock | 60 s | today's `timeout_global` (`zybooks.rs:402`, `vhl.rs:353`) — but **a bound on the whole step, its redirect chain included**, not on one HTTP request. Today's is per request because the device makes one; here it makes up to six, so a per-request 60 s would be a six-minute step (plan review **C4**) |
+| per-step wall clock | 60 s | today's `timeout_global` (`zybooks.rs:402`, `vhl.rs:353`) — but **a bound on the whole step, its redirect chain included**, not on one HTTP request. Today's is per request because the device makes one; here it makes up to six, so a per-request 60 s would be a six-minute step (plan review **C4**). **Two deadlines, each enforced once** (re-review **R4**): the step opens its own at `now + 60 s`, the run holds one at `now + 10 min`, and every request gets the *smaller remainder* of the two — `min(step, run)` — which is what makes the chain bound a mechanism rather than a constant named nearby |
 | redirect hops per step | 5 | CAS uses two; five is slack, ten (ureq's default) is a loop |
 | bytes per response | 2 MiB | ~38× the largest payload measured |
 | bytes per run | 8 MiB | four such responses; past it the run ends with a warning |
+| bytes per `results` POST | 16 MiB | `MAX_RUN_BYTES × 2`, and **the factor is JSON escaping, not base64**: the server measures the JSON *text*, and a quote-dense page approaches 2×. The same number is the server's `readJson` cap, so a 413 is unreachable rather than unlikely; a batch that would exceed it is **split into two posts**, never trimmed, because trimming loses a book the vendor served. **The platform's own ceiling is measured on staging** (the plan's Task 5 step 9) rather than assumed, and if it refuses below this, `bytes per response` drops to 1 MiB — still ~19× the largest payload measured — and this falls with it |
 | run wall clock | 10 min | half of `scheduler::CHILD_TIMEOUT` (`app/src/scheduler.rs:27`, 20 min), so the relay can never be the thing the scheduler kills |
 | server-side run TTL | 15 min | the `relay_runs` row expires past it and the next slot starts a new run |
 
@@ -294,6 +300,16 @@ important line"). Replaying the vendor's own bytes with `Cookie::parse(line, &or
 `jar.insert` puts the RFC 6265 rules — expiry, host-only vs domain, path, overwrite, `Max-Age=0`
 deletion — back where they were, and needs no `json` feature.
 
+**And the device parses two attributes off that line itself** (ruling **R-C5-plan-5**, from the
+re-review's R3). The session report below has to say *when* a cookie dies, and `ureq::Cookie` cannot
+say: it is a newtype over `cookie_store::Cookie` with a private inner, and its whole public surface
+is `parse`, `name`, `value` and a `Display` of `name=value` (`ureq-3.4.0/src/cookies.rs:44-92`).
+`cookie_store` as a direct dependency is refused by this stream's own dependency test. So `Expires`
+and `Max-Age` are read off the raw line under RFC 6265 §5.2.1 and §5.2.2 — `Max-Age` winning where
+both appear, an unreadable value ignored rather than fatal, and a cookie whose expiry cannot be read
+counted as a **session** cookie, which is the conservative answer. Twenty lines and a test each; the
+replay keeps the job `ureq::Cookie` is good at.
+
 **Re-authentication only on expiry.** The cloud decides it, from two inputs: the first call's report
 of which session slots exist and when they expire (names and expiries, never values), which lets a
 plan skip its login steps outright; and the vendor's own answer — a 401/403, or a page the plan
@@ -305,7 +321,18 @@ retry that step **once**. Not twice: a second failure is a credential problem, n
 `kind: "notice"`, `close_key: "login:<source>"`, `opened_by: "agent:knowlu.coursework"`, title *"Your
 zyBooks password no longer works"* — after checking `list_info` for an open item with the same
 `close_key`, the way `propose_map_cards` checks `asked_map_keys`, so there is exactly one. A later run
-that authenticates calls `close_info(key = "login:<source>")`. The source is **paused** until the
+that authenticates calls `close_info(key = "login:<source>")`.
+
+**And the pause has an exit the student can reach** (ruling **R-C5-plan-4**, from the re-review's
+R1). The card says *"Open **Settings → Logins** and save the password again"*, and C5 builds that
+screen: one row per source in `relay::PORTAL_SOURCES`, backed by one console-window command that
+writes the same `knowlu/<profile_id>/<source>` credential the wizard writes and closes
+`login:<source>` on success. Without it the only way to save a portal password is the onboarding
+wizard, which runs on a vault that does not exist yet — so the sentence would be false, the student's
+only exit would be dismissing the card by hand, and dismissing it un-pauses the source with the same
+wrong password, which is the loop this whole section exists to prevent. It is also a product gap on
+its own: a student who changes a portal password has no way to tell Knowlu. The source is **paused**
+until the
 student saves a new password (§10 Q2) — the legal note's "stop on the first sign of a vendor block and
 never retry through a change of identity". Never a retry loop.
 
@@ -384,7 +411,11 @@ create table relay_runs (
   plan text not null,               -- the JOB: 'coursework' or 'coursework-discover'
   plan_version text not null,       -- the composite: 'zybooks@1+vhl@1'
   cursor jsonb not null,            -- per source: indices, zybook codes, scraped form fields, the dashboard link
-  parsed jsonb not null default '{"assignments": [], "warnings": [], "proposals": []}'::jsonb,
+  -- {assignments, own, proposals}: `own` is a MAP of source name to that source's own un-prefixed
+  -- warnings, which is what the handler accumulates and what `finishSource` turns into the reply's
+  -- prefixed `warnings` at the end. Its size is bounded by `MAX_RUN_BYTES` (8 MiB of raw body per
+  -- run), which bounds everything that can ever be parsed into it.
+  parsed jsonb not null default '{"assignments": [], "own": {}, "proposals": []}'::jsonb,
   seq int not null default 0, steps_used int not null default 0, bytes_used bigint not null default 0,
   started_at timestamptz not null default now(),
   expires_at timestamptz not null default now() + interval '15 minutes');
@@ -616,7 +647,7 @@ mobile, a server-run engine.
 | R4-15 | adding or repairing a portal is a cloud change with no release and no user action | §6 | **narrowed**: repair, and everything but hosts and the login panel, is a deploy; a new host or a new login panel is a release. §3 argues the price |
 | R4-16 | the frozen parsed references stay as the server parsers' oracles | §7, §9 | yes |
 | R4-17 | the device keeps each source's jar between slots; re-authenticate only on expiry | §4 | yes, by recorded `Set-Cookie` replay — `ureq`'s own serialisation would drop the session cookie. **Restated 2026-09-17 (plan review I11):** the session report carries per-cookie **expiry** (a count, how many are session cookies with no expiry at all, and the earliest expiry among the rest) with no name, no value and no domain, and expired entries are pruned on load and on observe. A bare count could not have supported this row for VHL, where the session *is* the cookie and there is no capture; `earliest_expiry: null` is the honest "this may be alive", and the supervised run (§9, and the plan's exit gate 15(c), now blocking) is what turns it into a number. |
-| R4-18 | a failed login is one card, never a retry loop | §4 (`info::open_info`, `close_key: login:<source>`), Q2 | yes |
+| R4-18 | a failed login is one card, never a retry loop | §4 (`info::open_info`, `close_key: login:<source>`), Q2 | yes — **and since ruling R-C5-plan-4 the card's instruction is true**: the console gains a *Settings → Logins* row and one command that writes the same credential the wizard writes and closes the card on success. The re-review's R1 found that the first round's exit was a wizard-only command with no post-onboarding caller, which left "never a retry loop" resting on a student dismissing a card — which un-pauses with the same wrong password, i.e. the loop. |
 | R4-19 | raw pages: received for the run, parsed, not retained; the parsed rows persist; the policy says so | §5, §6, Q1 | yes — and **§6 now says how** (ruling R-C5-plan-2, from plan review C3): each body is parsed the moment it arrives and only the rows are kept, in `relay_runs.parsed`, deleted with the row. The sentence's second clause ("the parsed rows persist") is what makes the whole run possible; the first draft of the plan had nowhere for them and would have had to cap a shelf. |
 | R4-20 | `coursework-discover` becomes a relayed cloud job over the same contract | §6 | yes, plus the three pre-vault flags the wizard needs |
 | R4-21 | legal posture unchanged: the request originates from the device, with the user's credentials, at the user's instruction; the vendor sees the student's IP and session | §8 | yes for the posture, which nothing about C5 moves. **Corrected 2026-09-17 (plan review I10):** §8's claim that the wizard's ToS disclosure "stays" was wrong — there is no such sentence in the product. C5 **writes** it, which makes it legal copy: it goes to Quinn and the lawyer with §5's privacy wording rather than into a controller hand-off. |
