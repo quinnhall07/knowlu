@@ -809,3 +809,50 @@ resolution row's claim that "Task 5 asserts each clause" (plan:4848) is not true
 **Fix:** partition `parsed` the same way `own` already is — e.g. `assignments: Record<string,
 Assignment[]>` — flattened into `PORTAL_SOURCES` + arrival order only by `finishRun`, and add a test
 where a source succeeds on an earlier round trip and fails on a later one.
+
+## Re-review after fix round 3 (2026-09-17)
+
+**Execute.** S1 is resolved as written. One new finding, **T1**, is minor, pre-existing (not a
+round-3 regression), and self-correcting under concern 5's own tolerance for a step that will not
+compile — it does not change the verdict.
+
+1. **S1 resolved.** `assignments`, `own` and `proposals` are each `Record<string, …>` (plan:3690-92,
+   spec:421), `Parsed.source` is set by `parseArrival`/`sourceFailure` from their own argument
+   (plan:3668-70). `appendParsed`'s rule is explicit: append under the arriving source; on `failed`,
+   `delete parsed.assignments[source]` and `delete parsed.own[source]`, **keep**
+   `parsed.proposals[source]` (plan:3111-14), then record the one failure line. Keeping a retired
+   source's proposals is argued — "what `ingestHandler`'s own catch does" — and is exactly R7's
+   clause. `finishRun` is the only flattener, `PORTAL_SOURCES` order then arrival order by
+   construction (plan:3205-18). Column default and `RunRow` both say `{}/{}/{}`  in plan (plan:2951)
+   and spec (spec:421). The R7 resolution row is corrected on the record (plan:4971). Exit-gate 10b
+   restates the partition and names the new test (plan:4680-85).
+2. **The three tests hold up.** The retirement test scripts six zyBooks rows across trips 1-2, book
+   7 failing `success: false` twice on trip 3 (so `failed`, not `reauth`), VHL finishing, and asserts
+   the reply is all-VHL, one zyBooks warning (the failure, no `0 assignments parsed`), and zyBooks'
+   pre-failure proposals survive (plan:3378-3402). The structural guard fails on a second flattener
+   two ways — a DB scan asserting neither map is an array, and a source-text count of
+   `.assignments.push(` pinned at 1 (plan:3408-19). The twelve-book test's new assertion requires the
+   actual uid-source sequence equal its own `PORTAL_SOURCES`-index-sorted self, on top of the
+   pre-existing full-equality-to-one-shot check that already pins arrival order within a source.
+3. **Consistent.** `finishRun`'s `if (!(name in run.parsed.own)) continue` (plan:3211) mirrors
+   `ingestHandler`, which only ever iterates `body.sources`: a source never sent is never touched and
+   produces no warning, same as one absent from `parsed.own`. A source that *was* processed but had a
+   clean parse (no `own`, `items.length > 0`) also reports nothing, by the same handler.ts logic —
+   "reports nothing" is the endpoint's own behavior, not new.
+4. **Mostly consistent — see T1.** Task 6/7's `SourcePlan.parse(ctx, result): Parsed` matches the new
+   interface everywhere `parseArrival` calls it. Task 8/9 never see `RunRow.parsed` at all — they see
+   only `finishRun`'s already-flattened `{assignments, warnings, proposals}` over the wire, so the
+   partition is correctly invisible past Task 5.
+5. **Nothing new.** No placeholder, no name of a person, machine or credential in the round-3 diff.
+
+### New findings
+
+**T1 — Task 6's own composite-driver test doesn't fit the `Parsed` shape S1 just declared.**
+`courseworkPlan.next(...)` returns a `PlanResult`, whose `parsed?: Parsed` (plan:3616) is the same
+per-**one**-source interface S1 gave `own: string[]` (plan:3668-72). But
+`a source that fails on its first step retires and the other finishes` (plan:3375, untouched by this
+diff) asserts `r.parsed.own.vhl` — treating `own` as `Record<string, string[]>`, `RunRow.parsed.own`'s
+shape, not `Parsed.own`'s. Either the composite `next()` needs its own return shape or this test is
+stale from before `own` moved onto per-source `Parsed`. Pre-existing, not a round-3 regression — a
+type error Task 6 hits at compile time, concern 5's own "expected traffic" — so it does not change
+the verdict, but Task 6 should not start without deciding which shape `next()` actually returns.
