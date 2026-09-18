@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix round 1 after review), not started.** Execute on a branch `c1b-sign-in` in a worktree of this repository, merged into `main` before C3', C5 and C4 (HANDOFF §3: Quinn, 2026-09-17, "as soon as possible", before every other stream). Written against `docs/specs/2026-09-17-c1b-sign-in-design.md`.
+**Status: AMENDED 2026-09-17 (fix rounds 1 and 2 after review), not started.** Execute on a branch `c1b-sign-in` in a worktree of this repository, merged into `main` before C3', C5 and C4 (HANDOFF §3: Quinn, 2026-09-17, "as soon as possible", before every other stream). Written against `docs/specs/2026-09-17-c1b-sign-in-design.md`.
 
 **Goal:** A student who has never heard of Knowlu presses **Continue with Google**, picks their account in the browser they are already signed in to, and comes back to a wizard that has moved on — no password, no code, nothing pasted. A student who would rather not use Google types their address, presses **Email me a code** once, types the code, and is in. Whichever they chose, **Back always goes back and Next either moves or says in one sentence what is missing**. And the founder can finish the subscribe step with a 100-percent promotion code and no card.
 
@@ -1281,7 +1281,9 @@ enable_confirmations = false
 
 `double_confirm_changes = true` stays: an email CHANGE is a different question and still needs both addresses to agree.
 
-  …and, in the same block, the rate limit that bounds what D5 costs (review I2):
+  …and the comment at `config.toml:31-35` is rewritten in the same step (review R6b), because its first sentence — *"R-C1-3, second half. `enable_confirmations = true` means every sign-up depends on this mail arriving"* — is stale the moment the line above it flips. The SMTP block's reason has not gone away, it has moved: **`enable_confirmations = false` means every sign-up depends on the CODE mail arriving**, which is the same dependency on the same provider, and Supabase's built-in sender is still a few messages an hour and still not for production. Keep the rest of the block (Resend, the verified domain, `SMTP_PASSWORD` never in this file) word for word.
+
+  …and the rate limit that bounds what D5 costs (review I2) — **a sibling TOML table, not a key inside `[auth.email]`** (review R3). It goes **after `double_confirm_changes = true` (`config.toml:29`) and before the SMTP comment block at `:31`**, at the same level as `[auth]` and `[auth.email]`. Dropped in where the old wording pointed — straight under `enable_confirmations` — the `[auth.rate_limit]` header would swallow `double_confirm_changes` into the rate-limit table, and `config push` would either fail or push an `[auth.email]` that had quietly lost a setting:
 
 ```toml
 # **Set here, explicitly, rather than left at the platform default** (review I2). With no password in
@@ -1335,10 +1337,17 @@ Deno.test("config.toml declares no auth provider, and says why — the Google pr
   assert(toml.includes("enable_confirmations = false"), "D5: email confirmations are off");
   assert(/^\[auth\.rate_limit\]/m.test(toml), "[auth.rate_limit] is declared, not defaulted");
   assert(/^email_sent = \d+$/m.test(toml), "…with a number on the diff");
+  // **And the table starts AFTER `double_confirm_changes`** (review R3). A `[auth.rate_limit]`
+  // header placed one line too early does not fail to parse — it silently adopts the key below it,
+  // so `[auth.email]` loses `double_confirm_changes` and a push carries that loss to the project.
+  assert(
+    toml.indexOf("double_confirm_changes") < toml.indexOf("[auth.rate_limit]"),
+    "[auth.rate_limit] must not capture double_confirm_changes",
+  );
 });
 ```
 
-- [ ] **Step 4: Green, then commit.** `cargo test --workspace` at 0 warnings; `deno fmt --check`. Commit `app/src/account.rs`, `app/tests/account.rs`, `app/tests/static_assets.rs`, `cloud/supabase/config.toml` and `cloud/supabase/functions/_shared/config_toml_test.ts` by name. The page still calls `send_magic_link` with one argument at this point and will fail on the new `ageAttested` — Task 5 is what fixes it, and the two land in the same branch.
+- [ ] **Step 4: Green, then commit.** `cargo test --workspace` at 0 warnings, **and `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/`, `deno lint` and `deno fmt --check`** — step 3b's assertions are this task's own test and must be green at this task's gate, not first executed at exit gate 11 (review R4), exactly as Tasks 1 and 2 run theirs. Commit `app/src/account.rs`, `app/tests/account.rs`, `app/tests/static_assets.rs`, `cloud/supabase/config.toml` and `cloud/supabase/functions/_shared/config_toml_test.ts` by name. The page still calls `send_magic_link` with one argument at this point and will fail on the new `ageAttested` — Task 5 is what fixes it, and the two land in the same branch.
 
 ---
 
@@ -1416,10 +1425,16 @@ fn the_upgrade_overlay_offers_the_same_two_doors_and_no_password() {
     // tabs. The wizard's guard is `WIZ.busy`, painted by renderWizard; the overlay carries its own.
     assert!(js.contains("function upBusy("), "the overlay has a busy guard of its own");
     assert!(listener.contains("UP_BUSY"), "…and the listener reads it before starting a sign-in");
+    // **And the flag is declared OUTSIDE the listener** (review R2). Declared inside, it is
+    // re-initialised to `false` on every press and guards nothing — while both assertions above
+    // still pass. So the claim is about position: `var UP_BUSY` appears in the text BEFORE
+    // `EL("upgrade").addEventListener`, where `UPGRADE_DISMISSED` and `UPGRADE_UNREACHABLE` live.
+    let before = js.split("EL(\"upgrade\").addEventListener(\"click\"").next().expect("the file before the listener");
+    assert!(before.contains("var UP_BUSY"), "UP_BUSY must be declared at IIFE scope, not inside the click handler");
 }
 ```
 
-…and in `the_page_has_no_lms_credential_field_anywhere`, `OURS` becomes `["wiz-zy-pass", "wiz-vhl-pass"]`, `seen >= 3` becomes `assert_eq!(seen, 2, "the two coursework logins are the only passwords Knowlu ever asks for")`, and the `for id in [...]` loop drops `wiz-pw`.
+…and in `the_page_has_no_lms_credential_field_anywhere`, `const OURS: [&str; 4] = ["wiz-pw", "up-pw", "wiz-zy-pass", "wiz-vhl-pass"];` (`static_assets.rs:384`) becomes `const OURS: [&str; 2] = ["wiz-zy-pass", "wiz-vhl-pass"];` — **the length annotation moves with the list** (review R6a), or the file does not compile — `seen >= 3` becomes `assert_eq!(seen, 2, "the two coursework logins are the only passwords Knowlu ever asks for")`, and the `for id in [...]` loop drops `wiz-pw`.
 
 - [ ] **Step 1b: The two id lists that pin what this task deletes** (review C3) — both are shipped tests that go red the moment step 2 lands, and neither is optional:
   - `static_assets.rs:980`, in `every_control_this_task_added_is_in_the_markup_and_named_by_the_page`: `"upgrade", "up-email", "up-pw", "up-18", "up-terms", "up-create", "up-signin",` becomes `"upgrade", "up-email", "up-google", "up-magic", "up-code-row", "up-code", "up-code-go", "up-18", "up-terms",` — every one of the new ids is in `index.html` and named by `console.js`, which is what that test asks of each.
@@ -1504,7 +1519,9 @@ Unchanged on purpose, because `static_assets.rs:1029-1061` pins each: the `<asid
     EL("wiz-google-signin").disabled = WIZ.busy;
 ```
 
-The console's own upgrade-overlay handlers are replaced the same way — but **written out here**, because the overlay is a second sign-in surface with no `renderWizard` behind it (review I6). The `#up-create`/`#up-signin` branch (`console.js:1252-1273`) goes; these three take its place inside the same `EL("upgrade").addEventListener("click", …)`, after the `a.policy` branch:
+The console's own upgrade-overlay handlers are replaced the same way — but **written out here**, because the overlay is a second sign-in surface with no `renderWizard` behind it (review I6). The `#up-create`/`#up-signin` branch (`console.js:1252-1273`) goes, and what replaces it lands in **two different scopes**:
+
+**(a) At IIFE scope, beside `upgradeUnreachable()` (`console.js:1237`) and before `EL("upgrade").addEventListener` — never inside the listener.** A flag declared inside the handler is re-initialised to `false` on every press, which is not a guard at all: two presses on Continue with Google would again be two commands, two loopback listeners and two browser tabs (review R2). `UPGRADE_DISMISSED` and `UPGRADE_UNREACHABLE` already live at that scope for the same reason.
 
 ```javascript
   /** The overlay is the console window's own surface and nothing paints it, so its busy state is one
@@ -1528,6 +1545,8 @@ The console's own upgrade-overlay handlers are replaced the same way — but **w
     });
   }
 ```
+
+**(b) Inside the same `EL("upgrade").addEventListener("click", …)`, after the `a.policy` branch** — the three branches, and only the three branches:
 
 ```javascript
     if (e.target.closest("#up-google")) {
@@ -1651,6 +1670,16 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         assert!(!body.contains("EL(\"wiz-next\").disabled"), "{name} sets WIZ.busy, never the DOM property directly");
         assert!(body.contains("WIZ.busy"), "{name} still latches re-entry, through WIZ.busy");
     }
+    // …and one count over the WHOLE file, because the two slices above do not cover the file
+    // (review R5). `credentialsStranded` (`console.js:1617-1626`) sits between `wizGo` and
+    // `wizFinish`, so its write at `:1623` is in neither slice — and a missed one is the worst of
+    // the six: `renderWizard()` fires on the very next line and repaints `disabled = WIZ.busy`, so a
+    // stranded-credentials recovery would re-enable Next and then immediately kill it again.
+    assert_eq!(
+        js.matches("EL(\"wiz-next\").disabled").count(),
+        1,
+        "renderWizard is the ONLY writer of Next's disabled state"
+    );
     // (c) A refused Next says what is missing, in a sentence, and says it again on a second press —
     // a red line that was already on screen does not read as a new answer.
     // Review M7: the gates themselves, not merely the name — a `wizValid` that still exists and no
@@ -1695,7 +1724,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
 | `:1676` | `wizFinish`'s refusal path, `= false` | `WIZ.busy = false` |
 | `:1688` | `wizFinish`'s `.catch`, `= false` | `WIZ.busy = false` |
 
-After this task `grep -n 'EL("wiz-next").disabled' app/static/console.js` returns exactly one line — `renderWizard`'s — which is what step 1's test asserts from the other direction.
+After this task `grep -n 'EL("wiz-next").disabled' app/static/console.js` returns exactly one line — `renderWizard`'s — and step 1's count assertion is what enforces that, including for `credentialsStranded`, which neither of that test's two function slices reaches (review R5).
 
 - [ ] **Step 3: The refusal that is heard twice** — `console.js`, beside `wizValid`:
 
@@ -1801,7 +1830,7 @@ $env:KNOWLU_ANON_KEY  = "<the staging anon key>"
 scripts\scratch-vault.ps1 -Source <a scratch vault>
 ```
 
-…launch the app into the wizard, press **Continue with Google**, complete the consent in the browser that opens, and confirm: the browser shows one sentence; the wizard advances to the subscribe panel with *Signed in as …*; `knowlu/pending/session` exists in Credential Manager; `select id, email, age_attested_at from accounts` on staging has the row with a non-null `age_attested_at`; and `select kind, version from consents where account_id = …` has the three rows. Then press the subscribe button, type **P3's test-mode 100-percent promotion code** on Stripe's page, and confirm Checkout completes **with no card asked for** and the wizard's poll advances to the name panel.
+…launch the app into the wizard, press **Continue with Google**, complete the consent in the browser that opens, and confirm: the browser shows one sentence; the wizard advances to the subscribe panel with *Signed in as …*; `knowlu/pending/session` exists in Credential Manager; `select id, email, age_attested_at from accounts` on staging has the row with a non-null `age_attested_at`; and `select kind, version from consents where account_id = …` has the three rows. Then press the subscribe button, type **P3's test-mode 100-percent promotion code** on Stripe's page, and confirm **Stripe still asks for a card** (R-C1b-2 — `payment_method_collection` is `"always"` and this proof is the check that it stayed), the total reads **$0.00**, **nothing is charged**, the webhook writes `entitlements`, and the wizard's poll advances to the name panel. A Checkout that asked for **no** card would mean the form value moved: stop and report it rather than reading it as a pass.
 
 - [ ] **Step 5: The gate, the hand-offs, the close.** Run the whole gate below. Ask the controller for **H3** (`CLAUDE.md`'s recount and the no-password sentence) and **H4** (`HANDOFF.md` §3). Production — `supabase db push`, the two `functions deploy` against `knowlu-prod`, and a second `supabase config diff` (which must again show no `external.google` change) before the `config push` — is **Quinn's**, after staging is green, and is the one place in this plan where prod is named. Nothing in that sequence needs a Google client id or secret in the shell (R-C1b-5).
 
@@ -1999,3 +2028,46 @@ executed**: this is still a plan, and its status line says so.
    that separates a flood from real demand — a rate limit can only choose which of them to refuse.
    Not built here: it needs a provider account, a site key in the app and a token on the request, and
    it is a decision about what a student is asked to do before they can sign in.
+
+---
+
+## Fix round 2 — resolutions (2026-09-17)
+
+Against the re-review appended to `docs/reports/2026-09-17-c1b-sign-in-plan-review.md`
+(*"execute after fix round 2"*; all twenty original findings resolved, six new ones). No new ruling
+was needed: R1 is R-C1b-2 reaching one paragraph round 1 missed, and the rest are placement, gates
+and wording. The spec needed no change — every finding landed in this file.
+
+- **R1 — Task 7 step 4's live proof asked for the card-free Checkout R-C1b-2 rejected.** The step now
+  reads: Stripe **still asks for a card**, the total reads **$0.00**, nothing is charged, the webhook
+  writes `entitlements`, the poll advances — and a Checkout that asks for *no* card means the form
+  value moved and is **stopped and reported**, not passed. It was the last sentence anywhere in
+  either document written from the (b)-world.
+- **R2 — `UP_BUSY` was placed inside the click listener, where it guards nothing.** Task 5 step 3 now
+  splits the replacement in two: **(a)** the flag, `upBusy()` and `afterUpgradeSignIn()` at IIFE
+  scope beside `upgradeUnreachable()` (`console.js:1237`), where `UPGRADE_DISMISSED` and
+  `UPGRADE_UNREACHABLE` already live; **(b)** the three branches, and only those, inside the
+  listener. The pin now fails on the wrong placement: the text **before**
+  `EL("upgrade").addEventListener` must contain `var UP_BUSY` — the two assertions round 1 added pass
+  either way, which is exactly why a third was needed.
+- **R3 — `[auth.rate_limit]` is a sibling table, not a key in `[auth.email]`.** Task 4 step 3 names
+  the insertion point: after `double_confirm_changes = true` (`config.toml:29`), before the SMTP
+  comment block at `:31`, at `[auth]` sibling level — and says what the old wording would have cost
+  (the header adopting `double_confirm_changes` into the rate-limit table, so a push carries away a
+  setting nobody meant to move). Step 3b asserts `double_confirm_changes` appears **before** the
+  first `[auth.rate_limit]` line.
+- **R4 — Task 4's gate did not run Task 4's Deno test.** Step 4 now runs
+  `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` and `deno lint` beside
+  `cargo test --workspace` and `deno fmt --check`, as Tasks 1 and 2 already do; step 3b's assertions
+  are green at their own gate rather than first executed at exit gate 11.
+- **R5 — nothing tested the `console.js:1623` conversion, and the plan claimed something did.** Step
+  1's pin gains a count over the whole file —
+  `assert_eq!(js.matches("EL(\"wiz-next\").disabled").count(), 1, …)` — because `credentialsStranded`
+  (`:1617-1626`) sits between the `wizGo` and `wizFinish` slices and is in neither. The "from the
+  other direction" clause in step 2 is replaced by what is actually true: the count assertion is what
+  enforces the single writer, `credentialsStranded` included.
+- **R6 — two nits.** (a) Task 5 step 1 now moves the length annotation with the list:
+  `const OURS: [&str; 4]` → `const OURS: [&str; 2]` (`static_assets.rs:384`), or the file does not
+  compile. (b) Task 4 step 3 rewrites `config.toml:31-35`'s opening sentence, stale the moment
+  `enable_confirmations` flips: the SMTP block's reason is the same dependency on the same provider,
+  now for the **code** mail, and the rest of the block stands word for word.
