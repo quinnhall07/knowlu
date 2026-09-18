@@ -89,11 +89,12 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-15** (C2 Task 15,
-  by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
-  registers **43**, the vault-less picker/wizard window **30** (+3 from C2's hand-off H9 phase (a) —
-  `account::google_connect_url`, `account::google_connected`, `account::open_external`) — **62**
-  distinct. Commands live beside the module they serve
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-17 (C1b Task 7)**
+  (by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
+  registers **42**, the vault-less picker/wizard window **29** (+3 from C2's hand-off H9 phase (a) —
+  `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's H1
+  removed `account::sign_up` and `account::sign_in` with the password and added
+  `account::google_sign_in` to both lists) — **61** distinct. Commands live beside the module they serve
   (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one
   file. Seven mutate notes
   (`set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,
@@ -118,6 +119,9 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   `config/cloud.yaml` names it alongside the project's `api_base`, its public `anon_key` and the
   `account_id`. Entitlement is cached at `profiles\<id>\entitlement.json` with a 72-hour grace, and
   past it every cloud step is a named skipped step, never a failure.
+- There is no password on a Knowlu account: sign-in is `account::google_sign_in` (a loopback PKCE
+  round trip on `127.0.0.1:0`, one listener per sign-in) or the emailed one-time code;
+  `/auth/v1/signup` and `grant_type=password` are called by nothing.
 - The identifier is **`com.knowlu.desktop`**, permanent: uninstall key, autostart entry and window state are keyed by it.
 - The updater is configured: `tauri-plugin-updater`, `plugins.updater` (endpoint + minisign public
   key) and `bundle.createUpdaterArtifacts: true` are one decision — a static test pins flag ⇔ plugin.
