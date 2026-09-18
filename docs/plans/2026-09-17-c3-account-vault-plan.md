@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: AMENDED 2026-09-17 (fix rounds 1 and 2 — round 1: the review's C1, C2, I1–I6; round 2: the scoped re-review's R1–R6, the I3 nit and the I1 slip of fact, with R4 ruled by the controller as *perform the move*; Minors taken: M1, M2, M3, M4, M5, M6, M8, M9, M10, M11, M12, M13, and M7 in part; refused: M7's shared `refusal()` helper, because a test-only module under `engine/tests/` compiles as its own integration crate and one under `cloud/supabase/functions/_shared/` would be a production file existing for two suites — the three-line duplication is the cheaper of the two and is now named as a decision). Originally WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
+**Status: AMENDED 2026-09-17 (fix rounds 1–3 — round 1: the review's C1, C2, I1–I6; round 2: the scoped re-review's R1–R6, the I3 nit and the I1 slip of fact, with R4 ruled by the controller as *perform the move*; round 3: the re-review's S1, ruled **R-C3′-plan-2** — `build_push` excludes every record written under `sync::ACTOR`; Minors taken: M1, M2, M3, M4, M5, M6, M8, M9, M10, M11, M12, M13, and M7 in part; refused: M7's shared `refusal()` helper, because a test-only module under `engine/tests/` compiles as its own integration crate and one under `cloud/supabase/functions/_shared/` would be a production file existing for two suites — the three-line duplication is the cheaper of the two and is now named as a decision). Originally WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
 
 Execute on the **existing** branch `c3-sync` in its existing worktree (`C:\Users\danie\GitHub\knowlu\.claude\worktrees\c3-sync`), forked from `origin/main` at `7585ec6`. **Rebase it on `main` first** (`main` has moved: PR #8, `274e137`), then Task 1. The nine commits already on it stay; this plan reuses some and retires the rest, and says which in every task.
 
@@ -102,6 +102,7 @@ One row per ruling, spec sentence or inherited resolution C3′ carries or narro
 | **R6** | "the wording of the privacy sentence (C3′'s task, read by Quinn and the lawyer before merge, as C3's P2 already required)" | Amendment ruling 6 | **Precondition P1**, and Task 11 step 3 carries the drafted words. |
 | §5.5 Down | "the service's own writes… are queued as journal-shaped records the client pulls at `/sync/pull` and applies through `write`… with `actor: agent:knowlu.<kind>` and judge-once intact" | cloud design §5.5 | **Narrowed, on the record, and the reason has changed with the amendment.** All four kinds are **already delivered by pull, inside a slot step, by C2** — `/judge-task` per item inside `judge`, `/ingest-coursework` inside `coursework`, `/judge-event` inside the **judge** step's events pass (`enrich.rs`'s `run_lines_with`, not `rank` — `rank_cannot_reach_a_judgment_endpoint` forbids the string in `cli.rs` outright, review M3), and the Gmail and promoted-rule queues inside `judge` too — each written through `write` under `agent:knowlu.<kind>` with judge-once intact, which is exactly the property the sentence asks for. The superseded plan's *structural* reason for not re-routing them (a server-originated row could not be sealed) **no longer applies**: the server could now write a row. What decides it instead is smaller and still decides it: re-routing would re-open every C2 test for no behaviour change, and it would give the service a second way to write a note — one that skips the `judge`-step reporting a student reads in the Runs view. **C3′'s `/sync-pull` therefore carries exactly one thing: records another desktop of the same account pushed.** Revisit in C5, where the relay moves more of the fetch server-side and the question arises for real. |
 | §5.5 Second device | "replaying the journal onto an empty vault reconstructs it — the migration script already proved the shape" | cloud design §5.5 | Task 9. **Carried, with one recorded exception to `CLAUDE.md`'s "every note write goes through `write`".** A restore writes note files with `pystr::write_text` and journal lines with `JsonlLedger::append`, because every one of those records **already exists** and carries the `ts`, the `device` and the `seq` of the machine that made it. Putting them through `write` would fabricate a second `create` record, stamped with *this* device's name and *today's* `ts`, for a note created three months ago on another laptop — and `journal::human_set`, which is what judge-once reads, would then answer with the restore instead of with the student's own decision. The invariant exists to make attribution complete; re-journalling a restore is the one way to break it while appearing to obey it. **Bounded exactly as the code enforces it:** `restore` refuses a `dest` holding any note in any of `ids::NOTE_FOLDERS` (`tasks, approvals, archive, courses, issues, info`) other than the ones its caller explicitly tolerates. |
+| §5.5 Second device | "Conflicts … never silent merges" — and the **echo** every mirrored write leaves behind | cloud design §5.5; review S1; ruling **R-C3′-plan-2** | Tasks 5 and 6. Everything `apply` carries out goes through a `write::` function under `sync::ACTOR`, and every one of those journals a second, locally authored record beside the foreign one it mirrors — a `set` per applied field, a `move` for a rename, a `delete` for a settle. That is right as this device's own history and wrong on the wire: the echo has a fresh `ts` and this machine's `device_name()`, so it hashes new, and every other desktop would receive a cross-device move or settle twice, credited to `agent:knowlu.sync` rather than to whoever acted. **`build_push` therefore excludes every record whose `actor` is `sync::ACTOR`, whatever its `op`** — a filter narrowed to `move`/`delete` would miss the `set` echo, which fires on nearly every pull. The foreign record itself still goes up, and costs nothing: `/sync-push` re-derives its hash and upserts on `sync_records_once`, so it lands on the row it already is. |
 | §5.5 Second device | "the service's own writes … applied through `write`" — and the note another desktop **created**, which has no local file to apply onto | cloud design §5.5; `CLAUDE.md` | Task 6. **The second recorded exception, and it is the first one's argument in a smaller box.** A pulled note for a path this device has never seen arrives with its own `create` record in the same batch; that record is appended to the ledger verbatim, carrying the other desktop's `ts`, `device` and `actor`. Writing the file through `write::create` would then journal a **second** creation, stamped with this device and today — the same attribution damage the restore row argues, on one note instead of a vault. So `apply` writes the bytes with `pystr::write_text` **after** the record is appended, never before, and only for a path that passes `is_note_path`. **It never overwrites a note this device already has**: for a path with a local file the frontmatter is settled by `reconcile::resolve` above and the body is never merged, so the pulled text is dropped and the file on disk keeps its own. That is the whole bound, and `a_pulled_note_for_a_path_this_device_has_never_seen_arrives_whole` and `a_pulled_note_never_overwrites_a_note_this_device_already_has` are the two tests that hold it. |
 | §5.5 Backups | "the local snapshot tick stays; the cloud copy is the durable one" | cloud design §5.5 | Tasks 9 and 10, and the backup mirror is untouched. **`engine/src/backup.rs` is not modified by any task in this plan**, which is the whole of "the local snapshot tick stays". **Exit-gate item 12 asserts it by diff, not by a scan** (review M4): `git diff --quiet main -- engine/src/backup.rs` is the check, because a test that only greps for `pub fn` would pass on a file somebody had rewritten. |
 | §5.5 / P3 | The ceiling and the retention window, **and the `keep` bit** | cloud design §5.5; the superseded plan's P3, **answered by Quinn 2026-09-17** | Task 1. 200 MiB of ciphertext per account becomes 200 MiB of **text** per account (`sync_ceiling_bytes()` is unchanged at `209715200`, and the unit it counts is now honest); journal records are pruned at 400 days; **a record a human wrote is never pruned**, which is the half that is a correctness property rather than a storage one — `journal::human_set` is what judge-once reads and it reads *records*, so a pruned human `set` on a restored machine is a decision the student made and the device can no longer see. **Changed by ruling 2, and this is the improvement the amendment buys:** the device no longer *asserts* `keep`. The server decides it, from the plaintext record, in a **stored generated column** — `op` in (`set`, `create`) and `actor` not starting with `agent:`, which is `provenance::is_agent`'s own test. The one cleartext bit the superseded design had to leak, and the trust it had to place in the client, both go. |
@@ -2206,7 +2207,7 @@ The push half of the device. Nothing here opens a socket except the one loopback
 **Interfaces:**
 - Consumes: Task 2's `sha256_hex`, `device_token`, `MAX_RECORD_BYTES`, `MAX_NOTE_BYTES`, `SyncError`; C2's `cloudmodel::{CloudClient, CloudError}`; `journal::Journal`; `ids::NOTE_FOLDERS`; `ledger::dumps_value`; `pystr::read_text`.
 - Produces:
-  - `sync::PAGE: usize` (500) and `sync::CURSOR_FILE: &str` (`"state/sync-cursor.json"`)
+  - `sync::PAGE: usize` (500), `sync::CURSOR_FILE: &str` (`"state/sync-cursor.json"`) and `sync::ACTOR: &str` (`"agent:knowlu.sync"`)
   - `sync::Cursor { record_cursor: i64, note_cursor: i64, pushed_through: String, boundary: Vec<String>, notes: BTreeMap<String, String> }`, `Cursor::default()`, `sync::load_cursor(&Path) -> Cursor`, `sync::save_cursor(&Path, &Cursor) -> Result<(), SyncError>`
   - `sync::is_note_path(&Path, &str) -> bool`, `sync::note_paths(&Path) -> Vec<String>`
   - `sync::PushBatch { device: String, records: Vec<Value>, notes: Vec<Value>, warnings: Vec<String> }`
@@ -2272,6 +2273,50 @@ fn a_record_or_a_note_over_the_cap_is_named_and_left_behind_never_truncated() {
     let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
     assert!(!batch.notes.iter().any(|n| n["path"] == "tasks/huge.md"), "the oversize note is not sent");
     assert!(batch.warnings.iter().any(|w| w.contains("tasks/huge.md") && w.contains("too large")), "{:?}", batch.warnings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_record_this_devices_own_sync_wrote_is_never_pushed_back() {
+    // **The echo** (review S1, ruling R-C3′-plan-2). Everything `apply` carries out goes through a
+    // `write::` function under `sync::ACTOR`, and every one of those journals a second, locally
+    // authored record beside the foreign one it mirrors — with a fresh `ts` and this machine's own
+    // `device_name()`, so it hashes new and the content filter cannot see it. Pushed, it would reach
+    // every other desktop as an event that had never happened there, credited to the sync rather
+    // than to whoever acted. **The human record and the verbatim foreign record still go up**: the
+    // first is this device's own news, and the second costs nothing because `/sync-push` re-derives
+    // its hash and upserts on `sync_records_once`, so it lands on the row it already is.
+    let dir = fixture("no-echo");
+    let mut journal = Journal::new(&dir);
+
+    // 1. A human write on this machine.
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+
+    // 2. A foreign record, appended verbatim exactly as `apply` appends one.
+    let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+    spec.id = Some("task_0000000001");
+    spec.field = Some("effort");
+    spec.old = serde_json::json!(1.0);
+    spec.new = serde_json::json!(2.0);
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    let mut foreign = knowlu_engine::journal::make_record(spec).expect("a record");
+    knowlu_engine::ledger::JsonlLedger::new(dir.join("state").join("journal")).append(&foreign).expect("verbatim");
+    let _ = &mut foreign;
+
+    // 3. The echo `apply` leaves when it mirrors that foreign change.
+    let echo = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("effort".to_string(), "2.0".to_string())], &echo, &mut journal, &Default::default()).expect("the mirror");
+
+    journal.invalidate();
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    let actors: Vec<String> = batch.records.iter()
+        .map(|r| serde_json::from_str::<serde_json::Value>(r["body"].as_str().expect("a body")).expect("a record"))
+        .map(|v| v["actor"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(!actors.iter().any(|a| a == sync::ACTOR), "an echo went up: {actors:?}");
+    assert_eq!(actors.len(), 2, "the human write and the foreign record, and nothing else: {actors:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2353,6 +2398,16 @@ Expected: FAIL to compile — `sync::Cursor`, `sync::build_push`, `sync::note_pa
 /// One page, both ways. The same number `sync_rows.ts::MAX_ROWS` and `sync-pull`'s `MAX_PAGE` use,
 /// and under PostgREST's own `max_rows` (1000), so a short page always means "that is all".
 pub const PAGE: usize = 500;
+
+/// Who a pulled write is attributed to on THIS machine's side of a reconciliation. The foreign
+/// records keep their own actor; this is the actor of the local effect — the supersede record, the
+/// amend card, the note write — so the Runs view and the journal both say a sync did it.
+///
+/// **Declared here, in the push half, and not beside `apply` where it is used most**, because
+/// `build_push` is what has to recognise it: every record under this actor is a mirror of something
+/// the account already holds, and pushing one would tell every other desktop about an event that
+/// only ever happened on this one (review S1, ruling R-C3′-plan-2).
+pub const ACTOR: &str = "agent:knowlu.sync";
 
 /// Generated, device-local, and **never synced**: it holds two integers, one timestamp and a map of
 /// note path → content hash, every one of which is already in the vault in plainer form.
@@ -2467,6 +2522,23 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
     let already: std::collections::BTreeSet<&String> = cursor.boundary.iter().collect();
     for record in journal.read(since, None) {
         if batch.records.len() >= PAGE { break; }
+        // **Never push what `apply` wrote** (review S1; ruling R-C3′-plan-2). When a pull applies a
+        // foreign change, the `write::` function that carries it out journals a SECOND, locally
+        // authored record under `ACTOR` — `write_literals` for a field, `write::move_note` for a
+        // rename, `write::delete` for a settle — with a fresh `ts` and this machine's own
+        // `device_name()`. That record hashes differently from the foreign one it mirrors, so the
+        // content filter below cannot see it: it would go up as a new event and come down on every
+        // other desktop as something that had never happened there. **Every** record under this
+        // actor is excluded, whatever its `op`: everything `apply` writes under it is a mirror of
+        // something the account already holds, so no device needs to learn it twice, and a filter
+        // narrowed to `move`/`delete` would miss the `set` echo the field path produces on every
+        // single pull. The foreign record itself is NOT excluded — its actor is whoever made it —
+        // and re-pushing it is free: `/sync-push` re-derives `sha256(body)` and `sync_db::saveRecords`
+        // upserts on `account_id,record_hash` against Task 1's `sync_records_once`, so it lands on
+        // the row it already is, keeps its `seq` (an identity column does not move on an update) and
+        // its `received_at` (a default, not an on-update), and therefore never resurfaces on another
+        // desktop's cursor.
+        if record.get("actor").and_then(Value::as_str) == Some(ACTOR) { continue; }
         let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
         let hash = sha256_hex(body.as_bytes());
         if already.contains(&hash) { continue; }
@@ -2561,9 +2633,8 @@ The half the whole feature is for. A record another desktop wrote is appended to
 - Test: `engine/tests/sync_contract.rs` (thirteen new cases)
 
 **Interfaces:**
-- Consumes: `reconcile::resolve`, `write::{write_literals, create, delete, move_note, propose_amendment, find_pending_amendment, WriteContext, WriteOpts}`, `approvals::{AMENDABLE_FIELDS, AMENDABLE_FOLDERS}`, `models::split_frontmatter`, `ids::{read_meta, inside_vault, is_id, NOTE_FOLDERS}`, `journal::{Journal, OPS, VIAS}`, Task 5's `is_note_path`, `sha256_hex`.
+- Consumes: Task 5's `sync::ACTOR`, `is_note_path`, `sha256_hex`; `reconcile::resolve`, `write::{write_literals, create, delete, move_note, propose_amendment, find_pending_amendment, WriteContext, WriteOpts}`, `approvals::{AMENDABLE_FIELDS, AMENDABLE_FOLDERS}`, `models::split_frontmatter`, `ids::{read_meta, inside_vault, is_id, NOTE_FOLDERS}`, `journal::{Journal, OPS, VIAS}`, Task 5's `is_note_path`, `sha256_hex`.
 - Produces:
-  - `sync::ACTOR: &str` = `"agent:knowlu.sync"`
   - `sync::PulledNote { device: String, path: String, text: Option<String> }`
   - `sync::Pulled { records: Vec<(String, Record)>, notes: Vec<PulledNote>, record_cursor: i64, note_cursor: i64, more: bool, warnings: Vec<String> }`
   - `sync::pulled_from_reply(&Value) -> Result<Pulled, SyncError>`
@@ -2880,14 +2951,9 @@ fn a_pull_reads_the_two_cursors_and_the_more_flag_from_the_reply() {
 
 - [ ] **Step 2: Run them and watch them fail.** `cargo test -p knowlu-engine --test sync_contract` → FAIL to compile on `sync::apply`, `sync::Pulled`, `sync::PulledNote`, `sync::ACTOR`.
 
-- [ ] **Step 3: Write the guards and the reader.**
+- [ ] **Step 3: Write the guards and the reader.** (`ACTOR` is **Task 5's**, declared beside the cursor because `build_push`'s actor filter is what needs it first — review S1; Task 6 only uses it.)
 
 ```rust
-/// Who a pulled write is attributed to on THIS machine's side of a reconciliation. The foreign
-/// records keep their own actor; this is the actor of the local effect — the supersede record, the
-/// amend card, the note write — so the Runs view and the journal both say a sync did it.
-pub const ACTOR: &str = "agent:knowlu.sync";
-
 /// One note as the account holds it. `text: None` is a tombstone: the account knows the path is
 /// settled and carries no bytes for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3076,8 +3142,13 @@ pub fn apply(
         }
         match crate::write::move_note(vault, &from, &dest, ctx, journal) {
             Ok(_) => report.moved += 1,
-            // The destination is taken. Not a failure of the sync and not something a retry fixes:
-            // the note stays where it is, named, and the student sees both.
+            // The destination is taken. Not a failure of the sync, and **not retried**: `Cursor`
+            // carries no retry queue, so if the destination frees up later this device does not
+            // notice. Pilot-acceptable and recorded as such (round-2 re-review, R4(b)): the record
+            // is journalled either way so nothing is lost, the note stays at its old path rather
+            // than overwriting whatever is there, and the warning names both paths. A retry queue is
+            // a feature, not a one-line fix, and it needs two desktops independently choosing one
+            // destination filename — a case this plan says has never been exercised even once.
             Err(crate::write::WriteError::Exists(_)) => {
                 report.warnings.push(format!("sync: {from} could not be renamed to {dest} — a note is already there"));
             }
@@ -3155,6 +3226,12 @@ pub fn apply(
             }
         }
         if !literals.is_empty() {
+            // `write_literals` journals, like every `write::` path function — so this produces one
+            // `op: set` record per field under `ACTOR`, with this machine's `device_name()` and a
+            // fresh `ts`, beside the foreign record already appended verbatim above. That echo is
+            // correct history for THIS device and is exactly what `build_push`'s actor filter keeps
+            // off the wire (review S1). It is also why the ruling covers every op rather than
+            // `move`/`delete`: the field path is the common case and fires on nearly every pull.
             if let Err(e) = crate::write::write_literals(vault, &path, &literals, ctx, journal, &Default::default()) {
                 report.warnings.push(format!("sync: {path} could not be written ({e})"));
             }
@@ -4618,3 +4695,27 @@ One finding needed a decision rather than a correction, and the controller made 
 
 - **The task count, the task order, the hand-off set and every Quinn-owned precondition.** Every finding was a defect inside a function or a hand-off list; the re-review says the same and raises no design change.
 - **M7's refusal**, which the re-review accepts with its own argument: a `_shared/` module would be a production file existing for tests, and a `*_test.ts` imported by another suite re-registers its `Deno.test` cases inside the importing run.
+
+---
+
+## Fix round 3 — resolutions (2026-09-17)
+
+Against the *Re-review after fix round 2* section of `docs/reports/2026-09-17-c3-account-vault-plan-review.md` (`062a3a1`). It closes R1–R6, the I3 nit and the I1 slip, judges the occupied-destination case **pilot-acceptable**, and raises one blocking finding.
+
+**S1 — the echo, and the ruling that answers it (R-C3′-plan-2).** Everything `apply` carries out goes through a `write::` function under `sync::ACTOR`, and every one of those journals a **second, locally authored record** beside the foreign one already appended verbatim: a `set` per applied field from `write_literals`, a `move` from `write::move_note` (round 2's R4), a `delete` from `write::delete`. That echo is correct as *this* device's history — it is what actually happened here — and wrong on the wire: it carries a fresh `ts` and this machine's own `device_name()`, so it hashes differently from the record it mirrors, `build_push`'s content filter cannot recognise it, and it would go up as a genuinely new row and come down on every other desktop as an event that had never happened there, credited to `agent:knowlu.sync` rather than to whoever acted. The receiving desktop's existence guards stop it acting twice, so nothing is written incorrectly and nothing bounces without bound — but every cross-device move or settle would permanently double in the journal, and the field path would fire on nearly every pull.
+
+**The ruling, applied as ruled:** `build_push` excludes **every** record whose `actor` is `sync::ACTOR`, whatever its `op`. Everything under that actor is a mirror of something the account already holds, so no device needs to learn it twice; a filter narrowed to `move`/`delete` — which is what the reviewer offered as one option — would have missed the `set` echo entirely, and the `set` echo is the common case.
+
+### What changed
+
+- **`build_push`** gains one line, `if record.get("actor").and_then(Value::as_str) == Some(ACTOR) { continue; }`, ahead of the hash filter, with the argument in a comment: which three `write::` calls produce the echo, why the hash filter cannot see it, and why the rule is every op rather than two.
+- **`ACTOR` moves from Task 6 to Task 5**, declared beside `PAGE` and `CURSOR_FILE`, because the push half is now what has to recognise it — a const used by a filter written two tasks earlier cannot be declared two tasks later. Task 5's *Produces* gains it, Task 6's loses it and its *Consumes* names Task 5 for `ACTOR`, `is_note_path` and `sha256_hex`.
+- **The one thing the reviewer did not check, checked: the field path.** `write::write_literals` **does** journal — every `write::` path function does, journal record first — so the applied foreign field values produce exactly the same echo, `op: set`, under `ACTOR`. The actor filter covers it, and `apply`'s call site now says so in a comment. This is the evidence for the ruling's "all ops" rather than an aside.
+- **And the other half, confirmed and written down: the verbatim foreign record is still pushed, and that is free.** It keeps its original actor, so the filter does not touch it; `/sync-push`'s handler re-derives `sha256(body)` and refuses a mismatch, and `sync_db::saveRecords` upserts on `account_id,record_hash` against Task 1's `constraint sync_records_once unique (account_id, record_hash)` — so a re-push lands on the row it already is, keeps its `seq` (an identity column does not move on an update) and its `received_at` (a default, not an on-update), and therefore never resurfaces on another desktop's cursor.
+- **One test, in the push task beside `build_push`'s others**: `a_record_this_devices_own_sync_wrote_is_never_pushed_back` builds a journal holding a human write, a foreign record appended verbatim, and the `ACTOR` echo that mirrors it, and asserts the batch carries **exactly two** records and no actor equal to `sync::ACTOR`.
+- **A fidelity-ledger row** records the rule, its reason and its bound, so the next reader meets it before the code rather than inside it.
+- **R4(b), the minor the re-review asked to be made explicit:** the occupied-destination case is now argued in `apply`'s own comment rather than left implicit — the record is journalled either way, the note stays at its old path rather than overwriting what is there, the warning names both paths, and there is deliberately **no retry queue**, which is a feature and a follow-up rather than a one-line fix.
+
+### What did not change
+
+The task count, the task order, the hand-off set, every Quinn-owned precondition, and `apply`'s behaviour on the receiving side. S1 is a push-side omission; nothing about what a pull does was wrong.
