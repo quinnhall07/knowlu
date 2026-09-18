@@ -298,3 +298,154 @@ was checked against live Supabase, Google or Stripe: GoTrue's `IsRedirectURLVali
 GoTrue's source, which Task 7 step 3 is right to prove live, and C6 rests on Stripe's documented
 `if_required` semantics. I did not read `site/terms.html` past line 24, C2's functions, or
 `engine/src/` beyond `ids.rs`.
+
+## Re-review after fix round 1 (2026-09-17)
+
+**Verdict: Execute after fix round 2** — three lines to change, none of them structural. The round is
+otherwise complete and I re-checked every cite it wrote against the code: all hold, including the four
+it corrected out from under the review (`migrations_test.ts:304` not `:303`; the view pin `:320` not
+`:322`; `checkoutForm` `:39` and `payment_method_collection` `:55`; `tests/account.rs:149` for the
+sign-up test, whose `sign_up_at` call is at `:152`). What remains: **R1** Task 7's live proof still
+demands the card-free Checkout that R-C1b-2 rejected; **R2** the overlay's `UP_BUSY` is placed inside
+the click listener, where it resets on every press and the new test passes anyway; **R3**
+`[auth.rate_limit]` is a sibling TOML table, not a key "in the same block" as `enable_confirmations`.
+R4-R6 are cheap.
+
+### The original findings
+
+- **C1 resolved.** `plan.md:123-165`. `assertEquals(parsed, 18, …)` really is at
+  `migrations/migrations_test.ts:304`, `assertExecuteRevoked` counts before the `returns trigger`
+  exemption, the view pin at `:320` counts views this migration does not create, and `:471` is
+  `exemptedTriggers.includes("handle_new_user")`. The per-file test now strips `--` lines and all six of
+  its claims hold against the migration step 2 writes; nothing anywhere pins the raise text (only
+  `20260910000100_accounts.sql:120` and `:123` carry it).
+- **C2 resolved.** `plan.md:1133-1150`. After the four deletions the only `password` left in
+  `account.rs` is `:130`'s `cred.password.expose()`; `"password"` survives only at `:233`, `:250`
+  (deleted) and `:181` (rewritten in the same step), and `password: &str` / `password: String` only at
+  `:226`, `:249`, `:312`, `:327` — all deleted. Both new assertions are satisfiable.
+- **C3 resolved.** `plan.md:1157` rewrites `static_assets.rs:890`; `plan.md:1424-1426` swaps the id
+  lists at `:980` and `:1032`, quoting both lines exactly. A fourth pin the review missed —
+  `static_assets.rs:545`, `js.contains("sign_up") && js.contains("sign_in")` — is inside
+  `the_account_panel_gates_on_eighteen_and_links_both_policies`, which Task 5 step 1 replaces wholesale,
+  so it is covered. The relaxation from `args.ageAttested = EL("wiz-18").checked` to `ageAttested` is
+  right: `console.js:1260` and `:1725` carry it today and no `age_attested` appears on the page.
+- **C4 resolved.** `plan.md:1669-1671` rewrites `static_assets.rs:523-526` and the `.expect` at `:497`;
+  `plan.md:1687-1696` tables all six write sites. Verified against `console.js`: `wizGo` is
+  `:1546-1608` (holds `:1584`, `:1601`), `wizFinish` `:1627-1690` (`:1631`, `:1676`, `:1688`) and
+  `credentialsStranded` `:1617-1626` (`:1623`) sits between them — see **R5**.
+- **C5 superseded by R-C1b-5, applied consistently.** No `[auth.external.google]` anywhere; the comment
+  and its pin (`plan.md:1320-1339`) land in `_shared/config_toml_test.ts`, whose `CONFIG_TOML` really is
+  at `:4` and really is a `Deno.readTextFile` URL. `config.toml` declares no `[auth.external.*]` today,
+  so the absence assertion is true before and after. P1/P2/Q1/Q2, §3, §13 and the D7 row all agree, and
+  no `GOOGLE_*` value appears in either document.
+- **C6 superseded by R-C1b-2, applied — except R1.** `handler.ts:54` and `:55` are left alone,
+  `site/terms.html:24` stays true, D8, §8, §11 R2, the Architecture line and exit gate 6 all moved.
+  `plan.md:1804` did not.
+- **I1 superseded by R-C1b-3.** The trigger reads nothing and raises nothing; the per-file test bans
+  `raise exception`, `raw_user_meta_data` and `public.consents` over comment-stripped code.
+- **I2 answered twice.** R-C1b-3 removes the fabricated `age_18` row; R-C1b-4 sets `email_sent = 20`
+  with the trade-off stated both ways. `email_sent` is the right Supabase key and custom SMTP is
+  configured, so the number takes effect. Placement is **R3**.
+- **I3 resolved.** `plan.md:831-880`. Non-blocking accept against the deadline, 404 + `continue` for
+  any target whose path is not `/callback`, return on the first real one, listener still by value. The
+  new test is deterministic (the probe reads to EOF before the browser connects, so accept order is
+  fixed), and `write_page` keeps both existing listener tests' `HTTP/1.1 200 OK` prefix true.
+- **I4 resolved.** `post_authed` mirrors `post_for_url` (`account.rs:782-796`) field for field —
+  `agent()`, `UNREACHABLE`, `limit(1 << 16)`, `provider_error` — and `open_checkout`'s rewrite matches
+  the shipped body (`:799-809`) exactly, `PENDING_TARGET` included. `env_pair()`'s third member is the
+  API base (`:296`) and `attach_in`'s log line is at `:602`, as cited. The retry test is satisfiable:
+  `loopback` serves two responses, `checkout_url_at` is not in the `api_base()`-reaching set that
+  `no_test_in_this_file_can_reach_the_compiled_in_project` guards, so it needs no `ApiBase::set`.
+- **I5 resolved.** `handler_test.ts:6` is the only full `Deps` literal in that file; `consentDeps` now
+  builds from `deps({…})`. The four checkout stubs are at `:43`, `:79`, `:114`, `:142` as stated, and
+  Task 2 step 4 remembers `billing-checkout/index.ts`'s select.
+- **I6 resolved in substance.** Markup, three branches, the shared tail and a new `#upgrade` test are
+  all written out; `.set-row` is `display: flex` at `console.css:470` with no `[hidden]` rule, so that
+  addition is a live fix, not a pre-emptive one. The busy flag's placement is **R2**.
+- **I7 resolved** (exit gate 4 + Task 7 step 3 prove both states, report before merge). **I8 resolved:**
+  `plan.md:95` says `#wiz-google-signin` and why, and it cannot collide with `id="wiz-google"`.
+
+**Minors.** **M1** every corrected cite verified above, plus `index.html:86-93` (account panel) and
+`:174-182` (overlay). **M2** verified by script over both `generate_handler!` lists: 30 + 43 today, 62
+distinct, 11 shared; after C1b 29 + 42, 71 registrations, 10 twice, 61 distinct — the plan's arithmetic
+and its list of the seven shared sign-in commands are both right. **M3** `static_assets.rs:617` is
+`the_wizards_privacy_sentence_is_the_sites_privacy_sentence` and nothing pins `PRIVACY_VERSION`; "a NEW
+test" is correct, and Task 7's three edits do not touch the sentence that test reads. **M4** P1 done,
+P2 the controller's, both pointed at Task 7 step 3. **M5** `post_authed`/`post_no_reply` remove the
+string match on `post_for_url`'s private literal. **M6** `restSelect`/`restPatch`/`restUpsert` and
+`sha256Hex` are all already imported at `account/index.ts:1-11`, and `sha256Hex` does lower-case
+(`_shared/crypto.ts:31`); the new `restUpsert(rest, "consents", …)` does not disturb the purge guard at
+`handler_test.ts:363`, which matches `restPatch(rest, "consents"` only. **M7** `wizValid` really does
+contain both asserted gate strings (`console.js:1528`, `:1529`) and `wizGo` `!wizValid()` (`:1547`), and
+Task 6 step 4 moves the step-1 sentence to `"Sign in first."` so the pin is satisfiable at its own gate.
+**M8** added. **M9** one sentence at `plan.md:1087`. **M10** the three deletions and the narrowed `use`
+are right — `Session` is still used at `tests/account.rs:166` without an inner import, so keeping it in
+the `use` leaves no unused-import warning.
+
+### New findings
+
+**R1. `plan.md:1804` (Task 7 step 4) still asks the live proof to confirm the behaviour R-C1b-2
+rejected.** The step ends: *"type P3's test-mode 100-percent promotion code on Stripe's page, and
+confirm Checkout completes **with no card asked for**"*. Under the ruling the card is always collected
+(`handler.ts:55` untouched), and exit gate 6 now says so in as many words. A controller running the gate
+would read a working flow as a failure — or "fix" the form value back to `if_required`. It is the only
+survivor of the (b)-world in either document (`grep` finds no other).
+*Fix:* "…confirm Stripe still asks for a card, the total reads $0.00, nothing is charged, the webhook
+writes `entitlements`, and the wizard's poll advances to the name panel."
+
+**R2. `plan.md:1507-1527` — `var UP_BUSY = false;` is placed inside the click listener, which makes
+I6's guard a no-op, and `plan.md:1417-1418` cannot catch it.** The sentence reads "the `#up-create`
+/`#up-signin` branch goes; these three take its place **inside the same**
+`EL("upgrade").addEventListener("click", …)`", and the block immediately under it declares `UP_BUSY`,
+`upBusy()` and `afterUpgradeSignIn()`. Declared there, the flag is re-initialised to `false` on every
+press: two presses on Continue with Google are two commands, two loopback listeners and two browser
+tabs — exactly what I6 asked for a guard against. The indentation hints at IIFE scope, but the prose
+outranks indentation for an executor, and both new assertions (`js.contains("function upBusy(")`,
+`listener.contains("UP_BUSY")`) pass either way.
+*Fix:* say the flag and the two functions go at IIFE scope beside `upgradeUnreachable()`
+(`console.js:1237`), and that only the three branches go inside the listener; then pin it — the text
+**before** `EL("upgrade").addEventListener` must contain `var UP_BUSY`.
+
+**R3. `plan.md:1284` — "in the same block" is wrong for `[auth.rate_limit]`, and the new pin does not
+notice.** `[auth.rate_limit]` is a sibling table of `[auth.email]`, not a key in it. Inserted where the
+sentence points — straight after `enable_confirmations` (`config.toml:28`) — it captures
+`double_confirm_changes = true` (`:29`), which is not a rate-limit key, and `supabase config push`
+fails or, worse, pushes an `[auth.email]` that has quietly lost a setting. `config_toml_test.ts`'s new
+checks (`/^[auth.rate_limit]$/m`, `/^email_sent = d+$/m`) are satisfied wherever it lands.
+*Fix:* name the insertion point — after `double_confirm_changes = true` (`config.toml:29`) and before
+the SMTP comment block at `:31`, at `[auth]` sibling level — and add one assertion that
+`double_confirm_changes` appears before the first `[auth.rate_limit]` line.
+
+**R4. `plan.md:1341` (Task 4 step 4) never runs the Deno test Task 4 writes.** The gate is
+`cargo test --workspace` plus `deno fmt --check`; step 3b adds assertions to
+`_shared/config_toml_test.ts` that are first executed at exit gate 11. A task's own test must be green
+at its own gate.
+*Fix:* step 4 runs `deno test --allow-read --config cloud/supabase/deno.json cloud/supabase/` and
+`deno lint`, as Tasks 1 and 2 already do.
+
+**R5. `plan.md:1687-1696` converts `console.js:1623`, but no test reaches it, and the plan says one
+does.** Step 1's pin slices `wizGo` (`function wizGo(` to `function wizRegister(`) and `wizFinish`
+(`function wizFinish(` to the Checkout-page comment). `credentialsStranded` is `console.js:1617-1626`,
+between the two slices, so `:1623` is outside both — yet `plan.md:1696` claims the grep returning one
+line "is what step 1's test asserts from the other direction". A missed `:1623` is worse than cosmetic:
+`renderWizard()` fires on the next line and repaints `EL("wiz-next").disabled = WIZ.busy`, so a
+stranded-credentials recovery leaves Next stuck.
+*Fix:* add `assert_eq!(js.matches("EL(#wiz-next#).disabled").count(), 1, "renderWizard is the only
+writer")` to step 1 (with the real quoting), and drop the "from the other direction" clause.
+
+**R6. Two nits.** (a) `plan.md:1422`'s "`OURS` becomes `["wiz-zy-pass", "wiz-vhl-pass"]`" has to move
+the length annotation too — it is `const OURS: [&str; 4]` (`static_assets.rs:384`). (b) Task 4 step 3
+leaves `config.toml:31-35`'s comment reading *"`enable_confirmations = true` means every sign-up depends
+on this mail arriving"*, stale the moment the line below it flips.
+
+### What I checked, and did not
+
+Read against the code: `app/src/account.rs`, `app/tests/{account,static_assets}.rs`,
+`app/static/{index.html,console.js,console.css}`, `cloud/supabase/config.toml`, both `migrations_test.ts`
+files, `20260910000100_accounts.sql`, `_shared/{db,crypto,config_toml_test}.ts`,
+`account/{handler,handler_test,index}.ts`, `billing-checkout/{handler,handler_test}.ts`,
+`scripts/wizard-check.py`, `app/src/main.rs`, `site/{terms,privacy}.html`, `engine/tests/site.rs`. No
+command was run but `grep`, `sed` and one Python count of the two `generate_handler!` lists — no `cargo`,
+`deno` or `supabase` — so every red/green claim is still read from assertions. Unchecked from here, and
+ruled: that the CLI pushes only declared properties, that the dashboard provider is live on both
+projects, and Stripe's `if_required` semantics.
