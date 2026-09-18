@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
+**Status: AMENDED 2026-09-17 (fix round 1 — the review's C1, C2, I1–I6; Minors taken: M1, M2, M3, M4, M5, M6, M8, M9, M10, M11, M12, M13, and M7 in part; refused: M7's shared `refusal()` helper, because a test-only module under `engine/tests/` compiles as its own integration crate and one under `cloud/supabase/functions/_shared/` would be a production file existing for two suites — the three-line duplication is the cheaper of the two and is now named as a decision). Originally WRITTEN 2026-09-17; valid on Quinn's signature, which landed the same day; not started.** This plan is written from the cloud design's **Amendment 2026-09-17 — desktop only, the account vault, the relay fetch** (`docs/specs/2026-09-09-knowlu-cloud-design.md`, its last section). It was drafted while that amendment stood as *PROPOSED* and is written to be valid **on signature and not before**; Quinn **signed it on 2026-09-17** (`9ff3b57`, *SIGNED by Quinn, 2026-09-17*), so Task 1 may start. Every ruling this plan argues from is one of the amendment's six; nothing in it depends on a sentence Quinn has not spoken. It **supersedes `docs/plans/2026-09-14-c3-sync-plan.md`**, which was written for an end-to-end-encrypted copy under a device-held key and whose Tasks 1–3 are already executed on the paused branch `c3-sync` (head `934fefd`).
 
 Execute on the **existing** branch `c3-sync` in its existing worktree (`C:\Users\danie\GitHub\knowlu\.claude\worktrees\c3-sync`), forked from `origin/main` at `7585ec6`. **Rebase it on `main` first** (`main` has moved: PR #8, `274e137`), then Task 1. The nine commits already on it stay; this plan reuses some and retires the rest, and says which in every task.
 
@@ -19,7 +19,7 @@ Execute on the **existing** branch `c3-sync` in its existing worktree (`C:\Users
 
 **Architecture.** One plaintext row store, two endpoints, one engine module. On the **device**, `engine/src/sync.rs` collects each new journal record and each changed note, posts them to `/sync-push`, pulls what it has not seen from `/sync-pull`, appends foreign journal records to the local ledger **verbatim** — they carry their own `ts`, `device` and `seq`, and rewriting those would destroy the attribution judge-once reads — and settles the note-level effect through the existing pure `reconcile::resolve`, writing the winners through `write` and filing an amend card for every field both sides moved. On the **server**, two thin Deno handlers over two Postgres tables that hold the record's canonical JSON and the note's text under RLS, with an opaque 16-hex device token, a 64-hex content hash and a receive timestamp beside them. The cursor is a per-account identity column; a retried push is idempotent on the content hash, which the server **re-derives from the body it was given** rather than trusting. `knowlu-engine sync` is one more slot step with the same discipline as `judge` — **it always exits 0** — and it runs **first**, so the day ranks on what came down.
 
-**Tech Stack:** Supabase (Postgres 15 + Edge Functions on Deno) for the two endpoints, reusing C1's `_shared/{auth,db,entitlement,http}.ts` and C2's `CloudClient` — **no second HTTP client anywhere**; Rust 1.98 `stable-x86_64-pc-windows-gnu` with `sha2` 0.10 for the content hash (already resolved in this workspace's `Cargo.lock`, so this is one direct edge and no new crate — the same argument the retired envelope made for `ring`, and the reason `ring` and `base64` leave in Task 2); `deno test` for every pure module and one request/response contract test per function; `std::net::TcpListener` on `127.0.0.1:0` for every Rust test that exercises a client.
+**Tech Stack:** Supabase (Postgres 15 + Edge Functions on Deno) for the two endpoints, reusing C1's `_shared/{auth,db,entitlement,http}.ts` and C2's `CloudClient` — **no second HTTP client anywhere**; Rust 1.98 `stable-x86_64-pc-windows-gnu` with **`ring` 0.17** for the content hash — `ring::digest::SHA256`, the same crate this binary already links through `ureq` → `rustls`, so the hash costs **no new crate at all**; `base64` leaves in Task 2 with the envelope and `ring` stays for the one primitive that is still needed (`sha2` is deliberately **not** used: it is absent from `knowlu-engine`'s own dependency graph and would pull `digest 0.10` beside the engine's existing `sha1`/`digest 0.11`, two majors of two crates into a binary with a 6 MiB CI size gate); `deno test` for every pure module and one request/response contract test per function; `std::net::TcpListener` on `127.0.0.1:0` for every Rust test that exercises a client.
 
 **Spec.** `docs/specs/2026-09-09-knowlu-cloud-design.md` — read the **Amendment 2026-09-17 whole** before Task 1, then **§5.5** (the section this plan implements, as amended), §3.1, §4.4 and §9; `VISION.md`'s commitment 2 **as amended** is the sentence the whole plan serves. The parent design for the vault, the journal and `write` is `docs/specs/2026-08-11-personal-ops-system-design.md`. The superseded plan is `docs/plans/2026-09-14-c3-sync-plan.md` and its review is `docs/reports/2026-09-14-c3-sync-plan-review.md`; **the review's resolutions are rulings this plan inherits** and are carried in the fidelity ledger and in the tasks that hold them (B1's seed allowlist, B2's thrown-`Response` convention, B3's three `state/` inputs, B5's startup thread, I3's read lag, I4's check order, I5's empty-copy rule, I7's two guards, I9's hand-off rule, I10's one `materialise`). The paused branch's own ledger is `.superpowers/sdd/2026-09-14-c3-sync-plan/progress.md`; **R-C3-exec-4** (the corpus-wide pins are bumped by whichever stream moves them) and **R-C3-exec-5** (`db push --include-all` for every C3 migration) still bind and are stated again below.
 
@@ -32,7 +32,7 @@ Every task's requirements implicitly include this section. It is the superseded 
 - **Add no single-user assumptions.** Nothing in `cloud/`, `engine/`, `app/` or a fixture names a person, a vault, a machine, an account or a credential. Anything that would need hand-editing for a second user is a bug. (`CLAUDE.md`, rule 1.)
 - **Never regenerate a frozen reference.** The eight Python-written references in `engine/tests/fixtures/` are read-only oracles. The three Rust-generated surface references (`surface-today-{s1,s1-migrated,full}.json`) may be regenerated only in a commit whose diff shows the change and whose message says why (console spec §4.6) — **no task here regenerates one**, and `git status --porcelain --untracked-files=all engine/tests/fixtures/` is **empty at every task boundary**: no task in this plan adds, edits or removes a file under `engine/tests/fixtures/`.
 - `engine/tests/oracle.rs` and `engine/tests/surface_oracle.rs` must pass **unchanged** at every task boundary. None of the three fixture vaults carries a `config/cloud.yaml`, so `sync` skips them, the entitlement gate never fires on them, and their `today.md` cannot move.
-- **Every note write goes through `write` — journal record first, single-line frontmatter surgery second.** `src/yamlemit.rs` is the crate's one YAML emitter. **No note is ever parsed and re-dumped.** There is exactly one recorded exception in this plan, argued in the fidelity ledger and again at Task 9: **restore materialises bytes that were already journalled on the device that made them**, so it writes note files with `pystr::write_text` and journal lines with `JsonlLedger::append`, and it runs only into a vault holding no note its caller did not name.
+- **Every note write goes through `write` — journal record first, single-line frontmatter surgery second.** `src/yamlemit.rs` is the crate's one YAML emitter. **No note is ever parsed and re-dumped.** There are **two recorded exceptions** in this plan, each argued in the fidelity ledger and again at the task that takes it, and both are the same argument: **bytes that were already journalled on the device that made them are materialised, not re-written**. (1) **`sync::restore`** (Task 9) writes note files with `pystr::write_text` and journal lines with `JsonlLedger::append`, and runs only into a vault holding no note its caller did not name. (2) **`sync::apply`** (Task 6) writes a pulled note's text with `pystr::write_text` for a path this device has **never seen**, in the same step that appended that note's own `create` record verbatim — `write::create` would fabricate a second one stamped with this device and today's `ts`. Its bound is narrower than an allowlist and is enforced in code: the path must pass `is_note_path`, its record must already have been appended, and **a note this device already has is never overwritten** (its frontmatter is settled by `reconcile` and its body is never merged).
 - **`journal::VIAS`, `journal::OPS`, run records, ledgers and note frontmatter are contracts with existing vaults: byte-identical, never renamed.** This plan adds no `via`, no `op`, no frontmatter key and no run-record field. The one new file it puts in a vault is `state/sync-cursor.json`, which is generated, device-local and never synced.
 - **All JSON this crate writes goes through `ledger::dumps_value`** (Python `json.dumps` separators), never `serde_json::to_string`. **The canonical bytes a record is hashed over are `dumps_value`'s**, which is what makes a hash computed on two machines the same hash — and, now that the server can read the row, what makes the server's own re-derivation agree with the device's.
 - **The vault stays plain text on the student's machine, and the device ranks from the folder on disk — never from the account.** *(Amended: the account is the source of truth for the **data**; the folder is the source of truth for **a run**.)* A pull that fails, a 402, a 500: every one is a named line and exit 0, and the day still ranks from the folder. **Nothing in this plan ever deletes a local note because the cloud does not have it.**
@@ -92,7 +92,7 @@ One row per ruling, spec sentence or inherited resolution C3′ carries or narro
 | **R2** | "the service holds each account's notes and journal **readable by the service**, encrypted at rest by the platform, purged by `DELETE /account`" | Amendment ruling 2; §11 R4 **reversed** | Tasks 1, 3, 4. Two Postgres tables under RLS holding the record's canonical JSON (`sync_records.body`) and the note's text (`sync_notes.body`), encrypted at rest by Supabase's own storage encryption, deleted by the purge list C1 maintains (hand-off **H1**). **Narrowed, on the record: Postgres, not Supabase Storage** — unchanged from the superseded plan's argument. A vault's whole corpus is markdown and JSON (500 notes is about a megabyte); Postgres gives it row-level security, one access path, a cursor that is just an identity column and a purge that is one more table name in a list C1 already maintains. Storage would add a bucket, a second authorisation surface, a second retention mechanism and object names that are themselves metadata. **And the endpoints are `/sync-push` and `/sync-pull`, hyphenated**, not §5.5's slashed spelling: Supabase routes `/functions/v1/<function-name>` and a slash in a function name is a different function (C2's review Critical 1 ruled the same way). |
 | **R2** | "The device sync key, the recovery code, the sync switch and its own screen (C3's P2 screen), the key-generation machinery, 'restore with your recovery code'… what goes" | Amendment ruling 2 | Task 2 retires all of it: `engine/src/sync.rs`'s key, envelope, keyed-index and recovery-code sections are deleted, `ring` and `base64` leave `engine/Cargo.toml`, `sync_vectors.json` and `sync_envelope_test.ts` are deleted, and Task 1's migration drops `public.sync_generation`. **No `app/src/sync.rs` is created and no Tauri command is added** — the superseded plan's five (`sync_state`, `set_sync`, `set_sync_key`, `export_data`, `stage_restore_key`) existed to drive a switch, a key and an export that no longer exist. The counts in `CLAUDE.md` stay **43 / 30 / 62**, and Task 12's docs step says so rather than recounting to the same number by accident. |
 | **R2** | "the folder export — VISION commitment 2's 'open the folder, copy it, and leave with it' is struck on Quinn's word; `GET /account/export` stays as the data-access right (§9)" | Amendment ruling 2 | **Dropped, not moved.** The superseded plan's Task 10 added an *Export my data* settings row calling C1's `GET /account/export`; C3′ adds nothing to the settings panel. `site/privacy.html`'s rights list (`:96`) already names export and is **not edited** — the right is unchanged and C1 already implements it. `scripts/settings-check.py` is verified, not edited (hand-off **H13**). |
-| **R2** | "Each desktop keeps a plain-text **mirror**… every write journals locally exactly as today and syncs through the account; two desktops moving one field offline still surface an amend card, never a silent merge" | Amendment ruling 2; §5.5; VISION | Tasks 5, 6, 7. Carried through the existing pure `reconcile::resolve` with the roles reversed (Task 6 states the reversal twice, once in prose and once in the code). **Narrowed where it must be:** `approvals::validate_amendment` only ever applies a card whose target is under `AMENDABLE_FOLDERS` (`tasks`, `courses`) and whose field is one of `AMENDABLE_FIELDS` (nine), with non-null scalars on both sides. A conflict outside that set cannot become a card that would ever apply, so it takes reconcile's own rule (later `ts` wins), keeps its `supersede` record for the loser, and emits **one named warning line** naming the note and the field. Nothing is silently dropped; the losing value is in the journal either way. |
+| **R2** | "Each desktop keeps a plain-text **mirror**… every write journals locally exactly as today and syncs through the account; two desktops moving one field offline still surface an amend card, never a silent merge" | Amendment ruling 2; §5.5; VISION | Tasks 5, 6, 7. Carried through the existing pure `reconcile::resolve` with the roles reversed (Task 6 states the reversal twice, once in prose and once in the code). **And the rule that makes "never a silent merge" true rather than nearly true** (review C2): under the reversal `reconcile::resolve` puts the **foreign** value into `res.apply` exactly when the foreign side wins — so on the case the feature exists for, writing `apply` wholesale would overwrite this device's value *and* file a card for it. The card would then carry a `from` that no longer matches the note, and `approvals::validate_amendment` compares `from` against the note before applying, so it could never be approved. **A field that produced a supersede record and is card-eligible is therefore withheld from `apply` before `write_literals` sees it: the card IS the write.** The note keeps this device's value until the student answers, the card reads `from:` this device's value and `to:` the foreign one, and `report.applied` does not count it. **Narrowed where it must be:** `approvals::validate_amendment` only ever applies a card whose target is under `AMENDABLE_FOLDERS` (`tasks`, `courses`) and whose field is one of `AMENDABLE_FIELDS` (nine), with non-null scalars on both sides. A conflict outside that set cannot become a card that would ever apply, so it takes reconcile's own rule (later `ts` wins), keeps its `supersede` record for the loser, and emits **one named warning line** naming the note and the field. Nothing is silently dropped; the losing value is in the journal either way. |
 | **R2** | "restoring is signing in on a new desktop; the mirror fills from the account — old Task 11's picker link becomes the wizard's ordinary path when the account already holds a vault" | Amendment ruling 2 | Task 9. `create_vault_in` calls `knowlu_engine::sync::restore_into(&dest)` after `move_session` and before `finish_or_roll_back` (hand-off **H11**). **Three inherited resolutions ride on it and are kept:** the **seed allowlist** (review B1 — the vault is seconds old and `scaffold::seed_writes` has already written `archive/_migrated.md`, `tasks/get-to-know-knowlu.md` and one `courses/<slug>.md` per seeded course, so the allowlist is computed from `note_paths(vault)` at the moment it runs rather than demanded to be empty); the **empty-copy rule** (review I5 — an empty account copy keeps the vault and says so on the finish panel; only an `Err` rolls the folder back); and the **one `materialise`** (review I10 — `restore` is the allowlist check plus `materialise`, and `restore_all` calls `materialise` directly for the second and later pages). |
 | **R3** | "The engine refuses to run a slot without a valid entitlement past the 72-hour grace the app already caches (a task of C3′ below; today only the app gates)" | Amendment ruling 3 | Task 8, and **precondition P5 is the one open half**. `engine/src/entitle.rs` reads the cache the app already writes — `%LOCALAPPDATA%\knowlu\profiles\<profile_id>\entitlement.json`, whose `<profile_id>` is the middle segment of `config/cloud.yaml`'s `session_credential_target` — and re-implements `account::decide`'s arithmetic (status in `active`/`trialing`, `checked_at` within 72 hours, an hour of clock-skew tolerance) in the engine, pinned to the app's by a test that reads both constants. **Narrowed, on the record: the gate is in `engine/src/main.rs`'s match, not in each command.** One `if let Some(line) = entitle::gate(&vault)` in front of the slot arms is one place to read, one place to review and one place to widen if P5 is answered (b); a gate repeated in five `run_lines` bodies is five places to forget it. The consequence, stated so it is chosen deliberately: a *library* caller (`knowlu_engine::cli::run` from a test, or the app calling into the crate) is not gated. The binary is the product and the binary is what an orphaned copy runs. |
 | **R3** | "D4 stands: ranking, capacity, rendering, the journal and the scheduler run on the device and work offline, and today's list exists with no connectivity because it is computed from the mirror" | Amendment ruling 3; §3.1 | Global Constraints, and exit-gate item 3: a device with no network or no entitlement ranks the day from the folder on disk and says why in one line. This is also the argument for P5's recommendation (a). |
@@ -100,9 +100,10 @@ One row per ruling, spec sentence or inherited resolution C3′ carries or narro
 | **R5** | "C3′ — the account vault (sync without encryption on the paused branch's tables; the privacy sentences; the export dropped; the entitlement check in the engine; git leaves the product; `ics_url` leaves the vault)" | Amendment ruling 5 | **This plan's scope, exactly**, one clause per task group: Tasks 1–7 the sync, Task 8 the entitlement check, Task 9 the restore that makes a second desktop real, Task 10 git, Task 11 the privacy sentences and `ics_url`, Task 12 the close. |
 | **R5** | "The paused `c3-sync` branch's Tasks 1–3 are kept where they fit… and retired where they do not (the envelope, the key, the vectors)" | Amendment ruling 5 | Tasks 1, 2, 3. **Kept:** the two tables' *shape* (an identity-column cursor, a content-hash uniqueness constraint, a `rev` sequence and its stamping trigger for notes, `sync_usage` and its O(1) counter triggers, `sync_ceiling_bytes()`/`sync_limits`, `sync_prune(int)` and its cron job, the RLS-and-no-write-policy rule, the purge list, `_shared/sync_rows.ts`'s validator shape and its `noExtras` rule). **Retired:** the envelope, the key, the recovery code, the keyed index, `sync_generation`, the vectors and both languages' vector tests. **Never edited:** `20260912000100_sync.sql` and `20260912000200_sync_usage_prune.sql`, which are on staging; Task 1's `20260912000300_sync_plaintext.sql` is a new file that drops and recreates the two content tables. |
 | **R6** | "the wording of the privacy sentence (C3′'s task, read by Quinn and the lawyer before merge, as C3's P2 already required)" | Amendment ruling 6 | **Precondition P1**, and Task 11 step 3 carries the drafted words. |
-| §5.5 Down | "the service's own writes… are queued as journal-shaped records the client pulls at `/sync/pull` and applies through `write`… with `actor: agent:knowlu.<kind>` and judge-once intact" | cloud design §5.5 | **Narrowed, on the record, and the reason has changed with the amendment.** All four kinds are **already delivered by pull, inside a slot step, by C2** — `/judge-task` per item inside `judge`, `/ingest-coursework` inside `coursework`, `/judge-event` inside `rank`'s roster pass, and the Gmail and promoted-rule queues inside `judge` — each written through `write` under `agent:knowlu.<kind>` with judge-once intact, which is exactly the property the sentence asks for. The superseded plan's *structural* reason for not re-routing them (a server-originated row could not be sealed) **no longer applies**: the server could now write a row. What decides it instead is smaller and still decides it: re-routing would re-open every C2 test for no behaviour change, and it would give the service a second way to write a note — one that skips the `judge`-step reporting a student reads in the Runs view. **C3′'s `/sync-pull` therefore carries exactly one thing: records another desktop of the same account pushed.** Revisit in C5, where the relay moves more of the fetch server-side and the question arises for real. |
+| §5.5 Down | "the service's own writes… are queued as journal-shaped records the client pulls at `/sync/pull` and applies through `write`… with `actor: agent:knowlu.<kind>` and judge-once intact" | cloud design §5.5 | **Narrowed, on the record, and the reason has changed with the amendment.** All four kinds are **already delivered by pull, inside a slot step, by C2** — `/judge-task` per item inside `judge`, `/ingest-coursework` inside `coursework`, `/judge-event` inside the **judge** step's events pass (`enrich.rs`'s `run_lines_with`, not `rank` — `rank_cannot_reach_a_judgment_endpoint` forbids the string in `cli.rs` outright, review M3), and the Gmail and promoted-rule queues inside `judge` too — each written through `write` under `agent:knowlu.<kind>` with judge-once intact, which is exactly the property the sentence asks for. The superseded plan's *structural* reason for not re-routing them (a server-originated row could not be sealed) **no longer applies**: the server could now write a row. What decides it instead is smaller and still decides it: re-routing would re-open every C2 test for no behaviour change, and it would give the service a second way to write a note — one that skips the `judge`-step reporting a student reads in the Runs view. **C3′'s `/sync-pull` therefore carries exactly one thing: records another desktop of the same account pushed.** Revisit in C5, where the relay moves more of the fetch server-side and the question arises for real. |
 | §5.5 Second device | "replaying the journal onto an empty vault reconstructs it — the migration script already proved the shape" | cloud design §5.5 | Task 9. **Carried, with one recorded exception to `CLAUDE.md`'s "every note write goes through `write`".** A restore writes note files with `pystr::write_text` and journal lines with `JsonlLedger::append`, because every one of those records **already exists** and carries the `ts`, the `device` and the `seq` of the machine that made it. Putting them through `write` would fabricate a second `create` record, stamped with *this* device's name and *today's* `ts`, for a note created three months ago on another laptop — and `journal::human_set`, which is what judge-once reads, would then answer with the restore instead of with the student's own decision. The invariant exists to make attribution complete; re-journalling a restore is the one way to break it while appearing to obey it. **Bounded exactly as the code enforces it:** `restore` refuses a `dest` holding any note in any of `ids::NOTE_FOLDERS` (`tasks, approvals, archive, courses, issues, info`) other than the ones its caller explicitly tolerates. |
-| §5.5 Backups | "the local snapshot tick stays; the cloud copy is the durable one" | cloud design §5.5 | Tasks 9 and 10, and the backup mirror is untouched. **`engine/src/backup.rs` is not modified by any task in this plan**, which is the whole of "the local snapshot tick stays"; exit-gate item 11 asserts it is byte-identical to `main`. |
+| §5.5 Second device | "the service's own writes … applied through `write`" — and the note another desktop **created**, which has no local file to apply onto | cloud design §5.5; `CLAUDE.md` | Task 6. **The second recorded exception, and it is the first one's argument in a smaller box.** A pulled note for a path this device has never seen arrives with its own `create` record in the same batch; that record is appended to the ledger verbatim, carrying the other desktop's `ts`, `device` and `actor`. Writing the file through `write::create` would then journal a **second** creation, stamped with this device and today — the same attribution damage the restore row argues, on one note instead of a vault. So `apply` writes the bytes with `pystr::write_text` **after** the record is appended, never before, and only for a path that passes `is_note_path`. **It never overwrites a note this device already has**: for a path with a local file the frontmatter is settled by `reconcile::resolve` above and the body is never merged, so the pulled text is dropped and the file on disk keeps its own. That is the whole bound, and `a_pulled_note_for_a_path_this_device_has_never_seen_arrives_whole` and `a_pulled_note_never_overwrites_a_note_this_device_already_has` are the two tests that hold it. |
+| §5.5 Backups | "the local snapshot tick stays; the cloud copy is the durable one" | cloud design §5.5 | Tasks 9 and 10, and the backup mirror is untouched. **`engine/src/backup.rs` is not modified by any task in this plan**, which is the whole of "the local snapshot tick stays". **Exit-gate item 12 asserts it by diff, not by a scan** (review M4): `git diff --quiet main -- engine/src/backup.rs` is the check, because a test that only greps for `pub fn` would pass on a file somebody had rewritten. |
 | §5.5 / P3 | The ceiling and the retention window, **and the `keep` bit** | cloud design §5.5; the superseded plan's P3, **answered by Quinn 2026-09-17** | Task 1. 200 MiB of ciphertext per account becomes 200 MiB of **text** per account (`sync_ceiling_bytes()` is unchanged at `209715200`, and the unit it counts is now honest); journal records are pruned at 400 days; **a record a human wrote is never pruned**, which is the half that is a correctness property rather than a storage one — `journal::human_set` is what judge-once reads and it reads *records*, so a pruned human `set` on a restored machine is a decision the student made and the device can no longer see. **Changed by ruling 2, and this is the improvement the amendment buys:** the device no longer *asserts* `keep`. The server decides it, from the plaintext record, in a **stored generated column** — `op` in (`set`, `create`) and `actor` not starting with `agent:`, which is `provenance::is_agent`'s own test. The one cleartext bit the superseded design had to leak, and the trust it had to place in the client, both go. |
 | §9 | "Export / access / delete implemented for everyone (`DELETE /account`, `GET /account/export`)" | cloud design §9 | Task 1 (hand-off **H1**) and the ledger row above. The purge list loses `sync_generation` and keeps `sync_records`, `sync_notes` and `sync_usage`. **`exportAll` is extended this time**, and the reason is the amendment: the superseded plan left it alone because the rows were ciphertext this service cannot read, so "the plaintext is the vault folder" was a true and better answer. The rows are readable now, and with the folder export struck (ruling 2) `GET /account/export` is the **only** way a student takes their data elsewhere. Task 4 step 8 records this as the one item C3′ hands to whoever owns `account/index.ts` next, with the exact shape; it is **not** built here, because widening `exportAll` is a change to C1's own function body rather than a list, and *What is NOT in this plan* names it. |
 | §9 | Alabama § 8-38: session tokens and OAuth tokens are SPII, encrypted at rest, 45-day notice | cloud design §9 | Tasks 1 and 4. The sync tables hold no token. **What they now hold that they did not is the student's own coursework text** — which is why encryption at rest is named in the privacy sentence (P1) and why `DELETE /account` naming every table is a gate item rather than a nicety. The device adds no credential at all. |
@@ -113,7 +114,7 @@ One row per ruling, spec sentence or inherited resolution C3′ carries or narro
 | §11a | "the personal calendar … C1 delivers it by its secret iCal address … written to the vault's `calendars:`" | cloud design §11a | Task 11, the same removal and the same argument: `- name: personal` / `ics_url:` in `config/ingest.yaml` becomes `- name: personal` / `ics_url: 'cloud:personal'`, which C2's hand-off H4 already routes to `/ingest-calendar?name=personal`. |
 | `CLAUDE.md` | Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted | `CLAUDE.md`; `approvals::defer_over_budget` | Task 7 files conflict cards through the ordinary `propose_amendment` path, so the existing cap applies unchanged and a hundred-conflict first pull spreads over days rather than burying the deck. |
 | `CLAUDE.md` | `journal::VIAS` does not grow | `CLAUDE.md` | The slot's sync step runs `--via local-runner`; the console's *Sync now* runs `via: "dashboard"`. Both are already in `VIAS`. |
-| §8 | `dependency_boundary.rs` pins the engine's dependency budget; TLS is rustls/ring, never OpenSSL | cloud design §8 | Task 2. The crypto test that named `ring` and `base64` is **replaced**, not deleted: `ring` and `base64` leave the manifest with the envelope, `sha2 = "0.10"` arrives as the one direct edge the content hash needs (already resolved in `Cargo.lock`, so no new crate and no new version to audit), and the test refuses the return of `ring`, `base64`, `aes-gcm`, `chacha20` and any second hash. |
+| §8 | `dependency_boundary.rs` pins the engine's dependency budget; TLS is rustls/ring, never OpenSSL | cloud design §8 | Task 2. The crypto test that named `ring` and `base64` is **replaced**, not deleted. **`base64` leaves; `ring` stays**, and the reason is the lockfile rather than taste: `ring` is already in `knowlu-engine`'s graph through `ureq` → `rustls`, so `ring::digest::SHA256` is a hash with **no new crate**, while `sha2` is absent from that graph (`Cargo.lock`'s `sha2 0.10.9` is the app's, through `tauri-codegen` and `wry`) and adding it would pull `digest 0.10`, `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` beside the engine's existing `sha1 0.11`/`digest 0.11` — two majors of two crates, into the binary the CI size gate holds under 6 MiB. The replacement test **names `ring` as the hash** and refuses `sha2`, `base64`, `aes-gcm`, `chacha20`, `rust-crypto`, `sodiumoxide` and `hkdf`. |
 | §5.6 | Judgment logs never enter the vault | cloud design §5.6; `CLAUDE.md` | Unchanged: `sync` writes no judgment log, and `state/sync-cursor.json` is a cursor, not a log — it holds two integers, one timestamp and a map of note path → content hash, all of which are already in the vault in plainer form. |
 | §13 | "the console's visual redesign (parked)" | cloud design §13 | Task 10 rewrites exactly one line of the page — the sync line — because the facts behind it no longer exist. Nothing else in the console's appearance is touched, and no settings row is added. |
 | Review resolutions | B2 (thrown `Response`), B3 (three `state/` inputs a restore does not carry), B5 (`main.rs`'s startup thread), I3 (the ten-second read lag), I4 (the check order), I7 (`is_note_path` + `record_is_well_formed`), I9 (the hand-off rule) | `docs/reports/2026-09-14-c3-sync-plan-review.md` | **Inherited whole.** B2 is *Interfaces* contract 5 and the `refusal()` helper in both handler suites; B3 is Task 9's rank comparison; B5 is hand-off **H10**; I3 is `READ_LAG_SECONDS` in Tasks 3 and 4; I4 is `run_lines_with`'s check order in Task 7; I7 is the two guards in Task 6; I9 is the *Controller hand-offs* preamble. |
@@ -150,7 +151,7 @@ Every `_shared/` file this plan creates is prefixed `sync_`, because `_shared/en
 ### Modified — the device
 
 - `engine/src/sync.rs` — **rewritten from its first line down**. After Task 2 it is the module doc and `SyncError`; Tasks 5–7 and 9 fill it with the cursor, the push builder, the pull reader, the applier, the restorer and the command body. It reaches the network only through C2's `cloudmodel::CloudClient`.
-- `engine/Cargo.toml`, `Cargo.lock` — `ring` and `base64` out, `sha2` in (Task 2).
+- `engine/Cargo.toml`, `Cargo.lock` — **`base64` out, `ring` kept** for `ring::digest::SHA256` (Task 2); no crate is added.
 - `engine/src/lib.rs` — `pub mod sync;` is already on the branch (`baa5f0c`); `pub mod entitle;` is added and `pub mod history;` removed (hand-off **H3**).
 - `engine/src/main.rs` — the `Sync` subcommand (hand-off **H4**) and the entitlement gate in front of the slot arms (hand-off **H4**, same file, two tasks).
 - `engine/src/ingest.rs` — Task 11: the vault's `ics_url` stops being required (hand-off **H7**).
@@ -283,6 +284,8 @@ producing `coursework → [ingest] → [judge] → rank`, each the sibling `know
 Every change below is outside C3′'s file ownership. **No task in this plan edits these files.**
 
 **How and when they are applied — the controller's rule, inherited from the superseded plan's ruling R-C3-8 (review findings I8 and I9).** Every hand-off in this section lands **on the branch, at the task that first needs it, as that task's own separate commit**, applied **verbatim from the hand-off text** by the controller and reviewed together with the task. It is not a merge-time activity and there is no mid-branch round trip to wait for: the implementer finishes the task, names the hand-off in its report, and the controller's commit follows immediately. Nothing in this plan is ever red for more than that one commit, and **no task in this plan may be reported green while a hand-off it names is unapplied**.
+
+**One entry is authored in a task and committed by the controller, and it is said here once** (review I6). **H14**'s replacement text for `CLAUDE.md`, `HANDOFF.md` and `app/README.md` is *written* in Task 12 step 6 — the close is the only moment that knows the final counts, the merge date and what production still needs — and is *committed* by the controller as H14's own commit beside Task 12's. The implementer never runs `git add` on those three paths, and Task 12 step 8's `git add` does not name them. Everything else in this section is authored here and applied verbatim.
 
 Each entry carries **"applied at Task N"**. The order is the task order:
 
@@ -443,12 +446,35 @@ and, in `main`, **immediately before** the `match cli.command { … }` that foll
     // A refusal is a named line at exit 0, never a failure: a non-zero exit sets
     // `RunSummary.engine_ok = false`, which is retry backoff and an amber tray twice a day for a
     // student whose card simply expired — and retrying fixes nothing here.
+    //
+    // **The line is composed here, and here only** (review I3). `entitle::gate` answers the reason;
+    // the command's own word is this file's to supply, because this file is the only place that
+    // knows which subcommand was typed. The result reads exactly like the two skips the app already
+    // prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student meets one
+    // sentence shape whichever step stopped.
     if let Some(vault) = gated_vault(&cli.command) {
-        if let Some(line) = entitle::gate(vault) {
-            println!("{line}");
+        if let Some(reason) = entitle::gate(vault) {
+            println!("{} ({reason})", name_of(&cli.command));
             return ExitCode::SUCCESS;
         }
     }
+```
+
+and `name_of` beside `gated_vault`:
+
+```rust
+/// The subcommand's own word, as the student sees it on the Runs view. Only the gated four need one,
+/// and the catch-all is unreachable from the call site above — it exists so this function stays total
+/// rather than panicking on a command the gate will never be asked about.
+fn name_of(command: &Command) -> &'static str {
+    match command {
+        Command::Coursework { .. } => "coursework",
+        Command::Ingest { .. } => "ingest",
+        Command::Judge { .. } => "judge",
+        Command::Sync { .. } => "sync",
+        _ => "step",
+    }
+}
 ```
 
 ### H5 — `engine/src/cli.rs` (verified at Task 11; no edit)
@@ -503,15 +529,9 @@ and
     }
 ```
 
-and the `steps.push(sync_step(cs, "push"));` at the end of the same function, and the whole of `fn sync_step` above it, and the trailing `state::refresh_head(cs); state::refresh_history(cs);` pair. In `spawn`'s housekeeping loop, delete the two debounced `state::run_sync(&cs)` calls and the `lock(&cs.history).has_remote` gate around the second:
+and the trailing `state::refresh_head(cs); state::refresh_history(cs);` pair.
 
-```rust
-            if !slot_running && n % 30 == 0 && lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst) {
-                let _ = state::run_sync(&cs);
-            }
-```
-
-goes whole, and the `due_write` block above it keeps its backup and loses its `run_sync` line. The slot's own `sync` step is the only sync the scheduler runs, and the console's *Sync now* button is the only other caller.
+**What is NOT here, and why** (review C1). `fn sync_step`, the `steps.push(sync_step(cs, "push"));` at the end of `run_slot_inner`, and the two debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop are **H9a's**, at Task 7 — not this hand-off's, at Task 10. They are the callers of `state::run_sync`, and H9a **replaces** that function rather than adding a second one beside it; a caller left behind for three tasks would be a caller of a function whose return type had changed under it. H9a lists them and removes them in its own commit. This hand-off is the `history`-shaped remainder: the `has_remote` gate, the pull step and the two refreshes.
 
 ### H8c — `app/src/scheduler.rs`, `ics_state` (verified at Task 11; no edit, and this corrects the superseded plan too)
 
@@ -519,7 +539,43 @@ The superseded plan's H7c added an `IcsState::Cloud` arm so a cloud vault with n
 
 ### H9a — `app/src/state.rs` and `app/src/commands.rs`, the sync status (applied at Task 7)
 
-**Additive, and nothing is removed here** — Task 7 needs somewhere to put the last sync's result, and Task 10 is what takes git out.
+**A replacement, not an addition** (review C1). `app/src/state.rs:147` **already** declares `pub fn run_sync(cs: &ConsoleState) -> knowlu_engine::history::SyncOutcome`; adding a second `run_sync` beside it is `error[E0428]` the moment this lands, and it would stay red until Task 10. So this hand-off **rewrites that function's body and signature in place** and removes its three git-shaped callers in the same commit. Task 10's H9b then removes what is left of `history` — the import, the three fields, their initialisers and the two refreshers — and by then nothing calls them.
+
+**Removed by this hand-off, named exactly:**
+
+- `app/src/scheduler.rs` — `fn sync_step` whole, the `steps.push(sync_step(cs, "push"));` at the end of `run_slot_inner`, and **both** debounced `state::run_sync(&cs)` calls in `spawn`'s housekeeping loop, including the `lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst)` gate around the second:
+
+```rust
+            if !slot_running && n % 30 == 0 && lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst) {
+                let _ = state::run_sync(&cs);
+            }
+```
+
+  goes whole, and the `due_write` block above it keeps its backup and loses its `run_sync` line. (The `if lock(&cs.history).has_remote { steps.push(sync_step(cs, "pull")); }` block and the `state::refresh_history(cs);` before it are **H8b's**, at Task 10: they read `history` rather than call `run_sync`, and the pull step is replaced by the slot's own `sync` step in H8a, which lands in this same task.)
+- `app/src/state.rs` — `quit_flush`'s git branch, rewritten here rather than at H9b, because it is the third caller:
+
+```rust
+            let has_remote = cs.history.lock().unwrap_or_else(|e| e.into_inner()).has_remote;
+            if has_remote && cs.auto_sync.load(SeqCst) {
+                q.synced = run_sync(cs).status.last_error.is_none();
+            }
+```
+
+  becomes
+
+```rust
+            // A quit flush pushes what is already on disk; it never pulls. A pull applies writes and
+            // can file cards, and doing that while the window is closing would show the student a
+            // deck they never saw change.
+            if knowlu_engine::sync::is_configured(&cs.vault) {
+                let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
+                let (_, _, totals) =
+                    knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Push, "dashboard", None);
+                q.synced = totals.errors.is_empty();
+            }
+```
+
+**After this commit exactly one `state::run_sync` exists**, with exactly one shape, and `cargo build -p knowlu` is green. The controller runs that build before Task 8 starts and records it.
 
 **`app/src/state.rs`.** One field on `ConsoleState`, beside `backup`:
 
@@ -537,7 +593,7 @@ initialised in `ConsoleState::open`, beside the `backup` initialiser, as:
             sync: Mutex::new(knowlu_engine::sync::SyncStatus::default()),
 ```
 
-and one function beside `run_backup`:
+and `run_sync`'s **body and return type are replaced** (the `history::SyncOutcome` version goes; the name and the position beside `run_backup` stay, so no caller has to move):
 
 ```rust
 /// Runs the engine's sync in-process and records what it did. **Takes `vault_io`, never `lock`**:
@@ -572,21 +628,10 @@ The `history::sync` name in the three doc comments that explain why `vault_io` e
 
 ### H9b — `app/src/state.rs` and `app/src/commands.rs`, git out (applied at Task 10)
 
-**`app/src/state.rs`.** Remove the `use` of `HistoryStatus`, the three fields `history`, `head_sha`, `auto_sync`, their initialisers, and the two functions `refresh_history` and `refresh_head`. In `quit_flush`, the git branch
+**`app/src/state.rs`.** Remove the `use` of `HistoryStatus`, the three fields `history`, `head_sha`, `auto_sync`, their initialisers, and the two functions `refresh_history` and `refresh_head`. **`run_sync` is not here** — H9a replaced it at Task 7, and `quit_flush`'s branch went with it (review C1), so what follows is recorded as the shape H9a already produced rather than as an edit this hand-off makes. By the time this lands, `quit_flush` reads:
 
 ```rust
-            let has_remote = cs.history.lock().unwrap_or_else(|e| e.into_inner()).has_remote;
-            if has_remote && cs.auto_sync.load(SeqCst) {
-                q.synced = run_sync(cs).status.last_error.is_none();
-            }
-```
-
-becomes
-
-```rust
-            // A quit flush pushes what is already on disk; it never pulls. A pull applies writes and
-            // can file cards, and doing that while the window is closing would show the student a
-            // deck they never saw change.
+            // A quit flush pushes what is already on disk; it never pulls. (H9a, Task 7.)
             if knowlu_engine::sync::is_configured(&cs.vault) {
                 let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
                 let (_, _, totals) =
@@ -594,6 +639,8 @@ becomes
                 q.synced = totals.errors.is_empty();
             }
 ```
+
+— which names no `history` field and needs no edit here. **If it still reads `cs.history` when this hand-off is reached, H9a was applied wrong**: stop and report it rather than patching it twice.
 
 **`app/src/commands.rs`.** Remove the three git-derived topline keys in `build_state_value`:
 
@@ -986,9 +1033,18 @@ create table public.sync_records (
   -- ever (precondition P3, Quinn 2026-09-17): `journal::human_set` is what judge-once reads and it
   -- reads records, so a pruned human `set` on a restored machine is a decision the student made and
   -- the device can no longer see. `not like 'agent:%'` is `provenance::is_agent`'s own test.
+  -- `coalesce` on the whole expression, not only on `actor` (review M5): `->>` answers NULL for an
+  -- absent key, `NULL in (...)` is NULL, and a NOT NULL generated column over a NULL expression is a
+  -- 23502 from PostgREST rather than the 400 `sync_rows.ts` would have given. The validator refuses a
+  -- body with no `op` or no `actor` before it ever gets here, so this is the backstop being total
+  -- rather than a second guard. **What is deliberately NOT guarded here is JSON validity**: a
+  -- non-JSON `body` raises 22P02 on the cast, and the validator is the only thing standing between a
+  -- client and that 5xx — said out loud because it is the one place this schema trusts the function.
   keep        boolean     not null generated always as (
-                            (body::jsonb ->> 'op') in ('set', 'create')
-                            and coalesce(body::jsonb ->> 'actor', '') not like 'agent:%'
+                            coalesce(
+                              (body::jsonb ->> 'op') in ('set', 'create')
+                              and coalesce(body::jsonb ->> 'actor', '') not like 'agent:%',
+                              false)
                           ) stored,
   received_at timestamptz not null default now(),
   primary key (account_id, seq),
@@ -1125,29 +1181,34 @@ A pure removal, and the smallest task in the plan. Everything ruling 2 struck le
 - [ ] **Step 1: Write the failing test** — replace `the_crypto_dependencies_are_the_two_already_in_the_graph` in `engine/tests/dependency_boundary.rs` with:
 
 ```rust
-/// The one hash the account vault needs, and the four crates that are not coming back.
+/// The one hash the account vault needs, and the crates that are not coming back.
 ///
 /// **What left, and why.** Until Quinn's amendment of 2026-09-17 this engine sealed every journal
 /// record and every note with AES-256-GCM under a key that lived only in Credential Manager, and
 /// named `ring` and `base64` for it. Ruling 2 reversed that: the account holds the student's tasks
-/// and notes readable by the service, so there is no envelope, no IV, no key and no recovery code —
-/// and two direct dependencies leave with them.
+/// and notes readable by the service, so there is no envelope, no IV, no key and no recovery code.
+/// **`base64` leaves with them.**
 ///
-/// **What arrived.** `sha2`, for the content hash that makes a retried push idempotent and lets the
-/// server check a row against its own body. It is already resolved in this workspace's lockfile, so
-/// naming it adds a direct edge and no new crate and no new version to audit — the same argument
-/// the retired test made for `ring`. `sha1` stays and is a different thing: it is `ids::derived_id`,
-/// a note identity contract with every existing vault, and it is not a hash for anything new.
+/// **What stays, and why it is `ring` and not `sha2`.** A content hash is still needed — it is what
+/// makes a retried push idempotent and what lets the server check a row against its own body — and
+/// `ring::digest::SHA256` costs **nothing**: `ring` is already compiled into this binary through
+/// `ureq` to `rustls`, so keeping the direct edge adds no crate, no version and nothing to audit.
+/// `sha2` would: `knowlu-engine`'s own dependency graph has none (the workspace's `sha2 0.10.9` is
+/// the app's, through `tauri-codegen` and `wry`), so adding it pulls `sha2`, `digest 0.10`,
+/// `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` in beside the
+/// engine's existing `sha1 0.11`, which resolves `digest 0.11` and `cpufeatures 0.3` — two majors of
+/// two crates, into the binary CI holds under 6 MiB. `sha1` itself stays and is a different thing
+/// again: it is `ids::derived_id`, a note-identity contract with every vault that exists.
 #[test]
-fn the_content_hash_is_sha2_and_the_envelope_is_not_coming_back() {
-    assert!(MANIFEST.contains("sha2 = \"0.10\""), "engine/Cargo.toml must name sha2 for the sync content hash");
+fn the_content_hash_is_rings_and_the_envelope_is_not_coming_back() {
+    assert!(MANIFEST.contains("ring = \"0.17\""), "engine/Cargo.toml must keep ring for the sync content hash");
     for (name, manifest) in MANIFESTS {
-        for gone in ["ring = ", "base64 = ", "aes-gcm", "chacha20", "rust-crypto", "sodiumoxide", "hkdf"] {
+        for gone in ["base64 = ", "sha2", "aes-gcm", "chacha20", "rust-crypto", "sodiumoxide", "hkdf"] {
             assert!(
                 !manifest.contains(gone),
                 "`{gone}` must not appear in {name}: the account's copy is plain text (cloud design, \
-                 amendment 2026-09-17, ruling 2), and a crypto crate with nothing to encrypt is a \
-                 dependency nobody is auditing."
+                 amendment 2026-09-17, ruling 2). There is nothing to encrypt, and the one hash this \
+                 crate needs is `ring`'s, which it already links for TLS."
             );
         }
     }
@@ -1174,7 +1235,7 @@ fn the_sync_module_holds_no_key_and_no_envelope() {
 - [ ] **Step 2: Run them and watch them fail.**
 
 Run: `cargo test -p knowlu-engine --test dependency_boundary`
-Expected: FAIL — `engine/Cargo.toml must name sha2 for the sync content hash`, then ``ring = ` must not appear in engine/Cargo.toml``, then `engine/src/sync.rs still names SyncKey`.
+Expected: FAIL — ``base64 = ` must not appear in engine/Cargo.toml`` first (the manifest still names it), then `engine/src/sync.rs still names SyncKey`. The `ring = "0.17"` assertion passes from the start, and that is the point: the crate the envelope brought in is the crate the hash keeps.
 
 - [ ] **Step 3: Rewrite `engine/src/sync.rs` down to its foundations.** Everything from the `SyncKey` section to the end of the file goes; the module doc is replaced and `SyncError` loses the four variants that described a key. The whole file after this step:
 
@@ -1204,7 +1265,7 @@ Expected: FAIL — `engine/Cargo.toml must name sha2 for the sync content hash`,
 //! asks for them, and are journalled on the device that asked; they then go up through this module
 //! like any other record. The fidelity ledger's `§5.5 Down` row argues it.
 
-use sha2::{Digest, Sha256};
+use ring::digest;
 
 /// The largest journal record this device will send, in bytes, matching
 /// `sync_records.body`'s `octet_length` check. A record is a handful of scalars and, for a
@@ -1262,9 +1323,12 @@ impl std::fmt::Display for SyncError {
 /// Lowercase hex of `SHA-256(bytes)`. The one hash this module computes, and the one the server
 /// re-derives: `sync-push` refuses a row whose `hash` is not this of its `body`, so the idempotence
 /// key is a fact about the row rather than a claim about it.
+///
+/// `ring`, not `sha2`: this binary already links `ring` for TLS, so the primitive is free, and the
+/// alternative would put a second `digest` major beside `sha1`'s (`dependency_boundary.rs` argues it
+/// at length and refuses the alternative by name).
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    digest::digest(&digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Which machine pushed a row, to a server that has no reason to learn which machine that is.
@@ -1319,18 +1383,20 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: The manifest.** In `engine/Cargo.toml`, delete the `base64 = "0.22"` / `ring = "0.17"` block and its comment, and add, in alphabetical place after `serde_yaml_ng`:
+- [ ] **Step 4: The manifest — one line out, one comment rewritten, no line in.** In `engine/Cargo.toml`, delete `base64 = "0.22"`, **keep `ring = "0.17"`**, and replace the block's comment with:
 
 ```toml
 # Knowlu C3′ (cloud design §5.5 as amended 2026-09-17): SHA-256 for the sync content hash — the
-# idempotence key of a pushed journal record, which the server re-derives from the body. Already
-# resolved in this workspace's Cargo.lock, so this is one direct edge and no new crate to audit and
-# no new version to resolve. `sha1` beside it is a different thing and stays: it is
-# `ids::derived_id`, a note-identity contract with every vault that exists.
-sha2 = "0.10"
+# idempotence key of a pushed journal record, which the server re-derives from the body. The
+# envelope this crate was named for is gone with ruling 2 (no AES, no HKDF, no key); what remains is
+# one digest, and `ring` is what this binary already links for TLS through `ureq` → `rustls`, so the
+# direct edge costs no crate, no version and nothing new to audit. `sha2` was considered and refused:
+# it is absent from this crate's graph and would bring `digest 0.10` beside `sha1`'s `digest 0.11`.
+# `base64` left with the envelope; nothing here encodes bytes any more.
+ring = "0.17"
 ```
 
-Then `cargo build --workspace` once, so `Cargo.lock`'s `knowlu-engine` dependency list is rewritten with `ring` and `base64` out and `sha2` in. **Inspect the lockfile diff**: exactly one package's `dependencies` array changes, and no `[[package]]` block is added or removed. If one is, stop — `sha2` was not already resolved and the argument above is wrong.
+Then `cargo build --workspace` once, so `Cargo.lock`'s `knowlu-engine` dependency list loses `base64`. **Inspect the lockfile diff**: exactly one package's `dependencies` array changes, and **no `[[package]]` block is added**. A block that disappears is fine (nothing else in the engine used `base64`); a block that appears means a crate arrived that this step said would not.
 
 - [ ] **Step 5: Delete the two Deno vector files.**
 
@@ -1366,7 +1432,7 @@ The first endpoint and the validators it stands on. It verifies the entitlement,
 **Interfaces:**
 - Consumes: C1's `requireActiveEntitlement`, `_shared/db.ts`, `_shared/http.ts`; Task 1's tables.
 - Produces:
-  - `sync_rows.ts`: `MAX_ROWS` (500), `MAX_RECORD_BYTES` (16384), `MAX_NOTE_BYTES` (131072), `NOTE_PATH_RE`, `isDeviceToken`, `isHash`, `isNotePath`, `bytes(s)`, `checkRecord(raw, device, accountId)`, `checkNote(raw, device, accountId)`
+  - `sync_rows.ts`: `MAX_ROWS` (500), `MAX_RECORD_BYTES` (16384), `MAX_NOTE_BYTES` (131072), `NOTE_PATH_RE`, `isDeviceToken`, `isHash`, `isNotePath`, `bytes(s)`, **`sha256Hex(s)`**, `checkRecord(raw, device, accountId)`, `checkNote(raw, device, accountId)`
   - `sync_db.ts`: `READ_LAG_SECONDS` (10), `saveRecords`, `saveNotes`, `bytesUsed`, `ceiling`, `readRecords`, `readNotes`
   - `POST /sync-push` → `200 {"records": n, "notes": m, "bytes_used": b, "bytes_ceiling": c}`; 400 on a malformed row, an unknown field, a bad path or a hash that is not its body's; 401/402 from the gate — **thrown**, so a handler test awaits the rejection; 405 on the wrong method; **413** when the batch would carry the account past its ceiling.
 
@@ -1493,6 +1559,14 @@ export function isNotePath(x: unknown): boolean {
  * would let a vault of accented Spanish past a cap the column then refuses. */
 export function bytes(s: string): number {
   return new TextEncoder().encode(s).length;
+}
+
+/** The content hash, **defined once** (review M7): the handler computes it to check a pushed row and
+ * the handler's own suite computes it to build one, and two copies of a hash function are two
+ * chances for a test to agree with a bug. `crypto.subtle` is the platform's, so this imports nothing. */
+export async function sha256Hex(s: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export interface RecordIn { hash: string; body: string }
@@ -1627,11 +1701,7 @@ const DEVICE = "0123456789abcdef";
 const REC = (n: number) =>
   `{"actor":"quinn","device":"LAPTOP","id":"task_000000000${n}","op":"set","path":"tasks/x.md","ts":"2026-09-17T10:0${n}:00.000Z","via":"dashboard"}`;
 
-/** The one hash the server trusts is the one it computes. */
-async function sha256Hex(s: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+import { sha256Hex } from "../_shared/sync_rows.ts";   // the one hash, shared with the handler
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -1776,7 +1846,7 @@ Expected: FAIL to resolve `./handler.ts`.
 
 ```ts
 import { fail, json, methodNotAllowed, readJson } from "../_shared/http.ts";
-import { checkNote, checkRecord, isDeviceToken, MAX_ROWS } from "../_shared/sync_rows.ts";
+import { checkNote, checkRecord, isDeviceToken, MAX_ROWS, sha256Hex } from "../_shared/sync_rows.ts";
 
 export interface PushDeps {
   requireEntitled: (req: Request) => Promise<{ account_id: string }>;
@@ -1787,11 +1857,6 @@ export interface PushDeps {
 }
 
 interface Body { device?: unknown; records?: unknown; notes?: unknown }
-
-async function sha256Hex(s: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 function listOf(x: unknown, what: string): unknown[] {
   if (x === undefined) return [];
@@ -1840,7 +1905,32 @@ export async function handle(req: Request, deps: PushDeps): Promise<Response> {
 }
 ```
 
-`index.ts` follows C1's shape exactly — `Deno.serve`, `restFromEnv()`, `requireActiveEntitlement`, and `try { … } catch (e) { return asResponse(e); }`.
+`index.ts` — written out because it is what actually deploys, and it is the only place `restFromEnv`, `requireActiveEntitlement` and `asResponse` are wired (review M8):
+
+```ts
+import { asResponse } from "../_shared/http.ts";
+import { restFromEnv } from "../_shared/db.ts";
+import { requireActiveEntitlement } from "../_shared/entitlement.ts";
+import { bytesUsed, ceiling, saveNotes, saveRecords } from "../_shared/sync_db.ts";
+import { handle } from "./handler.ts";
+
+Deno.serve(async (req) => {
+  try {
+    const rest = restFromEnv();
+    return await handle(req, {
+      requireEntitled: requireActiveEntitlement,
+      bytesUsed: (accountId) => bytesUsed(rest, accountId),
+      ceiling: () => ceiling(rest),
+      saveRecords: (rows) => saveRecords(rest, rows),
+      saveNotes: (rows) => saveNotes(rest, rows),
+    });
+  } catch (e) {
+    // C1's shape: a thrown `Response` — `fail`'s, or `requireActiveEntitlement`'s — goes back
+    // verbatim, and anything else becomes a bare 500 with no body of ours in it.
+    return asResponse(e);
+  }
+});
+```
 
 - [ ] **Step 8: Record what C3′ hands on.** In the task report, one paragraph: **`exportAll` in `cloud/supabase/functions/account/index.ts` should now include the two sync tables**, because the folder export is struck (ruling 2) and `GET /account/export` is the only way a student takes their data elsewhere. The shape is `sync_notes` rows as `{path, body}` and `sync_records` rows as raw JSON lines, so the export is a vault a person could reconstruct. **Not built here** — it is a change to the body of C1's own export function and it deserves its own test and its own review — and it is named in *What is NOT in this plan* and in Task 12's production list.
 
@@ -2057,12 +2147,34 @@ export async function handle(req: Request, deps: PullDeps): Promise<Response> {
 }
 ```
 
-`index.ts` is `sync-push`'s, with `readRecords`/`readNotes` from `sync_db.ts` and `now: () => new Date()`.
+`index.ts`, the same shape:
+
+```ts
+import { asResponse } from "../_shared/http.ts";
+import { restFromEnv } from "../_shared/db.ts";
+import { requireActiveEntitlement } from "../_shared/entitlement.ts";
+import { readNotes, readRecords } from "../_shared/sync_db.ts";
+import { handle } from "./handler.ts";
+
+Deno.serve(async (req) => {
+  try {
+    const rest = restFromEnv();
+    return await handle(req, {
+      requireEntitled: requireActiveEntitlement,
+      readRecords: (accountId, after, limit, now) => readRecords(rest, accountId, after, limit, now),
+      readNotes: (accountId, after, limit, now) => readNotes(rest, accountId, after, limit, now),
+      now: () => new Date(),
+    });
+  } catch (e) {
+    return asResponse(e);
+  }
+});
+```
 
 - [ ] **Step 5 (controller): deploy both functions to staging and smoke them.**
 
 ```
-supabase functions deploy sync-push sync-pull --project-ref brvhgbihxevrudqpulcm
+supabase functions deploy sync-push sync-pull --project-ref brvhgbihxevrudqpulcm   # staging; a public subdomain, not a secret
 ```
 
 Then, with a staging session minted by the controller (never a subagent — `HANDOFF.md` §5): `POST /sync-push` with one record and one note → 200 and the two counts; `GET /sync-pull?records_after=0&notes_after=0` **twice, ten seconds apart** — the first page is **empty** (the read lag) and the second carries the row. **An implementer or controller who sees only the second pull has not tested the lag**; both observations go in the report. Then `POST /sync-push` with no bearer → 401, and with a bad row → 400.
@@ -2093,7 +2205,7 @@ The push half of the device. Nothing here opens a socket except the one loopback
   - `sync::build_push(&Path, &Cursor, &str, &mut Journal) -> (PushBatch, Cursor)`
   - `sync::push(&CloudClient, &PushBatch) -> Result<(usize, usize), CloudError>`
 
-- [ ] **Step 1: Write the failing contract tests** — `engine/tests/sync_contract.rs`. The loopback harness is C2's `engine/tests/cloud_contract.rs`, copied verbatim (a second harness would be a second thing to keep true): a `TcpListener` on `127.0.0.1:0`, a thread that reads one request and answers from a scripted list, and `requests()` joining that thread. The header says why that is not egress. Then:
+- [ ] **Step 1: Write the failing contract tests** — `engine/tests/sync_contract.rs`. The loopback harness is C2's `engine/tests/cloud_contract.rs`, **copied, and the copy is accepted rather than argued away** (review M7): extracting it would mean a shared test module under `engine/tests/`, which Cargo compiles as its own integration-test crate unless it moves into `src/` behind a `#[cfg(test)]` — a production module existing for two test files. Two forty-line harnesses that never change are the cheaper of the two, and this sentence is the record of the trade rather than a claim that copying is free: a `TcpListener` on `127.0.0.1:0`, a thread that reads one request and answers from a scripted list, and `requests()` joining that thread. The header says why that is not egress. Then:
 
 ```rust
 #[test]
@@ -2177,11 +2289,13 @@ fn a_page_is_at_most_PAGE_and_the_cursor_does_not_skip_the_rest() {
 }
 
 #[test]
-fn a_push_carries_no_token_no_hostname_and_no_app_data_path() {
+fn a_push_carries_no_bearer_no_credential_target_and_no_app_data_path() {
     // The data-minimisation assertion, kept from the sealed design because it is still true and
-    // still worth failing on: the bearer is a header `CloudClient` adds and scrubs from errors, the
-    // hostname is inside the record where the student can read it and not in a column, and nothing
-    // about this machine's app data travels at all.
+    // still worth failing on. **It does not assert the hostname** (review M6): every journal record
+    // carries `device` inside its own `body`, where the student can read it, and that is the design —
+    // what this checks is that nothing about the SESSION or this machine's app data travels beside
+    // it. The `device` COLUMN is the opaque token, and `a_device_token_is_sixteen_hex_stable_and_not_the_hostname`
+    // is where that is proved.
     let dir = fixture("minimal");
     let mut journal = Journal::new(&dir);
     let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
@@ -2436,7 +2550,7 @@ The half the whole feature is for. A record another desktop wrote is appended to
 
 **Files:**
 - Modify: `engine/src/sync.rs` (the pull and apply sections)
-- Test: `engine/tests/sync_contract.rs` (eleven new cases)
+- Test: `engine/tests/sync_contract.rs` (twelve new cases)
 
 **Interfaces:**
 - Consumes: `reconcile::resolve`, `write::{write_literals, create, delete, move_note, propose_amendment, find_pending_amendment, WriteContext, WriteOpts}`, `approvals::{AMENDABLE_FIELDS, AMENDABLE_FOLDERS}`, `models::split_frontmatter`, `ids::{read_meta, inside_vault, is_id, NOTE_FOLDERS}`, `journal::{Journal, OPS, VIAS}`, Task 5's `is_note_path`, `sha256_hex`.
@@ -2461,7 +2575,7 @@ The half the whole feature is for. A record another desktop wrote is appended to
 
 Read the function with that substitution and it does exactly the right thing: `chains` becomes the set of fields the *other* desktop changed; a field whose on-disk value equals that chain's first `old` means this device never touched it, so the foreign value applies cleanly and **no supersede record is produced**; anything else is a two-sided change, `wins()` decides by later `ts`, and a supersede record names the loser. **A field with a supersede record is this plan's definition of a conflict**, and that is what becomes a card.
 
-- [ ] **Step 1: Write the failing tests** — eleven cases appended to `engine/tests/sync_contract.rs`. The load-bearing six, in full; the other five are the same shape and are named in the step so an implementer cannot quietly drop one.
+- [ ] **Step 1: Write the failing tests** — **twelve** cases appended to `engine/tests/sync_contract.rs`, every one written out (review I5: an outline is what let the apply/card contradiction survive the first draft).
 
 ```rust
 /// A foreign `set` record: another desktop, another `seq`, a chosen `ts`.
@@ -2538,6 +2652,12 @@ fn a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge() {
     let rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
     let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
     assert_eq!(report.cards, 1, "{report:?}");
+    // **The carded field is withheld from `apply`** (review C2): the card is the write, so nothing
+    // counts as applied and the note below still holds this device's value. Without this assertion
+    // the note could hold 5, the card's `from: 4` would no longer match it, and
+    // `approvals::validate_amendment` would refuse the card for ever — a silent merge with an
+    // unapplyable card on top.
+    assert_eq!(report.applied, 0, "a carded field is not also written: {report:?}");
     // The note keeps what this device had until the card is answered: never a silent merge.
     let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
     assert_eq!(knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(4));
@@ -2602,7 +2722,126 @@ fn a_pulled_note_for_a_path_this_device_has_never_seen_arrives_whole() {
 }
 ```
 
-The other five, each one paragraph of the same shape: `a_conflict_this_device_won_writes_nothing_and_files_no_card` (a foreign write older than this device's leaves the note alone, produces one supersede record and no card); `a_conflict_on_an_unamendable_field_takes_reconciles_rule_and_says_so` (a field outside `AMENDABLE_FIELDS` — the later `ts` wins, the supersede record stands, one named warning names the note and the field); `a_pulled_tombstone_settles_the_note_rather_than_unlinking_it` (`text: None` goes through `write::delete`, never `fs::remove_file`); `a_pulled_move_may_not_escape_the_vault` (a `move` record whose destination fails `is_note_path` is refused before `write::move_note` sees it); and `a_pull_reads_the_two_cursors_and_the_more_flag_from_the_reply` (a loopback `GET /sync-pull?records_after=…&notes_after=…&limit=500` and the parsed `Pulled`).
+and the other five, written out because an outline is what let the apply/card contradiction survive the first draft (review I5):
+
+```rust
+#[test]
+fn a_pulled_note_never_overwrites_a_note_this_device_already_has() {
+    // **The bound on the second recorded exception** (review I4). A pulled note's text is written
+    // with `pystr::write_text` only for a path this device has never seen. For a path it HAS, the
+    // frontmatter was settled by `reconcile` a few lines earlier and the body is never merged — so
+    // the pulled text is dropped and the file on disk keeps its own. Without this the other
+    // desktop's body would silently replace an edit made here between two slots.
+    let dir = fixture("no-clobber");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rel = "tasks/cs-100-hw-01.md";
+    let mine = knowlu_engine::pystr::read_text(&dir.join(rel)).expect("the fixture note");
+    let report = sync::apply(&dir, &pulled(vec![], vec![
+        sync::PulledNote { device: "fedcba9876543210".into(), path: rel.into(), text: Some("---\nid: task_0000000001\n---\ntheirs\n".into()) },
+    ]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.notes_written, 0, "{report:?}");
+    assert_eq!(knowlu_engine::pystr::read_text(&dir.join(rel)).expect("the note"), mine, "the local body is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_conflict_this_device_won_writes_nothing_and_files_no_card() {
+    // `reconcile::resolve` fills `apply` only when the side passed as `local_records` wins, and with
+    // the roles reversed that side is the foreign one. A foreign write OLDER than this device's
+    // therefore leaves the note alone and produces a supersede record and nothing else — which is
+    // right: nothing changed here, so there is nothing to propose.
+    let dir = fixture("i-won");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2016-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.applied, report.cards), (0, 0), "{report:?}");
+    assert_eq!(report.superseded, 1, "the losing write is still on the record");
+    let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
+    assert_eq!(knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(4));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_conflict_on_an_unamendable_field_takes_reconciles_rule_and_says_so() {
+    // `approvals::validate_amendment` only ever applies a card under `AMENDABLE_FOLDERS` with a
+    // field in `AMENDABLE_FIELDS`. A conflict outside that set cannot become a card that would ever
+    // apply, so withholding it from `apply` would strand the value with nothing to answer: it takes
+    // reconcile's own rule (later `ts` wins), keeps its supersede record, and says so in one line.
+    let dir = fixture("unamendable");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("notes_link".to_string(), "'mine'".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    assert!(!knowlu_engine::approvals::AMENDABLE_FIELDS.contains(&"notes_link"), "the test's premise");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "notes_link", serde_json::json!("old"), serde_json::json!("theirs"), "2036-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.cards, report.applied, report.superseded), (0, 1, 1), "{report:?}");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("cs-100-hw-01") && w.contains("notes_link")),
+        "the losing value is named, never silently dropped: {:?}", report.warnings,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_tombstone_settles_the_note_rather_than_unlinking_it() {
+    // "Nothing is ever unlinked" is the vault's own rule: a settled note moves to `archive/` through
+    // `write::delete`, which journals the move. `fs::remove_file` would lose it and journal nothing.
+    let dir = fixture("tombstone-apply");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rel = "tasks/cs-100-hw-01.md";
+    assert!(dir.join(rel).exists(), "the fixture has it");
+    let report = sync::apply(&dir, &pulled(vec![], vec![
+        sync::PulledNote { device: "fedcba9876543210".into(), path: rel.into(), text: None },
+    ]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.moved, 1, "{report:?}");
+    assert!(!dir.join(rel).exists(), "the task is gone from tasks/");
+    assert!(
+        std::fs::read_dir(dir.join("archive")).expect("archive").flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("cs-100-hw-01")),
+        "and it is in archive/, not deleted",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_move_may_not_escape_the_vault() {
+    // A `move` record carries a destination, and the destination is a string another machine sent.
+    // It is checked with the same `is_note_path` every other path goes through, BEFORE
+    // `write::move_note` is called — not after, when the file would already be somewhere else.
+    let dir = fixture("escape");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let mut spec = knowlu_engine::journal::NewRecord::new("move", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+    spec.id = Some("task_0000000001");
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    spec.new = serde_json::json!("../../../Windows/System32/x.md");
+    let rec = knowlu_engine::journal::make_record(spec).expect("a record");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.refused, report.moved, report.records), (1, 0, 0), "{report:?}");
+    assert!(dir.join("tasks").join("cs-100-hw-01.md").exists(), "and the note did not move");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pull_reads_the_two_cursors_and_the_more_flag_from_the_reply() {
+    let body = serde_json::json!({
+        "records": [], "notes": [], "record_cursor": 41, "note_cursor": 17, "more": true
+    });
+    let mut server = loopback(vec![(200, knowlu_engine::ledger::dumps_value(&body))]);
+    let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
+    let page = sync::pull(&client, 40, 16).expect("a 200");
+    assert_eq!((page.record_cursor, page.note_cursor, page.more), (41, 17, true));
+    let sent = server.requests();
+    assert!(sent[0].starts_with("GET /sync-pull?records_after=40&notes_after=16&limit=500 "), "{}", sent[0]);
+}
+```
 
 - [ ] **Step 2: Run them and watch them fail.** `cargo test -p knowlu-engine --test sync_contract` → FAIL to compile on `sync::apply`, `sync::Pulled`, `sync::PulledNote`, `sync::ACTOR`.
 
@@ -2670,14 +2909,226 @@ pub fn pull(client: &crate::cloudmodel::CloudClient, records_after: i64, notes_a
 }
 ```
 
-- [ ] **Step 4: Write `apply`.** Its shape, in order, with the reasons in the code:
+- [ ] **Step 4: Write `apply`** — in full, because this is the function the whole feature is, and an outline is what let the withheld-field rule go missing from the first draft (review I5, C2):
 
-1. Build `known`, the set of `sha256_hex(dumps_value(record))` for every record already in the local journal. A pulled record already in it is not applied twice, whichever desktop pushed it.
-2. For each pulled record: `record_is_well_formed`, then `is_note_path` on its `path` (and, for a `move`, on its destination) — a failure is `refused += 1` and one warning, never an append.
-3. Append the survivors to the ledger **verbatim** through `JsonlLedger::append`, grouped by their own `ts`'s UTC day, so a record made on 15 September lands in `state/journal/2026-09-15.jsonl` and not in today's file.
-4. Group the appended records by note id. For each note: read the local note's `meta` and mtime, read this device's own records for that id since the foreign records' earliest `ts`, and call `reconcile::resolve` **with the roles reversed** exactly as the table above says.
-5. `resolution.apply` goes through `write::write_literals` under `ACTOR`; `resolution.supersede` records are appended; a field with a supersede record whose folder is in `AMENDABLE_FOLDERS` and whose field is in `AMENDABLE_FIELDS` becomes a `write::propose_amendment` **unless `write::find_pending_amendment` already has one for that (note, field)**; anything else is one named warning.
-6. Pulled notes: a path this device has no file for is written with `pystr::write_text` (it is a note another desktop created; there is nothing to reconcile); a path it does have is **left alone** — its frontmatter is settled by the records above and its body is never merged; `text: None` is `write::delete`.
+```rust
+/// What one `apply` did. Every field is a count the run's own line reads; none is a path or a value.
+#[derive(Debug, Clone, Default)]
+pub struct ApplyReport {
+    pub records: usize,
+    pub notes_written: usize,
+    pub applied: usize,
+    pub cards: usize,
+    pub superseded: usize,
+    pub moved: usize,
+    pub refused: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Apply one pulled page to this vault.
+///
+/// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
+/// history and because the note effects below are derived from them; then the note-level effect is
+/// settled per note; then the pulled note texts land, and only for paths this device has never seen.
+/// A record that fails a guard is counted and named and never reaches the ledger.
+pub fn apply(
+    vault: &Path,
+    page: &Pulled,
+    ctx: &crate::write::WriteContext,
+    journal: &mut Journal,
+    today: jiff::civil::Date,
+) -> ApplyReport {
+    let mut report = ApplyReport { warnings: page.warnings.clone(), ..Default::default() };
+
+    // 1. What this device already has. A record is identified by the hash of its canonical bytes,
+    //    which is the same identity `sync_records_once` uses, so a record that came down twice — or
+    //    came back down after this device pushed it (precondition P4) — is applied once.
+    let known: std::collections::BTreeSet<String> = journal
+        .read(None, None)
+        .into_iter()
+        .map(|r| sha256_hex(crate::ledger::dumps_value(&Value::Object(r)).as_bytes()))
+        .collect();
+
+    // 2 + 3. Guard, then append verbatim. `JsonlLedger::append` files by the record's OWN `ts`, so a
+    //    record made on 15 September lands in `state/journal/2026-09-15.jsonl` and not in today's.
+    let ledger = crate::ledger::JsonlLedger::new(vault.join("state").join("journal"));
+    let mut touched: std::collections::BTreeMap<String, Vec<Record>> = std::collections::BTreeMap::new();
+    for (_, record) in &page.records {
+        let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
+        if known.contains(&sha256_hex(body.as_bytes())) {
+            continue;
+        }
+        if let Err(why) = record_is_well_formed(record) {
+            report.refused += 1;
+            report.warnings.push(format!("sync: a pulled record was refused ({why})"));
+            continue;
+        }
+        let path = record.get("path").and_then(Value::as_str).unwrap_or_default();
+        if !is_note_path(vault, path) {
+            report.refused += 1;
+            report.warnings.push("sync: a pulled record named a path outside the vault's notes".to_string());
+            continue;
+        }
+        // A `move`'s destination is a string another machine sent, and it is checked BEFORE
+        // `write::move_note` is called — not after, when the file would already be somewhere else.
+        if record.get("op").and_then(Value::as_str) == Some("move") {
+            let dest = record.get("new").and_then(Value::as_str).unwrap_or_default();
+            if !is_note_path(vault, dest) {
+                report.refused += 1;
+                report.warnings.push("sync: a pulled move named a destination outside the vault's notes".to_string());
+                continue;
+            }
+        }
+        if let Err(e) = ledger.append(record) {
+            report.warnings.push(format!("sync: a pulled record could not be journalled ({e})"));
+            continue;
+        }
+        report.records += 1;
+        let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        if !id.is_empty() {
+            touched.entry(id).or_default().push(record.clone());
+        }
+    }
+    journal.invalidate();
+
+    // 4. Per note, with the roles reversed exactly as the table above says.
+    for (id, foreign) in &touched {
+        let Some(first_ts) = foreign.iter().filter_map(|r| r.get("ts").and_then(Value::as_str)).min() else { continue };
+        let path = foreign
+            .iter()
+            .rev()
+            .find_map(|r| r.get("path").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        let file = vault.join(&path);
+        let Some(meta) = crate::ids::read_meta(&file) else {
+            // No local file: nothing to reconcile. The note's own text arrives below, if it came.
+            continue;
+        };
+        // THIS device's records for the note since the foreign side's earliest `ts` — the
+        // `upstream_records` argument, because on this machine the file on disk is upstream.
+        let mine: Vec<Record> = journal
+            .records_for(id, None)
+            .into_iter()
+            .filter(|r| {
+                r.get("device").and_then(Value::as_str) != foreign[0].get("device").and_then(Value::as_str)
+                    && r.get("ts").and_then(Value::as_str).unwrap_or_default() >= first_ts
+            })
+            .collect();
+        let mtime_ts = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .map(|t| crate::journal::now_ts(jiff::Timestamp::try_from(t).ok()))
+            .unwrap_or_else(|_| crate::journal::now_ts(None));
+        let resolution = crate::reconcile::resolve(&meta, &mine, foreign, &mtime_ts, Some(id), &path, ctx.via.as_str());
+
+        // 5. **A carded field is withheld from `apply`: the card IS the write** (review C2). A field
+        //    with a supersede record is a field both desktops moved; if a card could ever apply to
+        //    it, writing the foreign value here would overwrite this device's and leave the card's
+        //    `from` no longer matching the note, which `approvals::validate_amendment` refuses. So
+        //    the note keeps what this device had until the student answers.
+        let folder = path.split('/').next().unwrap_or_default();
+        let card_folder = crate::approvals::AMENDABLE_FOLDERS.contains(&folder);
+        let superseded_fields: std::collections::BTreeSet<String> = resolution
+            .supersede
+            .iter()
+            .filter_map(|r| r.get("field").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let cardable = |field: &str| card_folder && crate::approvals::AMENDABLE_FIELDS.contains(&field);
+
+        let mut literals: Vec<(String, String)> = Vec::new();
+        for (field, value) in &resolution.apply {
+            if superseded_fields.contains(field) && cardable(field) {
+                continue;
+            }
+            if superseded_fields.contains(field) {
+                // A conflict no card could ever apply keeps reconcile's rule (later `ts` wins) and
+                // is named, so the losing value is visible and nothing is dropped in silence.
+                report.warnings.push(format!("sync: {path} — both machines set `{field}`; the later write won and the other is in the journal"));
+            }
+            literals.push((field.clone(), crate::write::to_literal(value)));
+            report.applied += 1;
+        }
+        for record in &resolution.supersede {
+            // The losing write, on the record. `JsonlLedger::append` files it by its own `ts`, like
+            // every other record this function appends.
+            if ledger.append(record).is_ok() {
+                report.superseded += 1;
+            }
+        }
+        if !literals.is_empty() {
+            if let Err(e) = crate::write::write_literals(vault, &path, &literals, ctx, journal, &Default::default()) {
+                report.warnings.push(format!("sync: {path} could not be written ({e})"));
+            }
+        }
+        // **One card for the whole conflicting set, not one per field.** `find_pending_amendment`
+        // keys on `(target_rel, fields)` and `propose_amendment` takes `(field, from, to)` triples,
+        // so a note whose `importance` and `due` both conflict is one card a student answers once.
+        // `from` is what the note holds NOW — this device's value, because the field was withheld
+        // from `apply` above — which is exactly what `approvals::validate_amendment` compares
+        // against before it applies anything.
+        let carded: std::collections::BTreeSet<String> =
+            superseded_fields.iter().filter(|f| cardable(f)).cloned().collect();
+        if !carded.is_empty() && crate::write::find_pending_amendment(vault, &path, &carded).is_none() {
+            let changes: Vec<(String, Value, Value)> = carded
+                .iter()
+                .filter_map(|field| {
+                    let to = resolution.apply.get(field)?.clone();
+                    let from = crate::yaml::get(&meta, field).map(crate::yaml::to_json).unwrap_or(Value::Null);
+                    Some((field.clone(), from, to))
+                })
+                .collect();
+            if !changes.is_empty() {
+                match crate::write::propose_amendment(vault, &file, &meta, &changes, ctx, journal, None, today) {
+                    // One card, however many fields it carries — the fifteen-a-day cap the deck
+                    // already applies counts cards, and so does this.
+                    Ok(_) => report.cards += 1,
+                    Err(e) => report.warnings.push(format!("sync: {path} — the amend card could not be filed ({e})")),
+                }
+            }
+        }
+    }
+
+    // 6. The pulled note texts. **The second recorded exception**, bounded here and nowhere else.
+    for note in &page.notes {
+        if !is_note_path(vault, &note.path) {
+            report.refused += 1;
+            report.warnings.push("sync: a pulled note named a path outside the vault's notes".to_string());
+            continue;
+        }
+        let file = vault.join(&note.path);
+        match &note.text {
+            // A tombstone settles the note through `write::delete`, which moves it to `archive/` and
+            // journals the move. Nothing in this vault is ever unlinked.
+            None => {
+                if file.exists() {
+                    match crate::write::delete(vault, &note.path, ctx, journal) {
+                        Ok(_) => report.moved += 1,
+                        Err(e) => report.warnings.push(format!("sync: {} could not be settled ({e})", note.path)),
+                    }
+                }
+            }
+            Some(text) => {
+                // **Never overwrites a note this device already has.** Its frontmatter was settled
+                // above by `reconcile` and its body is never merged, so the local file wins. What
+                // this writes is a note another desktop CREATED, whose own `create` record was
+                // appended verbatim a few lines ago — which is why it cannot go through
+                // `write::create`, and is the exception the fidelity ledger argues.
+                if file.exists() {
+                    continue;
+                }
+                if let Some(parent) = file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match crate::pystr::write_text(&file, text) {
+                    Ok(()) => report.notes_written += 1,
+                    Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
+                }
+            }
+        }
+    }
+    report
+}
+```
 
 - [ ] **Step 5: Run, then commit.**
 
@@ -2725,6 +3176,13 @@ fn a_vault_with_an_account_and_no_session_says_exactly_that() {
     // answer on a machine with a `cloud.yaml` and no credential is "no session", and a student who
     // has signed out must not read a sentence about their subscription. Reversing the order makes
     // this assertion impossible to write, which is how the review found it the first time.
+    //
+    // **This case reaches Windows Credential Manager, and the exemption is recorded** (review M10).
+    // `CLAUDE.md` asks a new test file that touches the store to carry a file-scoped lock; that rule
+    // exists because parallel `CredWriteW`/`CredReadW` on the SAME target race. This test only
+    // READS, and it reads a target (`knowlu/c3-no-such-profile/session`) that no test and no build of
+    // this product ever writes — so there is nothing to serialise with. `sync_contract.rs` therefore
+    // carries no lock, deliberately, and this comment is the record of that decision.
     let dir = fixture("nosession");
     std::fs::write(
         dir.join("config").join("cloud.yaml"),
@@ -2742,6 +3200,12 @@ fn every_refusal_is_a_named_line_and_never_a_non_zero_exit() {
     // The property `judge` has and the one this step must have: a non-zero exit sets
     // `RunSummary.engine_ok = false`, which paints the tray amber and puts the slot into retry
     // backoff twice a day forever.
+    // **Why none of these reaches a socket, stated because it is load-bearing** (review M9):
+    // `cloudmodel::load` returns `Some` only when all four keys are present and non-empty, so every
+    // shape below answers `None` and `run_lines_with` stops at check one. If `CloudConfig` ever
+    // gained a defaulted field, the second case would resolve `example.invalid` and this test would
+    // start doing DNS while still passing — so a reader who adds a default to that struct owes this
+    // test a `.invalid` host it can never leave the machine through, which is why the host is one.
     let dir = fixture("exitzero");
     for yaml in ["", "api_base: 'https://example.invalid'\n", "not: yaml: at: all\n"] {
         std::fs::write(dir.join("config").join("cloud.yaml"), yaml).expect("cloud.yaml");
@@ -2757,8 +3221,13 @@ fn a_line_never_carries_a_vault_path_a_bearer_or_a_hostname() {
     let dir = fixture("quiet-lines");
     let (_, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
     let joined = lines.join("\n");
-    for forbidden in ["Bearer", &dir.to_string_lossy().to_string(), &knowlu_engine::journal::device_name()] {
-        assert!(!joined.contains(forbidden.as_ref() as &str), "{joined}");
+    // Bound first: an array literal mixing a `&str` with two `&String` over temporaries does not
+    // compile, and the first draft of this test did exactly that (review M1).
+    let vault_path = dir.to_string_lossy().to_string();
+    let host = knowlu_engine::journal::device_name();
+    let forbidden: [&str; 3] = ["Bearer", vault_path.as_str(), host.as_str()];
+    for word in forbidden {
+        assert!(!joined.contains(word), "a line carried {word}: {joined}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2797,16 +3266,179 @@ fn sync_is_the_slots_first_step() {
 
 - [ ] **Step 2: Run them and watch them fail.** `cargo test -p knowlu-engine --test sync_contract` and `cargo test -p knowlu --test scheduler` → FAIL: `sync::run_lines` and `sync::SyncStatus` do not exist; `steps[0].1[0]` is `"coursework"`.
 
-- [ ] **Step 3: Write the command section.** `run_lines_with`, in order, and the order is the message (review I4):
+- [ ] **Step 3: Write the command section** — in full (review I5), because the order of the first two checks is the sentence a student reads:
 
-1. `cloudmodel::load(vault)` → `None` is `sync (skipped: no account)`, `Totals { skipped: Some("no account") }`, exit 0. This is the answer for every vault that has never signed in, including all three fixtures, which is why the oracles cannot move.
-2. `cloudmodel::resolve(vault)` → `Err(Unavailable::NoSession(why))` is `sync (skipped: no session — sign in again)`, exit 0.
-3. Load the cursor. **Pull first** when the direction includes it: `pull`, then `apply`, then save the cursor with the returned `record_cursor`/`note_cursor`. The pull is the half that has to precede `rank`.
-4. **Push second**: `build_push`, `push`, and **save the cursor only if the push returned 200** — a cursor advanced over a batch the service never received is the one bug that loses a record for good.
-5. Every `CloudError` becomes one line through `CloudError::label()` plus its `Display`, is recorded in `totals.errors`, and **is not a skip**: `sync (no network)` reads differently from `sync (skipped: no account)` because they are different facts. Exit 0 either way.
-6. `more: true` adds `sync: more to come — the next slot continues` so a term of catching up is visible rather than silent.
+```rust
+/// Which halves of a sync this run does. The slot runs `Both`; the console's *Sync now* runs `Both`;
+/// the two are separable for a smoke test and for a quit flush that must not pull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction { Pull, Push, Both }
 
-`run_lines` is `run_lines_with` with the totals dropped. `is_configured(vault)` is `cloudmodel::load(vault).is_some()` and is what `state::quit_flush` asks before pushing.
+impl Direction {
+    pub fn parse(word: &str) -> Option<Direction> {
+        match word {
+            "pull" => Some(Direction::Pull),
+            "push" => Some(Direction::Push),
+            "both" => Some(Direction::Both),
+            _ => None,
+        }
+    }
+    fn pulls(self) -> bool { matches!(self, Direction::Pull | Direction::Both) }
+    fn pushes(self) -> bool { matches!(self, Direction::Push | Direction::Both) }
+}
+
+/// What one run did, for the page and the report. Counts and words; never a path or a value.
+#[derive(Debug, Clone, Default)]
+pub struct Totals {
+    pub pulled_records: usize,
+    pub pulled_notes: usize,
+    pub applied: usize,
+    pub cards: usize,
+    pub superseded: usize,
+    pub pushed_records: usize,
+    pub pushed_notes: usize,
+    pub more: bool,
+    /// A normal state the student can act on — "no account", "no session". **Not an error.**
+    pub skipped: Option<String>,
+    /// Something went wrong that a later slot may fix. `SyncStatus::ok` is `errors.is_empty()`.
+    pub errors: Vec<String>,
+}
+
+/// What the console's sync line renders. The ENGINE's type (hand-off H9a): the engine produces it,
+/// and a second struct in the app would be a second thing to keep in step with the run that fills it.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SyncStatus {
+    pub ok: bool,
+    pub at: Option<String>,
+    pub lines: Vec<String>,
+    pub last_error: Option<String>,
+}
+
+impl SyncStatus {
+    /// **A skip is not an error.** A student who has not signed in must not paint the tray amber;
+    /// a 5xx should. `ok` is therefore `errors.is_empty()`, and `at` is stamped whatever happened,
+    /// because "we tried at 07:02 and there was no account" is still a fact the page should show.
+    pub fn of(totals: &Totals, lines: Vec<String>) -> SyncStatus {
+        SyncStatus {
+            ok: totals.errors.is_empty(),
+            at: Some(crate::journal::now_ts(None)),
+            lines,
+            last_error: totals.errors.first().cloned(),
+        }
+    }
+}
+
+/// Does this vault have an account at all? `state::quit_flush` asks before pushing.
+pub fn is_configured(vault: &Path) -> bool {
+    crate::cloudmodel::load(vault).is_some()
+}
+
+/// The whole command. **The return code is always 0** and the function says so by construction: it
+/// is the literal `0` in the one `return` and the one tail.
+///
+/// **The order of the first two checks is the message** (review I4). `load` before `resolve`: the
+/// common answer on a machine that has never signed in is "no account", and a student who is merely
+/// signed out must not read a sentence about their subscription. It also saves a Credential Manager
+/// read twice a day on every vault that has no account.
+pub fn run_lines_with(
+    vault: &Path,
+    direction: Direction,
+    via: &str,
+    run_id: Option<&str>,
+) -> (i32, Vec<String>, Totals) {
+    let mut lines = Vec::new();
+    let mut totals = Totals::default();
+
+    // 1. No account. Every fixture vault in this repository takes this path, which is why
+    //    `oracle.rs` and `surface_oracle.rs` cannot move.
+    if crate::cloudmodel::load(vault).is_none() {
+        totals.skipped = Some("no account".to_string());
+        lines.push("sync (skipped: no account)".to_string());
+        return (0, lines, totals);
+    }
+    // 2. No session. C1 owns the refresh; this only reads, and waits for the app's next slot.
+    let client = match crate::cloudmodel::resolve(vault) {
+        Ok(c) => c,
+        Err(e) => {
+            totals.skipped = Some(e.label().to_string());
+            lines.push(format!("sync (skipped: {e})"));
+            return (0, lines, totals);
+        }
+    };
+
+    let mut cursor = load_cursor(vault);
+    let mut journal = Journal::new(vault);
+    let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: via.to_string(), run_id: run_id.map(str::to_string) };
+    let today = crate::journal::now_ts(None)[..10].parse::<jiff::civil::Date>().unwrap_or(jiff::civil::date(1970, 1, 1));
+
+    // 3. **Pull first.** A field another desktop set this morning must be in the note before the day
+    //    is ordered, or every second desktop ranks a slot behind for ever.
+    if direction.pulls() {
+        match pull(&client, cursor.record_cursor, cursor.note_cursor) {
+            Ok(page) => {
+                let report = apply(vault, &page, &ctx, &mut journal, today);
+                totals.pulled_records = page.records.len();
+                totals.pulled_notes = page.notes.len();
+                totals.applied = report.applied;
+                totals.cards = report.cards;
+                totals.superseded = report.superseded;
+                totals.more = page.more;
+                lines.extend(report.warnings.iter().cloned());
+                lines.push(format!(
+                    "sync: {} record(s) and {} note(s) down; {} applied, {} card(s), {} refused",
+                    totals.pulled_records, totals.pulled_notes, report.applied, report.cards, report.refused
+                ));
+                cursor.record_cursor = page.record_cursor;
+                cursor.note_cursor = page.note_cursor;
+                if let Err(e) = save_cursor(vault, &cursor) {
+                    totals.errors.push(e.label().to_string());
+                    lines.push(format!("sync: the cursor could not be saved ({e})"));
+                }
+            }
+            Err(e) => {
+                totals.errors.push(e.label().to_string());
+                lines.push(format!("sync ({e})"));
+            }
+        }
+    }
+
+    // 4. **Push second, and the cursor moves only on a 200.** A cursor advanced over a batch the
+    //    service never received is the one bug in this module that loses a record for good.
+    if direction.pushes() {
+        let (batch, next) = build_push(vault, &cursor, client.account_id(), &mut journal);
+        lines.extend(batch.warnings.iter().cloned());
+        match push(&client, &batch) {
+            Ok((records, notes)) => {
+                totals.pushed_records = records;
+                totals.pushed_notes = notes;
+                lines.push(format!("sync: {records} record(s) and {notes} note(s) up"));
+                if let Err(e) = save_cursor(vault, &next) {
+                    totals.errors.push(e.label().to_string());
+                    lines.push(format!("sync: the cursor could not be saved ({e})"));
+                }
+            }
+            // 5. Every refusal is one line and **is not a skip**: `sync (no network)` and
+            //    `sync (no entitlement)` are things that happened, not states the student chose.
+            Err(e) => {
+                totals.errors.push(e.label().to_string());
+                lines.push(format!("sync ({e})"));
+            }
+        }
+    }
+
+    // 6. A term of catching up is visible rather than silent.
+    if totals.more {
+        lines.push("sync: more to come — the next slot continues".to_string());
+    }
+    (0, lines, totals)
+}
+
+/// The printing twin, and one line of it.
+pub fn run_lines(vault: &Path, direction: Direction, via: &str, run_id: Option<&str>) -> (i32, Vec<String>) {
+    let (code, lines, _) = run_lines_with(vault, direction, via, run_id);
+    (code, lines)
+}
+```
 
 - [ ] **Step 4: Apply the three hand-offs** (**H4a**, **H8a**, **H9a**) and re-run `cargo test --workspace`. The slot's first step is `sync`; the console's *Sync now* runs the engine instead of git; `ConsoleState.sync` is filled.
 
@@ -2835,7 +3467,8 @@ Ruling 3, and the one task in this plan that is not about sync at all. Today the
   - `entitle::profile_id(&str) -> Option<&str>`
   - `entitle::app_data_root_in(&Path) -> PathBuf` and `entitle::cache_path_in(&Path, &str) -> PathBuf`
   - `entitle::decide(Option<&Cached>, jiff::Timestamp) -> bool`
-  - `entitle::gate(&Path) -> Option<String>` — `Some(the named line)` when the step must not run
+  - `entitle::gate_in(&Path, &Path, jiff::Timestamp) -> Option<String>` — the app-data root and the clock injected; every test calls this one
+  - `entitle::gate(&Path) -> Option<String>` — the production entry point; `Some(the reason)` when the step must not run, and `main.rs` composes the line
 
 - [ ] **Step 1: Ask Quinn (P5)**, in one message, when this task is reached — the text is in the preconditions table. Record the answer in the task report; the plan is built to (a), the four cloud steps.
 
@@ -2901,13 +3534,18 @@ fn the_engines_grace_is_the_apps_grace_and_the_path_is_the_apps_path() {
     // reads it; a grace that drifted would mean the page said "your subscription lapsed" on a
     // different day from the one the slots stopped. Read as text, not linked: `knowlu-engine` does
     // not depend on `knowlu` and must not start.
-    let app = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("app").join("src").join("account.rs"),
-    ).expect("app/src/account.rs");
-    assert!(app.contains("from_secs(72 * 60 * 60)"), "the app's grace moved; move the engine's with it");
+    //
+    // **Two files, not one** (review I2): the grace and the cache filename are `account.rs`'s
+    // (`:479`, `:485`), and the app-data root is `state.rs`'s `app_data_root_in` (`:190`). Reading
+    // `account.rs` for all three is how the first draft of this test failed on a line that was never
+    // there, so each assertion names the file it is about.
+    let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("app").join("src");
+    let account = std::fs::read_to_string(app.join("account.rs")).expect("app/src/account.rs");
+    let state = std::fs::read_to_string(app.join("state.rs")).expect("app/src/state.rs");
+    assert!(account.contains("from_secs(72 * 60 * 60)"), "app/src/account.rs: the app's grace moved; move the engine's with it");
     assert_eq!(entitle::GRACE_SECONDS, 72 * 60 * 60);
-    assert!(app.contains(r#"data_dir.join("entitlement.json")"#), "the app's cache filename moved");
-    assert!(app.contains(r#"base.join("knowlu")"#), "the app's data root moved");
+    assert!(account.contains(r#"data_dir.join("entitlement.json")"#), "app/src/account.rs: the cache filename moved");
+    assert!(state.contains(r#"base.join("knowlu")"#), "app/src/state.rs: app_data_root_in moved");
 }
 
 #[test]
@@ -2928,11 +3566,29 @@ fn a_gated_vault_past_the_grace_gets_one_named_line_and_that_line_is_all_the_cal
         "api_base: 'https://example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_0a1b2c3d4e/session'\naccount_id: 'acct-1'\n",
     ).expect("cloud.yaml");
     cache(&root, "profile_0a1b2c3d4e", "canceled", "2026-09-17T06:00:00Z");
-    let line = entitle::gate_in(&root, &vault, "2026-09-17T12:00:00Z".parse().unwrap()).expect("gated");
-    assert_eq!(line, "skipped: no entitlement");
-    // And the line is a word, never a path or a status code from Stripe.
-    assert!(!line.contains("profile_") && !line.contains("canceled"));
+    let reason = entitle::gate_in(&root, &vault, "2026-09-17T12:00:00Z".parse().unwrap()).expect("gated");
+    assert_eq!(reason, "skipped: no entitlement");
+    // And the reason is a word, never a path or a status code from Stripe.
+    assert!(!reason.contains("profile_") && !reason.contains("canceled"));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_line_a_student_reads_names_the_step_and_the_reason() {
+    // **The one student-visible artefact of ruling 3, asserted** (review I3). `entitle::gate` answers
+    // the reason; `main.rs`'s `name_of` supplies the word; the composed line is what lands in the
+    // Runs view, and it has to read like the two skips the app already prints. Asserted against the
+    // hand-off's own source rather than by spawning the binary, because a spawn would need a real
+    // `LOCALAPPDATA` profile and this suite deliberately has none.
+    let main = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs"),
+    ).expect("engine/src/main.rs");
+    assert!(main.contains(r#"println!("{} ({reason})", name_of(&cli.command));"#), "H4b composes the line");
+    for word in ["\"coursework\"", "\"ingest\"", "\"judge\"", "\"sync\""] {
+        assert!(main.contains(word), "name_of must answer for {word}");
+    }
+    // And the shape itself, spelled out once so a reader knows what to look for on the page.
+    assert_eq!(format!("{} ({})", "sync", "skipped: no entitlement"), "sync (skipped: no entitlement)");
 }
 ```
 
@@ -3204,26 +3860,139 @@ fn a_restored_note_overwrites_the_seed_at_the_same_path_and_an_empty_copy_is_not
 
 - [ ] **Step 3: Run them and watch them fail.** `cargo test -p knowlu-engine --test sync_replay` → FAIL to compile: `sync::restore`, `sync::Restored`, `sync::unexpected_notes`.
 
-- [ ] **Step 4: Write the restore section.** One `materialise` and three callers around it (review I10):
-
-- `unexpected_notes(vault, tolerate)` returns every path under `ids::NOTE_FOLDERS` that is not in `tolerate`, sorted.
-- `restore(dest, page, tolerate)` refuses with `SyncError::Io` naming the first unexpected note, then calls `materialise`.
-- `materialise(dest, page)` writes each pulled note's text with `pystr::write_text` after `is_note_path` (creating the parent, so a pulled `courses/` path works on a vault that has none), skips a tombstone, appends each well-formed record to `state/journal/<its own ts's UTC day>.jsonl` with `JsonlLedger::append`, and counts what it did. **`empty` is `notes == 0 && records == 0`.**
-- `restore_all(dest, client, tolerate)` does the allowlist check once, then pages `/sync-pull` from zero, calling `materialise` for each page and summing.
-- `restore_into(dest)` is the wizard's one call: `cloudmodel::resolve(dest)`, `note_paths(dest)` as the allowlist, `restore_all`. **A network failure is not an `Err`** — it is `Ok(Restored { empty: true, warnings: [..] })`, because a student making their first vault on a hotel Wi-Fi should get a vault and a first slot that fills it, not a refusal (hand-off H11a's comment says the same thing from the other side).
-
-**The one recorded exception, in the code where it happens:**
+- [ ] **Step 4: Write the restore section** — the refusal and the allowlist are code, `materialise` is one function with three callers around it (review I10, and review I5 for which parts have to be written out):
 
 ```rust
-// **This is the one place in the crate that writes a note without `write`**, and the fidelity
-// ledger argues it. Every record here ALREADY EXISTS and carries the `ts`, the `device` and the
-// `seq` of the machine that made it. Putting them through `write` would fabricate a second
-// `create` record, stamped with THIS device's name and TODAY's `ts`, for a note created three
-// months ago on another laptop — and `journal::human_set`, which is what judge-once reads, would
-// then answer with the restore instead of with the student's own decision. The invariant exists to
-// make attribution complete; re-journalling a restore is the one way to break it while appearing
-// to obey it. The bound is the allowlist above: this function never runs into a folder holding a
-// note its caller did not name.
+/// What one restore put on disk. `empty` is the fact the wizard's finish panel reads.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Restored {
+    pub notes: usize,
+    pub records: usize,
+    pub empty: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Every note already in `dest` that the caller did not name. Sorted, so the message is stable.
+pub fn unexpected_notes(vault: &Path, tolerate: &[String]) -> Vec<String> {
+    note_paths(vault).into_iter().filter(|rel| !tolerate.contains(rel)).collect()
+}
+
+/// One page, materialised. **The first recorded exception to "every note write goes through
+/// `write`"**, and the fidelity ledger argues it: every record here ALREADY EXISTS and carries the
+/// `ts`, the `device` and the `seq` of the machine that made it. Putting them through `write` would
+/// fabricate a second `create` record, stamped with THIS device's name and TODAY's `ts`, for a note
+/// created three months ago on another laptop — and `journal::human_set`, which is what judge-once
+/// reads, would then answer with the restore instead of with the student's own decision. The
+/// invariant exists to make attribution complete; re-journalling a restore is the one way to break
+/// it while appearing to obey it.
+///
+/// The bound is `restore`'s allowlist, checked once by the caller before the first page.
+pub fn materialise(dest: &Path, page: &Pulled) -> Restored {
+    let mut out = Restored { warnings: page.warnings.clone(), ..Default::default() };
+    let ledger = crate::ledger::JsonlLedger::new(dest.join("state").join("journal"));
+    for (_, record) in &page.records {
+        if let Err(why) = record_is_well_formed(record) {
+            out.warnings.push(format!("restore: a record was refused ({why})"));
+            continue;
+        }
+        if !is_note_path(dest, record.get("path").and_then(Value::as_str).unwrap_or_default()) {
+            out.warnings.push("restore: a record named a path outside the vault's notes".to_string());
+            continue;
+        }
+        match ledger.append(record) {
+            Ok(()) => out.records += 1,
+            Err(e) => out.warnings.push(format!("restore: a record could not be journalled ({e})")),
+        }
+    }
+    for note in &page.notes {
+        // A tombstone is a path the account knows is settled. A restore does not resurrect it and
+        // does not have to move anything either: there is nothing on disk yet.
+        let Some(text) = note.text.as_deref() else { continue };
+        if !is_note_path(dest, &note.path) {
+            out.warnings.push("restore: a note named a path outside the vault's notes".to_string());
+            continue;
+        }
+        let file = dest.join(&note.path);
+        if let Some(parent) = file.parent() {
+            // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match crate::pystr::write_text(&file, text) {
+            Ok(()) => out.notes += 1,
+            Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
+        }
+    }
+    out.empty = out.notes == 0 && out.records == 0;
+    out
+}
+
+/// One page into a folder whose contents the caller vouches for.
+pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restored, SyncError> {
+    if let Some(stray) = unexpected_notes(dest, tolerate).first() {
+        // Named, not counted: a student reading this needs to know WHICH note made the folder
+        // unsafe to fill, and a restore that silently overwrote it would be the one unrecoverable
+        // thing this module could do.
+        return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
+    }
+    Ok(materialise(dest, page))
+}
+
+/// The whole copy, paged from zero. The allowlist is checked **once**, before the first page: the
+/// second page would otherwise see the notes the first one wrote and refuse itself.
+pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerate: &[String]) -> Result<Restored, SyncError> {
+    if let Some(stray) = unexpected_notes(dest, tolerate).first() {
+        return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
+    }
+    let mut total = Restored { empty: true, ..Default::default() };
+    let (mut records_after, mut notes_after) = (0i64, 0i64);
+    loop {
+        let page = pull(client, records_after, notes_after)?;
+        let one = materialise(dest, &page);
+        total.notes += one.notes;
+        total.records += one.records;
+        total.warnings.extend(one.warnings);
+        // A page that moved neither cursor would loop for ever; the server holds both where they
+        // were on an empty page, which is exactly the condition to stop on.
+        let stalled = page.record_cursor == records_after && page.note_cursor == notes_after;
+        records_after = page.record_cursor;
+        notes_after = page.note_cursor;
+        if !page.more || stalled {
+            break;
+        }
+    }
+    total.empty = total.notes == 0 && total.records == 0;
+    // The cursor the next slot starts from, so the first sync after onboarding does not re-pull the
+    // whole copy it has just written.
+    let cursor = Cursor { record_cursor: records_after, note_cursor: notes_after, ..Default::default() };
+    if let Err(e) = save_cursor(dest, &cursor) {
+        total.warnings.push(format!("restore: the cursor could not be saved ({e})"));
+    }
+    Ok(total)
+}
+
+/// The wizard's one call (hand-off H11a). Resolve, take what is on disk right now as the allowlist,
+/// page to the end.
+///
+/// **A network failure is NOT an `Err`.** A student making their first vault on a hotel Wi-Fi should
+/// get a vault and a first slot that fills it, not a refusal and a rolled-back folder; the `Err` arm
+/// is for a copy that exists and will not read, which is the case where a half-filled folder would
+/// be worse than none.
+pub fn restore_into(dest: &Path) -> Result<Restored, String> {
+    let client = match crate::cloudmodel::resolve(dest) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Restored { empty: true, warnings: vec![format!("restore: {e}; the first slot will fill this vault")], ..Default::default() });
+        }
+    };
+    let tolerate = note_paths(dest);
+    match restore_all(dest, &client, &tolerate) {
+        Ok(r) => Ok(r),
+        Err(SyncError::Service(why)) => {
+            Ok(Restored { empty: true, warnings: vec![format!("restore: {why}; the first slot will fill this vault")], ..Default::default() })
+        }
+        Err(e) => Err(format!("{e}")),
+    }
+}
 ```
 
 - [ ] **Step 5: Apply H11a**, then add `app/tests/onboarding.rs`'s case: a wizard finish whose account copy is empty **keeps the vault** and the envelope carries `restored.empty == true`; a finish whose `restore_into` returns `Err` removes the folder it made and returns `ok: false`. The finish panel's copy in `console.js` gains one line, pinned by `app/tests/static_assets.rs`:
@@ -3355,9 +4124,14 @@ fn the_page_says_nothing_about_a_repository() {
 }
 
 #[test]
-fn the_local_snapshot_mirror_is_untouched() {
+fn the_local_snapshot_mirror_is_still_a_module() {
     // §5.5: "the local snapshot tick stays". The account's copy answers "I lost the laptop"; the
     // mirror answers "I deleted the file five minutes ago". They are different products.
+    //
+    // **This asserts existence, not identity** (review M4). "Byte-identical to `main`" is a claim
+    // about a diff and belongs in the gate, where Task 12 step 2 runs
+    // `git diff --quiet main -- engine/src/backup.rs`; a test that greps for `pub fn` would pass on
+    // a file somebody had rewritten, so it says only what it checks.
     let backup = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("engine").join("src").join("backup.rs"),
     ).expect("engine/src/backup.rs");
@@ -3398,11 +4172,11 @@ In `app/static/console.js`, `renderSyncLine`'s first six lines of body — the c
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add engine/src/history.rs engine/src/lib.rs engine/tests/no_console.rs app/tests/no_git.rs app/tests/commands.rs app/static/console.js
+git add engine/src/history.rs engine/tests/no_console.rs app/tests/no_git.rs app/tests/commands.rs app/static/console.js
 git commit -F .git-commit-msg.txt   # "engine+app: git leaves the product — history.rs deleted, the page's repo words with it (C3' Task 10)"
 ```
 
-(`engine/src/lib.rs` appears in that `git add` only because `git rm` staged the deletion beside it; the **declaration** line is hand-off H3b's own commit. If the two collide, the hand-off wins and the implementer reports it.)
+**`engine/src/lib.rs` is not staged here** (review M11): `git rm engine/src/history.rs` stages the file's deletion and nothing else, and the `pub mod history;` declaration is hand-off **H3b**'s own commit, applied immediately after. The branch is red between the two, which is the one non-buildable intermediate state this plan allows and the reason all four of Task 10's hand-offs land back to back.
 
 ---
 ### Task 11: The privacy sentences, and the two capability URLs leave the vault
@@ -3546,7 +4320,7 @@ git commit -F .git-commit-msg.txt   # "site+app: the account holds the notes, an
 
 - [ ] **Step 1: The whole gate, twice.** `cargo test --workspace` at 0 warnings — record the pass count and the exact `warnings: N accepted (.rsrc), N tallies, N other` line, which must end in `0 other`. Then `deno check` / `deno lint` / `deno test` over `cloud/supabase/` **with C2's full flag set**, recording each count. Then `git ls-files --eol cloud/ engine/ app/ site/ docs/` and confirm every `.ts`, `.sql`, `.rs`, `.html`, `.css`, `.js` and `.md` is `i/lf`, every `.ps1` is `i/crlf`, and every fixture is `attr/-text`. Then `.\scripts\ci\eol-check.ps1`. Then `python scripts/wizard-check.py` → `ok` and `python scripts/settings-check.py` (hand-off **H13**, verified).
 
-- [ ] **Step 2: The frozen references.** `git status --porcelain --untracked-files=all engine/tests/fixtures/` → **empty**. The eight Python-written references and the three Rust-generated surface references are untouched; `oracle.rs` and `surface_oracle.rs` pass unchanged, and the reason is structural: none of the three fixture vaults has a `config/cloud.yaml`, so `sync` skips them and `entitle::gate` never fires on them.
+- [ ] **Step 2: The frozen references, and the backup mirror.** `git status --porcelain --untracked-files=all engine/tests/fixtures/` → **empty**; `git diff --quiet main -- engine/src/backup.rs` → exit 0, which is how exit-gate item 12's "byte-identical" is actually checked (review M4). The eight Python-written references and the three Rust-generated surface references are untouched; `oracle.rs` and `surface_oracle.rs` pass unchanged, and the reason is structural: none of the three fixture vaults has a `config/cloud.yaml`, so `sync` skips them and `entitle::gate` never fires on them.
 
 - [ ] **Step 3: The account-scoping scan — C3′'s own, in C3′'s own file.** Added to `cloud/supabase/functions/_shared/sync_rows_test.ts`, which C3′ owns. It scans `sync_db.ts` — the only file in this stream that queries anything — so that a `restSelect`, `restUpsert` or `restDelete` naming a sync table **without** `account_id=eq.` fails the suite. The service role bypasses RLS; this scan is the backstop and it is cheap. **And it asserts zero raw fetches**, which the superseded plan could not: with the key generation gone there is no compare-and-set, so every call goes through C1's helpers.
 
@@ -3565,9 +4339,9 @@ Deno.test("every sync query is scoped to one account, and nothing bypasses C1's 
 
 - [ ] **Step 4: The ownership check.** `git diff --name-only main...c3-sync` → confirm every path is inside C3′'s ownership as *Global Constraints* lists it, plus the hand-off files as their own commits and `cloud/supabase/migrations/migrations_test.ts` under R-C3-exec-4. **An overlap is a stop, not a rebase**: report it to the controller.
 
-- [ ] **Step 5: The hand-off list.** One section in the task report: **fifteen entries**, each with the exact code from *Controller hand-offs*, the task it landed beside, its commit sha, and what would have broken without it — in the order they were applied: **H1** (Task 1), **H2** (Task 3), **H4a**, **H8a**, **H9a** (Task 7), **H3a** and **H4b** (Task 8, H3a compile-blocking), **H11a** (Task 9), **H3b**, **H8b**, **H9b**, **H10** (Task 10, all four compile-blocking together), **H11b** and **H12** (Task 11), **H5**, **H7**, **H8c** (Task 11, verified), **H13** and **H15** (Task 12, verified), **H14** (Task 12). State plainly which were compile-blocking, and confirm that **no task was reported green with a hand-off it named unapplied**.
+- [ ] **Step 5: The hand-off list.** One section in the task report: **twenty entries** — and **there is no H6**: the superseded plan's numbering is kept where a hand-off survived it, so the gap is deliberate and is recorded here rather than looked for (review M12) — each with the exact code from *Controller hand-offs*, the task it landed beside, its commit sha, and what would have broken without it — in the order they were applied: **H1** (Task 1), **H2** (Task 3), **H4a**, **H8a**, **H9a** (Task 7), **H3a** and **H4b** (Task 8, H3a compile-blocking), **H11a** (Task 9), **H3b**, **H8b**, **H9b**, **H10** (Task 10, all four compile-blocking together), **H11b** and **H12** (Task 11), **H5**, **H7**, **H8c** (Task 11, verified), **H13** and **H15** (Task 12, verified), **H14** (Task 12). State plainly which were compile-blocking, and confirm that **no task was reported green with a hand-off it named unapplied**.
 
-- [ ] **Step 6: Docs (hand-off H14).** `CLAUDE.md` gains, in the engine-command list after `judge`:
+- [ ] **Step 6: Write the docs text — it is hand-off H14's, and the controller commits it.** The implementer produces the exact replacement text below in the task report; it does **not** edit `CLAUDE.md`, `HANDOFF.md` or `app/README.md` (Global Constraints: a task that silently edits a hand-off file is a plan defect). `CLAUDE.md` gains, in the engine-command list after `judge`:
 
 ```
 - `sync --vault <v> [--direction pull|push|both] [--via <via>] [--run-id <id>]` — the account's copy
@@ -3597,9 +4371,11 @@ and a sentence beside it: *"**The engine gates itself** (ruling 3): `coursework`
 - [ ] **Step 8: Commit.**
 
 ```bash
-git add HANDOFF.md CLAUDE.md app/README.md docs/plans/2026-09-17-c3-account-vault-plan.md cloud/supabase/functions/_shared/sync_rows_test.ts
-git commit -F .git-commit-msg.txt   # "docs: C3' closed — the account holds the vault, the engine gates itself, and git leaves the product (C3' Task 12)"
+git add docs/plans/2026-09-17-c3-account-vault-plan.md cloud/supabase/functions/_shared/sync_rows_test.ts
+git commit -F .git-commit-msg.txt   # "cloud+docs: the account-scoping scan, and this plan marked DONE (C3' Task 12)"
 ```
+
+`HANDOFF.md`, `CLAUDE.md` and `app/README.md` are **not** staged here: their text is written in step 6 and committed by the controller as hand-off **H14**, immediately after this commit (review I6). The two commits are reviewed together.
 
 ---
 ## Exit gate
@@ -3615,8 +4391,8 @@ git commit -F .git-commit-msg.txt   # "docs: C3' closed — the account holds th
 9. **A field both desktops moved is a `kind: amend` card**, filed through `write::propose_amendment` so the fifteen-a-day cap applies; a second pull of the same field set does not mint a second card; the note keeps this device's value until the card is answered; and a conflict on a field no card could ever apply takes reconcile's rule, keeps its supersede record and says so in one named line. **A foreign record is journalled verbatim** — its own `ts`, `device` and `actor` — and a record this device already has is not applied twice.
 10. **Two desktops cannot strand a row between them.** `/sync-pull` reads only rows that settled at least `READ_LAG_SECONDS` ago, so a cursor cannot step past a push that has taken its `seq` and not yet committed; `the clock the read lag uses is the handler's, and it reaches both readers` pins the wiring and Task 4's smoke step observes **both** pulls — the empty one and the one with the row.
 11. **The engine gates itself** (ruling 3). `coursework`, `ingest`, `judge` and `sync` on a vault with an account whose cached entitlement is absent, inactive or older than 72 hours print one named line and exit 0; a vault with **no** `config/cloud.yaml` is not gated at all; `surface`, `write`, `runs`, `info`, `issues` and `coursework-discover` are never gated; and `the_engines_grace_is_the_apps_grace_and_the_path_is_the_apps_path` pins the two constants that cannot be linked. **P5's answer is recorded** — whether `rank` joins them.
-12. **Git is gone.** `engine/src/history.rs` does not exist, `lib.rs` does not declare it, no file under `app/src/` names `history::`, `refresh_history`, `refresh_head` or `git_sha` — **including `app/src/main.rs`'s startup thread, which H10 deletes** — no file under `engine/src/` names `git_with` or `SyncLock`, `runs::git_sha` survives and is asserted to, no manifest names `git2`/`gix`, and the page renders none of `is_repo`, `has_remote`, `auto_sync`, `pending push`, `engine_newer` or `vault_head`. **`engine/src/backup.rs` is byte-identical to `main`.**
-13. **The envelope is gone and cannot come back.** `engine/Cargo.toml` names neither `ring` nor `base64`; `sha2` is the one hash edge and is justified in the test that names it; `engine/src/sync.rs` names no key, no recovery code, no HKDF and no AEAD; `sync_vectors.json` and `sync_envelope_test.ts` are deleted. **This stream adds no Credential Manager entry and no Tauri command**, and the counts stay 43 / 30 / 62.
+12. **Git is gone.** `engine/src/history.rs` does not exist, `lib.rs` does not declare it, no file under `app/src/` names `history::`, `refresh_history`, `refresh_head` or `git_sha` — **including `app/src/main.rs`'s startup thread, which H10 deletes** — no file under `engine/src/` names `git_with` or `SyncLock`, `runs::git_sha` survives and is asserted to, no manifest names `git2`/`gix`, and the page renders none of `is_repo`, `has_remote`, `auto_sync`, `pending push`, `engine_newer` or `vault_head`. **`engine/src/backup.rs` is byte-identical to `main`**, asserted by `git diff --quiet main -- engine/src/backup.rs` in Task 12 step 2 rather than by a scan for `pub fn`, which would pass on a rewrite (review M4).
+13. **The envelope is gone and cannot come back.** `engine/Cargo.toml` names no `base64`, no `aes-gcm`, no `hkdf` and **no `sha2`**; `ring` stays for `ring::digest::SHA256` alone — it was already linked through `rustls`, so the hash adds no crate, and `the_content_hash_is_rings_and_the_envelope_is_not_coming_back` is the test that argues it; `engine/src/sync.rs` names no key, no recovery code, no HKDF and no AEAD; `sync_vectors.json` and `sync_envelope_test.ts` are deleted. **This stream adds no Credential Manager entry and no Tauri command**, and the counts stay 43 / 30 / 62.
 14. **The two capability URLs are out of the vault** for any vault that has an account: `ics_url: ''` and `- name: personal` / `ics_url: 'cloud:personal'`, with `ingest` still exiting **0** and naming the reason when the service answers 404, and a vault with no account unchanged. `a_cloud_vault_runs_ingest_with_no_url_in_the_vault_at_all` passes.
 15. **The published promise is true.** All four copies of the privacy sentence say that the service stores the student's tasks and notes to keep their desktops in step, encrypted at rest, deleted with the account; `site/privacy.html` no longer carries `No note bodies` or the switch it promised; `the_wizards_privacy_sentence_is_the_sites_privacy_sentence`, `the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages` and `the_privacy_page_describes_the_account_vault_and_no_switch` all pass; **and Quinn and the lawyer have read it (P1)**. This item alone is a merge blocker.
 16. `cargo test --workspace` is green at **0 warnings**; `oracle.rs` and `surface_oracle.rs` pass **unchanged**; `deno check`, `deno lint` and `deno test` over `cloud/supabase/` are green **with C2's full flag set**; no test opens a socket that is not `127.0.0.1`; every hand-off **H1, H2, H3a, H3b, H4a, H4b, H5, H7, H8a, H8b, H8c, H9a, H9b, H10, H11a, H11b, H12, H13, H14, H15** is listed in the final report with exact code and the task it landed beside, and **no commit on `c3-sync` touches a file outside C3′'s ownership** (`git diff --name-only main...c3-sync` proves it).
@@ -3664,3 +4440,47 @@ Inherited from `docs/reports/2026-09-14-c3-sync-plan-review.md`, with the ones t
 | M-c | A note's **body** is never merged | Frontmatter is what the system ranks on and what `reconcile` was written for; a three-way text merge of prose is a different product. A body written on another desktop still arrives whole for a note this device has never seen, which is the case that matters for a second desktop and for a restore. |
 | M-d | The commit trailer hard-codes a model name | **Ruled not a defect** (R-C2-6): the trailers name the model and session that *execute* the plan, and the literal in Global Constraints is the writing session's. |
 | New | The device sends its whole note set on a first push, one page of 500 at a time | A vault of 500 notes is one page and about a megabyte; a fourth-year vault is two or three pages across two or three slots, each idempotent. A first push that streamed would be a second protocol for a case that resolves itself in a day. |
+
+---
+
+## Fix round 1 — resolutions (2026-09-17)
+
+Against `docs/reports/2026-09-17-c3-account-vault-plan-review.md`. **Nothing in that report is disputed.** Three findings moved the *design* rather than the wording, and a reader who knows the first draft should read those first: the entitlement gate now **composes its own line** (`sync (skipped: no entitlement)`, not a bare reason); `apply` now **withholds a carded field from the write**, which is what makes "never a silent merge" true rather than nearly true; and the content hash is **`ring`'s, not `sha2`'s**, because `ring` is already in the engine's graph and `sha2` is not.
+
+### Critical
+
+- **C1 — resolved by moving three callers.** `app/src/state.rs:147` already declares `run_sync`, so H9a is now a **replacement**: it rewrites that function's body and signature in place and, in the *same commit*, removes its three git-shaped callers — `scheduler::sync_step` and its `push` step, both housekeeping `state::run_sync` calls, and `quit_flush`'s git branch. H8b keeps only the `history`-shaped remainder (the `has_remote` gate, the pull step, the two refreshes) and says why the rest left early. H9b's list is corrected: `run_sync` is not in it, and `quit_flush` is shown as the shape H9a already produced, with a "stop and report" if it still reads `cs.history`. **Exactly one `state::run_sync` exists at every commit**, and the controller runs `cargo build -p knowlu` before Task 8 starts.
+- **C2 — resolved by a rule, stated three times.** Under the role reversal `reconcile::resolve` puts the *foreign* value into `res.apply` exactly when the foreign side wins, so writing `apply` wholesale would overwrite this device's value **and** file a card whose `from` no longer matched the note — which `approvals::validate_amendment` would refuse for ever. **A field that produced a supersede record and is card-eligible is now withheld from `apply` before `write_literals` sees it: the card is the write.** Written in `apply`'s code (Task 6 step 4), asserted in its own test (`assert_eq!(report.applied, 0)` beside the existing `cards == 1`), and stated in the fidelity ledger's conflict row. Fields with no supersede record apply cleanly; a supersede on a field no card could ever apply keeps reconcile's rule, applies, and emits the named warning the ledger already promised — `a_conflict_on_an_unamendable_field_takes_reconciles_rule_and_says_so` is the test.
+
+### Important
+
+- **I1 — resolved, and the argument is now the lockfile's.** `sha2` is **not** in `knowlu-engine`'s dependency array (the workspace's copy is the app's, through `tauri-codegen` and `wry`), so adding it would pull `digest 0.10`, `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` in beside `sha1 0.11`'s own `digest 0.11` — two majors of two crates into a binary with a 6 MiB gate. `ring` is already linked through `ureq` → `rustls`. So **`ring` stays** and the hash is `ring::digest::SHA256`; **`base64` still leaves**; the manifest step is now one line out and a comment rewritten, with no line in; `sha256_hex`'s body, the Tech Stack line, the file-structure line, the §8 ledger row and exit-gate item 13 all say the same thing; and the replacement test is `the_content_hash_is_rings_and_the_envelope_is_not_coming_back`, which names `ring` and refuses `sha2`, `base64`, `aes-gcm`, `chacha20`, `rust-crypto`, `sodiumoxide` and `hkdf`.
+- **I2 — resolved.** The grace pin reads **two** files: `app/src/account.rs` for `from_secs(72 * 60 * 60)` and `data_dir.join("entitlement.json")`, and `app/src/state.rs` for `base.join("knowlu")`. Each assertion names the file it is about, and the comment says the first draft failed on a line that was never there.
+- **I3 — resolved in the hand-off, and tested.** H4b now composes the line itself — `println!("{} ({reason})", name_of(&cli.command));` — with `name_of` written out beside `gated_vault` as a `match` over `Command`. `entitle::gate` returns the *reason*; `main.rs` supplies the word. `the_line_a_student_reads_names_the_step_and_the_reason` asserts the composition against the hand-off's own source and spells the resulting sentence out, so the one student-visible artefact of ruling 3 is no longer untested.
+- **I4 — resolved.** Global Constraints now says **two recorded exceptions** and names both. A new fidelity-ledger row argues the second (`apply` writing a pulled note's text) with the same reasoning as the restore — the note's own `create` record comes down verbatim in the same batch, so `write::create` would journal a duplicate stamped with this device and today — and states the bound the code actually enforces: `is_note_path`, after the record is appended, and **never over a note this device already has**. `a_pulled_note_never_overwrites_a_note_this_device_already_has` is the new test.
+- **I5 — resolved.** `sync::apply` (about 150 lines), `sync::run_lines_with` with `Direction`, `Totals` and `SyncStatus`, and the whole restore section (`Restored`, `unexpected_notes`, `materialise`, `restore`, `restore_all`, `restore_into`) are written out as code. Task 6's five named-but-unwritten tests are written, so its step 1 is twelve cases and all twelve are real. Writing `apply` out is also what surfaced two signature errors the outline hid: `find_pending_amendment` takes `(vault, target_rel, &BTreeSet<String>)` and `propose_amendment` takes `(field, from, to)` triples — so a conflicting note now files **one** card carrying every conflicting field, with `from` read out of the note's own frontmatter.
+- **I6 — resolved.** The hand-off preamble now says once that **H14's text is authored in Task 12 step 6 and committed by the controller as H14's own commit**. Step 6 says the implementer produces the text and edits none of the three files; step 8's `git add` drops them and its commit message changes to match.
+
+### Minor
+
+| # | Outcome |
+|---|---|
+| M1 | **Fixed** — the two strings are bound first and the array is `[&str; 3]`, with the reason in a comment. |
+| M2 | **Fixed** — `entitle::gate_in` is in the Produces list, beside `gate`, with the difference between them stated. |
+| M3 | **Fixed** — the `§5.5 Down` row now says `/judge-event` is reached inside the **judge** step's events pass (`enrich.rs`), and names `rank_cannot_reach_a_judgment_endpoint` as the reason it cannot be `rank`'s. |
+| M4 | **Fixed, by weakening the test and strengthening the gate.** The test is renamed `the_local_snapshot_mirror_is_still_a_module` and says it asserts existence, not identity; Task 12 step 2 runs `git diff --quiet main -- engine/src/backup.rs`, which is what exit-gate item 12 now cites. |
+| M5 | **Fixed** — the generated column is `coalesce(<expr>, false)`, so an absent `op` is `false` rather than a 23502; and the migration says plainly that **JSON validity is not guarded here** and the validator is the only thing between a client and a 22P02. |
+| M6 | **Fixed** — renamed `a_push_carries_no_bearer_no_credential_target_and_no_app_data_path`, with a comment saying the hostname is inside `body` by design and that the opaque `device` column is proved elsewhere. |
+| M7 | **Fixed in two of three parts, refused in one.** `sha256Hex` moves into `_shared/sync_rows.ts` and both the handler and its suite import it. The loopback harness copy is **accepted and argued**: extracting it needs either a shared integration-test crate or a production module existing for two test files. The shared `refusal()` helper is **refused**: it is three lines in two suites, and the same two homes are the only ones available for it. |
+| M8 | **Fixed** — both `index.ts` files are written out in full, wiring `restFromEnv`, `requireActiveEntitlement`, `asResponse` and each function's deps. |
+| M9 | **Fixed** — the test states why none of its three shapes reaches a socket (`cloudmodel::load` needs all four keys) and what a future defaulted field would cost. |
+| M10 | **Fixed by recording the exemption.** `sync_contract.rs` reads Credential Manager through `cloudmodel::resolve` and carries **no** lock, deliberately: it only reads, and it reads a target no test and no build ever writes, so there is nothing to serialise with. The comment is the record. |
+| M11 | **Fixed** — `engine/src/lib.rs` leaves Task 10's `git add`; `git rm` stages only the deletion, and the declaration is H3b's own commit. |
+| M12 | **Fixed** — "twenty entries", and **there is no H6**: the superseded plan's numbering is kept where a hand-off survived it, so the gap is deliberate and is now said so. |
+| M13 | **Fixed** — the deploy line carries `# staging; a public subdomain, not a secret`. |
+
+### What did not change, and why
+
+- **The task count, the task order and the hand-off set.** Every finding was a defect inside a task, not a defect of the shape; the review says the same.
+- **P1–P5.** No finding touched a Quinn-owned question. P1 remains the merge blocker.
+- **The migration.** The review checked it against staging and found it correct; M5 is the only change to it, and it is a `coalesce` and two sentences.
