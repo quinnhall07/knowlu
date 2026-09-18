@@ -933,3 +933,219 @@ fn a_session_that_cannot_be_moved_takes_the_cloud_yaml_back_with_it() {
     assert!(!needs_account(&vault));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+use knowlu::account::{authorize_url, b64url, code_from_request_line, pkce_pair};
+
+/// RFC 7636 Appendix B, verbatim. The one place in this file where a literal is not ours: it is the
+/// standard's own worked example, and matching it is what says our challenge is a PKCE challenge
+/// rather than a hash of something adjacent.
+#[test]
+fn the_challenge_is_rfc_7636_appendix_bs_worked_example() {
+    use sha2::{Digest, Sha256};
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
+    assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+}
+
+#[test]
+fn base64url_is_unpadded_and_uses_the_url_alphabet() {
+    // The three bytes that produce a `+` and a `/` in standard base64 — the two characters that
+    // would be re-encoded or mis-read inside a query string, which is the whole reason for -url.
+    assert_eq!(b64url(&[0xfb, 0xff, 0xbe]), "-_--");
+    assert_eq!(b64url(&[]), "");
+    assert_eq!(b64url(&[0x00]), "AA");
+    assert_eq!(b64url(&[0x00, 0x00]), "AAA");
+    assert!(!b64url(&[0x00]).contains('='), "no padding: the query string is not the place for it");
+}
+
+#[test]
+fn a_verifier_is_43_characters_of_the_unreserved_alphabet_and_never_repeats() {
+    let (v1, c1) = pkce_pair();
+    let (v2, _) = pkce_pair();
+    // RFC 7636 §4.1: 43 to 128 characters. 32 random bytes is 43 unpadded base64url characters.
+    assert_eq!(v1.len(), 43);
+    assert!(v1.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "{v1}");
+    assert_eq!(c1.len(), 43);
+    assert_ne!(v1, c1, "the challenge is the hash, never the verifier itself");
+    assert_ne!(v1, v2, "a fresh pair every sign-in");
+}
+
+#[test]
+fn the_authorize_url_names_google_pkce_and_the_loopback_port_and_nothing_else() {
+    let url = authorize_url("https://abc.supabase.co/auth/v1", 54321, "CHAL");
+    assert_eq!(
+        url,
+        "https://abc.supabase.co/auth/v1/authorize?provider=google\
+         &redirect_to=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback\
+         &code_challenge=CHAL&code_challenge_method=s256"
+            .replace(' ', "")
+    );
+    // `state` is in GoTrue's `reservedOAuthParams` and is stripped from the query before the
+    // provider is called — sending one would be a line of code that does nothing (spec §4).
+    assert!(!url.contains("state="), "{url}");
+    // No `flow_type`: GoTrue infers PKCE from the presence of `code_challenge`.
+    assert!(!url.contains("flow_type"), "{url}");
+}
+
+#[test]
+fn the_callback_request_line_yields_the_code_or_the_providers_own_sentence() {
+    assert_eq!(code_from_request_line("GET /callback?code=abc123 HTTP/1.1").unwrap(), "abc123");
+    // Percent-decoded, because GoTrue query-encodes what it puts there.
+    assert_eq!(code_from_request_line("GET /callback?code=a%2Bb HTTP/1.1").unwrap(), "a+b");
+    let e = code_from_request_line("GET /callback?error=access_denied&error_description=You+said+no HTTP/1.1")
+        .expect_err("an error is not a code");
+    assert!(e.contains("You said no"), "{e}");
+    assert!(code_from_request_line("GET /favicon.ico HTTP/1.1").is_err(), "no code, no session");
+    assert!(code_from_request_line("garbage").is_err());
+}
+
+use knowlu::account::{serve_one_callback, CALLBACK_PAGE};
+
+/// A loopback listener on `127.0.0.1:0` is not the network: the same machine, the same process
+/// tree, nothing that leaves it. The serving side is the production code; the client side is this
+/// test's own thread, joined before the test returns (the 3a rule).
+#[test]
+fn the_callback_listener_serves_exactly_one_browser_and_answers_in_one_sentence() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("addr").port();
+    let browser = std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.write_all(b"GET /callback?code=xyz789 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .expect("write");
+        let mut got = String::new();
+        let _ = s.read_to_string(&mut got);
+        got
+    });
+    let code = serve_one_callback(listener, std::time::Duration::from_secs(5)).expect("a code");
+    let page = browser.join().expect("browser thread");
+    assert_eq!(code, "xyz789");
+    assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+    assert!(page.contains("You are signed in to Knowlu. You can close this window."), "{page}");
+    assert!(page.contains(CALLBACK_PAGE), "the served body is the constant, not a second copy");
+}
+
+#[test]
+fn a_refusal_in_the_query_is_the_providers_sentence_and_the_browser_still_gets_a_page() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("addr").port();
+    let browser = std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.write_all(b"GET /callback?error=access_denied&error_description=You+said+no HTTP/1.1\r\n\r\n")
+            .expect("write");
+        let mut got = String::new();
+        let _ = s.read_to_string(&mut got);
+        got
+    });
+    let err = serve_one_callback(listener, std::time::Duration::from_secs(5)).expect_err("a refusal");
+    let page = browser.join().expect("browser thread");
+    assert!(err.contains("You said no"), "{err}");
+    // A browser left staring at a connection reset is a worse answer than a sentence.
+    assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+}
+
+#[test]
+fn a_browser_that_never_comes_back_times_out_instead_of_holding_the_wizard_forever() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let out = serve_one_callback(listener, std::time::Duration::from_millis(150));
+    let err = out.expect_err("nothing connected");
+    assert!(err.contains("not finished"), "{err}");
+}
+
+/// **Review I3.** Anything on this machine may reach an open loopback port first: a browser
+/// preconnect, a favicon fetch, security software, a port scanner, a second process. Answering it
+/// and returning would end the sign-in with *the browser came back without a sign-in code* while the
+/// real redirect was still in flight — and that redirect would then meet a closed socket. The
+/// listener answers 404 and keeps waiting; the FIRST real callback is still the only one served.
+#[test]
+fn a_stray_local_connection_gets_404_and_the_real_callback_still_lands() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("addr").port();
+    let noise_then_browser = std::thread::spawn(move || {
+        let mut probe = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        probe.write_all(b"GET /favicon.ico HTTP/1.1\r\nConnection: close\r\n\r\n").expect("write");
+        let mut probe_got = String::new();
+        let _ = probe.read_to_string(&mut probe_got);
+        let mut browser = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect again");
+        browser
+            .write_all(b"GET /callback?code=late123 HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .expect("write");
+        let mut page = String::new();
+        let _ = browser.read_to_string(&mut page);
+        (probe_got, page)
+    });
+    let code = serve_one_callback(listener, std::time::Duration::from_secs(5)).expect("the real code");
+    let (probe_got, page) = noise_then_browser.join().expect("the client thread");
+    assert_eq!(code, "late123", "the stray request must not consume the sign-in");
+    assert!(probe_got.starts_with("HTTP/1.1 404"), "{probe_got}");
+    assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+    assert!(page.contains("You are signed in to Knowlu."), "{page}");
+}
+
+use knowlu::account::{exchange_pkce_at, record_consent_at};
+
+#[test]
+fn the_code_and_the_verifier_are_traded_for_a_session_at_grant_type_pkce() {
+    let body = r#"{"access_token":"atG","refresh_token":"rtG","expires_in":3600,"user":{"id":"acc-g","email":"g@example.invalid"}}"#;
+    let (base, handle) = loopback(vec![(200, body.to_string())]);
+    let out = exchange_pkce_at(&format!("{base}/auth/v1"), "anon-key", "the-code", "the-verifier", 1_760_000_000);
+    let seen = handle.join().expect("server thread");
+    let (id, s) = out.expect("exchange");
+    assert_eq!(id, "acc-g");
+    assert_eq!(s.access_token, "atG");
+    assert_eq!(s.email, "g@example.invalid");
+    assert_eq!(s.expires_at, 1_760_000_000 + 3600);
+    let req = &seen[0];
+    assert!(req.starts_with("POST /auth/v1/token?grant_type=pkce "), "{req}");
+    assert!(req.to_lowercase().contains("apikey: anon-key"), "{req}");
+    // GoTrue's `PKCEGrantParams` has exactly these two fields; `code` or `verifier` would be
+    // silently empty and answer 400 `invalid request: both auth code and code verifier should be non-empty`.
+    assert!(req.contains("\"auth_code\":\"the-code\""), "{req}");
+    assert!(req.contains("\"code_verifier\":\"the-verifier\""), "{req}");
+}
+
+#[test]
+fn a_bad_verifier_is_gotrues_own_sentence_and_never_a_status_code() {
+    let (base, handle) = loopback(vec![(400, r#"{"error_description":"code challenge does not match previously saved code verifier"}"#.to_string())]);
+    let out = exchange_pkce_at(&format!("{base}/auth/v1"), "anon-key", "c", "v", 0);
+    let _ = handle.join();
+    let e = out.expect_err("refused");
+    assert!(e.contains("code challenge does not match"), "{e}");
+    assert!(!e.contains("400"), "the panel reads a sentence, not a status: {e}");
+}
+
+#[test]
+fn the_consent_call_carries_the_attestation_and_both_compiled_in_versions() {
+    let (base, handle) = loopback(vec![(200, r#"{"ok":true}"#.to_string())]);
+    let out = record_consent_at(&format!("{base}/functions/v1"), "the-token", "2026-09-10", "2026-09-17");
+    let seen = handle.join().expect("server thread");
+    assert!(out.is_ok(), "{out:?}");
+    let req = &seen[0];
+    assert!(req.starts_with("POST /functions/v1/account/consent "), "{req}");
+    assert!(req.to_lowercase().contains("authorization: bearer the-token"), "{req}");
+    assert!(req.contains("\"age_attested\":true"), "{req}");
+    assert!(req.contains("\"tos_version\":\"2026-09-10\""), "{req}");
+    assert!(req.contains("\"privacy_version\":\"2026-09-17\""), "{req}");
+}
+
+/// **Review I4.** The consent call after a sign-in is best effort, so `open_checkout` retries it
+/// **before** the checkout POST: an account whose attestation never landed meets
+/// `billing-checkout`'s 403 — *the 18+ attestation is missing — sign in again* — and signing in
+/// again would take the same failing path. The route writes only when the account has none, so the
+/// retry costs one request and can never double-record. A retry that fails again is logged and does
+/// not stand in the way: the 403 is the honest answer, and it is the server's to give.
+#[test]
+fn the_checkout_retries_the_consent_first_and_a_failed_retry_still_reaches_stripe() {
+    use knowlu::account::checkout_url_at;
+    let (base, handle) = loopback(vec![
+        (500, r#"{"msg":"the consent route is down"}"#.to_string()),
+        (200, r#"{"url":"https://checkout.example.invalid/c/cs_1"}"#.to_string()),
+    ]);
+    let out = checkout_url_at(&format!("{base}/functions/v1"), "the-token", "monthly");
+    let seen = handle.join().expect("server thread");
+    assert_eq!(out.expect("a checkout link"), "https://checkout.example.invalid/c/cs_1");
+    assert!(seen[0].starts_with("POST /functions/v1/account/consent "), "the retry comes first: {}", seen[0]);
+    assert!(seen[1].starts_with("POST /functions/v1/billing-checkout "), "{}", seen[1]);
+}
