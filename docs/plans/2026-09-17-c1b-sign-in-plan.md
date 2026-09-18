@@ -35,7 +35,7 @@ Every task's requirements implicitly include this section.
 - **Commits:** specific `git add` (**never `git add -A`**), message via `-F <file>`, trailers:
 
   ```
-  Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+  Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
   ```
 

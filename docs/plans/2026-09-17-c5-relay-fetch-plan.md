@@ -229,7 +229,7 @@ binds here, with each C5-specific narrowing said out loud.
   says (ruling R-C2-6 — this is not a defect to fix, it is a template to fill):
 
   ```
-  Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+  Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
   ```
 
