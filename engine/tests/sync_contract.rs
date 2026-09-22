@@ -260,8 +260,32 @@ fn a_page_is_at_most_PAGE_and_the_cursor_does_not_skip_the_rest() {
     let (batch, next) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
     assert_eq!(batch.records.len(), sync::PAGE);
     let (rest, _) = sync::build_push(&dir, &next, "acct-1", &mut journal);
-    assert!(!rest.records.is_empty(), "the tail is still owed");
+    // M4: the exact remainder, not just "non-empty" — 1 seed record (from `fixture()`) plus
+    // `PAGE + 7` loop records, minus the `PAGE` already sent, and this also proves the same-`ts`
+    // boundary survives a page break: the tight loop above shares milliseconds across many records.
+    assert_eq!(rest.records.len(), 8, "{:?}", rest.records.len());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M4 (Minor 4): `save_cursor`/`load_cursor` had no test of their own.
+#[test]
+fn a_saved_cursor_loads_back_equal_to_itself() {
+    let dir = fixture("cursor-roundtrip");
+    let mut cursor = Cursor::default();
+    cursor.record_cursor = 3;
+    cursor.note_cursor = 7;
+    cursor.pushed_through = "2026-09-20T00:00:00.000Z".to_string();
+    cursor.boundary = vec![sync::sha256_hex(b"a"), sync::sha256_hex(b"b")];
+    cursor.notes.insert("tasks/x.md".to_string(), sync::sha256_hex(b"x"));
+    sync::save_cursor(&dir, &cursor).expect("save the cursor");
+    assert_eq!(sync::load_cursor(&dir), cursor, "a saved cursor must load back byte-for-byte equal");
+
+    // A vault that has never synced loads back a fresh default, not an error.
+    let empty_dir = fixture("cursor-missing");
+    assert_eq!(sync::load_cursor(&empty_dir), Cursor::default());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&empty_dir);
 }
 
 #[test]
@@ -399,5 +423,149 @@ fn a_note_with_a_name_the_account_cannot_store_gets_a_warning_and_no_row() {
         batch.warnings.iter().any(|w| w.contains("Essay (draft).md") && w.contains("cannot store")),
         "{:?}", batch.warnings
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — R-C3′-exec-12, the wedge principle: the device predicts every refusal the server
+// makes of a row and skips that row with one named warning, never sending it.
+// ---------------------------------------------------------------------------
+
+/// Important 1: a budget `break` in the notes loop must not read as "everything after this point in
+/// the listing is gone" — the tombstone pass has to check the COMPLETE on-disk listing, never the
+/// loop's own visited set, or a page that breaks mid-folder marks live notes as deleted.
+#[test]
+fn a_budget_break_in_the_notes_loop_never_tombstones_a_note_still_on_disk() {
+    let dir = fixture("i1-tombstone-budget");
+    let mut journal = Journal::new(&dir);
+    let (_, cursor1) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    let tracked_before: std::collections::BTreeSet<String> = cursor1.notes.keys().cloned().collect();
+    assert!(!tracked_before.is_empty(), "the fixture's first push must have tracked its notes");
+
+    // Grow two of the fixture's own notes, and add enough large filler notes — sorting alphabetically
+    // BEFORE every one of the fixture's own `tasks/` files — that the folder's total is well past
+    // `PUSH_BUDGET_BYTES` before the loop ever reaches an already-tracked note again.
+    let grown = "x".repeat(120_000);
+    for name in ["done-already.md", "task-erste-reflexion.md"] {
+        knowlu_engine::pystr::write_text(&dir.join("tasks").join(name), &grown).expect("grow a note");
+    }
+    for n in 0..28 {
+        knowlu_engine::pystr::write_text(&dir.join("tasks").join(format!("aaa-{n:02}.md")), &grown).expect("write filler");
+    }
+
+    let (batch2, cursor2) = sync::build_push(&dir, &cursor1, "acct-1", &mut journal);
+    let on_disk: std::collections::BTreeSet<String> = sync::note_paths(&dir).into_iter().collect();
+    let tombstoned: Vec<&str> = batch2.notes.iter()
+        .filter(|n| n.get("deleted") == Some(&serde_json::Value::Bool(true)))
+        .filter_map(|n| n["path"].as_str())
+        .collect();
+    for path in &tombstoned {
+        assert!(!on_disk.contains(*path), "a note still on disk must never be tombstoned: {path}");
+    }
+    for path in &tracked_before {
+        if on_disk.contains(path) {
+            assert!(!tombstoned.contains(&path.as_str()), "{path} is on disk and must not be a tombstone");
+        }
+    }
+
+    // A third call from the second cursor still owes whatever the budget break left behind.
+    let (batch3, _) = sync::build_push(&dir, &cursor2, "acct-1", &mut journal);
+    assert!(!batch3.notes.is_empty(), "the tail is still owed after the budget break");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Important 2: the server refuses an empty body (`sync_rows.ts:111`, "a note has no body") and a
+/// raw NUL byte (`sync_rows.ts:114`) — the device predicts both and never sends either.
+#[test]
+fn a_note_that_is_empty_or_has_a_null_byte_gets_a_warning_and_the_rest_of_the_batch_still_goes() {
+    let dir = fixture("empty-or-null");
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("empty.md"), "").expect("write empty");
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("nulled.md"), "before\u{0}after").expect("write a null byte");
+    let mut journal = Journal::new(&dir);
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    for bad in ["tasks/empty.md", "tasks/nulled.md"] {
+        assert!(!batch.notes.iter().any(|n| n["path"] == bad), "{bad} must not be sent");
+        assert!(batch.warnings.iter().any(|w| w.contains(bad)), "{:?}", batch.warnings);
+    }
+    // Everything else in the fixture still went up.
+    assert_eq!(batch.notes.len(), sync::note_paths(&dir).len() - 2, "{:?}", batch.notes);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Minor 3 (records half): the server refuses a record whose body has no non-empty string `op` or
+/// `actor` (`sync_rows.ts:89-93`); `ledger::read` itself requires only `ts`, so a hand-edited or
+/// legacy journal line can carry neither. Treated exactly like an oversize record: skipped, so it
+/// never advances the cursor and never wedges a page that also carries good records.
+#[test]
+fn a_record_missing_a_usable_op_or_actor_is_never_sent() {
+    let dir = fixture("badrecord");
+    let mut rec = serde_json::Map::new();
+    rec.insert("ts".to_string(), serde_json::json!("2026-09-20T00:00:00.000Z"));
+    rec.insert("device".to_string(), serde_json::json!("TestPC"));
+    rec.insert("actor".to_string(), serde_json::json!("")); // empty, and no "op" at all
+    rec.insert("path".to_string(), serde_json::json!("tasks/legacy-marker.md"));
+    knowlu_engine::ledger::JsonlLedger::new(dir.join("state").join("journal"))
+        .append(&rec)
+        .expect("append a legacy line directly, bypassing make_record's validation");
+
+    let mut journal = Journal::new(&dir);
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    let sent_the_marker = batch.records.iter().any(|r| {
+        r["body"].as_str().unwrap_or_default().contains("legacy-marker.md")
+    });
+    assert!(!sent_the_marker, "a record with no usable op/actor must never be sent: {:?}", batch.records);
+    assert!(
+        batch.warnings.iter().any(|w| w.contains("op") || w.contains("actor")),
+        "{:?}", batch.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Minor 3 (notes half): the tombstone loop must also run `is_note_path` on `cursor.notes` keys — a
+/// hand-edited cursor could carry a path the server's own `NOTE_PATH_RE`/column check would refuse,
+/// and without this the device would resend a 400-producing tombstone every single run.
+#[test]
+fn a_tombstone_whose_path_fails_is_note_path_is_dropped_not_sent() {
+    let dir = fixture("bad-cursor-path");
+    let mut cursor = Cursor::default();
+    cursor.notes.insert("tasks/Bad Name!.md".to_string(), sync::sha256_hex(b"whatever"));
+    let mut journal = Journal::new(&dir);
+    let (batch, next) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    assert!(
+        !batch.notes.iter().any(|n| n["path"] == "tasks/Bad Name!.md"),
+        "an unsendable tombstone path must never be sent: {:?}", batch.notes
+    );
+    assert!(
+        !next.notes.contains_key("tasks/Bad Name!.md"),
+        "it must be dropped from the cursor, not retried forever"
+    );
+    assert!(batch.warnings.iter().any(|w| w.contains("Bad Name!.md")), "{:?}", batch.warnings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M2: a folder whose listing fails for a reason OTHER than "it does not exist" must not read as
+/// "this folder is now empty" — that would tombstone every note the cursor remembers there. Standing
+/// a plain file in place of `approvals/` is a deterministic way to make `read_dir` fail with
+/// something other than `NotFound` on Windows, entirely inside this test's own scratch vault and
+/// without touching permissions of anything (this repo's CLAUDE.md rules out touching ACLs in tests).
+#[test]
+fn an_unreadable_folder_suppresses_tombstones_for_that_folder_only() {
+    let dir = fixture("unreadable-folder");
+    let mut journal = Journal::new(&dir);
+    let (_, cursor) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    let approvals_known: Vec<String> =
+        cursor.notes.keys().filter(|p| p.starts_with("approvals/")).cloned().collect();
+    assert!(!approvals_known.is_empty(), "the fixture ships approvals notes");
+
+    std::fs::remove_dir_all(dir.join("approvals")).expect("clear the real folder");
+    knowlu_engine::pystr::write_text(&dir.join("approvals"), "not a directory any more").expect("stand a file in its place");
+
+    let (batch, _) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    for known in &approvals_known {
+        assert!(
+            !batch.notes.iter().any(|n| n["path"] == known.as_str()),
+            "{known} must not be tombstoned when its folder cannot be listed: {:?}", batch.notes
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

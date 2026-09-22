@@ -216,18 +216,37 @@ pub fn is_note_path(vault: &Path, rel: &str) -> bool {
 /// making this side recursive alone would push a file nothing else in the engine can see. Deferred,
 /// and recorded in *Deferred minors*.
 pub fn note_paths(vault: &Path) -> Vec<String> {
+    note_paths_and_unreadable(vault).0
+}
+
+/// `note_paths`, plus (M2) the folders whose listing failed for a reason other than "the folder does
+/// not exist". A missing folder is an ordinary empty folder — plenty of vaults have no `courses/`
+/// note yet — but any OTHER `read_dir` failure (permissions, a transient handle problem, or, as the
+/// test proves deterministically, a folder having been replaced by a plain file) must not read as
+/// "this folder is now empty", or `build_push`'s tombstone pass would mark every note the cursor
+/// remembers there as deleted. `build_push` uses this directly; `note_paths` stays the public,
+/// one-tuple-element shape the brief and its own tests already depend on.
+fn note_paths_and_unreadable(vault: &Path) -> (Vec<String>, std::collections::BTreeSet<&'static str>) {
     let mut out = Vec::new();
+    let mut unreadable = std::collections::BTreeSet::new();
     for folder in crate::ids::NOTE_FOLDERS {
-        let Ok(entries) = std::fs::read_dir(vault.join(folder)) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|x| x == "md") == Some(true) && path.is_file() {
-                out.push(format!("{folder}/{}", path.file_name().unwrap_or_default().to_string_lossy()));
+        match std::fs::read_dir(vault.join(folder)) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|x| x == "md") == Some(true) && path.is_file() {
+                        out.push(format!("{folder}/{}", path.file_name().unwrap_or_default().to_string_lossy()));
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                unreadable.insert(folder);
             }
         }
     }
     out.sort();
-    out
+    (out, unreadable)
 }
 
 /// What one push carries. `warnings` are lines the run prints; they are never sent.
@@ -257,6 +276,18 @@ pub struct PushBatch {
 ///
 /// **The returned cursor is only saved by the caller after the push succeeds.** A cursor advanced
 /// over a batch the service never received is the one bug that loses a record for good.
+///
+/// **R-C3′-exec-12, the wedge principle.** A batch is all-or-nothing server-side
+/// (`sync-push/handler.ts`), so any row the server would refuse turns every step of the slot into a
+/// 400 until a human intervenes. This function therefore predicts every refusal
+/// `_shared/sync_rows.ts` makes and never sends the row that would trigger it, warning once instead:
+/// an oversize record or note, a record whose body has no non-empty `op`/`actor`, a note that is
+/// empty or carries a raw NUL byte, and a path — on either side, a live note or a tombstoned one —
+/// that fails [`is_note_path`]. **The tombstone pass in particular is computed from the complete
+/// on-disk listing, never from which paths the notes loop happened to visit before a `PAGE` or
+/// budget `break`**, so a page that stops partway through the folder never marks a note still on
+/// disk as deleted; a folder whose own listing failed for a reason other than "does not exist yet"
+/// (`note_paths_and_unreadable`) is excluded from that pass entirely, for the same reason.
 pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut Journal) -> (PushBatch, Cursor) {
     let mut batch = PushBatch { device: device_token(account_id), ..Default::default() };
     let mut next = cursor.clone();
@@ -283,6 +314,17 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // its `received_at` (a default, not an on-update), and therefore never resurfaces on another
         // desktop's cursor.
         if record.get("actor").and_then(Value::as_str) == Some(ACTOR) { continue; }
+        // R-C3′-exec-12 (the wedge principle): predict every refusal `sync_rows.ts::checkRecord`
+        // makes and never send the row that would trigger it. `sync_rows.ts:89-93` refuses a record
+        // whose body has no non-empty string `op` or `actor` — `ledger::read` itself validates only
+        // `ts`, so a hand-edited or legacy journal line can carry neither. Treated exactly like an
+        // oversize record below: skipped with a `continue`, so it never advances `next` and can
+        // never wedge a page that also carries good records.
+        let has_str = |key: &str| record.get(key).and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false);
+        if !has_str("op") || !has_str("actor") {
+            batch.warnings.push("sync: one journal record has no usable op/actor; it stays in the journal".to_string());
+            continue;
+        }
         let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
         let hash = sha256_hex(body.as_bytes());
         if already.contains(&hash) { continue; }
@@ -303,11 +345,16 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         batch.records.push(row);
     }
 
-    let on_disk = note_paths(vault);
-    let mut seen = std::collections::BTreeSet::new();
+    // M2: a folder `read_dir` could not list at all (not merely "does not exist yet") must not be
+    // read as "empty" by the tombstone pass below, or a transient listing failure would mark every
+    // note the cursor remembers in it as deleted.
+    let (on_disk, unreadable_folders) = note_paths_and_unreadable(vault);
+    // I1: tombstone against the COMPLETE listing, never against which paths this loop happened to
+    // *visit* — a `PAGE` or budget `break` below must not read as "everything after this point in
+    // the sorted listing is gone". `on_disk` already holds every note this build can see; comparing
+    // `cursor.notes` against a full `BTreeSet` of it, after the loop, is what makes a break safe.
     for rel in &on_disk {
         if batch.notes.len() >= PAGE { break; }
-        seen.insert(rel.clone());
         if !is_note_path(vault, rel) {
             batch.warnings.push(format!(
                 "sync: {rel} has a name the account cannot store (letters, digits, spaces and . _ - only); it stays on this machine until it is renamed"
@@ -318,6 +365,13 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
             batch.warnings.push(format!("sync: {rel} could not be read; it stays on this machine"));
             continue;
         };
+        // R-C3′-exec-12: `sync_rows.ts:111` refuses an empty body ("a note has no body") and
+        // `sync_rows.ts:114` refuses a raw NUL byte — predicted here so neither ever reaches the
+        // wire, rather than wedging every future push until the file is fixed by hand.
+        if text.is_empty() || text.contains('\u{0}') {
+            batch.warnings.push(format!("sync: {rel} is empty or contains a character the account cannot store; it stays on this machine until it has real content"));
+            continue;
+        }
         if text.len() > MAX_NOTE_BYTES {
             batch.warnings.push(format!("sync: {rel} is too large to send ({} bytes); it stays on this machine", text.len()));
             continue;
@@ -331,9 +385,24 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         next.notes.insert(rel.clone(), hash);
         batch.notes.push(row);
     }
+    let on_disk_set: std::collections::BTreeSet<&String> = on_disk.iter().collect();
     for rel in cursor.notes.keys() {
         if batch.notes.len() >= PAGE { break; }
-        if seen.contains(rel) { continue; }
+        // I1: still on disk (whether or not this build's first loop got as far as visiting it) — not
+        // deleted, so never a tombstone.
+        if on_disk_set.contains(rel) { continue; }
+        // M2: this folder's listing failed transiently; conclude nothing about what is or is not in
+        // it this build.
+        if let Some(folder) = rel.split('/').next() {
+            if unreadable_folders.contains(folder) { continue; }
+        }
+        // Minor 3 / item 4: a hand-edited cursor can carry a path the server's own path rule would
+        // refuse. Drop it from this device's own bookkeeping rather than resend a 400 every run.
+        if !is_note_path(vault, rel) {
+            batch.warnings.push(format!("sync: {rel} in the cursor is not a name the account can store; dropped without sending"));
+            next.notes.remove(rel);
+            continue;
+        }
         let row = serde_json::json!({ "path": rel, "deleted": true });
         let row_len = crate::ledger::dumps_value(&row).len();
         if budget_used + row_len > PUSH_BUDGET_BYTES { break; }
