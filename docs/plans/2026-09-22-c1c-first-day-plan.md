@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-09-22-c1c-first-day-design.md` (decisions D1–D8; §7 is the controller's live proof, not a task; §8 and D9 are out of scope).
 
+**Status: AMENDED 2026-09-22 (fix round 1: B1, B2, I1–I4, minors M1–M7 — all taken, none refused).** Review: `docs/reports/2026-09-22-c1c-first-day-plan-review.md`. Four controller rulings decide where the spec contradicts itself or the code; each is recorded at the step it changes as **Ruling R-C1c-plan-1…4**, and a ruling overrides the spec.
+
 ## Global Constraints
 
 - **0 warnings is part of green.** `cargo build --workspace` and `cargo test --workspace` from the worktree root; the CI gate prints `warnings: N accepted (.rsrc), N tallies, N other` and the last number must be `0 other`. The one accepted line is the app's `.rsrc merge failure: multiple non-default manifests`.
@@ -39,6 +41,27 @@
 | D2 | Nothing new is built for it and nothing in this stream writes to disk before Finish: device-side it is already true (`scheduler::spawn` starts the first slot the instant the vault exists) and the half that was missing — the console showing it run — is §6, Task 5. The server-side pre-work is C5's, recorded in spec §8. |
 | §7 | The controller's live proof — the hand-off at the end of this plan, not a task. |
 | §8, D9 | Out of scope: C5's debt and two spikes, recorded in the spec and left there. |
+
+## Fidelity notes (fix round 1, 2026-09-22)
+
+Every finding in `docs/reports/2026-09-22-c1c-first-day-plan-review.md` is **taken**; none is refused.
+Four are taken by a controller ruling that differs from the route the review proposed, and each says so:
+
+| # | Where it landed | Note |
+| --- | --- | --- |
+| **B1** | Task 3, new Step 5a + Step 7 | `every_enrolled_course_becomes_a_note_the_engine_can_find` is amended, and named in the expected-PASS list. |
+| **B2** | Task 5, Steps 1, 5, 8 — **Ruling R-C1c-plan-1** | `build_state` never fails, so the page keys on the presence of `first_run`, not on a failed state. |
+| **I1** | Task 4, Steps 1, 6, 7 — **Ruling R-C1c-plan-3** | Taken by the stay-once latch (the shape discovery itself uses) rather than the review's `#wiz-summary` route, so the sentence is read on the panel it is about and §5's `#wiz-map-note` stands. |
+| **I2** | Tasks 3 and 4 — **Ruling R-C1c-plan-2** | Taken by the review's own alternative: `Course`/`CourseSeed` gain a fourth field, `label`, so spec §4's `BUI 100 · 202640-BUI-100-101` is rendered without the page reading a code out of a name. |
+| **I3** | Task 1, Steps 1, 4, 5 | The summary line moves into `sync_coursework` where the tests can read it, and both spellings are asserted. |
+| **I4** | Task 2, Steps 1, 4 — **Ruling R-C1c-plan-4** | Taken by writing the skip line with status `ok` rather than by de-duplicating: a routine skip is routine, `trim_log_lines` ages it out of the 50-line `ok` bucket, and no WARN is ever evicted for one. |
+| **M1** | Task 1, Step 4 | `create_dir_all` moved below the dry-run guard. |
+| **M2** | Task 1, Step 2 | The expected failure names the four `main` tests, not `vault_with`. |
+| **M3** | Task 4, Step 1 | The slice is `wizGo`/`wizStep`, and the comment says so. |
+| **M4** | Task 4, Step 4 | The option carries a human label; its value is the ruling's `label \|\| slug`. |
+| **M5** | Task 1, Step 4 | The cutoff is an `Option<Date>`, computed only on a first run. |
+| **M6** | Task 5, Step 8 | The unbounded 3-second poll is recorded in the comment, with why it is honest. |
+| **M7** | Task 1, Step 5 | `archived: 0` on every coursework sync step is stated as intended. |
 
 ---
 
@@ -85,6 +108,8 @@ In `engine/src/coursework.rs`, inside `mod tests`, add the helper next to `fn sy
                 "archived (imported-past) cs-100-hw-01".to_string(),
                 "archived (imported-past) cs-100-hw-02".to_string(),
                 "created cs-100-hw-03".to_string(),
+                // §3's summary line, ingest's in coursework's words (I3).
+                "coursework: first run — 2 item(s) already past were archived".to_string(),
             ]
         );
         assert!(vault.join("tasks").join("cs-100-hw-03.md").is_file());
@@ -103,7 +128,10 @@ In `engine/src/coursework.rs`, inside `mod tests`, add the helper next to `fn sy
             assert!(seen.contains(&item.uid), "{} is not in the seen ledger", item.uid);
         }
         let again = sync_first(&items, &vault, false);
-        assert!(again.is_empty(), "a second run changed something: {again:?}");
+        assert!(
+            again.iter().all(|l| l.starts_with("coursework: first run")),
+            "a second run changed something: {again:?}"
+        );
         assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 1);
         assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 2);
         let _ = std::fs::remove_dir_all(&vault);
@@ -132,14 +160,19 @@ In `engine/src/coursework.rs`, inside `mod tests`, add the helper next to `fn sy
             "would archive (imported-past) cs-100-hw-01 (due 2026-08-20T23:59)"
         );
         assert_eq!(log[2], "would create cs-100-hw-03 (due 2026-08-26T23:59)");
+        // Both spellings are counted (I3): a dry run that reported zero would be a lie about what
+        // the real run is about to do.
+        assert_eq!(log[3], "coursework: first run — 2 item(s) already past were archived");
         assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 0);
         assert!(load_seen(&vault).is_empty());
         let _ = std::fs::remove_dir_all(&vault);
     }
 
-    /// The run record and the summary line say it too: a student who opens `state/runner-log.md`
-    /// or the Runs view sees why their first day is shorter than their vendor's list.
+    /// The run record counts it: the Runs view's sync step says where the work went, so a first day
+    /// shorter than the vendor's list has a number behind it. (The summary LINE is
+    /// `sync_coursework`'s and is asserted by the three tests above — `main` returns an exit code,
+    /// and that line is not the run-log summary, which is built separately at `:1604`.)
     ///
     /// `main` passes `today: None`, so the cutoff is the real clock — the two items are built
     /// around it rather than pinned to a date that is already in the past by the time anyone runs
@@ -170,7 +203,6 @@ In `engine/src/coursework.rs`, inside `mod tests`, add the helper next to `fn sy
             .expect("a sync step");
         assert_eq!(sync_step["counts"]["archived"], 1);
         assert_eq!(sync_step["counts"]["created"], 1);
-        assert!(run_log(&vault).contains("coursework ("), "{}", run_log(&vault));
         let _ = std::fs::remove_dir_all(&vault);
     }
 ```
@@ -178,7 +210,7 @@ In `engine/src/coursework.rs`, inside `mod tests`, add the helper next to `fn sy
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `cargo test -p knowlu-engine --lib coursework::`
-Expected: FAIL — `sync_coursework` takes six arguments, not seven (`sync_first` does not compile), and `vault_with` has no `today.md` to remove.
+Expected: FAIL — `sync_coursework` takes six arguments, not seven, so `sync_first` does not compile. (M2: once it does, the four `main` tests over `runnable_vault` also fail, because that fixture writes no `state/today.md` and their assignments' due dates are already past — every one of them is a first run until Step 6.)
 
 - [ ] **Step 3: Add the archived twin of the note template**
 
@@ -236,7 +268,14 @@ Below, beside the existing `stamp`, add the cutoff (leave `stamp` exactly as it 
     // `cli::local_now`), not the machine's: a student travelling must not have a day's work
     // archived out from under them. The seen-ledger stamp above keeps its own clock — that value
     // is a contract with existing vaults and nothing in R-OB-3 asks for it to change.
-    let cutoff = today.unwrap_or_else(|| crate::cli::local_now(vault).date());
+    //
+    // `Some` only on a first run (M5): `local_now` reads and parses `config/ingest.yaml`, and every
+    // run after the first would pay for a date nothing below ever reads.
+    let cutoff = if first_run {
+        Some(today.unwrap_or_else(|| crate::cli::local_now(vault).date()))
+    } else {
+        None
+    };
 ```
 
 Then, in the create path, immediately after the `if seen.contains(&item.uid) { … }` guard and before `let mut path = tasks_dir.join(…)` (~368):
@@ -250,9 +289,10 @@ Then, in the create path, immediately after the `if seen.contains(&item.uid) { �
         //
         // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work,
         // and the one thing worse than importing a stale task is archiving a live one.
-        if first_run && item.due.date() < cutoff {
+        //
+        // `cutoff` is `Some` exactly when `first_run` is (M5), so this is the whole predicate.
+        if cutoff.is_some_and(|c| item.due.date() < c) {
             let archive_dir = vault.join("archive");
-            let _ = std::fs::create_dir_all(&archive_dir);
             let mut path = archive_dir.join(format!("{}.md", item.slug));
             let mut suffix = 2;
             while path.exists() {
@@ -267,6 +307,9 @@ Then, in the create path, immediately after the `if seen.contains(&item.uid) { �
                 log.push(format!("would archive (imported-past) {stem} (due {new_due})"));
                 continue;
             }
+            // M1: below the dry-run guard, never above it — a `--dry-run` that creates a folder in
+            // the vault has already broken the promise it exists to make.
+            let _ = std::fs::create_dir_all(&archive_dir);
             let text = IMPORTED_PAST_TEMPLATE
                 .replace("{title}", &json_quoted(&item.title))
                 .replace(
@@ -297,7 +340,26 @@ Then, in the create path, immediately after the `if seen.contains(&item.uid) { �
         }
 ```
 
-- [ ] **Step 5: Thread the flag, the summary line and the count through `main_with_fetchers`**
+And §3's summary line, at the very end of the function, immediately before `Ok(log)`:
+
+```rust
+    // D3, ingest's line in coursework's words (`ingest::run_lines`, engine/src/ingest.rs:945).
+    // Pushed HERE rather than in `main_with_fetchers` (I3) so a test can read it: `main` returns an
+    // exit code, and this line is not the run-log summary, which is built separately at `:1604`.
+    //
+    // Both spellings are counted, so a `--dry-run` reports the number the real run would archive
+    // rather than zero. One deliberate divergence from ingest: `main` only calls this function when
+    // a source returned something, so a fetch that came back empty says nothing at all, where
+    // ingest reports `0 item(s)` — and an empty coursework parse is already a failure with its own
+    // warning (the coursework spec §9), which is the line that matters on that run.
+    if first_run {
+        let archived = log.iter().filter(|l| l.contains("(imported-past)")).count();
+        log.push(format!("coursework: first run — {archived} item(s) already past were archived"));
+    }
+    Ok(log)
+```
+
+- [ ] **Step 5: Thread the flag and the count through `main_with_fetchers`**
 
 In `main_with_fetchers` (~1531), beside `let today = jiff::Zoned::now().date();`:
 
@@ -313,16 +375,14 @@ In the closure, replace the sync call with:
 ```rust
         if !assignments.is_empty() {
             log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None, first_run)?);
-            if first_run {
-                // Ingest's line, in coursework's words. Both spellings are counted: a dry run logs
-                // `would archive (imported-past) …` and must still report the true number.
-                let archived = log.iter().filter(|l| l.contains("(imported-past)")).count();
-                log.push(format!("coursework: first run — {archived} item(s) already past were archived"));
-            }
         }
 ```
 
-And in the run-record block, extend the sync step's counts (~1583):
+And in the run-record block, extend the sync step's counts (~1583). **The counts vector is built on
+every coursework run, so every sync step from now on carries a fourth key — `archived: 0` on a
+run that archived nothing (M7). That is intended and consistent with `created`/`updated`/`skipped`;
+no frozen reference is touched, because `the_run_records_match_python_byte_for_byte`
+(`engine/src/runs.rs:930`) builds its own step list:**
 
 ```rust
         let created = log.iter().filter(|l| l.starts_with("created")).count() as i64;
@@ -400,7 +460,7 @@ git commit -F /tmp/c1c-task1.txt
 
 **Interfaces:**
 - Consumes: `crate::account::cloud_config(&Path) -> Result<CloudConfig, String>`, `crate::account::cache_path(&Path) -> PathBuf`, `crate::account::refresh_entitlement(&Path, &Path) -> Result<EntitlementCache, String>` (one HTTPS round trip under `account::TIMEOUT`), and `knowlu_engine::cli::append_run_log(vault: &Path, runner: &str, status: &str, summary: &str, when: Option<jiff::civil::DateTime>) -> std::io::Result<()>` — **already `pub`**, so D8 needs no new engine entry point; it renders through `runs::log_line` and nothing else (F11).
-- Produces: two new step labels in `RunSummary.steps` — `entitlement (refreshed)` and `entitlement (refresh failed: <reason>)`, both with exit code `0` — and, in the vault, one `- <YYYY-MM-DD HH:MM> local skip <note>` line per skipped step.
+- Produces: two new step labels in `RunSummary.steps` — `entitlement (refreshed)` and `entitlement (refresh failed: <reason>)`, both with exit code `0` — and, in the vault, one `- <YYYY-MM-DD HH:MM> local ok <note>` line per skipped step (**Ruling R-C1c-plan-4**: the status is `ok`, not the spec's implied `skip`; see Step 4).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -447,9 +507,11 @@ fn a_first_slot_refreshes_the_entitlement_before_it_decides_about_judge() {
     assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
     assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
     assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
-    // D8: and the skip reaches the file a student can open, in the engine's own format.
+    // D8: and the skip reaches the file a student can open, in the engine's own format — with
+    // status `ok`, because a skip is routine (Ruling R-C1c-plan-4).
     let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
-    assert!(log.contains("local skip judge (skipped: no entitlement)"), "{log}");
+    assert!(log.contains("local ok judge (skipped: no entitlement)"), "{log}");
+    assert!(!log.contains("local skip"), "a skip must not be a non-ok line: {log}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
@@ -489,7 +551,7 @@ fn a_cached_entitlement_is_never_refreshed_inside_the_slot() {
     assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
     // Nothing was skipped, so nothing was written: D8 adds a line for a skip, not for every slot.
     let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
-    assert!(!log.contains("local skip"), "{log}");
+    assert!(!log.contains("(skipped:"), "{log}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
@@ -551,6 +613,14 @@ Immediately after the `if let JudgePlan::Skip(note) = &judge { steps.push(…); 
     // The two named skips only — a `pull (skipped: busy)` is a transient lock collision between
     // this slot and the housekeeping thread, not something a student opens a file to read.
     //
+    // **Ruling R-C1c-plan-4: the status is `ok`, not `skip`.** `cli::line_status` reads the fifth
+    // token and `trim_log_lines` keeps only the newest hundred NON-`ok` lines, for one stated
+    // reason: a failure must not age out while routine runs keep flowing. A skip repeats every slot
+    // — twice a day, forever, on a vault with no feed — and is not a problem, so filing it as
+    // non-`ok` would spend a failure's budget on routine. `ok` puts it in the fifty-line routine
+    // bucket, where it ages out like every other ordinary line. The step itself is still a step in
+    // the run record, which is what the Runs view reads.
+    //
     // Under `vault_io`, and taken here rather than around the loop below: `vault_io` is never held
     // across a child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
     let skips: Vec<String> = steps
@@ -561,7 +631,7 @@ Immediately after the `if let JudgePlan::Skip(note) = &judge { steps.push(…); 
     if !skips.is_empty() {
         let _io = lock(&cs.vault_io);
         for note in &skips {
-            let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "skip", note, None);
+            let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "ok", note, None);
         }
     }
 ```
@@ -599,16 +669,28 @@ git commit -F /tmp/c1c-task2.txt
 
 ### Task 3: One course code, one slug (spec §4, D4)
 
+> **Ruling R-C1c-plan-2 (review I2).** Spec §4 asks for two things that cannot both be true: the
+> wizard row shows `BUI 100 · 202640-BUI-100-101`, and "the `Course` struct gains nothing" — but for
+> a Blackboard course the struct's `code` is the opaque `_404752_1`, and the page is forbidden from
+> reading a code out of a name (that rule lives in Rust, and a second copy would drift from it in
+> silence). The ruling: **`lms_link::Course` and `scaffold::CourseSeed` gain a fourth field,
+> `label: String`** — the human code when one was read, empty otherwise — filled once in
+> `courses_from_json` and carried through the plan. The row, the note's title and the datalist all
+> read it, and nothing recomputes it.
+
 **Files:**
-- Modify: `app/src/scaffold.rs` — `code_in_name` (~287) becomes `course_code_in_name`, `course_fragments` (~305) calls it, the course-note writer (~650–665) titles by the code and carries `name:`.
-- Modify: `app/src/lms_link.rs` — `courses_from_json`'s slug (~502–508).
+- Modify: `app/src/scaffold.rs` — `code_in_name` (~287) becomes `course_code_in_name`, `CourseSeed` (~271) gains `label`, `course_fragments` (~305) calls the new function, the course-note writer (~650–665) titles by the label and carries `name:`.
+- Modify: `app/src/lms_link.rs` — `Course` (~461) gains `label`, and `courses_from_json` (~502–508) fills it.
+- Modify: `app/src/onboarding.rs` — the `CourseSeed` rebuild (~632–638) carries the label through.
 - Modify: `app/static/console.js` — `renderCourses` (~1999).
-- Test: `app/tests/scaffold.rs`, `app/tests/lms_link.rs`.
+- Modify: `scripts/wizard-check.py` — the fake `capture_courses` envelope (~69).
+- Test: `app/tests/scaffold.rs` (seven `CourseSeed` literals across four tests, one amended assertion loop, one new test), `app/tests/lms_link.rs` (one new test, one amended round trip), `app/tests/onboarding.rs` (two literals).
 
 **Interfaces:**
 - Consumes: `scaffold::suggest_course(&str) -> Option<String>` (unchanged, LMS ids only), `knowlu_engine::ingest::slugify(&str) -> String`.
 - Produces: `pub fn course_code_in_name(name: &str) -> Option<String>` in `app/src/scaffold.rs` — `"202640-BUI-100-101"` → `Some("BUI 100")`, `"CS 100 Intro"` → `Some("CS 100")`, `"UACS100Fall2026"` → `None`. Task 4 does **not** call it (the page never reads codes; that is Rust's job).
-- Produces: a course note whose frontmatter is `title` (the human code, else the LMS name), `name` (always the LMS name), `slug`, `code` (still the LMS's own key — the `course_map` fragment `ingest::match_course` matches a UID against), `status`.
+- Produces: `lms_link::Course { code: String, name: String, slug: String, label: String }` and `scaffold::CourseSeed { code: String, name: String, slug: String, label: String }` — one shape in two crates' worth of code, as they already are, with `#[serde(default)]` on `label` so a page or a stored plan that omits it is not a refusal.
+- Produces: a course note whose frontmatter is `title` (the label when it is set, else the LMS name), `name` (always the LMS name), `slug`, `code` (still the LMS's own key — the `course_map` fragment `ingest::match_course` matches a UID against), `status`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -652,11 +734,14 @@ fn a_seeded_course_note_is_titled_by_its_code_and_keeps_the_lms_name() {
             code: "_404752_1".into(),
             name: "202640-BUI-100-101".into(),
             slug: "bui-100".into(),
+            label: "BUI 100".into(),
         },
+        // No readable code anywhere: the label is empty and the note keeps today's behaviour.
         knowlu::scaffold::CourseSeed {
             code: "Independent Study".into(),
             name: "Independent Study".into(),
             slug: "independent-study".into(),
+            label: String::new(),
         },
     ];
     create_vault(&v, &p).unwrap();
@@ -688,20 +773,41 @@ fn a_course_whose_code_is_only_in_its_name_still_slugs_to_that_code() {
     assert_eq!(got[0].code, "_404752_1", "the LMS's own key is untouched");
     assert_eq!(got[0].name, "202640-BUI-100-101");
     assert_eq!(got[0].slug, "bui-100");
+    // R-C1c-plan-2: the human code, read once here and carried — the page never reads one itself.
+    assert_eq!(got[0].label, "BUI 100");
     assert_eq!(got[1].slug, "math-125");
+    assert_eq!(got[1].label, "MATH 125");
     // The id still wins where it carries a code: `UACS100Fall2026` is `suggest_course`'s, peel and
     // all, and reading the name instead would answer the same thing the long way round.
     let glued = r#"{"results":[{"courseId":"UACS100Fall2026","course":{"name":"CS 100 Intro to Computer Science"}}]}"#;
     assert_eq!(courses_from_json(glued)[0].slug, "cs-100");
-    // And a name with no code in it still slugs from the name, rather than being dropped.
-    assert_eq!(courses_from_json(r#"[{"name":"Independent Study"}]"#)[0].slug, "independent-study");
+    assert_eq!(courses_from_json(glued)[0].label, "CS 100");
+    // And a name with no code in it still slugs from the name, rather than being dropped — with an
+    // empty label, which is what tells every reader there was nothing to read.
+    let odd = courses_from_json(r#"[{"name":"Independent Study"}]"#);
+    assert_eq!(odd[0].slug, "independent-study");
+    assert_eq!(odd[0].label, "");
 }
+
 ```
+
+…and amend the existing round-trip test `a_captured_course_is_exactly_what_the_wizard_plan_takes_back`
+(`app/tests/lms_link.rs:470-481`), whose `assert_eq!(keys, ["code", "name", "slug"])` is now a
+three-field claim about a four-field struct. It is the test that pins `Course` and `CourseSeed` as
+one shape, so it is where the fourth field belongs — no second test for the same fact:
+
+```rust
+    assert_eq!(keys, ["code", "label", "name", "slug"], "{v}");
+```
+
+and `assert_eq!(seed.label, "CS 100");` beside its three existing field assertions, with one sentence
+added to its doc comment: *"Four fields since R-C1c-plan-2, and still nothing else riding along — a
+fifth would go out to a page and come back into a vault."*
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p knowlu --test scaffold a_course` then `cargo test -p knowlu --test lms_link a_course_whose_code`
-Expected: FAIL — `course_code_in_name` does not exist (`knowlu::scaffold::course_code_in_name` unresolved), and the Blackboard body still slugs to `202640-bui-100-101`.
+Run: `cargo test -p knowlu --test scaffold a_course` then `cargo test -p knowlu --test lms_link a_course`
+Expected: FAIL to compile — `knowlu::scaffold::course_code_in_name` is unresolved and neither struct has a `label` field. Once they do, the Blackboard body still slugs to `202640-bui-100-101` and the note is still titled by the name.
 
 - [ ] **Step 3: Replace `code_in_name` with `course_code_in_name`**
 
@@ -769,20 +875,75 @@ And in `course_fragments` (~310), the one call site:
     if let Some(human) = suggest_course(code).or_else(|| course_code_in_name(&c.name)) {
 ```
 
-- [ ] **Step 4: Read the name in `courses_from_json`**
+- [ ] **Step 3a: Give both structs the `label` field (Ruling R-C1c-plan-2)**
+
+In `app/src/scaffold.rs`, `CourseSeed` (~271):
+
+```rust
+pub struct CourseSeed {
+    pub code: String,
+    // m3: `create_vault_in` explicitly invents both when they are blank
+    // (`c.code.clone()` / `slug(&c.code)`), so a page that omits either is not a refusal.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    /// R-C1c-plan-2: the human course code (`BUI 100`) when the LMS's id or its name carried one,
+    /// empty when neither did. Read once, in `lms_link::courses_from_json`, and carried from there:
+    /// the note's title, the wizard's row and the mapping datalist all read this rather than each
+    /// deriving a code of their own.
+    #[serde(default)]
+    pub label: String,
+}
+```
+
+In `app/src/lms_link.rs`, `Course` (~461) — the same field, same name, and its doc comment's "three
+fields" becomes "four":
+
+```rust
+    /// `cs-100`. The vault's own name for it: the note's stem, and every task's `course:` field.
+    pub slug: String,
+    /// R-C1c-plan-2: the human course code, or empty. The one place a code is read out of an id or
+    /// a name is `courses_from_json`; every reader downstream takes it from here.
+    #[serde(default)]
+    pub label: String,
+```
+
+In `app/src/onboarding.rs`, the `CourseSeed` rebuild (~633) carries it through — trimmed, and never
+invented:
+
+```rust
+        .map(|c| crate::scaffold::CourseSeed {
+            code: c.code.clone(),
+            name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
+            slug: slug(if c.slug.trim().is_empty() { &c.code } else { &c.slug }),
+            // R-C1c-plan-2: whatever the page sent, trimmed. An empty label is a course whose id
+            // and name carried no code, and the note is titled by its name — never by a guess made
+            // here, two panels away from the only function that knows the rule.
+            label: c.label.trim().to_string(),
+        })
+```
+
+- [ ] **Step 4: Read the name in `courses_from_json`, and keep the code it read**
 
 In `app/src/lms_link.rs` (~502), replace the slug expression:
 
 ```rust
-        // The slug comes from the SUGGESTED code where there is one — `ua-cs-100-fall-2026` is
-        // nobody's idea of a course — then from a code the NAME carries (D4: Blackboard hands back
-        // an opaque `courseId` and writes the code into the name), and from the name otherwise.
-        let slug = crate::scaffold::suggest_course(&code)
-            .or_else(|| crate::scaffold::course_code_in_name(&name))
-            .map(|c| knowlu_engine::ingest::slugify(&c))
+        // The human code comes from the SUGGESTED code where the LMS's own id carries one —
+        // `ua-cs-100-fall-2026` is nobody's idea of a course — and from the NAME otherwise (D4:
+        // Blackboard hands back an opaque `courseId` and writes the code into the name).
+        let label = crate::scaffold::suggest_course(&code)
+            .or_else(|| crate::scaffold::course_code_in_name(&name));
+        // The slug is that code's, and the name's when there was no code to read.
+        let slug = label
+            .as_deref()
+            .map(knowlu_engine::ingest::slugify)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| knowlu_engine::ingest::slugify(if name.is_empty() { &code } else { &name }));
+        out.push(Course { code, name, slug, label: label.unwrap_or_default() });
 ```
+
+(and delete the old `out.push(Course { code, name, slug });` line below it).
 
 - [ ] **Step 5: Title the course note by its code and carry the LMS name**
 
@@ -790,14 +951,15 @@ In `app/src/scaffold.rs`, in the `for c in seeded_courses(plan)` loop (~650):
 
 ```rust
     for c in seeded_courses(plan) {
-        // D4: the note is TITLED by the human code when the LMS's id or its name carries one, so a
+        // D4: the note is TITLED by the human code the capture read (R-C1c-plan-2's `label`), so a
         // typed `BUI 100` on the coursework panel and this note are the same course. `name:` always
         // carries the school's own name, so nothing the student recognises is lost; `code:` stays
         // the LMS's own key, which is the `course_map` fragment `ingest::match_course` matches a
-        // UID against. A course with no readable code keeps today's behaviour — the name.
-        let human = suggest_course(&c.code).or_else(|| course_code_in_name(&c.name));
+        // UID against. A course whose id and name both carried no code has an empty label and keeps
+        // today's behaviour — the name. Nothing is recomputed here: one reader, one rule.
+        let title = if c.label.trim().is_empty() { c.name.as_str() } else { c.label.as_str() };
         let front = Node::map(vec![
-            ("title", Node::text(human.as_deref().unwrap_or(&c.name))),
+            ("title", Node::text(title)),
             ("name", Node::text(&c.name)),
             ("slug", Node::text(&c.slug)),
             ("code", Node::text(&c.code)),
@@ -805,18 +967,70 @@ In `app/src/scaffold.rs`, in the `for c in seeded_courses(plan)` loop (~650):
         ]);
 ```
 
+- [ ] **Step 5a: Amend the existing tests the fourth field and the new title change (B1)**
+
+`app/tests/scaffold.rs:682-686` asserts the course note's title verbatim, and under Step 5 both rows
+now fail. In `every_enrolled_course_becomes_a_note_the_engine_can_find` (~676), give the seeds their
+labels and assert both lines:
+
+```rust
+    p.courses = vec![
+        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into(), label: "CS 100".into() },
+        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into(), label: "GN 103".into() },
+    ];
+```
+
+```rust
+    // D4: the note is titled by the human code, and `name:` carries the school's own name.
+    for (slug, title, name) in [
+        ("cs-100", "CS 100", "CS 100 Intro to Computer Science"),
+        ("gn-103", "GN 103", "GN 103 German"),
+    ] {
+        let note = dest.join("courses").join(format!("{slug}.md"));
+        let text = knowlu_engine::pystr::read_text(&note).unwrap_or_else(|e| panic!("{}: {e}", note.display()));
+        assert!(text.contains(&format!("title: {title}")), "{text}");
+        assert!(text.contains(&format!("name: {name}")), "{text}");
+        assert!(text.contains(&format!("slug: {slug}")), "{text}");
+        assert!(text.contains("## Grade weights"), "{text}");
+        // Every note has an opaque id, like every other note this app writes.
+        assert!(text.contains("id: course_"), "{text}");
+    }
+```
+
+and its doc comment gains one sentence: *"From D4 on the title is the human code the capture read and
+`name:` carries the LMS's own name."*
+
+Then give the remaining `CourseSeed` literals their fourth field — every one of them, or the file
+does not compile:
+
+- `app/tests/scaffold.rs:91` (`a_scaffolded_vault_ranks_without_the_unmigrated_warning`) — `label: "CS 100".into(),`
+- `app/tests/scaffold.rs:710, 714, 716` (`a_captured_course_maps_by_its_lms_id_and_by_the_code_a_summary_spells`) — `label: "CS 100".into(),`, `label: "CS 100".into(),`, `label: "GN 103".into(),`. Its assertions are about `course_map` fragments, which `course_fragments` still computes from the id and the name, so they are unchanged.
+- `app/tests/scaffold.rs:769` (`every_mapped_course_is_a_slug_the_vault_knows`) — `label: "CS 100".into(),`
+- `app/tests/onboarding.rs:923, 924` (`a_page_supplied_course_slug_is_normalised_before_it_names_a_file`) — `label: String::new(),` on both; that test is about the slug, and an empty label is the honest value for a hand-built plan.
+
+And the headless walk's fake, `scripts/wizard-check.py` (~69), answers what `capture_courses` now
+answers:
+
+```python
+  if (cmd === 'capture_courses') {
+    return Promise.resolve({ ok: true, error: null, typed: false,
+      courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100', label: 'CS 100' }] }); }
+```
+
 - [ ] **Step 6: Say it on the wizard's own row**
 
-In `app/static/console.js`, `renderCourses` (~1999):
+In `app/static/console.js`, `renderCourses` (~1999) — spec §4's `BUI 100 · 202640-BUI-100-101`,
+rendered from the field R-C1c-plan-2 added rather than from a code the page read for itself:
 
 ```js
   function renderCourses() {
     EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      // D4: the school's own name first — it is what the student recognises — and beside it what
-      // Knowlu will call the course. The page never reads a code out of a name: that rule lives in
+      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
+      // when there was no code to read, or when the two are the same string (a typed course is
+      // both). The page never reads a code out of a name: that rule lives in
       // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.name || c.code) +
-             (c.slug && c.slug !== c.name ? " &middot; " + h(c.slug) : "") +
+      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
     }).join("");
   }
@@ -826,13 +1040,13 @@ In `app/static/console.js`, `renderCourses` (~1999):
 
 - [ ] **Step 7: Run the app tests that read courses**
 
-Run: `cargo test -p knowlu --test scaffold` and `cargo test -p knowlu --test lms_link`
-Expected: PASS, including `a_captured_course_is_exactly_what_the_wizard_plan_takes_back` (the `Course` struct still serialises exactly `code`, `name`, `slug`) and `a_scaffolded_vault_ranks_without_the_unmigrated_warning` (the new `name:` line is additive frontmatter; nothing warns on it).
+Run: `cargo test -p knowlu --test scaffold`, `cargo test -p knowlu --test lms_link` and `cargo test -p knowlu --test onboarding`
+Expected: PASS, including `every_enrolled_course_becomes_a_note_the_engine_can_find` and `a_captured_course_is_exactly_what_the_wizard_plan_takes_back` (both amended above), `a_captured_course_maps_by_its_lms_id_and_by_the_code_a_summary_spells`, `a_page_supplied_course_slug_is_normalised_before_it_names_a_file` and `a_scaffolded_vault_ranks_without_the_unmigrated_warning` (the new `name:` line is additive frontmatter; nothing warns on it).
 
 - [ ] **Step 8: Run the headless walk and the whole suite**
 
 Run: `python scripts/wizard-check.py` (from the worktree root)
-Expected: `ok` — check 5 still finds `CS 100` in `#wiz-course-rows`, now as the captured course's name, and the typed `GN 103` beside it.
+Expected: `ok` — check 5 still finds `CS 100` in `#wiz-course-rows`, now as the captured course's label ahead of its name, and the typed `GN 103` beside it.
 
 Run: `cargo test --workspace`
 Expected: PASS at 0 warnings, with `rejecting_and_snoozing_write_the_decision_fields` the one accepted failure.
@@ -847,12 +1061,14 @@ D4: scaffold::course_code_in_name reads the code a school writes into a
 course's display name (202640-BUI-100-101 -> BUI 100), with no
 institution-prefix peel; courses_from_json slugs from it when the LMS id
 carries none, so a Blackboard course and a typed code meet at one note.
-The course note is titled by the code and carries the LMS name as `name:`.
+Course and CourseSeed carry that code as `label` (ruling R-C1c-plan-2), so
+the row and the note's title read it rather than each deriving one; the note
+is titled by it and carries the LMS name as `name:`.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
 EOF
-git add app/src/scaffold.rs app/src/lms_link.rs app/static/console.js app/tests/scaffold.rs app/tests/lms_link.rs
+git add app/src/scaffold.rs app/src/lms_link.rs app/src/onboarding.rs app/static/console.js app/tests/scaffold.rs app/tests/lms_link.rs app/tests/onboarding.rs scripts/wizard-check.py
 git commit -F /tmp/c1c-task3.txt
 ```
 
@@ -860,14 +1076,22 @@ git commit -F /tmp/c1c-task3.txt
 
 ### Task 4: The mapping row offers the classes, and says what a blank one costs (spec §4 D5, §5 D6)
 
+> **Ruling R-C1c-plan-3 (review I1).** `wizStep` advances `WIZ.step` before the `leaving === 5`
+> branch runs, and `renderWizard` then hides every panel but the new one — so a sentence written into
+> `#wiz-map-note` on the way out lands in a hidden panel and is never read. The ruling: **the first
+> Next after a completed discovery with blank, un-ignored rows writes the sentence and STAYS on the
+> panel; the next Next goes on** — the same stay-once shape the discovery itself uses, latched on
+> `WIZ.mapWarned` and cleared when logins are stored again. Spec §5's `#wiz-map-note` and its "Next
+> goes on" both stand; what changes is that the student reads the sentence first.
+
 **Files:**
 - Modify: `app/static/index.html` — the `#wiz-logins` panel (~132), one `<datalist>`.
-- Modify: `app/static/console.js` — `renderCourses` (~1999, one added call), a new `renderCourseCodes`, `renderMapping` (~2020), a new `noteUnmapped`, and `wizStep`'s `leaving === 5` branch (~1692–1712).
+- Modify: `app/static/console.js` — the `WIZ` literal (~1490), `storeCredentials` (~1598), `renderCourses` (~1999, one added call), the typed-course push (~2011), a new `renderCourseCodes`, `renderMapping` (~2020), a new `noteUnmapped`, and `wizStep`'s `leaving === 5` branch (~1692–1712).
 - Test: `app/tests/static_assets.rs`, `scripts/wizard-check.py` (check 6).
 
 **Interfaces:**
-- Consumes: `WIZ.courses` (`[{code, name, slug}]`, filled by `capture_courses` and by the typed-course row) and `WIZ.map` (`[{source, key, detail, suggested, course, ignore}]`).
-- Produces: a page-level `<datalist id="wiz-course-codes">` that every mapping row's `<input list="wiz-course-codes">` reads.
+- Consumes: `WIZ.courses` (`[{code, name, slug, label}]` — `label` is Task 3's, filled by `capture_courses` and, for a typed course, by the row that pushes it) and `WIZ.map` (`[{source, key, detail, suggested, course, ignore}]`).
+- Produces: a page-level `<datalist id="wiz-course-codes">` that every mapping row's `<input list="wiz-course-codes">` reads, and `WIZ.mapWarned` — the stay-once latch R-C1c-plan-3 names.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -886,17 +1110,26 @@ fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
     let js = read("console.js");
     assert!(js.contains("function renderCourseCodes("), "renderCourseCodes fills it");
     assert!(js.contains("list=\"wiz-course-codes\""), "every mapping row's field reads it");
-    // The list offers what round-trips to the vault's own name for the course — never the LMS's
-    // opaque key, which would be slugged into a course note nobody has.
-    assert!(js.contains("c.slug || c.code"), "the datalist offers the slug, and a typed code otherwise");
+    // The list offers what round-trips to the vault's own name for the course — the human code the
+    // capture read, or the slug — never the LMS's opaque key, which would be slugged into a course
+    // note nobody has (R-C1c-plan-2).
+    assert!(js.contains("c.label || c.slug"), "the datalist offers the human code, and the slug otherwise");
     assert!(js.contains("type the course this belongs to"), "a row with no suggestion says what it needs");
     assert!(js.contains(" of these will be asked about in the app"), "…and Next says what blank rows cost");
     assert!(js.contains("function noteUnmapped("), "noteUnmapped");
-    // Asserted inside `wizGo`, so `wizFinish`'s own bookkeeping cannot stand in for it: the
-    // sentence belongs to the Next that LEAVES the panel.
-    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
+    // R-C1c-plan-3: the sentence is read BEFORE the panel goes — the first Next latches and stays,
+    // the second goes on. Asserted over the `wizGo`/`wizStep` slice (the split runs to
+    // `wizRegister`, so it spans both), because `wizFinish`'s own bookkeeping must not stand in.
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo/wizStep");
     assert!(go.contains("noteUnmapped()"), "the count is written on the way out of the panel");
-    // R-C1b-exec-10 still holds: the sentence is a note, never a refusal.
+    assert!(go.contains("WIZ.mapWarned"), "…and the panel stays once, so the student reads it");
+    assert!(js.contains("mapWarned: false"), "the latch starts clear on a fresh wizard");
+    assert!(
+        js.contains("WIZ.discovered = false; WIZ.mapWarned = false"),
+        "…and re-typed logins clear it with the discovery they invalidate"
+    );
+    // R-C1b-exec-10 still holds: the sentence is a note, never a refusal — the second Next goes on
+    // whatever the rows say, and nothing writes an error for a blank one.
     assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
 }
 ```
@@ -921,11 +1154,12 @@ In `app/static/console.js`, replace `renderCourses` (~1999) with the Task 3 body
 ```js
   function renderCourses() {
     EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      // D4: the school's own name first — it is what the student recognises — and beside it what
-      // Knowlu will call the course. The page never reads a code out of a name: that rule lives in
+      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
+      // when there was no code to read, or when the two are the same string (a typed course is
+      // both). The page never reads a code out of a name: that rule lives in
       // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.name || c.code) +
-             (c.slug && c.slug !== c.name ? " &middot; " + h(c.slug) : "") +
+      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
     }).join("");
     renderCourseCodes();
@@ -934,14 +1168,23 @@ In `app/static/console.js`, replace `renderCourses` (~1999) with the Task 3 body
   /// D5: the codes a mapping row offers, so a student picks a class rather than typing one from
   /// memory — the VHL row that nobody filled is why `sections: {}` reached the engine.
   ///
-  /// The value offered is the course's own SLUG when it has one (`bui-100`) and the typed code
-  /// otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to the
-  /// note the course already has. The LMS's opaque key would not — it would make a second course.
+  /// The VALUE is the human code the capture read (R-C1c-plan-2's `label`) and the course's own
+  /// slug otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to
+  /// the note the course already has. The LMS's opaque key would not — it would make a second
+  /// course. The LABEL is what the student recognises (M4), so the list reads as their class list
+  /// rather than as identifiers.
   function renderCourseCodes() {
     EL("wiz-course-codes").innerHTML = WIZ.courses.map(function (c) {
-      return '<option value="' + h(c.slug || c.code) + '">';
+      return '<option value="' + h(c.label || c.slug) + '">' + h(c.name || c.code) + "</option>";
     }).join("");
   }
+```
+
+…and the typed-course row gives its own push a label, so a course the student typed offers the thing
+they typed rather than an empty value (`app/static/console.js:2011`):
+
+```js
+      if (code) { WIZ.courses.push({ code: code, name: code, slug: "", label: code }); EL("wiz-course-add").value = ""; renderCourses(); }
 ```
 
 - [ ] **Step 5: Point the rows at it, and say what a row with no suggestion needs**
@@ -962,31 +1205,54 @@ Replace the row template inside `renderMapping` (~2024):
     }).join("");
 ```
 
-- [ ] **Step 6: Say what the blank rows cost on the way out**
+- [ ] **Step 6: Stay once, and say what the blank rows cost (Ruling R-C1c-plan-3)**
 
 In `app/static/console.js`, beside `renderMapping`, add:
 
 ```js
   /// D6: leaving the logins panel with rows still blank is a choice, not a refusal
   /// (R-C1b-exec-10 already lets Next through) — but it has a consequence, and the panel says what
-  /// it is on the way past: the engine files a coursework-map card for each one (R-OB-1) and the
-  /// app asks about it there. Silent when nothing is blank; the singular reads correctly without a
-  /// special case.
+  /// it is: the engine files a coursework-map card for each one (R-OB-1) and the app asks about it
+  /// there. Silent when nothing is blank; the singular reads correctly without a special case.
+  ///
+  /// Returns the count, so the caller can decide whether there is anything to stay for.
   function noteUnmapped() {
     var n = WIZ.map.filter(function (r) { return !r.ignore && !r.course; }).length;
-    if (!n) { return; }
-    EL("wiz-map-note").textContent = n + " of these will be asked about in the app";
+    if (n) { EL("wiz-map-note").textContent = n + " of these will be asked about in the app"; }
+    return n;
   }
 ```
 
-And in `wizStep`'s `leaving === 5 && n > leaving` branch, inside `storeCredentials().then(...)`, immediately after the `if (!ok) { … }` guard (~1701) — **above** the two early returns, so a student who stored no login at all and one who has already discovered both get the same sentence:
+In the `WIZ` literal (~1490), beside the other latches:
 
 ```js
-        if (!ok) { WIZ.step = leaving; renderWizard(); return; }
-        // D6: whatever happens next, a finished discovery says what the blank rows cost.
-        if (WIZ.discovered) { noteUnmapped(); }
-        if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }
+              // R-C1c-plan-3: `mapWarned` is whether the blank-row sentence has been shown once.
+              // `wizStep` sets `WIZ.step` BEFORE the panel branch runs and `renderWizard` hides
+              // every other panel, so a sentence written on the way out is a sentence nobody reads
+              // — the first Next stays on the panel to show it, the second goes on.
+              lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
+```
+
+In `storeCredentials` (~1598), beside the line that clears `WIZ.discovered`, so re-typed logins get
+a fresh discovery *and* a fresh warning:
+
+```js
+      if (stored.length) { WIZ.discovered = false; WIZ.mapWarned = false; }
+```
+
+And in `wizStep`'s `leaving === 5 && n > leaving` branch, inside `storeCredentials().then(...)`,
+replace the already-discovered early return (~1707):
+
+```js
+        if (WIZ.map.length || WIZ.discovered) {
+          // R-C1c-plan-3: the first Next after a finished discovery with blank, un-ignored rows
+          // writes the sentence and stays here — `WIZ.step` was advanced above, so putting it back
+          // is what keeps the panel, and its note, on screen. The next Next goes on whatever the
+          // rows say: this is a sentence, not a gate.
+          if (!WIZ.mapWarned && noteUnmapped()) { WIZ.mapWarned = true; WIZ.step = leaving; }
+          renderWizard();
+          return;
+        }
 ```
 
 - [ ] **Step 7: Drive it headlessly**
@@ -994,23 +1260,30 @@ And in `wizStep`'s `leaving === 5 && n > leaving` branch, inside `storeCredentia
 In `scripts/wizard-check.py`, in check 6, replace the two lines that fill the VHL row and press Next (the `page.fill('[data-course-for="1"]', "GN 103")` pair, ~239) with:
 
 ```python
-    # D6: a row left blank is a choice, and the panel says what it costs before Next goes on — the
-    # engine files a card for it (R-OB-1) and the app asks there.
+    # D6 / R-C1c-plan-3: the first Next after a discovery with blank rows STAYS on the panel and
+    # says what they cost — the engine files a card for each (R-OB-1) and the app asks there; the
+    # second Next goes on. `is_visible` is the assertion that matters: `inner_text` falls back to
+    # `textContent` and passes on a hidden panel, which is the bug this check exists for.
     page.click("#wiz-next"); page.wait_for_timeout(300)
+    if page.is_hidden("#wiz-logins"): bad.append("the blank-row sentence did not keep the student on the panel")
+    if not page.is_visible("#wiz-map-note"): bad.append("the count sentence was written to a hidden panel")
     if "asked about in the app" not in page.inner_text("#wiz-map-note"):
         bad.append("a blank mapping row did not say it would be asked about in the app")
-    if page.is_hidden("#wiz-gmail"): bad.append("a blank mapping row blocked Next instead of naming the cost")
-    page.click("#wiz-back"); page.wait_for_timeout(150)
-    # D5: the row offers the classes the wizard already captured, by the name the vault will use.
+    if names(page).count("discover_coursework") != 2: bad.append("staying to warn re-ran discovery")
+    # D5: the row offers the classes the wizard already captured, by the code the vault will use.
     if page.get_attribute('[data-course-for="1"]', "list") != "wiz-course-codes":
         bad.append("the mapping row does not offer the captured classes")
     opts = page.eval_on_selector_all("#wiz-course-codes option", "os => os.map(o => o.value)")
-    if "cs-100" not in opts: bad.append(f"the datalist does not carry the captured class: {opts!r}")
+    if "CS 100" not in opts: bad.append(f"the datalist does not carry the captured class: {opts!r}")
     page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
 ```
 
-The rest of check 6 — the Gmail panel, the cleared password, `store_credentials`' vault — is unchanged, and so is check 9's assertion that the plan carries the VHL mapping: the row is filled before the Next that leaves the panel for good.
+The rest of check 6 — the Gmail panel, the cleared password, `store_credentials`' vault — is
+unchanged, and so is check 9's assertion that the plan carries the VHL mapping: the row is filled
+before the Next that leaves the panel for good. The earlier empty-discovery sequence is unaffected:
+`WIZ.map` is empty there, so `noteUnmapped()` returns zero, nothing is written over that panel's
+"You can go on…" note and nothing stays.
 
 - [ ] **Step 8: Run the static test and the walk**
 
@@ -1032,9 +1305,10 @@ cat > /tmp/c1c-task4.txt <<'EOF'
 feat(app): the mapping row offers the classes, and says what a blank one costs
 
 D5: every mapping row's course field reads one page-level datalist filled
-from the captured classes, by the name the vault will use, so a student
+from the captured classes, by the code the vault will use, so a student
 picks rather than types. D6: a row with no suggestion says it needs one, and
-Next off the logins panel says how many blank rows the app will ask about.
+the first Next off the logins panel stays once to say how many blank rows
+the app will ask about (ruling R-C1c-plan-3); the second goes on.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
@@ -1047,6 +1321,15 @@ git commit -F /tmp/c1c-task4.txt
 
 ### Task 5: The first-run view (spec §6, D7)
 
+> **Ruling R-C1c-plan-1 (review B2).** `surface::build_state` has no failure path — it returns a
+> `State` unconditionally, and `surface::load` never reads `state/today.md` — so `build_state_value`
+> answers `ok: true` with a nearly empty state on a wizard-made vault, and a page that keyed on
+> `!env.ok` would never paint the first-run view at all. The ruling: **`commands::state` attaches
+> `first_run` iff `knowlu_engine::ingest::is_first_run(&cs.vault)`, and `poll()` paints `#first-run`
+> whenever the envelope carries the key and hides it when the key is absent.** The state paints
+> behind it, as it is. Spec §6's `ok: true, state: null` envelope stays as the safety net for the
+> three ways `build_state_value` really can fail.
+
 **Files:**
 - Modify: `app/src/commands.rs` — a new `first_run_value` beside `attach_scheduler` (~54), and the `state` command wrapper (~337).
 - Modify: `app/static/index.html` — one block under `#delta`.
@@ -1055,8 +1338,8 @@ git commit -F /tmp/c1c-task4.txt
 
 **Interfaces:**
 - Consumes: `knowlu_engine::ingest::is_first_run(&Path) -> bool`; `crate::scheduler::{lock, Scheduler, RunSummary}` — `Scheduler.running: Mutex<bool>`, `Scheduler.last: Mutex<Option<RunSummary>>`, `RunSummary.steps: Vec<(String, i32)>`.
-- Produces: `pub fn first_run_value(cs: &ConsoleState, sch: &Scheduler) -> Option<Value>` and the envelope key
-  `first_run: { "running": bool, "steps": [[label, code], …] }`. When the read model could not be built, the envelope is `{ ok: true, error: null, state: null, first_run: {…} }`; any other failure on a ranked vault keeps today's `ok: false`.
+- Produces: `pub fn first_run_value(cs: &ConsoleState, sch: &Scheduler) -> Option<Value>` — `Some` iff `is_first_run` (R-C1c-plan-1) — and the envelope key
+  `first_run: { "running": bool, "steps": [[label, code], …] }`. In the rare case where the read model could not be built at all, the envelope is `{ ok: true, error: null, state: null, first_run: {…} }`; any other failure on a ranked vault keeps today's `ok: false`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1075,6 +1358,11 @@ fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
     let v = scratch("firstrun");
     assert!(!v.join("state").join("today.md").exists(), "this vault has never been ranked");
     let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-console-appdata-firstrun-{}", std::process::id())));
+    // R-C1c-plan-1, the premise tested rather than assumed: the read model builds fine without
+    // `state/today.md` (`surface::build_state` has no failure path), so `ok` is true and the BLOCK
+    // — not a failed envelope — is what the page keys on.
+    let env = state_inner(&cs, "today").unwrap();
+    assert_eq!(env["ok"], true);
     let sch = Scheduler::default();
     let fr = knowlu::commands::first_run_value(&cs, &sch).expect("a vault with no today.md carries it");
     assert_eq!(fr["running"], false);
@@ -1115,12 +1403,13 @@ In `app/src/commands.rs`, after `attach_scheduler` (~72):
 /// D7 / §6: what the window has to paint while the vault has no read model yet — the minute between
 /// Finish and the first `rank`, which was a white page with an engine error in it.
 ///
-/// Attached whenever the vault has never been through a whole slot (`ingest::is_first_run` — the
-/// absence of `state/today.md`, the same predicate `scheduler::needs_first_run` and the engine's own
-/// first-run rules read), not only when the read model could not be built: a vault that builds an
-/// EMPTY state would otherwise paint an empty day, which is the white window by another name. The
-/// page decides what to do with it — it shows the block only while it has nothing else to paint, and
-/// hides it the moment a state arrives.
+/// **Ruling R-C1c-plan-1:** attached whenever the vault has never been through a whole slot
+/// (`ingest::is_first_run` — the absence of `state/today.md`, the same predicate
+/// `scheduler::needs_first_run` and the engine's own first-run rules read), and never on a failed
+/// read model: `surface::build_state` has no failure path, so a wizard-made vault answers `ok` with
+/// a nearly empty state, and a page that waited for a failure would paint that empty day and call it
+/// the first look. The page paints the block while the key is there and drops it when it stops
+/// coming.
 ///
 /// `running` and `steps` come from the live `Scheduler`; a slot in flight records nothing until it
 /// ends, so `steps` is empty on the first poll and the page shows its sentence alone.
@@ -1175,12 +1464,16 @@ fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
     );
     let js = read("console.js");
     assert!(js.contains("function renderFirstRun("), "renderFirstRun");
+    assert!(js.contains("function hideFirstRun("), "hideFirstRun");
     assert!(js.contains("var FIRST_RUN_MS = 3000"), "the first-run cadence is three seconds");
     assert!(js.contains("setInterval(poll, 60000)"), "…and the usual cadence is unchanged");
+    assert!(js.contains("EL(\"first-run\").hidden = true"), "…and the block is hidden once the day is there");
     let poll = js.split("function poll(").nth(1).and_then(|s| s.split("function openDrawer(").next()).expect("poll");
-    assert!(poll.contains("env.first_run"), "poll reads the envelope's first_run block");
-    assert!(poll.contains("renderFirstRun("), "…and paints it");
-    assert!(poll.contains("EL(\"first-run\").hidden = true"), "…and hides it once a state arrives");
+    // R-C1c-plan-1: the view stands on the presence of the block — which is `is_first_run` — and
+    // never on a failed state, because `surface::build_state` has no failure path to wait for.
+    assert!(poll.contains("if (env.first_run) {"), "the first-run view stands on is_first_run alone");
+    assert!(poll.contains("renderFirstRun("), "…poll paints it");
+    assert!(poll.contains("hideFirstRun()"), "…and takes it away when the key stops coming");
 }
 ```
 
@@ -1206,13 +1499,18 @@ In `app/static/console.js`, immediately above `function poll()` (~579):
 
 ```js
   // D7: the minute between Finish and the first `rank`. `first_run` rides on the envelope until
-  // `state/today.md` exists; while there is no state to paint the page says what is happening and
-  // lists the slot's steps as they land, and asks again every three seconds so the day appears as
-  // soon as it is there rather than up to a minute later.
+  // `state/today.md` exists; while it does, the page says what is happening, lists the slot's steps
+  // as they land, and asks again every three seconds so the day appears as soon as it is there
+  // rather than up to a minute later. The state paints behind it as it is — on a vault this new
+  // that is an empty day, which is exactly what the block is covering (R-C1c-plan-1).
+  //
+  // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
+  // failing polls on forever. That is honest rather than silent: the failed step shows up in the
+  // list below the line as soon as the slot ends, and the Runs view has the rest. A cap would
+  // replace a true "still working" with a false "gave up".
   var FIRST_RUN_MS = 3000;
   var firstRunTimer = null;
   function renderFirstRun(fr) {
-    EL("delta").textContent = "";
     EL("first-run").hidden = false;
     EL("first-run-steps").innerHTML = (((fr && fr.steps) || []).map(function (s) {
       return '<div class="meta">' + h(s[0]) + "</div>";
@@ -1222,6 +1520,11 @@ In `app/static/console.js`, immediately above `function poll()` (~579):
     if (firstRunTimer) { clearTimeout(firstRunTimer); }
     firstRunTimer = setTimeout(poll, FIRST_RUN_MS);
   }
+
+  function hideFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
+    EL("first-run").hidden = true;
+  }
 ```
 
 and replace `poll`'s body:
@@ -1229,12 +1532,14 @@ and replace `poll`'s body:
 ```js
   function poll() {
     return invoke("state", { view: current.view }).then(function (env) {
-      // The first-run line stands only while there is nothing else to paint (D7). The moment a read
-      // model arrives it goes, and the normal paint runs on the usual cadence.
-      if (env.first_run && (!env.ok || !env.state)) { renderFirstRun(env.first_run); return; }
-      if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
-      EL("first-run").hidden = true;
+      // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
+      // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
+      // path, so there is no failed state to wait for. The paint below still runs.
+      if (env.first_run) { renderFirstRun(env.first_run); } else { hideFirstRun(); }
       if (!env.ok) { EL("delta").textContent = "engine: " + env.error; return; }
+      // §6's safety net answers `ok` with no state when the read model could not be built at all;
+      // the line above is what the student reads while that is true.
+      if (!env.state) { return; }
       if (env.state.revision === current.revision) { return; }
       paint(env.state, false);
     }).catch(function (e) { EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")"; });
@@ -1292,5 +1597,5 @@ After Task 5's commit, the branch is code-complete. What is left is the controll
    - no zyBooks task due before onboarding day is `active` (D3);
    - the course notes are `bui-100`-style with `name:` lines (D4);
    - the VHL row left blank produced the count sentence (D6) and the engine's `map-vhl-…` card (R-OB-1);
-   - `state/runner-log.md` carries a `local skip …` line for anything the slot left out (D8).
+   - `state/runner-log.md` carries a `local ok <step> (skipped: …)` line for anything the slot left out (D8, as R-C1c-plan-4 spells it).
 4. **Then** the finishing-a-development-branch decision: this branch merges after `c1b-sign-in`.
