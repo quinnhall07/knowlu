@@ -1,7 +1,12 @@
 name: ci
 on:
-  push: { branches: [main] }
-  pull_request: {}
+  # Documents never change what the gate tests, and every run here is a Windows job billed at
+  # twice its wall-clock minutes: a document-only push runs nothing.
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "HANDOFF.md", "VISION.md", "PROVENANCE.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "HANDOFF.md", "VISION.md", "PROVENANCE.md"]
 permissions: { contents: read }
 env:
   RUSTFLAGS: "-D warnings"
