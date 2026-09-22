@@ -89,13 +89,18 @@ Deno.test("email: a message under MAX_BODY_CHARS is not marked truncated", () =>
 });
 
 // ---------------------------------------------------------------------------------------------
-// (b) the email rules text names how to resolve a relative deadline, against the Date line.
+// (b) T4: the model is EXTRACTION ONLY for `due` — it must not resolve a relative deadline
+// itself (`judge_due.ts` does that, between the model and `validate`). The old assertion here
+// pinned the opposite instruction ("resolve a relative deadline... against the Date line") and is
+// replaced, not kept alongside the new one: that sentence must be GONE from the prompt, not merely
+// supplemented, or the model would see both instructions at once.
 // ---------------------------------------------------------------------------------------------
 
-Deno.test("email rules: the due bullet resolves a relative deadline against the Date line", () => {
+Deno.test("email rules: the due bullet asks for the phrase as written, not a resolved date", () => {
   const rules = systemTemplate("email");
-  assert(rules.includes("Resolve a relative deadline"), `missing sentence in: ${rules}`);
-  assert(rules.includes("against the Date line above"), `missing sentence in: ${rules}`);
+  assert(rules.includes("exactly as the email states it"), `missing sentence in: ${rules}`);
+  assert(rules.includes("do NOT compute or resolve it yourself"), `missing sentence in: ${rules}`);
+  assert(!rules.includes("Resolve a relative deadline"), `the old resolve-it-yourself rule is still present: ${rules}`);
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -1,0 +1,21 @@
+-- Knowlu — stream J Task T4: the email `due` reference date.
+--
+-- The old email prompt asked the model to resolve a relative deadline ("Friday", "next week")
+-- into an absolute date itself — the 2026-09-16 scoping note's "single most dangerous line": a
+-- mis-resolved phrase comes back as a well-formed, silently wrong date. The corroborated fix is to
+-- keep the model on EXTRACTION (it now returns the deadline phrase as written, or an absolute date
+-- only when the email states one explicitly) and let a new deterministic TypeScript resolver
+-- (`cloud/supabase/functions/_shared/judge_due.ts`) do the arithmetic, between the model's answer
+-- and `judge_validate.ts`'s `validate()`. The wire contract to the device does not change: `due`
+-- is still `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM` or null.
+--
+-- Only the email prompt's due bullet changes (`judge_prompts.ts`'s `systemTemplate("email")`), so
+-- only the email row's `prompt_version` moves — off `email-2`
+-- (`20260916000100_provider_swap.sql`'s re-pin) onto `email-3`. Task and event are untouched: this
+-- lane never touches the EVENT region of `judge_prompts.ts`/`judge_validate.ts`, and the task
+-- prompt never had a `due` field to begin with.
+--
+-- Forward-only, like every migration here: 20260911000100…20260916000100 are applied and never
+-- edited. Not applied anywhere by this task (stream J lane rule 7): no `supabase` CLI call against
+-- a remote, staging or production.
+update models set prompt_version = 'email-3', since = current_date where kind = 'email';

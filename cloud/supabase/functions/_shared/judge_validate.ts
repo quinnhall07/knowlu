@@ -7,6 +7,11 @@ export const CONFIDENCE_FLOOR = 0.6;
 export const MAX_REASON_CHARS = 140;
 
 export type Kind = "task" | "event" | "email";
+
+/** The wire shape of a resolved `due`: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`. Shared with
+ * `judge_due.ts` (stream J Task T4) so the resolver's absolute-date passthrough and this
+ * function's final check can never drift apart — one pattern, not two copies of it. */
+export const ABSOLUTE_DUE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/;
 /** Why an answer did not become a verdict. A CLOSED set — `judgments.cause` checks it. */
 export type Cause = "below floor" | "incomplete" | "model failed" | "refused" | "truncated";
 
@@ -145,9 +150,12 @@ export function validate(
       why,
       title: oneLine(typeof answer.title === "string" ? answer.title : "", 200),
       course,
-      due: typeof answer.due === "string" && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(answer.due)
-        ? answer.due
-        : null,
+      // T4: the model no longer resolves a relative phrase itself, so by the time an answer
+      // reaches this function its `due` is either already the wire shape (`judge_due.ts` resolved
+      // it, or the email stated an absolute date the model copied verbatim) or something that
+      // failed to resolve — and an unresolved phrase is exactly as untrustworthy here as it always
+      // was, so it is still dropped to `null` rather than written into a vault.
+      due: typeof answer.due === "string" && ABSOLUTE_DUE_RE.test(answer.due) ? answer.due : null,
       effort_hours: effort === null ? null : clamp(effort, 0.25, 40),
       importance: importance === null ? null : clamp(Math.round(importance), 1, 5),
       confidence: clamp(confidence, 0, 1),

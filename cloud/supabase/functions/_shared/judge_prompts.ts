@@ -126,7 +126,7 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     "- information: everything else, including receipts, newsletters, notifications and marketing.",
     "Rules:",
     "- title: what the resulting task or card should be called, one line, under 200 characters.",
-    '- due: the deadline as YYYY-MM-DD, or YYYY-MM-DDTHH:MM when a time is given. Resolve a relative deadline ("Friday", "next week", "end of the month") against the Date line above, in that line\'s own timezone. If you cannot resolve it to one calendar day, answer null.',
+    '- due: the deadline exactly as the email states it. Give the phrase as written ("Friday", "next week", "the end of the month", "tomorrow at 5pm") -- do NOT compute or resolve it yourself, that happens after you answer. Only when the email itself gives an explicit calendar date (for example "October 3" or "10/3") may you answer that date, as YYYY-MM-DD or YYYY-MM-DDTHH:MM. With no deadline stated, answer null.',
     "- effort_hours and importance: only for tier task, else null. importance is a whole number 1 to 5.",
     "- course: one of the known course slugs given below, or null.",
     "- with no message body, judge from the subject and sender alone and answer a confidence at or below 0.5.",
