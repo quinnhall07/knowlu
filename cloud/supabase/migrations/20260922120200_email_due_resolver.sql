@@ -19,3 +19,14 @@
 -- edited. Not applied anywhere by this task (stream J lane rule 7): no `supabase` CLI call against
 -- a remote, staging or production.
 update models set prompt_version = 'email-3', since = current_date where kind = 'email';
+
+-- Stream J Task T9, folded into this same `email-3` (nothing deployed between T4 and T9): the
+-- email prompt gains a sixth tier, `completion` ("this email confirms the student already submitted
+-- or finished a specific piece of work", `title` = the work's name), and `gmail-read` recognises a
+-- templated LMS submission receipt deterministically before the model. Same route, provider, pin
+-- and budget — the one database change is the queue's own tier check, which named the five tiers
+-- and would otherwise refuse a `completion` row with a 23514 and fail the whole read. The inline
+-- check in `20260911000200_google.sql` took Postgres's default name, `gmail_queue_tier_check`.
+alter table gmail_queue drop constraint if exists gmail_queue_tier_check;
+alter table gmail_queue add constraint gmail_queue_tier_check
+  check (tier in ('task', 'borderline', 'event', 'opportunity', 'information', 'completion'));

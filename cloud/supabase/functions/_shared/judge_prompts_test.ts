@@ -3,7 +3,7 @@
 // `judge_prompts_test.ts` before this task; the prompt shape was exercised only indirectly, through
 // `judge_pipeline_test.ts` and the handlers' own tests, none of which pin prompt TEXT.
 import { assert, assertEquals } from "@std/assert";
-import { buildPrompt, MAX_BODY_CHARS, systemTemplate } from "./judge_prompts.ts";
+import { buildPrompt, MAX_BODY_CHARS, promptHash, schemaFor, systemTemplate } from "./judge_prompts.ts";
 
 // ---------------------------------------------------------------------------------------------
 // (a) clipping appends " …[truncated]" when text exceeds MAX_BODY_CHARS, and appends nothing
@@ -183,4 +183,36 @@ Deno.test("email: From is never scrubbed, even though it is an email address", (
     text: "See you Friday.",
   }, {});
   assert(user.includes("From: registrar@example.invalid"), `From must survive unscrubbed: ${user}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T9: the sixth email tier. Folded into T4's `email-3` (nothing deployed between
+// the two), so `email-3`'s hash is the one computed here, not T4's draft.
+// ---------------------------------------------------------------------------------------------
+
+/** T4's `email-3` draft hash, before T9 added the tier. Pinned so the fold is provably a change. */
+const T4_EMAIL_DRAFT_HASH = "c4bb4925b8104c38b064ad4d3b8535181838a6dfcb433a33fe43a6f361a7094d";
+
+Deno.test("T9: the email schema's tier enum names completion", () => {
+  const tier = (schemaFor("email").properties as Record<string, { enum: string[] }>).tier;
+  assertEquals(tier.enum, ["task", "borderline", "event", "opportunity", "information", "completion"]);
+});
+
+Deno.test("T9: the email rules define completion, name the work as its title, and exclude a posted grade", () => {
+  const rules = systemTemplate("email");
+  assert(rules.includes("into exactly one of six tiers"), `tier count not updated in: ${rules}`);
+  assert(
+    rules.includes("- completion: this email confirms the student already submitted or finished a specific piece of work."),
+    `missing completion tier line in: ${rules}`,
+  );
+  assert(rules.includes("for completion, the name of that piece of work"), `missing completion title rule in: ${rules}`);
+  assert(rules.includes("A grade or feedback being posted is not completion"), `missing grade exclusion in: ${rules}`);
+  // `information` no longer claims receipts wholesale, or the two tiers would contradict each other.
+  assert(!rules.includes("including receipts,"), `information still swallows every receipt: ${rules}`);
+});
+
+Deno.test("T9: email-3's hash moved off T4's draft; task and event hashes did not move", async () => {
+  assert((await promptHash("email")) !== T4_EMAIL_DRAFT_HASH, "the email prompt hash did not change");
+  assertEquals(await promptHash("task"), "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6");
+  assertEquals(await promptHash("event"), "0faedc21498a0f4127aee5095f4dcae8700e0c7e3dbec079d1b4cc6b96f61928");
 });

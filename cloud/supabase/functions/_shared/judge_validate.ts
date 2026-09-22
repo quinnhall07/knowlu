@@ -23,8 +23,10 @@ export interface Validated {
 
 /** The three words `eventledger::VALID_VERDICTS` will accept. */
 export const EVENT_VERDICTS = ["obligation", "opportunity", "drop"] as const;
-/** The five email tiers of cloud design §5.3. */
-export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information"] as const;
+/** The five email tiers of cloud design §5.3, and stream J Task T9's sixth: `completion`, "this
+ * email confirms the student already submitted or finished a specific piece of work". Its `title`
+ * is the work's name, which the device matches against its own task titles. */
+export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information", "completion"] as const;
 
 // Added for `cloud/eval/schema.ts` (C2 Task 13): this file had no item-field or labelled-field
 // lists before — nothing here validated `request.item`'s shape, only the model's answer — so
@@ -138,6 +140,11 @@ export function validate(
   if (!(EMAIL_TIERS as readonly string[]).includes(tier) || why === "") {
     return { ok: false, cause: "incomplete" };
   }
+  const title = oneLine(typeof answer.title === "string" ? answer.title : "", 200);
+  // T9: a completion names the work it completes, or the device has nothing to match — and a
+  // promoted rule never carries a title (`fieldsOf` drops it), so this is also what sends a
+  // title-less rule answer on to the model rather than queueing an unmatchable completion.
+  if (tier === "completion" && title === "") return { ok: false, cause: "incomplete" };
   if (confidence < CONFIDENCE_FLOOR) return { ok: false, cause: "below floor" };
   const known = Array.isArray(seed.known_courses) ? seed.known_courses as string[] : [];
   const course = typeof answer.course === "string" && known.includes(answer.course) ? answer.course : null;
@@ -148,7 +155,7 @@ export function validate(
     verdict: {
       tier,
       why,
-      title: oneLine(typeof answer.title === "string" ? answer.title : "", 200),
+      title,
       course,
       // T4: the model no longer resolves a relative phrase itself, so by the time an answer
       // reaches this function its `due` is either already the wire shape (`judge_due.ts` resolved
