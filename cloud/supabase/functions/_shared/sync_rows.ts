@@ -1,28 +1,26 @@
 /**
- * What a pushed row may be. **Every field is opaque or bounded** — that is the whole module.
+ * What a pushed row may be. **Every field is bounded and shaped** — that is the whole module.
  *
  * The device has already built these; refusing again here is not distrust of the device, it is the
- * only place the rule holds for a client somebody else wrote. And there is one refusal this file
- * makes that the device does not: **an unknown key is a 400**, because the single way a patched
- * client could turn this store into a plaintext store is by sending a field beside the ciphertext
- * and hoping we write it.
+ * only place the rule holds for a client somebody else wrote. Two refusals this file makes that the
+ * device does not: **an unknown key is a 400**, because a field beside the body is the one way a
+ * patched client could turn this store into something it is not; and **a path is checked**, because
+ * the path is the note's primary key now and a restore is what would write it.
  */
 import { fail } from "./http.ts";
 
 /** The server's own batch cap, and the device's page size. Matches C1's `/telemetry`. */
 export const MAX_ROWS = 500;
-/** 16 KiB of plaintext, base64, with room: the `sync_records.ciphertext` check constraint. */
-export const MAX_RECORD_CIPHERTEXT = 24576;
-/** 128 KiB of plaintext, base64, with room: the `sync_notes.ciphertext` check constraint. */
-export const MAX_NOTE_CIPHERTEXT = 196608;
+/** `sync_records.body`'s `octet_length` check. BYTES, not characters — see `bytes()`. */
+export const MAX_RECORD_BYTES = 16384;
+/** `sync_notes.body`'s `octet_length` check. */
+export const MAX_NOTE_BYTES = 131072;
 
 const DEVICE_RE = /^[0-9a-f]{16}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
-/** Eight hex characters of a SHA-256 of the key. Not the key, not reversible, not a secret. */
-const FINGERPRINT_RE = /^[0-9a-f]{8}$/;
-/** Twelve bytes of nonce is sixteen base64 characters, and base64's own alphabet. */
-const IV_RE = /^[A-Za-z0-9+/]{16}$/;
-const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+/** The same rule `engine/src/sync.rs::is_note_path` enforces and the same one the column checks:
+ * one of `ids::NOTE_FOLDERS`, markdown, no `..` segment and no empty segment. */
+export const NOTE_PATH_RE = /^(tasks|approvals|archive|courses|issues|info)\/[A-Za-z0-9._ /-]{1,300}\.md$/;
 
 export function isDeviceToken(x: unknown): boolean {
   return typeof x === "string" && DEVICE_RE.test(x);
@@ -30,31 +28,25 @@ export function isDeviceToken(x: unknown): boolean {
 export function isHash(x: unknown): boolean {
   return typeof x === "string" && HASH_RE.test(x);
 }
-export function isFingerprint(x: unknown): boolean {
-  return typeof x === "string" && FINGERPRINT_RE.test(x);
+export function isNotePath(x: unknown): boolean {
+  return typeof x === "string" && NOTE_PATH_RE.test(x) && !/(^|\/)\.\.(\/|$)/.test(x) && !x.includes("//");
 }
-export function isIv(x: unknown): boolean {
-  return typeof x === "string" && IV_RE.test(x);
-}
-function isCiphertext(x: unknown, cap: number): boolean {
-  return typeof x === "string" && x.length > 0 && x.length <= cap && B64_RE.test(x);
-}
-
-export interface RecordIn {
-  hash: string;
-  iv: string;
-  ciphertext: string;
-  /** The one cleartext bit about a record's content: the device says a human wrote it, and
-   * `sync_prune` never deletes one. Absent means false. */
-  keep?: boolean;
+/** Postgres's `octet_length` on the device's side of the wire. `String.length` is UTF-16 units and
+ * would let a vault of accented Spanish past a cap the column then refuses. */
+export function bytes(s: string): number {
+  return new TextEncoder().encode(s).length;
 }
 
-export interface NoteIn {
-  ref: string;
-  deleted?: boolean;
-  iv?: string;
-  ciphertext?: string;
+/** The content hash, **defined once** (review M7): the handler computes it to check a pushed row and
+ * the handler's own suite computes it to build one, and two copies of a hash function are two
+ * chances for a test to agree with a bug. `crypto.subtle` is the platform's, so this imports nothing. */
+export async function sha256Hex(s: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+export interface RecordIn { hash: string; body: string }
+export interface NoteIn { path: string; deleted?: boolean; body?: string }
 
 function noExtras(row: Record<string, unknown>, allowed: string[], what: string): void {
   for (const key of Object.keys(row)) {
@@ -66,46 +58,45 @@ function noExtras(row: Record<string, unknown>, allowed: string[], what: string)
 export function checkRecord(raw: unknown, device: string, accountId: string): Record<string, unknown> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw fail(400, "a record is not an object");
   const row = raw as Record<string, unknown>;
-  noExtras(row, ["hash", "iv", "ciphertext", "keep"], "record");
+  // `keep` is NOT allowed: it is a generated column decided from the record itself.
+  noExtras(row, ["hash", "body"], "record");
   if (!isHash(row.hash)) throw fail(400, "a record has no usable hash");
-  if (!isIv(row.iv)) throw fail(400, "a record has no usable iv");
-  if (!isCiphertext(row.ciphertext, MAX_RECORD_CIPHERTEXT)) {
-    throw fail(400, `a record's ciphertext is empty, not base64, or over ${MAX_RECORD_CIPHERTEXT} characters`);
+  if (typeof row.body !== "string" || row.body.length === 0) throw fail(400, "a record has no body");
+  if (bytes(row.body) > MAX_RECORD_BYTES) {
+    throw fail(400, `a record's body is over ${MAX_RECORD_BYTES} bytes`);
   }
-  if (row.keep !== undefined && typeof row.keep !== "boolean") throw fail(400, "keep must be a boolean");
-  return {
-    account_id: accountId,
-    device,
-    record_hash: row.hash as string,
-    iv: row.iv as string,
-    ciphertext: row.ciphertext as string,
-    keep: row.keep === true,
-  };
+  // Parsed here so the table's generated `keep` column never meets something it cannot cast, and so
+  // a client that sends a blob of text instead of a record is told which of the two it did.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.body);
+  } catch {
+    throw fail(400, "a record's body is not JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw fail(400, "a record's body is not a journal record");
+  }
+  const rec = parsed as Record<string, unknown>;
+  for (const field of ["op", "actor"]) {
+    if (typeof rec[field] !== "string" || (rec[field] as string).length === 0) {
+      throw fail(400, `a record's body has no ${field}`);
+    }
+  }
+  return { account_id: accountId, device, record_hash: row.hash as string, body: row.body as string };
 }
 
-/** One pushed note → the row `sync_notes` takes. A tombstone carries no bytes; a live note carries both. */
+/** One pushed note → the row `sync_notes` takes. A tombstone carries no bytes; a live note carries them. */
 export function checkNote(raw: unknown, device: string, accountId: string): Record<string, unknown> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw fail(400, "a note is not an object");
   const row = raw as Record<string, unknown>;
-  noExtras(row, ["ref", "deleted", "iv", "ciphertext"], "note");
-  if (!isHash(row.ref)) throw fail(400, "a note has no usable ref");
+  noExtras(row, ["path", "deleted", "body"], "note");
+  if (!isNotePath(row.path)) throw fail(400, "a note has no usable path");
   const deleted = row.deleted === true;
   if (deleted) {
-    if (row.iv !== undefined || row.ciphertext !== undefined) {
-      throw fail(400, "a deleted note carries no bytes");
-    }
-    return { account_id: accountId, note_ref: row.ref as string, device, deleted: true, iv: null, ciphertext: null };
+    if (row.body !== undefined) throw fail(400, "a deleted note carries no bytes");
+    return { account_id: accountId, path: row.path as string, device, deleted: true, body: null };
   }
-  if (!isIv(row.iv)) throw fail(400, "a note has no usable iv");
-  if (!isCiphertext(row.ciphertext, MAX_NOTE_CIPHERTEXT)) {
-    throw fail(400, `a note's ciphertext is empty, not base64, or over ${MAX_NOTE_CIPHERTEXT} characters`);
-  }
-  return {
-    account_id: accountId,
-    note_ref: row.ref as string,
-    device,
-    deleted: false,
-    iv: row.iv as string,
-    ciphertext: row.ciphertext as string,
-  };
+  if (typeof row.body !== "string" || row.body.length === 0) throw fail(400, "a note has no body");
+  if (bytes(row.body) > MAX_NOTE_BYTES) throw fail(400, `a note's body is over ${MAX_NOTE_BYTES} bytes`);
+  return { account_id: accountId, path: row.path as string, device, deleted: false, body: row.body as string };
 }
