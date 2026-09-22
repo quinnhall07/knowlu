@@ -31,7 +31,6 @@ const ROWS: Row[] = [
   { category: "same-day: bare weekday equal to today's weekday resolves to today", phrase: "Wednesday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-16" },
   { category: "same-day: 'this <weekday>' equal to today resolves to today", phrase: "this Wednesday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-16" },
   { category: "'tomorrow'", phrase: "tomorrow", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-17" },
-  { category: "'next week' (no named day) is one week out", phrase: "next week", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-23" },
 
   // -- month ends --
   { category: "month end: 30-day month", phrase: "end of the month", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-30" },
@@ -40,7 +39,6 @@ const ROWS: Row[] = [
   { category: "month end: leap February (29 days)", phrase: "end of the month", dateLine: "Thu, 10 Feb 2028 08:00:00 +0000", expected: "2028-02-29" },
 
   // -- year rollover --
-  { category: "year rollover: 'next week' from late December", phrase: "next week", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: "2027-01-05" },
   { category: "year rollover: 'tomorrow' crosses New Year's Eve", phrase: "tomorrow", dateLine: "Thu, 31 Dec 2026 09:00:00 +0000", expected: "2027-01-01" },
   { category: "year rollover: 'next <weekday>' crosses into January", phrase: "next Friday", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: "2027-01-08" },
 
@@ -52,6 +50,13 @@ const ROWS: Row[] = [
   { category: "time: 24-hour clock, no am/pm", phrase: "tomorrow at 17:00", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-17T17:00" },
   { category: "time: 'end of the month' can carry a time too", phrase: "end of the month at 11:59pm", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-30T23:59" },
 
+  // -- malformed 12-hour times: a value with am/pm outside 1-12, or minutes >= 60, is not sure --
+  // fix round 1, finding 2: these used to yield a wrong-but-in-range time instead of null.
+  { category: "malformed time: '13pm' has no 12-hour meaning", phrase: "tomorrow at 13pm", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "malformed time: '0am' has no 12-hour meaning (valid hours are 1-12)", phrase: "tomorrow at 0am", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "malformed time: minutes >= 60, even with a valid 12-hour value", phrase: "tomorrow at 5:75pm", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "malformed time: '25pm' is doubly out of range", phrase: "Friday at 25pm", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+
   // -- timezone offsets on the Date line: same naive wall clock, different offsets, same answer --
   { category: "offset: -0400 (EDT)", phrase: "tomorrow", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-17" },
   { category: "offset: +0530 (IST) — same naive time, same answer", phrase: "tomorrow", dateLine: "Wed, 16 Sep 2026 14:23:00 +0530", expected: "2026-09-17" },
@@ -59,9 +64,10 @@ const ROWS: Row[] = [
   { category: "offset: +0000", phrase: "tomorrow", dateLine: "Wed, 16 Sep 2026 14:23:00 +0000", expected: "2026-09-17" },
 
   // -- a DST boundary: resolving across it changes no arithmetic, because the offset is never
-  // re-applied (see judge_due.ts's module doc) -- Nov 1 2026 is the US fall-back Sunday.
-  { category: "DST boundary: 'next week' from just before fall-back, still +7 calendar days", phrase: "next week", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-07" },
-  { category: "DST boundary: a time survives the crossing unchanged", phrase: "next week at 9am", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-07T09:00" },
+  // re-applied (see judge_due.ts's module doc) -- Nov 1 2026 is the US fall-back Sunday, and
+  // 'next Friday' from the Saturday before it lands 13 days later, well past the crossing.
+  { category: "DST boundary: 'next Friday' from just before fall-back", phrase: "next Friday", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-13" },
+  { category: "DST boundary: a time survives the crossing unchanged", phrase: "next Friday at 9am", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-13T09:00" },
 
   // -- an absolute date the email stated explicitly: the model's own extraction, passed through --
   { category: "absolute passthrough: date only", phrase: "2026-10-01", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-10-01" },
@@ -71,6 +77,14 @@ const ROWS: Row[] = [
   // -- unresolvable phrases -> null, never a guess --
   { category: "unresolvable: vague urgency word", phrase: "ASAP", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
   { category: "unresolvable: 'soon'", phrase: "soon", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  // fix round 1, finding 1: "next week" names a SPAN (seven candidate days), not one calendar day.
+  // Picking today+7 out of that span was a guess wearing a resolved date's clothes -- the same
+  // failure "next month" (below) was already refused for. Same treatment, near the reference date
+  // and across a year rollover, so the null branch is proven to fire before any date arithmetic
+  // ever runs, not just to happen to produce a date nobody checked.
+  { category: "unresolvable: 'next week' names a span, not one calendar day", phrase: "next week", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "unresolvable: 'next week' is still a span across a year rollover", phrase: "next week", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: null },
+  { category: "unresolvable: 'next week' with a time clause is still a span", phrase: "next week at 9am", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
   { category: "unresolvable: a month name alone, not a calendar date", phrase: "next month", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
   { category: "unresolvable: a day-of-month with no month named", phrase: "the 13th", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
   { category: "unresolvable: empty string", phrase: "", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },

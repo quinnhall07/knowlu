@@ -215,9 +215,11 @@ export async function judge(
 
   // T4: the model answers `due` with the deadline phrase as written (or an absolute date only
   // when the email itself stated one) — this is the one place between the model and `validate`
-  // where "Friday" or "next week" becomes a calendar date, resolved against the email's own Date
-  // line (`req.item.date`) rather than guessed by the model. Task and event answers have no `due`
-  // field (`judge_prompts.ts`'s `TASK_SCHEMA`/`EVENT_SCHEMA`), so this only ever touches email.
+  // where a phrase like "Friday" becomes a calendar date, resolved against the email's own Date
+  // line (`req.item.date`) rather than guessed by the model. `resolveDue` itself is where a phrase
+  // that names a span rather than one day (e.g. "next week") is refused to `null` — see
+  // `judge_due.ts`. Task and event answers have no `due` field (`judge_prompts.ts`'s
+  // `TASK_SCHEMA`/`EVENT_SCHEMA`), so this only ever touches email.
   const resolved = req.kind === "email"
     ? { ...answer.json, due: resolveDue(typeof answer.json.due === "string" ? answer.json.due : null, String(req.item.date ?? "")) }
     : answer.json;

@@ -6,13 +6,18 @@
 // tell a wrong date from a right one. The corroborated fix (independently found this week, and
 // consistent with every vendor's own guidance for this model class) is to stop asking the model to
 // do arithmetic at all: the model now does EXTRACTION ONLY (`judge_prompts.ts`'s email due bullet),
-// returning the deadline exactly as the email states it — a phrase ("Friday", "next week", "the
-// end of the month", "tomorrow at 5pm") or, only when the email itself gives an explicit calendar
-// date, that date. This module is the "ordinary code" that does the arithmetic instead.
+// returning the deadline exactly as the email states it — a phrase ("Friday", "the end of the
+// month", "tomorrow at 5pm") or, only when the email itself gives an explicit calendar date, that
+// date. This module is the "ordinary code" that does the arithmetic instead.
 //
 // **Ambiguity resolves to null, never a guess.** A wrong date silently written into a student's
 // vault is the one failure this module exists to prevent, so every branch below that is not sure
-// returns `null` rather than its best guess.
+// returns `null` rather than its best guess — and that includes a phrase that names a SPAN of days
+// rather than one of them: "next week" is seven candidate days, and picking one (fix round 1,
+// finding 1: this module used to pick today+7) is exactly the kind of guess this module exists to
+// refuse. Only a phrase this module can place on exactly one calendar day is ever resolved —
+// "today", "tomorrow", a named weekday, and "end of the month" (which names the month's own last
+// day, a single day, not a range) qualify; "next week" and "next month" do not.
 //
 // **Everything happens in the email's own Date header's wall-clock values, never converted.** RFC
 // 5322's `Date:` header already records local time plus a UTC offset — the date/time fields ARE
@@ -142,10 +147,13 @@ function format(d: CalendarDay, time: { hour: number; minute: number } | null): 
 
 /**
  * Pulls a trailing `"at H[:MM][am|pm]"` clause off `phrase` (already lower-cased), returning the
- * day words that remain and the parsed time, if any. `null` for both the hour-out-of-range case
- * and for no match at all — a time clause this cannot parse is left in `rest`, where it will fail
- * every day-word pattern below and the phrase resolves to `null` rather than silently dropping the
- * time a student actually wrote.
+ * day words that remain and the parsed time, if any. `null` for the no-match case, for a minute
+ * past 59, and for an hour that is not sure for the clock it was written on — fix round 1, finding
+ * 2: `am`/`pm` is a 12-hour clock, whose only real hours are 1-12 ("13pm" and "0am" are not sure,
+ * not calendar times, the same as an "at 25:00" with no am/pm); bare 24-hour digits (no am/pm) are
+ * checked against 0-23 instead. Either way, a time clause this cannot parse is left whole in
+ * `rest`, where it will fail every day-word pattern below and the phrase resolves to `null` rather
+ * than silently dropping the time a student actually wrote.
  */
 function splitTime(phrase: string): { rest: string; time: { hour: number; minute: number } | null } {
   const m = /\s*\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$/i.exec(phrase);
@@ -153,9 +161,14 @@ function splitTime(phrase: string): { rest: string; time: { hour: number; minute
   let hour = Number(m[1]);
   const minute = m[2] ? Number(m[2]) : 0;
   const ampm = m[3]?.toLowerCase();
-  if (hour > 23 || minute > 59) return { rest: phrase, time: null };
-  if (ampm === "pm" && hour < 12) hour += 12;
-  if (ampm === "am" && hour === 12) hour = 0;
+  if (minute > 59) return { rest: phrase, time: null };
+  if (ampm !== undefined) {
+    if (hour < 1 || hour > 12) return { rest: phrase, time: null };
+    if (ampm === "pm" && hour < 12) hour += 12;
+    if (ampm === "am" && hour === 12) hour = 0;
+  } else if (hour > 23) {
+    return { rest: phrase, time: null };
+  }
   return { rest: phrase.slice(0, m.index).trim(), time: { hour, minute } };
 }
 
@@ -187,7 +200,9 @@ export function resolveDue(phrase: string | null | undefined, dateLine: string):
 
   if (rest === "today") return format(today, time);
   if (rest === "tomorrow") return format(addDays(today, 1), time);
-  if (rest === "next week") return format(addDays(today, 7), time);
+  // "next week" names a SPAN of seven candidate days, not one of them — fix round 1, finding 1.
+  // Deliberately NOT a branch here: it falls through to the final `return null` below, the same
+  // path "next month" and every other unmatched phrase already takes.
   if (rest === "end of month" || rest === "end of the month") {
     return format({ ...today, day: daysInMonth(today.year, today.month) }, time);
   }
