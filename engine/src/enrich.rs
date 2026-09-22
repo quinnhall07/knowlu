@@ -640,12 +640,37 @@ pub fn pull_gmail(
                             format!("created {stem}")
                         })
                         .inspect_err(|_| failed += 1),
-                    _ => write_gmail_card(vault, item, today, &ctx, &mut journal)
-                        .map(|stem| {
-                            cards += 1;
-                            format!("proposed {stem}")
+                    "borderline" | "event" | "opportunity" => {
+                        write_gmail_card(vault, item, today, &ctx, &mut journal)
+                            .map(|stem| {
+                                cards += 1;
+                                format!("proposed {stem}")
+                            })
+                            .inspect_err(|_| failed += 1)
+                    }
+                    // T9: an email confirming the student already submitted a piece of work. A
+                    // `status: done` proposal when exactly one active task carries that title;
+                    // otherwise nothing is written and the uid is recorded as `information` is.
+                    "completion" => propose_gmail_completion(vault, item, today, &ctx, &mut journal)
+                        .map(|stem| match stem {
+                            Some(stem) => {
+                                cards += 1;
+                                format!("proposed done {stem}")
+                            }
+                            None => {
+                                dropped += 1;
+                                String::new()
+                            }
                         })
                         .inspect_err(|_| failed += 1),
+                    // T9: a tier this engine does not know is dropped and recorded like
+                    // `information`. The old catch-all filed it as a `kind: task` card, which for a
+                    // newer tier can mean the opposite of what it says: a receipt for finished work
+                    // read as a proposal to add that work.
+                    _ => {
+                        dropped += 1;
+                        Ok(String::new())
+                    }
                 },
             };
             match outcome {
@@ -657,7 +682,9 @@ pub fn pull_gmail(
                     // succeeded here — a duplicate of this uid later in the batch is safe to ack
                     // again regardless of what the seen-ledger write below does.
                     acked_this_batch.insert(item.uid.clone());
-                    let title = if item.tier == "information" { "(email)" } else { &item.title };
+                    // Only a write names its title here. Everything dropped (information, an
+                    // unmatched completion, an unknown tier) is recorded as "(email)" (R-C2-E44).
+                    let title = if note.is_empty() { "(email)" } else { &item.title };
                     if let Err(e) = crate::ingest::record_seen(vault, &item.uid, title, &stamp) {
                         lines.push(format!("gmail {}: seen ledger not written ({e})", item.uid));
                         continue;
@@ -704,6 +731,86 @@ pub fn pull_gmail(
     }
     lines.push(summary);
     lines
+}
+
+/// T9: the key two titles are compared on: whitespace trimmed and collapsed, case folded, every
+/// straight or curly single or double quote made one character, and the few HTML entities a
+/// templated email carries decoded. The service one-lines a title (`oneLine` turns `"` into `'`)
+/// and a task note stores it YAML-escaped (unescaped by the YAML read), so the two sides of a
+/// match can differ in exactly these ways.
+fn completion_title_key(title: &str) -> String {
+    let decoded = title
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let folded: String = decoded
+        .chars()
+        .map(|c| match c {
+            '"' | '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '`'
+            | '\u{b4}' => '\'',
+            other => other,
+        })
+        .collect();
+    // After collapsing whitespace, " · " becomes " - ", exactly as the service's `oneLine` does
+    // (`judge_validate.ts`), so a middle-dot title matches the title the service sends back.
+    judge::one_line(&folded, usize::MAX).replace(" \u{b7} ", " - ").to_lowercase()
+}
+
+/// The active task notes directly under `tasks/` whose title matches `title` by
+/// [`completion_title_key`], in path order.
+fn active_tasks_titled(vault: &Path, title: &str) -> Vec<PathBuf> {
+    let want = completion_title_key(title);
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let tasks = vault.join("tasks");
+    if !tasks.is_dir() {
+        return Vec::new();
+    }
+    crate::approvals::sorted_md(&tasks)
+        .into_iter()
+        .filter(|path| {
+            let Some(meta) = crate::ids::read_meta(path) else { return false };
+            let text = |key: &str| crate::yaml::opt_text(crate::yaml::get(&meta, key));
+            text("status").as_deref() == Some("active")
+                && text("title").is_some_and(|t| completion_title_key(&t) == want)
+        })
+        .collect()
+}
+
+/// T9: a `tier: completion` message. Exactly one active task titled as the payload says gets
+/// [`crate::completion::propose_done`], which alone decides the 15-a-day cap, "never re-file after
+/// a rejection" and "never touch a status the student set by hand". `Ok(Some(stem))` when a card
+/// was filed; `Ok(None)` for every "nothing to do" (zero or several matches, or a skip), which the
+/// caller records exactly as it records `information`. The evidence is templated: the message uid,
+/// and no address, confirmation number or body text.
+fn propose_gmail_completion(
+    vault: &Path,
+    item: &crate::cloudmodel::GmailItem,
+    today: jiff::civil::Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<String>, String> {
+    let matches = active_tasks_titled(vault, &item.title);
+    let [task] = matches.as_slice() else { return Ok(None) };
+    let mut detail = serde_json::Map::new();
+    detail.insert("uid".to_string(), serde_json::Value::String(item.uid.clone()));
+    let evidence = crate::completion::Evidence {
+        source: "email".to_string(),
+        summary: "An email confirms this was submitted".to_string(),
+        detail,
+    };
+    let ctx = ctx.with_actor(crate::completion::ACTOR);
+    match crate::completion::propose_done(vault, task, &evidence, today, &ctx, journal, false) {
+        Ok(crate::completion::Outcome::Proposed(_)) => {
+            Ok(Some(task.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
+        }
+        Ok(_) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// R-C2-E43: the device's own shape check, mirroring the server's `judge_validate.ts` regex
@@ -2698,5 +2805,244 @@ mod tests {
             "no rule decision waiting, and nothing else pending, must never reach the service"
         );
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Stream J Task T9 — `completion`: an email confirming the student already submitted a piece
+    // of work becomes a `status: done` proposal through `completion::propose_done`, when exactly
+    // one active task carries that work's title. Every fixture is fabricated.
+    // -------------------------------------------------------------------------------------
+
+    fn completion_item(uid: &str, title: &str) -> String {
+        serde_json::json!({
+            "uid": uid, "tier": "completion",
+            "payload": {"title": title, "course": null, "due": null, "effort_hours": null,
+                        "importance": null, "why": "Blackboard submission receipt", "confidence": 1},
+        })
+        .to_string()
+    }
+
+    fn blackboard_task(v: &Path, stem: &str, yaml_title: &str, status: &str, id: &str) {
+        crate::pystr::write_text(
+            &v.join("tasks").join(format!("{stem}.md")),
+            &format!(
+                "---\ntitle: {yaml_title}\ncourse: null\ndomain: school\ndue: 2026-09-03T23:59\n\
+                 status: {status}\nprogress: 0\ncreated_by: blackboard\nsource_uid: \"blackboard:{stem}\"\n\
+                 id: {id}\n---\n\nFrom the LMS.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn approvals_in(v: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(v.join("approvals"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn completion_titles_match_after_normalisation() {
+        assert_eq!(completion_title_key("  CS-100   Homework 3 "), completion_title_key("cs-100 homework 3"));
+        assert_eq!(completion_title_key("Office Space \"Quiz\""), completion_title_key("Office Space 'Quiz'"));
+        assert_eq!(
+            completion_title_key("Office Space \u{201c}Quiz\u{201d}"),
+            completion_title_key("office space \u{2018}quiz\u{2019}")
+        );
+        assert_eq!(completion_title_key("Q&amp;A: Unit 2"), completion_title_key("Q&A: Unit 2"));
+        assert_ne!(completion_title_key("Lab 3: Pendulum"), completion_title_key("Lab 4: Pendulum"));
+        assert_eq!(completion_title_key("   "), "");
+    }
+
+    /// T9 fix round 1: the service's `oneLine` turns " · " into " - " (the ledger separator), so
+    /// a note title carrying a middle dot must still match the title the service sends back.
+    #[test]
+    fn completion_title_key_folds_the_middle_dot_as_the_service_does() {
+        assert_eq!(completion_title_key("Unit 2 \u{b7} Lab 4"), completion_title_key("Unit 2 - Lab 4"));
+        assert_eq!(completion_title_key("Unit 2  \u{b7}\tLab 4"), completion_title_key("unit 2 - lab 4"));
+    }
+
+    /// T9 fix round 1: the same title active in `tasks/` and archived in `archive/` is one match,
+    /// not two, because only `tasks/` is scanned. Exactly one card, for the active note.
+    #[test]
+    fn an_archived_twin_of_the_title_does_not_block_the_active_tasks_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-archived-twin");
+        std::fs::create_dir_all(v.join("archive")).unwrap();
+        crate::pystr::write_text(
+            &v.join("archive").join("hw3-last-term.md"),
+            "---\ntitle: \"CS-100 Homework 3\"\nstatus: active\ncreated_by: blackboard\n\
+             source_uid: \"blackboard:_old_1\"\nid: task_4444444444\n---\n\nLast term.\n",
+        )
+        .unwrap();
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:t1", "CS-100 Homework 3")), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        let card = meta_of_approval(&v, "amend-hw3-done.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&card, "target")).as_deref(), Some("tasks/hw3.md"));
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The "done when": a submission receipt reaches a proposal. The note itself is untouched,
+    /// the card is `completion::propose_done`'s own, and the evidence names no address, no
+    /// confirmation number and no body.
+    #[test]
+    fn a_submission_receipt_for_one_active_task_files_one_done_proposal() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:r1", "cs-100  homework 3")), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        let card = meta_of_approval(&v, "amend-hw3-done.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&card, "kind")).as_deref(), Some("amend"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&card, "target")).as_deref(), Some("tasks/hw3.md"));
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&card, "created_by")).as_deref(),
+            Some(crate::completion::ACTOR)
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta_of(&v, "hw3.md"), "status")).as_deref(),
+            Some("active"),
+            "a proposal never touches the note"
+        );
+        let text = crate::pystr::read_text(&v.join("approvals").join("amend-hw3-done.md")).unwrap();
+        assert!(text.contains("An email confirms this was submitted"), "{text}");
+        let evidence: Vec<serde_json::Value> =
+            records(&v).into_iter().filter_map(|r| r.get("evidence").cloned()).collect();
+        assert_eq!(evidence, vec![serde_json::json!({"source": "email", "uid": "gmail:r1"})]);
+        assert!(!text.contains('@'), "no email address on the card: {text}");
+
+        assert!(crate::ingest::load_seen(&v).contains("gmail:r1"));
+        assert!(lines.iter().any(|l| l == "gmail gmail:r1: completion (proposed done hw3)"), "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 1 proposed, 0 dropped as information", "{lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert!(requests[1].contains("gmail:r1"), "the receipt must be acknowledged: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// The addendum's quoted title: stored YAML-escaped in the note, and one-lined by the service
+    /// (`oneLine` turns `"` into `'`) — the two still match.
+    #[test]
+    fn a_quoted_title_matches_across_yaml_escaping_and_quote_folding() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-quotes");
+        blackboard_task(&v, "office-space-quiz", "\"Office Space \\\"Quiz\\\"\"", "active", "task_2222222222");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:r2", "Office Space 'Quiz'")), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        assert_eq!(approvals_in(&v), vec!["amend-office-space-quiz-done.md".to_string()], "{lines:?}");
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Zero matches, several matches, or a match that is no longer active: nothing is written,
+    /// and the uid is recorded exactly as `information` records it — never asked about again.
+    #[test]
+    fn a_receipt_with_no_single_active_match_writes_nothing_and_is_recorded_like_information() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-nomatch");
+        blackboard_task(&v, "quiz-1", "Quiz 1", "active", "task_3333333331");
+        blackboard_task(&v, "quiz-1-b", "QUIZ 1", "active", "task_3333333332");
+        blackboard_task(&v, "essay-2", "Essay 2", "done", "task_3333333333");
+        let items = format!(
+            "[{},{},{}]",
+            completion_item("gmail:n1", "Lab 9: Nothing like it"),
+            completion_item("gmail:n2", "Quiz 1"),
+            completion_item("gmail:n3", "Essay 2"),
+        );
+        let (base, handle) = gmail_loopback(vec![gmail_reply(&items, false), gmail_reply("[]", false)]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+
+        assert!(approvals_in(&v).is_empty(), "no card for zero, several or inactive matches: {lines:?}");
+        let seen = crate::ingest::load_seen(&v);
+        for uid in ["gmail:n1", "gmail:n2", "gmail:n3"] {
+            assert!(seen.contains(uid), "{uid} must be recorded");
+        }
+        let ledger = crate::pystr::read_text(&v.join("state").join("ingest-seen.md")).unwrap();
+        assert!(ledger.contains("gmail:n1 \u{b7} (email) \u{b7}"), "{ledger}");
+        assert!(!ledger.contains("Nothing like it"), "{ledger}");
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 0 proposed, 3 dropped as information", "{lines:?}");
+        let requests = handle.join().unwrap();
+        for uid in ["gmail:n1", "gmail:n2", "gmail:n3"] {
+            assert!(requests[1].contains(uid), "{uid} must be acknowledged: {}", requests[1]);
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A resubmission sends a second receipt for the same work. `propose_done`'s one-proposal-ever
+    /// rule answers it: one card, both uids recorded and acknowledged.
+    #[test]
+    fn a_resubmission_receipt_files_no_second_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-twice");
+        let items = format!(
+            "[{},{}]",
+            completion_item("gmail:s1", "CS-100 Homework 3"),
+            completion_item("gmail:s2", "CS-100 Homework 3"),
+        );
+        let (base, handle) = gmail_loopback(vec![gmail_reply(&items, false), gmail_reply("[]", false)]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 1 proposed, 1 dropped as information", "{lines:?}");
+        let requests = handle.join().unwrap();
+        assert!(requests[1].contains("gmail:s1") && requests[1].contains("gmail:s2"), "{}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// T9: the service hands `completion` only to a device that declares it (`gmail-read`'s
+    /// `forDevice`); every other device gets `information`. So every `/gmail-read` request this
+    /// engine sends, the first pull and the ack flush alike, must declare it.
+    #[test]
+    fn every_gmail_read_request_declares_it_accepts_completion() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-accepts");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:a1", "CS-100 Homework 3")), false),
+            gmail_reply("[]", false),
+        ]);
+        let _ = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        let requests = handle.join().unwrap();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        for request in &requests {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+            let body: serde_json::Value = serde_json::from_str(body.trim()).expect("a JSON body");
+            assert_eq!(body["accepts"], serde_json::json!(["completion"]), "{request}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Forward compatibility: a tier this engine does not know is dropped and recorded like
+    /// `information`, never filed as a `kind: task` card — the catch-all that would have turned a
+    /// receipt for finished work into a proposal to ADD that work.
+    #[test]
+    fn an_unknown_tier_is_dropped_like_information_not_filed_as_a_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-unknown-tier");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:u1","tier":"some-future-tier","payload":{"title":"Something new","course":null,"due":null,"effort_hours":null,"importance":null,"why":"a new kind","confidence":0.9}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        assert!(approvals_in(&v).is_empty(), "{lines:?}");
+        assert!(crate::ingest::load_seen(&v).contains("gmail:u1"));
+        let ledger = crate::pystr::read_text(&v.join("state").join("ingest-seen.md")).unwrap();
+        assert!(!ledger.contains("Something new"), "{ledger}");
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 0 proposed, 1 dropped as information", "{lines:?}");
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&v);
     }
 }

@@ -166,6 +166,70 @@ Deno.test("an email's subject and body reach no judgment row — only its sender
   assertEquals(log.rows[0].fields.source, "registrar@example.edu");
 });
 
+// T4: the model now answers `due` with the phrase as written, and the pipeline — not the model —
+// resolves it against the email's own Date line before `validate` ever sees it. This is the one
+// test that exercises the wiring in `judge_pipeline.ts` itself (`judge_due_test.ts` covers the
+// resolver's own logic exhaustively); RED before `judge_pipeline.ts` called `resolveDue` was: the
+// verdict's `due` came back as the literal string "Friday", which is not `ABSOLUTE_DUE_RE`-shaped,
+// so `validate` would have dropped it to `null` — the wiring is what turns a correct extraction
+// into a correct verdict instead of a silently discarded one.
+Deno.test("a relative due phrase from the model is resolved against the email's Date line before validate sees it", async () => {
+  const item = {
+    message_id: "gmail:9f31c",
+    from: "registrar@example.edu",
+    subject: "Re: your schedule",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500", // a Monday; "Friday" is 2026-09-18.
+    text: "Please confirm by Friday.",
+  };
+  const verdict = {
+    tier: "task",
+    title: "Confirm schedule",
+    course: null,
+    due: "Friday", // the model's extraction, not a resolved date.
+    effort_hours: 0.5,
+    importance: 3,
+    why: "the message asks for a reply by Friday",
+    confidence: 0.9,
+  };
+  const log = new Sink();
+  const reply = await judge("acct-1", { kind: "email", item, heuristics_seed: { known_courses: ["cs-100"] } }, {
+    ...deps(new ScriptedModel([verdict]), log, new Caps()),
+    row: { ...ROW, kind: "email", prompt_version: "email-3", grammar_version: "email-1" },
+  });
+  assertEquals(reply.verdict?.due, "2026-09-18");
+  assertEquals(log.rows[0].fields.due, "2026-09-18");
+});
+
+// T4, the failure side of the same wiring: a phrase the resolver cannot place on one calendar day
+// must reach `validate` as `null`, not as the literal phrase (which would otherwise fail
+// `ABSOLUTE_DUE_RE` and still end up `null` today — but only by accident of that regex, not by the
+// resolver's own design; this pins the intended path, not just the accidental outcome).
+Deno.test("an unresolvable due phrase from the model becomes null, never a guess, before validate sees it", async () => {
+  const item = {
+    message_id: "gmail:1a2b3",
+    from: "registrar@example.edu",
+    subject: "Reminder",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500",
+    text: "Please respond soon.",
+  };
+  const verdict = {
+    tier: "borderline",
+    title: "Respond to registrar",
+    course: null,
+    due: "soon",
+    effort_hours: null,
+    importance: null,
+    why: "vague timing, needs a human",
+    confidence: 0.9,
+  };
+  const log = new Sink();
+  const reply = await judge("acct-1", { kind: "email", item, heuristics_seed: {} }, {
+    ...deps(new ScriptedModel([verdict]), log, new Caps()),
+    row: { ...ROW, kind: "email", prompt_version: "email-3", grammar_version: "email-1" },
+  });
+  assertEquals(reply.verdict?.due, null);
+});
+
 Deno.test("fieldsOf merges the verdict first and the feature map last", () => {
   // C2 final review S-6: a promotion feature can never be overwritten by a verdict field of the
   // same name. `promote_rules` subtracts the feature keys from `fields` to build a rule's verdict,
