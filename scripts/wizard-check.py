@@ -134,7 +134,7 @@ def check(page) -> list:
 
     # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled
     #    (R-C1b-exec-9). A Next off the subscribe panel re-asks the service rather than trusting a
-    #    stale WIZ.entitled — and once the account really is entitled, a second Subscribe press
+    #    stale WIZ.entitled — and once the account really is entitled, a second Next press
     #    never opens a second Checkout page.
     page.click("#wiz-sub-month"); page.wait_for_timeout(3600)
     if names(page).count("open_checkout") != 1: bad.append("open_checkout was not invoked exactly once")
@@ -147,7 +147,7 @@ def check(page) -> list:
     page.evaluate("window.__ENTITLED = true")
     page.click("#wiz-next"); page.wait_for_timeout(400)
     if page.is_hidden("#wiz-vault"): bad.append("an entitled account did not advance to the name panel")
-    if names(page).count("open_checkout") != 1: bad.append("a second Subscribe press opened a second Checkout page")
+    if names(page).count("open_checkout") != 1: bad.append("a second Next press opened a second Checkout page")
 
     # 4. Panel 4 names the setup. NO folder is picked, and the path is shown before Finish.
     page.fill("#wiz-name", "Fall 2026"); page.wait_for_timeout(120)
