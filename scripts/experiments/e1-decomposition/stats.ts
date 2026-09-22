@@ -11,8 +11,8 @@
 // scores higher (2 × 0.5^6 = 0.031; five gives 0.0625), and each loss raises that — see
 // `minimumShippableWins`. In weighted_exact terms six wins is a gap of at least 6/26 × 1/3 ≈ 0.08
 // when every win is the smallest possible one-cost step, and ≈ 0.23 when every win is a full
-// miss-to-hit; in practice something like 0.15–0.20. Anything smaller is inside what 26 cases can
-// explain by noise, and B1 says: record the number and close the idea.
+// miss-to-hit. Fewer net wins than that is inside what 26 cases can explain by noise, and B1 says:
+// record the number and close the idea.
 import { type Case, score } from "../../../cloud/eval/score.ts";
 
 export interface Interval {
@@ -112,7 +112,9 @@ export interface B1 {
 export function b1Verdict(a: number[], b: number[], resamples = 10_000, seed = 20260922): B1 {
   const paired = pairedSummary(a, b, resamples, seed);
   const ciAbove = paired.ci.lower > 0;
-  const signOk = paired.meanDiff > 0 && paired.signP < 0.05;
+  // A sign test's direction is its own counts, never the mean: a few large wins can outweigh many
+  // small losses on the mean while the sign test is significant AGAINST event-4 (fix round 1).
+  const signOk = paired.wins > paired.losses && paired.signP < 0.05;
   const ship = ciAbove && signOk;
   const reason = ship
     ? `SHIP: event-4 beats event-3 by ${paired.meanDiff.toFixed(3)}, 95% CI [${paired.ci.lower.toFixed(3)}, ` +

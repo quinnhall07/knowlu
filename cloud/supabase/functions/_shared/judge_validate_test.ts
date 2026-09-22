@@ -213,3 +213,17 @@ Deno.test("event-4: the templated whys are ledger-safe one-liners under the reas
     assertEquals(why.startsWith("drop rule:"), true, why);
   }
 });
+
+Deno.test("event-4: a rule-fired drop at or above the floor is recorded as the drop with the rule's templated why", () => {
+  for (const confidence of [CONFIDENCE_FLOOR, 0.75]) {
+    const got = validate("event", {
+      audience_excludes_student: false,
+      standing_or_drop_in: true,
+      verdict: "unsure",
+      why: "cannot tell who it is for",
+      confidence,
+    }, {});
+    assertEquals(got.ok, true);
+    assertEquals(got.verdict, { verdict: "drop", why: EVENT_RULE_WHY.standing, confidence });
+  }
+});

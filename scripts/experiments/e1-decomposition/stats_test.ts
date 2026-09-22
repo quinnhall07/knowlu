@@ -77,6 +77,43 @@ Deno.test("B1: a loss never ships", () => {
   assertEquals(b1Verdict(a, b, 2000, 1).ship, false);
 });
 
+Deno.test("B1: the sign test's direction is wins against losses, not the mean — a few large wins against more small losses never ships", () => {
+  // event-4 wins 6 cases by a full point and loses 17 by a third: the mean favours event-4
+  // (6 - 17/3 > 0), and the sign test is significant (p ~ 0.035) — but AGAINST event-4, because
+  // far more cases went the other way. Its direction must come from wins vs losses, not the mean.
+  const a = new Array(26).fill(2 / 3);
+  const b = [...a];
+  for (let i = 0; i < 6; i++) {
+    a[i] = 0;
+    b[i] = 1;
+  }
+  for (let i = 6; i < 23; i++) b[i] = 1 / 3;
+  const v = b1Verdict(a, b, 2000, 1);
+  assert(v.paired.meanDiff > 0);
+  assertEquals([v.paired.wins, v.paired.losses], [6, 17]);
+  assert(v.paired.signP < 0.05, String(v.paired.signP));
+  assertEquals(v.ship, false);
+  assert(v.reason.includes("not < 0.05 in event-4's favour"), v.reason);
+});
+
+Deno.test("B1: many wins with a negative mean still does not ship — both conditions must hold", () => {
+  const a = new Array(26).fill(1 / 3);
+  const b = [...a];
+  // 12 small wins (+1/3 each, +4 in all) against 8 heavier losses (2 x -1 and 6 x -2/3, -6 in all).
+  for (let i = 0; i < 12; i++) b[i] = 2 / 3;
+  for (const i of [12, 13]) {
+    a[i] = 1;
+    b[i] = 0;
+  }
+  for (let i = 14; i < 20; i++) {
+    a[i] = 1;
+    b[i] = 1 / 3;
+  }
+  const v = b1Verdict(a, b, 2000, 1);
+  assert(v.paired.meanDiff < 0, String(v.paired.meanDiff));
+  assertEquals(v.ship, false);
+});
+
 Deno.test("minimumShippableWins: six clean wins with no losses is the floor the sign test sets", () => {
   assertEquals(minimumShippableWins(0), 6);
   assert(minimumShippableWins(1) > 6);

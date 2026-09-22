@@ -17,11 +17,22 @@ import { EVENT3_SCHEMA, EVENT3_SYSTEM, event3Hash, validateEvent3 } from "./even
 export type ArmName = "event-3" | "event-4";
 
 export interface Interpreted {
-  /** What the device would record: `null` when the product would have refused the answer. */
+  /** The service's validated verdict — what `/judge-event` replies with — or `null` when the
+   *  service refused the answer (`cause` says why). NOT what the device records: see
+   *  `deviceRecorded`. */
   verdict: Record<string, unknown> | null;
   cause?: Cause;
   /** event-4 only: which named drop rule fired, if any. */
   rule?: "audience" | "standing";
+}
+
+/** What the device writes to its ledger for this answer. `engine/src/cloudmodel.rs`'s
+ *  `judge_event` records any refused reply (below floor, incomplete, model failed) as `unsure` at
+ *  confidence 0, never as a missing verdict — so E1 reports each arm this way too, beside
+ *  score.ts's own figure, where a missing answer costs 3. (A spent cap is the one refusal the
+ *  device leaves unrecorded; E1 never reaches a cap.) */
+export function deviceRecorded(r: Interpreted): Record<string, unknown> {
+  return r.verdict ?? { verdict: "unsure" };
 }
 
 export interface Arm {

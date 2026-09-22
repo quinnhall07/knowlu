@@ -36,3 +36,9 @@ Deno.test("the B1 rule is stated with the gap 26 cases require", () => {
   assert(text.includes("6 wins with 0 losses"), text);
   assert(text.includes("close"), text);
 });
+
+Deno.test("the B1 rule prints only what it derives — no unsupported 'realistic' gap", () => {
+  const text = b1RuleLines(26).join("\n");
+  assert(!/realistic/i.test(text), text);
+  assert(text.includes("0.077") && text.includes("0.231"), text);
+});

@@ -66,6 +66,9 @@ const TASK_SCHEMA = {
 // "The three lessons"); the counter-case there is why E1 (`scripts/experiments/e1-decomposition/`)
 // measures this against event-3 before it ships. The reply to the device is unchanged: the two
 // rule fields never leave `validate`.
+// `confidence` is scoped to the WHOLE answer, the two rule fields included (T3 fix round 1, ruled):
+// the rule fields carry no confidence of their own, so a rule-fired drop clears the floor on this
+// one number, and the model must not read it as confidence in `verdict` alone.
 const EVENT_SCHEMA = {
   type: "object",
   properties: {
@@ -135,7 +138,7 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
       "- verdict: judged on everything the two fields above do not cover. obligation (the student is expected there), opportunity (worth offering), drop, or unsure.",
       "- unsure: answer unsure when the event's own text does not say whether it applies to this student — do not guess the audience to force obligation, opportunity or drop.",
       "- why: one line, under 140 characters, no line breaks, no double quotes.",
-      "- confidence: 0 to 1.",
+      "- confidence: 0 to 1, how sure you are of the whole answer, the two fields above included.",
     ].join("\n");
   }
   return [

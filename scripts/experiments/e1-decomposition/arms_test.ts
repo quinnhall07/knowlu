@@ -1,7 +1,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { promptHash } from "../../../cloud/supabase/functions/_shared/judge_prompts.ts";
 import type { ModelRow } from "../../../cloud/supabase/functions/_shared/judge_models.ts";
-import { ARMS, estimateCost, requestBody } from "./arms.ts";
+import { ARMS, deviceRecorded, estimateCost, requestBody } from "./arms.ts";
 import { EVENT3_PROMPT_HASH, event3Hash } from "./event3_frozen.ts";
 
 const ROW: ModelRow = {
@@ -76,4 +76,13 @@ Deno.test("the cost estimate prices both arms over every case at the row's rates
   assert(est.inputTokens > 0 && est.outputTokens > 0);
   const expected = (est.inputTokens * ROW.usd_per_m_in + est.outputTokens * ROW.usd_per_m_out) / 1e6;
   assertEquals(est.usd, expected);
+});
+
+Deno.test("deviceRecorded: a refused answer is what the device records it as — unsure — and an answer is itself", () => {
+  // engine/src/cloudmodel.rs judge_event: a below-floor or incomplete reply (ModelError::Failed)
+  // becomes `unsure` at confidence 0 in the ledger, never a missing verdict.
+  assertEquals(deviceRecorded({ verdict: null, cause: "below floor" }), { verdict: "unsure" });
+  assertEquals(deviceRecorded({ verdict: null, cause: "model failed" }), { verdict: "unsure" });
+  const answered = { verdict: "drop", why: "x", confidence: 0.9 };
+  assertEquals(deviceRecorded({ verdict: answered }), answered);
 });

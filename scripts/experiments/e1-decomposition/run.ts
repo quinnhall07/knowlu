@@ -18,7 +18,16 @@ import type { Case } from "../../../cloud/eval/score.ts";
 import { score } from "../../../cloud/eval/score.ts";
 import type { ModelRow } from "../../../cloud/supabase/functions/_shared/judge_models.ts";
 import { OpenRouterModel } from "../../../cloud/supabase/functions/_shared/judge_openrouter.ts";
-import { type Arm, ARMS, type ArmName, estimateCost, type Interpreted, modelRequest, requestBody } from "./arms.ts";
+import {
+  type Arm,
+  ARMS,
+  type ArmName,
+  deviceRecorded,
+  estimateCost,
+  type Interpreted,
+  modelRequest,
+  requestBody,
+} from "./arms.ts";
 import { noKeyMessage, resolveOpenRouterKey } from "./credentials.ts";
 import { eventRowFromMigrations } from "./model_row.ts";
 import { b1Verdict, bootstrapMeanCI, minimumShippableWins, perCaseCredit } from "./stats.ts";
@@ -43,9 +52,9 @@ export function b1RuleLines(n: number): string[] {
     "disagree gives p < 0.05 in event-4's favour. A tie or a loss closes the idea: record the number.",
     `How large a gap that takes with ${n} cases: the sign test binds — event-4 must score higher on at least ` +
     `${table}. Six clean wins out of ${n} is a weighted_exact gap of ${(6 / n / 3).toFixed(3)} if every win is ` +
-    `the smallest one-cost step and ${(6 / n).toFixed(3)} if every win is a full miss-to-hit; realistically ` +
-    "0.15-0.20. A smaller gap is inside what this seed can explain by noise (its README: roughly twenty " +
-    "points of error at 95%). This seed can rule the decomposition out; it cannot rule it in for real events.",
+    `the smallest one-cost step and ${(6 / n).toFixed(3)} if every win is a full miss-to-hit. Fewer net ` +
+    "wins than that is inside what this seed can explain by noise (its README: roughly twenty points of " +
+    "error at 95%). This seed can rule the decomposition out; it cannot rule it in for real events.",
   ];
 }
 
@@ -129,7 +138,10 @@ async function main() {
   const model = new OpenRouterModel({ apiKey: key });
 
   const scoreCases: Case[] = cases.map((c) => ({ kind: "event", theirs: { verdict: c.label } }));
-  const out: Record<string, { answers: Array<Record<string, unknown> | null>; credit: number[] }> = {};
+  const out: Record<
+    string,
+    { answers: Array<Record<string, unknown> | null>; credit: number[]; recordedCredit: number[] }
+  > = {};
   let usd = 0;
   for (const name of ["event-3", "event-4"] as ArmName[]) {
     const arm = ARMS[name];
@@ -137,9 +149,14 @@ async function main() {
     usd += (run.inTok * row.usd_per_m_in + run.outTok * row.usd_per_m_out) / 1e6;
     const answers = run.results.map((r) => r.verdict);
     const credit = perCaseCredit(scoreCases, answers);
-    out[name] = { answers, credit };
+    // The device's view: a refused answer is recorded as `unsure` (cloudmodel.rs judge_event).
+    const recorded = run.results.map(deviceRecorded);
+    const recordedCredit = perCaseCredit(scoreCases, recorded);
+    out[name] = { answers, credit, recordedCredit };
     const we = score("event", scoreCases, answers)[0].value ?? 0;
     const ci = bootstrapMeanCI(credit);
+    const weRec = score("event", scoreCases, recorded)[0].value ?? 0;
+    const ciRec = bootstrapMeanCI(recordedCredit);
     const causes = run.results.reduce<Record<string, number>>(
       (m, r) => (r.cause ? { ...m, [r.cause]: (m[r.cause] ?? 0) + 1 } : m),
       {},
@@ -149,7 +166,9 @@ async function main() {
       {},
     );
     console.log(
-      `${name}: weighted_exact ${we.toFixed(3)}, 95% CI [${ci.lower.toFixed(3)}, ${ci.upper.toFixed(3)}]; ` +
+      `${name}: weighted_exact ${we.toFixed(3)}, 95% CI [${ci.lower.toFixed(3)}, ${ci.upper.toFixed(3)}] ` +
+        `(score.ts: a refused answer costs 3); as the device records it (refused -> unsure): ` +
+        `${weRec.toFixed(3)}, 95% CI [${ciRec.lower.toFixed(3)}, ${ciRec.upper.toFixed(3)}]; ` +
         `refused ${JSON.stringify(causes)}; ${name === "event-4" ? `rules fired ${JSON.stringify(rules)}; ` : ""}` +
         `tokens ${run.inTok} in / ${run.outTok} out`,
     );
@@ -167,7 +186,9 @@ async function main() {
       `${b1.paired.ci.upper.toFixed(3)}]; wins ${b1.paired.wins}, losses ${b1.paired.losses}, ties ${b1.paired.ties}; ` +
       `sign test p=${b1.paired.signP.toFixed(4)}`,
   );
-  console.log(`B1: ${b1.reason}`);
+  console.log(`B1 (the gate, on score.ts's figure): ${b1.reason}`);
+  const b1Rec = b1Verdict(out["event-3"].recordedCredit, out["event-4"].recordedCredit);
+  console.log(`beside it, as the device records (refused -> unsure; not the gate): ${b1Rec.reason}`);
   console.log(`actual spend at the row's rates: ~$${usd.toFixed(4)}`);
 }
 

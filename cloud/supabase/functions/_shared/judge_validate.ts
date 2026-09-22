@@ -140,6 +140,9 @@ export function validate(
     // through here too, and a rule carries only verdict/why/confidence), and a model reply always
     // carries both because the schema is strict and requires them. Anything else is incomplete,
     // never read as truthy. The audience rule is checked first, so it names a drop both fire on.
+    // A rule-fired drop is NOT exempt from the floor below (T3 fix round 1, ruled): the rule
+    // fields are model judgments with no confidence of their own, and the prompt scopes
+    // `confidence` to the whole answer, rule fields included.
     const audience = answer.audience_excludes_student;
     const standing = answer.standing_or_drop_in;
     let verdict = modelVerdict;

@@ -226,3 +226,13 @@ Deno.test("event-4 rules: each rule field is explained, and the drop rules are n
   assert(!rules.includes("is a drop."), `a drop rule is still stated as verdict prose: ${rules}`);
   assert(rules.includes("no audience"), `the unstated-audience case must answer false: ${rules}`);
 });
+
+// T3 fix round 1 (ruled): confidence covers the WHOLE answer, the two rule fields included — the
+// rule fields carry no confidence of their own, and a rule-fired drop still clears the floor on it.
+Deno.test("event-4 rules: confidence is scoped to the whole answer, the two rule fields included", () => {
+  const rules = systemTemplate("event");
+  assert(
+    rules.includes("- confidence: 0 to 1, how sure you are of the whole answer, the two fields above included."),
+    rules,
+  );
+});
