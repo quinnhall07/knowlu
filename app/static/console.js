@@ -24,6 +24,17 @@
     return window.__TAURI__.core.invoke(cmd, args || {});
   }
 
+  // R-C1b-exec-9: the wizard's subscribe panel and the upgrade overlay both need to ask this same
+  // question — is this account entitled right now — and each used to carry its own copy of the
+  // status test. One copy, resolved `true` only on `ok` plus an active or trialing status, `false`
+  // on anything else, a refusal or a dropped invoke included: nobody downstream of this has to
+  // remember to `.catch`.
+  function checkEntitled() {
+    return invoke("entitlement_now", {}).then(function (r) {
+      return !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
+    }).catch(function () { return false; });
+  }
+
   function renderNav(state) {
     var n = state.nav_counts;
     var map = { today: n.today, overdue: n.overdue, week: n.week, later: n.later, all: n.all, decisions: n.decisions, "good-to-know": n.good_to_know, issues: n.issues, runs: n.runs_warn };
@@ -1255,8 +1266,8 @@
     EL("up-error").textContent = "";
     EL("up-code-row").hidden = true;
     EL("up-subscribe").hidden = false;
-    return invoke("entitlement_now", {}).then(function (ent) {
-      if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
+    return checkEntitled().then(function (yes) {
+      if (yes) { return finishUpgrade(); }
     });
   }
   EL("upgrade").addEventListener("click", function (e) {
@@ -1315,21 +1326,31 @@
       return;
     }
     if (e.target.closest("#up-subscribe")) {
-      invoke("open_checkout", { plan: "monthly" }).then(function (r) {
-        // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
-        // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
-        // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
-        if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        var tries = 0;
-        var tick = function () {
-          tries += 1;
-          invoke("entitlement_now", {}).then(function (ent) {
-            if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-            if (tries < 40) { setTimeout(tick, 3000); }
-          }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
-        };
-        setTimeout(tick, 3000);
+      // R-C1b-exec-9: ask before opening a second Checkout page. An account the service already
+      // calls entitled — its own poll below gave up, or the student left and came back — goes
+      // straight through; only an account that is still not entitled gets a Checkout tab.
+      checkEntitled().then(function (yes) {
+        if (yes) { return finishUpgrade(); }
+        return invoke("open_checkout", { plan: "monthly" }).then(function (r) {
+          // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
+          // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
+          // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
+          if (!r.ok) { EL("up-error").textContent = r.error; return; }
+          EL("up-error").textContent = "";
+          var tries = 0;
+          var tick = function () {
+            // The overlay can close — a sign-out, a re-render — while this is still ticking; nothing
+            // asked it to stop, so it kept polling behind a hidden panel until the count ran out.
+            if (EL("upgrade").hidden) { return; }
+            tries += 1;
+            checkEntitled().then(function (yes2) {
+              if (yes2) { return finishUpgrade(); }
+              if (tries < 40) { setTimeout(tick, 3000); }
+              else { EL("up-error").textContent = "Still not subscribed. When the payment page is done, press Subscribe again."; }
+            });
+          };
+          setTimeout(tick, 3000);
+        });
       }).catch(function () { EL("up-error").textContent = UNREACHABLE; });
     }
   });
@@ -1615,6 +1636,23 @@
   }
 
   function wizGo(n) {
+    // R-C1b-exec-9: the only thing that ever set WIZ.entitled true used to be the two-minute poll
+    // below, and a student who came back to the wizard after that poll had already given up found
+    // Next refusing forever with no way to ask again. One re-ask, here, before the refusal — and
+    // never from inside it, since an account that truly is not entitled must not ask the service
+    // forever.
+    if (n > WIZ.step && WIZ.step === 2 && !WIZ.entitled) {
+      WIZ.busy = true; renderWizard();
+      return checkEntitled().then(function (yes) {
+        WIZ.busy = false;
+        if (yes) { WIZ.entitled = true; }
+        return wizStep(n);
+      });
+    }
+    return wizStep(n);
+  }
+
+  function wizStep(n) {
     if (n > WIZ.step && !wizValid()) { renderWizard(); flashError(); return Promise.resolve(); }
     // A refusal belongs to the panel that raised it: stepping back clears it rather than carrying
     // a red line about a field that is no longer on screen.
@@ -1772,14 +1810,18 @@
   function pollEntitlement() {
     var tries = 0;
     var tick = function () {
+      // The student can leave panel 2 without waiting on this — Back, or the pre-ask in `wizGo`
+      // already got a yes — and a poll that kept ticking behind a panel nobody is looking at is a
+      // poll that outlives the question it was asked.
+      if (WIZ.entitled || WIZ.step !== 2) { return; }
       tries += 1;
-      invoke("entitlement_now", {}).then(function (r) {
-        if (r.ok && (r.status === "active" || r.status === "trialing")) {
+      checkEntitled().then(function (yes) {
+        if (yes) {
           WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
         }
         if (tries < 40) { setTimeout(tick, 3000); }
-        else { WIZ.error = "Still not subscribed. Try the payment page again."; renderWizard(); }
-      }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
+        else { WIZ.error = "Still not subscribed. When the payment page is done, press Next."; renderWizard(); }
+      });
     };
     setTimeout(tick, 3000);
   }
@@ -1848,11 +1890,16 @@
     }
     if (e.target.closest("#wiz-sub-month") || e.target.closest("#wiz-sub-year")) {
       var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
-      invoke("open_checkout", { plan: which }).then(function (r) {
-        if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-        WIZ.checkoutOpened = true;
-        renderWizard();
-        pollEntitlement();
+      // R-C1b-exec-9: ask before opening a second Checkout page — an account the service already
+      // calls entitled goes straight to the vault panel, never back through Stripe.
+      checkEntitled().then(function (yes) {
+        if (yes) { WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
+        return invoke("open_checkout", { plan: which }).then(function (r) {
+          if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
+          WIZ.checkoutOpened = true;
+          renderWizard();
+          pollEntitlement();
+        });
       }).catch(function () {});
       return;
     }

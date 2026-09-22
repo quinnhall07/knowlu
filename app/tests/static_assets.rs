@@ -1237,6 +1237,53 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
     for sentence in ["Sign in first.", "Finish the payment page in your browser, then come back."] {
         assert!(js.contains(sentence), "the refusal names what is missing: {sentence}");
     }
+    // R-C1b-exec-9: a Next off the subscribe panel now asks the service once before it refuses,
+    // rather than trusting a WIZ.entitled the two-minute poll below may already have given up on.
+    assert!(
+        go.contains("WIZ.step === 2 && !WIZ.entitled"),
+        "wizGo's own pre-ask is gated on the same panel and the same field wizValid is"
+    );
+    assert!(go.contains("checkEntitled("), "wizGo re-asks the service before it refuses");
+    // The subscribe presses ask first too — never a second Checkout page for an account the service
+    // already calls entitled.
+    let wiz_sub = js
+        .find("if (e.target.closest(\"#wiz-sub-month\")")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("if (e.target.closest(\"#wiz-lms-open\")").next())
+        .expect("the wiz-sub-month/year handler");
+    let up_sub = js
+        .find("if (e.target.closest(\"#up-subscribe\")")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("function finishUpgrade(").next())
+        .expect("the up-subscribe handler");
+    for (name, handler) in [("#wiz-sub-month", wiz_sub), ("#up-subscribe", up_sub)] {
+        let ask = handler.find("checkEntitled(").expect("checkEntitled appears in the subscribe handler");
+        let open = handler.find("open_checkout").expect("open_checkout is still reachable on a no");
+        assert!(ask < open, "{name} asks the service before it ever opens a second Checkout page");
+    }
+    // Both expiries name the way forward instead of dead-ending on a re-ask nobody can trigger.
+    for sentence in [
+        "Still not subscribed. When the payment page is done, press Next.",
+        "Still not subscribed. When the payment page is done, press Subscribe again.",
+    ] {
+        assert!(js.contains(sentence), "the expiry names the way forward: {sentence}");
+    }
+    // The entitlement status test lives in exactly one place — `checkEntitled` — so a status the
+    // service adds later needs one edit, not three.
+    assert_eq!(
+        js.matches("status === \"trialing\"").count(),
+        1,
+        "checkEntitled is the ONLY copy of the entitlement status test"
+    );
+    let poll = js
+        .split("function pollEntitlement(")
+        .nth(1)
+        .and_then(|s| s.split("EL(\"wizard\").addEventListener(").next())
+        .expect("pollEntitlement");
+    assert!(
+        poll.contains("WIZ.step !== 2"),
+        "pollEntitlement's tick stands down once the student has left panel 2"
+    );
 }
 
 /// The version constant and the page's own date are one fact in two files (`account.rs`'s rule).

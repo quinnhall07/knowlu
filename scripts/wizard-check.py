@@ -47,7 +47,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'send_magic_link') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'verify_email_code') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'open_checkout') { return Promise.resolve({ ok: true, error: null }); }
-  if (cmd === 'entitlement_now') { return Promise.resolve({ ok: true, error: null, status: 'trialing', plan: 'monthly', current_period_end: null }); }
+  if (cmd === 'entitlement_now') { return Promise.resolve({ ok: true, error: null, status: (window.__ENTITLED ? 'trialing' : 'none'), plan: 'monthly', current_period_end: null }); }
   if (cmd === 'open_policy') { return Promise.resolve({ ok: true, error: null }); }
   // R-C1-40 I2: the command answers with no session directory — the page never learns where the
   // sign-in window keeps its data.
@@ -84,6 +84,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'set_settings') { return Promise.resolve({ ok: true, settings: { profile_id: 'p1', backup_dir: 'C:\\b', autostart: true, quit_at: null } }); }
   return Promise.resolve({ ok: true, error: null });
 } } };
+window.__ENTITLED = false;
 window.__CALLS = [];
 """
 
@@ -128,12 +129,22 @@ def check(page) -> list:
     if ga.get("ageAttested") is not True: bad.append("google_sign_in did not carry the attestation")
     if page.is_hidden("#wiz-subscribe"): bad.append("a signed-in account did not advance to the subscribe panel")
 
-    # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled.
+    # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled
+    #    (R-C1b-exec-9). A Next off the subscribe panel re-asks the service rather than trusting a
+    #    stale WIZ.entitled — and once the account really is entitled, a second Subscribe press
+    #    never opens a second Checkout page.
     page.click("#wiz-sub-month"); page.wait_for_timeout(3600)
-    if "open_checkout" not in names(page): bad.append("open_checkout was not invoked")
+    if names(page).count("open_checkout") != 1: bad.append("open_checkout was not invoked exactly once")
     if (first_args(page, "open_checkout") or {}).get("plan") != "monthly": bad.append("open_checkout named the wrong plan")
     if "entitlement_now" not in names(page): bad.append("the wizard did not poll for the subscription")
+    if page.is_hidden("#wiz-subscribe"): bad.append("an unentitled account left the subscribe panel")
+    page.click("#wiz-next"); page.wait_for_timeout(400)
+    if page.is_hidden("#wiz-subscribe"): bad.append("Next advanced an account the service still calls unentitled")
+    if "Finish the payment page" not in page.inner_text("#wiz-error"): bad.append("Next's re-ask did not say what was still missing")
+    page.evaluate("window.__ENTITLED = true")
+    page.click("#wiz-next"); page.wait_for_timeout(400)
     if page.is_hidden("#wiz-vault"): bad.append("an entitled account did not advance to the name panel")
+    if names(page).count("open_checkout") != 1: bad.append("a second Subscribe press opened a second Checkout page")
 
     # 4. Panel 4 names the setup. NO folder is picked, and the path is shown before Finish.
     page.fill("#wiz-name", "Fall 2026"); page.wait_for_timeout(120)
