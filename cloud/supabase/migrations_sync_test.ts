@@ -18,15 +18,20 @@ async function migrations(): Promise<{ name: string; sql: string }[]> {
   return out;
 }
 
-/** Every migration's SQL, joined in file order. `20260912000400_sync_note_path_check.sql`
- * (R-C3′-exec-10) is the first migration in this stream that patches a constraint without
- * recreating the table, which breaks the "the LAST file is the current shape" assumption several
- * tests below used to make with `.at(-1)`: `sync_records`/`sync_notes`'s column definitions still
- * live only in 000300, and 000400 is textually last but defines nothing about them. A forward-only
- * corpus never removes a still-true substring, so scanning the whole join finds every check that is
- * still live exactly where a single "current" file used to. */
-async function corpus(): Promise<string> {
-  return (await migrations()).map((m) => m.sql).join("\n");
+/** `20260912000300_sync_plaintext.sql` by name, not `.at(-1)` and not a whole-corpus join
+ * (R-C3′-exec-10 review I1): `20260912000400_sync_note_path_check.sql` is the first migration in
+ * this stream that patches a constraint without recreating the table, so it is textually last
+ * while defining none of what the three tests below pin — `.at(-1)` would read the wrong file. A
+ * whole-corpus join would read the RIGHT text today, but it can never go red again: migrations are
+ * forward-only, so a still-true substring is never removed from an OLDER file even if a later
+ * migration alters or drops the check it names — exactly the kind of silent drift this suite exists
+ * to catch. 000300 is still the one file that actually defines `sync_records`/`sync_notes`'s shape
+ * (000400 touches only `sync_notes_path_check`), so naming it keeps these three as tight as they
+ * were before 000400 existed. */
+async function plaintextShapeSql(): Promise<string> {
+  const found = (await migrations()).find((m) => m.name === "20260912000300_sync_plaintext.sql");
+  assert(found, "expected 20260912000300_sync_plaintext.sql to still exist");
+  return found!.sql;
 }
 
 /** Every table C3′ leaves BEHIND: created by one of its migrations and not dropped by a later one.
@@ -97,7 +102,7 @@ Deno.test("the rows hold the student's own text, bounded in BYTES, and every one
   // one account, that the payload is bounded, and that the bound is in BYTES on both sides of the
   // wire (`octet_length`, not `length`: Postgres counts characters and the device counts bytes, and
   // a vault full of accented Spanish would otherwise disagree with its own cap).
-  const sql = (await corpus()).toLowerCase();
+  const sql = (await plaintextShapeSql()).toLowerCase();
   assert(sql.includes("account_id  uuid        not null references public.accounts (id) on delete cascade"), "records cascade from the account");
   assert(sql.includes("octet_length(body) between 2 and 16384"), "a record's body is bounded in bytes");
   assert(sql.includes("octet_length(body) between 1 and 131072"), "a note's body is bounded in bytes");
@@ -109,10 +114,12 @@ Deno.test("a note's path is checked, not trusted", async () => {
   // The path is the note's primary key now, and it is a string a client sends. Without this a
   // pushed `../../etc/hosts` would sit in the table waiting for a restore to write it.
   //
-  // R-C3′-exec-10 moved the folder/markdown check itself to 20260912000400 (the {1,300} bound in
-  // 000300's version tripped Postgres's DUPMAX), but the two climb-out siblings stayed put in
-  // 000300 — so this reads the whole corpus rather than one file, which is true of both.
-  const sql = await corpus();
+  // R-C3′-exec-10 review I1: named at 000300, not the corpus — the folder/markdown text below
+  // still appears in 000300's OWN (superseded) check even though 20260912000400 is what enforces it
+  // on the server now, and the two climb-out siblings this test also pins were never moved. Reading
+  // 000300 by name, rather than any-file-ever, is what lets this test go red again if a future
+  // migration ever weakened one of ITS OWN checks without 000300 changing.
+  const sql = await plaintextShapeSql();
   assert(sql.includes("(tasks|approvals|archive|courses|issues|info)/"), "only the six note folders");
   assert(sql.includes("\\.md$"), "and only markdown");
   assert(sql.includes("path !~ "), "and a path that can climb out is refused by its own check");
@@ -128,7 +135,12 @@ Deno.test("retention never deletes a record a human wrote, and the SERVER is wha
   // computed from the record itself — `op` in (set, create) and an actor that is not an agent, which
   // is `provenance::is_agent`'s own `starts_with("agent:")` test. A client cannot lie about it and
   // cannot forget it.
-  const sql = await corpus();
+  // R-C3′-exec-10 review I1: named at 000300, not the corpus. `sync_prune`'s own body (`and not
+  // keep`) is 000100's and never redefined, but 000300's header comment names the same clause
+  // (`` `and not keep`) and the ... cron job``) precisely because it is the file that took over
+  // defining `keep` itself — a generated column now, not a client-asserted bit — so 000300 is still
+  // the right single file to pin all four of these against.
+  const sql = await plaintextShapeSql();
   assert(sql.includes("and not keep"), "sync_prune must exempt the records marked `keep`");
   assert(/keep\s+boolean\s+not null generated always as/.test(sql), "`keep` is generated, not sent");
   assert(sql.includes("'agent:%'"), "an agent's record is not kept");
