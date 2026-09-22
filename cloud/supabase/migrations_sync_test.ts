@@ -128,5 +128,7 @@ Deno.test("the account purge names every table C3′ leaves, and no table it dro
   const index = await Deno.readTextFile(new URL("./functions/account/index.ts", import.meta.url));
   const purge = index.slice(index.indexOf("purge:"), index.indexOf("deleteAuthUser:"));
   for (const t of await liveTables()) assert(purge.includes(`"${t}"`), `DELETE /account does not purge ${t}`);
-  assert(!purge.includes("sync_generation"), "sync_generation is gone; purging it is a 404 every time");
+  // The quoted NAME, not the word: the comment above the list is allowed to say where
+  // `sync_generation` went (hand-off H1 does), and only a string literal in the list is a purge.
+  assert(!purge.includes('"sync_generation"'), "sync_generation is gone; purging it is a 404 every time");
 });
