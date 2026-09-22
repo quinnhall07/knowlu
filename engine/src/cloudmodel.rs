@@ -531,7 +531,9 @@ pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPul
     // with a real HTTP failure rather than `quiet: true` — there may be no account row to name a
     // reason against at all. Caught here, once, so every caller downstream sees the same closed
     // `QuietReason` set regardless of which of the two shapes the service used to say it.
-    let reply = match client.post("/gmail-read", &json!({ "ack": ack })) {
+    // T9: `accepts` declares the tiers this engine routes; the service hands `completion` to no
+    // device that does not declare it (an older engine would file it as a `kind: task` card).
+    let reply = match client.post("/gmail-read", &json!({ "ack": ack, "accepts": ["completion"] })) {
         Ok(reply) => reply,
         Err(CloudError::Status { code: 503, ref detail }) if detail == GMAIL_NOT_CONFIGURED_DETAIL => {
             return Err(CloudError::Quiet(QuietReason::NotConfigured));

@@ -2965,6 +2965,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// T9: the service hands `completion` only to a device that declares it (`gmail-read`'s
+    /// `forDevice`); every other device gets `information`. So every `/gmail-read` request this
+    /// engine sends, the first pull and the ack flush alike, must declare it.
+    #[test]
+    fn every_gmail_read_request_declares_it_accepts_completion() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-accepts");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:a1", "CS-100 Homework 3")), false),
+            gmail_reply("[]", false),
+        ]);
+        let _ = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        let requests = handle.join().unwrap();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        for request in &requests {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+            let body: serde_json::Value = serde_json::from_str(body.trim()).expect("a JSON body");
+            assert_eq!(body["accepts"], serde_json::json!(["completion"]), "{request}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     /// Forward compatibility: a tier this engine does not know is dropped and recorded like
     /// `information`, never filed as a `kind: task` card — the catch-all that would have turned a
     /// receipt for finished work into a proposal to ADD that work.
