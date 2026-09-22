@@ -219,3 +219,27 @@ Deno.test("the metadata-trim migration allow-lists four keys, backfills existing
     "execute is not revoked from both anon and authenticated",
   );
 });
+
+Deno.test("the metadata-trim grant follow-up gives supabase_auth_admin explicit EXECUTE on both functions (R-C1b-exec-8 re-review)", async () => {
+  // 20260922000100_trim_user_metadata.sql is already applied on staging and is never edited
+  // (migrations are forward-only); this is the belt, in its own file, same shape as
+  // 20260911000300_google_privileges.sql following 20260911000200_google.sql. It creates no
+  // function of its own, so it adds nothing to `migrations/migrations_test.ts`'s parsed-function
+  // count — only these two grants.
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260922000200_trim_user_metadata_grant.sql", import.meta.url),
+  );
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+
+  assert(!/create\s+(table|function|policy|trigger)/i.test(code), "this migration creates nothing");
+  assert(
+    /grant\s+execute\s+on\s+function\s+public\.trimmed_user_metadata\(jsonb\)\s+to\s+supabase_auth_admin\s*;/i
+      .test(code),
+    "no explicit EXECUTE grant to supabase_auth_admin on trimmed_user_metadata",
+  );
+  assert(
+    /grant\s+execute\s+on\s+function\s+public\.trim_user_metadata\(\)\s+to\s+supabase_auth_admin\s*;/i
+      .test(code),
+    "no explicit EXECUTE grant to supabase_auth_admin on trim_user_metadata",
+  );
+});
