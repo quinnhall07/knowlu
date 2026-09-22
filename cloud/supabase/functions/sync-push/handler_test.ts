@@ -3,9 +3,9 @@ import { handle } from "./handler.ts";
 
 const DEVICE = "0123456789abcdef";
 const REC = (n: number) =>
-  `{"actor":"quinn","device":"LAPTOP","id":"task_000000000${n}","op":"set","path":"tasks/x.md","ts":"2026-09-17T10:0${n}:00.000Z","via":"dashboard"}`;
+  `{"actor":"student","device":"LAPTOP","id":"task_000000000${n}","op":"set","path":"tasks/x.md","ts":"2026-09-17T10:0${n}:00.000Z","via":"dashboard"}`;
 
-import { sha256Hex } from "../_shared/sync_rows.ts";   // the one hash, shared with the handler
+import { MAX_PUSH_BYTES, sha256Hex } from "../_shared/sync_rows.ts";   // the one hash, shared with the handler
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -101,7 +101,10 @@ Deno.test("a device token that is not a device token is a 400", async () => {
   assertEquals((await refusal(push({ records: [] }), deps())).status, 400);
 });
 
-Deno.test("a batch that would pass the ceiling is a 413 and stores nothing", async () => {
+Deno.test("a batch that would pass the ceiling is a 403 and stores nothing", async () => {
+  // 403, not 413 (R-C3′-exec-7): 413 is `readJson`'s own refusal for a request body over
+  // `MAX_PUSH_BYTES`, thrown before a row is ever parsed. This is the account's ceiling instead —
+  // a reason the device must tell apart from a request that was simply too big to read.
   let stored = 0;
   const res = await refusal(
     push({ device: DEVICE, records: [{ hash: await sha256Hex(REC(1)), body: REC(1) }] }),
@@ -111,8 +114,86 @@ Deno.test("a batch that would pass the ceiling is a 413 and stores nothing", asy
       saveRecords: () => { stored += 1; return Promise.resolve(); },
     }),
   );
+  assertEquals(res.status, 403);
+  assertEquals(stored, 0);
+});
+
+Deno.test("an over-ceiling account can still push a batch that adds no net bytes", async () => {
+  // R-C3′-exec-9 m1: `used` already over `cap` — a concurrent push from a second desktop, or a
+  // lowered ceiling — must not trap the account with no push that can ever succeed. A tombstone
+  // carries no bytes, so a tombstone-only batch adds 0 and must go through.
+  const res = await handle(
+    push({ device: DEVICE, notes: [{ path: "tasks/x.md", deleted: true }] }),
+    deps({ bytesUsed: () => Promise.resolve(2_000_000), ceiling: () => Promise.resolve(1_000_000) }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).notes, 1);
+});
+
+Deno.test("a valid batch whose JSON is over 1 MiB and under MAX_PUSH_BYTES is accepted", async () => {
+  // The brief-mandated default `readJson` cap is 1 MiB of characters; five hundred notes at a
+  // realistic size clear it easily and must not be refused as if the account were full.
+  const notes = Array.from({ length: 500 }, (_, i) => ({ path: `tasks/x${i}.md`, body: "x".repeat(4000) }));
+  const text = JSON.stringify({ device: DEVICE, notes });
+  assert(text.length > 1 << 20, "the test vector must exceed the old 1 MiB default to be a test");
+  assert(text.length < MAX_PUSH_BYTES, "the test vector must stay under the new transport cap");
+  let saved = 0;
+  const res = await handle(
+    new Request("http://127.0.0.1/sync-push", {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: text,
+    }),
+    deps({
+      ceiling: () => Promise.resolve(100_000_000),
+      saveNotes: (n) => { saved = n.length; return Promise.resolve(); },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(saved, 500);
+});
+
+Deno.test("a request body over MAX_PUSH_BYTES is a 413 and stores nothing", async () => {
+  const text = JSON.stringify({ device: DEVICE, pad: "x".repeat(MAX_PUSH_BYTES + 8) });
+  let stored = 0;
+  const res = await refusal(
+    new Request("http://127.0.0.1/sync-push", {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: text,
+    }),
+    deps({ saveRecords: () => { stored += 1; return Promise.resolve(); } }),
+  );
   assertEquals(res.status, 413);
   assertEquals(stored, 0);
+});
+
+Deno.test("a push body that is not a JSON object is a 400, not a bare 500", async () => {
+  for (const text of ["null", "[]", '"x"', "42"]) {
+    const res = await refusal(
+      new Request("http://127.0.0.1/sync-push", {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: text,
+      }),
+      deps(),
+    );
+    assertEquals(res.status, 400, `${text} was accepted`);
+  }
+});
+
+Deno.test("valid records beside one bad note is all-or-nothing: saveRecords is never called", async () => {
+  let recordsCalled = 0;
+  const res = await refusal(
+    push({
+      device: DEVICE,
+      records: [{ hash: await sha256Hex(REC(1)), body: REC(1) }],
+      notes: [{ path: "tasks/x.md", body: "x", title: "nope" }],
+    }),
+    deps({ saveRecords: () => { recordsCalled += 1; return Promise.resolve(); } }),
+  );
+  assertEquals(res.status, 400);
+  assertEquals(recordsCalled, 0);
 });
 
 Deno.test("more than MAX_ROWS of either kind is a 400, not a silent truncation", async () => {

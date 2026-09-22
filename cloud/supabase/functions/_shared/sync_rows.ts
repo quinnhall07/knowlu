@@ -15,6 +15,11 @@ export const MAX_ROWS = 500;
 export const MAX_RECORD_BYTES = 16384;
 /** `sync_notes.body`'s `octet_length` check. */
 export const MAX_NOTE_BYTES = 131072;
+/** The transport cap on one whole pushed body — `readJson`'s own limit, not the account's ceiling
+ * (R-C3′-exec-7): 500 rows at either row cap is well past 1 MiB, so a legitimate full batch must fit
+ * under this before the ceiling is ever checked. Over it is `_shared/http.ts`'s own 413; the ceiling
+ * below is a 403, a different reason the device can tell apart. */
+export const MAX_PUSH_BYTES = 4194304;
 
 const DEVICE_RE = /^[0-9a-f]{16}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -62,6 +67,10 @@ export function checkRecord(raw: unknown, device: string, accountId: string): Re
   noExtras(row, ["hash", "body"], "record");
   if (!isHash(row.hash)) throw fail(400, "a record has no usable hash");
   if (typeof row.body !== "string" || row.body.length === 0) throw fail(400, "a record has no body");
+  // A NUL byte is valid JSON text but `body::jsonb` (the `keep` generated column) rejects it with
+  // 22P05, and the migration's own comment names the validator as the only guard before that 5xx —
+  // named here, before it ever reaches the database.
+  if (row.body.includes("\u0000")) throw fail(400, "a record's body contains a null byte");
   if (bytes(row.body) > MAX_RECORD_BYTES) {
     throw fail(400, `a record's body is over ${MAX_RECORD_BYTES} bytes`);
   }
@@ -91,12 +100,18 @@ export function checkNote(raw: unknown, device: string, accountId: string): Reco
   const row = raw as Record<string, unknown>;
   noExtras(row, ["path", "deleted", "body"], "note");
   if (!isNotePath(row.path)) throw fail(400, "a note has no usable path");
+  if (row.deleted !== undefined && typeof row.deleted !== "boolean") {
+    throw fail(400, "deleted must be a boolean");
+  }
   const deleted = row.deleted === true;
   if (deleted) {
     if (row.body !== undefined) throw fail(400, "a deleted note carries no bytes");
     return { account_id: accountId, path: row.path as string, device, deleted: true, body: null };
   }
   if (typeof row.body !== "string" || row.body.length === 0) throw fail(400, "a note has no body");
+  // Same reason as `checkRecord`'s: the `text` column takes it, but a restore that reads it back
+  // through anything JSON-shaped would not, and a named 400 beats a 502 the student cannot act on.
+  if (row.body.includes("\u0000")) throw fail(400, "a note's body contains a null byte");
   if (bytes(row.body) > MAX_NOTE_BYTES) throw fail(400, `a note's body is over ${MAX_NOTE_BYTES} bytes`);
   return { account_id: accountId, path: row.path as string, device, deleted: false, body: row.body as string };
 }
