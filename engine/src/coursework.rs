@@ -519,9 +519,10 @@ pub fn sync_coursework(
         record_seen(vault, &item.uid, &item.title, &stamp)
             .map_err(|err| SourceError::Failed(format!("{err}")))?;
     }
-    // D3, ingest's line in coursework's words (`ingest::run_lines`, engine/src/ingest.rs:945).
+    // D3, ingest's line in coursework's words (`ingest::run_lines`'s own first-run arm, `engine/src/ingest.rs`).
     // Pushed HERE rather than in `main_with_fetchers` (I3) so a test can read it: `main` returns an
-    // exit code, and this line is not the run-log summary, which is built separately at `:1604`.
+    // exit code, and this line is not the run-log summary, which `main_with_fetchers` builds
+    // separately, after the sync loop.
     //
     // Both spellings are counted, so a `--dry-run` reports the number the real run would archive
     // rather than zero. One deliberate divergence from ingest: `main` only calls this function when
@@ -1988,11 +1989,13 @@ mod tests {
     /// The run record counts it: the Runs view's sync step says where the work went, so a first day
     /// shorter than the vendor's list has a number behind it. (The summary LINE is
     /// `sync_coursework`'s and is asserted by the three tests above — `main` returns an exit code,
-    /// and that line is not the run-log summary, which is built separately at `:1604`.)
+    /// and that line is not the run-log summary, which `main_with_fetchers` builds separately,
+    /// after the sync loop.)
     ///
-    /// `main` passes `today: None`, so the cutoff is the real clock — the two items are built
-    /// around it rather than pinned to a date that is already in the past by the time anyone runs
-    /// this, which would archive both and prove nothing.
+    /// `main` passes `today: None`, so the cutoff is the real clock, read in the VAULT's own
+    /// timezone (`cli::local_now`, final review I1) rather than the machine's — the two items are
+    /// built around that same reading rather than pinned to a date that is already in the past by
+    /// the time anyone runs this, which would archive both and prove nothing.
     #[test]
     fn a_first_run_counts_and_names_what_it_archived() {
         let vault = runnable_vault(
@@ -2002,7 +2005,7 @@ mod tests {
         // `runnable_vault` gives every other `main` test a vault that has already been ranked;
         // this one is about the run that has not, so the page `rank` writes is removed.
         let _ = std::fs::remove_file(vault.join("state").join("today.md"));
-        let now = jiff::Zoned::now().date();
+        let now = crate::cli::local_now(&vault).date();
         let items = vec![
             make("zybooks:p1", "cs-100-hw-01", "CS 100 HW 01", now.yesterday().unwrap().at(23, 59, 0, 0), 0),
             make("zybooks:f1", "cs-100-hw-02", "CS 100 HW 02", now.tomorrow().unwrap().at(23, 59, 0, 0), 0),
