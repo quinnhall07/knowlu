@@ -536,6 +536,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Final review item 8 (`already_proposed`'s `to == done` filter): another amend card on the
+    /// same note — a `due` re-proposal, or a status change to anything but `done` — is not a
+    /// "mark done" question and must not close it.
+    #[test]
+    fn an_unrelated_amend_card_on_the_same_task_does_not_count_as_already_proposed() {
+        let vault = scratch("unrelated");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = |name: &str, changes: &str| {
+            let text = format!(
+                "---\ntype: approval\nkind: amend\ntitle: \"x\"\nstatus: pending\ntarget: tasks/hw-01.md\n\
+                 proposed_at: 2026-09-21\nfirst_proposed_at: 2026-09-21\ncreated_by: agent:knowlu.enrich\n\
+                 changes:\n{changes}---\n\nbody\n"
+            );
+            std::fs::write(vault.join("approvals").join(name), text).unwrap();
+        };
+        card("amend-hw-01-due.md", "  due:\n    from: 2026-09-30T23:59\n    to: 2026-10-02T23:59\n");
+        card("amend-hw-01-archive.md", "  status:\n    from: active\n    to: archived\n");
+        assert!(!already_proposed(&vault, "tasks/hw-01.md"));
+
+        let (log, warnings) =
+            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        assert!(already_proposed(&vault, "tasks/hw-01.md"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Final review item 8 (`propose_done`'s `op == set` filter): a note the student created by
+    /// hand WITH a status has not taken a position on `status` — only a later explicit `set` is
+    /// one — so a vendor's 100% still files the card for it.
+    #[test]
+    fn a_task_the_student_created_by_hand_with_a_status_is_still_proposed() {
+        let vault = scratch("by-hand-create");
+        let text = "---\ntitle: \"CS 100 hw-01\"\ncourse: \"cs-100\"\ndomain: school\n\
+                    due: 2026-09-30T23:59\nstatus: active\nsource_uid: \"zybooks:1\"\n---\n\nbody\n";
+        let mut journal = Journal::new(&vault);
+        crate::write::create(&vault, "tasks/hw-01.md", text, &WriteContext::new("quinn", "dashboard"), &mut journal, None)
+            .unwrap();
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("create mints an id");
+        assert!(
+            Journal::new(&vault).human_set(&id, "status").is_some(),
+            "precondition: the hand-made create record names status"
+        );
+
+        let (log, warnings) =
+            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn a_dry_run_says_what_it_would_file_and_writes_nothing() {
         let vault = scratch("dry");
