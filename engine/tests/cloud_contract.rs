@@ -317,6 +317,55 @@ fn a_401_event_reply_is_still_an_error_naming_the_session() {
     let _ = server.requests();
 }
 
+/// Final review item 1: `judge_pipeline.ts` answers a provider exception (OpenRouter 5xx/429/timeout)
+/// as HTTP 200 with `cause: "model failed"`. That is an outage, not a judgment of the event — it
+/// must stay an error so the uid is asked again next slot, never be buried as a recorded `unsure`.
+#[test]
+fn a_model_failed_event_reply_stays_an_error_so_an_outage_is_retried() {
+    let failed = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"model failed"}"#;
+    let mut server = loopback(vec![(200, failed.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:3"))
+        .expect_err("an upstream outage must never be recorded as unsure");
+    assert!(matches!(err, judge::ModelError::Failed(_)), "{err:?}");
+    assert!(err.to_string().contains("model failed"), "{err}");
+    let _ = server.requests();
+}
+
+/// The same for a verdict-less reply naming no cause the device recognises: only the four
+/// repeatable causes (`below floor`, `incomplete`, `refused`, `truncated`) become `unsure`.
+#[test]
+fn a_verdict_less_event_reply_with_no_recognised_cause_stays_an_error() {
+    for body in [
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence"}"#,
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"something new"}"#,
+    ] {
+        let mut server = loopback(vec![(200, body.to_string())]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let err = model.judge_event(&event_item("engage:4")).expect_err(body);
+        assert!(matches!(err, judge::ModelError::Failed(_)), "{body}: {err:?}");
+        let _ = server.requests();
+    }
+}
+
+/// The two remaining repeatable causes also become `unsure` (below floor and incomplete are above).
+#[test]
+fn refused_and_truncated_event_replies_become_unsure() {
+    for cause in ["refused", "truncated"] {
+        let body = format!(r#"{{"verdict":null,"tier":3,"outcome":"low confidence","cause":"{cause}"}}"#);
+        let mut server = loopback(vec![(200, body)]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let got = model.judge_event(&event_item("engage:5")).expect(cause);
+        assert_eq!(got.verdict, "unsure", "{cause}");
+        assert!(got.why.contains(cause), "{}", got.why);
+        let _ = server.requests();
+    }
+}
+
 #[test]
 fn tier1_still_answers_without_the_service_being_reached_at_all() {
     // The seam is unchanged (cloud design §3.2): a vendor-stated effort plus a pinned course is a

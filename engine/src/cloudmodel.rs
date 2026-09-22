@@ -440,6 +440,11 @@ pub fn event_request(item: &judge::EventItem) -> Value {
     })
 }
 
+/// The service's causes for a verdict-less reply that ARE a judgment of the event: asking again
+/// would get the same answer, so the device records `unsure` (T1). Anything else — `model failed`
+/// (the provider was down), or a cause this engine does not know — is not, and stays retryable.
+const REPEATABLE_CAUSES: [&str; 4] = ["below floor", "incomplete", "refused", "truncated"];
+
 impl judge::EventModel for CloudModel<'_> {
     /// Stream J Task T1 (CHECKPOINT J-1, ruled 2026-09-22): the service answering with no usable
     /// verdict is not, by itself, a reason to leave a uid unjudged forever.
@@ -449,7 +454,7 @@ impl judge::EventModel for CloudModel<'_> {
     /// this function still propagates untouched) — from a genuine HTTP 2xx. So by the time
     /// `self.verdict_of(&reply)` runs, the account WAS charged for a real attempt; the service just
     /// could not turn it into `obligation`/`opportunity`/`drop`/`unsure` (below the confidence
-    /// floor, an incomplete reply, `refused`, `truncated`, or a bare model failure). Left as an
+    /// floor, an incomplete reply, `refused`, `truncated`). Left as an
     /// `Err`, that uid would fail `events::judge_roster`'s "already judged" check every slot,
     /// forever (defect B). Recording `unsure` instead is not a new mechanism: a verdict the model
     /// could not honestly produce is functionally the same as one it honestly declined to give, and
@@ -457,7 +462,9 @@ impl judge::EventModel for CloudModel<'_> {
     /// verdict per uid, forever). `confidence: 0.0` because the service's reply for this case never
     /// carries a number back to the device (`judge_pipeline.ts`'s `low confidence` branch logs the
     /// model's own confidence server-side only) — this is not a floor-crossing confidence, it is an
-    /// honestly-unknown one.
+    /// honestly-unknown one. A `model failed` reply (the provider itself failed — an outage, not a
+    /// judgment) and a verdict-less reply with no recognised cause are NOT rescued: they stay
+    /// `Err` so the uid is asked again next slot (final review item 1, `REPEATABLE_CAUSES`).
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
         let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
@@ -471,6 +478,17 @@ impl judge::EventModel for CloudModel<'_> {
             // A spent cap answers every remaining item identically and must stay retryable
             // tomorrow — never recorded as if the event itself had been considered.
             Err(ModelError::Capped) => Err(ModelError::Capped),
+            // Final review item 1: `judge_pipeline.ts` answers a provider outage as HTTP 200 with
+            // `cause: "model failed"`. Recording that as `unsure` would bury every event judged
+            // during the outage for good, so only a repeatable cause is rescued.
+            Err(ModelError::Failed(reason))
+                if !reply
+                    .get("cause")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cause| REPEATABLE_CAUSES.contains(&cause)) =>
+            {
+                Err(ModelError::Failed(reason))
+            }
             Err(ModelError::Failed(reason)) => Ok(judge::EventVerdict {
                 verdict: "unsure".to_string(),
                 why: judge::one_line(&reason, 140),
