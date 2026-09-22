@@ -199,6 +199,35 @@ source_uid: {uid}\n\
 \n\
 {body}\n";
 
+/// The archived twin of [`NOTE_TEMPLATE`] (D3), and `ingest::IMPORTED_PAST_TEMPLATE`'s rule in
+/// coursework's own shape: the vendor's fields all stay — `progress` is still seeded once from
+/// VHL's `percentage_complete` — and the three lines that say why the note is in `archive/` are
+/// added. A second template rather than a substitution on the first, for the reason ingest gives:
+/// the two differ in what they MEAN, and a reader should not have to diff them to see it.
+///
+/// `needs_enrichment: false` is stated although the active template states nothing (a vendor's
+/// item arrives fully resolved): an archived import is not work the judge owes, and saying so is
+/// cheaper than a reader wondering.
+const IMPORTED_PAST_TEMPLATE: &str = "---\n\
+title: {title}\n\
+course: {course}\n\
+domain: school\n\
+due: {due}\n\
+effort_hours: {effort_hours}\n\
+effort_confidence: {effort_confidence}\n\
+effort_source: {effort_source}\n\
+importance: {importance}\n\
+importance_reason: {importance_reason}\n\
+status: archived\n\
+archived_reason: imported-past\n\
+progress: {progress}\n\
+needs_enrichment: false\n\
+created_by: {created_by}\n\
+source_uid: {uid}\n\
+---\n\
+\n\
+{body}\n";
+
 /// Python's `f"{value}"` on a float, which keeps the decimal point on a whole number — `3.0`,
 /// never `3`. The frontmatter value depends on it: `effort_hours: 3` and `effort_hours: 3.0` load
 /// as different YAML types.
@@ -249,6 +278,11 @@ pub fn sync_coursework(
     dry_run: bool,
     ctx: Option<&WriteContext>,
     journal: Option<&mut Journal>,
+    // D3 / R-OB-3. `true` only on a vault that has never been through a whole slot —
+    // `ingest::is_first_run`, the absence of `state/today.md`, which is the predicate `ingest`
+    // already shares with `app/src/scheduler.rs::needs_first_run`. `main` computes it; every test
+    // that predates D3 passes `false`, which is the behaviour it was written against.
+    first_run: bool,
 ) -> Result<Vec<String>, SourceError> {
     let mut owned_journal;
     let journal: &mut Journal = match journal {
@@ -273,6 +307,18 @@ pub fn sync_coursework(
         .unwrap_or_else(|| jiff::Zoned::now().date())
         .strftime("%Y-%m-%d")
         .to_string();
+    // D3 measures "already past" in the VAULT's timezone (`cli::vault_zone`, through
+    // `cli::local_now`), not the machine's: a student travelling must not have a day's work
+    // archived out from under them. The seen-ledger stamp above keeps its own clock — that value
+    // is a contract with existing vaults and nothing in R-OB-3 asks for it to change.
+    //
+    // `Some` only on a first run (M5): `local_now` reads and parses `config/ingest.yaml`, and every
+    // run after the first would pay for a date nothing below ever reads.
+    let cutoff = if first_run {
+        Some(today.unwrap_or_else(|| crate::cli::local_now(vault).date()))
+    } else {
+        None
+    };
 
     for item in assignments {
         let item_ctx = match ctx {
@@ -372,6 +418,64 @@ pub fn sync_coursework(
             continue;
         }
 
+        // D3 / R-OB-3: a vendor's semester reaches backwards, and a vault born today has no
+        // history to reconcile against. On a FIRST run an item already past is recorded as seen and
+        // written straight into `archive/`. **Not skipped** — skipping leaves the uid unseen and
+        // the next run creates it. **Not created-then-deleted** — that is two journal records and a
+        // note that briefly ranks. One `create` into `archive/`, one `record_seen`, one line.
+        //
+        // Strictly before TODAY, never before *now*: an item due at 23:59 today is today's work,
+        // and the one thing worse than importing a stale task is archiving a live one.
+        //
+        // `cutoff` is `Some` exactly when `first_run` is (M5), so this is the whole predicate.
+        if cutoff.is_some_and(|c| item.due.date() < c) {
+            let archive_dir = vault.join("archive");
+            let mut path = archive_dir.join(format!("{}.md", item.slug));
+            let mut suffix = 2;
+            while path.exists() {
+                path = archive_dir.join(format!("{}-{suffix}.md", item.slug));
+                suffix += 1;
+            }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if dry_run {
+                log.push(format!("would archive (imported-past) {stem} (due {new_due})"));
+                continue;
+            }
+            // M1: below the dry-run guard, never above it — a `--dry-run` that creates a folder in
+            // the vault has already broken the promise it exists to make.
+            let _ = std::fs::create_dir_all(&archive_dir);
+            let text = IMPORTED_PAST_TEMPLATE
+                .replace("{title}", &json_quoted(&item.title))
+                .replace(
+                    "{course}",
+                    &match item.course.as_deref().filter(|c| !c.is_empty()) {
+                        Some(course) => json_quoted(course),
+                        None => "null".to_string(),
+                    },
+                )
+                .replace("{due}", &new_due)
+                .replace("{effort_hours}", &py_float(item.effort_hours))
+                .replace("{effort_confidence}", &item.effort_confidence)
+                .replace("{effort_source}", &item.effort_source)
+                .replace("{importance}", &item.importance.to_string())
+                .replace("{importance_reason}", &json_quoted(&item.importance_reason))
+                .replace("{progress}", &item.progress.to_string())
+                .replace("{created_by}", &item.created_by)
+                .replace("{uid}", &json_quoted(&item.uid))
+                .replace("{body}", &item.body);
+            let target = crate::ids::rel(vault, &path);
+            crate::write::create(vault, &target, &text, &item_ctx, journal, None)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            log.push(format!("archived (imported-past) {stem}"));
+            known.insert(item.uid.clone(), path);
+            record_seen(vault, &item.uid, &item.title, &stamp)
+                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            continue;
+        }
+
         let mut path = tasks_dir.join(format!("{}.md", item.slug));
         let mut suffix = 2;
         while path.exists() {
@@ -414,6 +518,19 @@ pub fn sync_coursework(
         known.insert(item.uid.clone(), path);
         record_seen(vault, &item.uid, &item.title, &stamp)
             .map_err(|err| SourceError::Failed(format!("{err}")))?;
+    }
+    // D3, ingest's line in coursework's words (`ingest::run_lines`, engine/src/ingest.rs:945).
+    // Pushed HERE rather than in `main_with_fetchers` (I3) so a test can read it: `main` returns an
+    // exit code, and this line is not the run-log summary, which is built separately at `:1604`.
+    //
+    // Both spellings are counted, so a `--dry-run` reports the number the real run would archive
+    // rather than zero. One deliberate divergence from ingest: `main` only calls this function when
+    // a source returned something, so a fetch that came back empty says nothing at all, where
+    // ingest reports `0 item(s)` — and an empty coursework parse is already a failure with its own
+    // warning (the coursework spec §9), which is the line that matters on that run.
+    if first_run {
+        let archived = log.iter().filter(|l| l.contains("(imported-past)")).count();
+        log.push(format!("coursework: first run — {archived} item(s) already past were archived"));
     }
     Ok(log)
 }
@@ -1529,6 +1646,10 @@ pub fn main_with_fetchers(
     // H12 / R-OB-1: today's date, computed once and shared by the map-card machinery below —
     // both when a proposal is stamped and when a still-unmapped book is asked about again.
     let today = jiff::Zoned::now().date();
+    // D3: the same predicate `ingest` uses, read BEFORE this pass writes anything — `rank` writes
+    // `state/today.md` at the END of the slot, so coursework and ingest agree within one slot about
+    // which run is the first one.
+    let first_run = crate::ingest::is_first_run(vault);
     let outcome = (|| -> Result<(), SourceError> {
         // H12: an approved coursework-map card is applied BEFORE this run fetches, so a card
         // approved in the console at 11am is a mapping the noon slot already uses. `dry_run`
@@ -1544,7 +1665,7 @@ pub fn main_with_fetchers(
             _ => collect(vault, &config, &mut warnings, fetchers),
         };
         if !assignments.is_empty() {
-            log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?);
+            log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None, first_run)?);
         }
         Ok(())
     })();
@@ -1583,7 +1704,10 @@ pub fn main_with_fetchers(
         let created = log.iter().filter(|l| l.starts_with("created")).count() as i64;
         let updated = log.iter().filter(|l| l.starts_with("updated")).count() as i64;
         let skipped = log.iter().filter(|l| l.starts_with("skipped")).count() as i64;
-        let counts = vec![("created", created), ("updated", updated), ("skipped", skipped)];
+        // D3: an archived import is neither a creation nor a skip, and a first day that looks empty
+        // needs a number that says where the work went.
+        let archived = log.iter().filter(|l| l.starts_with("archived (imported-past)")).count() as i64;
+        let counts = vec![("created", created), ("updated", updated), ("skipped", skipped), ("archived", archived)];
         crate::runs::add_step(vault, rid, "sync", "ok", &counts, "", None);
         steps.push(crate::cli::step_record(&crate::cli::Step {
             name: "sync",
@@ -1763,8 +1887,139 @@ mod tests {
     const VENDOR_TITLE: &str = "GN 103 Hausaufgaben — due Fri 08-28 (21 activities)";
 
     fn sync(items: &[Assignment], vault: &Path, dry_run: bool) -> Vec<String> {
-        sync_coursework(items, vault, Some(date(2026, 8, 25)), dry_run, None, None)
+        sync_coursework(items, vault, Some(date(2026, 8, 25)), dry_run, None, None, false)
             .expect("the sync completed")
+    }
+
+    /// [`sync`] on a vault that has never been through a whole slot (D3).
+    fn sync_first(items: &[Assignment], vault: &Path, dry_run: bool) -> Vec<String> {
+        sync_coursework(items, vault, Some(date(2026, 8, 25)), dry_run, None, None, true)
+            .expect("the sync completed")
+    }
+
+    fn past_and_future() -> [Assignment; 3] {
+        [
+            make("zybooks:p1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 20).at(23, 59, 0, 0), 0),
+            make("zybooks:p2", "cs-100-hw-02", "CS 100 HW 02", date(2026, 8, 24).at(23, 59, 0, 0), 0),
+            make("zybooks:f1", "cs-100-hw-03", "CS 100 HW 03", date(2026, 8, 26).at(23, 59, 0, 0), 0),
+        ]
+    }
+
+    /// D3: a vendor's semester reaches backwards, and a vault born today has no history to
+    /// reconcile against — the first live onboarding put eight already-past zyBooks tasks at the
+    /// top of Must do. On a FIRST run they go straight to `archive/`, under the same field and the
+    /// same word `ingest` uses (R-OB-3), and everything else is created as usual.
+    #[test]
+    fn a_first_run_archives_what_is_already_past_and_creates_the_rest() {
+        let vault = vault_with("cwfirstpast");
+        let items = past_and_future();
+        let log = sync_first(&items, &vault, false);
+        assert_eq!(
+            log,
+            vec![
+                "archived (imported-past) cs-100-hw-01".to_string(),
+                "archived (imported-past) cs-100-hw-02".to_string(),
+                "created cs-100-hw-03".to_string(),
+                // §3's summary line, ingest's in coursework's words (I3).
+                "coursework: first run — 2 item(s) already past were archived".to_string(),
+            ]
+        );
+        assert!(vault.join("tasks").join("cs-100-hw-03.md").is_file());
+        assert!(!vault.join("tasks").join("cs-100-hw-01.md").exists());
+        let meta = meta_of(&vault.join("archive").join("cs-100-hw-01.md"));
+        assert_eq!(field(&meta, "status"), "archived");
+        assert_eq!(field(&meta, "archived_reason"), crate::ingest::IMPORTED_PAST);
+        // `field()` reads back through `pystr::yaml_str` (Python's `str(x)` on a YAML-loaded
+        // value), which renders a real YAML boolean as `"True"`/`"False"` — the template's own
+        // bytes are the lowercase `needs_enrichment: false` the docstring above describes; this
+        // is the round trip, not a different value.
+        assert_eq!(field(&meta, "needs_enrichment"), "False");
+        // The vendor's own numbers survive the move: an archived import is still the item the
+        // vendor described, and `progress` is seeded once at creation and never rewritten.
+        assert_eq!(field(&meta, "effort_source"), "inferred");
+        assert_eq!(field(&meta, "progress"), "0");
+        // All three uids are in the seen ledger, so a second run re-creates nothing.
+        let seen = load_seen(&vault);
+        for item in &items {
+            assert!(seen.contains(&item.uid), "{} is not in the seen ledger", item.uid);
+        }
+        let again = sync_first(&items, &vault, false);
+        assert!(
+            again.iter().all(|l| l.starts_with("coursework: first run")),
+            "a second run changed something: {again:?}"
+        );
+        assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 2);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// …and a run that is not the first creates all three, unchanged. The rule is R-OB-3's, not a
+    /// new policy about old work: a vault mid-semester keeps importing what a vendor still lists.
+    #[test]
+    fn a_later_run_still_creates_an_item_that_is_already_past() {
+        let vault = vault_with("cwlaterpast");
+        let log = sync(&past_and_future(), &vault, false);
+        assert_eq!(log.iter().filter(|l| l.starts_with("created ")).count(), 3);
+        assert!(log.iter().all(|l| !l.contains("imported-past")), "{log:?}");
+        assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A dry run says what it would do and writes nothing — the promise `sync_coursework`'s dry
+    /// run already makes, extended to the archive path.
+    #[test]
+    fn a_first_run_dry_run_names_the_archive_and_writes_nothing() {
+        let vault = vault_with("cwfirstdry");
+        let log = sync_first(&past_and_future(), &vault, true);
+        assert_eq!(
+            log[0],
+            "would archive (imported-past) cs-100-hw-01 (due 2026-08-20T23:59)"
+        );
+        assert_eq!(log[2], "would create cs-100-hw-03 (due 2026-08-26T23:59)");
+        // Both spellings are counted (I3): a dry run that reported zero would be a lie about what
+        // the real run is about to do.
+        assert_eq!(log[3], "coursework: first run — 2 item(s) already past were archived");
+        assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 0);
+        assert!(load_seen(&vault).is_empty());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The run record counts it: the Runs view's sync step says where the work went, so a first day
+    /// shorter than the vendor's list has a number behind it. (The summary LINE is
+    /// `sync_coursework`'s and is asserted by the three tests above — `main` returns an exit code,
+    /// and that line is not the run-log summary, which is built separately at `:1604`.)
+    ///
+    /// `main` passes `today: None`, so the cutoff is the real clock — the two items are built
+    /// around it rather than pinned to a date that is already in the past by the time anyone runs
+    /// this, which would archive both and prove nothing.
+    #[test]
+    fn a_first_run_counts_and_names_what_it_archived() {
+        let vault = runnable_vault(
+            "cwfirstruns",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
+        );
+        // `runnable_vault` gives every other `main` test a vault that has already been ranked;
+        // this one is about the run that has not, so the page `rank` writes is removed.
+        let _ = std::fs::remove_file(vault.join("state").join("today.md"));
+        let now = jiff::Zoned::now().date();
+        let items = vec![
+            make("zybooks:p1", "cs-100-hw-01", "CS 100 HW 01", now.yesterday().unwrap().at(23, 59, 0, 0), 0),
+            make("zybooks:f1", "cs-100-hw-02", "CS 100 HW 02", now.tomorrow().unwrap().at(23, 59, 0, 0), 0),
+        ];
+        let both = |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            Ok(items.clone())
+        };
+        let fetchers: [(&str, Fetcher); 1] = [("zybooks", &both)];
+        assert_eq!(main_with_fetchers(&vault, false, "local-runner", None, Some(&fetchers)), 0);
+        let day = crate::runs::Runs::new(&vault).read(None);
+        let sync_step = day
+            .iter()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sync"))
+            .expect("a sync step");
+        assert_eq!(sync_step["counts"]["archived"], 1);
+        assert_eq!(sync_step["counts"]["created"], 1);
+        let _ = std::fs::remove_dir_all(&vault);
     }
 
     fn meta_of(path: &Path) -> Mapping {
@@ -2414,6 +2669,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(pystr::read_text(&note).unwrap().contains("progress: 40"));
@@ -2692,6 +2948,11 @@ mod tests {
             std::fs::create_dir_all(vault.join(folder)).unwrap();
         }
         write_note(&vault.join("config").join("ingest.yaml"), config);
+        // D3: these tests are about a vault that has already been through a slot — per-source
+        // counts, the run-log summary, the via and run_id on a journal record. `rank` writes this
+        // page at the end of every slot, and without it every one of them would be a FIRST run and
+        // would archive its fixture's already-past assignments instead of creating them.
+        write_note(&vault.join("state").join("today.md"), "# Today\n");
         vault
     }
 
