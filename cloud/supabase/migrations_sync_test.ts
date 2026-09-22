@@ -18,6 +18,17 @@ async function migrations(): Promise<{ name: string; sql: string }[]> {
   return out;
 }
 
+/** Every migration's SQL, joined in file order. `20260912000400_sync_note_path_check.sql`
+ * (R-C3′-exec-10) is the first migration in this stream that patches a constraint without
+ * recreating the table, which breaks the "the LAST file is the current shape" assumption several
+ * tests below used to make with `.at(-1)`: `sync_records`/`sync_notes`'s column definitions still
+ * live only in 000300, and 000400 is textually last but defines nothing about them. A forward-only
+ * corpus never removes a still-true substring, so scanning the whole join finds every check that is
+ * still live exactly where a single "current" file used to. */
+async function corpus(): Promise<string> {
+  return (await migrations()).map((m) => m.sql).join("\n");
+}
+
 /** Every table C3′ leaves BEHIND: created by one of its migrations and not dropped by a later one.
  * Derived, never hand-typed, so a table added or dropped later cannot be forgotten in two places.
  *
@@ -86,7 +97,7 @@ Deno.test("the rows hold the student's own text, bounded in BYTES, and every one
   // one account, that the payload is bounded, and that the bound is in BYTES on both sides of the
   // wire (`octet_length`, not `length`: Postgres counts characters and the device counts bytes, and
   // a vault full of accented Spanish would otherwise disagree with its own cap).
-  const sql = (await migrations()).at(-1)!.sql.toLowerCase();
+  const sql = (await corpus()).toLowerCase();
   assert(sql.includes("account_id  uuid        not null references public.accounts (id) on delete cascade"), "records cascade from the account");
   assert(sql.includes("octet_length(body) between 2 and 16384"), "a record's body is bounded in bytes");
   assert(sql.includes("octet_length(body) between 1 and 131072"), "a note's body is bounded in bytes");
@@ -97,7 +108,11 @@ Deno.test("the rows hold the student's own text, bounded in BYTES, and every one
 Deno.test("a note's path is checked, not trusted", async () => {
   // The path is the note's primary key now, and it is a string a client sends. Without this a
   // pushed `../../etc/hosts` would sit in the table waiting for a restore to write it.
-  const sql = (await migrations()).at(-1)!.sql;
+  //
+  // R-C3′-exec-10 moved the folder/markdown check itself to 20260912000400 (the {1,300} bound in
+  // 000300's version tripped Postgres's DUPMAX), but the two climb-out siblings stayed put in
+  // 000300 — so this reads the whole corpus rather than one file, which is true of both.
+  const sql = await corpus();
   assert(sql.includes("(tasks|approvals|archive|courses|issues|info)/"), "only the six note folders");
   assert(sql.includes("\\.md$"), "and only markdown");
   assert(sql.includes("path !~ "), "and a path that can climb out is refused by its own check");
@@ -113,12 +128,11 @@ Deno.test("retention never deletes a record a human wrote, and the SERVER is wha
   // computed from the record itself — `op` in (set, create) and an actor that is not an agent, which
   // is `provenance::is_agent`'s own `starts_with("agent:")` test. A client cannot lie about it and
   // cannot forget it.
-  const sql = (await migrations()).map((m) => m.sql).join("\n");
+  const sql = await corpus();
   assert(sql.includes("and not keep"), "sync_prune must exempt the records marked `keep`");
-  const last = (await migrations()).at(-1)!.sql;
-  assert(/keep\s+boolean\s+not null generated always as/.test(last), "`keep` is generated, not sent");
-  assert(last.includes("'agent:%'"), "an agent's record is not kept");
-  assert(last.includes("in ('set', 'create')"), "only a set or a create is a human decision worth keeping");
+  assert(/keep\s+boolean\s+not null generated always as/.test(sql), "`keep` is generated, not sent");
+  assert(sql.includes("'agent:%'"), "an agent's record is not kept");
+  assert(sql.includes("in ('set', 'create')"), "only a set or a create is a human decision worth keeping");
 });
 
 Deno.test("the account purge names every table C3′ leaves, and no table it dropped", async () => {
@@ -131,4 +145,91 @@ Deno.test("the account purge names every table C3′ leaves, and no table it dro
   // The quoted NAME, not the word: the comment above the list is allowed to say where
   // `sync_generation` went (hand-off H1 does), and only a string literal in the list is a purge.
   assert(!purge.includes('"sync_generation"'), "sync_generation is gone; purging it is a 404 every time");
+});
+
+/** Every single-quoted string literal that follows a regex operator (`~`, `!~`, `~*`, `!~*`) or
+ * `similar to` — comments stripped first, so a commented-out example pattern is never scanned and
+ * neither is a jsonb literal (`'{"a": 1}'::jsonb` has no such operator before it). SQL doubles an
+ * embedded quote (`''`) rather than escaping it; this corpus never actually has one inside a regex
+ * literal, but the pattern still consumes a doubled quote as literal content rather than stopping on
+ * it, so a future one would not be silently truncated. */
+function regexLiteralsIn(sql: string): string[] {
+  const stripped = sql
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("--");
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join("\n");
+  const re = /(?:~\*?|!~\*?|similar\s+to)\s*'((?:[^']|'')*)'/gi;
+  return [...stripped.matchAll(re)].map((m) => m[1].replace(/''/g, "'"));
+}
+
+/** The largest bound repetition count (`{n}`, `{m,n}`, `{m,}`) in `pattern` that exceeds Postgres's
+ * DUPMAX of 255, or `undefined` if every bound in it is at or under the cap. Both numbers of a
+ * `{m,n}` form are checked, not just the second: `{300,1}` is nonsense Postgres would refuse for a
+ * different reason, but a scan that only read the second number would miss a `{300,}` open bound. */
+function maxBoundOver255(pattern: string): number | undefined {
+  let worst: number | undefined;
+  for (const m of pattern.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
+    for (const g of [m[1], m[2]]) {
+      if (g === undefined || g === "") continue;
+      const n = Number(g);
+      if (n > 255 && (worst === undefined || n > worst)) worst = n;
+    }
+  }
+  return worst;
+}
+
+Deno.test("no regex literal's bound repetition count exceeds Postgres's DUPMAX of 255, except one named, expiring exemption", async () => {
+  // Postgres's regex engine caps a bound repetition count at 255 (DUPMAX) and raises 2201B "invalid
+  // regular expression: invalid repetition count(s)" the first time a ROW is checked against a
+  // pattern over it — not when the migration that declares the CHECK is applied. That is exactly how
+  // 20260912000300_sync_plaintext.sql's `[A-Za-z0-9._ /-]{1,300}` bound on `sync_notes_path_check`
+  // sat on staging, invisible, until the controller's live smoke actually inserted a note (found
+  // 2026-09-22): every insert into `sync_notes` failed. R-C3′-exec-10's fix is
+  // 20260912000400_sync_note_path_check.sql, which drops and replaces that one constraint — 000300
+  // itself is never edited, since it is already applied to staging and migrations are forward-only.
+  //
+  // The exemption below names 000300's superseded literal exactly, and is real only as long as 000400
+  // actually drops `sync_notes_path_check`: an exemption that outlived the fix it was named for would
+  // hide the next regression this guard exists to catch.
+  const EXEMPT_FILE = "20260912000300_sync_plaintext.sql";
+  const SUPERSEDED_PATTERN = "^(tasks|approvals|archive|courses|issues|info)/[A-Za-z0-9._ /-]{1,300}\\.md$";
+
+  const files = await migrations();
+  let sawExemption = false;
+  for (const m of files) {
+    for (const literal of regexLiteralsIn(m.sql)) {
+      const bad = maxBoundOver255(literal);
+      if (bad === undefined) continue;
+      if (m.name === EXEMPT_FILE && literal === SUPERSEDED_PATTERN) {
+        sawExemption = true;
+        continue;
+      }
+      assert(
+        false,
+        `${m.name}: regex literal ${JSON.stringify(literal)} has a repetition bound of ${bad}, over ` +
+          `Postgres's DUPMAX of 255 (2201B "invalid repetition count(s)", found on staging by the ` +
+          `controller's smoke of 2026-09-22) — only ${EXEMPT_FILE}'s superseded path check is exempt, ` +
+          "and only because 20260912000400 replaces it",
+      );
+    }
+  }
+  assert(
+    sawExemption,
+    `expected to find ${EXEMPT_FILE}'s superseded {1,300} path check as the named exemption — if it is ` +
+      "gone, this test's exemption is stale and should be removed along with it",
+  );
+
+  // The exemption is real, not merely declared: the file that supersedes 000300's path check must
+  // actually drop `sync_notes_path_check`, or the over-255 pattern above is still the live
+  // constraint Postgres enforces on every insert.
+  const successor = files.find((f) => f.name === "20260912000400_sync_note_path_check.sql");
+  assert(successor, "expected 20260912000400_sync_note_path_check.sql to supersede 000300's path check");
+  assert(
+    successor!.sql.includes("drop constraint sync_notes_path_check"),
+    "the exemption only holds if 000400 actually drops sync_notes_path_check — otherwise the " +
+      "over-255 pattern named above is still the live constraint",
+  );
 });

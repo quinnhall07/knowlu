@@ -94,19 +94,43 @@ Deno.test("an unknown field beside the body is a 400 that names it", () => {
   assertEquals(e.status, 400);
 });
 
-Deno.test("the byte bounds and the note path's character class match the migration's own checks", async () => {
-  // R-C3′-exec-9 m3: nothing else ties `MAX_RECORD_BYTES`, `MAX_NOTE_BYTES` or `NOTE_PATH_RE`'s
-  // character class to the column checks a drift here would fall through to as an unexplained 502
-  // (`db.ts`'s `ok()` logs PostgREST's error text, which for a check violation names the row).
-  const sql = await Deno.readTextFile(
+Deno.test("the byte bounds and the note path's character class match the migrations' own checks", async () => {
+  // R-C3′-exec-9 m3, amended by R-C3′-exec-10: nothing else ties `MAX_RECORD_BYTES`,
+  // `MAX_NOTE_BYTES` or `NOTE_PATH_RE`'s character class to the column checks a drift here would
+  // fall through to as an unexplained 502 (`db.ts`'s `ok()` logs PostgREST's error text, which for a
+  // check violation names the row). The two byte bounds are still 20260912000300_sync_plaintext.sql's
+  // own, untouched — but the note path check itself moved to
+  // 20260912000400_sync_note_path_check.sql, which drops and replaces `sync_notes_path_check`
+  // because Postgres's regex engine caps a bound repetition count at 255 (DUPMAX) and 000300's
+  // `{1,300}` bound failed every insert on staging (2201B "invalid repetition count(s)", found by
+  // the controller's smoke of 2026-09-22; 000300 is never edited).
+  const plaintextSql = await Deno.readTextFile(
     new URL("../../migrations/20260912000300_sync_plaintext.sql", import.meta.url),
   );
-  assert(sql.includes(`between 2 and ${MAX_RECORD_BYTES})`), "sync_records.body's octet_length bound");
-  assert(sql.includes(`between 1 and ${MAX_NOTE_BYTES})`), "sync_notes.body's octet_length bound");
-  // The character class and its length are the same literal in the SQL and in the regex's own
-  // source — only the slash before it needs escaping in JS and not in SQL, so that one substring
-  // is derived from the constant rather than retyped.
-  const classAndLength = NOTE_PATH_RE.source.match(/\[[^\]]+\]\{[0-9,]+\}/)?.[0];
-  assert(classAndLength, "NOTE_PATH_RE must contain a bounded character class");
-  assert(sql.includes(classAndLength!), "sync_notes.path's character class and length");
+  assert(plaintextSql.includes(`between 2 and ${MAX_RECORD_BYTES})`), "sync_records.body's octet_length bound");
+  assert(plaintextSql.includes(`between 1 and ${MAX_NOTE_BYTES})`), "sync_notes.body's octet_length bound");
+
+  const pathCheckSql = await Deno.readTextFile(
+    new URL("../../migrations/20260912000400_sync_note_path_check.sql", import.meta.url),
+  );
+  // The character class alone — the SQL's version is unbounded (`+`), since Postgres cannot express
+  // a bound over 255, where the device's regex still bounds it ({1,300}); only the class itself is
+  // shared text between the two, so it is derived from the constant rather than retyped.
+  const charClass = NOTE_PATH_RE.source.match(/\[[^\]]+\]/)?.[0];
+  assert(charClass, "NOTE_PATH_RE must contain a character class");
+  assert(pathCheckSql.includes(`${charClass!}+`), "sync_notes.path's character class, unbounded in SQL");
+
+  // The length bound the SQL checks separately (`char_length(...) between 4 and 303`): NOTE_PATH_RE's
+  // own {1,300} plus the three characters of ".md", which sit outside the character class but
+  // inside what `regexp_replace(path, '^[a-z]+/', '')` measures — 1+3=4 and 300+3=303, computed from
+  // the constant so a future change to 300 cannot drift silently from the SQL's hand-typed 303.
+  const bound = NOTE_PATH_RE.source.match(/\{(\d+),(\d+)\}/);
+  assert(bound, "NOTE_PATH_RE must contain a {min,max} bound");
+  const [, minStr, maxStr] = bound!;
+  const minLen = Number(minStr) + 3;
+  const maxLen = Number(maxStr) + 3;
+  assert(
+    pathCheckSql.includes(`between ${minLen} and ${maxLen}`),
+    `sync_notes.path's length bound (expected 'between ${minLen} and ${maxLen}')`,
+  );
 });
