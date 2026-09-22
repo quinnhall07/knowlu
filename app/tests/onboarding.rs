@@ -785,7 +785,7 @@ fn a_child_that_fails_outright_surfaces_its_exit_status_and_stderr_in_error() {
     assert!(err.contains("boom-from-fake-engine"), "the stderr is in it: {err}");
     // stdout was empty (no valid discovery JSON), so rows are empty and the note is the generic one.
     assert!(out["rows"].as_array().unwrap().is_empty());
-    assert_eq!(out["note"].as_str(), Some("we could not reach your coursework sites — fill them in below"));
+    assert_eq!(out["note"].as_str(), Some("We could not reach your coursework sites"));
     let _ = std::fs::remove_dir_all(&root);
 }
 

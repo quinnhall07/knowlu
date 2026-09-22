@@ -1284,6 +1284,60 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         poll.contains("WIZ.step !== 2"),
         "pollEntitlement's tick stands down once the student has left panel 2"
     );
+    // Round-4 re-review, BLOCKING: both stand-down checks must run again AFTER checkEntitled()
+    // resolves, not only before it starts — a reply that lands after the student moved on must not
+    // act on a panel nobody is looking at.
+    let ce_in_poll = poll.find("checkEntitled(").expect("pollEntitlement calls checkEntitled");
+    let guards: Vec<_> = poll.match_indices("WIZ.step !== 2").map(|(i, _)| i).collect();
+    assert_eq!(guards.len(), 2, "pollEntitlement's stand-down is checked before AND after checkEntitled()");
+    assert!(guards[1] > ce_in_poll, "the second WIZ.step !== 2 check runs after checkEntitled() resolves");
+    let up_sub = js
+        .find("if (e.target.closest(\"#up-subscribe\")")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("function finishUpgrade(").next())
+        .expect("the up-subscribe handler");
+    let ce_in_up = up_sub.find("checkEntitled(").expect("the up-subscribe handler calls checkEntitled");
+    let hidden_checks: Vec<_> = up_sub.match_indices("EL(\"upgrade\").hidden").map(|(i, _)| i).collect();
+    assert_eq!(hidden_checks.len(), 2, "the overlay's stand-down is checked before AND after checkEntitled()");
+    assert!(hidden_checks[1] > ce_in_up, "the second hidden check runs after checkEntitled() resolves");
+}
+
+/// R-C1b-exec-10: an empty coursework discovery — no rows, for any reason — must not trap the
+/// student on the logins panel, and must say something rather than show an empty div.
+#[test]
+fn an_empty_coursework_discovery_lets_next_proceed_and_says_so() {
+    let js = read("console.js");
+    let step = js
+        .split("function wizStep(")
+        .nth(1)
+        .and_then(|s| s.split("function wizRegister(").next())
+        .expect("wizStep");
+    assert!(
+        step.contains("WIZ.map.length || WIZ.discovered"),
+        "a finished discovery, rows or none, lets Next proceed"
+    );
+    let mapping = js
+        .split("function renderMapping(")
+        .nth(1)
+        .and_then(|s| s.split("\n  }").next())
+        .expect("renderMapping");
+    assert!(mapping.contains("!WIZ.discovered"), "the mapping panel stays up for a finished-but-empty discovery");
+    assert!(
+        js.contains("You can go on — Knowlu will try again on its first run."),
+        "an empty discovery names the way forward rather than dead-ending"
+    );
+    let onboarding_rs = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
+    for stale in ["fill them in below", "fill those in below"] {
+        assert!(!js.contains(stale), "console.js no longer tells the student to fill in a panel with nothing on it: {stale}");
+        assert!(!onboarding_rs.contains(stale), "onboarding.rs no longer tells the student to fill in a panel with nothing on it: {stale}");
+    }
+    let html = read("index.html");
+    let map_div = html
+        .find("id=\"wiz-map\"")
+        .map(|i| &html[i..])
+        .and_then(|s| s.split("</div>").next())
+        .expect("#wiz-map");
+    assert!(map_div.contains("id=\"wiz-map-heading\""), "the mapping heading has an id renderMapping can hide");
 }
 
 /// The version constant and the page's own date are one fact in two files (`account.rs`'s rule).

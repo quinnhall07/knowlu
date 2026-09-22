@@ -1344,6 +1344,10 @@
             if (EL("upgrade").hidden) { return; }
             tries += 1;
             checkEntitled().then(function (yes2) {
+              // The re-review's blocking finding: the overlay can close while this reply is still in
+              // flight, and a yes that lands after must not act on a panel nobody is looking at
+              // either — the same stand-down, checked again now that the wait is over.
+              if (EL("upgrade").hidden) { return; }
               if (yes2) { return finishUpgrade(); }
               if (tries < 40) { setTimeout(tick, 3000); }
               else { EL("up-error").textContent = "Still not subscribed. When the payment page is done, press Subscribe again."; }
@@ -1480,7 +1484,10 @@
               // decide the mapping panel between them); `checkoutOpened` is what makes the
               // subscribe panel silent until the browser has actually been sent somewhere;
               // `schoolSeq` drops a typeahead answer a later keystroke has already overtaken.
-              lmsOpen: false, discovering: false, checkoutOpened: false, schoolSeq: 0,
+              // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
+              // rows or none — the first `coursework` run files an empty parse as an issue rather
+              // than an empty semester, so a student who saw nothing here can still go on honestly.
+              lmsOpen: false, discovering: false, discovered: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "" };
 
@@ -1586,6 +1593,9 @@
       // vault's ingest.yaml; set before the write resolved, they promised a login that a failed
       // write had not stored (review round 1, IMPORTANT 2).
       stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
+      // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
+      // stand in for one against these.
+      if (stored.length) { WIZ.discovered = false; }
       WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
       clearCredentialFields();
       return true;
@@ -1614,6 +1624,11 @@
     void el.offsetWidth;
     el.classList.add("flash");
   }
+
+  // The discovery command states a reason and nothing else now (onboarding.rs's own rule); the
+  // page is what appends the way forward, and a reason that already ends in a stop needs its own
+  // trimmed before the page's own sentence follows it.
+  function tidy(s) { return String(s || "").replace(/[.\s]+$/, ""); }
 
   function wizValid() {
     WIZ.error = "";
@@ -1687,7 +1702,7 @@
         // can run. Stay on the panel while it does — the mapping is the whole point of having asked
         // for the logins — and let Next work again the moment the rows are on screen.
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length) { renderWizard(); return; }
+        if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }
         WIZ.step = leaving;
         WIZ.discovering = true;
         WIZ.busy = true;
@@ -1698,11 +1713,19 @@
           WIZ.map = ((d && d.rows) || []).map(function (r) {
             return { source: r.source, key: r.key, detail: r.detail, suggested: r.suggested, course: r.suggested || "", ignore: !!r.ignored };
           });
-          EL("wiz-map-note").textContent = (d && d.note)
-            || "Knowlu found these on your accounts. Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for.";
+          // R-C1b-exec-10: set BEFORE renderMapping() runs — the first `coursework` run files an
+          // empty parse as an issue rather than an empty semester, so a finished discovery that
+          // found nothing is still a finished discovery, and renderMapping() has to know that on
+          // this very paint or the panel it is about to draw is the empty one nobody could see.
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = WIZ.map.length
+            ? (d && d.note ? tidy(d.note) + ". " : "Knowlu found these on your accounts. ") + "Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for."
+            : tidy((d && d.note) || "We could not reach your coursework sites") + ". You can go on — Knowlu will try again on its first run.";
           renderMapping();
         }).catch(function () {
-          EL("wiz-map-note").textContent = "We could not look those up — fill them in below.";
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = "We could not look those up. You can go on — Knowlu will try again on its first run.";
+          renderMapping();
         }).then(function () {
           // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
           // comes back. Repainted here rather than left for a later render: nothing else touches the
@@ -1816,6 +1839,10 @@
       if (WIZ.entitled || WIZ.step !== 2) { return; }
       tries += 1;
       checkEntitled().then(function (yes) {
+        // The re-review's blocking finding: the student can leave panel 2 while this reply is still
+        // in flight, and a yes that lands after they moved on must not act on a panel nobody is
+        // looking at either — the same stand-down, checked again now that the wait is over.
+        if (WIZ.entitled || WIZ.step !== 2) { return; }
         if (yes) {
           WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
         }
@@ -1989,7 +2016,10 @@
   /// student corrects. A row left blank is a source that stays unmapped — which is a choice, and is
   /// why the panel says what the consequence is rather than refusing Next.
   function renderMapping() {
-    EL("wiz-map").hidden = WIZ.map.length === 0;
+    // A finished discovery that found nothing still has a note to show — only an UNfinished one
+    // (nothing asked yet) has no panel to paint.
+    EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
+    EL("wiz-map-heading").hidden = WIZ.map.length === 0;
     EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
       return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
              (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +

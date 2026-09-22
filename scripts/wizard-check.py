@@ -68,9 +68,11 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
     return Promise.resolve({ ok: true, error: null, typed: false,
       courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100' }] }); }
   if (cmd === 'discover_coursework') {
-    return Promise.resolve({ ok: true, error: null, note: null, rows: [
-      { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
-      { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
+    return window.__DISCOVER_EMPTY
+      ? Promise.resolve({ ok: true, error: null, note: 'We could not reach your coursework sites', rows: [] })
+      : Promise.resolve({ ok: true, error: null, note: null, rows: [
+        { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
+        { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
   if (cmd === 'store_credentials') {
     return (args.user || '').indexOf('fail') === 0
       ? Promise.resolve({ ok: false, error: 'credential write failed for ' + args.source })
@@ -85,6 +87,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   return Promise.resolve({ ok: true, error: null });
 } } };
 window.__ENTITLED = false;
+window.__DISCOVER_EMPTY = false;
 window.__CALLS = [];
 """
 
@@ -200,10 +203,30 @@ def check(page) -> list:
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-logins"): bad.append("a failed credential write advanced anyway")
     if page.input_value("#wiz-zy-pass") == "": bad.append("a failed write cleared the fields the user must retype")
-    page.fill("#wiz-zy-user", "a@example.invalid")
+
+    # R-C1b-exec-10: an empty discovery — no rows, for any reason — must not trap the student on
+    # this panel, and must say something rather than show an empty div.
+    page.evaluate("window.__DISCOVER_EMPTY = true")
+    page.fill("#wiz-zy-user", "a@example.invalid"); page.fill("#wiz-zy-pass", secret)
+    page.click("#wiz-next"); page.wait_for_timeout(400)
+    if page.is_hidden("#wiz-logins"): bad.append("an empty discovery left the credentials panel on its own")
+    if names(page).count("discover_coursework") != 1: bad.append("an empty discovery did not run exactly once")
+    if page.is_hidden("#wiz-map"): bad.append("an empty discovery hid the panel — the student saw nothing")
+    if page.inner_text("#wiz-map-rows").strip() != "": bad.append("an empty discovery still listed rows")
+    if "You can go on" not in page.inner_text("#wiz-map-note"): bad.append("an empty discovery did not say the way forward")
+    if not page.is_hidden("#wiz-map-heading"): bad.append("an empty discovery still showed the mapping heading")
+    page.click("#wiz-next"); page.wait_for_timeout(300)
+    if page.is_hidden("#wiz-gmail"): bad.append("an empty discovery trapped the student on the logins panel")
+    if names(page).count("discover_coursework") != 1: bad.append("Next re-ran discovery on an already-finished empty result")
+
+    page.click("#wiz-back"); page.wait_for_timeout(150)
+    if page.is_hidden("#wiz-logins"): bad.append("Back did not return to the credentials panel")
+    page.evaluate("window.__DISCOVER_EMPTY = false")
     # R-OB-1: the first Next after a successful store runs discovery and STAYS on the panel with the
     # rows; the second one moves on. A wizard that took the password and skipped the mapping is the
-    # run this exists because of.
+    # run this exists because of. The fields were cleared by the earlier successful store, so they
+    # are re-typed here — a re-typed login is a new answer and runs discovery again.
+    page.fill("#wiz-zy-user", "a@example.invalid"); page.fill("#wiz-zy-pass", secret)
     page.click("#wiz-next"); page.wait_for_timeout(400)
     if page.is_hidden("#wiz-logins"): bad.append("the mapping step was skipped after the credentials were stored")
     if "discover_coursework" not in names(page): bad.append("discovery did not run after the credentials were stored")
@@ -211,6 +234,7 @@ def check(page) -> list:
     rows = page.inner_text("#wiz-map-rows")
     if "UACS100Fall2026" not in rows or "2102121" not in rows: bad.append(f"the discovered sources are not listed: {rows!r}")
     if page.input_value('[data-course-for="0"]') != "CS 100": bad.append("the suggestion was not pre-filled")
+    if names(page).count("discover_coursework") != 2: bad.append("re-typed logins did not run discovery again")
     page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-gmail"): bad.append("a confirmed mapping did not advance to the Gmail panel")
