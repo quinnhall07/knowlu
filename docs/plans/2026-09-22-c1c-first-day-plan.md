@@ -10,7 +10,7 @@
 
 **Spec:** `docs/specs/2026-09-22-c1c-first-day-design.md` (decisions D1–D8; §7 is the controller's live proof, not a task; §8 and D9 are out of scope).
 
-**Status: AMENDED 2026-09-22 (fix round 1: B1, B2, I1–I4, minors M1–M7 — all taken, none refused).** Review: `docs/reports/2026-09-22-c1c-first-day-plan-review.md`. Four controller rulings decide where the spec contradicts itself or the code; each is recorded at the step it changes as **Ruling R-C1c-plan-1…4**, and a ruling overrides the spec.
+**Status: REVIEWED 2026-09-22 — EXECUTE** (the scoped re-review after fix round 1 says *Execute*, none open). AMENDED 2026-09-22 (fix round 1: B1, B2, I1–I4, minors M1–M7 — all taken, none refused).** Review: `docs/reports/2026-09-22-c1c-first-day-plan-review.md`. Four controller rulings decide where the spec contradicts itself or the code; each is recorded at the step it changes as **Ruling R-C1c-plan-1…4**, and a ruling overrides the spec.
 
 ## Global Constraints
 

@@ -373,3 +373,78 @@ say so in the task and record that the retention rule now trades failures for sk
   (Task 5). Tasks 3 and 4 both edit `app/static/console.js` and both restate `renderCourses`, which
   the plan flags in Task 3 Step 6 — that is a sequencing note, not duplication. No step is a
   placeholder; every test is written out in full.
+
+## Re-review after fix round 1 (2026-09-22)
+
+**Execute.**
+
+Checked the amended plan (`docs/plans/2026-09-22-c1c-first-day-plan.md`, 1,601 lines, Status AMENDED)
+against the four rulings in `progress.md`, the spec, and the current text of every file each amended
+step cites, in this worktree on branch `c1c-first-day`. All thirteen findings are addressed; no new
+blocking or important defect found. One minor observation below.
+
+- **B1** (scaffold title assertion goes red) — addressed. Task 3 Step 5a amends
+  `every_enrolled_course_becomes_a_note_the_engine_can_find` (`app/tests/scaffold.rs:668-695`) to a
+  `(slug, title, name)` triple and asserts both `title:` and `name:` lines; the test is named in Task
+  3 Step 7's "Expected: PASS" list. Traced `course_code_in_name` (Task 3 Step 3) by hand over all
+  eight cases the plan's new test asserts (`202640-BUI-100-101`, `MATH-125-001`, the two-word form,
+  `PSYC 101H Honors`, `Biology`, `""`, `MATH-1250-001`, `UACS100Fall2026`) — every one answers as
+  claimed, including the two negatives.
+- **B2** (the first-run condition can never be true) — addressed exactly as Ruling R-C1c-plan-1. Task
+  5 Step 3's `first_run_value` keys on `ingest::is_first_run` alone
+  (`engine/src/ingest.rs:493-495`, confirmed: `!vault.join("state").join("today.md").exists()`); the
+  `state` wrapper (`app/src/commands.rs:337`, confirmed current three-clause line) attaches the block
+  and, only when `env["ok"] != true`, downgrades to the §6 safety net rather than requiring it. `poll`
+  (Step 8) keys on `if (env.first_run)` alone, matching the amended static test's
+  `poll.contains("if (env.first_run) {")`. The commands test asserts the premise
+  (`env["ok"] == true` on a never-ranked vault) rather than assuming it. `Scheduler`/`RunSummary`
+  field names and `scheduler::lock` all check out against `app/src/scheduler.rs:51-132`.
+- **I1** (D6's sentence written into a hidden panel) — addressed exactly as Ruling R-C1c-plan-3. Confirmed
+  against the real `wizStep` (`app/static/console.js:1670-1712`): `WIZ.step` is set at line 1692,
+  before the `leaving === 5` branch, and the plan's replacement targets the correct
+  `if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }` at line 1705. The stay-once
+  latch (`WIZ.mapWarned`, cleared in `storeCredentials` beside the existing `WIZ.discovered = false`
+  at line 1598) reproduces the discovery panel's own established stay-once shape
+  (`WIZ.step = leaving;` at line 1706). The headless check's replacement (Step 7) asserts
+  `is_visible`, not `inner_text` alone, closing the exact hole B2's sibling finding named for the old
+  check.
+- **I2** (spec self-contradiction) — addressed exactly as Ruling R-C1c-plan-2. `Course`
+  (`app/src/lms_link.rs:461-469`) and `CourseSeed` (`app/src/scaffold.rs:271-280`) each have exactly
+  three fields today; the plan's fourth (`label`) is added to both, `#[serde(default)]`, and every
+  existing struct-literal site in the tree is accounted for and updated: `app/tests/scaffold.rs:91,
+  676, 677, 710, 714, 716, 769` and `app/tests/onboarding.rs:923, 924` (verified by grepping every
+  `CourseSeed {` and `Course {` construction in `app/` — the plan's list is exhaustive, none missed).
+  `app/src/onboarding.rs:632-638`'s `CourseSeed` rebuild iterates `plan.courses: Vec<CourseSeed>`
+  (line 466) directly, so `c.label` is already typed and needs no new field on a separate JS-facing
+  struct. The round-trip test's `keys` amendment (`app/tests/lms_link.rs:476`) sorts correctly
+  (`code < label < name < slug`). One minor implementation nuance, not a defect: Task 4's
+  `renderCourses` shows `label · name` only when `c.label && c.label !== c.name` (an added
+  not-equal guard the ruling's text doesn't spell out), so a typed course — whose row is pushed as
+  `{code, name: code, slug: "", label: code}` — reads as plain `CS 100` rather than `CS 100 · CS
+  100`. Sensible and harmless; flagged only because the ruling as recorded says "when set," not "when
+  set and different."
+- **I3** (D3 summary line unobservable) — addressed. The push moved into `sync_coursework`, at the
+  function's true end before `Ok(log)` (confirmed against the current 6-parameter signature at
+  `engine/src/coursework.rs:245-252`, and the `stamp`/`seen.contains`/`tasks_dir.join` anchors at
+  lines 272, 370, 375 — the archive block's insertion point). All three of Task 1's new tests assert
+  the line's exact text, including the dry-run spelling; the fourth test's doc comment now claims
+  only the run record's `archived` count and that `main` stays green.
+- **I4** (routine skips evict real failures) — addressed exactly as Ruling R-C1c-plan-4. Confirmed
+  against `engine/src/cli.rs:657-676`: `trim_log_lines` keeps the newest 50 `ok` lines and the newest
+  100 non-`ok` lines by index, so writing the skip at status `ok` puts it in the 50-line bucket that
+  already ages out routine lines, never touching the 100-line bucket a WARN/FAIL lives in. The
+  insertion point in Task 2 Step 4 (between the `JudgePlan::Skip` push at
+  `app/src/scheduler.rs:611-613` and `match engine_exe()` at line 614) is exactly right — both the
+  ingest skip (pushed earlier at lines 598-599) and the judge skip are already in `steps` by that
+  point, so the filter catches both. `append_run_log`'s signature and `runs::log_line`'s rendered
+  shape (`- <date> <time> <runner> <status> <summary>`) were checked directly and match the test's
+  `"local ok judge (skipped: no entitlement)"` assertion token-for-token.
+- **M1–M7** — all six re-verified in place (M1 create_dir_all moved below the dry-run continue in
+  Task 1 Step 4; M2 Step 2 names the four `main` tests; M3 Task 4 Step 1 says "wizGo/wizStep",
+  confirmed the slice's actual span, `wizGo` 1653 to `wizRegister` 1744, contains `wizStep` at 1670;
+  M4 the datalist option carries a `name || code` label distinct from its `label || slug` value; M5
+  the cutoff is `Option<Date>`, computed only under `if first_run`; M6 stated in the Step 8 comment;
+  M7 stated in Task 1 Step 5). None reopens a question the controller already settled.
+
+No new blocking or important finding. The `label !== c.name` nuance above is the only thing worth a
+second look, and it is cosmetic — recorded as informational, not a gate on Execute.
