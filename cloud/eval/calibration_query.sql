@@ -1,5 +1,5 @@
--- T6 — the calibration harness's query (stream J, `.superpowers/sdd/2026-09-22-judgment-quality-
--- plan/t6-brief.md`). Produces one row per judgment: enough to answer "does our `confidence` mean
+-- T6 — the calibration harness's query (stream J, `docs/plans/2026-09-22-judgment-quality-plan.md`
+-- Task T6). Produces one row per judgment: enough to answer "does our `confidence` mean
 -- anything?" per kind, grouped by the prompt that produced it.
 --
 -- **This file is never run by this harness.** Per the dispatch's own decision ("No database

@@ -52,9 +52,9 @@ const TASK_SCHEMA = {
 // event's own text, and forcing a choice among the other three there measurably breaks both
 // accuracy and calibration on the unanswerable slice (docs/notes/2026-09-22-jev-what-people-built.md
 // §3) — the same failure a router that always guesses shows on a benchmark's hard slice. `unsure`
-// lets the model say so honestly, and `judge_validate.ts`'s `record_verdict` path writes it like
-// any other verdict, so the uid is never re-asked (events spec §7's one-verdict-per-uid-forever
-// rule already does the rest).
+// lets the model say so honestly, and the device's `record_verdict` (`engine/src/eventledger.rs`)
+// writes it like any other verdict, so the uid is never re-asked (events spec §7's
+// one-verdict-per-uid-forever rule already does the rest).
 const EVENT_SCHEMA = {
   type: "object",
   properties: {
