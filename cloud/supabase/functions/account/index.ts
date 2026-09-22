@@ -63,12 +63,13 @@ Deno.serve(async (req) => {
             "corrections",
             "issues",
             "billing_reminders",
-            // C3': the account's copy of the vault, in plain text (the amendment's ruling 2). The
-            // foreign key already cascades from `accounts`, but this list is what the privacy
-            // policy's deletion paragraph is written from, so a table that holds the student's data
-            // is named here whether or not the cascade would also reach it. `sync_usage` is the
-            // account's byte counter: it holds no content, but it holds a fact about the student
-            // and the same argument applies.
+            // C3′ (cloud design, amendment 2026-09-17, ruling 2): the account's own copy of the
+            // student's vault — the records and the note text, readable by this service and
+            // encrypted at rest. The foreign key already cascades from `accounts`, but this list is
+            // what the privacy policy's deletion paragraph is written from, so a table that holds
+            // the student's data is named here whether or not the cascade would also reach it.
+            // `sync_usage` is the account's byte counter: it holds no content and the same argument
+            // applies. `sync_generation` is gone with the device key it named.
             "sync_records",
             "sync_notes",
             "sync_usage",
