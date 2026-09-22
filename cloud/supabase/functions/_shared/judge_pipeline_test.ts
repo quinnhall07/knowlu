@@ -347,3 +347,45 @@ Deno.test("the prompt hash is stable across accounts with different planner slic
   );
   assertEquals(a.rows[0].prompt_hash, b.rows[0].prompt_hash);
 });
+
+// Final review item 2: the capability gate for `unsure`. A pre-T1 engine rejects the fourth word
+// (its VALID_VERDICTS has three) and re-asks — and pays — every slot, so a request that does not
+// declare `accepts: ["unsure"]` gets exactly the pre-T1 shape instead: no verdict, `below floor`.
+const EVENT_ITEM = { uid: "engage:1", title: "AI Club Kickoff", start: "2026-08-29T18:00", end: "2026-08-29T19:30" };
+const UNSURE = { verdict: "unsure", why: "the text does not say who it is for", confidence: 0.3 };
+
+Deno.test("an event request that does not declare accepts unsure never sees unsure", async () => {
+  for (const accepts of [undefined, [], ["completion"]]) {
+    const log = new Sink();
+    const reply = await judge(
+      "acct-1",
+      { kind: "event", item: EVENT_ITEM, heuristics_seed: {}, ...(accepts === undefined ? {} : { accepts }) },
+      deps(new ScriptedModel([UNSURE]), log, new Caps()),
+    );
+    assertEquals(reply.verdict, null, `accepts ${JSON.stringify(accepts)}`);
+    assertEquals(reply.outcome, "low confidence");
+    assertEquals(reply.cause, "below floor");
+    assertEquals(reply.tier, 3);
+    assertEquals(reply.judgment_id, "judgment-1");
+  }
+});
+
+Deno.test("an event request that declares accepts unsure gets unsure as a verdict", async () => {
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {}, accepts: ["unsure"] },
+    deps(new ScriptedModel([UNSURE]), new Sink(), new Caps()),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.verdict?.verdict, "unsure");
+});
+
+Deno.test("an undeclared event request still gets the three old words untouched", async () => {
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([{ verdict: "drop", why: "a club social", confidence: 0.9 }]), new Sink(), new Caps()),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.verdict?.verdict, "drop");
+});

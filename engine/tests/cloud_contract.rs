@@ -366,6 +366,14 @@ fn refused_and_truncated_event_replies_become_unsure() {
     }
 }
 
+/// Final review item 2: the device declares it understands the fourth verdict word, so the
+/// service may answer `unsure`; an engine that does not declare it gets the pre-T1 shape instead.
+#[test]
+fn the_event_request_declares_it_accepts_unsure() {
+    let body = knowlu_engine::cloudmodel::event_request(&event_item("engage:6"));
+    assert_eq!(body["accepts"], serde_json::json!(["unsure"]), "{body}");
+}
+
 #[test]
 fn tier1_still_answers_without_the_service_being_reached_at_all() {
     // The seam is unchanged (cloud design §3.2): a vendor-stated effort plus a pinned course is a

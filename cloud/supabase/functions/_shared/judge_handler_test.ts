@@ -122,3 +122,23 @@ Deno.test("a thrown error is a 500 that names nothing from the request", async (
   assertEquals(text.includes("TRIPWIRE-9f2c"), false);
   assertEquals(text.includes("CS 100 HW 01"), false);
 });
+
+// Final review item 2: the handler carries the request's `accepts` through to the pipeline's gate.
+Deno.test("the event handler answers unsure only to a request that declares it", async () => {
+  const unsure = { verdict: "unsure", why: "the text does not say who it is for", confidence: 0.3 };
+  const event = (extra: Record<string, unknown>) =>
+    JSON.stringify({ kind: "event", item: { uid: "engage:1", title: "AI Club Kickoff" }, heuristics_seed: {}, ...extra });
+  const ask = async (body: string) => {
+    const handler = judgeHandler("event", OK, deps(new ScriptedModel([unsure])));
+    const response = await handler(new Request("http://127.0.0.1/judge-event", { method: "POST", body }));
+    assertEquals(response.status, 200);
+    return await response.json();
+  };
+  const declared = await ask(event({ accepts: ["unsure"] }));
+  assertEquals(declared.verdict.verdict, "unsure");
+  const old = await ask(event({}));
+  assertEquals(old.verdict, null);
+  assertEquals(old.cause, "below floor");
+  const malformed = await ask(event({ accepts: "unsure" }));
+  assertEquals(malformed.verdict, null, "a non-array accepts declares nothing");
+});

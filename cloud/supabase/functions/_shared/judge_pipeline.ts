@@ -30,6 +30,9 @@ export interface JudgeRequest {
   kind: Kind;
   item: Record<string, unknown>;
   heuristics_seed: Record<string, unknown>;
+  /** What the caller's engine can take beyond the original vocabulary. Today one word matters:
+   * `"unsure"` on an event request (final review item 2, see `gateUnsure`). */
+  accepts?: readonly string[];
 }
 
 export interface JudgeReply {
@@ -91,6 +94,28 @@ function itemId(item: Record<string, unknown>): string {
 }
 
 export async function judge(
+  accountId: string,
+  req: JudgeRequest,
+  deps: PipelineDeps,
+): Promise<JudgeReply> {
+  return gateUnsure(req, await judgeUngated(accountId, req, deps));
+}
+
+/**
+ * Final review item 2: the capability gate for event-3's fourth verdict word. An engine from
+ * before stream J's T1 rejects `unsure` (its `VALID_VERDICTS` has three words), treats the reply as
+ * a failure and asks — and pays — again every slot. So a request that does not declare
+ * `accepts: ["unsure"]` receives exactly the pre-T1 shape instead: no verdict, `low confidence`,
+ * `below floor` — today's behaviour for that device, never worse. The `judgments` row keeps what
+ * the model actually said; only the reply to the old device is reshaped.
+ */
+function gateUnsure(req: JudgeRequest, reply: JudgeReply): JudgeReply {
+  if (req.kind !== "event" || reply.verdict?.verdict !== "unsure") return reply;
+  if (Array.isArray(req.accepts) && req.accepts.includes("unsure")) return reply;
+  return { ...reply, verdict: null, outcome: "low confidence", cause: "below floor" };
+}
+
+async function judgeUngated(
   accountId: string,
   req: JudgeRequest,
   deps: PipelineDeps,

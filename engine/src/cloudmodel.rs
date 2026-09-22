@@ -436,7 +436,11 @@ pub fn event_request(item: &judge::EventItem) -> Value {
             "url": item.url, "description": item.description,
             "categories": item.categories, "audiences": item.audiences, "series_uid": item.series_uid,
         },
-        "heuristics_seed": { "interests": item.interests }
+        "heuristics_seed": { "interests": item.interests },
+        // Final review item 2: this engine understands the fourth verdict word. The service answers
+        // `unsure` only to a request that declares it; an older engine (whose VALID_VERDICTS has
+        // three words) gets the pre-T1 `verdict: null` + `below floor` shape instead.
+        "accepts": ["unsure"]
     })
 }
 

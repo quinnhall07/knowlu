@@ -299,7 +299,11 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
           return reply;
         },
       };
-      const reply = await judge(EVAL_ACCOUNT, { kind, item: r.request.item, heuristics_seed: r.request.heuristics_seed }, {
+      // The eval speaks for the current engine, which declares `unsure` on every event request
+      // (final review item 2) — without this, `judge()` would answer every `unsure` case with the
+      // pre-T1 `below floor` shape and the eval would score the gate, not the model.
+      const accepts = kind === "event" ? ["unsure"] : [];
+      const reply = await judge(EVAL_ACCOUNT, { kind, item: r.request.item, heuristics_seed: r.request.heuristics_seed, accepts }, {
         row,
         model: metered,
         // Tier 2 is deliberately OFF for the eval: a promoted rule would score the rule, not the

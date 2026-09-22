@@ -517,3 +517,42 @@ Deno.test("thresholds.json's _note is provisional documentation, ignored by the 
   const email = thresholds.email as Record<string, number>;
   assertEquals(email.weighted_exact_min, 0.70);
 });
+
+// Final review item 2: the eval calls `judge()` directly, and `judge()` only answers `unsure` to a
+// request that declares it — so the eval must declare it too, or every `unsure`-labelled event
+// case would score as a miss against the pre-T1 `below floor` shape.
+Deno.test("an unsure-labelled event case scores 1.0 on a dry run, so the eval declares accepts unsure", async () => {
+  const theirs = { verdict: "unsure" };
+  const request = { kind: "event" as const, item: { uid: "engage:1", title: "AI Club Kickoff" }, heuristics_seed: {} };
+  const values: number[] = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?kind=eq.event")) {
+        return Promise.resolve([{ id: 1, kind: "event", request, ours: null, theirs }]);
+      }
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.event")) {
+        return Promise.resolve([{
+          kind: "event", provider: "anthropic", model_id: "claude-haiku-4-5", prompt_version: "event-3",
+          grammar_version: "event-3", max_tokens: 256, sampling: {}, usd_per_m_in: 1, usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") values.push(row.value as number);
+      return Promise.resolve(null);
+    },
+  });
+  const records: SeedRecord[] = [{ id: "seed-e1", kind: "event", request, theirs }];
+  const captured = captureConsole();
+  try {
+    await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      { db: () => db, loadSeed: () => Promise.resolve(records), envGet: () => undefined },
+    );
+  } finally {
+    captured.restore();
+  }
+  assertEquals(values, [1]);
+});

@@ -28,9 +28,13 @@ export function judgeHandler(
       const seed = typeof body.heuristics_seed === "object" && body.heuristics_seed !== null
         ? body.heuristics_seed
         : {};
+      // Only a list of strings declares anything (final review item 2's `unsure` gate).
+      const accepts = Array.isArray(body.accepts)
+        ? body.accepts.filter((word): word is string => typeof word === "string")
+        : [];
       const reply = await judge(
         account_id,
-        { kind, item: body.item, heuristics_seed: seed },
+        { kind, item: body.item, heuristics_seed: seed, accepts },
         await deps(kind),
       );
       return Response.json(reply);
