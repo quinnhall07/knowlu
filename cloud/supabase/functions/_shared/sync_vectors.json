@@ -1,7 +1,0 @@
-{
-  "_why": "Two AES-256-GCM envelopes over one plaintext under one key, one sealed by Rust and one by Deno, so each language proves it can open the other's. Written once by hand (C3 Task 3); no test regenerates it, because a vector a test can regenerate proves only that a function agrees with itself. The key is a TEST VECTOR and protects nothing.",
-  "key": "bm90LWEtc2VjcmV0LTMyLWJ5dGUtdGVzdC1rZXktISE=",
-  "plaintext": "the quick brown fox — ünïcode, and a \" quote",
-  "rust": { "iv": "t8ujlR2ZyhPTystw", "ciphertext": "RCP4M0gDRoOVasA+zUn6QIBdrv/aWDvNNC4aqSU/nLfh3IXL1wQp7dTDTRZN6pxeTbt8vWQiQZOc7yBKh/uZtA==" },
-  "deno": { "iv": "6zNlFo1QOwl4qr0I", "ciphertext": "h+7hqqVxX8VsCfCamd7ub8FqEvAGwfvpc85kqxJt6DYzZmv8I3LAoUZ99LlE4siQZPkeJFv44mvQTO9I88Cp/w==" }
-}
