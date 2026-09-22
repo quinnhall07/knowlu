@@ -506,17 +506,34 @@ pub fn fetch_zybooks_into(
             }
         };
         let payload = crate::zybooks::fetch_assignments(&token, &code, None)?;
-        sink.borrow_mut().extend(crate::zybooks::completions(&payload));
-        out.extend(crate::zybooks::parse_assignments(
-            &payload,
-            &cfg_str(&mapping, "course", ""),
-            &cfg_str(&mapping, "label", ""),
-            cfg,
-            tz,
-            warnings,
-        )?);
+        out.extend(absorb_zybooks_book(&payload, &mapping, cfg, tz, warnings, sink)?);
     }
     Ok(out)
+}
+
+/// One fetched zyBooks book: its assignments, and — only once they parsed — its completion figures
+/// into `sink`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn absorb_zybooks_book(
+    payload: &serde_json::Value,
+    mapping: &Mapping,
+    cfg: &Mapping,
+    tz: &TimeZone,
+    warnings: &mut Vec<String>,
+    sink: &CompletionSink,
+) -> Result<Vec<Assignment>, SourceError> {
+    let items = crate::zybooks::parse_assignments(
+        payload,
+        &cfg_str(mapping, "course", ""),
+        &cfg_str(mapping, "label", ""),
+        cfg,
+        tz,
+        warnings,
+    )?;
+    // Only AFTER the payload parsed (final review item 7), as the VHL wrapper already does:
+    // `completions` is lenient, so a payload the parser rejects could otherwise still file cards.
+    sink.borrow_mut().extend(crate::zybooks::completions(payload));
+    Ok(items)
 }
 
 pub fn fetch_vhl(
@@ -3904,6 +3921,38 @@ mod tests {
         assert_eq!(run_with_figure(&vault, true, 193.0), 0);
         assert_eq!(snapshot(&vault), before, "a dry run wrote something");
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Final review item 7: a zyBooks payload of unexpected shape must file no completion cards.
+    /// `completions` is deliberately lenient (it skips what it cannot read), so if the figures were
+    /// taken before `parse_assignments` had accepted the payload, a payload the parser rejects
+    /// could still propose "done" cards for the assignments it did manage to read.
+    #[test]
+    fn a_zybooks_payload_that_fails_to_parse_reports_no_completion_figures() {
+        let payload = serde_json::json!({
+            "success": true,
+            "assignments": [{"assignment_id": 1, "sections": [], "section_scores": []}, 42],
+        });
+        assert!(!crate::zybooks::completions(&payload).is_empty(), "precondition: a figure is readable");
+        let sink = CompletionSink::default();
+        let mut warnings = Vec::new();
+        let got = absorb_zybooks_book(&payload, &Mapping::new(), &Mapping::new(), &TimeZone::get(DEFAULT_TZ).unwrap(), &mut warnings, &sink);
+        assert!(got.is_err(), "the payload must not parse: {got:?}");
+        assert!(sink.borrow().is_empty(), "a rejected payload reported {:?}", sink.borrow());
+    }
+
+    #[test]
+    fn a_zybooks_payload_that_parses_reports_its_completion_figures() {
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string("tests/fixtures/zybooks-assignments-scored.json").unwrap(),
+        )
+        .unwrap();
+        let sink = CompletionSink::default();
+        let mut warnings = Vec::new();
+        let items = absorb_zybooks_book(&payload, &Mapping::new(), &Mapping::new(), &TimeZone::get(DEFAULT_TZ).unwrap(), &mut warnings, &sink)
+            .expect("the scored fixture parses");
+        assert_eq!(items.len(), 6);
+        assert_eq!(sink.borrow().len(), 6);
     }
 
     #[test]
