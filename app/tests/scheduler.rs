@@ -606,6 +606,9 @@ fn a_vault_that_has_never_been_ranked_is_owed_its_first_run_at_launch() {
 /// sit side by side in the Runs view and a reader should not have to learn two conventions.
 #[test]
 fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_green() {
+    // D1: this vault has an account and no cache, so the slot now attempts one refresh, which
+    // reaches `valid_access_token_at` and the real Credential Manager (CLAUDE.md).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let v = scratch("noentitlement");
     std::fs::write(
         v.join("config").join("runners.yaml"),
@@ -736,6 +739,95 @@ fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() 
     assert!(named.contains(&"judge (skipped: no entitlement)".to_string()), "{named:?}");
     assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
     assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// §2 / D1: the first slot of a brand-new cloud vault used to lose a race. `scheduler::spawn`
+/// starts the first slot and the launch entitlement refresh on two threads, and on the first live
+/// onboarding the slot reached the judge decision before the refresh had written its cache — so the
+/// judge was skipped for want of an answer that was already on its way. A vault that has an account
+/// and has never cached an entitlement now refreshes it INSIDE the slot, before the decision.
+#[test]
+fn a_first_slot_refreshes_the_entitlement_before_it_decides_about_judge() {
+    // The refresh reaches `valid_access_token_at`, which reads the real Credential Manager
+    // (CLAUDE.md: every test that touches the store takes this file's lock).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entrefresh");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entrefresh");
+    assert!(!knowlu::account::cache_path(&cs.data_dir).exists(), "nothing has been cached yet");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entrefresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    // D8: and the skip reaches the file a student can open, in the engine's own format — with
+    // status `ok`, because a skip is routine (Ruling R-C1c-plan-4).
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok judge (skipped: no entitlement)"), "{log}");
+    assert!(!log.contains("local skip"), "a skip must not be a non-ok line: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and a cache that already exists is never refreshed here, even a stale one: the six-hourly
+/// housekeeping refresh and the 72-hour grace own that question, and a slot is not the place to
+/// re-ask one that has an answer.
+#[test]
+fn a_cached_entitlement_is_never_refreshed_inside_the_slot() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entcached");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entcached");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entcached-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
+    // Nothing was skipped, so nothing was written: D8 adds a line for a skip, not for every slot.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
+    assert!(!log.contains("(skipped:"), "{log}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }

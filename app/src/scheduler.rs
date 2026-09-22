@@ -606,10 +606,61 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
     // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
     // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
+    // §2 / D1: a cloud vault whose entitlement has NEVER been cached refreshes it here,
+    // synchronously, before the judge decision. `scheduler::spawn` starts the first slot and the
+    // launch refresh on two threads, and the first live onboarding proved the slot can win: the
+    // judge was skipped for want of a cache that landed eleven seconds later, and the day's tasks
+    // sat unenriched until the next slot. One HTTPS round trip, under `account::TIMEOUT`.
+    //
+    // A cache that exists is never refreshed here, even a stale one — the six-hourly housekeeping
+    // refresh and the 72-hour grace own that. A failure leaves no cache and `judge_plan_for` names
+    // the skip exactly as it does today: only a refusal from the service, never a missing cache,
+    // is what a student reads as "no entitlement".
+    if crate::account::cloud_config(&cs.vault).is_ok() && !crate::account::cache_path(&cs.data_dir).exists() {
+        // Exit code **0** on both arms, like every other named step here: an account service that
+        // could not be reached is not a slot that failed, and an amber tray twice a day for a
+        // network is the wrong answer.
+        let step = match crate::account::refresh_entitlement(&cs.vault, &cs.data_dir) {
+            Ok(_) => "entitlement (refreshed)".to_string(),
+            Err(e) => format!("entitlement (refresh failed: {e})"),
+        };
+        steps.push((step, 0));
+    }
     let est = entitlement_state(cs);
     let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
         steps.push(((*note).to_string(), 0));
+    }
+    // D8: a skipped step reaches the vault too. `RunSummary` lives in this process and the Runs
+    // view reads the run record the ENGINE writes — a step this app left out appears in neither, so
+    // the first live onboarding had nothing on screen and nothing on disk saying the judge never
+    // ran. One line each, in the engine's own format, through the engine's own appender
+    // (`cli::append_run_log` → `runs::log_line`, the single renderer, F11), so a line this app
+    // wrote and a line the engine wrote are the same bytes.
+    //
+    // The two named skips only — a `pull (skipped: busy)` is a transient lock collision between
+    // this slot and the housekeeping thread, not something a student opens a file to read.
+    //
+    // **Ruling R-C1c-plan-4: the status is `ok`, not `skip`.** `cli::line_status` reads the fifth
+    // token and `trim_log_lines` keeps only the newest hundred NON-`ok` lines, for one stated
+    // reason: a failure must not age out while routine runs keep flowing. A skip repeats every slot
+    // — twice a day, forever, on a vault with no feed — and is not a problem, so filing it as
+    // non-`ok` would spend a failure's budget on routine. `ok` puts it in the fifty-line routine
+    // bucket, where it ages out like every other ordinary line. The step itself is still a step in
+    // the run record, which is what the Runs view reads.
+    //
+    // Under `vault_io`, and taken here rather than around the loop below: `vault_io` is never held
+    // across a child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    let skips: Vec<String> = steps
+        .iter()
+        .filter(|(n, _)| n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:"))
+        .map(|(n, _)| n.clone())
+        .collect();
+    if !skips.is_empty() {
+        let _io = lock(&cs.vault_io);
+        for note in &skips {
+            let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "ok", note, None);
+        }
     }
     match engine_exe() {
         Ok(exe) => {
