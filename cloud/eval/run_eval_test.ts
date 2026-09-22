@@ -508,6 +508,12 @@ Deno.test("thresholds.json's _note is provisional documentation, ignored by the 
   const raw = await Deno.readTextFile(new URL("./thresholds.json", import.meta.url));
   const thresholds = JSON.parse(raw) as Record<string, unknown>;
   assertEquals(typeof thresholds._note, "string");
+  // Final review item 5: the note must not still say the seed is empty once it holds cases.
+  const seedEvents = (await Deno.readTextFile(new URL("./seed/events.jsonl", import.meta.url)))
+    .split("\n").filter((l) => l.trim() !== "").length;
+  const note = thresholds._note as string;
+  assert(!note.includes("the seed is empty"), note);
+  assert(note.includes(`${seedEvents} event cases`), `the note should count the seed's ${seedEvents} event cases: ${note}`);
   const task = thresholds.task as Record<string, number>;
   assertEquals(task.effort_mae_max, 1.5);
   assertEquals(task.importance_exact_min, 0.55);
