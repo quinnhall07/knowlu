@@ -314,6 +314,93 @@ pub fn parse_assignments(
     Ok(out)
 }
 
+/// The student's completion of every assignment in one book's payload, as points earned against
+/// points possible (stream J T8, design note §7a). **A separate function on purpose**:
+/// [`parse_assignments`] is gated byte for byte by the frozen `zybooks-parsed-reference.json`, and
+/// completion is a different question asked of the same payload.
+///
+/// The uid is [`parse_assignments`]'s own, `zybooks:<assignment_id>` spelled through the same
+/// `json_str`, so a figure lands on the note the parser wrote. Measured against the live payload
+/// (2026-09-22): `sections[]` carries `total_points` and `include_participations` /
+/// `include_challenges` / `include_labs`; `section_scores[]` carries `participation_earned`,
+/// `challenge_earned` and `lab_earned` and lists **only sections with recorded activity**.
+///
+/// **Points, never section counts** — seven of HW 01's 25 sections carry no points, so counting
+/// sections calls a finished assignment 72% done. And two conservative choices, both because a
+/// false *done* hides live work (the costliest mistake this product can make):
+///
+/// - a component a section does not include earns nothing there (a missing flag counts as
+///   included), so challenge points cannot top up a participation-only section;
+/// - each section's earned figure is capped at its own `total_points`, so one over-full section
+///   cannot cover for an empty one. Scores are matched to sections by `(chapter, section)`.
+///
+/// Tolerant by construction: this never fails a coursework run. A payload that is not a success,
+/// an assignment with no `assignment_id`, or a section whose `total_points` is not a number yields
+/// no figure for that assignment — no figure means no proposal.
+pub fn completions(payload: &Json) -> Vec<crate::completion::VendorCompletion> {
+    let mut out = Vec::new();
+    if payload.get("success").is_some_and(|s| !json_truthy(s)) {
+        return out;
+    }
+    let Some(items) = payload.get("assignments").and_then(Json::as_array) else {
+        return out;
+    };
+    let number = |value: Option<&Json>| -> Option<f64> {
+        match value {
+            None | Some(Json::Null) => Some(0.0),
+            Some(Json::Number(n)) => n.as_f64(),
+            Some(_) => None,
+        }
+    };
+    let key = |map: &serde_json::Map<String, Json>| -> (String, String) {
+        let field = |k: &str| map.get(k).map(json_str).unwrap_or_else(|| "None".to_string());
+        (field("chapter_number"), field("section_number"))
+    };
+    'assignments: for raw in items {
+        let Some(raw) = raw.as_object() else { continue };
+        let Some(assignment_id) = raw.get("assignment_id").filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let scores: Vec<&serde_json::Map<String, Json>> = raw
+            .get("section_scores")
+            .and_then(Json::as_array)
+            .map(|all| all.iter().filter_map(Json::as_object).collect())
+            .unwrap_or_default();
+        let sections = raw.get("sections").and_then(Json::as_array).cloned().unwrap_or_default();
+        let (mut earned, mut possible) = (0.0_f64, 0.0_f64);
+        for section in &sections {
+            let Some(section) = section.as_object() else { continue 'assignments };
+            let Some(total) = number(section.get("total_points")) else { continue 'assignments };
+            if total <= 0.0 {
+                continue;
+            }
+            let included = |flag: &str| section.get(flag) != Some(&Json::Bool(false));
+            let mut got = 0.0;
+            if let Some(score) = scores.iter().find(|s| key(s) == key(section)) {
+                for (flag, field) in [
+                    ("include_participations", "participation_earned"),
+                    ("include_challenges", "challenge_earned"),
+                    ("include_labs", "lab_earned"),
+                ] {
+                    if included(flag) {
+                        let Some(value) = number(score.get(field)) else { continue 'assignments };
+                        got += value.max(0.0);
+                    }
+                }
+            }
+            earned += got.min(total);
+            possible += total;
+        }
+        out.push(crate::completion::VendorCompletion {
+            source: "zybooks".to_string(),
+            uid: format!("zybooks:{}", json_str(assignment_id)),
+            earned,
+            possible,
+        });
+    }
+    out
+}
+
 /// A 200 with `success: false` is a dead session, not an empty semester.
 ///
 /// Only an explicitly falsy `success` counts: absence means the endpoint does not report one, and
@@ -1250,5 +1337,90 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    // --- completion (stream J T8) ------------------------------------------------------------
+
+    /// Fabricated, shaped like the live `/v1/zybook/{code}/assignments` payload of 2026-09-22:
+    /// `sections[]` with `total_points` and the `include_*` flags, `section_scores[]` listing only
+    /// sections with recorded activity.
+    fn scored_payload() -> Json {
+        let text = std::fs::read_to_string("tests/fixtures/zybooks-assignments-scored.json")
+            .expect("the scored fixture is committed");
+        serde_json::from_str(&text).expect("the scored fixture is valid JSON")
+    }
+
+    fn figure(all: &[crate::completion::VendorCompletion], uid: &str) -> (f64, f64) {
+        let found = all
+            .iter()
+            .find(|c| c.uid == uid)
+            .unwrap_or_else(|| panic!("no completion for {uid}: {all:?}"));
+        assert_eq!(found.source, "zybooks");
+        (found.earned, found.possible)
+    }
+
+    #[test]
+    fn completion_is_points_earned_not_sections_scored() {
+        // HW 01's shape: two of four sections scored, because two carry no points — and every
+        // point earned. Counting sections would call this 50% done.
+        let all = completions(&scored_payload());
+        assert_eq!(figure(&all, "zybooks:9100001"), (100.0, 100.0));
+        assert!(all.iter().find(|c| c.uid == "zybooks:9100001").unwrap().is_complete());
+        assert_eq!(figure(&all, "zybooks:9100005"), (10.0, 10.0));
+    }
+
+    #[test]
+    fn partial_and_untouched_assignments_are_below_one_hundred() {
+        let all = completions(&scored_payload());
+        assert_eq!(figure(&all, "zybooks:9100002"), (91.0, 100.0));
+        assert_eq!(figure(&all, "zybooks:9100003"), (87.0, 100.0));
+        assert_eq!(figure(&all, "zybooks:9100004"), (0.0, 30.0));
+        let complete: Vec<&str> =
+            all.iter().filter(|c| c.is_complete()).map(|c| c.uid.as_str()).collect();
+        assert_eq!(complete, vec!["zybooks:9100001", "zybooks:9100005"]);
+    }
+
+    #[test]
+    fn a_component_the_section_excludes_earns_nothing() {
+        // HW 05 counts participation only; challenge points earned there must not top it up to a
+        // false 100%. A false done hides live work — the costlier mistake by far.
+        let all = completions(&scored_payload());
+        assert_eq!(figure(&all, "zybooks:9100006"), (10.0, 20.0));
+    }
+
+    #[test]
+    fn completion_uids_are_the_parsers_uids() {
+        // The proposal is filed against the note whose `source_uid` the parser wrote; the two must
+        // agree for every assignment. (`parse_zybooks.ts` builds the same `zybooks:${assignmentId}`,
+        // and both parsers are gated by the frozen reference.)
+        let payload = scored_payload();
+        let mut warnings = Vec::new();
+        let parsed = parse(&payload, &mut warnings);
+        let mut parsed_uids: Vec<String> = parsed.iter().map(|a| a.uid.clone()).collect();
+        let mut completion_uids: Vec<String> = completions(&payload).into_iter().map(|c| c.uid).collect();
+        parsed_uids.sort();
+        completion_uids.sort();
+        assert_eq!(parsed_uids.len(), 6);
+        assert_eq!(completion_uids, parsed_uids);
+    }
+
+    #[test]
+    fn the_captured_payload_has_no_scores_and_nothing_is_complete() {
+        let all = completions(&fixture_payload());
+        let (items, _) = load();
+        assert_eq!(all.len(), items.len());
+        assert!(all.iter().all(|c| c.earned == 0.0 && !c.is_complete()), "{all:?}");
+    }
+
+    #[test]
+    fn a_malformed_payload_yields_no_completions_rather_than_an_error() {
+        for payload in [
+            serde_json::json!({"success": false}),
+            serde_json::json!({"assignments": "nope"}),
+            serde_json::json!({"assignments": [{"title": "no id", "sections": []}]}),
+            serde_json::json!({"assignments": [{"assignment_id": 1, "sections": [{"total_points": "x"}]}]}),
+        ] {
+            assert!(completions(&payload).is_empty(), "{payload}");
+        }
     }
 }
