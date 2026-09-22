@@ -312,9 +312,11 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // functions `sync_notes_stamp_rev` and `sync_usage_bump`, exempt by kind), plus fix round 2's
   // `create or replace function sync_usage_bump()` in 20260912000200 (the same trigger function
   // re-issued so a DELETE never inserts a usage row — still exempt by kind, still one more
-  // definition this scan parses) —
+  // definition this scan parses), plus C3′'s own re-issue of `sync_usage_bump()` in
+  // 20260912000300 (the amendment's plaintext tables read `body` instead of `ciphertext`; same
+  // trigger function, exempt by kind, one more definition parsed) —
   // counted by hand against today's corpus.
-  assertEquals(parsed, 26, "today's corpus should parse exactly 26 function creations");
+  assertEquals(parsed, 27, "today's corpus should parse exactly 27 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
