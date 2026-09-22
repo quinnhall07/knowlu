@@ -12,11 +12,21 @@ fn envelope(result: Result<Value, String>, key: &str) -> Value {
     match result { Ok(v) => json!({ "ok": true, "error": Value::Null, key: v }), Err(e) => json!({ "ok": false, "error": e, key: Value::Null }) }
 }
 
-fn now_in(vault: &std::path::Path) -> jiff::Zoned { jiff::Zoned::now().with_time_zone(knowlu_engine::cli::vault_zone(vault)) }
+/// "Today" for every read/write path in this file. Honours `ConsoleState::test_today` — the
+/// test-only seam described there — when a test has set it; every real caller leaves that `None`
+/// and gets the real clock exactly as before the seam existed. A pinned date carries noon local
+/// time, matching nothing in particular except being safely clear of both a day's midnight edges.
+fn now_in(cs: &ConsoleState) -> jiff::Zoned {
+    let zone = knowlu_engine::cli::vault_zone(&cs.vault);
+    match *cs.test_today.lock().unwrap() {
+        Some(d) => d.at(12, 0, 0, 0).to_zoned(zone).expect("a pinned test date is always a valid zoned time"),
+        None => jiff::Zoned::now().with_time_zone(zone),
+    }
+}
 
 fn build_state_value(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let view = knowlu_engine::surface::View::parse(view).ok_or_else(|| format!("unknown view {view:?}"))?;
-    let now = now_in(&cs.vault);
+    let now = now_in(cs);
     let state = knowlu_engine::surface::build_state(&cs.vault, view, now.date(), &now, cs.seen_at().as_deref());
     let mut v = serde_json::to_value(&state).map_err(|e| e.to_string())?;
     // The shell adds its own build, and the vault's git HEAD (cached by `refresh_head`, never
@@ -79,7 +89,7 @@ pub fn state_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
 
 pub fn note_inner(cs: &ConsoleState, id: &str) -> Result<Value, String> {
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
-    let now = now_in(&cs.vault);
+    let now = now_in(cs);
     let mut journal = knowlu_engine::journal::Journal::new(&cs.vault);
     let detail = knowlu_engine::surface::note_detail(&cs.vault, id, now.date(), &mut journal).ok_or_else(|| format!("no note with id {id}"));
     Ok(envelope(detail.and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())), "note"))
@@ -234,7 +244,7 @@ pub fn decide_inner(cs: &ConsoleState, view: &str, id: &str, verdict: &str, note
             ("snooze_until".to_string(), snooze),
         ];
         write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
-        let now = now_in(&cs.vault);
+        let now = now_in(cs);
         let r = knowlu_engine::approvals::process_approvals(&cs.vault, now.date(), now.datetime(), &executor_ctx(), journal);
         decision = json!({ "executed": r.executed, "expired": r.expired, "woken": r.woken, "rejected": r.rejected, "warnings": r.warnings });
         Ok(())

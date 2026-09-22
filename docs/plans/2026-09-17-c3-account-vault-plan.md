@@ -58,7 +58,7 @@ Every task's requirements implicitly include this section. It is the superseded 
 - **Commits:** specific `git add` (never `git add -A`), the message through a file (`git commit -F <file>`), and both trailers. The two literals below are **the writing session's**; the executing session substitutes its own model name and session URL, exactly as `HANDOFF.md` §5 says (ruling R-C2-6 — this is not a defect to fix, it is a template to fill):
 
 ```
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_018EXZqBCHaJBKtYtkNfjj1Z
 ```
 
