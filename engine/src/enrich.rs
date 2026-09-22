@@ -754,7 +754,9 @@ fn completion_title_key(title: &str) -> String {
             other => other,
         })
         .collect();
-    judge::one_line(&folded, usize::MAX).to_lowercase()
+    // After collapsing whitespace, " · " becomes " - ", exactly as the service's `oneLine` does
+    // (`judge_validate.ts`), so a middle-dot title matches the title the service sends back.
+    judge::one_line(&folded, usize::MAX).replace(" \u{b7} ", " - ").to_lowercase()
 }
 
 /// The active task notes directly under `tasks/` whose title matches `title` by
@@ -2851,6 +2853,39 @@ mod tests {
         assert_eq!(completion_title_key("Q&amp;A: Unit 2"), completion_title_key("Q&A: Unit 2"));
         assert_ne!(completion_title_key("Lab 3: Pendulum"), completion_title_key("Lab 4: Pendulum"));
         assert_eq!(completion_title_key("   "), "");
+    }
+
+    /// T9 fix round 1: the service's `oneLine` turns " · " into " - " (the ledger separator), so
+    /// a note title carrying a middle dot must still match the title the service sends back.
+    #[test]
+    fn completion_title_key_folds_the_middle_dot_as_the_service_does() {
+        assert_eq!(completion_title_key("Unit 2 \u{b7} Lab 4"), completion_title_key("Unit 2 - Lab 4"));
+        assert_eq!(completion_title_key("Unit 2  \u{b7}\tLab 4"), completion_title_key("unit 2 - lab 4"));
+    }
+
+    /// T9 fix round 1: the same title active in `tasks/` and archived in `archive/` is one match,
+    /// not two, because only `tasks/` is scanned. Exactly one card, for the active note.
+    #[test]
+    fn an_archived_twin_of_the_title_does_not_block_the_active_tasks_card() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-archived-twin");
+        std::fs::create_dir_all(v.join("archive")).unwrap();
+        crate::pystr::write_text(
+            &v.join("archive").join("hw3-last-term.md"),
+            "---\ntitle: \"CS-100 Homework 3\"\nstatus: active\ncreated_by: blackboard\n\
+             source_uid: \"blackboard:_old_1\"\nid: task_4444444444\n---\n\nLast term.\n",
+        )
+        .unwrap();
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{}]", completion_item("gmail:t1", "CS-100 Homework 3")), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        let card = meta_of_approval(&v, "amend-hw3-done.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&card, "target")).as_deref(), Some("tasks/hw3.md"));
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     /// The "done when": a submission receipt reaches a proposal. The note itself is untouched,

@@ -2,7 +2,7 @@
 // the shape of the real templated mail (course codes, titles, ids and confirmation numbers are
 // invented) — never a real student's course or assignment.
 import { assert, assertEquals } from "@std/assert";
-import { RECEIPT_TEMPLATES, receiptVerdict, recogniseReceipt } from "./lms_receipts.ts";
+import { notCompletionEvidence, RECEIPT_TEMPLATES, receiptVerdict, recogniseReceipt } from "./lms_receipts.ts";
 
 const BB = "Blackboard <do-not-reply@blackboard.com>";
 
@@ -161,4 +161,22 @@ Deno.test("receiptVerdict: anything that is not a receipt answers null, so the m
     receiptVerdict({ subject: "This week on campus", from: "news@example.invalid", text: "Hi." }, {}),
     null,
   );
+});
+
+// T9 fix round 1: the not-evidence veto, table-driven like the recogniser.
+const VETO: Array<[string, string, string, boolean]> = [
+  ["grade posted", BB, "New grade and feedback for Lab 3: Pendulum in 202640-XX-101-001", true],
+  ["overdue", BB, "Lab 3: Pendulum is overdue in 202640-XX-101-001", true],
+  ["due soon", BB, "Lab 3: Pendulum is due soon in 202640-XX-101-001", true],
+  ["the receipt itself", BB, "Submission received", false],
+  ["a grade subject from another sender", "noreply@lms.example.invalid", "New grade and feedback for X in Y", false],
+];
+for (const [name, from, subject, want] of VETO) {
+  Deno.test(`notCompletionEvidence: ${name}`, () => {
+    assertEquals(notCompletionEvidence({ from, subject }), want);
+  });
+}
+
+Deno.test("each template lists its not-evidence subjects as data", () => {
+  for (const t of RECEIPT_TEMPLATES) assert(Array.isArray(t.notEvidence), `${t.label}: notEvidence must be a list`);
 });

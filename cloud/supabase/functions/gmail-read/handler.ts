@@ -29,7 +29,7 @@
 import { fieldsOf, judge, type JudgeReply, type PipelineDeps } from "../_shared/judge_pipeline.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
-import { receiptVerdict } from "../_shared/lms_receipts.ts";
+import { notCompletionEvidence, receiptVerdict } from "../_shared/lms_receipts.ts";
 
 export const WINDOW = "newer_than:7d";
 /** A bound on one read, so a mailbox with a thousand unread messages cannot eat a slot. */
@@ -292,6 +292,9 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           read += 1;
           continue;
         }
+        // T9 fix round 1: decided here, before the text leaves scope. A vendor's not-evidence mail
+        // (a posted grade, "overdue", "due soon") is never completion, whatever the model answers.
+        const vetoCompletion = notCompletionEvidence(message);
         const reply: JudgeReply = await judge(account_id, {
           kind: "email",
           item: { message_id: uid, subject: message.subject, from: message.from, date: message.date, text: message.text },
@@ -310,8 +313,10 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           }
           continue;
         }
-        const tier = typeof reply.verdict.tier === "string" ? reply.verdict.tier : "information";
-        await deps.enqueue(account_id, uid, tier, reply.verdict, reply.judgment_id ?? null);
+        const answered = typeof reply.verdict.tier === "string" ? reply.verdict.tier : "information";
+        const tier = answered === "completion" && vetoCompletion ? "information" : answered;
+        const verdict = tier === answered ? reply.verdict : { ...reply.verdict, tier };
+        await deps.enqueue(account_id, uid, tier, verdict, reply.judgment_id ?? null);
         await deps.markSeen(account_id, uid);
         read += 1;
       }

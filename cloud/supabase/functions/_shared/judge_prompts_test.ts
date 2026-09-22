@@ -213,6 +213,9 @@ Deno.test("T9: the email rules define completion, name the work as its title, an
 
 Deno.test("T9: email-3's hash moved off T4's draft; task and event hashes did not move", async () => {
   assert((await promptHash("email")) !== T4_EMAIL_DRAFT_HASH, "the email prompt hash did not change");
+  // email-3 as shipped (T4 + T9). Any edit to the email template or schema moves this and must
+  // come with a new prompt_version in a migration.
+  assertEquals(await promptHash("email"), "ad890b53c5e984a8bd7ac03eff7170085cbb8df17e316e7d8d48ad6c15fa2405");
   assertEquals(await promptHash("task"), "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6");
   assertEquals(await promptHash("event"), "0faedc21498a0f4127aee5095f4dcae8700e0c7e3dbec079d1b4cc6b96f61928");
 });

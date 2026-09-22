@@ -555,3 +555,44 @@ Deno.test("T9: a device that does not declare completion is handed it as informa
   const fresh = await (await readHandler(OK, deps)(post({ accepts: ["completion"] }))).json();
   assertEquals(fresh.items[0].tier, "completion");
 });
+
+// ---------------------------------------------------------------------------------------------
+// T9 fix round 1: a vendor's own not-evidence mail (a posted grade, "overdue", "due soon") is NEVER
+// completion, deterministically — even when the model answers `completion` with the exact title.
+// ---------------------------------------------------------------------------------------------
+
+for (
+  const [shape, subject] of [
+    ["grade posted", "New grade and feedback for Lab 3: Pendulum in 202640-XX-101-001"],
+    ["overdue", "Lab 3: Pendulum is overdue in 202640-XX-101-001"],
+    ["due soon", "Lab 3: Pendulum is due soon in 202640-XX-101-001"],
+  ]
+) {
+  Deno.test(`T9 fix 1: a model 'completion' for a Blackboard ${shape} email is queued as information`, async () => {
+    const { deps, queued } = fakes([{
+      tier: "completion", title: "Lab 3: Pendulum", course: null, due: null,
+      effort_hours: null, importance: null, why: "the work is graded", confidence: 0.9,
+    }], ["m1"], {
+      subject, from: "Blackboard <do-not-reply@blackboard.com>",
+      date: "Thu, 10 Sep 2026 08:00:00 -0500", text: "Lab 3: Pendulum.",
+    });
+    const reply = await (await readHandler(OK, deps)(post({ accepts: ["completion"] }))).json();
+    assertEquals(queued.length, 1);
+    assertEquals(queued[0].tier, "information");
+    assertEquals(queued[0].payload.tier, "information");
+    assertEquals(reply.items[0].tier, "information");
+  });
+}
+
+Deno.test("T9 fix 1: a model 'completion' from a sender with no template is left alone", async () => {
+  const { deps, queued } = fakes([{
+    tier: "completion", title: "Essay 2", course: null, due: null,
+    effort_hours: null, importance: null, why: "a submission confirmation", confidence: 0.9,
+  }], ["m1"], {
+    subject: "New grade and feedback for Essay 2 in XX-202",
+    from: "Other LMS <noreply@lms.example.invalid>",
+    date: "Thu, 10 Sep 2026 08:00:00 -0500", text: "Received.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"] }));
+  assertEquals(queued[0].tier, "completion");
+});

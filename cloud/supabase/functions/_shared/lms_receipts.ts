@@ -24,6 +24,9 @@ export interface ReceiptTemplate {
   /** The body, matched against the text with every whitespace run collapsed to one space. Must
    * capture the work's name as the named group `title`. */
   body: RegExp;
+  /** Subjects from these senders that are NEVER completion evidence, whatever any model answers:
+   * a posted grade (a zero for missing work sends the same mail), "overdue", "due soon". */
+  notEvidence: RegExp[];
 }
 
 const WEEKDAY = "(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)";
@@ -39,6 +42,7 @@ export const RECEIPT_TEMPLATES: readonly ReceiptTemplate[] = [
     body: new RegExp(
       `\\bAssessment submitted (?<title>.+?) Submitted: ${WEEKDAY}, .*\\bConfirmation number: [0-9A-Fa-f-]+`,
     ),
+    notEvidence: [/^New grade and feedback for /i, / is overdue in /i, / is due soon in /i],
   },
 ];
 
@@ -90,4 +94,18 @@ export function receiptVerdict(
     confidence: 1,
   }, seed);
   return checked.ok && checked.verdict !== undefined ? checked.verdict : null;
+}
+
+/**
+ * T9 fix round 1: true when this message comes from a template's sender with one of its
+ * not-evidence subjects. The caller downgrades a `completion` answer for such a message to
+ * `information`, so "a posted grade is never completion evidence" holds deterministically rather
+ * than resting on one prompt sentence.
+ */
+export function notCompletionEvidence(message: { from: string; subject: string }): boolean {
+  const sender = senderAddress(message.from);
+  const subject = message.subject.trim();
+  return RECEIPT_TEMPLATES.some((t) =>
+    t.senders.includes(sender) && t.notEvidence.some((pattern) => pattern.test(subject))
+  );
 }
