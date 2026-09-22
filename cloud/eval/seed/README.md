@@ -1,14 +1,34 @@
 # The eval seed
 
-This directory is empty on purpose. The eval suite needed a floor of labelled cases on day one, and
+This directory was empty on purpose. The eval suite needed a floor of labelled cases on day one, and
 the only place enough of them existed was an archived vault — but on 2026-09-14 that read was
-declined: nothing is ever read from an archive to seed this suite. So `cloud/eval/` ships with the
-schema, the scrub rules and the loader that will check every case against them, and no cases at
-all. The eval suite goes from `0 cases` to something real the same way every other judgment in this
-product does: one account at a time, and only with that account's consent. A later stream adds the
-opt-in — a student reviewing one of their own corrections and choosing to let it become an eval
-case — and that correction already carries the shape below, because it is the same `request` the
-device sent when it was first judged.
+declined: nothing is ever read from an archive to seed this suite. So `cloud/eval/` shipped with the
+schema, the scrub rules and the loader that would check every case against them, and no cases at
+all — until T2 (stream J, 2026-09-22), which hand-wrote `events.jsonl` below: the first cases this
+suite has ever scored. `tasks.jsonl` and `email.jsonl` still carry no cases and fill the same way the
+rest of this file describes: one account at a time, and only with that account's consent. A later
+stream adds the opt-in — a student reviewing one of their own corrections and choosing to let it
+become an eval case — and that correction already carries the shape below, because it is the same
+`request` the device sent when it was first judged.
+
+## The honest limit (T2)
+
+`events.jsonl` is twenty-six hand-written cases, invented, not sampled — no real student, event,
+organizer or institution appears in it. They measure one thing: whether a model applies the rules
+`judge_prompts.ts`'s event template actually states (the two drop rules, the three verdict words,
+now four — see below). **They are not the real distribution of campus events**, and at this size a
+three-class estimate carries roughly twenty points of error at ninety-five percent confidence. A
+score on this seed **can rule a prompt or model change out. It cannot rule one in.** The first real
+signal comes from `eval_cases` rows the opt-in writes, not from this file.
+
+`events.jsonl` includes cases labelled `verdict: "unsure"` — J-1's ruling (2026-09-22, design (a)):
+a fourth verdict word for "whether this event obliges this student is not in the event text."
+Nothing in `cloud/eval/schema.ts` or `cloud/eval/loader.ts` restricts `theirs.verdict` to a fixed
+set of words (only that the key `verdict` is the one an event case may label), so these cases load
+and score today; `cloud/eval/score.ts`'s `COST` table is this directory's own enumeration of event
+verdicts, and it prices `unsure` transitions by the same default-1 fallback every unnamed transition
+gets — ratifying named costs for `unsure` (like the rest of the cost-matrix proposal,
+`docs/notes/2026-09-22-cost-matrices.md`) is separate, unruled work this task does not do.
 
 ## The record shape
 
