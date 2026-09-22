@@ -194,6 +194,10 @@ fn create_task_defaults_and_slug_and_delete_archives() {
 fn approving_a_task_proposal_puts_the_task_in_the_returned_state() {
     let v = scratch("decide");
     let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-decide-data-{}", std::process::id())));
+    // `task-freshman-forum.md` carries a frozen `expires: 2026-09-30` — pin "today" the same way
+    // `rejecting_and_snoozing_write_the_decision_fields` does, or this test starts failing from
+    // 2026-10-01 when `read_approvals` drops the card the same way it dropped the amend card here.
+    cs.set_test_today(Some("2026-08-28".parse().unwrap()));
     let s = state_inner(&cs, "decisions").unwrap();
     let card = s["state"]["decisions"]["cards"].as_array().unwrap().iter().find(|c| c["kind"] == json!("task")).expect("vault-full holds a pending task proposal");
     let approval_id = card["id"].as_str().unwrap().to_string();
