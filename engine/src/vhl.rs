@@ -291,6 +291,46 @@ pub fn parse_dashboard(
     Ok(out)
 }
 
+/// VHL's own `percentage_complete` for every due-date bucket on the dashboard (stream J T8).
+/// **A separate function on purpose**: [`parse_dashboard`] is gated byte for byte by the frozen
+/// `vhl-parsed-reference.json`, and completion is a different question asked of the same page.
+///
+/// The uid is [`parse_dashboard`]'s own, `vhl:<section_id>:<due_date>`, built from the same
+/// `detail_url` section match and the same raw `due_date` text; a bucket the parser would skip
+/// (no section id, an unreadable date) yields no figure here either. The figure is out of `100`,
+/// the number the parser already seeds `progress` with once and never again.
+///
+/// Tolerant by construction — a page that is not a dashboard yields nothing rather than an error:
+/// the parse half already reports a dead session, and this must never fail a coursework run.
+pub fn completions(html_text: &str) -> Vec<crate::completion::VendorCompletion> {
+    let mut out = Vec::new();
+    if !html_text.contains(MOUNT_MARKER) {
+        return out;
+    }
+    let Some(captures) = SUMMARIES.captures(html_text) else { return out };
+    let raw = html_escape::decode_html_entities(&quoted_group(&captures, 1)).into_owned();
+    let Ok(Json::Array(summaries)) = serde_json::from_str::<Json>(&raw) else { return out };
+    for item in &summaries {
+        if !item.is_object() {
+            continue;
+        }
+        let raw_date = field_str(item, "due_date");
+        let detail = field_str(item, "detail_url");
+        let Some(section_id) = SECTION.captures(&detail).and_then(|c| c.get(1)) else { continue };
+        if Date::strptime("%Y-%m-%d", &raw_date).is_err() {
+            continue;
+        }
+        let Ok(percent) = json_int(item.get("percentage_complete")) else { continue };
+        out.push(crate::completion::VendorCompletion {
+            source: "vhl".to_string(),
+            uid: format!("vhl:{}:{raw_date}", section_id.as_str()),
+            earned: percent as f64,
+            possible: 100.0,
+        });
+    }
+    out
+}
+
 /// Whether `sections[section_id]` in a `coursework.vhl` config block names a real mapping, and
 /// the mapping itself when it does.
 ///
@@ -1271,5 +1311,82 @@ mod tests {
     fn the_user_agent_is_an_honest_identifying_string() {
         assert!(USER_AGENT.contains("Knowlu"));
         assert!(!USER_AGENT.to_lowercase().contains("python-urllib"));
+    }
+
+    // --- completion (stream J T8) ------------------------------------------------------------
+
+    /// A dashboard page carrying the given summaries, entity-escaped the way the real one is.
+    /// Fabricated ids throughout.
+    fn dashboard_with(summaries: &Json) -> String {
+        let attr = summaries.to_string().replace('&', "&amp;").replace('"', "&quot;");
+        format!(
+            "<html><body><div class=\"{MOUNT_MARKER}\" data-assignment-summaries=\"{attr}\"></div></body></html>"
+        )
+    }
+
+    fn bucket(date: &str, percent: i64) -> Json {
+        serde_json::json!({
+            "due_date": date,
+            "detail_url": format!("/courses/1000001/sections/2000001/assignments_by_due_date?due_date={date}"),
+            "estimated_time": if percent >= 100 { "0m" } else { "40m" },
+            "percentage_complete": percent,
+            "assignment_count": 4,
+            "activities_remaining": if percent >= 100 { 0 } else { 2 },
+        })
+    }
+
+    fn fabricated_cfg() -> Mapping {
+        crate::yaml::mapping_of("sections:\n  \"2000001\":\n    course: gn-101\n    label: GN 101\n")
+    }
+
+    fn scored_dashboard() -> String {
+        dashboard_with(&serde_json::json!([
+            bucket("2026-09-21", 100),
+            bucket("2026-09-23", 99),
+            bucket("2026-09-25", 0),
+        ]))
+    }
+
+    #[test]
+    fn a_bucket_at_one_hundred_is_complete_and_nothing_below_is() {
+        let all = completions(&scored_dashboard());
+        let complete: Vec<&str> =
+            all.iter().filter(|c| c.is_complete()).map(|c| c.uid.as_str()).collect();
+        assert_eq!(complete, vec!["vhl:2000001:2026-09-21"]);
+        let at_99 = all.iter().find(|c| c.uid == "vhl:2000001:2026-09-23").expect("the 99% bucket");
+        assert_eq!((at_99.source.as_str(), at_99.earned, at_99.possible), ("vhl", 99.0, 100.0));
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn vhl_completion_uids_are_the_parsers_uids() {
+        // `parse_vhl.ts` builds the same `vhl:${sectionId}:${rawDate}`; both parsers are gated by
+        // the frozen reference, so matching the Rust parser is matching both.
+        let html = scored_dashboard();
+        let mut warnings = Vec::new();
+        let parsed = parse_dashboard(&html, &fabricated_cfg(), &tz(), &mut warnings).unwrap();
+        let parsed_uids: Vec<String> = parsed.iter().map(|a| a.uid.clone()).collect();
+        let completion_uids: Vec<String> = completions(&html).into_iter().map(|c| c.uid).collect();
+        assert_eq!(completion_uids, parsed_uids);
+        // And the number is the one the parser seeds `progress` with.
+        let seeded: Vec<i64> = parsed.iter().map(|a| a.progress).collect();
+        let reported: Vec<i64> = completions(&html).iter().map(|c| c.earned as i64).collect();
+        assert_eq!(reported, seeded);
+    }
+
+    #[test]
+    fn the_captured_dashboard_has_nothing_complete() {
+        let all = completions(&dashboard_html());
+        let (items, _) = load();
+        assert_eq!(all.len(), items.len());
+        assert!(all.iter().all(|c| !c.is_complete()), "{all:?}");
+    }
+
+    #[test]
+    fn a_page_that_is_not_a_dashboard_yields_no_completions() {
+        assert!(completions("<html>login</html>").is_empty());
+        assert!(completions(&format!("<div class=\"{MOUNT_MARKER}\"></div>")).is_empty());
+        let bad = dashboard_with(&serde_json::json!([{"due_date": "2026-09-21", "detail_url": "/x", "percentage_complete": 100}]));
+        assert!(completions(&bad).is_empty(), "a bucket with no section id names no note");
     }
 }
