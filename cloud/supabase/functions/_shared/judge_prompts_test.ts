@@ -3,7 +3,7 @@
 // `judge_prompts_test.ts` before this task; the prompt shape was exercised only indirectly, through
 // `judge_pipeline_test.ts` and the handlers' own tests, none of which pin prompt TEXT.
 import { assert, assertEquals } from "@std/assert";
-import { buildPrompt, MAX_BODY_CHARS, systemTemplate } from "./judge_prompts.ts";
+import { buildPrompt, MAX_BODY_CHARS, schemaFor, systemTemplate } from "./judge_prompts.ts";
 
 // ---------------------------------------------------------------------------------------------
 // (a) clipping appends " …[truncated]" when text exceeds MAX_BODY_CHARS, and appends nothing
@@ -168,6 +168,21 @@ Deno.test("email: a long bearer-shaped string in subject and text is scrubbed be
   }, {});
   assert(!user.includes(bearer), `the raw bearer token must not reach the prompt: ${user}`);
   assert(user.includes("<secret>"), `expected the credential placeholder in: ${user}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// CHECKPOINT J-1 (ruled 2026-09-22): the event schema and prompt teach `unsure` as a real answer.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("event schema: the verdict enum carries unsure as a fourth word", () => {
+  const schema = schemaFor("event") as { properties: { verdict: { enum: string[] } } };
+  assertEquals(schema.properties.verdict.enum, ["obligation", "opportunity", "drop", "unsure"]);
+});
+
+Deno.test("event rules: unsure is named and told not to guess the audience", () => {
+  const rules = systemTemplate("event");
+  assert(rules.includes("unsure"), `missing 'unsure' in: ${rules}`);
+  assert(rules.includes("do not guess"), `missing the no-guessing rule in: ${rules}`);
 });
 
 Deno.test("email: From is never scrubbed, even though it is an email address", () => {

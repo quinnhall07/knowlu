@@ -441,15 +441,43 @@ pub fn event_request(item: &judge::EventItem) -> Value {
 }
 
 impl judge::EventModel for CloudModel<'_> {
+    /// Stream J Task T1 (CHECKPOINT J-1, ruled 2026-09-22): the service answering with no usable
+    /// verdict is not, by itself, a reason to leave a uid unjudged forever.
+    ///
+    /// `self.call(...)?` above already separated the failures that must stay retryable — no
+    /// network, no session, no entitlement, a 5xx, a spent daily cap (`ModelError::Capped`, which
+    /// this function still propagates untouched) — from a genuine HTTP 2xx. So by the time
+    /// `self.verdict_of(&reply)` runs, the account WAS charged for a real attempt; the service just
+    /// could not turn it into `obligation`/`opportunity`/`drop`/`unsure` (below the confidence
+    /// floor, an incomplete reply, `refused`, `truncated`, or a bare model failure). Left as an
+    /// `Err`, that uid would fail `events::judge_roster`'s "already judged" check every slot,
+    /// forever (defect B). Recording `unsure` instead is not a new mechanism: a verdict the model
+    /// could not honestly produce is functionally the same as one it honestly declined to give, and
+    /// `eventledger::VALID_VERDICTS` already treats `unsure` as first-class and terminal (one
+    /// verdict per uid, forever). `confidence: 0.0` because the service's reply for this case never
+    /// carries a number back to the device (`judge_pipeline.ts`'s `low confidence` branch logs the
+    /// model's own confidence server-side only) — this is not a floor-crossing confidence, it is an
+    /// honestly-unknown one.
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
-        let verdict = self.verdict_of(&reply)?;
-        Ok(judge::EventVerdict {
-            verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
-            why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
-            confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
-            tier: reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8,
-        })
+        let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
+        match self.verdict_of(&reply) {
+            Ok(verdict) => Ok(judge::EventVerdict {
+                verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
+                why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
+                confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+                tier,
+            }),
+            // A spent cap answers every remaining item identically and must stay retryable
+            // tomorrow — never recorded as if the event itself had been considered.
+            Err(ModelError::Capped) => Err(ModelError::Capped),
+            Err(ModelError::Failed(reason)) => Ok(judge::EventVerdict {
+                verdict: "unsure".to_string(),
+                why: judge::one_line(&reason, 140),
+                confidence: 0.0,
+                tier,
+            }),
+        }
     }
 }
 

@@ -67,10 +67,30 @@ Deno.test("an event why is shaped so the device's ledger can actually write it",
   assertEquals(got.verdict?.why, "she said 'yes' - maybe next week");
 });
 
-Deno.test("an event verdict outside the ledger's three words is refused", () => {
+Deno.test("an event verdict outside the ledger's four words is refused", () => {
   const got = validate("event", { verdict: "maybe", why: "unsure", confidence: 0.9 }, {});
   assertEquals(got.ok, false);
   assertEquals(got.cause, "incomplete");
+});
+
+// CHECKPOINT J-1: `unsure` is now a genuine fourth verdict word.
+
+Deno.test("an event verdict of unsure is accepted", () => {
+  const got = validate("event", { verdict: "unsure", why: "audience not stated", confidence: 0.9 }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict, { verdict: "unsure", why: "audience not stated", confidence: 0.9 });
+});
+
+Deno.test("an event verdict of unsure is accepted even below the confidence floor — the floor guards a guess, not an honest decline", () => {
+  const got = validate("event", { verdict: "unsure", why: "audience not stated", confidence: CONFIDENCE_FLOOR - 0.01 }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict?.verdict, "unsure");
+});
+
+Deno.test("an event verdict of obligation below the floor is still refused — the unsure exemption is not a general floor bypass", () => {
+  const got = validate("event", { verdict: "obligation", why: "x", confidence: CONFIDENCE_FLOOR - 0.01 }, {});
+  assertEquals(got.ok, false);
+  assertEquals(got.cause, "below floor");
 });
 
 Deno.test("an email tier outside the five is refused", () => {

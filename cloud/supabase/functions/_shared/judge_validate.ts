@@ -16,8 +16,9 @@ export interface Validated {
   cause?: Cause;
 }
 
-/** The three words `eventledger::VALID_VERDICTS` will accept. */
-export const EVENT_VERDICTS = ["obligation", "opportunity", "drop"] as const;
+/** The four words `eventledger::VALID_VERDICTS` will accept (CHECKPOINT J-1, ruled 2026-09-22:
+ * `unsure` added, additive — a vault contract, never a rename). */
+export const EVENT_VERDICTS = ["obligation", "opportunity", "drop", "unsure"] as const;
 /** The five email tiers of cloud design §5.3. */
 export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information"] as const;
 
@@ -124,7 +125,14 @@ export function validate(
     if (!(EVENT_VERDICTS as readonly string[]).includes(verdict) || why === "") {
       return { ok: false, cause: "incomplete" };
     }
-    if (confidence < CONFIDENCE_FLOOR) return { ok: false, cause: "below floor" };
+    // `unsure` IS the model's honest answer to "I can't tell from this text" — gating it behind
+    // the SAME confidence floor that forces a guess among obligation/opportunity/drop in the first
+    // place would just reintroduce defect B for the one answer meant to close it: the floor exists
+    // to keep a shaky obligation/opportunity/drop guess out of the ledger, not to punish an event
+    // that honestly declined to guess. Every other verdict still clears the floor as before.
+    if (verdict !== "unsure" && confidence < CONFIDENCE_FLOOR) {
+      return { ok: false, cause: "below floor" };
+    }
     return { ok: true, verdict: { verdict, why, confidence: clamp(confidence, 0, 1) } };
   }
 

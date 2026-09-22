@@ -48,7 +48,18 @@ delete a line to force a deliberate re-judge.";
 
 /// The complete verdict vocabulary. Other modules match these strings exactly; nothing else is
 /// accepted on write, and anything else is skipped with a warning on read.
-pub const VALID_VERDICTS: [&str; 3] = ["obligation", "opportunity", "drop"];
+///
+/// **`unsure` (stream J Task T1, CHECKPOINT J-1, ruled 2026-09-22): additive, never a rename.**
+/// Whether an event obliges a particular student is usually not in the event's own text; `unsure`
+/// lets the judgment say so honestly instead of guessing among the other three. It also closes the
+/// re-ask-forever defect for good: once ANY word here is recorded for a uid, `events::judge_roster`
+/// never asks about it again (one verdict per uid, forever), so `unsure` for a service reply the
+/// device could not otherwise use — below the confidence floor, incomplete, refused, truncated, or
+/// a bare model failure — is exactly as terminal as a real `drop`. An OLDER engine reading a vault
+/// this word reached would find it outside its own (three-word) `VALID_VERDICTS`, so
+/// `load_ledger`'s "not a valid verdict" branch below would leave that entry's `verdict` unset —
+/// graceful degradation to "ask again", never a crash and never a misread as some other word.
+pub const VALID_VERDICTS: [&str; 4] = ["obligation", "opportunity", "drop", "unsure"];
 
 /// The line terminator Python's text-mode writes produce on this platform.
 ///

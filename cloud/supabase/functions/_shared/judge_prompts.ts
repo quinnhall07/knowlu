@@ -47,10 +47,18 @@ const TASK_SCHEMA = {
   additionalProperties: false,
 };
 
+// CHECKPOINT J-1 (ruled 2026-09-22, design (a)): `unsure` is a fourth, first-class verdict word,
+// not an error path. Whether an event obliges a particular student is usually absent from the
+// event's own text, and forcing a choice among the other three there measurably breaks both
+// accuracy and calibration on the unanswerable slice (docs/notes/2026-09-22-jev-what-people-built.md
+// §3) — the same failure a router that always guesses shows on a benchmark's hard slice. `unsure`
+// lets the model say so honestly, and `judge_validate.ts`'s `record_verdict` path writes it like
+// any other verdict, so the uid is never re-asked (events spec §7's one-verdict-per-uid-forever
+// rule already does the rest).
 const EVENT_SCHEMA = {
   type: "object",
   properties: {
-    verdict: { type: "string", enum: ["obligation", "opportunity", "drop"] },
+    verdict: { type: "string", enum: ["obligation", "opportunity", "drop", "unsure"] },
     why: { type: "string" },
     confidence: { type: "number" },
   },
@@ -109,7 +117,8 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     return [
       "You decide whether one campus event is worth a student's attention.",
       "Rules:",
-      "- verdict: obligation (the student is expected there), opportunity (worth offering), or drop.",
+      "- verdict: obligation (the student is expected there), opportunity (worth offering), drop, or unsure.",
+      "- unsure: answer unsure when the event's own text does not say whether it applies to this student — do not guess the audience to force obligation, opportunity or drop.",
       "- an event aimed at faculty, staff, alumni or graduate students is a drop.",
       "- a standing exhibit, an office-hours block or a recurring drop-in is a drop.",
       "- why: one line, under 140 characters, no line breaks, no double quotes.",

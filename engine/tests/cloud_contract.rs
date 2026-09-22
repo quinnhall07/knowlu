@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 use knowlu_engine::cloudmodel::{CloudClient, CloudConfig, CloudModel};
-use knowlu_engine::judge::{self, Heuristics, Item, Model, Verdict};
+use knowlu_engine::judge::{self, EventModel, Heuristics, Item, Model, Verdict};
 
 /// A loopback server that answers `replies` in order and hands back everything it was sent.
 struct Loopback {
@@ -237,6 +237,83 @@ fn a_verdict_the_service_refused_is_an_error_that_names_the_cause() {
     let seed = judge::tier1(&item(), &heuristics());
     let err = model.judge(&item(), &heuristics(), &seed).expect_err("no verdict is an error");
     assert!(err.to_string().contains("below floor"), "{err}");
+    let _ = server.requests();
+}
+
+fn event_item(uid: &str) -> judge::EventItem {
+    judge::EventItem {
+        uid: uid.to_string(),
+        title: "AI Club Kickoff".to_string(),
+        start: "2026-08-29T18:00".to_string(),
+        end: "2026-08-29T19:30".to_string(),
+        source: "engage".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Stream J Task T1, CHECKPOINT J-1: defect B for the below-floor / no-verdict path.
+///
+/// Before this fix, `CloudModel::judge_event` propagated exactly the same shape of `Err` the task
+/// path still does (proven above), and `events::judge_roster` writes nothing on an `Err` — so the
+/// uid stayed unjudged and `judge_roster`'s own "already judged" filter would send it again every
+/// slot, forever. **The task path is deliberately unchanged** (the test above still expects an
+/// `Err`): only events get the fourth verdict word, so only events get this device-side rescue.
+#[test]
+fn a_below_floor_event_reply_becomes_unsure_instead_of_an_error_the_device_would_re_ask_forever() {
+    let refused = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"below floor"}"#;
+    let mut server = loopback(vec![(200, refused.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model
+        .judge_event(&event_item("engage:1"))
+        .expect("a below-floor reply must become a usable verdict, not an error");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("below floor"), "{}", got.why);
+    assert_eq!(got.confidence, 0.0, "the service never returns a number for this case (server log only)");
+    let _ = server.requests();
+}
+
+/// The same rescue for an `incomplete` reply (a required field missing, not merely low confidence)
+/// — the second of the two shapes `verdict_of` folds into one `ModelError::Failed`.
+#[test]
+fn an_incomplete_event_reply_also_becomes_unsure() {
+    let incomplete = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"incomplete"}"#;
+    let mut server = loopback(vec![(200, incomplete.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model.judge_event(&event_item("engage:2")).expect("incomplete must not be a dead end either");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("incomplete"), "{}", got.why);
+    let _ = server.requests();
+}
+
+/// A spent cap answers every remaining event identically and must stay retryable TOMORROW, never
+/// recorded today as if the event itself had been weighed and found wanting.
+#[test]
+fn a_capped_event_reply_still_stops_the_batch_rather_than_becoming_unsure() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let mut server = loopback(vec![(200, capped.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:1"))
+        .expect_err("a spent cap must stay an error, never a recorded unsure");
+    assert!(matches!(err, judge::ModelError::Capped), "{err:?}");
+    assert_eq!(model.fatal(), Some(judge::CAPPED_LABEL));
+    let _ = server.requests();
+}
+
+/// A 401 (no session) must stay exactly as fatal for events as it is for tasks — this is a
+/// transport/auth failure from `self.call(...)`, never reaching `verdict_of` at all, so it must
+/// never be rescued into `unsure`.
+#[test]
+fn a_401_event_reply_is_still_an_error_naming_the_session() {
+    let mut server = loopback(vec![(401, r#"{"error":"invalid jwt"}"#.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model.judge_event(&event_item("engage:1")).expect_err("a 401 is an error");
+    assert!(err.to_string().contains("no session"), "{err}");
+    assert_eq!(model.fatal(), Some("no session"));
     let _ = server.requests();
 }
 

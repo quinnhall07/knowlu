@@ -765,6 +765,23 @@ Deno.test("the seed's max_tokens (256/256/640) are correct, and no *provider_swa
   }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T1, CHECKPOINT J-1 (ruled 2026-09-22): `unsure` becomes a fourth event verdict
+// word. This migration re-pins only the `event` row's `prompt_version` (the prompt text changed)
+// and `grammar_version` (the schema's verdict enum gained a member) — never `task` or `email`.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("the event_unsure migration re-pins only the event row's prompt_version and grammar_version", async () => {
+  const sql = await Deno.readTextFile(new URL("20260922120100_event_unsure.sql", HERE));
+  assert(/update\s+models\s+set/i.test(sql), "expected an 'update models set …' statement");
+  assert(sql.includes("prompt_version = 'event-3'"), sql);
+  assert(sql.includes("grammar_version = 'event-2'"), sql);
+  assert(sql.includes("since = current_date"), sql);
+  assert(/where\s+kind\s*=\s*'event'/i.test(sql), sql);
+  assert(!sql.includes("prompt_version = 'task-"), "task must not be touched by this migration");
+  assert(!sql.includes("prompt_version = 'email-"), "email must not be touched by this migration");
+});
+
 Deno.test("the last definition of export_training_rows excludes both gmail_api and events origins", async () => {
   // Google's Limited Use policy binds Calendar-API data exactly as it binds Gmail's, and `origin`
   // cannot yet tell a Google-Calendar event from an ICS one — so every `events` row is excluded
