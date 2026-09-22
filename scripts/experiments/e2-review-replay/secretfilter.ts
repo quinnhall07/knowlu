@@ -5,18 +5,24 @@
 // is dropped outright, because the cheapest way to honour "no secret in a prompt" is to not send
 // the finding at all.
 
+// Every pattern ends the last word with `s?` so the plain plural (or, for "id", "ids") of the term
+// matches too — fix round 1, finding 1 (Important): the binding rule ("drop, never redact, any
+// finding that names a secret, a token or a session") is applied mechanically, so a plural mention
+// (B-final-F2's kept text: "the port and the tokens") must be caught exactly like the singular, not
+// left to a human to notice case by case. None of these words pluralise irregularly (no -es, no
+// -ies), so appending `s?` is the whole fix — it is not a general English-plural rule.
 const SECRET_TERMS: RegExp[] = [
-  /\bsession\b/gi,
-  /\bjwt\b/gi,
-  /\banon key\b/gi,
-  /\banon_key\b/gi,
-  /\bcredential manager\b/gi,
-  /\bcredential\b/gi,
-  /\bsecret\b/gi,
-  /\btoken\b/gi,
-  /\bclient_id\b/gi,
-  /\bclient id\b/gi,
-  /\bapi key\b/gi,
+  /\bsessions?\b/gi,
+  /\bjwts?\b/gi,
+  /\banon keys?\b/gi,
+  /\banon_keys?\b/gi,
+  /\bcredential managers?\b/gi,
+  /\bcredentials?\b/gi,
+  /\bsecrets?\b/gi,
+  /\btokens?\b/gi,
+  /\bclient_ids?\b/gi,
+  /\bclient ids?\b/gi,
+  /\bapi keys?\b/gi,
 ];
 
 /**

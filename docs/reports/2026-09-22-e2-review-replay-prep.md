@@ -20,9 +20,10 @@ artefact. `scripts/experiments/e2-review-replay/parsers_test.ts` pins the correc
 against the corpus on disk (10/2/6/1/1/2/2 for tasks 1-7, 12 for the final review, 24 for the plan
 review), so a future re-run that disagrees fails loudly rather than silently re-drifting.
 
-Of the 60, the secret/token/session/credential drop filter removes **10** (not the 3-8 a first
-manual read of the source text suggested — see §3). **50 findings ship in the corpus**, 19 from Set
-A (plan review) and 31 from Set B (task + final reviews).
+Of the 60, the secret/token/session/credential drop filter removes **11** (not the 3-8 a first
+manual read of the source text suggested — see §3; fix round 1, §8, added one of the 11 after this
+report's first version). **49 findings ship in the corpus**, 19 from Set A (plan review) and 30
+from Set B (task + final reviews).
 
 ## 2. Extraction bugs found and fixed (RED/GREEN evidence)
 
@@ -54,11 +55,12 @@ Mechanical, over every kept finding's leak-stripped text, never a per-item judgm
 (`secretfilter.ts`): a whole-word (underscore/hyphen-normalised) match on session, jwt, anon key,
 credential manager, credential, secret, token, client id, api key drops the finding outright.
 
-**10 dropped**, full audit at `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/dropped.json`:
-`B-task1-2` (bearer token / `verify_jwt`), `B-task3-3` (Credential Manager / session), `B-final-F7`
-(anon key / `verify_jwt`), `B-final-F8` (credential / `token_verifications`), `B-final-F11` (a test
-name containing "...becomes_a_session_on_this_machine"), `A-C2` (credential struct / stored
-session), `A-C5` (the literal TOML key `secret = "env(GOOGLE_SECRET)"`), `A-C6`, `A-I2`, `A-M4`.
+**11 dropped**, full audit at `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/dropped.json`:
+`B-task1-2` (bearer token / `verify_jwt`), `B-task3-3` (Credential Manager / session), `B-final-F2`
+("the port and the tokens" — plural, see §8), `B-final-F7` (anon key / `verify_jwt`), `B-final-F8`
+(credential / `token_verifications`), `B-final-F11` (a test name containing
+"...becomes_a_session_on_this_machine"), `A-C2` (credential struct / stored session), `A-C5` (the
+literal TOML key `secret = "env(GOOGLE_SECRET)"`), `A-C6`, `A-I2`, `A-M4`.
 
 Two read as false positives on a first look and are not, on the mechanical policy this filter
 states: **`A-C6`** matches on Stripe's own proper noun "Checkout Session" — still, literally, a
@@ -71,22 +73,22 @@ findings."
 ## 4. The label-leak check (stop rule 1)
 
 **Passes**, by direct proof: `findLeaks()` (`severity.ts`) is a word-boundary scan for
-critical/important/minor/blocking/should-fix/nit/severity, and returns empty on every one of the 50
+critical/important/minor/blocking/should-fix/nit/severity, and returns empty on every one of the 49
 kept findings' text — proven both as a unit test over hand-written fixtures for all four placements
 (`severity_test.ts`, `parsers_test.ts`) and as an integration test and a runtime assertion over the
 real, extracted corpus (`extract_test.ts`, `extract.ts`, `run.ts`).
 
 A softer, corroborating check (procedure §Step 3's "run once with labels left in"):
 `run.ts` also scores the lexical baseline (§5) on the *un-stripped* span. The gap is real but modest
-— whole corpus: stripped 38.0% vs raw 42.0%; Set B only (31 items, the only ones whose raw span
+— whole corpus: stripped 42.9% vs raw 46.9%; Set B only (30 items, the only ones whose raw span
 literally contains the label word — Set A's severity is positional, a heading above the item, never
-inside it) — stripped 35.5% vs raw 38.7%. The modest size is explained, not concerning: a term that
+inside it) — stripped 50.0% vs raw 53.3%. The modest size is explained, not concerning: a term that
 appears in roughly a third to a half of all documents (as `nit`/`should-fix` do) gets a low
 IDF weight, so it adds only a little to a cosine score already carrying many other shared words. The
 direction is consistently correct (raw ≥ stripped in both comparisons); the load-bearing proof is
 the zero-survivors string check, not this magnitude.
 
-## 5. Baselines (leave-one-out over the 50-item corpus)
+## 5. Baselines (leave-one-out over the 49-item corpus)
 
 Majority class and an honest **lexical** (TF-IDF, cosine, 3-nearest-neighbour, leave-one-out — never
 called "embeddings") baseline, per the decision context: no embedding model can be downloaded on
@@ -94,18 +96,18 @@ this machine, so this stands in for the commercial comparator §4a of the proced
 
 | label | majority class | lexical (TF-IDF 3-NN) |
 |---|---|---|
-| severity (critical/important/minor) | 52.0% (26/50), 95% CI [38.5%, 65.2%] | 38.0% (19/50), 95% CI [25.9%, 51.8%] |
-| disposition (fixed/ruled against/handed off/deferred) | 82.0% (41/50), 95% CI [69.2%, 90.2%] | 86.0% (43/50), 95% CI [73.8%, 93.0%] |
+| severity (critical/important/minor) | 53.1% (26/49), 95% CI [39.4%, 66.3%] | 42.9% (21/49), 95% CI [30.0%, 56.7%] |
+| disposition (fixed/ruled against/handed off/deferred) | 81.6% (40/49), 95% CI [68.6%, 90.0%] | 85.7% (42/49), 95% CI [73.3%, 92.9%] |
 
 **Stop rule 3 status: not yet evaluated** — it is a comparison against the *model's* accuracy, and
 no model has run. What these numbers say on their own: for severity, the lexical baseline **loses**
-to the majority class by 14 points — the cheap baseline does not win here, contrary to §4a's
-Greptile precedent, and severity is a genuinely hard 3-way call for a bag-of-words method on 50
-heterogeneous items. For disposition, majority class is already high (82%) because the corpus's own
-disposition distribution is skewed — Set A is 100% "fixed" (§7), which the plan review's own
+to the majority class by 10 points — the cheap baseline does not win here, contrary to §4a's
+Greptile precedent, and severity is a genuinely hard 3-way call for a bag-of-words method on 49
+heterogeneous items. For disposition, majority class is already high (81.6%) because the corpus's
+own disposition distribution is skewed — Set A is 100% "fixed" (§7), which the plan review's own
 thoroughness explains, not an extraction defect — so the lexical method's 4-point edge over it is a
 small win against a strong, unbalanced baseline. Full confusion-adjacent numbers (not a matrix at
-n=50 with 3-4 classes; see raw JSON) are at
+n=49 with 3-4 classes; see raw JSON) are at
 `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/baselines.json`.
 
 ## 6. Cost, transport, and the one command for the paid run
@@ -123,7 +125,7 @@ calibrated `choice`/`noul` answers, or just free-form chat text, is unverified**
 $0.0001 live call before trusting anything past that.
 
 Estimated cost, minimal state (finding + primary file + one-line task context + the three
-questions), chars/4 token heuristic: **~12,400 input tokens for all 50 items, ~$0.0005 total**
+questions), chars/4 token heuristic: **~12,100 input tokens for all 49 items, ~$0.0005 total**
 (output free, $0.042/M input — `jev_request.ts`). Lower than the note's own $0.002-0.009 estimate
 for 59 items because the state here carries no whole-review-file context, only the one finding.
 
@@ -150,9 +152,50 @@ resolved** in the plan review's own re-review — a true picture of how thorough
 review's fix-and-recheck loop was, not a labelling error, but it means Set A alone teaches nothing
 about the "ruled against"/"handed off"/"deferred" classes; those come entirely from Set B.
 
+## 8. Fix round 1 (2026-09-22): plural/inflected secret terms
+
+The task review approved the work with one Important finding: every `SECRET_TERMS` pattern in
+`secretfilter.ts` was `\bTERM\b` on the singular only, so a plural or inflected mention — "tokens",
+"sessions", "secrets", "credentials" — was not caught. Live in the corpus: **`B-final-F2`**'s kept
+text read "...is about the URL, the port and the tokens, not the attestation", which named a token
+(plural) and should have been dropped under the binding rule ("drop, never redact, any finding that
+names a secret, a token or a session"), applied mechanically, not by a human judging each mention.
+
+**Test-first.** Four new rows added to `secretfilter_test.ts` before any fix, covering the plain
+plural of every single-word term (token→tokens, session→sessions, secret→secrets,
+credential→credentials), the plain plural of every multi-word term (anon key→anon keys, credential
+manager→credential managers, client id→client ids, api key→api keys), a plural embedded in a
+snake_case identifier, and that `secretMentionTerms` reports the matched plural form itself (not a
+normalised singular). RED: 4 of 8 tests in the file failed (`mentionsSecret("about the port and the
+tokens, ...")` returned `false`, expected `true`; three more of the same shape).
+
+**Fix.** Every `SECRET_TERMS` pattern's last word gets an optional trailing `s` before the closing
+`\b` (`/\bsessions?\b/gi`, `/\btokens?\b/gi`, `/\banon keys?\b/gi`, etc.) — none of the eleven terms
+pluralise irregularly (no `-es`, no `-ies`), so this is the whole fix, not a general English-plural
+rule. GREEN: all 8 tests in `secretfilter_test.ts` pass; full suite re-run, 54/54 pass.
+
+**Re-extraction.** `run.ts` re-run end to end (`--dry-run`, no network permission needed for this
+part): raw findings still 60 (unchanged — the plural fix only affects the drop filter, not parsing);
+**11 dropped** (was 10) — `B-final-F2` newly caught; **49 kept** (was 50). `corpus.jsonl`,
+`dropped.json`, `summary.json` and `baselines.json` in the workspace directory are all regenerated
+with these numbers; every count and baseline number in this report (§1, §3, §4, §5, §6) is updated
+to match. `deno check`/`deno lint`/`deno fmt --check` all still clean; no new warning.
+
+```
+deno test --config deno.json --allow-read --allow-write --allow-run=powershell.exe \
+  --allow-env=OPENROUTER_API_KEY .          # 54 passed, 0 failed
+deno check --config deno.json *.ts          # 19 files, clean
+deno lint --config deno.json .              # 18 files, clean
+deno fmt --config deno.json --check .       # 19 files, clean
+deno run --config deno.json --allow-read --allow-write --allow-run=powershell.exe \
+  --allow-env=OPENROUTER_API_KEY run.ts --dry-run   # re-extraction + baselines, no network
+```
+
+The paid run was not executed for this fix round, per instruction.
+
 ## Files
 
 - `scripts/experiments/e2-review-replay/` — all 9 modules + their test files, `deno.json`.
-- `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/` (git-ignored) — `corpus.jsonl` (50 kept
-  findings, leak-free), `dropped.json` (10 audited drops), `summary.json`, `baselines.json`.
+- `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/` (git-ignored) — `corpus.jsonl` (49 kept
+  findings, leak-free), `dropped.json` (11 audited drops), `summary.json`, `baselines.json`.
 - Full report: `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2-report.md`.

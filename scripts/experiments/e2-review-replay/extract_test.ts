@@ -18,7 +18,7 @@ const CORPUS_AVAILABLE = pathExists(
 
 Deno.test({
   name:
-    "extractCorpus finds 60 raw findings, drops exactly the 10 that name a secret/token/session/credential",
+    "extractCorpus finds 60 raw findings, drops exactly the 11 that name a secret/token/session/credential",
   ignore: !CORPUS_AVAILABLE,
   fn: async () => {
     const { kept, dropped, summary } = await extractCorpus();
@@ -26,14 +26,16 @@ Deno.test({
     assertEquals(summary.rawFound, 60);
     assertEquals(summary.expected, 59);
     assertEquals(kept.length + dropped.length, 60);
-    assertEquals(dropped.length, 10);
-    assertEquals(kept.length, 50);
+    assertEquals(dropped.length, 11);
+    assertEquals(kept.length, 49);
 
     // Every id here was checked by hand against its source document, 2026-09-22 (see
     // docs/reports/2026-09-22-e2-review-replay-prep.md): each genuinely names the concept its
     // matched term says, including two that read as a false positive at first glance and are not —
     // A-C6 matches on Stripe's own proper noun "Checkout Session" (still, literally, naming a
-    // session), and A-M4 matches on the literal env-var name `KNOWLU_ANON_KEY`.
+    // session), and A-M4 matches on the literal env-var name `KNOWLU_ANON_KEY`. B-final-F2 is fix
+    // round 1's own finding: it names "the tokens" (plural), which SECRET_TERMS's singular-only
+    // patterns missed until the plural fix.
     const droppedIds = dropped.map((d) => d.id).sort();
     assertEquals(droppedIds, [
       "A-C2",
@@ -42,6 +44,7 @@ Deno.test({
       "A-I2",
       "A-M4",
       "B-final-F11",
+      "B-final-F2",
       "B-final-F7",
       "B-final-F8",
       "B-task1-2",

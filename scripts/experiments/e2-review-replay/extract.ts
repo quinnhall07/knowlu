@@ -138,11 +138,12 @@ export async function extractCorpus(): Promise<ExtractionOutcome> {
     "(`app/src/account.rs:395-398`, a `(nit)`) is present in the source document and is not an " +
     "extraction artefact; re-derived directly from task-3-review.md on disk, 2026-09-22.",
     "Total raw corpus: 60 findings (24 + 36), against the brief's expected 59.",
-    "Secret/token/session/credential drop filter: 10 of the 60 raw findings, not the 3-8 a first " +
+    "Secret/token/session/credential drop filter: 11 of the 60 raw findings, not the 3-8 a first " +
     "manual read suggested — see docs/reports/2026-09-22-e2-review-replay-prep.md for the full " +
     "audit. Two read as false positives at first glance and are not: A-C6 matches on Stripe's own " +
     'proper noun "Checkout Session" (still, literally, a mention of a session), and A-M4 matches ' +
-    "on the literal env-var name KNOWLU_ANON_KEY. Kept: 50.",
+    'on the literal env-var name KNOWLU_ANON_KEY. Fix round 1 added B-final-F2 ("the port and the ' +
+    'tokens", plural) once SECRET_TERMS matched plural/inflected forms too. Kept: 49.',
   ];
 
   const summary: ExtractionSummary = {
