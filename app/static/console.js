@@ -1826,7 +1826,15 @@
     var vhlRows = WIZ.map.filter(function (r) { return r.source === "vhl" && !r.ignore && r.course; });
     var codes = {};
     zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
-    WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
+    // Final review, I4 (a C1 Task 17 bug predating this branch): only a TYPED course belongs here —
+    // it carries `slug: ""`, and this is the only place anything derives one for it. A CAPTURED
+    // course already carries its own slug and is covered by the engine's `course_fragments`
+    // (`app/src/scaffold.rs`); sending it here too would give its LMS id a *second*, phantom
+    // `[id, ""]` entry that `create_vault_in` derives an ENGINE slug for on the empty second
+    // element — and because `course_map_lines` is first-wins by key with the page's entries first,
+    // that phantom slug wins over the real one `course_fragments` would have written, so the id
+    // ends up pointing at a course that doesn't exist (D4's `[LMS id -> slug]` guarantee broken).
+    WIZ.courses.forEach(function (c) { if (c.code && !c.slug) { codes[c.code] = true; } });
     // A-5 (b): re-read the truth rather than trust the poll loop's last tick. A consent that
     // finished (in the browser, or after the poll was cancelled by leaving and returning to the
     // panel) after the loop last checked must still birth the vault with the `cloud:google` entry
@@ -1844,9 +1852,13 @@
                    // The second element is the slug, and the page has none: an empty string is what
                    // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
                    course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
-                   // Review round 1, I2: every discovered zyBook the student declined. Out of this list
-                   // an unmapped book is `not in config; skipped` on every healthy run, forever.
-                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
+                   // Final review, I2: only the rows the student explicitly ticked as ignored — never
+                   // a blank one. A blank zyBooks row must stay UNMAPPED so the engine files a
+                   // coursework-map card for it (R-OB-1), the same as a blank VHL row; putting it in
+                   // this list instead made it `not in config; skipped` on every healthy run, forever,
+                   // and made noteUnmapped's "N of these will be asked about in the app" false for
+                   // zyBooks.
+                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && r.ignore; })
                                           .map(function (r) { return r.key; }),
                    courses: WIZ.courses };
       // Before anything is created: move the credentials if the path has changed since they were
@@ -1860,10 +1872,12 @@
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
           if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
-          // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
-          // from the pending target onto this profile, so this is the first moment the cache can be
-          // written where the console will look for it — and the console relaunches into a vault whose
-          // grace clock has already started rather than one that must reach the network to paint.
+          // R-C1-31, corrected by the final review (Minor 8): `entitlement_now` writes NO cache —
+          // it only reads the PENDING session, which `create_vault` has just moved onto this
+          // profile, so this call typically finds nothing there any more and resolves to null. The
+          // real first cache write is the in-slot refresh D1 added (`scheduler::run_slot_inner`,
+          // spec §2), keyed off the profile's own vault and data dir. Left in place as a harmless
+          // best-effort poll rather than removed here.
           // Best effort in both directions: a refusal, or a build where the command is not yet
           // registered, must never stop a finished wizard from opening.
           return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {

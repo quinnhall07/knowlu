@@ -72,7 +72,11 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       ? Promise.resolve({ ok: true, error: null, note: 'We could not reach your coursework sites', rows: [] })
       : Promise.resolve({ ok: true, error: null, note: null, rows: [
         { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
-        { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
+        { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false },
+        // Final review, I2: one row left blank (never touched) and one row the student ticks as
+        // ignored — proves `wizFinish` puts only the ticked one in `zybooks_ignore`.
+        { source: 'zybooks', key: 'HowToUseZyBooks2', detail: null, suggested: null, mapped: false, ignored: false },
+        { source: 'zybooks', key: 'AnotherOldBook2020', detail: null, suggested: null, mapped: false, ignored: false }] }); }
   if (cmd === 'store_credentials') {
     return (args.user || '').indexOf('fail') === 0
       ? Promise.resolve({ ok: false, error: 'credential write failed for ' + args.source })
@@ -251,6 +255,10 @@ def check(page) -> list:
     opts = page.eval_on_selector_all("#wiz-course-codes option", "os => os.map(o => o.value)")
     if "CS 100" not in opts: bad.append(f"the datalist does not carry the captured class: {opts!r}")
     page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
+    # Final review, I2: row 2 (HowToUseZyBooks2) is left untouched — blank, un-ticked — and row 3
+    # (AnotherOldBook2020) is ticked as ignored. `zybooks_ignore` must carry the ticked one and
+    # never the blank one, so the blank one stays UNMAPPED and gets a coursework-map card.
+    page.check('[data-ignore-for="3"]'); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-gmail"): bad.append("a confirmed mapping did not advance to the Gmail panel")
     if page.input_value("#wiz-zy-pass") != "": bad.append("the password field was not cleared")
@@ -308,6 +316,13 @@ def check(page) -> list:
         # in Rust without a sound, so `label` alone would pass a mapping that never lands.
         if not any(b.get("course") == "CS 100" for b in zy):
             bad.append("the zyBooks mapping carried no course code — create_vault_in drops a row whose `course` is empty")
+        # Final review, I2: the ticked row is ignored; the blank, un-ticked row is not — it must
+        # stay unmapped so the engine's coursework-map card path (R-OB-1) can still reach it.
+        zi = plan.get("zybooks_ignore") or []
+        if "AnotherOldBook2020" not in zi:
+            bad.append(f"a ticked zyBooks row did not reach zybooks_ignore: {zi!r}")
+        if "HowToUseZyBooks2" in zi:
+            bad.append(f"a blank, un-ticked zyBooks row was sent as ignored: {zi!r}")
         vh = plan.get("vhl_sections") or []
         if not any(v.get("section") == "2102121" and v.get("label") == "GN 103" for v in vh):
             bad.append(f"the plan did not carry the VHL mapping: {vh!r}")
@@ -315,6 +330,13 @@ def check(page) -> list:
             bad.append("the VHL mapping carried no course code")
         if not any(c[0] == "CS 100" for c in (plan.get("course_map") or [])):
             bad.append("the plan did not carry the course map")
+        # Final review, I4: the CAPTURED course 'UACS100Fall2026' already carries its own slug
+        # ('cs-100', from `capture_courses` above) and is covered by the engine's own
+        # `course_fragments` — the page must never send its LMS id into `course_map` a second time
+        # with a phantom empty slug, which `create_vault_in` would fill and which would then win
+        # over the real one (first-wins by key).
+        if any(c[0] == "UACS100Fall2026" for c in (plan.get("course_map") or [])):
+            bad.append("a captured course's LMS id was sent in course_map with a phantom slug")
         if not any(c.get("code") == "UACS100Fall2026" for c in (plan.get("courses") or [])):
             bad.append("the plan did not carry the enrolled courses")
         if plan.get("zybooks") is not True: bad.append("the plan did not record that a zyBooks login was stored")

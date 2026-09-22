@@ -561,6 +561,49 @@ fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
     assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
 }
 
+/// Final review, I2: `wizFinish` must put only the rows the student explicitly ticked as ignored
+/// into `zybooks_ignore` — never a blank row. A blank zyBooks row left out of both `courses` and
+/// `ignore` is `BookRouting::Unmapped` (`route_zybook`, `engine/src/coursework.rs`) and the cloud
+/// handler's mirror (`routeZybook`, `cloud/supabase/functions/ingest-coursework/parse_zybooks.ts`)
+/// files a coursework-map card for it — the same path a blank VHL row already takes. Putting a
+/// blank row in `zybooks_ignore` instead makes it silently skipped forever and makes
+/// `noteUnmapped`'s "N of these will be asked about in the app" false for zyBooks.
+#[test]
+fn a_blank_zybooks_row_is_never_sent_as_ignored() {
+    let js = read("console.js");
+    let finish = js.find("function wizFinish(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("\n  // The Checkout page").next())
+        .expect("wizFinish");
+    assert!(
+        finish.contains("r.source === \"zybooks\" && r.ignore; }"),
+        "zybooks_ignore takes only rows the student ticked as ignored"
+    );
+    assert!(
+        !finish.contains("r.source === \"zybooks\" && (r.ignore || !r.course)"),
+        "a blank, un-ignored zyBooks row must not reach zybooks_ignore"
+    );
+}
+
+/// Final review, I4 (a C1 Task 17 bug predating this branch, undoing part of D4): a captured
+/// course already carries its own slug and is covered by `course_fragments`
+/// (`app/src/scaffold.rs`) — sending its LMS id into `course_map` a second time with an empty
+/// slug lets `create_vault_in` fill it with `slugify(<LMS id>)`, and because `course_map_lines` is
+/// first-wins with the page's entries first, that phantom slug wins over the real one. Only a
+/// TYPED course (`slug: ""`) belongs in this list.
+#[test]
+fn a_captured_courses_lms_id_never_gets_a_phantom_slug() {
+    let js = read("console.js");
+    let finish = js.find("function wizFinish(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("\n  // The Checkout page").next())
+        .expect("wizFinish");
+    assert!(
+        finish.contains("if (c.code && !c.slug)"),
+        "only a typed course (no slug of its own) contributes its code to course_map"
+    );
+}
+
 /// D7 / §6: the minute between Finish and the first `rank` says what is happening instead of
 /// painting nothing. The sentence is the page's, the steps come from the envelope, and the page
 /// asks again every three seconds until the day is there — then goes back to its usual cadence.
