@@ -222,6 +222,13 @@ fn approving_a_task_proposal_puts_the_task_in_the_returned_state() {
 fn rejecting_and_snoozing_write_the_decision_fields() {
     let v = scratch("snooze");
     let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-snooze-data-{}", std::process::id())));
+    // `vault-full`'s two approvals carry frozen `expires:` dates (2026-09-20, 2026-09-30) — the
+    // fixture is never regenerated (CLAUDE.md rule 2), so this test pins "today" to the fixture's
+    // own reference date rather than racing the real clock past 2026-09-20 and losing a card
+    // (`engine/src/surface.rs`'s `read_approvals` excludes a pending approval whose `expires` is
+    // before today). 2026-08-28 is the date `engine/tests/fixtures/golden-today-full.md` and the
+    // oracle tests' `PINNED_DATE` were generated against.
+    cs.set_test_today(Some("2026-08-28".parse().unwrap()));
     let s = state_inner(&cs, "decisions").unwrap();
     let cards = s["state"]["decisions"]["cards"].as_array().unwrap().clone();
     let a = cards[0]["id"].as_str().unwrap(); let b = cards[1]["id"].as_str().unwrap();
@@ -231,6 +238,22 @@ fn rejecting_and_snoozing_write_the_decision_fields() {
     let text = std::fs::read_to_string(v.join("approvals").join(format!("{}.md", cards[1]["slug"].as_str().unwrap()))).unwrap();
     assert!(text.contains("status: snoozed") && text.contains("snooze_until: 2099-01-01") && text.contains("decision_note:"), "{text}");
     assert_eq!(decide_inner(&cs, "today", a, "maybe", "", None).unwrap()["ok"], false, "verdict is one of three words");
+}
+
+/// `ConsoleState::set_test_today` is the seam the test above relies on — proved here on its own
+/// terms rather than by the side effect of another test passing. `amend-ph-106-due.md` carries a
+/// frozen `expires: 2026-09-20` (never regenerated, CLAUDE.md rule 2); 2026-08-28 is before that
+/// date and always will be, so pinning "today" there must keep the card in view regardless of what
+/// day this suite actually runs on (`engine/src/surface.rs`'s `read_approvals` excludes a pending
+/// approval once `expires` is before today).
+#[test]
+fn set_test_today_pins_what_the_read_model_treats_as_today() {
+    let v = scratch("pin-today");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-pin-today-data-{}", std::process::id())));
+    cs.set_test_today(Some("2026-08-28".parse().unwrap()));
+    let s = state_inner(&cs, "decisions").unwrap();
+    let cards = s["state"]["decisions"]["cards"].as_array().unwrap();
+    assert!(cards.iter().any(|c| c["kind"] == json!("amend")), "pinning today to 2026-08-28 must keep the amend approval (expires 2026-09-20) in view: {cards:?}");
 }
 
 #[test]
