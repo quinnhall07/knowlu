@@ -454,7 +454,7 @@ fn capture_steps(unitid: &str) -> Option<Vec<String>> {
 
 /// One course the student is enrolled in, as the LMS names it and as the vault will.
 ///
-/// **The three fields `scaffold::CourseSeed` carries, by the same names.** The panel hands what
+/// **The four fields `scaffold::CourseSeed` carries, by the same names.** The panel hands what
 /// `capture_courses` returned straight back as the wizard plan's `courses:`, so these two structs are
 /// one shape; `a_captured_course_is_exactly_what_the_wizard_plan_takes_back` pins the round trip, and
 /// that nothing else rides along on it.
@@ -466,6 +466,10 @@ pub struct Course {
     pub name: String,
     /// `cs-100`. The vault's own name for it: the note's stem, and every task's `course:` field.
     pub slug: String,
+    /// R-C1c-plan-2: the human course code, or empty. The one place a code is read out of an id or
+    /// a name is `courses_from_json`; every reader downstream takes it from here.
+    #[serde(default)]
+    pub label: String,
 }
 
 /// Both shapes, one reader (spec §11a R-OB-2). Blackboard Ultra answers
@@ -499,13 +503,18 @@ pub fn courses_from_json(body: &str) -> Vec<Course> {
         if code.is_empty() && name.is_empty() {
             continue;
         }
-        // The slug comes from the SUGGESTED code where there is one — `ua-cs-100-fall-2026` is
-        // nobody's idea of a course — and from the name otherwise.
-        let slug = crate::scaffold::suggest_course(&code)
-            .map(|c| knowlu_engine::ingest::slugify(&c))
+        // The human code comes from the SUGGESTED code where the LMS's own id carries one —
+        // `ua-cs-100-fall-2026` is nobody's idea of a course — and from the NAME otherwise (D4:
+        // Blackboard hands back an opaque `courseId` and writes the code into the name).
+        let label = crate::scaffold::suggest_course(&code)
+            .or_else(|| crate::scaffold::course_code_in_name(&name));
+        // The slug is that code's, and the name's when there was no code to read.
+        let slug = label
+            .as_deref()
+            .map(knowlu_engine::ingest::slugify)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| knowlu_engine::ingest::slugify(if name.is_empty() { &code } else { &name }));
-        out.push(Course { code, name, slug });
+        out.push(Course { code, name, slug, label: label.unwrap_or_default() });
     }
     out
 }

@@ -1998,8 +1998,12 @@
   /// page never invents one.
   function renderCourses() {
     EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.code || c.name) +
-             (c.name && c.name !== c.code ? " &middot; " + h(c.name) : "") +
+      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
+      // when there was no code to read, or when the two are the same string (a typed course is
+      // both). The page never reads a code out of a name: that rule lives in
+      // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
+      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
     }).join("");
   }

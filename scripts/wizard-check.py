@@ -66,7 +66,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'close_lms_window') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'capture_courses') {
     return Promise.resolve({ ok: true, error: null, typed: false,
-      courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100' }] }); }
+      courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100', label: 'CS 100' }] }); }
   if (cmd === 'discover_coursework') {
     return window.__DISCOVER_EMPTY
       ? Promise.resolve({ ok: true, error: null, note: 'We could not reach your coursework sites', rows: [] })
