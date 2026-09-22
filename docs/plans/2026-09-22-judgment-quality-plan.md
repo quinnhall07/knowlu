@@ -8,7 +8,7 @@ evidence, recorded in `docs/notes/2026-09-22-confidence-calibration-and-the-floo
 **Written to survive a context compaction.** Every task names its files, its evidence and its
 decision, so a fresh session can execute from this document alone.
 
-## The six research notes behind this plan
+## The seven research notes behind this plan
 
 | note | what it establishes |
 |---|---|
@@ -18,6 +18,7 @@ decision, so a fresh session can execute from this document alone.
 | `docs/notes/2026-09-22-jev-review-replay-experiment.md` | the review-triage procedure, and its real baseline |
 | `docs/notes/2026-09-22-jev-retention-recheck.md` | retention is no longer the blocker; OpenRouter marks the endpoint |
 | `docs/notes/2026-09-22-jev-in-the-development-workflow.md` | what may and may not be wired beside Claude Code |
+| `docs/notes/2026-09-22-completion-detection-design.md` | completion is three tiers, the free one needs no model, and it labels itself |
 
 ## What makes this plan dynamic
 
@@ -44,10 +45,17 @@ T6  calibration harness (written now, parked) ──> B2 ──┤
 T1  abstain verdict + the re-ask fix   (no data needed)
 T2  synthetic event seed ──> T3  decomposition ──> B1
 T4  email `due` reference date         (no data needed)
+
+T8  completion, vendor number ──> T9  the sixth email tier ──┐
+        (no model, no cloud)          (one enum member)      └──> labels ──> T10 / E5
 ```
 
-**T1, T2 and T4 touch disjoint files and can run in parallel.** T3 needs T2. T5 and T7 are blocked
-on data that does not exist yet.
+**T1, T2, T4 and T8 touch disjoint files and can run in parallel.** T3 needs T2; T9 needs T8; T10
+needs both plus Quinn's completion cost row. T5 and T7 are blocked on data that does not exist yet.
+
+**T8 is the one task here that produces data instead of consuming it.** Everything gated on labels —
+T5, T6, T7, T10 — gets closer every day T8 is shipped and not a day sooner, which is why it sits
+early despite being the smallest thing in the plan.
 
 ## Prerequisite check before any dispatch
 
@@ -305,6 +313,66 @@ plan.**
 
 ---
 
+## T8 — completion detection, tier 1: the vendor number *(no model, no cloud, no ruling)*
+
+**What.** VHL already reports `percentage_complete` on every coursework run
+(`engine/src/vhl.rs:235`) and Knowlu uses it once, to seed `progress` at creation, then never looks
+again (`engine/src/coursework.rs:241`). An item reporting 100 is a vendor certifying the student
+finished it. Turn that into an `amend` proposal moving `status` from `active` to `done`.
+
+**Why it is safe.** `status` is one of the nine amendable fields (`engine/src/approvals.rs:42-52`);
+`progress` is not, and a test asserts the refusal (`:2746`). So the proposal path is the existing
+one: capped at 15 a day, overflow snoozed never deleted, surfaced at `surface --view decisions`,
+reversible by construction. **No new field, no new write path, no migration, no model.**
+
+**Why it matters more than its size suggests.** A ranked list that keeps showing finished work
+teaches the student the list is wrong. Nothing in Knowlu derives completion from anything today —
+`completed_at` is in the parent design's schema (`:137`) and does not exist in the engine.
+
+**And it is what makes T10 answerable.** Every proposal the student approves or rejects is a
+ground-truth label, journaled with its evidence. **This is the only thing in the repository that
+builds a corpus for free**, and the corpus is exactly what closed the event kind.
+
+The design, the per-source table and the unverified questions:
+`docs/notes/2026-09-22-completion-detection-design.md`.
+
+**Done when.** A VHL item at 100 produces one proposal, a second run produces none, a rejection
+sticks, and `cargo test --workspace` is green at 0 warnings.
+
+## T9 — completion detection, tier 2: the sixth email tier
+
+**What.** The email triage has five tiers and **none of them means "this reports that existing work
+is finished"** (`judge_prompts.ts:66`, `judge_validate.ts:22`). So "Your submission for HW 3 was
+received" lands in `information`, which writes nothing and records the uid so it is never
+reconsidered (`engine/src/enrich.rs:628-636`). The best completion evidence a student gets is
+classified as noise and tombstoned. Add a `completion` tier and route it to a proposal.
+
+**Why this and not a fourth judgment kind.** A fourth kind means seven
+`check (kind in (...))` constraints across two migrations, a new edge function, a `DAILY_CAP` entry,
+a `models` row, a prompt, a schema and a new `promptHash`. A sixth tier is one enum member and one
+prompt line on the existing route, provider, pin and budget. **No migration.** The note's §6 lists
+the seven constraint sites.
+
+**Depends on T8** for the proposal path, and on a prompt-version bump (`email-3`) with its hash.
+
+**Done when.** A "submission received" fixture reaches a proposal, an unrelated newsletter still
+drops as `information`, and the eval thresholds for the email kind do not regress.
+
+## T10 — completion detection, tier 3: does a model beat the rules? *(gated, see E5)*
+
+**What.** Only the residue — evidence whose meaning is genuinely in the prose. This is the first
+place in Knowlu where **a calibrated probability would earn its price**, because the cost asymmetry
+demands a threshold self-reported confidence cannot support: a false *done* hides live work and the
+student misses a deadline; a false *not-done* costs one dismissive click. At 10:1 Elkan gives
+`t* = 0.91`, at 20:1 `0.95`, against a `CONFIDENCE_FLOOR` of 0.6 that is optimal for 2:3.
+
+**Gated on three things, none of them negotiable.** Quinn's completion cost matrix (folded into
+T0); enough labels from T8 and T9 to measure anything; and, if the candidate is Jev, the D-R8
+provider gate — a privacy-page version bump, a notice to every account and an in-app yes. **That
+gate has not moved.**
+
+---
+
 ## E — the experiments, each with its stop rule
 
 These are **planned work, not optional extras.** Each has a stop rule written before it runs, so a
@@ -350,6 +418,28 @@ rows now** so that the day real corrections exist it is one command, not a proje
 including tool use and tool ordering. **If anyone ever proposes a hook or plugin, this measures it
 rather than arguing about it.** The standing recommendation today is not to install one, and
 `docs/notes/2026-09-22-jev-in-the-development-workflow.md` §6 says why.
+
+### E5 — does a model beat the rules at completion? *(T10; runs when labels exist)*
+
+**The question.** On the labels T8 and T9 collect, does a model reading the evidence prose beat the
+promoted rules at deciding a task is finished?
+
+**The baseline is the rules, not a coin.** Tier 2 will already catch the structured cases, so the
+model is only being asked about what the rules left over. Measuring it against anything weaker than
+the live rule set would flatter it.
+
+**What is measured.** Precision at the operating threshold first, because that is the number the
+student feels; then recall at that threshold; then calibration error and a risk-coverage curve over
+the residue, per T6's harness.
+
+**The stop rule.** If the model's precision at Quinn's cost-derived threshold does not beat the
+rules' precision by a margin larger than the confidence interval at the N we have, **the question is
+closed and tier 3 is not built.** A result that closes it is a good outcome and gets written up as
+one. If the candidate is a new provider, the D-R8 gate applies before a single request is sent, so
+this experiment cannot start by accident.
+
+**Prerequisite, and it is a real one.** N. At 50 labels nothing here is measurable. The note's §5
+explains why the labels arrive anyway.
 
 ---
 
@@ -412,16 +502,25 @@ rules at the checkpoint. **A note that closes an idea is worth as much as one th
 | the fitted scorer | T7 | gated on B2 |
 | review-triage replay | **E2** | specified, gated on Quinn's word |
 | plugin eval, if a Claude Code change is proposed | **E4** | standing, not scheduled |
+| completion from the vendor number | T8 | ready, independent, no model |
+| completion from email, sixth tier | T9 | ready once T8 lands |
+| does a model beat the rules at completion | T10 / **E5** | gated on labels and, for Jev, on D-R8 |
 | wizard course mapping, promotion weighting | open lane | unowned, may be picked up |
 | anything not listed here | open lane | invited |
 
 ## What Quinn is asked for, in order
 
-1. **T0**, the cost matrices. Blocking, and about twenty minutes.
+1. **T0**, the cost matrices — now with a fourth row, **completion**: how much worse is a task
+   wrongly marked done than a finished task still on the list? That row sets E5's threshold. Still
+   blocking, still about twenty minutes.
 2. **CHECKPOINT J-1**, the abstain design. Recommendation: the fourth verdict word.
 3. **E2's gate**: may our own review prose leave this machine? One word, and it unblocks an
    experiment costing under two cents.
-4. Later, at **B1** and **B2**, a look at a measured number rather than a decision in advance.
+4. **One zyBooks payload.** `fetch_assignments` pulls `/v1/zybook/{code}/assignments` and the
+   parser reads only titles, due dates and points. Whether that same response already carries
+   per-student completion is unverified and only Quinn's own credentials can answer it. If it does,
+   zyBooks joins VHL in T8 for free; if it does not, T8 ships VHL-only and nothing is lost.
+5. Later, at **B1** and **B2**, a look at a measured number rather than a decision in advance.
 
 Nothing else in this plan needs a ruling, and nothing in it needs a new provider, a migration, a
 privacy-page change or a new party on the sub-processor list.
