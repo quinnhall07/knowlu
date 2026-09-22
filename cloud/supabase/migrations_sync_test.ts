@@ -34,6 +34,17 @@ async function plaintextShapeSql(): Promise<string> {
   return found!.sql;
 }
 
+/** `20260912000100_sync.sql` by name (re-review of R-C3′-exec-10 review I1): `sync_prune`'s real
+ * `delete ... and not keep;` clause lives only here, untouched by both 000300 and 000400 —
+ * `plaintextShapeSql()` does not cover this file, and the same substring also happens to appear in
+ * 000300's own header COMMENT (prose about what 000300 does not redefine), which is not the same
+ * thing as the live SQL enforcing the property. */
+async function syncPruneSql(): Promise<string> {
+  const found = (await migrations()).find((m) => m.name === "20260912000100_sync.sql");
+  assert(found, "expected 20260912000100_sync.sql to still exist");
+  return found!.sql;
+}
+
 /** Every table C3′ leaves BEHIND: created by one of its migrations and not dropped by a later one.
  * Derived, never hand-typed, so a table added or dropped later cannot be forgotten in two places.
  *
@@ -135,13 +146,14 @@ Deno.test("retention never deletes a record a human wrote, and the SERVER is wha
   // computed from the record itself — `op` in (set, create) and an actor that is not an agent, which
   // is `provenance::is_agent`'s own `starts_with("agent:")` test. A client cannot lie about it and
   // cannot forget it.
-  // R-C3′-exec-10 review I1: named at 000300, not the corpus. `sync_prune`'s own body (`and not
-  // keep`) is 000100's and never redefined, but 000300's header comment names the same clause
-  // (`` `and not keep`) and the ... cron job``) precisely because it is the file that took over
-  // defining `keep` itself — a generated column now, not a client-asserted bit — so 000300 is still
-  // the right single file to pin all four of these against.
+  // R-C3′-exec-10 review I1, re-review: named at 000300 for three of these four — that is the file
+  // that turned `keep` into a generated column, a live property of 000300's own SQL. The first
+  // assertion is different: `sync_prune`'s real `delete ... and not keep;` clause lives only in
+  // 000100 (untouched by 000300 or 000400), and the same substring in 000300 is prose in a header
+  // COMMENT, not the SQL that enforces anything — so it reads 000100 by name instead.
+  const pruneSql = await syncPruneSql();
+  assert(pruneSql.includes("and not keep;"), "sync_prune must exempt the records marked `keep`");
   const sql = await plaintextShapeSql();
-  assert(sql.includes("and not keep"), "sync_prune must exempt the records marked `keep`");
   assert(/keep\s+boolean\s+not null generated always as/.test(sql), "`keep` is generated, not sent");
   assert(sql.includes("'agent:%'"), "an agent's record is not kept");
   assert(sql.includes("in ('set', 'create')"), "only a set or a create is a human decision worth keeping");
