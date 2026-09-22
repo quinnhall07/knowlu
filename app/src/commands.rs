@@ -72,6 +72,28 @@ pub fn attach_scheduler(env: &mut Value, sch: &Scheduler) -> Result<(), String> 
     Ok(())
 }
 
+/// D7 / §6: what the window has to paint while the vault has no read model yet — the minute between
+/// Finish and the first `rank`, which was a white page with an engine error in it.
+///
+/// **Ruling R-C1c-plan-1:** attached whenever the vault has never been through a whole slot
+/// (`ingest::is_first_run` — the absence of `state/today.md`, the same predicate
+/// `scheduler::needs_first_run` and the engine's own first-run rules read), and never on a failed
+/// read model: `surface::build_state` has no failure path, so a wizard-made vault answers `ok` with
+/// a nearly empty state, and a page that waited for a failure would paint that empty day and call it
+/// the first look. The page paints the block while the key is there and drops it when it stops
+/// coming.
+///
+/// `running` and `steps` come from the live `Scheduler`; a slot in flight records nothing until it
+/// ends, so `steps` is empty on the first poll and the page shows its sentence alone.
+pub fn first_run_value(cs: &ConsoleState, sch: &Scheduler) -> Option<Value> {
+    if !knowlu_engine::ingest::is_first_run(&cs.vault) {
+        return None;
+    }
+    let running = *crate::scheduler::lock(&sch.running);
+    let steps = crate::scheduler::lock(&sch.last).as_ref().map(|s| s.steps.clone()).unwrap_or_default();
+    Some(json!({ "running": running, "steps": steps }))
+}
+
 pub fn state_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     Ok(envelope(build_state_value(cs, view), "state"))
@@ -334,7 +356,18 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
 // so are the `*_inner` functions the tests call. The four read commands (`state`, `note`,
 // `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take only `cs.lock`,
 // they never wait on git, and keeping them there keeps a poll cheap.
-#[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { let mut env = state_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value {
+    let mut env = state_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null }));
+    if let Some(fr) = first_run_value(&cs, &sch) {
+        // §6: a vault with no read model yet answers `ok: true` and no state, rather than an error
+        // line a student can do nothing about — the page has a sentence for exactly this minute.
+        // Any other failure, on a vault that has been ranked, keeps today's `ok: false`.
+        if env["ok"] != true { env = json!({ "ok": true, "error": Value::Null, "state": Value::Null }); }
+        env["first_run"] = fr;
+    }
+    let _ = attach_scheduler(&mut env, &sch);
+    env
+}
 #[tauri::command] pub fn note(cs: State<'_, ConsoleState>, id: String) -> Value { note_inner(&cs, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "note": Value::Null })) }
 #[tauri::command] pub fn mark_seen(cs: State<'_, ConsoleState>) -> Value { mark_seen_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e })) }
 #[tauri::command] pub fn ui_event(cs: State<'_, ConsoleState>, action: String, view: String, object_id: Option<String>, object_kind: Option<String>, ms: Option<i64>) -> Value { ui_event_inner(&cs, &action, &view, object_id, object_kind, ms) }

@@ -576,9 +576,44 @@
     return poll();
   }
 
+  // D7: the minute between Finish and the first `rank`. `first_run` rides on the envelope until
+  // `state/today.md` exists; while it does, the page says what is happening, lists the slot's steps
+  // as they land, and asks again every three seconds so the day appears as soon as it is there
+  // rather than up to a minute later. The state paints behind it as it is — on a vault this new
+  // that is an empty day, which is exactly what the block is covering (R-C1c-plan-1).
+  //
+  // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
+  // failing polls on forever. That is honest rather than silent: the failed step shows up in the
+  // list below the line as soon as the slot ends, and the Runs view has the rest. A cap would
+  // replace a true "still working" with a false "gave up".
+  var FIRST_RUN_MS = 3000;
+  var firstRunTimer = null;
+  function renderFirstRun(fr) {
+    EL("first-run").hidden = false;
+    EL("first-run-steps").innerHTML = (((fr && fr.steps) || []).map(function (s) {
+      return '<div class="meta">' + h(s[0]) + "</div>";
+    }).join("")) + (fr && fr.running ? '<div class="meta">still working&hellip;</div>' : "");
+    // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
+    // call poll() too, and a chain per call would multiply every three seconds.
+    if (firstRunTimer) { clearTimeout(firstRunTimer); }
+    firstRunTimer = setTimeout(poll, FIRST_RUN_MS);
+  }
+
+  function hideFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
+    EL("first-run").hidden = true;
+  }
+
   function poll() {
     return invoke("state", { view: current.view }).then(function (env) {
+      // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
+      // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
+      // path, so there is no failed state to wait for. The paint below still runs.
+      if (env.first_run) { renderFirstRun(env.first_run); } else { hideFirstRun(); }
       if (!env.ok) { EL("delta").textContent = "engine: " + env.error; return; }
+      // §6's safety net answers `ok` with no state when the read model could not be built at all;
+      // the line above is what the student reads while that is true.
+      if (!env.state) { return; }
       if (env.state.revision === current.revision) { return; }
       paint(env.state, false);
     }).catch(function (e) { EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")"; });

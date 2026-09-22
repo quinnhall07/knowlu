@@ -7,6 +7,7 @@ use knowlu::commands::{
     resolve_issue_inner, set_fields_inner, set_settings_inner, state_inner, sync_inner,
     ui_event_inner,
 };
+use knowlu::scheduler::{lock, RunSummary, Scheduler};
 
 /// Every journal record across `state/journal/*.jsonl`, parsed. Files are CRLF (translate on
 /// read per the repo's line-ending rule) and one JSON object per line.
@@ -52,6 +53,45 @@ fn state_returns_the_envelope_with_the_read_model_and_never_writes() {
     let bad = state_inner(&cs, "tomorrow").unwrap();
     assert_eq!(bad["ok"], false);
     assert!(bad["error"].as_str().unwrap().contains("tomorrow"));
+}
+
+/// D7 / §6: between Finish and the first `rank` a vault has no read model, and the window painted
+/// nothing for about a minute — a white page with an error line in it. The envelope now carries a
+/// block that says so, with the steps the slot has finished, and the page has a sentence for it.
+#[test]
+fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
+    let v = scratch("firstrun");
+    assert!(!v.join("state").join("today.md").exists(), "this vault has never been ranked");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-console-appdata-firstrun-{}", std::process::id())));
+    // R-C1c-plan-1, the premise tested rather than assumed: the read model builds fine without
+    // `state/today.md` (`surface::build_state` has no failure path), so `ok` is true and the BLOCK
+    // — not a failed envelope — is what the page keys on.
+    let env = state_inner(&cs, "today").unwrap();
+    assert_eq!(env["ok"], true);
+    let sch = Scheduler::default();
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("a vault with no today.md carries it");
+    assert_eq!(fr["running"], false);
+    // The slot in flight records nothing until it ends: an empty list, never an invented step.
+    assert_eq!(fr["steps"], json!([]));
+
+    *lock(&sch.last) = Some(RunSummary {
+        started: "2026-09-22T19:14:37Z".into(),
+        ended: "2026-09-22T19:15:38Z".into(),
+        steps: vec![("coursework".into(), 0), ("judge (skipped: no entitlement)".into(), 0)],
+        ok: true,
+        engine_ok: true,
+        late: false,
+        reason: None,
+        attempts: 1,
+    });
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("still no read model");
+    assert_eq!(fr["steps"][1][0], "judge (skipped: no entitlement)");
+    assert_eq!(fr["steps"][1][1], 0);
+
+    // …and the moment `rank` has written the day, the block is gone and the page paints normally.
+    std::fs::create_dir_all(v.join("state")).unwrap();
+    std::fs::write(v.join("state").join("today.md"), b"# Today\n").unwrap();
+    assert!(knowlu::commands::first_run_value(&cs, &sch).is_none());
 }
 
 #[test]

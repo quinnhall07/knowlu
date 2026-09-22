@@ -561,6 +561,32 @@ fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
     assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
 }
 
+/// D7 / §6: the minute between Finish and the first `rank` says what is happening instead of
+/// painting nothing. The sentence is the page's, the steps come from the envelope, and the page
+/// asks again every three seconds until the day is there — then goes back to its usual cadence.
+#[test]
+fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"first-run\""), "the first-run block");
+    assert!(html.contains("id=\"first-run-steps\""), "…and the steps the slot has finished");
+    assert!(
+        html.contains("Knowlu is doing its first run. Your day appears here in about a minute."),
+        "the sentence D7 asks for, in the page rather than in a string the engine sends"
+    );
+    let js = read("console.js");
+    assert!(js.contains("function renderFirstRun("), "renderFirstRun");
+    assert!(js.contains("function hideFirstRun("), "hideFirstRun");
+    assert!(js.contains("var FIRST_RUN_MS = 3000"), "the first-run cadence is three seconds");
+    assert!(js.contains("setInterval(poll, 60000)"), "…and the usual cadence is unchanged");
+    assert!(js.contains("EL(\"first-run\").hidden = true"), "…and the block is hidden once the day is there");
+    let poll = js.split("function poll(").nth(1).and_then(|s| s.split("function openDrawer(").next()).expect("poll");
+    // R-C1c-plan-1: the view stands on the presence of the block — which is `is_first_run` — and
+    // never on a failed state, because `surface::build_state` has no failure path to wait for.
+    assert!(poll.contains("if (env.first_run) {"), "the first-run view stands on is_first_run alone");
+    assert!(poll.contains("renderFirstRun("), "…poll paints it");
+    assert!(poll.contains("hideFirstRun()"), "…and takes it away when the key stops coming");
+}
+
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
 #[test]
 fn the_account_panel_leads_with_google_asks_for_no_password_and_still_gates_on_eighteen() {
