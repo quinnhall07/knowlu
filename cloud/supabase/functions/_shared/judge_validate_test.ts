@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { CONFIDENCE_FLOOR, validate } from "./judge_validate.ts";
+import { CONFIDENCE_FLOOR, EVENT_RULE_WHY, MAX_REASON_CHARS, oneLine, validate } from "./judge_validate.ts";
 
 Deno.test("a task answer is clamped, one-lined and accepted", () => {
   const got = validate("task", {
@@ -97,4 +97,119 @@ Deno.test("an email tier outside the five is refused", () => {
   const got = validate("email", { tier: "spam", why: "junk", confidence: 0.9 }, { known_courses: [] });
   assertEquals(got.ok, false);
   assertEquals(got.cause, "incomplete");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T3 (prompt event-4): the two drop rules are their own schema fields, answered by
+// the model and combined HERE, in code. A drop that fires on a named rule carries a templated why
+// naming the rule. The reply's wire shape is unchanged: verdict, why, confidence — nothing else.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("event-4: an audience the event excludes the student from is a drop, whatever the model's own verdict", () => {
+  const got = validate("event", {
+    audience_excludes_student: true,
+    standing_or_drop_in: false,
+    verdict: "opportunity",
+    why: "a colloquium worth attending",
+    confidence: 0.9,
+  }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict, { verdict: "drop", why: EVENT_RULE_WHY.audience, confidence: 0.9 });
+});
+
+Deno.test("event-4: a standing exhibit, office-hours block or recurring drop-in is a drop with the rule's why", () => {
+  const got = validate("event", {
+    audience_excludes_student: false,
+    standing_or_drop_in: true,
+    verdict: "obligation",
+    why: "weekly office hours",
+    confidence: 0.8,
+  }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict, { verdict: "drop", why: EVENT_RULE_WHY.standing, confidence: 0.8 });
+});
+
+Deno.test("event-4: when both rules fire the audience rule names the drop", () => {
+  const got = validate("event", {
+    audience_excludes_student: true,
+    standing_or_drop_in: true,
+    verdict: "drop",
+    why: "x",
+    confidence: 0.9,
+  }, {});
+  assertEquals(got.verdict?.why, EVENT_RULE_WHY.audience);
+});
+
+Deno.test("event-4: with neither rule firing, the model's own verdict and why pass through", () => {
+  const got = validate("event", {
+    audience_excludes_student: false,
+    standing_or_drop_in: false,
+    verdict: "unsure",
+    why: "audience not stated",
+    confidence: 0.5,
+  }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict, { verdict: "unsure", why: "audience not stated", confidence: 0.5 });
+});
+
+Deno.test("event-4: a rule that fires needs no why of the model's own — the rule's why is the reason", () => {
+  const got = validate("event", {
+    audience_excludes_student: true,
+    standing_or_drop_in: false,
+    verdict: "drop",
+    why: "",
+    confidence: 0.9,
+  }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict?.why, EVENT_RULE_WHY.audience);
+});
+
+Deno.test("event-4: a rule-fired drop still clears the confidence floor like any other drop", () => {
+  const got = validate("event", {
+    audience_excludes_student: true,
+    standing_or_drop_in: false,
+    verdict: "unsure",
+    why: "x",
+    confidence: CONFIDENCE_FLOOR - 0.01,
+  }, {});
+  assertEquals(got.ok, false);
+  assertEquals(got.cause, "below floor");
+});
+
+Deno.test("event-4: a rule field that is not a boolean is incomplete, never read as truthy", () => {
+  const got = validate("event", {
+    audience_excludes_student: "true",
+    standing_or_drop_in: false,
+    verdict: "opportunity",
+    why: "x",
+    confidence: 0.9,
+  }, {});
+  assertEquals(got.ok, false);
+  assertEquals(got.cause, "incomplete");
+});
+
+Deno.test("event-4: one rule field without the other is incomplete — the pair is answered together or not at all", () => {
+  const got = validate("event", {
+    standing_or_drop_in: false,
+    verdict: "opportunity",
+    why: "x",
+    confidence: 0.9,
+  }, {});
+  assertEquals(got.ok, false);
+  assertEquals(got.cause, "incomplete");
+});
+
+Deno.test("event-4: a verdict without the rule fields (a promoted rule's shape) is judged as before", () => {
+  // `judge_pipeline.ts` validates a tier-2 rule's stored verdict through this same function, and a
+  // promoted rule carries only verdict/why/confidence — it must keep answering.
+  const got = validate("event", { verdict: "drop", why: "promoted rule", confidence: 1 }, {});
+  assertEquals(got.ok, true);
+  assertEquals(got.verdict, { verdict: "drop", why: "promoted rule", confidence: 1 });
+});
+
+Deno.test("event-4: the templated whys are ledger-safe one-liners under the reason bound", () => {
+  for (const why of Object.values(EVENT_RULE_WHY)) {
+    assertEquals(oneLine(why, MAX_REASON_CHARS), why);
+    assertEquals(why.startsWith("drop rule:"), true, why);
+  }
 });

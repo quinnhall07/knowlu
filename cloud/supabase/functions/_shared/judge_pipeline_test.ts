@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "./judge_anthropic.ts";
+import { EVENT_RULE_WHY } from "./judge_validate.ts";
 import {
   type CapStore,
   DAILY_CAP,
@@ -282,4 +283,31 @@ Deno.test("the prompt hash is stable across accounts with different planner slic
     deps(new ScriptedModel([ANSWER]), b, new Caps()),
   );
   assertEquals(a.rows[0].prompt_hash, b.rows[0].prompt_hash);
+});
+
+// Stream J Task T3: the decomposed event answer (event-4) is combined before anything leaves the
+// pipeline — the device's reply and the judgments row carry the verdict alone, never the two
+// rule fields, so the wire contract (verdict, why, confidence) and a promoted rule's shape hold.
+Deno.test("an event-4 answer whose rule fires replies drop with the rule's why, and the rule fields go nowhere", async () => {
+  const log = new Sink();
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: { uid: "ev-1", title: "Office hours", start: "a", end: "b", source: "s" }, heuristics_seed: {} },
+    deps(
+      new ScriptedModel([{
+        audience_excludes_student: false,
+        standing_or_drop_in: true,
+        verdict: "opportunity",
+        why: "meet the instructor",
+        confidence: 0.9,
+      }]),
+      log,
+      new Caps(),
+    ),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.verdict, { verdict: "drop", why: EVENT_RULE_WHY.standing, confidence: 0.9 });
+  assertEquals(log.rows[0].fields.verdict, "drop");
+  assert(!("audience_excludes_student" in log.rows[0].fields), JSON.stringify(log.rows[0].fields));
+  assert(!("standing_or_drop_in" in log.rows[0].fields), JSON.stringify(log.rows[0].fields));
 });

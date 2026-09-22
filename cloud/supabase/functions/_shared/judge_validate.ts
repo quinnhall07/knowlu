@@ -19,6 +19,17 @@ export interface Validated {
 /** The four words `eventledger::VALID_VERDICTS` will accept (CHECKPOINT J-1, ruled 2026-09-22:
  * `unsure` added, additive — a vault contract, never a rename). */
 export const EVENT_VERDICTS = ["obligation", "opportunity", "drop", "unsure"] as const;
+/**
+ * Stream J Task T3 (prompt event-4): the templated why each named drop rule carries. The rule, not
+ * a generated sentence, is the reason the event was dropped, so the why says which rule it was.
+ * Both are ledger-safe as written: one line, no double quote, no middle-dot separator, under
+ * MAX_REASON_CHARS — `judge_validate_test.ts` pins that.
+ */
+export const EVENT_RULE_WHY = {
+  audience: "drop rule: the stated audience is faculty, staff, alumni or graduate students",
+  standing: "drop rule: a standing exhibit, office-hours block or recurring drop-in",
+} as const;
+
 /** The five email tiers of cloud design §5.3. */
 export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information"] as const;
 
@@ -120,11 +131,29 @@ export function validate(
   }
 
   if (kind === "event") {
-    const verdict = typeof answer.verdict === "string" ? answer.verdict : "";
-    const why = oneLine(typeof answer.why === "string" ? answer.why : "", MAX_REASON_CHARS);
-    if (!(EVENT_VERDICTS as readonly string[]).includes(verdict) || why === "") {
+    const modelVerdict = typeof answer.verdict === "string" ? answer.verdict : "";
+    if (!(EVENT_VERDICTS as readonly string[]).includes(modelVerdict)) {
       return { ok: false, cause: "incomplete" };
     }
+    // Stream J Task T3: event-4's two drop-rule fields, combined in code. Both present and boolean,
+    // or both absent — the absent shape is a promoted rule's stored verdict (tier 2 validates
+    // through here too, and a rule carries only verdict/why/confidence), and a model reply always
+    // carries both because the schema is strict and requires them. Anything else is incomplete,
+    // never read as truthy. The audience rule is checked first, so it names a drop both fire on.
+    const audience = answer.audience_excludes_student;
+    const standing = answer.standing_or_drop_in;
+    let verdict = modelVerdict;
+    let ruleWhy: string | null = null;
+    if (audience !== undefined || standing !== undefined) {
+      if (typeof audience !== "boolean" || typeof standing !== "boolean") {
+        return { ok: false, cause: "incomplete" };
+      }
+      if (audience) ruleWhy = EVENT_RULE_WHY.audience;
+      else if (standing) ruleWhy = EVENT_RULE_WHY.standing;
+      if (ruleWhy !== null) verdict = "drop";
+    }
+    const why = ruleWhy ?? oneLine(typeof answer.why === "string" ? answer.why : "", MAX_REASON_CHARS);
+    if (why === "") return { ok: false, cause: "incomplete" };
     // `unsure` IS the model's honest answer to "I can't tell from this text" — gating it behind
     // the SAME confidence floor that forces a guess among obligation/opportunity/drop in the first
     // place would just reintroduce defect B for the one answer meant to close it: the floor exists

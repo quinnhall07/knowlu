@@ -194,3 +194,35 @@ Deno.test("email: From is never scrubbed, even though it is an email address", (
   }, {});
   assert(user.includes("From: registrar@example.invalid"), `From must survive unscrubbed: ${user}`);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T3 (prompt event-4): the two drop rules are schema fields the model answers, not
+// prose it must hold in mind; `judge_validate.ts` combines them into the verdict in code.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("event-4 schema: the two drop rules are required boolean fields, asked before the verdict", () => {
+  const schema = schemaFor("event") as {
+    properties: Record<string, { type: string }>;
+    required: string[];
+    additionalProperties: boolean;
+  };
+  assertEquals(Object.keys(schema.properties), [
+    "audience_excludes_student",
+    "standing_or_drop_in",
+    "verdict",
+    "why",
+    "confidence",
+  ]);
+  assertEquals(schema.properties.audience_excludes_student.type, "boolean");
+  assertEquals(schema.properties.standing_or_drop_in.type, "boolean");
+  assertEquals(schema.required, Object.keys(schema.properties));
+  assertEquals(schema.additionalProperties, false);
+});
+
+Deno.test("event-4 rules: each rule field is explained, and the drop rules are no longer verdict prose", () => {
+  const rules = systemTemplate("event");
+  assert(rules.includes("- audience_excludes_student:"), rules);
+  assert(rules.includes("- standing_or_drop_in:"), rules);
+  assert(!rules.includes("is a drop."), `a drop rule is still stated as verdict prose: ${rules}`);
+  assert(rules.includes("no audience"), `the unstated-audience case must answer false: ${rules}`);
+});

@@ -803,3 +803,17 @@ Deno.test("the last definition of export_training_rows excludes both gmail_api a
       `(cloud design §5.3/§9, provider swap Task 2)`,
   );
 });
+
+// Stream J Task T3: the event prompt's two drop rules become schema fields combined in code, so
+// both the prompt text (event-4) and the schema shape (event-3) move — the event row only.
+Deno.test("the event_decomposed migration re-pins only the event row's prompt_version and grammar_version", async () => {
+  const sql = await Deno.readTextFile(new URL("20260922120300_event_decomposed.sql", HERE));
+  assert(/update\s+models\s+set/i.test(sql), "expected an 'update models set …' statement");
+  assert(sql.includes("prompt_version = 'event-4'"), sql);
+  assert(sql.includes("grammar_version = 'event-3'"), sql);
+  assert(sql.includes("since = current_date"), sql);
+  assert(/where\s+kind\s*=\s*'event'/i.test(sql), sql);
+  assert(!/model_id\s*=/.test(sql), "the pinned model must not move in this migration");
+  assert(!sql.includes("prompt_version = 'task-"), "task must not be touched by this migration");
+  assert(!sql.includes("prompt_version = 'email-"), "email must not be touched by this migration");
+});

@@ -55,14 +55,27 @@ const TASK_SCHEMA = {
 // lets the model say so honestly, and `judge_validate.ts`'s `record_verdict` path writes it like
 // any other verdict, so the uid is never re-asked (events spec §7's one-verdict-per-uid-forever
 // rule already does the rest).
+//
+// Stream J Task T3 (prompt event-4, grammar event-3): the two drop rules the event-3 prompt stated
+// as prose — an audience of faculty/staff/alumni/graduate students, and a standing exhibit /
+// office-hours block / recurring drop-in — are now their own boolean fields, asked FIRST (the
+// properties' order is the order a constrained decoder writes them), and `judge_validate.ts`'s
+// `combineEvent` turns either one being true into a `drop` carrying a templated why that names the
+// rule. The model's own `verdict` covers everything else. Narrow questions combined in code beat
+// one broad question in four independent measurements (docs/notes/2026-09-22-jev-what-people-built.md
+// "The three lessons"); the counter-case there is why E1 (`scripts/experiments/e1-decomposition/`)
+// measures this against event-3 before it ships. The reply to the device is unchanged: the two
+// rule fields never leave `validate`.
 const EVENT_SCHEMA = {
   type: "object",
   properties: {
+    audience_excludes_student: { type: "boolean" },
+    standing_or_drop_in: { type: "boolean" },
     verdict: { type: "string", enum: ["obligation", "opportunity", "drop", "unsure"] },
     why: { type: "string" },
     confidence: { type: "number" },
   },
-  required: ["verdict", "why", "confidence"],
+  required: ["audience_excludes_student", "standing_or_drop_in", "verdict", "why", "confidence"],
   additionalProperties: false,
 };
 
@@ -116,11 +129,11 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
   if (kind === "event") {
     return [
       "You decide whether one campus event is worth a student's attention.",
-      "Rules:",
-      "- verdict: obligation (the student is expected there), opportunity (worth offering), drop, or unsure.",
+      "Answer each field in order:",
+      "- audience_excludes_student: true only when the event's own text says it is for faculty, staff, alumni or graduate students. false when it names undergraduates or all students, and false when it names no audience at all.",
+      "- standing_or_drop_in: true when the event is a standing exhibit or display, an office-hours block, or a recurring drop-in with no set session to attend. false for a one-time event or a session with a set start.",
+      "- verdict: judged on everything the two fields above do not cover. obligation (the student is expected there), opportunity (worth offering), drop, or unsure.",
       "- unsure: answer unsure when the event's own text does not say whether it applies to this student — do not guess the audience to force obligation, opportunity or drop.",
-      "- an event aimed at faculty, staff, alumni or graduate students is a drop.",
-      "- a standing exhibit, an office-hours block or a recurring drop-in is a drop.",
       "- why: one line, under 140 characters, no line breaks, no double quotes.",
       "- confidence: 0 to 1.",
     ].join("\n");
