@@ -22,8 +22,11 @@ const ROWS: Row[] = [
   // -- weekday names, bare vs "this" vs "next" -- reference: Wed 2026-09-16.
   { category: "bare weekday = this-week semantics (Wed -> Fri)", phrase: "Friday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-18" },
   { category: "explicit 'this <weekday>' matches bare weekday", phrase: "this Friday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-18" },
-  { category: "'next <weekday>' skips the immediate occurrence", phrase: "next Friday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-25" },
-  { category: "'next <weekday>' when today IS that weekday jumps a full week", phrase: "next Wednesday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-23" },
+  // Final review item 6: "next Friday" said on a Wednesday means the 18th to some readers and the
+  // 25th to others -- two candidate days, so the same rule as "next week": null, never a guess.
+  { category: "'next <weekday>' is ambiguous between two days, so null", phrase: "next Friday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "'next <weekday>' when today IS that weekday is still null", phrase: "next Wednesday", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
+  { category: "'next <weekday>' with a time clause is still null", phrase: "next Friday at 9am", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: null },
   { category: "case-insensitive weekday name", phrase: "FRIDAY", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-18" },
 
   // -- same-day --
@@ -40,7 +43,8 @@ const ROWS: Row[] = [
 
   // -- year rollover --
   { category: "year rollover: 'tomorrow' crosses New Year's Eve", phrase: "tomorrow", dateLine: "Thu, 31 Dec 2026 09:00:00 +0000", expected: "2027-01-01" },
-  { category: "year rollover: 'next <weekday>' crosses into January", phrase: "next Friday", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: "2027-01-08" },
+  { category: "year rollover: 'this <weekday>' crosses into January", phrase: "this Friday", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: "2027-01-01" },
+  { category: "year rollover: 'next <weekday>' is still null", phrase: "next Friday", dateLine: "Tue, 29 Dec 2026 09:00:00 +0000", expected: null },
 
   // -- times with am/pm --
   { category: "time: 'tomorrow at 5pm'", phrase: "tomorrow at 5pm", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-09-17T17:00" },
@@ -65,9 +69,9 @@ const ROWS: Row[] = [
 
   // -- a DST boundary: resolving across it changes no arithmetic, because the offset is never
   // re-applied (see judge_due.ts's module doc) -- Nov 1 2026 is the US fall-back Sunday, and
-  // 'next Friday' from the Saturday before it lands 13 days later, well past the crossing.
-  { category: "DST boundary: 'next Friday' from just before fall-back", phrase: "next Friday", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-13" },
-  { category: "DST boundary: a time survives the crossing unchanged", phrase: "next Friday at 9am", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-13T09:00" },
+  // 'this Friday' from the Saturday before it lands 6 days later, past the crossing.
+  { category: "DST boundary: 'this Friday' from just before fall-back", phrase: "this Friday", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-06" },
+  { category: "DST boundary: a time survives the crossing unchanged", phrase: "Friday at 9am", dateLine: "Sat, 31 Oct 2026 22:00:00 -0400", expected: "2026-11-06T09:00" },
 
   // -- an absolute date the email stated explicitly: the model's own extraction, passed through --
   { category: "absolute passthrough: date only", phrase: "2026-10-01", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", expected: "2026-10-01" },

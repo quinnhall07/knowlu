@@ -16,8 +16,10 @@
 // rather than one of them: "next week" is seven candidate days, and picking one (fix round 1,
 // finding 1: this module used to pick today+7) is exactly the kind of guess this module exists to
 // refuse. Only a phrase this module can place on exactly one calendar day is ever resolved —
-// "today", "tomorrow", a named weekday, and "end of the month" (which names the month's own last
-// day, a single day, not a range) qualify; "next week" and "next month" do not.
+// "today", "tomorrow", a named weekday (bare or "this <weekday>"), and "end of the month" (which
+// names the month's own last day, a single day, not a range) qualify; "next week" and "next month"
+// do not, and neither does "next <weekday>" (final review item 6): "next Friday" said on a Monday
+// means that Friday to some readers and the one after to others -- two candidate days, one guess.
 //
 // **Everything happens in the email's own Date header's wall-clock values, never converted.** RFC
 // 5322's `Date:` header already records local time plus a UTC offset — the date/time fields ARE
@@ -174,7 +176,6 @@ function splitTime(phrase: string): { rest: string; time: { hour: number; minute
 
 const WEEKDAY_ALT = WEEKDAYS.join("|");
 const THIS_WEEKDAY_RE = new RegExp(`^(?:this\\s+)?(${WEEKDAY_ALT})$`);
-const NEXT_WEEKDAY_RE = new RegExp(`^next\\s+(${WEEKDAY_ALT})$`);
 
 /**
  * Resolves `phrase` — the model's extracted `due` text — against `dateLine` — the email's own
@@ -207,13 +208,9 @@ export function resolveDue(phrase: string | null | undefined, dateLine: string):
     return format({ ...today, day: daysInMonth(today.year, today.month) }, time);
   }
 
-  const next = NEXT_WEEKDAY_RE.exec(rest);
-  if (next !== null) {
-    const target = WEEKDAYS.indexOf(next[1]);
-    const delta = ((target - weekdayOf(today) + 7) % 7) + 7;
-    return format(addDays(today, delta), time);
-  }
-
+  // "next <weekday>" is ambiguous between two days (final review item 6) -- deliberately NOT a
+  // branch here: `THIS_WEEKDAY_RE` does not match it, so it falls through to `return null`, the
+  // same rule as "next week".
   const bareOrThis = THIS_WEEKDAY_RE.exec(rest);
   if (bareOrThis !== null) {
     const target = WEEKDAYS.indexOf(bareOrThis[1]);
