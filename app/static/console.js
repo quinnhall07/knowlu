@@ -1487,7 +1487,11 @@
               // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
               // rows or none — the first `coursework` run files an empty parse as an issue rather
               // than an empty semester, so a student who saw nothing here can still go on honestly.
-              lmsOpen: false, discovering: false, discovered: false, checkoutOpened: false, schoolSeq: 0,
+              // R-C1c-plan-3: `mapWarned` is whether the blank-row sentence has been shown once.
+              // `wizStep` sets `WIZ.step` BEFORE the panel branch runs and `renderWizard` hides
+              // every other panel, so a sentence written on the way out is a sentence nobody reads
+              // — the first Next stays on the panel to show it, the second goes on.
+              lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "" };
 
@@ -1595,7 +1599,7 @@
       stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
       // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
       // stand in for one against these.
-      if (stored.length) { WIZ.discovered = false; }
+      if (stored.length) { WIZ.discovered = false; WIZ.mapWarned = false; }
       WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
       clearCredentialFields();
       return true;
@@ -1702,7 +1706,15 @@
         // can run. Stay on the panel while it does — the mapping is the whole point of having asked
         // for the logins — and let Next work again the moment the rows are on screen.
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }
+        if (WIZ.map.length || WIZ.discovered) {
+          // R-C1c-plan-3: the first Next after a finished discovery with blank, un-ignored rows
+          // writes the sentence and stays here — `WIZ.step` was advanced above, so putting it back
+          // is what keeps the panel, and its note, on screen. The next Next goes on whatever the
+          // rows say: this is a sentence, not a gate.
+          if (!WIZ.mapWarned && noteUnmapped()) { WIZ.mapWarned = true; WIZ.step = leaving; }
+          renderWizard();
+          return;
+        }
         WIZ.step = leaving;
         WIZ.discovering = true;
         WIZ.busy = true;
@@ -2006,13 +2018,28 @@
       return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
     }).join("");
+    renderCourseCodes();
+  }
+
+  /// D5: the codes a mapping row offers, so a student picks a class rather than typing one from
+  /// memory — the VHL row that nobody filled is why `sections: {}` reached the engine.
+  ///
+  /// The VALUE is the human code the capture read (R-C1c-plan-2's `label`) and the course's own
+  /// slug otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to
+  /// the note the course already has. The LMS's opaque key would not — it would make a second
+  /// course. The LABEL is what the student recognises (M4), so the list reads as their class list
+  /// rather than as identifiers.
+  function renderCourseCodes() {
+    EL("wiz-course-codes").innerHTML = WIZ.courses.map(function (c) {
+      return '<option value="' + h(c.label || c.slug) + '">' + h(c.name || c.code) + "</option>";
+    }).join("");
   }
   EL("wiz-courses").addEventListener("click", function (e) {
     var drop = e.target.closest("[data-drop]");
     if (drop) { WIZ.courses.splice(Number(drop.getAttribute("data-drop")), 1); renderCourses(); return; }
     if (e.target.closest("#wiz-course-add-go")) {
       var code = EL("wiz-course-add").value.trim();
-      if (code) { WIZ.courses.push({ code: code, name: code, slug: "" }); EL("wiz-course-add").value = ""; renderCourses(); }
+      if (code) { WIZ.courses.push({ code: code, name: code, slug: "", label: code }); EL("wiz-course-add").value = ""; renderCourses(); }
     }
   });
 
@@ -2025,12 +2052,28 @@
     EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
     EL("wiz-map-heading").hidden = WIZ.map.length === 0;
     EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
+      // D6: a row nobody can guess for says so. Computed at paint, never on every keystroke —
+      // re-rendering the rows under the cursor would take the focus out of the field being typed
+      // into — so the hint goes on the next paint, which is what the student has already answered.
+      var hint = (!r.suggested && !r.course) ? '<span class="meta">type the course this belongs to</span>' : "";
       return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
              (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +
-             '<input type="text" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
-             '" placeholder="Course code, e.g. CS 100">' +
+             '<input type="text" list="wiz-course-codes" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
+             '" placeholder="Course code, e.g. CS 100">' + hint +
              '<label><input type="checkbox" data-ignore-for="' + i + '"' + (r.ignore ? " checked" : "") + '> Ignore</label></div>';
     }).join("");
+  }
+
+  /// D6: leaving the logins panel with rows still blank is a choice, not a refusal
+  /// (R-C1b-exec-10 already lets Next through) — but it has a consequence, and the panel says what
+  /// it is: the engine files a coursework-map card for each one (R-OB-1) and the app asks about it
+  /// there. Silent when nothing is blank; the singular reads correctly without a special case.
+  ///
+  /// Returns the count, so the caller can decide whether there is anything to stay for.
+  function noteUnmapped() {
+    var n = WIZ.map.filter(function (r) { return !r.ignore && !r.course; }).length;
+    if (n) { EL("wiz-map-note").textContent = n + " of these will be asked about in the app"; }
+    return n;
   }
   EL("wiz-map").addEventListener("input", function (e) {
     var f = e.target.getAttribute("data-course-for");

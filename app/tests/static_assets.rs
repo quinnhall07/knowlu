@@ -526,6 +526,41 @@ fn the_logins_panel_maps_what_it_finds_to_a_course() {
         "Next is disabled while discovery is in flight and re-enabled when it settles");
 }
 
+/// D5 and D6: the mapping row offers the classes the wizard already captured rather than asking
+/// for a code from memory, a row with nothing to offer says what it needs, and leaving one blank is
+/// a choice whose consequence the panel states before Next goes on. The first live onboarding left
+/// the VHL row blank, wrote `sections: {}` and spent the whole next run warning about it.
+#[test]
+fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
+    assert!(panel.contains("<datalist id=\"wiz-course-codes\">"), "the panel keeps one datalist");
+    let js = read("console.js");
+    assert!(js.contains("function renderCourseCodes("), "renderCourseCodes fills it");
+    assert!(js.contains("list=\"wiz-course-codes\""), "every mapping row's field reads it");
+    // The list offers what round-trips to the vault's own name for the course — the human code the
+    // capture read, or the slug — never the LMS's opaque key, which would be slugged into a course
+    // note nobody has (R-C1c-plan-2).
+    assert!(js.contains("c.label || c.slug"), "the datalist offers the human code, and the slug otherwise");
+    assert!(js.contains("type the course this belongs to"), "a row with no suggestion says what it needs");
+    assert!(js.contains(" of these will be asked about in the app"), "…and Next says what blank rows cost");
+    assert!(js.contains("function noteUnmapped("), "noteUnmapped");
+    // R-C1c-plan-3: the sentence is read BEFORE the panel goes — the first Next latches and stays,
+    // the second goes on. Asserted over the `wizGo`/`wizStep` slice (the split runs to
+    // `wizRegister`, so it spans both), because `wizFinish`'s own bookkeeping must not stand in.
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo/wizStep");
+    assert!(go.contains("noteUnmapped()"), "the count is written on the way out of the panel");
+    assert!(go.contains("WIZ.mapWarned"), "…and the panel stays once, so the student reads it");
+    assert!(js.contains("mapWarned: false"), "the latch starts clear on a fresh wizard");
+    assert!(
+        js.contains("WIZ.discovered = false; WIZ.mapWarned = false"),
+        "…and re-typed logins clear it with the discovery they invalidate"
+    );
+    // R-C1b-exec-10 still holds: the sentence is a note, never a refusal — the second Next goes on
+    // whatever the rows say, and nothing writes an error for a blank one.
+    assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
+}
+
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
 #[test]
 fn the_account_panel_leads_with_google_asks_for_no_password_and_still_gates_on_eighteen() {

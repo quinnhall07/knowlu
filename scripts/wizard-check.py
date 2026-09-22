@@ -235,6 +235,21 @@ def check(page) -> list:
     if "UACS100Fall2026" not in rows or "2102121" not in rows: bad.append(f"the discovered sources are not listed: {rows!r}")
     if page.input_value('[data-course-for="0"]') != "CS 100": bad.append("the suggestion was not pre-filled")
     if names(page).count("discover_coursework") != 2: bad.append("re-typed logins did not run discovery again")
+    # D6 / R-C1c-plan-3: the first Next after a discovery with blank rows STAYS on the panel and
+    # says what they cost — the engine files a card for each (R-OB-1) and the app asks there; the
+    # second Next goes on. `is_visible` is the assertion that matters: `inner_text` falls back to
+    # `textContent` and passes on a hidden panel, which is the bug this check exists for.
+    page.click("#wiz-next"); page.wait_for_timeout(300)
+    if page.is_hidden("#wiz-logins"): bad.append("the blank-row sentence did not keep the student on the panel")
+    if not page.is_visible("#wiz-map-note"): bad.append("the count sentence was written to a hidden panel")
+    if "asked about in the app" not in page.inner_text("#wiz-map-note"):
+        bad.append("a blank mapping row did not say it would be asked about in the app")
+    if names(page).count("discover_coursework") != 2: bad.append("staying to warn re-ran discovery")
+    # D5: the row offers the classes the wizard already captured, by the code the vault will use.
+    if page.get_attribute('[data-course-for="1"]', "list") != "wiz-course-codes":
+        bad.append("the mapping row does not offer the captured classes")
+    opts = page.eval_on_selector_all("#wiz-course-codes option", "os => os.map(o => o.value)")
+    if "CS 100" not in opts: bad.append(f"the datalist does not carry the captured class: {opts!r}")
     page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-gmail"): bad.append("a confirmed mapping did not advance to the Gmail panel")
