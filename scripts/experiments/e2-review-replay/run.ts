@@ -1,18 +1,25 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY --allow-net=openrouter.ai
+#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE --allow-net=openrouter.ai
 // Stream J experiment E2 — the offline review-triage replay. Orchestrates the whole procedure:
 // extract, leak-check both arms, both baselines, the cost estimate, then either the paid run (one
 // sequential pass over OpenRouter, only if a key resolves) or --dry-run (always the default; prints
 // the exact request bodies and the cost estimate, sends nothing).
 //
+// Every run needs the corpus folder and a workspace to write into, as `--corpus-root <dir>
+// --workspace <dir>` or the environment variables `E2_CORPUS_ROOT` / `E2_WORKSPACE` (see
+// `extract.ts`'s `resolvePaths`; there is no default, and no machine path is written here).
+//
 // The one command for the paid run, once OPENROUTER_API_KEY is available through any of the three
 // tiers credentials.ts tries:
-//   deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY \
-//     --allow-net=openrouter.ai run.ts
+//   deno run --allow-read --allow-write --allow-run=powershell.exe \
+//     --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE --allow-net=openrouter.ai run.ts \
+//     --corpus-root <dir> --workspace <dir>
 //
 // Dry run (no network permission needed, nothing sent):
-//   deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY run.ts --dry-run
+//   deno run --allow-read --allow-write --allow-run=powershell.exe \
+//     --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE run.ts --dry-run \
+//     --corpus-root <dir> --workspace <dir>
 
-import { extractCorpus, forDisk, WORKSPACE_DIR } from "./extract.ts";
+import { extractCorpus, forDisk, resolvePaths } from "./extract.ts";
 import { findLeaks } from "./severity.ts";
 import { type LabeledItem, leaveOneOutLexicalKNN, leaveOneOutMajorityClass } from "./baselines.ts";
 import { buildOpenRouterChatBody, estimateCorpusCost, OPENROUTER_CHAT_URL } from "./jev_request.ts";
@@ -26,20 +33,22 @@ function toLabeledItems(findings: CorpusFinding[], label: (f: CorpusFinding) => 
 async function main() {
   const args = new Set(Deno.args);
   const forceDryRun = args.has("--dry-run");
+  const paths = resolvePaths(Deno.args);
+  const workspace = paths.workspace;
 
   console.log("== Step 1: extract ==");
-  const { kept, dropped, summary } = await extractCorpus();
+  const { kept, dropped, summary } = await extractCorpus(paths);
   console.log(`raw findings: ${summary.rawFound} (expected ${summary.expected})`);
   console.log(`dropped (secret/token/session/credential): ${dropped.length}`);
   console.log(`corpus size: ${kept.length}`);
 
-  await Deno.mkdir(WORKSPACE_DIR, { recursive: true });
+  await Deno.mkdir(workspace, { recursive: true });
   await Deno.writeTextFile(
-    `${WORKSPACE_DIR}\\corpus.jsonl`,
+    `${workspace}/corpus.jsonl`,
     kept.map((f) => JSON.stringify(forDisk(f))).join("\n") + "\n",
   );
-  await Deno.writeTextFile(`${WORKSPACE_DIR}\\summary.json`, JSON.stringify(summary, null, 2));
-  await Deno.writeTextFile(`${WORKSPACE_DIR}\\dropped.json`, JSON.stringify(dropped, null, 2));
+  await Deno.writeTextFile(`${workspace}/summary.json`, JSON.stringify(summary, null, 2));
+  await Deno.writeTextFile(`${workspace}/dropped.json`, JSON.stringify(dropped, null, 2));
 
   console.log("\n== Step 2: leak check, both arms (procedure §Step 3) ==");
   for (const f of kept) {
@@ -107,7 +116,7 @@ async function main() {
     disposition: { majorityClass: majorityDisposition, lexicalKnn: lexicalDisposition },
     leakCheck: { strippedArm, rawArm, strippedArmSetBOnly: strippedArmB, rawArmSetBOnly: rawArmB },
   };
-  await Deno.writeTextFile(`${WORKSPACE_DIR}\\baselines.json`, JSON.stringify(baselineResults, null, 2));
+  await Deno.writeTextFile(`${workspace}/baselines.json`, JSON.stringify(baselineResults, null, 2));
 
   console.log("\n== Step 4: cost estimate ==");
   const cost = estimateCorpusCost(kept);
@@ -153,8 +162,8 @@ async function main() {
     results.push({ id: f.id, status: resp.status, elapsedMs, body: text });
     console.log(`${f.id}: HTTP ${resp.status} in ${elapsedMs.toFixed(0)}ms`);
   }
-  await Deno.writeTextFile(`${WORKSPACE_DIR}\\paid-run-results.json`, JSON.stringify(results, null, 2));
-  console.log(`wrote ${WORKSPACE_DIR}\\paid-run-results.json`);
+  await Deno.writeTextFile(`${workspace}/paid-run-results.json`, JSON.stringify(results, null, 2));
+  console.log(`wrote ${workspace}/paid-run-results.json`);
 }
 
 if (import.meta.main) {

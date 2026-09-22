@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { findLeaks } from "./severity.ts";
 import { parseFinalReviewFindings, parsePlanReviewFindings, parseTaskReviewFindings } from "./parsers.ts";
+import { corpusRootFromEnv, PLAN_REVIEW_URL } from "./extract.ts";
 
 // --- Small, structurally faithful fixtures for each of the shapes the real files use ---
 
@@ -143,10 +144,9 @@ Deno.test("parsePlanReviewFindings assigns severity by heading, both paragraph a
 
 // --- Integration: parse the real corpus and reconcile the count (procedure §Step 1) ---
 
-const CORPUS_ROOT =
-  "C:\\Users\\danie\\GitHub\\knowlu\\.claude\\worktrees\\c1b-sign-in\\.superpowers\\sdd\\2026-09-17-c1b-sign-in-plan";
-const PLAN_REVIEW_PATH =
-  "C:\\Users\\danie\\GitHub\\knowlu\\.claude\\worktrees\\j-e2\\docs\\reports\\2026-09-17-c1b-sign-in-plan-review.md";
+// Outside this repository: set `E2_CORPUS_ROOT` (see `extract.ts`) or these ignore themselves.
+const CORPUS_ROOT = corpusRootFromEnv() ?? "";
+const PLAN_REVIEW_PATH = PLAN_REVIEW_URL;
 
 // Reconciled by hand against every source file, 2026-09-22 — see
 // docs/reports/2026-09-22-e2-review-replay-prep.md for the discrepancy this test pins: the
@@ -167,10 +167,10 @@ const EXPECTED_TASK_COUNTS: Record<string, number> = {
 
 Deno.test({
   name: "reconciliation: each task review's real finding count, against the corpus on disk",
-  ignore: !pathExists(CORPUS_ROOT),
+  ignore: CORPUS_ROOT === "" || !pathExists(CORPUS_ROOT),
   fn: async () => {
     for (const [file, expected] of Object.entries(EXPECTED_TASK_COUNTS)) {
-      const text = await Deno.readTextFile(`${CORPUS_ROOT}\\${file}`);
+      const text = await Deno.readTextFile(`${CORPUS_ROOT}/${file}`);
       const items = parseTaskReviewFindings(text);
       assertEquals(items.length, expected, `${file}: expected ${expected} findings`);
     }
@@ -179,9 +179,9 @@ Deno.test({
 
 Deno.test({
   name: "reconciliation: the final review has 12 findings (F1-F12), 7 should-fix + 5 nit",
-  ignore: !pathExists(CORPUS_ROOT),
+  ignore: CORPUS_ROOT === "" || !pathExists(CORPUS_ROOT),
   fn: async () => {
-    const text = await Deno.readTextFile(`${CORPUS_ROOT}\\final-review.md`);
+    const text = await Deno.readTextFile(`${CORPUS_ROOT}/final-review.md`);
     const items = parseFinalReviewFindings(text);
     assertEquals(items.length, 12);
     const bySeverity = items.map((i) => i.severityRaw.toLowerCase());
@@ -204,7 +204,7 @@ Deno.test({
   },
 });
 
-function pathExists(path: string): boolean {
+function pathExists(path: string | URL): boolean {
   try {
     Deno.statSync(path);
     return true;

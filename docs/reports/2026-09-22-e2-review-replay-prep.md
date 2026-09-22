@@ -10,6 +10,11 @@ paid run is one command (§6) once a key is available through any of the three p
 
 Scripts: `scripts/experiments/e2-review-replay/` (18 files, tests alongside each pure module).
 Corpus workspace (git-ignored, not in this repo): `.superpowers/sdd/2026-09-22-judgment-quality-plan/e2/`.
+**Paths (final-review fix, 2026-09-22):** no script names a machine path. The C1b task/final
+reviews folder and the workspace are given as `--corpus-root <dir>` / `--workspace <dir>` or the
+environment variables `E2_CORPUS_ROOT` / `E2_WORKSPACE`, with a clear error when either is absent;
+the plan review is read from this repository (`docs/reports/2026-09-17-c1b-sign-in-plan-review.md`).
+The corpus-reading tests ignore themselves when `E2_CORPUS_ROOT` is unset.
 
 ## 1. Corpus: found vs expected
 
@@ -134,8 +139,9 @@ resolves from the process environment, the Windows USER environment variable, or
 target `knowlu/dev/openrouter` (tried in that order, `credentials.ts`; never printed or logged):
 
 ```
-deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY \
-  --allow-net=openrouter.ai run.ts
+deno run --allow-read --allow-write --allow-run=powershell.exe \
+  --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE --allow-net=openrouter.ai run.ts \
+  --corpus-root <C1b review folder> --workspace <e2 workspace>
 ```
 
 Without a key, or with `--dry-run` added, it runs every step through the cost estimate and prints
@@ -183,12 +189,14 @@ to match. `deno check`/`deno lint`/`deno fmt --check` all still clean; no new wa
 
 ```
 deno test --config deno.json --allow-read --allow-write --allow-run=powershell.exe \
-  --allow-env=OPENROUTER_API_KEY .          # 54 passed, 0 failed
+  --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE .   # with E2_CORPUS_ROOT set; 54 passed at
+                                            # this round (57 after the final-review paths fix)
 deno check --config deno.json *.ts          # 19 files, clean
 deno lint --config deno.json .              # 18 files, clean
 deno fmt --config deno.json --check .       # 19 files, clean
 deno run --config deno.json --allow-read --allow-write --allow-run=powershell.exe \
-  --allow-env=OPENROUTER_API_KEY run.ts --dry-run   # re-extraction + baselines, no network
+  --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE run.ts --dry-run \
+  --corpus-root <C1b review folder> --workspace <e2 workspace>   # re-extraction + baselines, no network
 ```
 
 The paid run was not executed for this fix round, per instruction.

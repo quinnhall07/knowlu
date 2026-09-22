@@ -1,27 +1,48 @@
-import { assertEquals } from "@std/assert";
-import { extractCorpus } from "./extract.ts";
+import { assertEquals, assertThrows } from "@std/assert";
+import { corpusRootFromEnv, extractCorpus, PLAN_REVIEW_URL, resolvePaths } from "./extract.ts";
 import { findLeaks } from "./severity.ts";
 import { mentionsSecret } from "./secretfilter.ts";
 
-function pathExists(path: string): boolean {
-  try {
-    Deno.statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// The corpus is the C1b review documents, which live outside this repository (git-ignored
+// `.superpowers/` of whichever checkout holds them). These tests run only when `E2_CORPUS_ROOT`
+// names that folder (and `--allow-env=E2_CORPUS_ROOT` lets this file read it); otherwise they
+// ignore themselves rather than fail — no machine path is written here (CLAUDE.md rule 1).
+const CORPUS_ROOT = corpusRootFromEnv();
+const CORPUS_AVAILABLE = CORPUS_ROOT !== undefined;
+const PATHS = { corpusRoot: CORPUS_ROOT ?? "", workspace: "", planReview: PLAN_REVIEW_URL };
 
-const CORPUS_AVAILABLE = pathExists(
-  "C:\\Users\\danie\\GitHub\\knowlu\\.claude\\worktrees\\c1b-sign-in\\.superpowers\\sdd\\2026-09-17-c1b-sign-in-plan",
-);
+Deno.test("resolvePaths takes the corpus root and workspace from flags, then the environment", () => {
+  const env = (name: string) =>
+    ({ E2_CORPUS_ROOT: "env-corpus", E2_WORKSPACE: "env-ws" } as Record<string, string>)[name];
+  assertEquals(resolvePaths([], env), {
+    corpusRoot: "env-corpus",
+    workspace: "env-ws",
+    planReview: PLAN_REVIEW_URL,
+  });
+  assertEquals(
+    resolvePaths(["--corpus-root", "flag-corpus", "--workspace", "flag-ws", "--dry-run"], env),
+    { corpusRoot: "flag-corpus", workspace: "flag-ws", planReview: PLAN_REVIEW_URL },
+  );
+});
+
+Deno.test("resolvePaths names what is missing instead of guessing a machine path", () => {
+  const none = () => undefined;
+  assertThrows(() => resolvePaths([], none), Error, "E2_CORPUS_ROOT");
+  assertThrows(() => resolvePaths(["--corpus-root", "c"], none), Error, "E2_WORKSPACE");
+  assertThrows(() => resolvePaths(["--workspace", "w"], none), Error, "--corpus-root");
+});
+
+Deno.test("the plan-review document is read from this repository, not from a worktree", () => {
+  assertEquals(PLAN_REVIEW_URL.href.endsWith("/docs/reports/2026-09-17-c1b-sign-in-plan-review.md"), true);
+  assertEquals(Deno.statSync(PLAN_REVIEW_URL).isFile, true);
+});
 
 Deno.test({
   name:
     "extractCorpus finds 60 raw findings, drops exactly the 11 that name a secret/token/session/credential",
   ignore: !CORPUS_AVAILABLE,
   fn: async () => {
-    const { kept, dropped, summary } = await extractCorpus();
+    const { kept, dropped, summary } = await extractCorpus(PATHS);
 
     assertEquals(summary.rawFound, 60);
     assertEquals(summary.expected, 59);
@@ -57,7 +78,7 @@ Deno.test({
   name: "every kept finding is leak-free and mentions no secret/token/session/credential",
   ignore: !CORPUS_AVAILABLE,
   fn: async () => {
-    const { kept } = await extractCorpus();
+    const { kept } = await extractCorpus(PATHS);
     for (const f of kept) {
       assertEquals(findLeaks(f.text), [], `leak in ${f.id}`);
       assertEquals(mentionsSecret(f.text), false, `secret mention survived in ${f.id}`);
@@ -69,7 +90,7 @@ Deno.test({
   name: "every kept finding has a disposition in one of the four named values",
   ignore: !CORPUS_AVAILABLE,
   fn: async () => {
-    const { kept } = await extractCorpus();
+    const { kept } = await extractCorpus(PATHS);
     const allowed = new Set(["fixed", "ruled_against", "handed_off", "deferred"]);
     for (const f of kept) {
       assertEquals(allowed.has(f.disposition), true, `${f.id} has disposition ${f.disposition}`);
@@ -81,7 +102,7 @@ Deno.test({
   name: "Set A keeps its 6/8/10 Critical/Important/Minor split minus the 5 dropped (C2, C5, C6, I2, M4)",
   ignore: !CORPUS_AVAILABLE,
   fn: async () => {
-    const { kept } = await extractCorpus();
+    const { kept } = await extractCorpus(PATHS);
     const setA = kept.filter((f) => f.set === "A");
     assertEquals(setA.length, 19);
     assertEquals(setA.filter((f) => f.severity === "critical").length, 3);
