@@ -158,3 +158,64 @@ Deno.test("the OAuth migration adds no table, no policy, no birthdate column —
     "…and writes no consent row: that is the route's, behind a session",
   );
 });
+
+Deno.test("the metadata-trim migration allow-lists four keys, backfills existing rows, and revokes client execute (R-C1b-exec-8)", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260922000100_trim_user_metadata.sql", import.meta.url),
+  );
+  // Same reasoning as the OAuth test above: the comment block names the six dropped keys at
+  // length, so an assertion over the raw text would be an assertion about the prose, not the code.
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+
+  assert(!/create\s+table/i.test(code), "this migration creates no table");
+  assert(!/create\s+policy/i.test(code), "…and no policy");
+
+  assert(
+    code.includes("create or replace function public.trimmed_user_metadata"),
+    "the reduction helper exists",
+  );
+  assert(
+    code.includes("create or replace function public.trim_user_metadata() returns trigger"),
+    "the trigger function exists",
+  );
+  assert(
+    /create\s+trigger\s+on_auth_user_metadata[\s\S]*?before\s+insert\s+or\s+update\s+of\s+raw_user_meta_data\s+on\s+auth\.users/i
+      .test(code),
+    "the trigger fires before insert or update of raw_user_meta_data",
+  );
+
+  // The allow-list is exactly these four keys — asserted both ways, so neither a missing key nor
+  // an extra one can pass silently, and none of the six dropped keys survives in it.
+  for (const key of ["email", "email_verified", "phone_verified", "sub"]) {
+    assert(code.includes(`'${key}'`), `the allow-list is missing '${key}'`);
+  }
+  for (const dropped of ["avatar_url", "picture", "full_name", "name"]) {
+    assert(
+      !code.includes(`'${dropped}'`),
+      `${dropped} must not survive in the allow-list — it is one of the dropped keys`,
+    );
+  }
+
+  assert(
+    /update\s+auth\.users\s+set\s+raw_user_meta_data\s*=\s*public\.trimmed_user_metadata\(raw_user_meta_data\)/i
+      .test(code),
+    "the one-time backfill update is present, using the same reduction",
+  );
+
+  const trigger = code.slice(code.indexOf("create or replace function public.trim_user_metadata()"));
+  assert(/security\s+definer/i.test(trigger), "the trigger function is SECURITY DEFINER");
+  assert(
+    /set\s+search_path\s*=\s*public\s*,\s*pg_temp/i.test(trigger),
+    "search_path is fixed, not inherited from the caller",
+  );
+
+  const revoke = code.match(
+    /revoke\s+execute\s+on\s+function\s+public\.trim_user_metadata\(\)\s+from\s+([^;]+);/i,
+  );
+  assert(revoke !== null, "execute on the trigger function is never revoked from the client roles");
+  const from = revoke![1].toLowerCase();
+  assert(
+    from.includes("anon") && from.includes("authenticated"),
+    "execute is not revoked from both anon and authenticated",
+  );
+});
