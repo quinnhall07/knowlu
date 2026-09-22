@@ -63,16 +63,15 @@ Deno.serve(async (req) => {
             "corrections",
             "issues",
             "billing_reminders",
-            // C3: the account's encrypted vault copy. The foreign key already cascades from
-            // `accounts`, but this list is what the privacy policy's deletion paragraph is written
-            // from, so a table that holds the student's data is named here whether or not the
-            // cascade would also reach it. `sync_usage` is the account's byte counter and
-            // `sync_generation` its key fingerprint: neither holds content, but both hold a fact
-            // about the student and the same argument applies.
+            // C3': the account's copy of the vault, in plain text (the amendment's ruling 2). The
+            // foreign key already cascades from `accounts`, but this list is what the privacy
+            // policy's deletion paragraph is written from, so a table that holds the student's data
+            // is named here whether or not the cascade would also reach it. `sync_usage` is the
+            // account's byte counter: it holds no content, but it holds a fact about the student
+            // and the same argument applies.
             "sync_records",
             "sync_notes",
             "sync_usage",
-            "sync_generation",
             "entitlements",
           ]
         ) {
