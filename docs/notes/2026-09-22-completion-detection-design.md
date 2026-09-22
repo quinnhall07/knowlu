@@ -59,7 +59,7 @@ This is the heart of Quinn's question — *based on the different sources we'll 
 | source | what we fetch today | completion signal | needs a model? |
 |---|---|---|---|
 | **VHL** | `percentage_complete` per item, every run | **yes, already in hand** — `engine/src/vhl.rs:235` | **no** |
-| **zyBooks** | sections and `total_points`; writes `progress: 0` hardcoded at `engine/src/zybooks.rs:309` | **unknown** — see §7 | no, if the payload has it |
+| **zyBooks** | sections and `total_points`; writes `progress: 0` hardcoded at `engine/src/zybooks.rs:309` | **yes, verified 2026-09-22 — `section_scores`, already in the payload** | **no** |
 | **LMS `.ics`** | due dates | none, deliberately | no |
 | **Gmail** | subject, sender, scrubbed body into five tiers | **yes, and we throw it away** — see below | yes |
 | **Calendar events** | title, time into obligation / opportunity / drop | weak | yes, marginally |
@@ -156,11 +156,8 @@ That asymmetry decides the ordering by itself.
 
 ## 7. Open questions, and what is unverified
 
-1. **Does the zyBooks payload carry per-student completion?** `fetch_assignments` pulls
-   `/v1/zybook/{code}/assignments` (`engine/src/zybooks.rs:629-644`) and the parser reads only
-   `title`, `due`, `total_points` and section counts. Whether that same payload carries a completion
-   or activity figure is **unverified** — it needs one look at a real response, which only Quinn's
-   own credentials can produce. If it does, zyBooks joins VHL in tier 1 for free.
+1. ~~**Does the zyBooks payload carry per-student completion?**~~ **ANSWERED 2026-09-22, and the
+   answer is yes.** See §7a.
 2. **Does a VHL item ever report 100 and then move?** Unverified. The design must survive it: an
    amend proposal is reversible by construction, and the journal records the reversal.
 3. **What is the real cost ratio?** Quinn's, and it is the same T0 question already blocking the
@@ -174,11 +171,53 @@ That asymmetry decides the ordering by itself.
    inference provider is a privacy-page version bump, a notice to every account and an in-app yes.
    **That is the real gate on step 3, and it has not moved.**
 
+## 7a. The zyBooks answer, measured 2026-09-22
+
+Run against Quinn's own zyBooks account with their standing permission, read-only, nothing written:
+`GET /v1/zybook/UACS100Fall2026/assignments` — **the endpoint the engine already calls on every
+coursework run** — returns 23 assignments, each carrying an eleven-key object that includes
+**`section_scores`**, an array with `challenge_earned`, `lab_earned`, `participation_earned`,
+`chapter_number`, `section_id` and `section_number` per section.
+
+Summing those three earned figures against the `total_points` the parser already reads gives a
+completion percentage directly:
+
+| state | count of 23 | examples |
+|---|---|---|
+| 100% of points | **7** | Lab 01, Lab 02, Lab 03, HW 01, HW 02, HW 05, Project 1 |
+| partial | **2** | HW 03 at 91% (16 of 18 sections scored), Project 2 at 87% |
+| 0% | 14 | HW 04, HW 06–13, Lab 04–08 |
+
+**So the completion signal has been arriving in the payload all along and the parser drops it on the
+floor** — `parse_assignments` reads `title`, due dates, section counts and `total_points`, ignores
+`section_scores`, and hardcodes `progress: 0` at `engine/src/zybooks.rs:309`.
+
+**zyBooks therefore joins VHL in tier 1, and it is the bigger half** — this is the CS coursework,
+23 items against VHL's language sections.
+
+**Two design consequences, both real.**
+
+*Points earned is not the same as finished.* A student can complete every section and still not earn
+full points on a challenge. So 100% of points is a **stronger** condition than "done" — it implies
+every point-bearing section was completed correctly. The recommendation is to fire tier 1 at 100%
+only, and leave the 80–99% band (HW 03, Project 2) to tier 3 later, where it is exactly the
+ambiguous residue a model is for.
+
+*Section counts are the weaker signal, not the stronger one.* HW 01 shows 18 of 25 sections scored
+yet 193 of 193 points, because seven sections carry no points. Counting sections would call it 72%
+done when it is finished. **Points, not sections** — which is also what the effort model already
+uses.
+
+The probe was read-only, printed field names and aggregates, stored nothing and wrote nothing to the
+vault. The credential was read from Windows Credential Manager at runtime and never persisted, per
+the standing rule that no secret enters the repo, a log, a prompt or a test name.
+
 ## 8. The honest ranking
 
-1. **Tier 1, deterministic, no model.** VHL at 100 proposes `status: done`. Engine-side, no cloud,
-   no provider, no ruling, no migration. This is the free half and it should ship regardless of what
-   happens to everything else in this note.
+1. **Tier 1, deterministic, no model.** VHL at 100 **and zyBooks at 100% of points** propose
+   `status: done`. Engine-side, no cloud, no provider, no ruling, no migration. This is the free
+   half, it now covers both vendors, and it should ship regardless of what happens to everything
+   else in this note.
 2. **The sixth email tier.** One enum member, one prompt line, existing route and budget. Routes
    "submission received" to a proposal instead of to the bin.
 3. **Ask whether a model beats the rules** — using the labels that steps 1 and 2 have been

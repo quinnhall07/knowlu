@@ -19,6 +19,7 @@ decision, so a fresh session can execute from this document alone.
 | `docs/notes/2026-09-22-jev-retention-recheck.md` | retention is no longer the blocker; OpenRouter marks the endpoint |
 | `docs/notes/2026-09-22-jev-in-the-development-workflow.md` | what may and may not be wired beside Claude Code |
 | `docs/notes/2026-09-22-completion-detection-design.md` | completion is three tiers, the free one needs no model, and it labels itself |
+| `docs/notes/2026-09-22-cost-matrices.md` | every cell of both matrices, derived from five principles; **proposed, not ruled** |
 
 ## What makes this plan dynamic
 
@@ -84,8 +85,22 @@ quantities. They are a statement of what Quinn cares about, in units of each oth
 obligation is three times worse than a false alarm" is already the ruling; the rest is the same
 question asked five more times.
 
-**Output.** A short ruling in `HANDOFF.md`, and the matrix into `score.ts`'s `COST` map with the new
-cells. **Not** a model change.
+**PROPOSAL ON THE TABLE, 2026-09-22.** Quinn asked to address these properly rather than guess, so
+every missing cell is now worked out from five stated principles in
+`docs/notes/2026-09-22-cost-matrices.md`: the full 3x3 event matrix, the full 5x5 email matrix, and
+two completion matrices. **It awaits a yes, a no, or an edit** — the note names the three cells it
+is least sure of, so a five-minute read is enough to rule on it.
+
+**One finding from writing it, worth Quinn's eye:** the word `opportunity` means two different
+things — a scholarship or job in the email tiers, a talk or dinner in the event verdicts — which is
+why the same-named cells are priced differently and why that is correct rather than inconsistent.
+
+**A correction it forced:** the completion threshold is **0.67, not 0.91**, because T8 proposes
+rather than writes and a wrong proposal is rejected in one click. The high bar applies only to
+auto-apply, which nothing in this plan builds. See the note's §5.
+
+**Output.** A short ruling in `HANDOFF.md`, and the matrix into `score.ts`'s `COST` map with the
+eighteen new cells. **Not** a model change.
 
 ---
 
@@ -110,7 +125,8 @@ calibration error from 0.023 to **0.793**. A pre-registered benchmark found a ro
 class 120 times out of 120, scoring zero on the hard slice. Both are cited in
 `docs/notes/2026-09-22-jev-what-people-built.md` §3.
 
-**CHECKPOINT J-1, Quinn's, before any code.** Two designs, and I recommend the first.
+**CHECKPOINT J-1 — RULED by Quinn, 2026-09-22: design (a), the fourth verdict word.** The
+alternative is kept below for the record. Implement (a); no further checkpoint is needed here.
 
 - **(a) A fourth verdict word, `unsure`.** Added to `EVENT_VERDICTS` (`judge_validate.ts:20`) and to
   `eventledger::VALID_VERDICTS`. `record_verdict` writes it, so the uid has a verdict and is never
@@ -315,10 +331,20 @@ plan.**
 
 ## T8 — completion detection, tier 1: the vendor number *(no model, no cloud, no ruling)*
 
-**What.** VHL already reports `percentage_complete` on every coursework run
-(`engine/src/vhl.rs:235`) and Knowlu uses it once, to seed `progress` at creation, then never looks
-again (`engine/src/coursework.rs:241`). An item reporting 100 is a vendor certifying the student
-finished it. Turn that into an `amend` proposal moving `status` from `active` to `done`.
+**What.** Two vendors already tell us what is finished, and Knowlu discards both answers.
+
+- **VHL** reports `percentage_complete` on every coursework run (`engine/src/vhl.rs:235`); Knowlu
+  uses it once to seed `progress` at creation and never looks again (`coursework.rs:241`).
+- **zyBooks** returns `section_scores` on the endpoint the engine already calls — **verified against
+  Quinn's own account on 2026-09-22**: 23 assignments, 7 of them at 100% of points, 2 partial. The
+  parser ignores the field and hardcodes `progress: 0` (`zybooks.rs:309`).
+
+Turn both into an `amend` proposal moving `status` from `active` to `done`.
+
+**Fire at 100% of points, not on section counts.** HW 01 shows 18 of 25 sections scored yet 193 of
+193 points — counting sections would call finished work 72% done. The 80–99% band (HW 03 at 91%,
+Project 2 at 87%) is left for tier 3, where the ambiguity belongs. The measurement and both design
+consequences are in the design note's §7a.
 
 **Why it is safe.** `status` is one of the nine amendable fields (`engine/src/approvals.rs:42-52`);
 `progress` is not, and a test asserts the refusal (`:2746`). So the proposal path is the existing
@@ -336,8 +362,9 @@ builds a corpus for free**, and the corpus is exactly what closed the event kind
 The design, the per-source table and the unverified questions:
 `docs/notes/2026-09-22-completion-detection-design.md`.
 
-**Done when.** A VHL item at 100 produces one proposal, a second run produces none, a rejection
-sticks, and `cargo test --workspace` is green at 0 warnings.
+**Done when.** A VHL item at 100 and a zyBooks assignment at 100% of points each produce one
+proposal, a second run produces none, a rejection sticks, an 87% item produces nothing, and
+`cargo test --workspace` is green at 0 warnings.
 
 ## T9 — completion detection, tier 2: the sixth email tier
 
@@ -386,7 +413,11 @@ Score the decomposed event prompt and the current one against T2's seed on `weig
 forty cases carry roughly twenty points of error, so a two-point win is noise. If it loses or ties,
 record the number and close the idea.
 
-### E2 — the review-triage replay *(specified, needs one word from Quinn)*
+### E2 — the review-triage replay *(**CLEARED** by Quinn, 2026-09-22)*
+
+**The gate is open.** Quinn ruled on 2026-09-22 that our own review prose may leave this machine for
+this experiment. What leaves is finding text we wrote about our own code — no credentials, no vault
+content, no student data. Run it against the embeddings baseline, not a constant.
 
 Full procedure in `docs/notes/2026-09-22-jev-review-replay-experiment.md`: 59 graded findings from
 the C1b corpus, replayed offline against their reviewer severity and the controller's disposition.
@@ -502,7 +533,8 @@ rules at the checkpoint. **A note that closes an idea is worth as much as one th
 | the fitted scorer | T7 | gated on B2 |
 | review-triage replay | **E2** | specified, gated on Quinn's word |
 | plugin eval, if a Claude Code change is proposed | **E4** | standing, not scheduled |
-| completion from the vendor number | T8 | ready, independent, no model |
+| completion from the vendor number | T8 | ready — **both vendors**, zyBooks verified 09-22 |
+| the cost matrices | T0 | **proposed 09-22**, awaiting Quinn's yes |
 | completion from email, sixth tier | T9 | ready once T8 lands |
 | does a model beat the rules at completion | T10 / **E5** | gated on labels and, for Jev, on D-R8 |
 | wizard course mapping, promotion weighting | open lane | unowned, may be picked up |
@@ -513,13 +545,10 @@ rules at the checkpoint. **A note that closes an idea is worth as much as one th
 1. **T0**, the cost matrices — now with a fourth row, **completion**: how much worse is a task
    wrongly marked done than a finished task still on the list? That row sets E5's threshold. Still
    blocking, still about twenty minutes.
-2. **CHECKPOINT J-1**, the abstain design. Recommendation: the fourth verdict word.
-3. **E2's gate**: may our own review prose leave this machine? One word, and it unblocks an
-   experiment costing under two cents.
-4. **One zyBooks payload.** `fetch_assignments` pulls `/v1/zybook/{code}/assignments` and the
-   parser reads only titles, due dates and points. Whether that same response already carries
-   per-student completion is unverified and only Quinn's own credentials can answer it. If it does,
-   zyBooks joins VHL in T8 for free; if it does not, T8 ships VHL-only and nothing is lost.
+2. ~~CHECKPOINT J-1, the abstain design.~~ **Ruled 2026-09-22: design (a), the fourth verdict word `unsure`.**
+3. ~~E2's gate.~~ **Cleared 2026-09-22: our own review prose may leave this machine.**
+4. ~~One zyBooks payload.~~ **Done 2026-09-22** — `section_scores` is already in the payload;
+   zyBooks joins VHL in T8. Design note §7a.
 5. Later, at **B1** and **B2**, a look at a measured number rather than a decision in advance.
 
 Nothing else in this plan needs a ruling, and nothing in it needs a new provider, a migration, a
