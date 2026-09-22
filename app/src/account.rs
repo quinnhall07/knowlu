@@ -530,12 +530,41 @@ pub fn verify_email_code(email: String, code: String) -> Value {
     }
 }
 
-/// The system browser, by `explorer.exe <url>` — the same mechanism the tray's *Open vault folder*
-/// uses, and no new dependency for one line. Its exit code is not checked: `explorer.exe` returns
-/// non-zero on success often enough that checking it would report failures that did not happen.
+/// The system browser, by `ShellExecuteW`'s `"open"` verb — the API the shell itself uses to carry
+/// out a double click. The Explorer shell process (R-C1b-exec-7's predecessor mechanism) does
+/// **not** work on every machine: a live proof on this one found it routing every `https://` URL,
+/// even `https://example.com/?x=1`, to a Documents folder window instead of a browser tab, while
+/// `ShellExecuteW` and `rundll32 url.dll,FileProtocolHandler` both routed the same URLs correctly —
+/// so a web URL never goes through the Explorer shell process again (a folder still does; see
+/// `tray.rs`). `ShellExecuteW` needs no child process at all and is tried first; a failure (its
+/// return value, as an integer, at or below 32) falls back to spawning
+/// `rundll32.exe url.dll,FileProtocolHandler <url>` — the same mechanism a plain `<a href>` click
+/// resolves to under the hood. Every caller only ever passes a web address (the sign-in authorize
+/// URL, the Stripe checkout URL, a published policy page, the Google consent URL), so anything that
+/// is not `http://` or `https://` is refused before either mechanism is tried.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only a web address can be opened".to_string());
+    }
     use knowlu_engine::childproc::NoConsole;
-    std::process::Command::new("explorer.exe").no_console().arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is kept alive across the call by this binding; `w!("open")` is a static
+    // null-terminated literal; `None`/`None` are the unused lpparameters/lpdirectory the "open"
+    // verb does not read.
+    let result = unsafe { ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
+    if result.0 as isize > 32 {
+        return Ok(());
+    }
+    std::process::Command::new("rundll32.exe")
+        .no_console()
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// **The terms and the privacy policy, opened where they can actually be read.** `app/static/` holds
@@ -1349,7 +1378,7 @@ fn external_url_allowed(url: &str) -> bool {
 /// the page takes it from the service; one that opened anything would be one indirection away from
 /// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
 /// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
-/// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
+/// injection into a URL that reaches the shell is the other way this goes wrong.
 #[tauri::command(async)]
 pub fn open_external(url: String) -> Value {
     if !external_url_allowed(&url) {

@@ -1246,3 +1246,35 @@ fn the_only_bind_in_account_rs_is_the_loopback_and_never_the_wildcard() {
     assert!(rust.contains("bind(\"127.0.0.1:0\")"), "the loopback bind must still be there, verbatim");
     assert!(!rust.contains("0.0.0.0"), "the OAuth callback port must never listen on the wildcard address");
 }
+
+/// **R-C1b-exec-7.** A live proof on this machine found Explorer routing every `https://` URL, even
+/// `https://example.com/?x=1`, to a Documents folder window instead of a browser tab — so
+/// `open_in_browser` no longer shells out to `explorer.exe` at all. The tray's *Open vault folder*
+/// action (`tray.rs`) is unrelated — it really does open a folder — and keeps its one call exactly
+/// as it was. A source-text pin, the same style `the_only_bind_in_account_rs_is_the_loopback_and_never_the_wildcard`
+/// above already uses for a security-relevant literal in this file.
+#[test]
+fn explorer_exe_never_opens_a_url_again_but_still_opens_the_vault_folder() {
+    let account_src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    assert!(!account_src.contains("explorer.exe"), "a URL must never reach explorer.exe again (R-C1b-exec-7)");
+    // The quoted literal, not the bare substring: `tray.rs`'s own comment names `explorer.exe` in
+    // prose (backticked, no quotes) right above the one real call, and a substring count would see
+    // both — the actual claim is about the one `Command::new("explorer.exe")` in the code.
+    let tray_src = std::fs::read_to_string("src/tray.rs").expect("src/tray.rs");
+    assert_eq!(tray_src.matches("\"explorer.exe\"").count(), 1, "the tray's folder opener must still use explorer.exe, exactly once");
+}
+
+/// `open_in_browser` refuses anything that is not a web address before either the `ShellExecuteW`
+/// call or the `rundll32` fallback is ever reached — no process spawns and no browser opens. Every
+/// real caller only ever passes `https://`/`http://` (the sign-in authorize URL, the Stripe checkout
+/// URL, a published policy page, the Google consent URL); this is the whole allow-list, proved at
+/// the unit level rather than by reading the source, the way the refusal-gate tests above do for
+/// `google_sign_in`.
+#[test]
+fn open_in_browser_refuses_anything_that_is_not_a_web_address_and_opens_nothing() {
+    use knowlu::account::open_in_browser;
+    let err = open_in_browser("not a url").unwrap_err();
+    assert_eq!(err, "only a web address can be opened");
+    let err = open_in_browser("file:///C:/x").unwrap_err();
+    assert_eq!(err, "only a web address can be opened");
+}
