@@ -1221,3 +1221,116 @@ fn a_carded_change_whose_from_equals_to_files_no_card() {
     assert_eq!(knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(5));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 3 (re-review round 2): B1, B2, B3 (R-C3′-exec-15).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_stale_card_is_settled_when_the_desktops_converge_not_just_when_a_newer_card_replaces_it() {
+    // B1 (probe N7). A pending card offers `4 -> 5`. The other desktop then moves BACK to 4, the
+    // value this device already holds: every carded field now converges (O4 drops it as
+    // `from == to`), so `changes` ends up empty and the M3 stale-card check — which lives inside
+    // `if !changes.is_empty()` — never runs at all. Approving the untouched `4 -> 5` card would then
+    // write 5 here and, once pushed, on the other desktop too — a value neither student holds any
+    // more, which is exactly what M3 exists to prevent.
+    let dir = fixture_with_id("converged-with-stale-card");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let first = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
+    let r1 = sync::apply(&dir, &pulled(vec![first], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(r1.cards, 1, "a pending `4 -> 5` card must exist to begin with: {r1:?}");
+    // The other desktop moves back to 4 — converging on this device's own value.
+    let back = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z");
+    let r2 = sync::apply(&dir, &pulled(vec![back], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(r2.cards, 0, "a converged value files no new card: {r2:?}");
+    let live_cards: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    assert!(live_cards.is_empty(), "the stale `4 -> 5` card must be settled, not left live: {live_cards:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mine_excludes_only_this_pulls_own_records_not_every_record_from_those_devices() {
+    // B2 (probe N8). B's `importance 2->5` was applied here in an EARLIER pull (a clean apply, no
+    // conflict). THIS pull carries C's later `importance 2->7` for the same note, plus an unrelated
+    // `progress` record from B in the SAME page. Excluding every record from B's device — not only
+    // the records THIS pull appended — throws away the very record that explains this device's
+    // current value (5), so `resolve` falls back to the mtime stand-in and C's genuinely later write
+    // loses silently. Tested in both page orders.
+    for c_first in [false, true] {
+        let dir = fixture_with_id(&format!("mine-hash-not-device-{c_first}"));
+        let mut journal = Journal::new(&dir);
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        let b1 = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), "2026-01-01T00:00:00.000Z");
+        let r1 = sync::apply(&dir, &pulled(vec![b1], vec![]), &ctx, &mut journal, today);
+        assert_eq!(r1.applied, 1, "c_first={c_first}: the clean first pull must apply B's value: {r1:?}");
+        let c = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(7), "2026-01-01T00:00:01.000Z");
+        let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+        spec.id = Some("task_0000000001");
+        spec.field = Some("progress");
+        spec.old = serde_json::json!(0);
+        spec.new = serde_json::json!(10);
+        spec.ts = Some("2026-01-01T00:00:02.000Z".to_string());
+        spec.device = Some("OtherDesktop".to_string());
+        let b2 = knowlu_engine::journal::make_record(spec).expect("a record");
+        let recs = if c_first { vec![c, b2] } else { vec![b2, c] };
+        let r2 = sync::apply(&dir, &pulled(recs, vec![]), &ctx, &mut journal, today);
+        assert_eq!(r2.cards, 1, "c_first={c_first}: C's genuinely later write must never lose silently: {r2:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn o1_never_conflates_two_notes_that_merely_share_a_case_insensitive_name() {
+    // B3 (probe N9). The other desktop DELETED `cs-100-hw-01.md` and, separately, CREATED an
+    // unrelated note spelled `CS-100-HW-01.md` (a different id, a different body) in the same push.
+    // The two rows only look like a rename because their names collide case-insensitively; without
+    // checking `id:` first, O1 would drop the tombstone, rename this device's own note onto the new
+    // spelling, and the other desktop's real new note would never land here — and this device's next
+    // push would then overwrite the other desktop's note on the account with its own, unrelated body.
+    for tombstone_first in [false, true] {
+        let dir = fixture_with_id(&format!("unrelated-case-variant-{tombstone_first}"));
+        let mut journal = Journal::new(&dir);
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let other_body = "---\nid: task_0000000999\ntitle: \"A different note\"\nstatus: active\n---\n\nUnrelated body.\n";
+        let live = sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/CS-100-HW-01.md".into(), text: Some(other_body.to_string()) };
+        let tomb = sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/cs-100-hw-01.md".into(), text: None };
+        let notes = if tombstone_first { vec![tomb, live] } else { vec![live, tomb] };
+        let report = sync::apply(&dir, &pulled(vec![], notes), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+        // Exactly one entry survives in `tasks/`, under the NEW note's own exact spelling — never
+        // both, and never the old exact spelling. `Path::exists` is case-insensitive on NTFS and
+        // would answer true for the OLD spelling too, once the new file exists under a case
+        // variant, so the directory listing is checked exactly instead.
+        let in_tasks: Vec<String> = std::fs::read_dir(dir.join("tasks")).expect("tasks").flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_lowercase().contains("100-hw-01")).collect();
+        assert_eq!(
+            in_tasks, vec!["CS-100-HW-01.md".to_string()],
+            "tombstone_first={tombstone_first}: exactly one entry, the new note under its own spelling: {in_tasks:?}, {report:?}"
+        );
+        // This device's own note is a genuine delete here, not a rename it merely resembles.
+        let archived: Vec<String> = std::fs::read_dir(dir.join("archive")).expect("archive").flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert!(
+            archived.iter().any(|n| n.starts_with("cs-100-hw-01")),
+            "tombstone_first={tombstone_first}: {archived:?}, {report:?}"
+        );
+        assert_eq!(report.moved, 1, "tombstone_first={tombstone_first}: {report:?}");
+        // The other desktop's genuinely new, unrelated note lands, with its own id and body — on
+        // NTFS the new write happens after the archive, so `create_new` succeeds either wire order.
+        let new_path = dir.join("tasks").join("CS-100-HW-01.md");
+        assert_eq!(report.notes_written, 1, "tombstone_first={tombstone_first}: {report:?}");
+        let meta = knowlu_engine::ids::read_meta(&new_path).expect("the new note");
+        assert_eq!(
+            knowlu_engine::yaml::get(&meta, "id").and_then(knowlu_engine::yaml::text),
+            Some("task_0000000999".to_string())
+        );
+        let text = knowlu_engine::pystr::read_text(&new_path).expect("the new note text");
+        assert_eq!(text, other_body, "tombstone_first={tombstone_first}: the new note's own body must land unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

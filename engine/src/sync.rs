@@ -615,6 +615,19 @@ fn case_insensitive_match(path: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+/// The `id:` a pulled note's OWN text carries, read without writing anything — a plain parse into a
+/// `Mapping` that is inspected once and dropped, the same shape `ids::read_meta` already does for a
+/// file on disk. Never a re-dump: nothing here reconstructs frontmatter text from the parsed value.
+///
+/// **B3 (re-review round 2).** A case-insensitive name collision is not proof that two rows name the
+/// same note — the other desktop can delete one note and separately create an unrelated one whose
+/// name only happens to collide, case only. Comparing this against the local file's own `id:` is
+/// what tells the two apart before either O1 branch treats them as one rename.
+fn note_frontmatter_id(text: &str) -> Option<String> {
+    let (meta, _) = crate::models::split_frontmatter(text).ok()?;
+    crate::yaml::get(&meta, "id").and_then(crate::yaml::text)
+}
+
 /// Rename `from` to `to` — both already resolved, real paths — in two `std::fs::rename` steps
 /// through a temp name in `to`'s own folder (review O1).
 ///
@@ -820,23 +833,22 @@ pub fn apply(
         // desktops then stay different for good. `resolve` itself already limits a chain to `op ==
         // "set"` records and groups by field, so passing every record for the note, of any age, costs
         // nothing: a field the foreign side never touched simply has no chain to compare against.
-        // O2 (re-review round 2): every device THIS PAGE'S OWN foreign records came from, not just
-        // `foreign[0]`'s. When one page carries two other desktops' records for the same note (a
-        // real case: both pushed while this device was offline), `foreign` holds records from
-        // BOTH — and a record excluded only against `foreign[0]`'s device let the SECOND desktop's
-        // own, just-appended record stay in `mine`. It then becomes `up_latest` under its own
-        // field, its `new` does not match the note (nothing wrote it here), and `resolve` falls back
-        // to the mtime stand-in exactly as if this device's real record were missing — I1's bug,
-        // reopened by a second foreign device instead of a `ts` floor.
-        let foreign_devices: std::collections::BTreeSet<&str> = foreign
+        // B2 (re-review round 2, fix round 3): only the records THIS PULL ITSELF just appended —
+        // `foreign`, identified by the hash of their own canonical bytes, the same identity `known`
+        // uses above — not every record ever received from those devices. Round 2's fix excluded a
+        // whole DEVICE, which also dropped that device's genuinely earlier records from a PRIOR
+        // pull; when this device's own note value was explained by exactly one of those earlier
+        // records (e.g. B's `2→5`, applied cleanly on an earlier pull), losing it from `mine` sent
+        // `resolve` to the mtime stand-in again — reopening I1's silent loss through a second route.
+        let foreign_hashes: std::collections::BTreeSet<String> = foreign
             .iter()
-            .filter_map(|r| r.get("device").and_then(Value::as_str))
+            .map(|r| sha256_hex(crate::ledger::dumps_value(&Value::Object(r.clone())).as_bytes()))
             .collect();
         let mine: Vec<Record> = journal
             .records_for(id, None)
             .into_iter()
             .filter(|r| {
-                !foreign_devices.contains(r.get("device").and_then(Value::as_str).unwrap_or_default())
+                !foreign_hashes.contains(&sha256_hex(crate::ledger::dumps_value(&Value::Object(r.clone())).as_bytes()))
                     // Also drop this device's own SYNC echoes (review I1/M2): an echo carries a
                     // fresh `ts` for a value that is really the foreign write restated, so once a
                     // third desktop is in the mix an echo could out-rank a genuinely later write it
@@ -924,6 +936,26 @@ pub fn apply(
                     // this to what it already is" answers no real question and still spends a cap
                     // slot doing it.
                     if from == to {
+                        // B1 (re-review round 2, fix round 3): dropping the field here is not enough
+                        // on its own. If a card already exists offering an OLDER value for this same
+                        // field, it is now stale — the desktops have since converged — and it was
+                        // never touched, because the whole `changes`-based stale check below never
+                        // runs when `changes` ends up empty. Settled here instead, without filing a
+                        // replacement: there is nothing left to propose.
+                        let singleton: std::collections::BTreeSet<String> =
+                            std::iter::once(field.clone()).collect();
+                        if let Some(stale_card) = find_amend_card(vault, &path, &singleton) {
+                            let stale_rel = crate::ids::rel(vault, &stale_card);
+                            if let Err(e) = crate::write::delete(vault, &stale_rel, ctx, journal) {
+                                report.warnings.push(format!(
+                                    "sync: {path} — a stale amend card for `{field}` could not be settled ({e})"
+                                ));
+                            } else {
+                                report.warnings.push(format!(
+                                    "sync: {path} — the pending amend card for `{field}` is settled: both desktops now agree"
+                                ));
+                            }
+                        }
                         return None;
                     }
                     Some((field.clone(), from, to))
@@ -981,12 +1013,34 @@ pub fn apply(
     // every LIVE row in this page, case-insensitively, is what tells that pair apart from a genuine
     // delete (which carries no live row at all); a real delete is untouched by this. Precomputed
     // once, over the whole page, so both wire orders land the same way.
-    let live_lower: std::collections::BTreeMap<String, &str> = page
+    //
+    // B3 (re-review round 2, fix round 3): a case-insensitive name match is not, on its own, proof
+    // of identity — the other desktop can delete one note and separately create an unrelated one
+    // whose name happens to collide with the deleted note's, case only. Both halves below are
+    // gated on the pulled note's own `id:` equalling the LOCAL file's `id:`, read directly off each
+    // side's frontmatter (never re-dumped — this is a read, exactly like `ids::read_meta` already
+    // does for an on-disk note). Only when the ids agree is this treated as one rename event.
+    //
+    // **Tombstones before live rows, always** (B3): when the ids do NOT agree, both halves fall
+    // through to their ordinary, non-O1 behaviour — the tombstone settles its own note into
+    // `archive/`, and the live row is a genuinely new note. On NTFS those two ordinary operations
+    // still collide if the live row's `create_new` runs before the tombstone's `write::delete` has
+    // cleared the old, case-colliding name out of the folder. Processing every tombstone first,
+    // regardless of the order `page.notes` carries them in, is what makes the new note's
+    // `create_new` land after the archive has already happened.
+    let live_by_lower: std::collections::BTreeMap<String, &PulledNote> = page
         .notes
         .iter()
-        .filter_map(|n| n.text.as_ref().map(|_| (n.path.to_lowercase(), n.path.as_str())))
+        .filter(|n| n.text.is_some())
+        .map(|n| (n.path.to_lowercase(), n))
         .collect();
-    for note in &page.notes {
+    let ordered_notes: Vec<&PulledNote> = page
+        .notes
+        .iter()
+        .filter(|n| n.text.is_none())
+        .chain(page.notes.iter().filter(|n| n.text.is_some()))
+        .collect();
+    for note in ordered_notes {
         if !is_note_path(vault, &note.path) {
             report.refused += 1;
             report.warnings.push("sync: a pulled note named a path outside the vault's notes".to_string());
@@ -1001,17 +1055,30 @@ pub fn apply(
             // answers case-insensitively on NTFS and would archive the still-live, differently-cased
             // note. `exact_case_exists` answers at the byte level a directory listing would.
             None => {
-                if let Some(&live_path) = live_lower.get(&note.path.to_lowercase()) {
-                    if live_path != note.path {
-                        // O1: this tombstone and a live row in the SAME page name the same note,
-                        // cased differently — a rename, not a deletion. The live row's own handling
-                        // below performs the actual rename; this tombstone names nothing left to
-                        // settle and is dropped, never archived.
-                        report.warnings.push(format!(
-                            "sync: {} — a case-only rename to {live_path}, not an archive", note.path
-                        ));
-                        continue;
+                let mut renamed_elsewhere = false;
+                if let Some(live_note) = live_by_lower.get(&note.path.to_lowercase()) {
+                    if live_note.path != note.path {
+                        let local_id = crate::ids::read_meta(&file)
+                            .and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text));
+                        let live_id = live_note.text.as_deref().and_then(note_frontmatter_id);
+                        if local_id.is_some() && local_id == live_id {
+                            // O1: this tombstone and a live row in the SAME page name the same
+                            // note (same id), cased differently — a rename, not a deletion. The
+                            // live row's own handling below performs the actual rename; this
+                            // tombstone names nothing left to settle and is dropped, never
+                            // archived.
+                            report.warnings.push(format!(
+                                "sync: {} — a case-only rename to {}, not an archive", note.path, live_note.path
+                            ));
+                            renamed_elsewhere = true;
+                        }
+                        // B3: a case-insensitive collision with a DIFFERENT id is not a rename —
+                        // two unrelated notes just happen to share a spelling. Fall through to the
+                        // ordinary settle below.
                     }
+                }
+                if renamed_elsewhere {
+                    continue;
                 }
                 if exact_case_exists(&file) {
                     match crate::write::delete(vault, &note.path, ctx, journal) {
@@ -1035,21 +1102,30 @@ pub fn apply(
                 if exact_case_exists(&file) {
                     continue;
                 }
-                // O1: a case-insensitive match that is NOT the exact spelling is this device's own
-                // copy of the SAME note, cased differently — the other half of the rename pair
-                // above. Renaming this device's file keeps its own id and body untouched; any
-                // foreign `move` record for the note is journalled in the ordinary record pass
-                // above (and, on NTFS, fails there at its own case-insensitive `exists()` check —
-                // by design, see the moves pass — leaving the rename to land here instead).
+                // O1: a case-insensitive match that is NOT the exact spelling MIGHT be this
+                // device's own copy of the SAME note, cased differently — the other half of the
+                // rename pair above. Renaming this device's file keeps its own id and body
+                // untouched; any foreign `move` record for the note is journalled in the ordinary
+                // record pass above (and, on NTFS, fails there at its own case-insensitive
+                // `exists()` check — by design, see the moves pass — leaving the rename to land
+                // here instead). B3: only when the ids agree — otherwise this is a genuinely new,
+                // unrelated note that merely collides in spelling, and it falls through to the
+                // ordinary `create_new` below (which, because tombstones ran first, no longer
+                // collides with anything).
                 if let Some(existing) = case_insensitive_match(&file) {
-                    match rename_case_only(&existing, &file) {
-                        Ok(()) => report.moved += 1,
-                        Err(e) => report.warnings.push(format!(
-                            "sync: {} could not be renamed to match the account's spelling ({e}); keeping the old spelling",
-                            note.path
-                        )),
+                    let local_id = crate::ids::read_meta(&existing)
+                        .and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text));
+                    let live_id = note_frontmatter_id(text);
+                    if local_id.is_some() && local_id == live_id {
+                        match rename_case_only(&existing, &file) {
+                            Ok(()) => report.moved += 1,
+                            Err(e) => report.warnings.push(format!(
+                                "sync: {} could not be renamed to match the account's spelling ({e}); keeping the old spelling",
+                                note.path
+                            )),
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 if let Some(parent) = file.parent() {
                     let _ = std::fs::create_dir_all(parent);
