@@ -1902,9 +1902,24 @@ mod tests {
             "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
         ).unwrap();
 
-        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
-                   DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
-                   DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        // F10 fix round 0: `judge_roster` now runs `eventfilter::prefilter_events` before judging
+        // (the same call `rank` makes), and this pass's `today` is the real clock
+        // (`jiff::Zoned::now().date()`, `enrich.rs:437`) — a date baked in at write time drifts out
+        // of the 90-day roster window as real time passes and the event is correctly dropped
+        // unjudged, exactly as `rank` would drop it. So the fixture's date is computed relative to
+        // `now`, a few days out, rather than hard-coded.
+        let start_date = jiff::Zoned::now()
+            .date()
+            .checked_add(jiff::Span::new().days(3))
+            .expect("date add");
+        let end_date = start_date.checked_add(jiff::Span::new().days(1)).expect("date add");
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
+             DTSTART:{}T230000Z\r\nDTEND:{}T000000Z\r\n\
+             DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            start_date.strftime("%Y%m%d"),
+            end_date.strftime("%Y%m%d"),
+        );
         let events_reply = crate::ledger::dumps_value(&serde_json::json!({ "body": ics }));
         let judge_reply = crate::ledger::dumps_value(&serde_json::json!({
             "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
