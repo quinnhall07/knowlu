@@ -672,3 +672,305 @@ fn rank_cannot_reach_a_judgment_endpoint() {
         "hand-off H4 has not been applied: `cli::run` still fetches event feeds on the device."
     );
 }
+
+// -----------------------------------------------------------------------------------------
+// F8: the judge step reports card answers and rejections, keyed by `judgment_id`, to /telemetry.
+// -----------------------------------------------------------------------------------------
+
+const LABEL_J: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const LABEL_J2: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+fn label_vault(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-f8-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for folder in ["tasks", "approvals", "archive", "config", "state"] {
+        std::fs::create_dir_all(dir.join(folder)).expect("make the scratch vault");
+    }
+    dir
+}
+
+fn agent_ctx(actor: &str) -> knowlu_engine::write::WriteContext {
+    knowlu_engine::write::WriteContext { actor: actor.to_string(), via: "local-runner".to_string(), run_id: None }
+}
+
+/// The console's own context (`app/src/commands.rs` `console_ctx()`): the one human actor
+/// `journal::human_set` recognises (global constraint 1).
+fn console_ctx() -> knowlu_engine::write::WriteContext {
+    knowlu_engine::write::WriteContext { actor: "quinn".to_string(), via: "dashboard".to_string(), run_id: None }
+}
+
+/// File a card as the agent that would have filed it, and return its `id:`. `extra` is extra
+/// frontmatter lines (the judgment pair, or nothing).
+fn file_card(v: &std::path::Path, stem: &str, kind: &str, extra: &str) -> String {
+    let text = format!(
+        "---\ntype: approval\nkind: {kind}\ntitle: A card about {stem}\nstatus: pending\n\
+         proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\nexpires: 2026-10-04\n\
+         snooze_until: null\ncreated_by: enrich\n{extra}---\n\nbody\n"
+    );
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    let rel = format!("approvals/{stem}.md");
+    knowlu_engine::write::create(v, &rel, &text, &agent_ctx("agent:knowlu.enrich"), &mut journal, None)
+        .expect("the card files");
+    card_field(v, &rel, "id").expect("create minted an id")
+}
+
+fn judged(kind: &str, jid: &str) -> String {
+    format!("judgment_id: {jid}\njudgment_kind: {kind}\n")
+}
+
+fn set_status(v: &std::path::Path, rel: &str, status: &str, ctx: &knowlu_engine::write::WriteContext) {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    knowlu_engine::write::write_literals(
+        v,
+        rel,
+        &[("status".to_string(), status.to_string())],
+        ctx,
+        &mut journal,
+        &knowlu_engine::write::WriteOpts::default(),
+    )
+    .expect("the status writes");
+}
+
+/// What `rank` does to a settled card: move it to `archive/`, keeping its frontmatter.
+fn archive(v: &std::path::Path, stem: &str) -> String {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    knowlu_engine::write::delete(v, &format!("approvals/{stem}.md"), &agent_ctx("agent:rank"), &mut journal)
+        .expect("the card archives");
+    format!("archive/{stem}.md")
+}
+
+fn card_field(v: &std::path::Path, rel: &str, key: &str) -> Option<String> {
+    let text = knowlu_engine::pystr::read_text(&v.join(rel)).ok()?;
+    let (meta, _) = knowlu_engine::models::split_frontmatter(&text).ok()?;
+    knowlu_engine::yaml::opt_text(knowlu_engine::yaml::get(&meta, key))
+}
+
+fn human_ts(v: &std::path::Path, id: &str) -> String {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    let record = journal.human_set(id, "status").expect("a human status record");
+    record.get("ts").and_then(|t| t.as_str()).expect("a ts").to_string()
+}
+
+fn label_opts() -> knowlu_engine::enrich::Options<'static> {
+    knowlu_engine::enrich::Options {
+        via: "local-runner",
+        run_id: None,
+        runtime: None,
+        model: None,
+        log_dir: None,
+        limit: 10,
+        budget: knowlu_engine::enrich::BATCH_BUDGET,
+    }
+}
+
+fn report(v: &std::path::Path, client: &CloudClient) -> Vec<String> {
+    knowlu_engine::enrich::report_labels(v, client, &label_opts(), knowlu_engine::enrich::BATCH_BUDGET)
+}
+
+fn body_of(request: &str) -> &str {
+    request.split("\r\n\r\n").nth(1).unwrap_or_default()
+}
+
+const SAVED_ONE: &str = r#"{"events":0,"corrections":1,"unowned":0,"refused":0}"#;
+
+#[test]
+fn a_settled_event_check_is_reported_once_with_its_judgment_id() {
+    let v = label_vault("event-check");
+    let id = file_card(&v, "event-check-club", "event-check", &judged("event", LABEL_J));
+    set_status(&v, "approvals/event-check-club.md", "approved", &console_ctx());
+    // `rank` settles an approved event-check card as `executed` and archives it (F3).
+    set_status(&v, "approvals/event-check-club.md", "executed", &agent_ctx("agent:rank"));
+    let rel = archive(&v, "event-check-club");
+    let ts = human_ts(&v, &id);
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    let stamped = card_field(&v, &rel, "reported_at").expect("the card is stamped reported_at");
+    assert!(stamped.ends_with('Z') && stamped.contains('T'), "a UTC ISO stamp: {stamped}");
+
+    // A second call finds nothing waiting and makes no request at all.
+    let again = report(&v, &client);
+    assert!(again.is_empty(), "{again:?}");
+    let sent = server.requests();
+    assert_eq!(sent.len(), 1, "exactly one request: {sent:?}");
+    assert!(sent[0].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[0]);
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": ts, "item_id": id, "field": "verdict", "ours": "unsure", "theirs": "obligation",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "event",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_rejected_judged_amend_card_is_reported_as_a_decision() {
+    let v = label_vault("amend-rejected");
+    let id = file_card(&v, "amend-hw3", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-hw3.md", "rejected", &console_ctx());
+    let ts = human_ts(&v, &id);
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-hw3.md", "reported_at").is_some());
+    let sent = server.requests();
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": ts, "item_id": id, "field": "decision", "ours": "proposed", "theirs": "rejected",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "task",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn an_approved_amend_card_is_not_reported() {
+    let v = label_vault("amend-approved");
+    file_card(&v, "amend-live", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-live.md", "approved", &console_ctx());
+    file_card(&v, "amend-done", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-done.md", "approved", &console_ctx());
+    set_status(&v, "approvals/amend-done.md", "executed", &agent_ctx("agent:rank"));
+    let done = archive(&v, "amend-done");
+
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    assert!(card_field(&v, "approvals/amend-live.md", "reported_at").is_none());
+    assert!(card_field(&v, &done, "reported_at").is_none());
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_card_without_a_judgment_id_or_without_a_human_decision_is_not_reported() {
+    let v = label_vault("unreportable");
+    // Rejected by the student, but no judgment behind it (a tier-1 write).
+    file_card(&v, "amend-tier1", "amend", "");
+    set_status(&v, "approvals/amend-tier1.md", "rejected", &console_ctx());
+    // Carries a judgment, but no human ever set its status: there is no truthful `ts`.
+    file_card(&v, "amend-by-hand", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-by-hand.md", "rejected", &agent_ctx("agent:knowlu.enrich"));
+    // A malformed id is never sent either.
+    file_card(&v, "amend-bad-id", "amend", &judged("task", "not-a-uuid"));
+    set_status(&v, "approvals/amend-bad-id.md", "rejected", &console_ctx());
+
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    for stem in ["amend-tier1", "amend-by-hand", "amend-bad-id"] {
+        assert!(card_field(&v, &format!("approvals/{stem}.md"), "reported_at").is_none(), "{stem}");
+    }
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_rejected_email_kind_card_is_never_reported_or_stamped() {
+    let v = label_vault("email");
+    // A Gmail-derived task card and a Gmail completion card (F6b), both rejected by the student.
+    file_card(&v, "gmail-task", "task", &judged("email", LABEL_J));
+    set_status(&v, "approvals/gmail-task.md", "rejected", &console_ctx());
+    file_card(&v, "gmail-done", "amend", &judged("email", LABEL_J2));
+    set_status(&v, "approvals/gmail-done.md", "rejected", &console_ctx());
+    let archived = archive(&v, "gmail-done");
+
+    assert!(!knowlu_engine::enrich::labels_waiting(&v), "an email card is never waiting");
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(card_field(&v, "approvals/gmail-task.md", "reported_at").is_none());
+    assert!(card_field(&v, &archived, "reported_at").is_none());
+    assert!(server.requests().is_empty(), "no request for an email-kind decision");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn an_unowned_count_is_named_and_the_batch_is_still_stamped() {
+    let v = label_vault("unowned");
+    file_card(&v, "amend-a", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-a.md", "rejected", &console_ctx());
+    file_card(&v, "amend-b", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-b.md", "rejected", &console_ctx());
+
+    let reply = r#"{"events":0,"corrections":1,"unowned":1,"refused":0}"#;
+    let mut server = loopback(vec![(200, reply.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(
+        lines,
+        vec!["labels: sent 2, 1 not accepted (judgment not on this account)".to_string()],
+        "{lines:?}"
+    );
+    assert!(card_field(&v, "approvals/amend-a.md", "reported_at").is_some());
+    assert!(card_field(&v, "approvals/amend-b.md", "reported_at").is_some());
+    assert_eq!(server.requests().len(), 1);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_refused_batch_stamps_nothing_and_says_so() {
+    let v = label_vault("refused");
+    file_card(&v, "amend-a", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-a.md", "rejected", &console_ctx());
+
+    // What a handler from before F7 answers any batch holding a label row.
+    let reply = r#"{"error":"field \"decision\" is not a judged field"}"#;
+    let mut server = loopback(vec![(400, reply.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("labels: not sent ("), "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-a.md", "reported_at").is_none());
+    // Still waiting, so the next slot tries again.
+    assert!(knowlu_engine::enrich::labels_waiting(&v));
+    assert_eq!(server.requests().len(), 1);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn nothing_waiting_means_no_request() {
+    let v = label_vault("nothing");
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn the_probe_fires_when_only_a_label_is_waiting() {
+    let v = label_vault("probe");
+    file_card(&v, "event-check-talk", "event-check", &judged("event", LABEL_J));
+    set_status(&v, "approvals/event-check-talk.md", "rejected", &console_ctx());
+    assert!(knowlu_engine::enrich::labels_waiting(&v));
+
+    // The probe (`GET /judge-rules`), `pull_rules`' offer read, then the label report.
+    let no_rules = r#"{"proposals":[]}"#.to_string();
+    let mut server = loopback(vec![(200, no_rules.clone()), (200, no_rules), (200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (code, lines) = knowlu_engine::enrich::run_lines_with(&v, &label_opts(), Some(&client));
+    assert_eq!(code, 0);
+    assert!(lines.iter().any(|l| l == "labels: sent 1"), "{lines:?}");
+    let sent = server.requests();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(sent[2].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[2]);
+    assert!(body_of(&sent[2]).contains(r#""theirs": "drop""#), "{}", sent[2]);
+    assert!(card_field(&v, "approvals/event-check-talk.md", "reported_at").is_some());
+    let _ = std::fs::remove_dir_all(&v);
+}

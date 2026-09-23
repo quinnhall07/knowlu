@@ -373,7 +373,7 @@ pub fn run_lines_with(
     let google = google_calendar_linked(vault);
     // R-C2-E15, widened by fix 1 (R-C2-E22 #1), again by Task 11 (R-C2-E38) and again by Task 12
     // (R-C2-E46): the probe is a network round trip, and it must not fire when there is nothing to
-    // judge or send in ANY of the four passes — reusing `pending`'s own predicate, `judge_roster`'s
+    // judge or send in ANY of the passes — reusing `pending`'s own predicate, `judge_roster`'s
     // own enabled-source predicate, `google_calendar_linked`, and `rule_decisions_waiting` (an
     // answered `kind: rule` card not yet sent) here, rather than a second scanning routine for any
     // of them, is what lets a job that runs twice a day forever skip both the call and, on a
@@ -381,7 +381,14 @@ pub fn run_lines_with(
     // queue behind it would otherwise risk. `enrich_with` below re-derives the pending list; that
     // second read is the accepted cost of leaving `enrich_with`'s own signature — and every test
     // that calls it directly — untouched.
-    if pending(vault).0.is_empty() && !any_feed && !google && !rule_decisions_waiting(vault) {
+    // F8 widens it once more: `labels_waiting` (a decision on a judged card not yet reported) is
+    // the fifth pass's own predicate, last so the cheaper four short-circuit it.
+    if pending(vault).0.is_empty()
+        && !any_feed
+        && !google
+        && !rule_decisions_waiting(vault)
+        && !labels_waiting(vault)
+    {
         return enrich_with(vault, opts, Ok(&model));
     }
     // A session or entitlement problem answers every item identically, so the FIRST call decides
@@ -459,6 +466,13 @@ pub fn run_lines_with(
             // could start a request after the slot's own twenty minutes were already gone.
             let rules_budget = opts.budget.saturating_sub(arm_started.elapsed());
             lines.extend(pull_rules(vault, client, opts, rules_budget));
+
+            // F8 — the label report. Runs last, after `pull_rules`, on whatever of `opts.budget`
+            // the four passes above have left: it sends the student's answers on judged cards
+            // (event-check verdicts, rejected judged proposals — never an `email` one) to
+            // `/telemetry`, keyed by `judgment_id`, and stamps each card `reported_at`.
+            let labels_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(report_labels(vault, client, opts, labels_budget));
 
             if let Some(reason) = model.fatal() {
                 lines.push(format!(
@@ -1112,6 +1126,183 @@ fn decided_rule_cards(vault: &Path) -> Vec<(std::path::PathBuf, i64, String)> {
 /// one scanner for this question, not two.
 fn rule_decisions_waiting(vault: &Path) -> bool {
     !decided_rule_cards(vault).is_empty()
+}
+
+// -----------------------------------------------------------------------------------------
+// F8: the device reports the student's decisions on judged cards, keyed by `judgment_id`.
+// -----------------------------------------------------------------------------------------
+
+/// The agent actor for the `reported_at` stamp. Its own name, so the journal says which loop wrote
+/// it; `agent:` prefix, so `provenance::is_agent` reads it as an agent.
+pub const LABELS_ACTOR: &str = "agent:knowlu.labels";
+
+/// At most this many rows per `POST /telemetry` (F7 caps a batch at 500, and its ownership lookup
+/// puts every id in one URL; 100 ids is about 3.7 KB).
+pub const LABEL_BATCH: usize = 100;
+
+/// The handler's own `ISO_TIMESTAMP`. `journal::now_ts` always matches it; a hand-edited journal
+/// might not, and one row the service refuses would 400 the whole batch every slot forever.
+static LABEL_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$").unwrap()
+});
+
+/// One card ready to report: its vault-relative path (for the stamp) and its row.
+struct LabelCard {
+    rel: String,
+    ts: String,
+    item_id: String,
+    row: serde_json::Value,
+}
+
+/// Every card whose decision is waiting to be reported, in `(ts, item_id)` order.
+///
+/// A card qualifies when it is in `approvals/` or `archive/`, is `type: approval`, has no
+/// `reported_at`, carries a well-formed `judgment_id` and a `judgment_kind` of `task` or `event`,
+/// and the journal holds the student's own `status` set on it (`Journal::human_set`, whose `ts` is
+/// the row's `ts`):
+/// - `kind: event-check`, `executed` (approved) or `rejected`: a `verdict` row, `unsure` →
+///   `obligation` / `drop`, `judgment_kind: event` only;
+/// - any other kind, `rejected`: a `decision` row, `proposed` → `rejected`.
+///
+/// **Never an `email` card (global constraint 14, Gmail Limited Use):** a Gmail task or completion
+/// card is skipped here, so it is never a row, never stamped and never "waiting". An approved
+/// non-event card is not sent either: a judgment the student accepted stays right by absence.
+///
+/// The frontmatter test runs before the journal is read, and the text is checked for
+/// `judgment_id` before it is parsed, so a vault with nothing to report pays one directory read
+/// per folder and never loads the journal.
+fn labels_to_report(vault: &Path) -> Vec<LabelCard> {
+    let mut journal: Option<Journal> = None;
+    let mut out = Vec::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = crate::pystr::read_text(&path) else { continue };
+            if !text.contains("judgment_id") {
+                continue;
+            }
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            let field = |key: &str| crate::yaml::opt_text(crate::yaml::get(&meta, key)).unwrap_or_default();
+            if field("type") != "approval" || !field("reported_at").is_empty() {
+                continue;
+            }
+            let (jid, jkind, kind, status) =
+                (field("judgment_id"), field("judgment_kind"), field("kind"), field("status"));
+            if !crate::cloudmodel::is_judgment_id(&jid) {
+                continue;
+            }
+            let (label, ours, theirs) = match (kind.as_str(), status.as_str(), jkind.as_str()) {
+                ("event-check", "executed", "event") => ("verdict", "unsure", "obligation"),
+                ("event-check", "rejected", "event") => ("verdict", "unsure", "drop"),
+                ("event-check", _, _) => continue,
+                (_, "rejected", "task" | "event") => ("decision", "proposed", "rejected"),
+                // Everything else, and every `email` card whatever its status.
+                _ => continue,
+            };
+            let item_id = field("id");
+            if !crate::ids::is_id(&item_id) {
+                continue;
+            }
+            let journal = journal.get_or_insert_with(|| Journal::new(vault));
+            let Some(ts) = journal
+                .human_set(&item_id, "status")
+                .and_then(|r| r.get("ts").and_then(|t| t.as_str()).map(str::to_string))
+                .filter(|ts| LABEL_TS_RE.is_match(ts))
+            else {
+                continue;
+            };
+            let row = serde_json::json!({
+                "ts": ts, "item_id": item_id, "field": label, "ours": ours, "theirs": theirs,
+                "kind": "approval", "judgment_id": jid, "judgment_kind": jkind,
+            });
+            out.push(LabelCard { rel: crate::ids::rel(vault, &path), ts, item_id, row });
+        }
+    }
+    out.sort_by(|a, b| (&a.ts, &a.item_id).cmp(&(&b.ts, &b.item_id)));
+    out
+}
+
+/// F8: whether a decision is waiting to be reported — the same scan [`report_labels`] makes, so
+/// `run_lines_with`'s early return and the pass agree on what "waiting" means. An `email` card is
+/// never waiting.
+pub fn labels_waiting(vault: &Path) -> bool {
+    !labels_to_report(vault).is_empty()
+}
+
+/// F8, the fifth pass of the cloud arm: report the student's answers on judged cards to
+/// `/telemetry`, as label rows carrying the card's `judgment_id`, so `calibration_query.sql`'s
+/// `c.judgment_id = j.id` join finds them with no heuristic (plan section (b)).
+///
+/// **Idempotent through `reported_at`.** On a 200 every card in the batch is stamped
+/// `reported_at: "<UTC ISO>"` through `write_literals`, as [`LABELS_ACTOR`] under `opts.via`, and is
+/// never read as waiting again. A 200 whose `unowned` count is above zero still stamps the whole
+/// batch — the service has answered for those rows and would drop a resend again — and says so.
+/// Any other outcome (a 400 from a handler older than F7, a 5xx, no network) is one line
+/// `labels: not sent (…)`, stamps nothing, and the rest is left for the next slot; a resend lands
+/// on the same `corrections_once` key. Batches of at most [`LABEL_BATCH`] rows, in `(ts, item_id)`
+/// order, each checked against `budget` before its request exactly as [`pull_rules`] checks its own.
+pub fn report_labels(
+    vault: &Path,
+    client: &crate::cloudmodel::CloudClient,
+    opts: &Options<'_>,
+    budget: std::time::Duration,
+) -> Vec<String> {
+    let cards = labels_to_report(vault);
+    let mut lines = Vec::new();
+    if cards.is_empty() {
+        return lines;
+    }
+    let ctx = WriteContext {
+        actor: LABELS_ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let started = std::time::Instant::now();
+    let mut total = crate::cloudmodel::LabelsSent::default();
+    let mut sent = 0usize;
+    for (i, batch) in cards.chunks(LABEL_BATCH).enumerate() {
+        if started.elapsed() + crate::cloudmodel::CALL_TIMEOUT > budget {
+            lines.push(format!("labels: {} decision(s) left for the next slot", cards.len() - i * LABEL_BATCH));
+            break;
+        }
+        let rows: Vec<serde_json::Value> = batch.iter().map(|c| c.row.clone()).collect();
+        match crate::cloudmodel::post_labels(client, &rows) {
+            Ok(reply) => {
+                let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+                let stamp = format!("\"{}\"", now.strftime("%Y-%m-%dT%H:%M:%SZ"));
+                for card in batch {
+                    // Best effort: a stamp that fails leaves the card waiting, and its resend lands
+                    // on the same `corrections_once` row.
+                    let _ = crate::write::write_literals(
+                        vault,
+                        &card.rel,
+                        &[("reported_at".to_string(), stamp.clone())],
+                        &ctx,
+                        &mut journal,
+                        &WriteOpts::default(),
+                    );
+                }
+                sent += batch.len();
+                total.unowned += reply.unowned;
+                total.refused += reply.refused;
+            }
+            Err(e) => {
+                lines.push(format!("labels: not sent ({e})"));
+                break;
+            }
+        }
+    }
+    if sent > 0 {
+        let mut line = format!("labels: sent {sent}");
+        if total.unowned > 0 {
+            line.push_str(&format!(", {} not accepted (judgment not on this account)", total.unowned));
+        }
+        if total.refused > 0 {
+            line.push_str(&format!(", {} refused (labels nothing)", total.refused));
+        }
+        lines.insert(0, line);
+    }
+    lines
 }
 
 /// Every `rule_id` already filed — `approvals/` for the live ones and `archive/` for the settled,

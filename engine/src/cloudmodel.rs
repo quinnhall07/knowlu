@@ -54,8 +54,15 @@ pub fn judgment_id_of(reply: &Value) -> Option<String> {
     reply
         .get("judgment_id")
         .and_then(Value::as_str)
-        .filter(|s| JUDGMENT_ID.is_match(s))
+        .filter(|s| is_judgment_id(s))
         .map(str::to_string)
+}
+
+/// F8: the one shape check for a `judgment_id`, wherever it was read from — a reply
+/// ([`judgment_id_of`]) or a card's frontmatter (`enrich::report_labels`), which a hand edit can
+/// leave malformed.
+pub fn is_judgment_id(s: &str) -> bool {
+    JUDGMENT_ID.is_match(s)
 }
 
 /// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
@@ -714,6 +721,26 @@ pub fn pull_rule_proposals(client: &CloudClient) -> Result<Vec<RuleProposal>, Cl
 
 pub fn decide_rule(client: &CloudClient, id: i64, decision: &str) -> Result<(), CloudError> {
     client.post("/judge-rules", &json!({ "id": id, "decision": decision })).map(|_| ())
+}
+
+/// F8: what `/telemetry` said about one batch of label rows. `unowned` (the judgment is not this
+/// account's, or not of the kind claimed) and `refused` (a verdict row that labels nothing) are
+/// F7's optional counts, present only when the batch held a label row: an absent count reads as 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LabelsSent {
+    pub saved: usize,
+    pub unowned: usize,
+    pub refused: usize,
+}
+
+/// F8: POST label rows (`enrich::report_labels` builds them) to `/telemetry`, the endpoint the app
+/// already sends class (b) corrections to — `{"events": [], "corrections": rows}`. The service
+/// authenticates, deduplicates on `corrections_once` and refuses free text, so a resend after a
+/// lost reply lands on the same rows.
+pub fn post_labels(client: &CloudClient, rows: &[Value]) -> Result<LabelsSent, CloudError> {
+    let reply = client.post("/telemetry", &json!({ "events": [], "corrections": rows }))?;
+    let count = |key: &str| reply.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    Ok(LabelsSent { saved: count("corrections"), unowned: count("unowned"), refused: count("refused") })
 }
 
 /// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not
