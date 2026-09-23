@@ -5537,4 +5537,91 @@ mod conflicts_tests {
         assert_eq!(got[0].1, Level::Optional);
         assert_eq!(fit(&got), Fit::Clear);
     }
+
+    // --- P15 cross-check: `commitment_busy_on` (P10) must never drift from what
+    // `weekcal::WeekCalendar::for_vault` (P15) subtracts, since both read the same vault. ---
+
+    fn scratch_p15(tag: &str) -> PathBuf {
+        let v = std::env::temp_dir().join(format!("knowlu-p15-crosscheck-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&v);
+        std::fs::create_dir_all(v.join(FOLDER)).unwrap();
+        v
+    }
+
+    /// A vault with a confirmed hard class (a `source_uid` whose fresh horizon covers
+    /// 2026-08-24..2026-09-21, one moved instance inside it) and a confirmed soft club (no
+    /// `source_uid`, so it always falls back to its weekly `meets` — a span the horizon never
+    /// touches). Both are read by `load`/`read_series_file` exactly as `for_vault` reads them.
+    #[test]
+    fn busy_spans_agree_with_week_calendar_for_vault() {
+        let vault = scratch_p15("agree");
+        std::fs::write(
+            vault.join(FOLDER).join("hard.md"),
+            "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon], start: \"12:00\", end: \"12:50\"}]\nsource_uid: \"gcal-series:cs100\"\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vault.join(FOLDER).join("soft.md"),
+            "---\ntype: commitment\nkind: club\ntitle: \"Chess Club\"\nmeets: [{days: [mon], start: \"17:00\", end: \"18:00\"}]\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+
+        let read_date = jiff::civil::date(2026, 8, 24);
+        let moved_date = jiff::civil::date(2026, 8, 31); // second Monday, inside the horizon
+        let series = Series {
+            source_uid: "gcal-series:cs100".into(),
+            calendar: "google:abc".into(),
+            title: "CS 100".into(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: vec![Instance { date: moved_date, start: Some(t(13, 0)), end: Some(t(13, 50)) }],
+            meets: vec![Meet { days: vec!["mon"], start: t(12, 0), end: t(12, 50) }],
+            first: Some(read_date),
+            until: None,
+            last_seen: Some(read_date),
+        };
+        let mut file = SeriesFile::default();
+        file.calendars.insert("google:abc".into(), read_date);
+        file.series.push(series);
+        write_series_file(&vault, &file_bytes(&file)).unwrap();
+
+        let set = load(&vault);
+        assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+        let (series_file, series_warnings) = read_series_file(&vault);
+        assert!(series_warnings.is_empty(), "{series_warnings:?}");
+        let instances = series_file.instances_map();
+        let calendar = crate::weekcal::WeekCalendar::for_vault(&vault, Vec::new());
+
+        // 2026-08-24: inside the horizon, no instance that day (cancelled) — the class is absent,
+        // the weekly club (untouched by any horizon) still meets.
+        // 2026-08-31: inside the horizon, the moved instance applies instead of the weekly time.
+        // 2026-09-28: past the horizon end (2026-09-21) — the class falls back to its weekly time.
+        for date in [read_date, moved_date, jiff::civil::date(2026, 9, 28)] {
+            let mut from_commitments: Vec<(Time, Time)> = set
+                .confirmed
+                .iter()
+                .filter(|c| c.level != Level::Optional)
+                .flat_map(|c| commitment_busy_on(c, date, &instances))
+                .collect();
+            from_commitments.sort();
+
+            let mut from_weekcal: Vec<(Time, Time)> = calendar
+                .spans_on(date)
+                .into_iter()
+                .map(|(start, end, _)| (start.time(), end.time()))
+                .collect();
+            from_weekcal.sort();
+
+            assert_eq!(
+                from_commitments, from_weekcal,
+                "{date}: commitment_busy_on and WeekCalendar::for_vault must never disagree"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }

@@ -176,6 +176,32 @@ impl WeekCalendar {
         WeekCalendar::new(&config, events)
     }
 
+    /// The one constructor `rank` and `surface` both build their calendar from (spec §6.1):
+    /// `config/week_template.yaml`, plus `vault`'s confirmed hard/soft commitments and planning
+    /// day (`commitments::load`), plus the fresh-read horizon and actual instances
+    /// (`commitments::read_series_file`). A vault with no `commitments/` and no series file gives
+    /// exactly what `from_file` alone would (§8): `load` returns empty spans and no window, and
+    /// `read_series_file` returns an empty instances map.
+    pub fn for_vault(vault: &Path, events: Vec<CalEvent>) -> WeekCalendar {
+        WeekCalendar::for_vault_with_warnings(vault, events).0
+    }
+
+    /// [`WeekCalendar::for_vault`], plus every warning `commitments::load` and
+    /// `commitments::read_series_file` produced along the way — a caller (the `calendar` run-record
+    /// step, §6.5) folds them in without re-reading the vault.
+    pub fn for_vault_with_warnings(vault: &Path, events: Vec<CalEvent>) -> (WeekCalendar, Vec<String>) {
+        let commitments = crate::commitments::load(vault);
+        let (series, series_warnings) = crate::commitments::read_series_file(vault);
+        let mut warnings = commitments.warnings.clone();
+        warnings.extend(series_warnings);
+
+        let template = vault.join("config").join("week_template.yaml");
+        let calendar = WeekCalendar::from_file(&template, events)
+            .with_commitments(commitments.spans(), commitments.window)
+            .with_instances(series.instances_map());
+        (calendar, warnings)
+    }
+
     /// Plain data in: confirmed hard/soft commitment spans, plus the planning-day window per
     /// weekday. *Reason:* §6.1 — keeps `weekcal` buildable and pure before `commitments.rs` exists.
     pub fn with_commitments(
@@ -951,5 +977,172 @@ mod tests {
             DateTime::constant(2026, 8, 28, 7, 0, 0, 0),
             "an earlier window start is honoured, not clamped to the template's day_start"
         );
+    }
+
+    // --- P15: `for_vault` and the no-commitments equivalence (spec §6.1, §8) ---
+
+    const FIXTURE_VAULTS: [&str; 3] =
+        ["tests/fixtures/vault-s1", "tests/fixtures/vault-s1-migrated", "tests/fixtures/vault-full"];
+
+    /// The 35 days spec §8 test 1 names, starting 2026-08-24.
+    fn horizon_35(start: Date) -> Vec<Date> {
+        (0..35).map(|n| crate::scheduling::add_days(start, n)).collect()
+    }
+
+    /// `for_vault(vault, ..)` and `from_file(vault/config/week_template.yaml, ..)` must draw the
+    /// identical calendar over `days` — spec §8 test 1's five-way comparison, shared by the fixture
+    /// test and the decline-markers test.
+    fn assert_for_vault_equals_from_file(vault: &Path, days: &[Date]) {
+        let template = vault.join("config").join("week_template.yaml");
+        let from_file = WeekCalendar::from_file(&template, Vec::new());
+        let for_vault = WeekCalendar::for_vault(vault, Vec::new());
+        for &day in days {
+            assert_eq!(
+                for_vault.template_blocks(day),
+                from_file.template_blocks(day),
+                "template_blocks disagree on {day}"
+            );
+            assert_eq!(
+                for_vault.free_blocks(day),
+                from_file.free_blocks(day),
+                "free_blocks disagree on {day}"
+            );
+            assert_eq!(
+                for_vault.capacity(day),
+                from_file.capacity(day),
+                "capacity disagrees on {day}"
+            );
+            assert_eq!(
+                for_vault.template_capacity(day),
+                from_file.template_capacity(day),
+                "template_capacity disagrees on {day}"
+            );
+            assert_eq!(for_vault.window(day), from_file.window(day), "window disagrees on {day}");
+        }
+    }
+
+    #[test]
+    fn for_vault_equals_from_file_without_commitments() {
+        let days = horizon_35(Date::constant(2026, 8, 24));
+        for name in FIXTURE_VAULTS {
+            assert_for_vault_equals_from_file(Path::new(name), &days);
+        }
+    }
+
+    #[test]
+    fn template_only_blocks_equals_template_blocks_without_commitments() {
+        let days = horizon_35(Date::constant(2026, 8, 24));
+        for name in FIXTURE_VAULTS {
+            let for_vault = WeekCalendar::for_vault(Path::new(name), Vec::new());
+            for &day in &days {
+                assert_eq!(
+                    for_vault.template_only_blocks(day),
+                    for_vault.template_blocks(day),
+                    "{name} {day}: no commitments, so template_only_blocks must match template_blocks"
+                );
+            }
+        }
+    }
+
+    fn copy_dir_all(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let target = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_all(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// A private scratch copy of `tests/fixtures/vault-full`, safe for a test to add
+    /// `commitments/` notes into. Every call gets its own directory so parallel tests never
+    /// collide.
+    fn scratch_vault_full(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("knowlu-p15-{}-{tag}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir_all(Path::new("tests/fixtures/vault-full"), &dir);
+        std::fs::create_dir_all(dir.join("commitments")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn decline_markers_change_nothing() {
+        let days = horizon_35(Date::constant(2026, 8, 24));
+        let vault = scratch_vault_full("decline");
+        std::fs::write(
+            vault.join("commitments").join("declined.md"),
+            "---\ntype: commitment\nstatus: declined\nsource_uid: \"gcal-series:declined-club\"\n---\n\nInvented.\n",
+        )
+        .unwrap();
+
+        assert_for_vault_equals_from_file(&vault, &days);
+
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_confirmed_class_note_reduces_capacity_on_its_days() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let vault =
+            std::env::temp_dir().join(format!("knowlu-p15-class-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        std::fs::write(
+            vault.join("commitments").join("class.md"),
+            "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon, wed], start: \"12:00\", end: \"12:50\"}]\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+
+        let baseline = WeekCalendar::new(&Mapping::new(), Vec::new());
+        let with_class = WeekCalendar::for_vault(&vault, Vec::new());
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // Both Mon and Wed carry the 12:00-12:50 class (50 minutes).
+        for day in [Date::constant(2026, 8, 24), Date::constant(2026, 8, 26)] {
+            let dropped = baseline.capacity(day) - with_class.capacity(day);
+            assert!(
+                (dropped - 50.0 / 60.0).abs() < 1e-9,
+                "{day}: capacity must drop by exactly the 50-minute overlap, got {dropped}"
+            );
+        }
+        // Tuesday has no class in this note, so it is untouched.
+        let tuesday = Date::constant(2026, 8, 25);
+        assert_eq!(with_class.capacity(tuesday), baseline.capacity(tuesday));
+    }
+
+    #[test]
+    fn for_vault_with_warnings_surfaces_commitments_load_warnings() {
+        let vault = scratch_vault_full("warnings");
+        std::fs::write(
+            vault.join("commitments").join("bad.md"),
+            "---\ntype: commitment\nkind: class\ntitle: \"Bad\"\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+
+        let template = vault.join("config").join("week_template.yaml");
+        let from_file = WeekCalendar::from_file(&template, Vec::new());
+        let (calendar, warnings) = WeekCalendar::for_vault_with_warnings(&vault, Vec::new());
+        let _ = std::fs::remove_dir_all(&vault);
+
+        assert!(
+            warnings.iter().any(|w| w.contains("no valid meets entry")),
+            "expected a no-valid-meets warning, got {warnings:?}"
+        );
+        // The invalid note is skipped entirely, so it contributes no span.
+        let monday = Date::constant(2026, 8, 24);
+        assert_eq!(calendar.template_blocks(monday), from_file.template_blocks(monday));
+    }
+
+    #[test]
+    fn for_vault_with_warnings_is_empty_with_no_commitments_folder() {
+        let (_, warnings) =
+            WeekCalendar::for_vault_with_warnings(Path::new("tests/fixtures/vault-full"), Vec::new());
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }
