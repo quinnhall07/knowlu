@@ -112,7 +112,7 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
         .into_values()
         .flatten()
         .collect();
-    let cal = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), events);
+    let cal = WeekCalendar::for_vault(vault, events);
     let ranked = rank(&tasks, today, &cal);
     let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
     Loaded { tasks, metas, unreadable, cal, planning, ranked, takes }
@@ -852,12 +852,13 @@ pub struct TheDay {
     pub empty_text: Option<String>,
 }
 
-/// The day laid out as one lane: free blocks (carrying today's takes), calendar busy time, and the
-/// class gaps in the timetable — everything on the same timeline, in start order. A recurring
-/// commitment spends the effort budget and renders in `commitments`; it never appears as a block,
-/// because a commitment spends Quinn's time, not a slot on today's clock. An all-day event never
-/// subtracts capacity (`weekcal::free_blocks` already excludes it), so it surfaces only in
-/// `all_day`, read for display and nothing else.
+/// The day laid out as one lane: free blocks (carrying today's takes), calendar busy time, commitment
+/// blocks and the class gaps in the timetable — everything on the same timeline, in start order. A
+/// recurring commitment (`planning.recurring`) spends the effort budget and renders in
+/// `commitments`; it never appears as a block, because it spends Quinn's time, not a slot on
+/// today's clock — a confirmed `commitments/` note is different: it IS a slot on today's clock, so
+/// it draws one (§6.2). An all-day event never subtracts capacity (`weekcal::free_blocks` already
+/// excludes it), so it surfaces only in `all_day`, read for display and nothing else.
 pub fn the_day(l: &Loaded, today: Date) -> TheDay {
     let free = l.cal.free_blocks(today);
     let mut blocks: Vec<DayBlock> = free
@@ -877,20 +878,44 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
                 .collect(),
         })
         .collect();
+
+    // §6.1/§6.3: every date-based use of day_start/day_end goes through `window(day)`, which
+    // falls back to the template's when there is no confirmed planning day.
+    let (window_start, window_end) = l.cal.window(today);
+    let day_start = today.to_datetime(window_start);
+    let day_end = today.to_datetime(window_end);
+
+    // Each confirmed commitment span active today draws its own block (§6.2) — `kind: "class"`
+    // for a class or lab, `"busy"` otherwise, `label` the note's title — clamped to the window and
+    // dropped if wholly outside it. `commitment_bounds` remembers the clamped ranges so a Google
+    // event covering the same span (below) is not drawn a second time.
+    let mut commitment_bounds: Vec<(DateTime, DateTime)> = Vec::new();
+    for (start, end, span) in l.cal.spans_on(today) {
+        let start = start.max(day_start);
+        let end = end.min(day_end);
+        if start >= end {
+            continue; // wholly outside window(today): not drawn (R15)
+        }
+        let kind = if span.kind == "class" || span.kind == "lab" { "class" } else { "busy" };
+        blocks.push(DayBlock { start: hm(start), end: hm(end), kind: kind.into(), label: span.title.clone(), hours: hours_between(start, end), takes: Vec::new() });
+        commitment_bounds.push((start, end));
+    }
+
     let mut all_day = Vec::new();
     for e in l.cal.events_on(today) {
         if e.all_day {
             all_day.push(e.title.clone());
-        } else {
+        } else if !commitment_bounds.iter().any(|(s, en)| *s == e.start && *en == e.end) {
+            // A Google event identical to a commitment block is drawn once — the commitment's
+            // own block above, not this one (R15).
             blocks.push(DayBlock { start: hm(e.start), end: hm(e.end), kind: "busy".into(), label: e.title.clone(), hours: hours_between(e.start, e.end), takes: Vec::new() });
         }
     }
-    // Classes are the gaps between template blocks inside the day window — `template_blocks` is
-    // free time from the timetable alone, WITHOUT the minimum-length filter (weekcal.rs), so the
-    // gaps it leaves behind are exactly where a class sits; no second data source is needed.
-    let template = l.cal.template_blocks(today);
-    let day_start = today.to_datetime(l.cal.day_start);
-    let day_end = today.to_datetime(l.cal.day_end);
+    // Classes are the gaps between the TEMPLATE's classes alone inside the day window —
+    // `template_only_blocks` (weekcal.rs) has no commitment span folded in, so a confirmed club
+    // is never mistaken for a class gap here (R15); the commitment spans draw their own blocks
+    // above instead.
+    let template = l.cal.template_only_blocks(today);
     let mut cursor = day_start;
     for b in &template {
         if b.start > cursor {
@@ -2140,6 +2165,117 @@ mod tests {
         assert_eq!(d.commitments, vec![Commitment { name: "Gym".into(), hours: 1.5 }]);
         assert_eq!(d.open_hours, 4.5);
         assert!(d.blocks.iter().all(|b| b.label != "Gym"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // P17: the_day's commitment blocks and window (spec §6.2).
+    // -----------------------------------------------------------------------------------------
+
+    /// A confirmed commitment note, written straight into `vault/commitments/`, never re-dumped —
+    /// same shape `commitments.rs`'s own tests use.
+    fn commitment_note(vault: &Path, file: &str, front: &str) {
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        std::fs::write(
+            vault.join("commitments").join(file),
+            format!("---\n{front}---\n\nInvented for a test.\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_day_draws_a_club_as_busy_with_its_title_not_as_class() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "chess-club.md",
+            "id: cmt_0000000001\ntype: commitment\nkind: club\ntitle: \"Chess Club\"\n\
+             meets: [{days: [fri], start: \"16:00\", end: \"17:00\"}]\n\
+             source_uid: \"gcal-series:chess\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.start == "16:00").expect("the club's block");
+        assert_eq!((block.kind.as_str(), block.label.as_str(), block.end.as_str()), ("busy", "Chess Club", "17:00"));
+    }
+
+    #[test]
+    fn a_class_commitment_is_drawn_as_class_with_its_title() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "extra-lab.md",
+            "id: cmt_0000000002\ntype: commitment\nkind: lab\ntitle: \"Extra Lab\"\n\
+             meets: [{days: [fri], start: \"10:15\", end: \"10:45\"}]\n\
+             source_uid: \"gcal-series:lab\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.start == "10:15").expect("the lab's block");
+        assert_eq!((block.kind.as_str(), block.label.as_str(), block.end.as_str()), ("class", "Extra Lab", "10:45"));
+    }
+
+    #[test]
+    fn a_commitment_straddling_the_window_is_clamped_and_one_outside_is_not_drawn() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday.
+        commitment_note(
+            &v,
+            "early-bird.md",
+            "id: cmt_0000000003\ntype: commitment\nkind: club\ntitle: \"Early Bird\"\n\
+             meets: [{days: [fri], start: \"07:00\", end: \"08:30\"}]\n\
+             source_uid: \"gcal-series:early\"\nstatus: confirmed\n",
+        );
+        commitment_note(
+            &v,
+            "night-owl.md",
+            "id: cmt_0000000004\ntype: commitment\nkind: club\ntitle: \"Night Owl\"\n\
+             meets: [{days: [fri], start: \"19:00\", end: \"20:00\"}]\n\
+             source_uid: \"gcal-series:night\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.label == "Early Bird").expect("the clamped block");
+        assert_eq!((block.start.as_str(), block.end.as_str()), ("08:00", "08:30"));
+        assert!(d.blocks.iter().all(|b| b.label != "Night Owl"), "wholly outside the window: never drawn");
+    }
+
+    #[test]
+    fn a_google_event_identical_to_a_commitment_is_drawn_once() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "cs-extra.md",
+            "id: cmt_0000000005\ntype: commitment\nkind: class\ntitle: \"CS Extra Session\"\n\
+             meets: [{days: [fri], start: \"10:00\", end: \"10:45\"}]\n\
+             source_uid: \"gcal-series:extra\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let duplicate = crate::weekcal::CalEvent {
+            title: "CS Extra Session (calendar copy)".into(),
+            start: TODAY.at(10, 0, 0, 0),
+            end: TODAY.at(10, 45, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![duplicate]);
+        let d = the_day(&l, TODAY);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.start == "10:00" && b.end == "10:45").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!(matching[0].label, "CS Extra Session", "the commitment's own block wins, the event's copy is dropped");
+    }
+
+    #[test]
+    fn the_day_uses_the_planning_window() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "planning-day.md",
+            "id: cmt_0000000006\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+             window: [{days: [fri], start: \"07:00\", end: \"20:00\"}]\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        assert_eq!(d.blocks.first().map(|b| b.start.as_str()), Some("07:00"));
+        assert_eq!(d.blocks.last().map(|b| b.end.as_str()), Some("20:00"));
     }
 
     #[test]
