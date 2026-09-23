@@ -530,32 +530,18 @@ fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// C3' Task 9, H11a's OTHER arm — a copy that will not read rolls the vault Finish just made back
-/// and answers `ok: false` — is not reachable through this call by any input a test can hand it:
-/// `sync::restore_into` computes its OWN allowlist from `note_paths(dest)` in the same breath it
-/// checks a stray note against it (`restore_all`'s one `unexpected_notes` check runs before the
-/// first page, with no write and no yield in between), so the check that arm exists to report can
-/// never see a note the same call did not just allow. `engine/tests/sync_replay.rs`'s
-/// `a_restore_refuses_a_note_it_did_not_put_there_and_tolerates_exactly_the_seeds` (Task 9, Step 2)
-/// already proves that refusal fires correctly against `sync::restore`, called with a hand-picked
-/// allowlist narrower than disk — the one shape that CAN happen, and the shape a real second-desktop
-/// caller of the lower-level function could hit. What is left to pin here is that `create_vault_in`'s
-/// own handling of THAT arm — should `restore_into` ever return one — is the same
-/// scaffold-then-roll-back shape every other failure in this function already uses: read the source,
-/// the way `no_test_in_this_file_can_reach_the_compiled_in_project`
-/// (`app/tests/account.rs`) and `no_multi_word_command_argument_is_sent_in_the_wrong_case`
-/// (`app/tests/static_assets.rs`) already do for a runtime path this codebase cannot otherwise reach.
-#[test]
-fn h11a_rolls_the_vault_back_when_the_restore_cannot_read_the_account() {
-    let src = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
-    let at = src.find("let restored = match knowlu_engine::sync::restore_into(&dest)").expect("H11a's restore call is in create_vault_in");
-    let window = &src[at..(at + 1100).min(src.len())];
-    assert!(window.contains("Ok(r) => r,"), "an Ok result is kept, not matched away");
-    assert!(window.contains("Err(e) => {"), "the restore's own Err arm");
-    assert!(window.contains("std::fs::remove_dir_all(&dest)"), "a copy that will not read rolls the new vault back");
-    assert!(window.contains("\"ok\": false"), "and the envelope says so");
-    assert!(window.contains("\"error\": e"), "naming the reason `restore_into` gave, not a fixed sentence");
-}
+// M2 (fix round 1): the source-text test that used to stand here,
+// `h11a_rolls_the_vault_back_when_the_restore_cannot_read_the_account`, is gone. Its own reasoning
+// still holds — `sync::restore_into` computes its allowlist from `note_paths(dest)` in the same
+// breath it checks a stray note against it, so the `Err` arm `create_vault_in` guards against is not
+// reachable through this call by any input a test can hand it — but pinning that guard's SHAPE by
+// matching a byte window of `src/onboarding.rs` was exactly the brittle kind of test the review
+// named: a reflow breaks it, and a comment that happens to contain the same words satisfies it
+// without the code underneath having to agree. The guard itself is unchanged and stays in
+// `create_vault_in`; `engine/tests/sync_replay.rs`'s
+// `a_restore_refuses_a_note_it_did_not_put_there_and_tolerates_exactly_the_seeds` (Task 9, Step 2)
+// is what actually exercises the refusal this guard exists for, against `sync::restore` with a
+// hand-picked allowlist narrower than disk — the one shape that can really happen.
 
 /// Fix round 1, item 2: `personal_calendar` is validated on the device before it ever reaches a
 /// `VaultPlan` — trimmed, `webcal://` rewritten to `https://` (R-C1-22), anything else that is not

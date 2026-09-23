@@ -487,6 +487,23 @@ fn sync_card_note(text: &str) -> Option<Option<String>> {
     Some(crate::yaml::get(&meta, "id").and_then(crate::yaml::text))
 }
 
+/// **I5 (fix round 1), Task 6's own parked finding F1, closed here.** Whichever pull applies a row —
+/// `apply`'s live pull, or `materialise`'s restore — this app's own sync actor's affairs can never
+/// legitimately arrive as a PULLED row, and the reason is the same on both paths: [`ACTOR`]'s own doc
+/// says a record under it never leaves the device that made it (`build_push`'s actor filter is what
+/// makes that true). A record claiming it anyway is malformed or hostile, never a real push.
+fn record_is_foreign_actor(record: &Record) -> bool {
+    record.get("actor").and_then(Value::as_str) == Some(ACTOR)
+}
+
+/// See [`record_is_foreign_actor`]: the note-side half of the same shared refusal. A note that IS
+/// one of the account's own sync amend cards ([`sync_card_note`]) can only ever be answered on the
+/// device that filed it (probes N18, N19, `ACTOR`'s own doc) — materialising or applying one here
+/// would hand this device a question that is not its own, and one sync will never settle.
+fn note_is_foreign_sync_card(text: &str) -> bool {
+    sync_card_note(text).is_some()
+}
+
 /// What one push carries. `warnings` are lines the run prints; they are never sent.
 #[derive(Debug, Clone, Default)]
 pub struct PushBatch {
@@ -852,12 +869,27 @@ pub fn unexpected_notes(vault: &Path, tolerate: &[String]) -> Vec<String> {
 /// it while appearing to obey it.
 ///
 /// The bound is `restore`'s allowlist, checked once by the caller before the first page.
+///
+/// **M5 (fix round 1): still one `fsync` per record, not per page.** `JsonlLedger::append`
+/// (`ledger.rs`) opens its day file, writes and calls `sync_all` on every call, with no batched or
+/// deferred variant — and `ledger.rs` is a shared port every other write path in this crate also
+/// goes through, outside this stream's file ownership (the plan's file-ownership rule). Narrowing
+/// its durability guarantee to fix one caller would change it for all of them. Documented rather
+/// than silently left, per the fix round's own instruction.
 pub fn materialise(dest: &Path, page: &Pulled) -> Restored {
     let mut out = Restored { warnings: page.warnings.clone(), ..Default::default() };
     let ledger = crate::ledger::JsonlLedger::new(dest.join("state").join("journal"));
     for (_, record) in &page.records {
         if let Err(why) = record_is_well_formed(record) {
             out.warnings.push(format!("restore: a record was refused ({why})"));
+            continue;
+        }
+        // I5: refused before it is ever journalled — see `record_is_foreign_actor`.
+        if record_is_foreign_actor(record) {
+            out.warnings.push(
+                "restore: a pulled record under this app's own sync actor was refused (sync's own records never leave their device)"
+                    .to_string(),
+            );
             continue;
         }
         if !is_note_path(dest, record.get("path").and_then(Value::as_str).unwrap_or_default()) {
@@ -869,22 +901,61 @@ pub fn materialise(dest: &Path, page: &Pulled) -> Restored {
             Err(e) => out.warnings.push(format!("restore: a record could not be journalled ({e})")),
         }
     }
-    for note in &page.notes {
-        // A tombstone is a path the account knows is settled. A restore does not resurrect it and
-        // does not have to move anything either: there is nothing on disk yet.
-        let Some(text) = note.text.as_deref() else { continue };
+    // I4: a tombstone whose path is already on disk can only be one of the tolerated seeds — restore
+    // never resurrects a path it has already settled, and nothing else is here yet. Settled with
+    // `apply`'s own tombstone semantics (`write::delete`, under `sync::ACTOR` so `build_push` never
+    // sends it back up as a new local delete) — not a raw file removal, so the seed's history is
+    // archived exactly the way a real desktop's own delete already is, and a live note this same page
+    // sends for the archived path (below) still wins whatever it says.
+    //
+    // **Tombstones before live rows, always** (mirrors `apply`'s own O1 ordering): a seed tombstoned
+    // to `archive/<name>.md` and a pulled live note landing at that same archive path are the two
+    // halves of one real event — the OTHER desktop deleted the seed and pushed its own archived copy
+    // — and processing the tombstone first is what lets the live write below land cleanly on the slot
+    // `write::delete` just freed, with the account's own text, rather than racing it for the name or
+    // leaving the seed's stale body sitting there.
+    let mut journal = Journal::new(dest);
+    let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: "dashboard".to_string(), run_id: None };
+    let ordered_notes: Vec<&PulledNote> = page
+        .notes
+        .iter()
+        .filter(|n| n.text.is_none())
+        .chain(page.notes.iter().filter(|n| n.text.is_some()))
+        .collect();
+    for note in ordered_notes {
         if !is_note_path(dest, &note.path) {
             out.warnings.push("restore: a note named a path outside the vault's notes".to_string());
             continue;
         }
         let file = dest.join(&note.path);
-        if let Some(parent) = file.parent() {
-            // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match crate::pystr::write_text(&file, text) {
-            Ok(()) => out.notes += 1,
-            Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
+        match &note.text {
+            None => {
+                if exact_case_exists(&file) {
+                    match crate::write::delete(dest, &note.path, &ctx, &mut journal) {
+                        Ok(_) => out.notes += 1,
+                        Err(e) => out.warnings.push(format!("restore: {} could not be settled ({e})", note.path)),
+                    }
+                }
+                // Else: the ordinary case — there really is nothing on disk yet for this path.
+            }
+            Some(text) => {
+                // I5: shared with `apply`'s own guard — see `note_is_foreign_sync_card`.
+                if note_is_foreign_sync_card(text) {
+                    out.warnings.push(format!(
+                        "restore: {} — a sync amend card from the account was refused (it can only be answered on the device that filed it)",
+                        note.path
+                    ));
+                    continue;
+                }
+                if let Some(parent) = file.parent() {
+                    // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match crate::pystr::write_text(&file, text) {
+                    Ok(()) => out.notes += 1,
+                    Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
+                }
+            }
         }
     }
     out.empty = out.notes == 0 && out.records == 0;
@@ -902,16 +973,102 @@ pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restor
     Ok(materialise(dest, page))
 }
 
+/// I2 (fix round 1): a full, in-memory copy of every file under `dest` — small enough to hold for
+/// the length of one restore, since the only vault [`restore_all`] is ever pointed at is the one
+/// `scaffold::create_vault` just seeded (H11a), a handful of files. Taken once, before the first
+/// page, so a later page's failure can undo every page THIS CALL wrote and leave exactly what was
+/// there before it — the pristine scaffold, byte for byte — rather than a half-filled folder this
+/// function would otherwise have no way to take back.
+fn snapshot_tree(dest: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let (Ok(rel), Ok(bytes)) = (path.strip_prefix(root).map(Path::to_path_buf), std::fs::read(&path)) {
+                out.push((rel, bytes));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dest, dest, &mut out);
+    out
+}
+
+/// The other half of [`snapshot_tree`]: every file the snapshot did not carry is removed, then every
+/// file it did carry is written back exactly as it was. Best-effort on every individual file — a
+/// restore that failed is already being reported as a failure, and a rollback that itself failed
+/// silently would be strictly worse than one that left a stray file behind and said nothing.
+fn restore_tree(dest: &Path, snapshot: &[(PathBuf, Vec<u8>)]) {
+    let known: std::collections::BTreeSet<&PathBuf> = snapshot.iter().map(|(p, _)| p).collect();
+    for (rel, _) in snapshot_tree(dest) {
+        if !known.contains(&rel) {
+            let _ = std::fs::remove_file(dest.join(&rel));
+        }
+    }
+    for (rel, bytes) in snapshot {
+        let path = dest.join(rel);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
+/// I3 (fix round 1): the cursor a restore leaves behind, made to look exactly like the cursor an
+/// ordinary pull-then-push would have left — every note's hash (so `build_push`'s diff pass sees
+/// nothing changed) and the push position at the very end of the journal (so not one of the records
+/// this restore just wrote, every one of them foreign, is ever read by `build_push` as unsent).
+/// Built once, after the LAST page, over the WHOLE journal and the WHOLE note listing on disk — never
+/// just what this call's own pages carried — so a seed nothing here ever restored is covered too.
+fn caught_up_cursor(dest: &Path, records_after: i64, notes_after: i64) -> Cursor {
+    let mut cursor = Cursor { record_cursor: records_after, note_cursor: notes_after, ..Default::default() };
+    let records = Journal::new(dest).read(None, None);
+    if let Some(last_ts) = records.last().and_then(|r| r.get("ts")).and_then(Value::as_str).map(str::to_string) {
+        cursor.boundary = records
+            .iter()
+            .filter(|r| r.get("ts").and_then(Value::as_str) == Some(last_ts.as_str()))
+            .map(|r| sha256_hex(crate::ledger::dumps_value(&Value::Object(r.clone())).as_bytes()))
+            .collect();
+        cursor.pushed_through = last_ts;
+    }
+    for rel in note_paths(dest) {
+        if let Ok(text) = crate::pystr::read_text(&dest.join(&rel)) {
+            cursor.notes.insert(rel, sha256_hex(text.as_bytes()));
+        }
+    }
+    cursor
+}
+
 /// The whole copy, paged from zero. The allowlist is checked **once**, before the first page: the
 /// second page would otherwise see the notes the first one wrote and refuse itself.
+///
+/// **I2 (fix round 1): all or nothing.** A failure pulling any page — including the first — undoes
+/// every page this call itself materialised and returns the folder to exactly the snapshot taken
+/// before the loop started, so a half-filled vault reported as `empty: true` (the bug: real files on
+/// disk, a count of zero) can no longer happen. **No run lock is taken here** (M4): `RunLock` exists
+/// to keep the slot's own `sync` child, the console's *Sync now* and the quit push from racing one
+/// another over an EXISTING profile's vault, and none of those three can target this one — there is
+/// no profile until `finish_or_roll_back` returns, a few lines after `restore_into`'s own call into
+/// this function, so nothing else can be pointed at `dest` until this has already finished.
 pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerate: &[String]) -> Result<Restored, SyncError> {
     if let Some(stray) = unexpected_notes(dest, tolerate).first() {
         return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
     }
+    let pristine = snapshot_tree(dest);
     let mut total = Restored { empty: true, ..Default::default() };
     let (mut records_after, mut notes_after) = (0i64, 0i64);
     loop {
-        let page = pull(client, records_after, notes_after)?;
+        let page = match pull(client, records_after, notes_after) {
+            Ok(page) => page,
+            Err(e) => {
+                // I2: undo every page this call wrote so far and report the real failure, rather than
+                // leaving a half-filled folder for `restore_into` to describe as `empty: true`.
+                restore_tree(dest, &pristine);
+                return Err(e);
+            }
+        };
         let one = materialise(dest, &page);
         total.notes += one.notes;
         total.records += one.records;
@@ -926,9 +1083,11 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
         }
     }
     total.empty = total.notes == 0 && total.records == 0;
-    // The cursor the next slot starts from, so the first sync after onboarding does not re-pull the
-    // whole copy it has just written.
-    let cursor = Cursor { record_cursor: records_after, note_cursor: notes_after, ..Default::default() };
+    // I3: made to look like an ordinary pull-then-push, not a bare "we read this far" — see
+    // `caught_up_cursor`. Saved only here, after every page has landed (I2): a cursor saved mid-way
+    // would tell the next run to resume from a page whose own effects a later failure has since
+    // undone.
+    let cursor = caught_up_cursor(dest, records_after, notes_after);
     if let Err(e) = save_cursor(dest, &cursor) {
         total.warnings.push(format!("restore: the cursor could not be saved ({e})"));
     }
@@ -1174,7 +1333,7 @@ pub fn apply(
         // desktop's sync sent this one. Refused before the journal append, so a `create` under
         // `ACTOR` in this journal always means "filed on this vault's machine" — the key card
         // ownership rests on below.
-        if record.get("actor").and_then(Value::as_str) == Some(ACTOR) {
+        if record_is_foreign_actor(record) {
             report.refused += 1;
             report.warnings.push(
                 "sync: a pulled record under this app's own sync actor was refused (sync's own records never leave their device)"
@@ -1607,6 +1766,20 @@ pub fn apply(
                 }
             }
             Some(text) => {
+                // I5: shared with `materialise`'s own guard (`record_is_foreign_actor`'s sibling) —
+                // the account's own sync amend card, pulled back as an ordinary live note, is refused
+                // rather than written. Before `exact_case_exists` (Task 6's parked F1): a stale card
+                // this device once pushed, as a note, in a build that predates `63612c9`
+                // (R-C3′-exec-18) would otherwise land back here on every pull, offering a value only
+                // the OTHER desktop can answer and that sync itself will never settle.
+                if note_is_foreign_sync_card(text) {
+                    report.refused += 1;
+                    report.warnings.push(format!(
+                        "sync: {} — a sync amend card from the account was refused (it can only be answered on the device that filed it)",
+                        note.path
+                    ));
+                    continue;
+                }
                 // **Never overwrites a note this device already has — the one recorded exception to
                 // "every write goes through `write::`".** Exactly two bounds, not the plan's original
                 // three (review M1: its third, "the note's own `create` record must already have

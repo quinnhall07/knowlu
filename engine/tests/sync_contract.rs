@@ -1950,6 +1950,32 @@ fn a_pulled_record_under_the_sync_actor_is_refused_and_never_journalled() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// I5 (fix round 1, Task 9 review), closing Task 6's own parked finding F1: `apply`'s notes loop had
+/// no guard against the account's own sync amend cards at all — only `build_push`'s SENDING side
+/// (`SyncCards`) ever kept them off the wire. A build from before `63612c9` (R-C3′-exec-18) pushed a
+/// card as a note; pulling it back here must refuse it, the same way a pulled `ACTOR` record already
+/// is, rather than write it live.
+#[test]
+fn a_pulled_live_sync_amend_card_is_refused_and_never_written() {
+    let dir = fixture_with_id("pulled-live-sync-card");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let card_text = "---\nid: approval_0000000001\ncreated_by: agent:knowlu.sync\n---\n# amend\n";
+    let note = sync::PulledNote {
+        device: "fedcba9876543210".to_string(),
+        path: "approvals/amend-x.md".to_string(),
+        text: Some(card_text.to_string()),
+    };
+    let report = sync::apply(&dir, &pulled(vec![], vec![note]), &ctx, &mut journal, "2026-09-22".parse().unwrap());
+    assert_eq!(report.refused, 1, "{report:?}");
+    assert!(!dir.join("approvals").join("amend-x.md").exists(), "the account's own card was not written here");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("amend card")),
+        "the refusal is a named line: {:?}", report.warnings,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_cursor_from_before_the_rule_never_carries_or_tombstones_a_sync_card() {
     // (i), path 5. A cursor written before R-C3′-exec-18 can already remember a sync card's path,

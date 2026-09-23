@@ -6,10 +6,100 @@
 //! fixture's own day files are whatever they are — and because the records, not the bytes, are what
 //! the journal is (`ledger.read` sorts them into one order whatever order they arrived in).
 use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
+use knowlu_engine::cloudmodel::{CloudClient, CloudConfig};
 use knowlu_engine::journal::Journal;
 use knowlu_engine::sync::{self, Cursor};
+
+// ---------------------------------------------------------------------------
+// The loopback harness (fix round 1, I2/I3/I6) — copied from `sync_contract.rs`, which copied it
+// from `cloud_contract.rs` (review M7's accepted trade: two forty-line harnesses beat a third
+// crate). Every test that uses it binds `127.0.0.1:0`, serves its own request from a second thread,
+// and joins that thread before returning — no DNS, no route off the machine.
+// ---------------------------------------------------------------------------
+
+fn read_request(stream: &std::net::TcpStream) -> String {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone the accepted stream"));
+    let mut head = String::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = rest.trim().parse().unwrap_or(0);
+        }
+        let blank = line == "\r\n" || line == "\n";
+        head.push_str(&line);
+        if blank {
+            break;
+        }
+    }
+    let mut body = vec![0u8; length];
+    if length > 0 {
+        let _ = reader.read_exact(&mut body);
+    }
+    format!("{head}{}", String::from_utf8_lossy(&body))
+}
+
+/// Returns the base URL and a handle whose `join()` yields the raw request text of each reply
+/// served, in order — so a caller that cares can assert what went on the wire, and one that does
+/// not can simply join it to know the server thread finished cleanly.
+fn loopback(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+    let port = listener.local_addr().expect("the listener has an address").port();
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (code, body) in replies {
+            let Ok((mut stream, _)) = listener.accept() else { break };
+            seen.push(read_request(&stream));
+            let response = format!(
+                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+}
+
+fn cfg(base: &str) -> CloudConfig {
+    CloudConfig {
+        api_base: base.to_string(),
+        anon_key: "anon-not-a-secret".to_string(),
+        session_credential_target: "knowlu/test-profile/session".to_string(),
+        account_id: "acct-1".to_string(),
+    }
+}
+
+/// One `/sync-pull` reply body, built from raw records and note rows rather than a round trip —
+/// these tests are about an ACCOUNT'S OWN copy, made of writes from devices this vault has never
+/// been (unlike `round_trip`, which replays THIS vault's own push).
+fn page_reply(records: Vec<(&str, serde_json::Value)>, notes: Vec<serde_json::Value>, record_cursor: i64, note_cursor: i64, more: bool) -> String {
+    let records_json: Vec<serde_json::Value> = records
+        .into_iter()
+        .enumerate()
+        .map(|(i, (device, body))| {
+            let body_str = knowlu_engine::ledger::dumps_value(&body);
+            serde_json::json!({
+                "seq": i + 1, "device": device,
+                "record_hash": sync::sha256_hex(body_str.as_bytes()),
+                "body": body_str
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "records": records_json, "notes": notes,
+        "record_cursor": record_cursor, "note_cursor": note_cursor, "more": more
+    });
+    knowlu_engine::ledger::dumps_value(&body)
+}
 
 /// Everything the source vault would push, read straight back into a `Pulled` — the wire without the
 /// wire. The two endpoints are under test in `sync_contract.rs`; this test is about the replay.
@@ -129,6 +219,152 @@ fn a_restored_note_overwrites_the_seed_at_the_same_path_and_an_empty_copy_is_not
     assert!(!report.empty);
     let nothing = sync::restore(&dest, &sync::Pulled::default(), &sync::note_paths(&dest)).expect("an empty copy");
     assert!(nothing.empty, "an empty account copy is a fact, not an error");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// I4 (fix round 1, review probe c). The account already deleted the wizard's own welcome task and
+/// pushed its own archived copy; this device is restoring for the first time and still has the seed
+/// `scaffold::create_vault` just wrote. The tombstone must settle the seed — `apply`'s own tombstone
+/// semantics, `write::delete` under `sync::ACTOR` — not leave it live while an unrelated archived
+/// copy also lands.
+#[test]
+fn a_tombstone_for_a_seed_settles_it_with_apply_s_own_tombstone_semantics() {
+    let dest = temp("tombstone-seed");
+    std::fs::create_dir_all(dest.join("tasks")).expect("mkdir");
+    let seed = dest.join("tasks").join("get-to-know-knowlu.md");
+    knowlu_engine::pystr::write_text(&seed, "---\nid: task_0000000001\n---\nthe seed\n").expect("seed");
+    let archived_text = "---\nid: task_0000000001\n---\narchived on the other desktop\n";
+    let page = sync::Pulled {
+        notes: vec![
+            sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/get-to-know-knowlu.md".into(), text: None },
+            sync::PulledNote { device: "fedcba9876543210".into(), path: "archive/get-to-know-knowlu.md".into(), text: Some(archived_text.into()) },
+        ],
+        ..Default::default()
+    };
+    let tolerate = sync::note_paths(&dest);
+    let report = sync::restore(&dest, &page, &tolerate).expect("restore settles the seed");
+    assert!(!seed.exists(), "the tombstoned seed is no longer at its old path");
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dest.join("archive").join("get-to-know-knowlu.md")).expect("the archived note"),
+        archived_text,
+        "the account's own archived copy is what ends up there, not the stale local seed"
+    );
+    assert!(!report.empty);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// I5 (fix round 1): the shared filter — `materialise`'s side of it. Neither row is a real push:
+/// [`sync::ACTOR`]'s own records never leave the device that made them, and a note that IS one of
+/// the account's own amend cards can only ever be answered where it was filed.
+#[test]
+fn a_restore_refuses_the_accounts_own_sync_actor_record_and_its_live_amend_cards() {
+    let dest = temp("restore-sync-affairs");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let hostile_record = serde_json::json!({
+        "op": "set", "path": "tasks/x.md", "field": "status", "old": "todo", "new": "done",
+        "actor": sync::ACTOR, "via": "dashboard",
+        "device": "fedcba9876543210", "ts": "2026-08-01T10:00:00.000Z"
+    });
+    let card_text = "---\nid: approval_0000000001\ncreated_by: agent:knowlu.sync\n---\n# amend\n";
+    let page = sync::Pulled {
+        records: vec![("fedcba9876543210".to_string(), hostile_record.as_object().unwrap().clone())],
+        notes: vec![sync::PulledNote { device: "fedcba9876543210".into(), path: "approvals/amend-x.md".into(), text: Some(card_text.into()) }],
+        ..Default::default()
+    };
+    let report = sync::restore(&dest, &page, &[]).expect("restore runs; it only refuses the two rows");
+    assert!(report.empty, "both rows were refused; nothing landed: {report:?}");
+    assert!(!dest.join("tasks").join("x.md").exists());
+    assert!(!dest.join("approvals").join("amend-x.md").exists());
+    assert!(report.warnings.iter().any(|w| w.contains("sync actor")), "{:?}", report.warnings);
+    assert!(report.warnings.iter().any(|w| w.contains("amend card")), "{:?}", report.warnings);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// I6 (fix round 1): `restore_all` direct — paging across two pages, and the cursor it leaves.
+#[test]
+fn restore_all_pages_across_more_than_one_page_and_leaves_a_saved_cursor() {
+    let dest = temp("restore-all-pages");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let device = "aaaaaaaaaaaaaaaa";
+    let rec1 = serde_json::json!({"op":"create","path":"tasks/a.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:00.000Z","id":"task_0000000001","new":{"id":"task_0000000001"}});
+    let page1 = page_reply(
+        vec![(device, rec1)],
+        vec![serde_json::json!({"path":"tasks/a.md","device":device,"deleted":false,"body":"---\nid: task_0000000001\n---\nfirst page\n"})],
+        1, 1, true,
+    );
+    let rec2 = serde_json::json!({"op":"create","path":"tasks/b.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:01.000Z","id":"task_0000000002","new":{"id":"task_0000000002"}});
+    let page2 = page_reply(
+        vec![(device, rec2)],
+        vec![serde_json::json!({"path":"tasks/b.md","device":device,"deleted":false,"body":"---\nid: task_0000000002\n---\nsecond page\n"})],
+        2, 2, false,
+    );
+    let (base, handle) = loopback(vec![(200, page1), (200, page2)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let report = sync::restore_all(&dest, &client, &[]).expect("two pages restore cleanly");
+    handle.join().expect("the loopback thread did not panic");
+    assert_eq!((report.notes, report.records), (2, 2), "{report:?}");
+    assert!(!report.empty);
+    assert!(dest.join("tasks").join("a.md").is_file(), "page 1's note landed");
+    assert!(dest.join("tasks").join("b.md").is_file(), "page 2's note landed");
+    assert!(dest.join("state").join("sync-cursor.json").is_file(), "the cursor is saved after the last page");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// I2 (fix round 1): a failure on the SECOND page must undo the FIRST page's own writes too — not
+/// leave a half-filled vault this function then reports as `empty: true`.
+#[test]
+fn restore_all_rolls_back_every_page_this_call_wrote_when_a_later_page_fails() {
+    let dest = temp("restore-all-rollback");
+    std::fs::create_dir_all(dest.join("tasks")).expect("mkdir");
+    let seed = dest.join("tasks").join("get-to-know-knowlu.md");
+    knowlu_engine::pystr::write_text(&seed, "---\nid: task_0000000001\n---\nthe seed\n").expect("seed");
+    let before = std::fs::read(&seed).expect("seed bytes");
+    let device = "aaaaaaaaaaaaaaaa";
+    let rec1 = serde_json::json!({"op":"create","path":"tasks/c.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:00.000Z","id":"task_0000000003","new":{"id":"task_0000000003"}});
+    let page1 = page_reply(
+        vec![(device, rec1)],
+        vec![serde_json::json!({"path":"tasks/c.md","device":device,"deleted":false,"body":"---\nid: task_0000000003\n---\nwill be rolled back\n"})],
+        1, 1, true,
+    );
+    let (base, handle) = loopback(vec![(200, page1), (503, r#"{"error":"down"}"#.to_string())]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    let err = sync::restore_all(&dest, &client, &tolerate).expect_err("page 2's failure fails the whole call");
+    handle.join().expect("the loopback thread did not panic");
+    assert!(format!("{err}").contains("503") || format!("{err}").contains("refused"), "the cause is named: {err}");
+    assert!(!dest.join("tasks").join("c.md").exists(), "page 1's note was rolled back");
+    assert_eq!(std::fs::read(&seed).expect("seed bytes"), before, "the untouched seed is unchanged, byte for byte");
+    assert!(!dest.join("state").join("sync-cursor.json").exists(), "no cursor is saved on a rolled-back restore");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// I3 (fix round 1): after a completed restore, the cursor left behind must read exactly like a
+/// completed pull-then-push already happened — so the very first push after Finish, with nothing
+/// else touched, sends nothing at all. Otherwise every restored note re-uploads on the first slot,
+/// which (per the fidelity ledger's own S1 argument) risks reverting a concurrent edit made
+/// elsewhere in the short window before that upload lands.
+#[test]
+fn the_first_push_after_a_completed_restore_sends_nothing_from_an_untouched_vault() {
+    let dest = temp("restore-then-push");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let device = "aaaaaaaaaaaaaaaa";
+    let rec1 = serde_json::json!({"op":"create","path":"tasks/d.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:00.000Z","id":"task_0000000004","new":{"id":"task_0000000004"}});
+    let page1 = page_reply(
+        vec![(device, rec1)],
+        vec![serde_json::json!({"path":"tasks/d.md","device":device,"deleted":false,"body":"---\nid: task_0000000004\n---\nrestored\n"})],
+        1, 1, false,
+    );
+    let (base, handle) = loopback(vec![(200, page1)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let report = sync::restore_all(&dest, &client, &[]).expect("restore completes");
+    handle.join().expect("the loopback thread did not panic");
+    assert!(!report.empty);
+
+    let cursor = sync::load_cursor(&dest);
+    let mut journal = Journal::new(&dest);
+    let (batch, _next) = sync::build_push(&dest, &cursor, "acct-1", &mut journal);
+    assert!(batch.notes.is_empty(), "no note is unsent after a caught-up restore: {:?}", batch.notes);
+    assert!(batch.records.is_empty(), "no record is unsent after a caught-up restore: {:?}", batch.records);
     let _ = std::fs::remove_dir_all(&dest);
 }
 

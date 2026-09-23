@@ -1427,14 +1427,31 @@
   // (`finish_or_roll_back` -> `finish_profile_in`: the autostart choice and the local-judgment offer
   // marker), so the rest of this minimal plan is never looked at — the fields still have to be the
   // shapes `WizardPlan` requires to deserialize.
+  //
+  // M3 (fix round 1): a name and an autostart choice, asked rather than assumed — the SAME two
+  // things panel 4 and panel 8 of the nine-panel wizard ask, with the SAME defaults ("Knowlu",
+  // Start Knowlu with Windows checked). Without a name, a second restore always landed at
+  // `<home>\Knowlu\Knowlu` and the second one was refused outright ("already exists"); forcing
+  // autostart enabled it without asking.
+  var PICK_RESTORE_BACKUP = "";
   EL("pick-restore-backup").addEventListener("click", function () {
     invoke("pick_folder", { title: "Choose the Backups folder to restore from" }).then(function (r) {
       if (!r || !r.path) { return; }
-      var plan = { ics_url: null, personal_calendar: null, timezone: "", slots: ["12:00", "18:00"], zybooks: false, vhl: false, autostart: true };
-      return invoke("restore_vault", { backup: r.path, name: "Knowlu", plan: plan }).then(function (a) {
-        if (!a.ok) { EL("pick-lede").textContent = a.error; return; }
-        return invoke("open_profile", { id: a.profile.id });
-      });
+      PICK_RESTORE_BACKUP = r.path;
+      EL("pick-restore-name").value = "Knowlu";
+      EL("pick-restore-autostart").checked = true;
+      EL("pick-restore-options").hidden = false;
+    }).catch(function () {});
+  });
+  EL("pick-restore-go").addEventListener("click", function () {
+    var name = EL("pick-restore-name").value.trim() || "Knowlu";
+    var plan = {
+      ics_url: null, personal_calendar: null, timezone: "", slots: ["12:00", "18:00"],
+      zybooks: false, vhl: false, autostart: EL("pick-restore-autostart").checked,
+    };
+    invoke("restore_vault", { backup: PICK_RESTORE_BACKUP, name: name, plan: plan }).then(function (a) {
+      if (!a.ok) { EL("pick-lede").textContent = a.error; return; }
+      return invoke("open_profile", { id: a.profile.id });
     }).catch(function () {});
   });
 
@@ -1507,7 +1524,12 @@
               // than an empty semester, so a student who saw nothing here can still go on honestly.
               lmsOpen: false, discovering: false, discovered: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
-              zy: false, vhl: false, credVault: "", error: "" };
+              zy: false, vhl: false, credVault: "", error: "",
+              // M1 (fix round 1): what Finish's own restore found, painted the ordinary A-5 way —
+              // set once `create_vault`/`restore_vault` resolves (`restoreSentence`, in `wizFinish`),
+              // read here by `renderWizard` like every other wizard field. Blank until then: a
+              // sentence claiming an outcome before Finish has even run is the bug this replaces.
+              restoreNote: "" };
 
   // The trim and the trailing-separator strip are not cosmetic. `dest_for` in onboarding.rs trims
   // both halves and joins them with PathBuf::join, which never doubles a separator — and
@@ -1579,11 +1601,9 @@
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
-    // C3' Task 9 (cloud design amendment, ruling 2): restoring is signing in on a new desktop, not a
-    // route on this page — Finish also brings back the account's own copy of the vault here, and this
-    // says so up front so a first sign-in, where the account has nothing to bring back yet, reads as
-    // ordinary rather than as something having gone wrong.
-    EL("wiz-restore-note").textContent = "If you've used Knowlu before, Finish also brings back your account's copy of your vault — your account had no vault yet the first time, so this one will be it.";
+    // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
+    // has an actual answer from `restore_into`, never a claim made before Finish has even run.
+    EL("wiz-restore-note").textContent = WIZ.restoreNote;
   }
 
   // Panel 6 leaves: write whatever was typed straight into Credential Manager, then clear the
@@ -1768,6 +1788,20 @@
     return invoke("create_vault", { name: WIZ.name, plan: plan });
   }
 
+  // M1 (fix round 1): the one place all three of Finish's restore outcomes are worded, so a student
+  // never reads a claim the actual result disagrees with. `restored` is `create_vault`'s own
+  // `{notes, records, empty, warnings}` (H11a's `sync::Restored`, C3' Task 9). `empty` alone cannot
+  // tell "the account truly has nothing yet" from "the account could not be reached just now" —
+  // `restore_into` folds a failed pull into the same `empty: true` so Finish never rolls the vault
+  // back over a hotel Wi-Fi — so `warnings` (non-empty only on the failed-pull fold) is what tells
+  // the two apart here.
+  function restoreSentence(restored) {
+    if (!restored) { return ""; }
+    if (!restored.empty) { return "Your account already had a vault here — it just came back."; }
+    if ((restored.warnings || []).length) { return "Your account could not be reached just now; your vault will fill in at the next sync."; }
+    return "Your account had no vault yet — this is the first one.";
+  }
+
   // R-P4a-23: the logins panel's entries are keyed to the path as it stood then, and Back → rename is
   // exactly what the refused-Finish panel asks for. Say where they went and send the user back to
   // panel 6 — the logins panel, which is where the fields are — rather than build a vault whose
@@ -1836,6 +1870,10 @@
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
           if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
+          // M1 (fix round 1): painted before the relaunch — `restoreSentence` reads what Finish's own
+          // restore actually found, never the claim the OLD static sentence made before Finish ran.
+          WIZ.restoreNote = restoreSentence(r.restored);
+          renderWizard();
           // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
           // from the pending target onto this profile, so this is the first moment the cache can be
           // written where the console will look for it — and the console relaunches into a vault whose

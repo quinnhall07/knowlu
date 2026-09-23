@@ -1372,7 +1372,22 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
 #[test]
 fn the_finish_panel_says_when_the_account_had_nothing_to_restore() {
     let js = read("console.js");
-    assert!(js.contains("your account had no vault yet"), "the empty-copy sentence is the page's, not an error");
+    // M1 (fix round 1): the OLD sentence was static, painted on every visit to the finish panel
+    // before Finish had even run — a returning student with a real account copy read a claim that
+    // was simply false. `restoreSentence` reads the actual result instead, and each of the three
+    // outcomes gets its own sentence rather than one fixed line pretending to cover all of them.
+    let sentence_fn = js.split("function restoreSentence(").nth(1).and_then(|s| s.split("\n  }").next()).expect("restoreSentence");
+    for (label, sentence) in [
+        ("restored", "Your account already had a vault here"),
+        ("could not be reached", "could not be reached just now; your vault will fill in at the next sync"),
+        ("had no vault yet", "Your account had no vault yet"),
+    ] {
+        assert!(sentence_fn.contains(sentence), "{label}: the sentence is not in restoreSentence: {sentence_fn}");
+    }
+    // The static claim is gone: no fixed sentence is painted before Finish has run.
+    assert!(js.contains("restoreNote: \"\""), "WIZ.restoreNote starts blank — nothing is claimed before Finish runs");
+    assert!(js.contains("WIZ.restoreNote = restoreSentence("), "wizFinish reads the real result into it");
+    assert!(js.contains("EL(\"wiz-restore-note\").textContent = WIZ.restoreNote"), "renderWizard paints it, like every other wizard field");
 }
 
 /// C3' Task 9, Step 6 (P3: built to yes — Quinn is away; logged for Quinn, not asked). The picker's
@@ -1389,13 +1404,24 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
         button.to_lowercase().contains("never from your account") || button.to_lowercase().contains("nothing to do with the account"),
         "the title says this is the local mirror, not the account: {button}"
     );
+    // M3 (fix round 1): a name field and an autostart choice, not a hardcoded name and a forced
+    // `true` — the same two defaults the nine-panel wizard itself uses ("Knowlu"; Start Knowlu with
+    // Windows checked).
+    for id in ["pick-restore-options", "pick-restore-name", "pick-restore-autostart", "pick-restore-go"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
+    }
+    assert!(html.contains("id=\"pick-restore-autostart\" checked"), "autostart defaults on, like the wizard's own checkbox");
     let js = read("console.js");
     let handler = js
         .find("EL(\"pick-restore-backup\").addEventListener(")
         .map(|i| &js[i..])
         .and_then(|s| s.split("EL(\"pick-add\").addEventListener(").next())
-        .expect("the pick-restore-backup click handler");
+        .expect("the pick-restore-backup and pick-restore-go click handlers");
     assert!(handler.contains("invoke(\"pick_folder\""), "it picks a folder first");
     assert!(handler.contains("invoke(\"restore_vault\""), "…then restores from it");
     assert!(handler.contains("invoke(\"open_profile\""), "…and opens the restored profile, like pick-adopt does");
+    assert!(handler.contains("EL(\"pick-restore-name\").value = \"Knowlu\""), "the name field defaults from the wizard's own convention");
+    assert!(!handler.contains("autostart: true"), "autostart is read from the checkbox, never hardcoded true");
+    assert!(handler.contains("EL(\"pick-restore-autostart\").checked"), "autostart is read from the checkbox");
+    assert!(handler.contains("name: name"), "the typed name is sent, not a literal");
 }
