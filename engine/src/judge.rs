@@ -71,6 +71,10 @@ pub struct Verdict {
     pub confidence: f64,
     /// 0 nothing, 1 heuristics, 2 a promoted rule, 3 the model.
     pub tier: u8,
+    /// F4: the service's own `judgments` row id, whenever tier 2 or tier 3 wrote one
+    /// (`cloudmodel::judgment_id_of`, a lowercase UUID or nothing). `None` on a tier-1-only
+    /// verdict and on every reply from an older server that never sent the field.
+    pub judgment_id: Option<String>,
 }
 
 impl Verdict {
@@ -226,7 +230,7 @@ pub struct EventItem {
     pub interests: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct EventVerdict {
     /// `obligation` | `opportunity` | `drop` — validated again on the device before it is written.
     pub verdict: String,
@@ -234,6 +238,10 @@ pub struct EventVerdict {
     pub why: String,
     pub confidence: f64,
     pub tier: u8,
+    /// F4: the same `judgment_id` a task verdict carries (see [`Verdict::judgment_id`]), so
+    /// `events::judge_roster` can hand it to `eventledger::record_judged_verdict` and a later
+    /// `unsure` decision card can name the judgment it is asking about.
+    pub judgment_id: Option<String>,
 }
 
 /// Tier 3 for one email (cloud design §5.3's five tiers).
@@ -436,11 +444,21 @@ pub fn tier1(item: &Item, h: &Heuristics) -> Verdict {
         None => crate::ingest::match_course_fields(&item.source_uid, &item.title, &h.course_map),
     };
     let effort_hours = (item.effort_source == "vendor").then_some(item.effort_hours);
-    Verdict { course, effort_hours, importance: None, importance_reason: None, confidence: 1.0, tier: 1 }
+    Verdict {
+        course,
+        effort_hours,
+        importance: None,
+        importance_reason: None,
+        confidence: 1.0,
+        tier: 1,
+        judgment_id: None,
+    }
 }
 
 /// `lower` wins every field it answered; `upper` fills only the gaps. The tier and confidence come
-/// from whichever actually contributed.
+/// from whichever actually contributed. `judgment_id` always takes `upper`'s: `upper` is the
+/// verdict this call is folding in — the freshest tier reached — so its id is the judgment this
+/// merged verdict now stands on, whether or not it ended up contributing a field.
 pub fn merge(lower: Verdict, upper: Verdict) -> Verdict {
     let contributed = (lower.course.is_none() && upper.course.is_some())
         || (lower.effort_hours.is_none() && upper.effort_hours.is_some())
@@ -453,6 +471,7 @@ pub fn merge(lower: Verdict, upper: Verdict) -> Verdict {
         importance_reason: lower.importance_reason.or(upper.importance_reason),
         confidence: if contributed { upper.confidence } else { lower.confidence },
         tier: if contributed { upper.tier.max(lower.tier) } else { lower.tier },
+        judgment_id: upper.judgment_id,
     }
 }
 
@@ -678,6 +697,9 @@ pub fn parse_reply(text: &str) -> Result<Verdict, ModelError> {
         importance_reason: (!reason.is_empty()).then_some(reason),
         confidence: confidence.clamp(0.0, 1.0),
         tier: 3,
+        // Set by the caller: `parse_reply` only ever sees the reply's `verdict` object, and
+        // `judgment_id` sits beside it, not inside it (`judge_pipeline.ts`'s reply shape).
+        judgment_id: None,
     })
 }
 
@@ -745,6 +767,7 @@ mod tests {
             importance_reason: Some("Worth 15% of the grade.".to_string()),
             confidence: conf,
             tier: 3,
+            judgment_id: None,
         }
     }
 
@@ -909,6 +932,7 @@ mod tests {
                     importance_reason: Some("Promoted rule: weekly homework.".to_string()),
                     confidence: 1.0,
                     tier: 2,
+                    judgment_id: None,
                 })
             }
         }

@@ -1,7 +1,6 @@
 import { assert, assertEquals, assertAlmostEquals } from "@std/assert";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { validate } from "../supabase/functions/_shared/judge_validate.ts";
-import { loadSeed } from "./loader.ts";
 import { dryRunAnswer, main } from "./run_eval.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
@@ -147,10 +146,11 @@ Deno.test("an email case that labels only 'course' (never 'tier') contributes no
 // ---------------------------------------------------------------------------------------------
 // Ruling R-C2-E50 (2): a normal run with zero cases is a stated, PASSING outcome, and it must
 // never touch a secret or a connection setting to get there — this is what lets `eval-gate`
-// (hand-off H8, part 2) pass green on a PR that sets none of its secrets. Both tests below first
-// assert the REAL, committed `cloud/eval/seed/` is empty (Task 13, ruling R-C2-E12) — the test
-// assumes that, and says so, so a filled seed fails this test plainly rather than the assertion
-// below it silently proving nothing.
+// (hand-off H8, part 2) pass green on a PR that sets none of its secrets. T2 (stream J,
+// 2026-09-22) filled `cloud/eval/seed/events.jsonl`, so this path is no longer exercised by the
+// REAL, committed seed (Task 13, ruling R-C2-E12's empty state) — the four tests below inject an
+// empty `loadSeed` instead, so they still test the code path `main()` takes when its seed truly
+// has nothing, independent of what is on disk today.
 // ---------------------------------------------------------------------------------------------
 
 // A-4: the ONE env read the empty-seed path is now allowed — `SUPABASE_SERVICE_ROLE_KEY`, to ask
@@ -164,17 +164,14 @@ function throwingExceptServiceKey(): (name: string) => string | undefined {
 }
 
 Deno.test("a normal run with zero cases and no service-role key prints the exact message, exits 0, and reads no other secret", async () => {
-  const committed = await loadSeed();
-  assert(
-    committed.length === 0,
-    "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
-  );
   const captured = captureConsole();
   let code: number;
   try {
     // No --load-seed, no --dry-run, no --thresholds: none of it should matter, because the
-    // zero-case check runs before any of these other switches are even consulted.
-    code = await main([], { envGet: throwingExceptServiceKey() });
+    // zero-case check runs before any of these other switches are even consulted. `loadSeed` is
+    // injected as empty rather than read from disk — `cloud/eval/seed/events.jsonl` is real cases
+    // now (T2), and this test is about the zero-case CODE PATH, not about what is committed today.
+    code = await main([], { envGet: throwingExceptServiceKey(), loadSeed: () => Promise.resolve([]) });
   } finally {
     captured.restore();
   }
@@ -183,17 +180,12 @@ Deno.test("a normal run with zero cases and no service-role key prints the exact
 });
 
 Deno.test("the same zero-case exit holds with --dry-run and --thresholds present", async () => {
-  const committed = await loadSeed();
-  assert(
-    committed.length === 0,
-    "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12) — it is not, so the zero-case path is no longer exercised by it",
-  );
   const captured = captureConsole();
   let code: number;
   try {
     code = await main(
       ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
-      { envGet: throwingExceptServiceKey() },
+      { envGet: throwingExceptServiceKey(), loadSeed: () => Promise.resolve([]) },
     );
   } finally {
     captured.restore();
@@ -208,8 +200,6 @@ Deno.test("the same zero-case exit holds with --dry-run and --thresholds present
 // ---------------------------------------------------------------------------------------------
 
 Deno.test("an empty seed with a service-role key but an empty database still exits 0 with nothing to score", async () => {
-  const committed = await loadSeed();
-  assert(committed.length === 0, "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12)");
   let dbCalls = 0;
   const db = fakeDb();
   const captured = captureConsole();
@@ -217,6 +207,7 @@ Deno.test("an empty seed with a service-role key but an empty database still exi
   try {
     code = await main([], {
       envGet: (name) => (name === "SUPABASE_SERVICE_ROLE_KEY" ? "service-role-not-a-secret" : undefined),
+      loadSeed: () => Promise.resolve([]),
       db: () => {
         dbCalls += 1;
         return db;
@@ -237,8 +228,6 @@ Deno.test("an empty seed with a service-role key but an empty database still exi
 // ---------------------------------------------------------------------------------------------
 
 Deno.test("an empty seed with a service-role key and cases already in eval_cases runs the suite for real", async () => {
-  const committed = await loadSeed();
-  assert(committed.length === 0, "this test assumes cloud/eval/seed/ is empty (ruling R-C2-E12)");
   const consentedTheirs = { effort_hours: 2, importance: 4, course: "cs-101" };
   const evalRunsInserted: Array<Record<string, unknown>> = [];
   const db: Db = fakeDb({
@@ -519,6 +508,12 @@ Deno.test("thresholds.json's _note is provisional documentation, ignored by the 
   const raw = await Deno.readTextFile(new URL("./thresholds.json", import.meta.url));
   const thresholds = JSON.parse(raw) as Record<string, unknown>;
   assertEquals(typeof thresholds._note, "string");
+  // Final review item 5: the note must not still say the seed is empty once it holds cases.
+  const seedEvents = (await Deno.readTextFile(new URL("./seed/events.jsonl", import.meta.url)))
+    .split("\n").filter((l) => l.trim() !== "").length;
+  const note = thresholds._note as string;
+  assert(!note.includes("the seed is empty"), note);
+  assert(note.includes(`${seedEvents} event cases`), `the note should count the seed's ${seedEvents} event cases: ${note}`);
   const task = thresholds.task as Record<string, number>;
   assertEquals(task.effort_mae_max, 1.5);
   assertEquals(task.importance_exact_min, 0.55);
@@ -527,4 +522,43 @@ Deno.test("thresholds.json's _note is provisional documentation, ignored by the 
   assertEquals(event.weighted_exact_min, 0.75);
   const email = thresholds.email as Record<string, number>;
   assertEquals(email.weighted_exact_min, 0.70);
+});
+
+// Final review item 2: the eval calls `judge()` directly, and `judge()` only answers `unsure` to a
+// request that declares it — so the eval must declare it too, or every `unsure`-labelled event
+// case would score as a miss against the pre-T1 `below floor` shape.
+Deno.test("an unsure-labelled event case scores 1.0 on a dry run, so the eval declares accepts unsure", async () => {
+  const theirs = { verdict: "unsure" };
+  const request = { kind: "event" as const, item: { uid: "engage:1", title: "AI Club Kickoff" }, heuristics_seed: {} };
+  const values: number[] = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?kind=eq.event")) {
+        return Promise.resolve([{ id: 1, kind: "event", request, ours: null, theirs }]);
+      }
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.event")) {
+        return Promise.resolve([{
+          kind: "event", provider: "anthropic", model_id: "claude-haiku-4-5", prompt_version: "event-3",
+          grammar_version: "event-3", max_tokens: 256, sampling: {}, usd_per_m_in: 1, usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") values.push(row.value as number);
+      return Promise.resolve(null);
+    },
+  });
+  const records: SeedRecord[] = [{ id: "seed-e1", kind: "event", request, theirs }];
+  const captured = captureConsole();
+  try {
+    await main(
+      ["--dry-run", "--thresholds", "cloud/eval/thresholds.json"],
+      { db: () => db, loadSeed: () => Promise.resolve(records), envGet: () => undefined },
+    );
+  } finally {
+    captured.restore();
+  }
+  assertEquals(values, [1]);
 });

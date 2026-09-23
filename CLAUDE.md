@@ -54,9 +54,12 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 
 - `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]`
 - `coursework --vault <v> [--dry-run] [--via <via>] [--run-id <id>]` — zyBooks + VHL into `tasks/`.
-  Always exits 0. An empty parse is a failure, never an empty semester. Passwords come from Windows
-  Credential Manager via the vault's `credential_target`; zyBooks 403s without a `User-Agent`; VHL is
-  CAS with a one-time `lt` ticket and a dashboard on `m3a.vhlcentral.com`.
+  Always exits 0. An empty parse is a failure, never an empty semester. A vendor figure at 100%
+  (zyBooks points, VHL `percentage_complete`) files a `status: done` amend proposal as
+  `agent:knowlu.completion` (`engine/src/completion.rs`); `progress` is still never written after
+  creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
+  zyBooks 403s without a `User-Agent`; VHL is CAS with a one-time `lt` ticket and a dashboard on
+  `m3a.vhlcentral.com`.
 - `coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — read-only: the
   zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
   row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
@@ -81,8 +84,13 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
   for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
   move server-side) — never for judgment, so `rank` never calls a model still holds.
-  `engine/src/enrich.rs`'s `run_lines_with` hosts the four cloud pulls a judge step runs in one slot:
-  the tier-3 judge pass, the events pass, the Gmail pull and the rule-decision pull.
+  `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud passes a judge step runs in one slot:
+  the tier-3 judge pass, the events pass, the Gmail pull, the rule-decision pull and the label
+  report (F8: card answers and rejections, keyed by `judgment_id`, to `/telemetry`; never an
+  `email`-kind decision).
+  The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
+  a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
+  `completion::propose_done`, matched to exactly one active task by title.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
   items, issue notes, journaled note edits.
 

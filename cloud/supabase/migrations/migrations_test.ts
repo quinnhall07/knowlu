@@ -765,6 +765,44 @@ Deno.test("the seed's max_tokens (256/256/640) are correct, and no *provider_swa
   }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T1, CHECKPOINT J-1 (ruled 2026-09-22): `unsure` becomes a fourth event verdict
+// word. This migration re-pins only the `event` row's `prompt_version` (the prompt text changed)
+// and `grammar_version` (the schema's verdict enum gained a member) — never `task` or `email`.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("the event_unsure migration re-pins only the event row's prompt_version and grammar_version", async () => {
+  const sql = await Deno.readTextFile(new URL("20260922120100_event_unsure.sql", HERE));
+  assert(/update\s+models\s+set/i.test(sql), "expected an 'update models set …' statement");
+  assert(sql.includes("prompt_version = 'event-3'"), sql);
+  assert(sql.includes("grammar_version = 'event-2'"), sql);
+  assert(sql.includes("since = current_date"), sql);
+  assert(/where\s+kind\s*=\s*'event'/i.test(sql), sql);
+  assert(!sql.includes("prompt_version = 'task-"), "task must not be touched by this migration");
+  assert(!sql.includes("prompt_version = 'email-"), "email must not be touched by this migration");
+});
+
+// Stream J final review item 3: T4 + T9's `email-3` migration.
+Deno.test("the last gmail_queue_tier_check admits all six email tiers, including completion", async () => {
+  const marker = /add\s+constraint\s+gmail_queue_tier_check\s+check\s*\(([^;]*)\)\s*;/gi;
+  let last: { name: string; check: string } | undefined;
+  for (const [name, sql] of await everyMigrationFile()) {
+    for (const m of stripLineComments(sql).matchAll(marker)) last = { name, check: m[1] };
+  }
+  assert(last !== undefined, "no migration names gmail_queue_tier_check");
+  for (const tier of ["task", "borderline", "event", "opportunity", "information", "completion"]) {
+    assert(last!.check.includes(`'${tier}'`), `${last!.name}: the last tier check must admit '${tier}'`);
+  }
+});
+
+Deno.test("the email_due_resolver migration re-pins only the email row, to email-3", async () => {
+  const sql = stripLineComments(await Deno.readTextFile(new URL("20260922120200_email_due_resolver.sql", HERE)));
+  const updates = [...sql.matchAll(/update\s+models\s+set\s+([^;]*);/gi)].map((m) => m[1]);
+  assertEquals(updates.length, 1, "exactly one update of models");
+  assert(updates[0].includes("prompt_version = 'email-3'"), updates[0]);
+  assert(/where\s+kind\s*=\s*'email'\s*$/i.test(updates[0].trim()), updates[0]);
+});
+
 Deno.test("the last definition of export_training_rows excludes both gmail_api and events origins", async () => {
   // Google's Limited Use policy binds Calendar-API data exactly as it binds Gmail's, and `origin`
   // cannot yet tell a Google-Calendar event from an ICS one — so every `events` row is excluded

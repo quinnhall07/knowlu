@@ -1,5 +1,5 @@
 {
-  "_note": "Provisional (C2 Task 14, ruling R-C2-E50 (2)): the seed is empty at merge (ruling R-C2-E12), so step 7's real run — the only step that would produce measured numbers — was skipped. These are the plan's placeholder-free-but-unmeasured starting numbers, each one clear step inside the safe side of a plausible model. Replace every number here from the first real run once cases exist, one clear step below what was measured, and delete this key or update it to say when that happened. The reader ignores this key.",
+  "_note": "Provisional (C2 Task 14, ruling R-C2-E50 (2); updated by stream J's final review): the seed now holds 26 event cases (stream J Task T2, cloud/eval/seed/events.jsonl) and no task or email cases, but no measured run has been made yet, so every number here is still an unmeasured starting number, each one clear step inside the safe side of a plausible model. Replace every number from the first real run, one clear step below what was measured, and delete this key or update it to say when that happened. The reader ignores this key.",
   "task": { "effort_mae_max": 1.5, "importance_exact_min": 0.55, "course_exact_min": 0.85 },
   "event": { "weighted_exact_min": 0.75 },
   "email": { "weighted_exact_min": 0.70 }

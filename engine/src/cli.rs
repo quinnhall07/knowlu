@@ -22,7 +22,7 @@ use jiff::Timestamp;
 
 use crate::approvals::{count_proposals_created, defer_over_budget, process_approvals};
 use crate::calfeed::load_calendar_events;
-use crate::eventemit::emit_digest;
+use crate::eventemit::{emit_digest, emit_event_checks, inherit_series_answers};
 use crate::eventfeed::load_discovered_events;
 use crate::eventfilter::prefilter_events;
 use crate::eventledger::load_ledger;
@@ -120,6 +120,24 @@ pub fn vault_zone(vault: &Path) -> TimeZone {
         }
     }
     TimeZone::try_system().unwrap_or(TimeZone::UTC)
+}
+
+/// The vault's timezone name, exactly as `config/ingest.yaml` names it — `None` when the file is
+/// missing, unreadable, leaves the key out, sets it null, or sets it to an empty (or all-blank)
+/// string. Unlike [`vault_zone`], this never falls back to the machine's own clock: a cloud
+/// request body (`cloudmodel::email_request`, `pull_gmail_queue`'s `/gmail-read` body) must say
+/// nothing rather than claim a zone the vault never named. Not validated against `jiff`'s zone
+/// table on purpose — the due resolver already degrades an unrecognised name to "no timezone"
+/// without throwing, so a typo here costs nothing extra by traveling.
+pub fn vault_timezone_name(vault: &Path) -> Option<String> {
+    let config = crate::yaml::mapping_from_file(&vault.join("config").join("ingest.yaml"));
+    let name = crate::yaml::get(&config, "timezone").and_then(crate::yaml::text)?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Wall-clock time in the vault's own timezone, as a naive datetime.
@@ -370,7 +388,11 @@ pub fn run_with(
         }
 
         let mut ledger_warnings: Vec<String> = Vec::new();
-        let ledger = load_ledger(vault, Some(&mut ledger_warnings));
+        let mut ledger = load_ledger(vault, Some(&mut ledger_warnings));
+        // A settled series card answers the series' later instances (F2) — before the roster and
+        // the digest, so this run's roster already shows the inherited verdict.
+        let (_, inherit_warnings) = inherit_series_answers(vault, &candidates, &mut ledger, today);
+        ledger_warnings.extend(inherit_warnings);
         for w in ledger_warnings {
             event_warnings.push(format!("ledger: {w}"));
         }
@@ -399,6 +421,18 @@ pub fn run_with(
             &mut journal,
         );
         approvals.events_in_digest += emitted as i64;
+        // The "Does this apply to you?" cards (F2), sized to what the digest left of the budget.
+        let (_, checks) = emit_event_checks(
+            vault,
+            &candidates,
+            &ledger,
+            &events_config,
+            today,
+            (remaining_budget - emitted as i64).max(0),
+            &ctx.with_actor("agent:events"),
+            &mut journal,
+        );
+        approvals.pending += checks as i64;
         coming_up = relevant_events(&candidates, &ledger)
             .into_iter()
             .map(|e| {
@@ -1112,6 +1146,34 @@ calendars:
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// `vault_timezone_name` feeds cloud request bodies, so — unlike `vault_zone` — it must say
+    /// `None` rather than the machine's own clock whenever the vault itself named nothing usable.
+    #[test]
+    fn vault_timezone_name_is_none_unless_the_vault_actually_names_one() {
+        let vault = bare_vault("tzname");
+        assert_eq!(vault_timezone_name(&vault), None, "no config file at all");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: America/Chicago\n")
+            .unwrap();
+        assert_eq!(vault_timezone_name(&vault), Some("America/Chicago".to_string()));
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "ics_url: https://x\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "key absent");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: ~\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "key present but null");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: \"\"\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "empty string");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: \"   \"\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "blank string");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "ics_url: [unclosed\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "malformed config");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     // -----------------------------------------------------------------------
     // The rest of the run
     // -----------------------------------------------------------------------
@@ -1631,6 +1693,107 @@ Bring questions.
         assert_eq!(chosen.len(), 10, "{chosen:?}");
         assert!(!chosen.iter().any(|u| u == "ics:ev-10"), "{chosen:?}");
         assert!(chosen.iter().any(|u| u == "ics:ev-9"), "{chosen:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- the event-check card (F2) ------------------------------------------------------------
+
+    const CHECK_JID: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+
+    #[test]
+    fn rank_files_an_event_check_for_an_unsure_event_and_counts_it_pending() {
+        let vault = scaffold("evcheck");
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART;TZID=America/Chicago:20260827T100000\n\
+                   DTEND;TZID=America/Chicago:20260827T150000\nUID:fair-1\nSUMMARY:Career Fair\n\
+                   LOCATION:Union\nEND:VEVENT\nEND:VCALENDAR\n"
+            .to_string();
+        crate::eventledger::record_judged_verdict(
+            &vault,
+            "ics:fair-1",
+            "Career Fair",
+            Date::constant(2026, 8, 25),
+            "unsure",
+            "the listing does not say who it is for",
+            Some(CHECK_JID),
+        )
+        .unwrap();
+        let fetch = |_: &str| Ok(ics.clone());
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
+
+        let cards = md_names(&vault.join("approvals"), "event-check-");
+        assert_eq!(cards, vec!["event-check-career-fair-2026-08-27.md".to_string()]);
+        let card = vault.join("approvals").join(&cards[0]);
+        assert_eq!(meta_str(&card, "title"), "Career Fair · Thu 27 Aug 10am–3pm");
+        assert_eq!(meta_str(&card, "judgment_id"), CHECK_JID);
+        let recs = run_records(&vault);
+        let end = recs.last().unwrap();
+        assert_eq!(step_of(end, "approvals")["counts"]["pending"], serde_json::json!(1), "{end:?}");
+        // No digest: an `unsure` event is a question, never an opportunity.
+        assert!(md_names(&vault.join("approvals"), "events-digest-").is_empty());
+
+        // The next run asks nothing new and still counts the card pending.
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
+        assert_eq!(md_names(&vault.join("approvals"), "event-check-").len(), 1);
+        let recs = run_records(&vault);
+        assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["pending"], serde_json::json!(1));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_shows_a_later_instance_of_an_approved_series_in_the_same_run() {
+        let vault = scaffold("evseries");
+        pystr::write_text(
+            &vault.join("config").join("events.yaml"),
+            "sources:\n  - name: campus\n    type: localist\n    url: unreachable://x\n    enabled: true\n",
+        )
+        .unwrap();
+        let feed = serde_json::json!({"events": [{"event": {
+            "id": 77,
+            "title": "Weekly Meeting",
+            "event_instances": [
+                {"event_instance": {"id": 1, "start": "2026-08-20T18:00:00-05:00", "end": "2026-08-20T19:00:00-05:00"}},
+                {"event_instance": {"id": 2, "start": "2026-08-27T18:00:00-05:00", "end": "2026-08-27T19:00:00-05:00"}}
+            ]
+        }}]})
+        .to_string();
+        let seed = Date::constant(2026, 8, 19);
+        crate::eventledger::record_judged_verdict(
+            &vault, "localist:77:1", "Weekly Meeting", seed, "unsure", "", Some(CHECK_JID),
+        )
+        .unwrap();
+        crate::eventledger::record_answer(
+            &vault, "localist:77:1", "Weekly Meeting", seed, "obligation", "quinn", Some(CHECK_JID),
+        )
+        .unwrap();
+        crate::eventledger::record_judged_verdict(
+            &vault, "localist:77:2", "Weekly Meeting", seed, "unsure", "", None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(
+            &vault.join("archive").join("event-check-weekly-meeting-2026-08-20.md"),
+            "---\ntype: approval\nkind: event-check\ntitle: \"Weekly Meeting\"\nstatus: executed\n\
+             source_uid: \"localist:77:1\"\nseries_uid: \"localist:77\"\nevents:\n- \"localist:77:1\"\n\
+             proposed_at: 2026-08-19\nfirst_proposed_at: 2026-08-19\nexpires: 2026-08-20\n\
+             snooze_until: null\ncreated_by: events\n---\n\nbody\n",
+        )
+        .unwrap();
+        let fetch = |_: &str| Ok(feed.clone());
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
+
+        let seen = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
+        assert!(
+            seen.contains("- localist:77:2 · Weekly Meeting · verdict:obligation · by:quinn · answered 2026-08-26"),
+            "{seen}"
+        );
+        let roster = pystr::read_text(&vault.join("state").join("events.md")).unwrap();
+        let relevant = roster.split("## Everything else").next().unwrap_or("");
+        assert!(relevant.contains("`localist:77:2`"), "{roster}");
+        // Answered, so never asked.
+        assert!(md_names(&vault.join("approvals"), "event-check-").is_empty());
         let _ = std::fs::remove_dir_all(&vault);
     }
 

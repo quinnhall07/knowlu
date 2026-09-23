@@ -212,6 +212,35 @@ The probe was read-only, printed field names and aggregates, stored nothing and 
 vault. The credential was read from Windows Credential Manager at runtime and never persisted, per
 the standing rule that no secret enters the repo, a log, a prompt or a test name.
 
+## 7b. The email answer, measured 2026-09-22, and what was built
+
+Run against Quinn's own Gmail with their standing permission, read-only. Five weeks of Blackboard
+mail held 18 templated threads from the vendor's no-reply sender, in four shapes: **"Submission
+received"** (the body names the assessment and a confirmation number), **"New grade and feedback for
+<title> in <course>"**, **"<title> is overdue in <course>"** and **"<title> is due soon in
+<course>"**. The assessment titles match the vault's Blackboard task titles verbatim.
+
+Two consequences changed the design in §6 and §8:
+
+- **The email evidence is rule-tier, not model-tier.** A template this rigid is a rule. T9 therefore
+  runs a deterministic recogniser in `gmail-read` *before* the model: a recognised receipt costs no
+  model call and no cap, and becomes the new `completion` tier with the title taken from the body.
+  The model path also learned the tier, for receipts from vendors with no template yet.
+- **A grade is not completion.** Instructors post a zero for missing work, which sends the same
+  "New grade" email. Only the submission receipt counts. A data-driven veto downgrades any
+  `completion` answer — model or promoted rule — for a vendor's grade, overdue or due-soon mail to
+  `information`, so this is enforced in code rather than hoped for in a prompt.
+
+On the device, a `completion` item matches exactly one active task by normalised title and files the
+same `status: done` amend proposal the vendor tier files (`engine/src/completion.rs`); zero or several
+matches write nothing. A device only receives the tier if it declares `accepts: ["completion"]`, so an
+older engine sees `information` and never files a wrong card.
+
+**What this does to the Jev case (§5, step 3).** It shrinks it. The structured half of the email
+evidence never reaches a model at all, so tier 3 sees only the residue — receipts from vendors with
+no template, and prose that genuinely needs reading. The self-labelling argument of §5 still holds,
+but the volume a model would ever judge here is small, and E5's stop rule should expect that.
+
 ## 8. The honest ranking
 
 1. **Tier 1, deterministic, no model.** VHL at 100 **and zyBooks at 100% of points** propose

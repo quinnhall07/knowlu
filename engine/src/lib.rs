@@ -57,6 +57,8 @@ pub mod eventemit;
 pub mod coursework;
 pub mod zybooks;
 pub mod vhl;
+// Stream J T8 — completion detection, tier 1: a vendor's own 100% becomes a `status: done` amend.
+pub mod completion;
 // Wave 7 — runs landed early because coursework::main needs it; info and issues are the two
 // note constructors that needed yamlemit's block style (Task 15).
 pub mod runs;

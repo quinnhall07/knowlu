@@ -26,9 +26,10 @@
 // rest of the verdict's fields, every one of them derived from the text and none of them the text
 // itself (the correction beside `gmail_queue`'s own definition, `20260911000200_google.sql`, says
 // the same thing from the schema's side).
-import { judge, type JudgeReply, type PipelineDeps } from "../_shared/judge_pipeline.ts";
+import { fieldsOf, judge, type JudgeReply, type PipelineDeps } from "../_shared/judge_pipeline.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
+import { notCompletionEvidence, receiptVerdict } from "../_shared/lms_receipts.ts";
 
 export const WINDOW = "newer_than:7d";
 /** A bound on one read, so a mailbox with a thousand unread messages cannot eat a slot. */
@@ -142,7 +143,9 @@ export interface ReadDeps {
     payload: Record<string, unknown>,
     judgmentId: string | null,
   ): Promise<void>;
-  undelivered(accountId: string): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown> }>>;
+  undelivered(
+    accountId: string,
+  ): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>>;
   deliver(accountId: string, uids: string[]): Promise<void>;
   knownCourses(accountId: string): Promise<string[]>;
   pipeline(): Promise<PipelineDeps>;
@@ -160,6 +163,30 @@ export function query(excluded: string[]): string {
   return [WINDOW, ...terms].join(" ");
 }
 
+/**
+ * Stream J Task T9: the tiers a device must DECLARE it understands before it is handed them. An
+ * engine that predates a tier routes it through its catch-all arm — which files a `kind: task`
+ * card — so a `completion` (a receipt for finished work) would become a proposal to ADD that work.
+ * A device that does not list the tier in its request's `accepts` gets `information` instead: the
+ * one tier every engine drops and records as seen, so it is never asked about again. The queue
+ * keeps the real tier either way.
+ */
+export const DECLARED_TIERS = ["completion"] as const;
+
+/** The undelivered rows as this device may see them: every declared-only tier it did not declare
+ * reads as `information`. `judgment_id` carries through unchanged either way (F6a): the id names
+ * the judgment that produced the row, not the tier it is currently labelled with. */
+export function forDevice(
+  items: Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>,
+  accepts: string[],
+): Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }> {
+  return items.map((item) =>
+    (DECLARED_TIERS as readonly string[]).includes(item.tier) && !accepts.includes(item.tier)
+      ? { ...item, tier: "information" }
+      : item
+  );
+}
+
 /** `ack` entries the device could have produced: `gmail:` plus the id characters Gmail actually
  * uses. Anything else is dropped rather than handed to a `uid=in.(...)` filter. */
 const ACK_SHAPE = /^gmail:[A-Za-z0-9_-]+$/;
@@ -174,7 +201,15 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
     if (req.method !== "POST") return Response.json({ error: "POST only" }, { status: 405 });
     try {
       const { account_id } = await entitle(req);
-      const body = await req.json().catch(() => ({})) as { ack?: unknown };
+      const body = await req.json().catch(() => ({})) as { ack?: unknown; accepts?: unknown; timezone?: unknown };
+      // Due-fix: the vault's own timezone, so an email's relative deadline resolves against the
+      // student's local date (`judge_due.ts`). Absent from an older engine; the resolver then
+      // falls back to the Date header's own offset.
+      const timezone = typeof body.timezone === "string" && body.timezone !== "" ? body.timezone : undefined;
+      const accepts = Array.isArray(body.accepts)
+        ? body.accepts.filter((t): t is string => typeof t === "string")
+        : [];
+      const undelivered = async () => forDevice(await deps.undelivered(account_id), accepts);
       const shaped = Array.isArray(body.ack)
         ? body.ack.filter((u): u is string => typeof u === "string" && ACK_SHAPE.test(u))
         : [];
@@ -196,7 +231,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           // A calendar-only grant. Not a failure and not `markRevoked` — that would kill the
           // calendar reader over a Gmail step the student never took (R-C2-E41).
           return Response.json({
-            items: await deps.undelivered(account_id), read: 0, quiet: true, reason: "no_gmail_scope", more: false,
+            items: await undelivered(), read: 0, quiet: true, reason: "no_gmail_scope", more: false,
           });
         }
         // `missing === "grant"`: a revoked or expired grant, and while the Google project is in
@@ -204,7 +239,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
         // a line the student can act on; here it is one status change.
         await deps.markRevoked(account_id);
         return Response.json({
-          items: await deps.undelivered(account_id), read: 0, quiet: true, reason: "revoked", more: false,
+          items: await undelivered(), read: 0, quiet: true, reason: "revoked", more: false,
         });
       }
       const token = lookup.token;
@@ -236,10 +271,42 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           break;
         }
         const message = await deps.api.message(token, id);
+        // T9: tier 2 before tier 3. A templated LMS submission receipt is recognised here, where
+        // the text exists, before the pipeline (and so before the cap, the budget and any promoted
+        // rule) — a receipt costs no model call. It is logged as a tier-2 answer: the promotion job
+        // learns only from tier 3, and the row, like every judgment row, carries no text.
+        const seed = { known_courses: known };
+        const receipt = receiptVerdict(message, seed);
+        if (receipt !== null) {
+          const judgmentId = await pipeline.log.write({
+            account_id,
+            kind: "email",
+            item_id: uid,
+            tier: 2,
+            outcome: "answered",
+            cause: null,
+            confidence: Number(receipt.confidence ?? 1),
+            fields: fieldsOf(receipt, "email", { from: message.from }),
+            model: null,
+            prompt_version: null,
+            grammar_version: null,
+            prompt_hash: null,
+            ms: 0,
+            origin: pipeline.origin,
+          });
+          await deps.enqueue(account_id, uid, "completion", receipt, judgmentId);
+          await deps.markSeen(account_id, uid);
+          read += 1;
+          continue;
+        }
+        // T9 fix round 1: decided here, before the text leaves scope. A vendor's not-evidence mail
+        // (a posted grade, "overdue", "due soon") is never completion, whatever the model answers.
+        const vetoCompletion = notCompletionEvidence(message);
         const reply: JudgeReply = await judge(account_id, {
           kind: "email",
           item: { message_id: uid, subject: message.subject, from: message.from, date: message.date, text: message.text },
-          heuristics_seed: { known_courses: known },
+          heuristics_seed: seed,
+          timezone,
         }, pipeline);
         // The text is out of scope from here: nothing below this line can reach it.
         if (reply.verdict === null) {
@@ -254,12 +321,14 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           }
           continue;
         }
-        const tier = typeof reply.verdict.tier === "string" ? reply.verdict.tier : "information";
-        await deps.enqueue(account_id, uid, tier, reply.verdict, reply.judgment_id ?? null);
+        const answered = typeof reply.verdict.tier === "string" ? reply.verdict.tier : "information";
+        const tier = answered === "completion" && vetoCompletion ? "information" : answered;
+        const verdict = tier === answered ? reply.verdict : { ...reply.verdict, tier };
+        await deps.enqueue(account_id, uid, tier, verdict, reply.judgment_id ?? null);
         await deps.markSeen(account_id, uid);
         read += 1;
       }
-      return Response.json({ items: await deps.undelivered(account_id), read, quiet: false, more, deferred });
+      return Response.json({ items: await undelivered(), read, quiet: false, more, deferred });
     } catch (e) {
       if (e instanceof Response) return e;
       // The class and, for a Gmail API failure, its status — never the message, which for a

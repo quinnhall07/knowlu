@@ -242,6 +242,17 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **Fires `decision_made` for `approved`/`rejected`, `decision_deferred` for `snoozed`** (§4.6) —
   ids only, as soon as the `invoke` round trip resolves, **before** the envelope's `ok` is
   checked; a refused decide still logs the attempt.
+- **`kind: event-check` — "Does this apply to you?"** `rank` files one for an event the judgment
+  could only call `unsure` (at most 3 a day, inside the 15). The deck renders it like any other card.
+  **Approve** writes a human answer `verdict:obligation` to `state/events-seen.md` for every uid on
+  the card, so the event joins Coming up; **Reject** writes `verdict:drop`. Either line carries
+  `by:` (the actor of the journal's human `status` set, else `unknown`) and the instance's own
+  `jid:`, and it is written by `process_approvals` in the same `decide` call: the card leaves the
+  deck on the click, and the event joins Coming up at the next `rank`. A settled answer carries to
+  the series' later instances: the next `rank`
+  gives each unanswered instance the same answer, and the series is never asked about again. A card
+  that expires or is deleted unanswered is not an answer: it writes nothing, its own instances are
+  never asked again, and the series' next instance may be.
 
 ### 3.10 AHEAD
 

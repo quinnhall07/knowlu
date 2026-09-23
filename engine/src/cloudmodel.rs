@@ -30,11 +30,40 @@
 
 use std::cell::Cell;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::judge::{self, ModelError};
+
+/// The same shape `eventledger::JID_SAFE` requires: lowercase hex, five groups, no separator a
+/// ledger line or a flow mapping could ever misread. Nothing but this shape is ever accepted —
+/// `dumps_value`, `write_literals` and `eventledger::write_verdict_line` all write the id
+/// unquoted, so a stray `"` or ` · ` in it would corrupt the line it lands on.
+static JUDGMENT_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+});
+
+/// F4: the reply's own `judgment_id`, whenever the service wrote a `judgments` row for this call
+/// (`judge_pipeline.ts`'s `id === null ? {} : { judgment_id: id }`). `None` for an absent field,
+/// a non-string value, or anything that is not a lowercase UUID — an old server that never sends
+/// the field, and a malformed one, read exactly alike: nothing to carry forward.
+pub fn judgment_id_of(reply: &Value) -> Option<String> {
+    reply
+        .get("judgment_id")
+        .and_then(Value::as_str)
+        .filter(|s| is_judgment_id(s))
+        .map(str::to_string)
+}
+
+/// F8: the one shape check for a `judgment_id`, wherever it was read from — a reply
+/// ([`judgment_id_of`]) or a card's frontmatter (`enrich::report_labels`), which a hand edit can
+/// leave malformed.
+pub fn is_judgment_id(s: &str) -> bool {
+    JUDGMENT_ID.is_match(s)
+}
 
 /// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
 /// completion. Spelled again here rather than borrowed, because C4 removes `runtime.rs` and this
@@ -341,11 +370,22 @@ pub fn task_request(item: &judge::Item, h: &judge::Heuristics, seed: &judge::Ver
 pub struct CloudModel<'a> {
     client: &'a CloudClient,
     fatal: Cell<Option<&'static str>>,
+    timezone: Option<String>,
 }
 
 impl<'a> CloudModel<'a> {
     pub fn new(client: &'a CloudClient) -> CloudModel<'a> {
-        CloudModel { client, fatal: Cell::new(None) }
+        CloudModel { client, fatal: Cell::new(None), timezone: None }
+    }
+
+    /// Carry the vault's own timezone name onto `/judge-email` (`cli::vault_timezone_name`), the
+    /// same field `pull_gmail_queue` carries directly for `/gmail-read` — Gmail judgment runs
+    /// server-side and never through this trait (D12), so this is for the eval harness's parity
+    /// check and §13's forwarding fallback, not the production Gmail path. Every existing
+    /// `CloudModel::new` caller is unaffected: `None` here sends no `timezone` key at all.
+    pub fn with_timezone(mut self, timezone: Option<String>) -> CloudModel<'a> {
+        self.timezone = timezone;
+        self
     }
 
     /// Set once a call comes back 401, 402 or 403. `enrich` prints it as one summary line instead
@@ -420,6 +460,7 @@ impl judge::Model for CloudModel<'_> {
         if let Some(tier) = reply.get("tier").and_then(Value::as_u64) {
             v.tier = tier.min(3) as u8;
         }
+        v.judgment_id = judgment_id_of(&reply);
         Ok(v)
     }
 }
@@ -436,20 +477,77 @@ pub fn event_request(item: &judge::EventItem) -> Value {
             "url": item.url, "description": item.description,
             "categories": item.categories, "audiences": item.audiences, "series_uid": item.series_uid,
         },
-        "heuristics_seed": { "interests": item.interests }
+        "heuristics_seed": { "interests": item.interests },
+        // Final review item 2: this engine understands the fourth verdict word. The service answers
+        // `unsure` only to a request that declares it; an older engine (whose VALID_VERDICTS has
+        // three words) gets the pre-T1 `verdict: null` + `below floor` shape instead.
+        "accepts": ["unsure"]
     })
 }
 
+/// The service's causes for a verdict-less reply that ARE a judgment of the event: asking again
+/// would get the same answer, so the device records `unsure` (T1). Anything else — `model failed`
+/// (the provider was down), or a cause this engine does not know — is not, and stays retryable.
+const REPEATABLE_CAUSES: [&str; 4] = ["below floor", "incomplete", "refused", "truncated"];
+
 impl judge::EventModel for CloudModel<'_> {
+    /// Stream J Task T1 (CHECKPOINT J-1, ruled 2026-09-22): the service answering with no usable
+    /// verdict is not, by itself, a reason to leave a uid unjudged forever.
+    ///
+    /// `self.call(...)?` above already separated the failures that must stay retryable — no
+    /// network, no session, no entitlement, a 5xx, a spent daily cap (`ModelError::Capped`, which
+    /// this function still propagates untouched) — from a genuine HTTP 2xx. So by the time
+    /// `self.verdict_of(&reply)` runs, the account WAS charged for a real attempt; the service just
+    /// could not turn it into `obligation`/`opportunity`/`drop`/`unsure` (below the confidence
+    /// floor, an incomplete reply, `refused`, `truncated`). Left as an
+    /// `Err`, that uid would fail `events::judge_roster`'s "already judged" check every slot,
+    /// forever (defect B). Recording `unsure` instead is not a new mechanism: a verdict the model
+    /// could not honestly produce is functionally the same as one it honestly declined to give, and
+    /// `eventledger::VALID_VERDICTS` already treats `unsure` as first-class and terminal (one
+    /// verdict per uid, forever). `confidence: 0.0` because the service's reply for this case never
+    /// carries a number back to the device (`judge_pipeline.ts`'s `low confidence` branch logs the
+    /// model's own confidence server-side only) — this is not a floor-crossing confidence, it is an
+    /// honestly-unknown one. A `model failed` reply (the provider itself failed — an outage, not a
+    /// judgment) and a verdict-less reply with no recognised cause are NOT rescued: they stay
+    /// `Err` so the uid is asked again next slot (final review item 1, `REPEATABLE_CAUSES`).
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
-        let verdict = self.verdict_of(&reply)?;
-        Ok(judge::EventVerdict {
-            verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
-            why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
-            confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
-            tier: reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8,
-        })
+        let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
+        // Read once and carried into every `Ok` arm below: `judge_pipeline.ts` writes a
+        // `judgments` row — and so a `judgment_id` — for the rescued-`unsure` replies exactly as
+        // it does for an honest verdict (lines 233 and 271), so the id is not conditional on
+        // which arm below is taken.
+        let judgment_id = judgment_id_of(&reply);
+        match self.verdict_of(&reply) {
+            Ok(verdict) => Ok(judge::EventVerdict {
+                verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
+                why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
+                confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+                tier,
+                judgment_id,
+            }),
+            // A spent cap answers every remaining item identically and must stay retryable
+            // tomorrow — never recorded as if the event itself had been considered.
+            Err(ModelError::Capped) => Err(ModelError::Capped),
+            // Final review item 1: `judge_pipeline.ts` answers a provider outage as HTTP 200 with
+            // `cause: "model failed"`. Recording that as `unsure` would bury every event judged
+            // during the outage for good, so only a repeatable cause is rescued.
+            Err(ModelError::Failed(reason))
+                if !reply
+                    .get("cause")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cause| REPEATABLE_CAUSES.contains(&cause)) =>
+            {
+                Err(ModelError::Failed(reason))
+            }
+            Err(ModelError::Failed(reason)) => Ok(judge::EventVerdict {
+                verdict: "unsure".to_string(),
+                why: judge::one_line(&reason, 140),
+                confidence: 0.0,
+                tier,
+                judgment_id,
+            }),
+        }
     }
 }
 
@@ -465,13 +563,24 @@ pub struct GmailItem {
     pub importance: Option<i64>,
     pub why: String,
     pub confidence: f64,
+    /// F6b: `gmail-read`'s row itself (not `payload`) carries `judgment_id` — the `judgments` row
+    /// the service wrote for this message, whenever it wrote one — parsed with F4's
+    /// [`judgment_id_of`]. Under the Limited Use ruling (global constraint 14) this id stays in
+    /// the vault only: `enrich.rs` stamps it onto the note or card it writes, and the device never
+    /// reports it, so it is never cross-account material.
+    pub judgment_id: Option<String>,
 }
 
 /// The body of `POST /judge-email`. Used by the eval harness's parity check and by §13's
 /// forwarding fallback; **not by the Gmail path**, which judges server-side because Gmail message
 /// text must never reach the device (D12).
-pub fn email_request(item: &judge::EmailItem) -> Value {
-    json!({
+///
+/// `timezone` is the vault's own IANA name (`cli::vault_timezone_name`) — an optional key so the
+/// due resolver can convert a relative word ("tonight") onto the student's clock instead of the
+/// email header's own offset. Omitted entirely, never sent null or empty, when the vault names
+/// none (T4 follow-up to `_shared/judge_due.ts`).
+pub fn email_request(item: &judge::EmailItem, timezone: Option<&str>) -> Value {
+    let mut body = json!({
         "kind": "email",
         "item": {
             "message_id": item.message_id,
@@ -481,12 +590,16 @@ pub fn email_request(item: &judge::EmailItem) -> Value {
             "text": judge::clip(item.text.trim(), judge::MAX_BODY_CHARS),
         },
         "heuristics_seed": { "known_courses": item.known_courses }
-    })
+    });
+    if let Some(tz) = timezone.filter(|t| !t.is_empty()) {
+        body["timezone"] = json!(tz);
+    }
+    body
 }
 
 impl judge::EmailModel for CloudModel<'_> {
     fn judge_email(&self, item: &judge::EmailItem) -> Result<judge::EmailVerdict, ModelError> {
-        let reply = self.call("/judge-email", &email_request(item))?;
+        let reply = self.call("/judge-email", &email_request(item, self.timezone.as_deref()))?;
         let verdict = self.verdict_of(&reply)?;
         let text = |key: &str| verdict.get(key).and_then(Value::as_str).map(str::to_string);
         Ok(judge::EmailVerdict {
@@ -526,12 +639,25 @@ pub struct GmailPull {
     pub deferred: u64,
 }
 
-pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPull, CloudError> {
+pub fn pull_gmail_queue(
+    client: &CloudClient,
+    ack: &[String],
+    timezone: Option<&str>,
+) -> Result<GmailPull, CloudError> {
     // R-C2-E41: an unconfigured deployment (no P2) is the one situation `/gmail-read` answers
     // with a real HTTP failure rather than `quiet: true` — there may be no account row to name a
     // reason against at all. Caught here, once, so every caller downstream sees the same closed
     // `QuietReason` set regardless of which of the two shapes the service used to say it.
-    let reply = match client.post("/gmail-read", &json!({ "ack": ack })) {
+    // T9: `accepts` declares the tiers this engine routes; the service hands `completion` to no
+    // device that does not declare it (an older engine would file it as a `kind: task` card).
+    // `timezone` is the vault's own IANA name (`cli::vault_timezone_name`), so `judge_due.ts`'s
+    // resolver can convert a relative word onto the student's clock rather than the message's own
+    // header offset — omitted entirely, never null or empty, when the vault names none.
+    let mut body = json!({ "ack": ack, "accepts": ["completion"] });
+    if let Some(tz) = timezone.filter(|t| !t.is_empty()) {
+        body["timezone"] = json!(tz);
+    }
+    let reply = match client.post("/gmail-read", &body) {
         Ok(reply) => reply,
         Err(CloudError::Status { code: 503, ref detail }) if detail == GMAIL_NOT_CONFIGURED_DETAIL => {
             return Err(CloudError::Quiet(QuietReason::NotConfigured));
@@ -564,6 +690,9 @@ pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPul
             importance: p.get("importance").and_then(Value::as_i64).map(|i| i.clamp(1, 5)),
             why: judge::one_line(&text("why").unwrap_or_default(), 140),
             confidence: p.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+            // F6b: the row's own `judgment_id`, not `payload`'s — same door `judge`/`judge_event`
+            // already use, so a malformed or absent id reads exactly like an old server's reply.
+            judgment_id: judgment_id_of(row),
         });
     }
     Ok(GmailPull { items: out, more, deferred })
@@ -623,6 +752,26 @@ pub fn pull_rule_proposals(client: &CloudClient) -> Result<Vec<RuleProposal>, Cl
 
 pub fn decide_rule(client: &CloudClient, id: i64, decision: &str) -> Result<(), CloudError> {
     client.post("/judge-rules", &json!({ "id": id, "decision": decision })).map(|_| ())
+}
+
+/// F8: what `/telemetry` said about one batch of label rows. `unowned` (the judgment is not this
+/// account's, or not of the kind claimed) and `refused` (a verdict row that labels nothing) are
+/// F7's optional counts, present only when the batch held a label row: an absent count reads as 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LabelsSent {
+    pub saved: usize,
+    pub unowned: usize,
+    pub refused: usize,
+}
+
+/// F8: POST label rows (`enrich::report_labels` builds them) to `/telemetry`, the endpoint the app
+/// already sends class (b) corrections to — `{"events": [], "corrections": rows}`. The service
+/// authenticates, deduplicates on `corrections_once` and refuses free text, so a resend after a
+/// lost reply lands on the same rows.
+pub fn post_labels(client: &CloudClient, rows: &[Value]) -> Result<LabelsSent, CloudError> {
+    let reply = client.post("/telemetry", &json!({ "events": [], "corrections": rows }))?;
+    let count = |key: &str| reply.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    Ok(LabelsSent { saved: count("corrections"), unowned: count("unowned"), refused: count("refused") })
 }
 
 /// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not

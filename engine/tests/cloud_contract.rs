@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 use knowlu_engine::cloudmodel::{CloudClient, CloudConfig, CloudModel};
-use knowlu_engine::judge::{self, Heuristics, Item, Model, Verdict};
+use knowlu_engine::judge::{self, EventModel, Heuristics, Item, Model, Verdict};
 
 /// A loopback server that answers `replies` in order and hands back everything it was sent.
 struct Loopback {
@@ -240,6 +240,266 @@ fn a_verdict_the_service_refused_is_an_error_that_names_the_cause() {
     let _ = server.requests();
 }
 
+/// F4: `judge_pipeline.ts` hands back the `judgments` row it just wrote (`id === null ? {} :
+/// { judgment_id: id }`), sitting beside `verdict`, not inside it. `CloudModel::judge` must carry
+/// that onto the `Verdict` it returns.
+#[test]
+fn a_task_reply_hands_its_judgment_id_to_the_verdict() {
+    let with_id = r#"{"verdict":{"course":"cs-100","effort_hours":2.5,"importance":4,"importance_reason":"twenty percent of the grade","confidence":0.82},"tier":3,"outcome":"answered","judgment_id":"11111111-1111-1111-1111-111111111111"}"#;
+    let mut server = loopback(vec![(200, with_id.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let got = model.judge(&item(), &heuristics(), &seed).expect("the service answered");
+    assert_eq!(got.judgment_id.as_deref(), Some("11111111-1111-1111-1111-111111111111"));
+    let _ = server.requests();
+}
+
+/// Old and new pairings (F4 brief): a new engine talking to an old server gets no `judgment_id`
+/// field at all, and that must read as `None`, not as a malformed id or an error.
+#[test]
+fn a_reply_without_a_judgment_id_is_none() {
+    let mut server = loopback(vec![(200, ANSWERED.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let got = model.judge(&item(), &heuristics(), &seed).expect("the service answered");
+    assert_eq!(got.judgment_id, None, "an old server sends no judgment_id field at all");
+    let _ = server.requests();
+}
+
+/// `judgment_id_of` accepts only a lowercase UUID (the same shape `eventledger::JID_SAFE`
+/// requires) because the id is written unquoted into a ledger line and a flow mapping, so it must
+/// never be able to carry a separator.
+#[test]
+fn a_malformed_judgment_id_is_dropped() {
+    use knowlu_engine::cloudmodel::judgment_id_of;
+    for bad in ["judgment-1", "../x"] {
+        let reply = serde_json::json!({ "judgment_id": bad });
+        assert_eq!(judgment_id_of(&reply), None, "{bad}");
+    }
+    let reply = serde_json::json!({ "judgment_id": "11111111-1111-1111-1111-111111111111" });
+    assert_eq!(
+        judgment_id_of(&reply),
+        Some("11111111-1111-1111-1111-111111111111".to_string()),
+        "a real lowercase UUID must still pass"
+    );
+    assert_eq!(judgment_id_of(&serde_json::json!({})), None, "an absent field is None too");
+}
+
+fn event_item(uid: &str) -> judge::EventItem {
+    judge::EventItem {
+        uid: uid.to_string(),
+        title: "AI Club Kickoff".to_string(),
+        start: "2026-08-29T18:00".to_string(),
+        end: "2026-08-29T19:30".to_string(),
+        source: "engage".to_string(),
+        ..Default::default()
+    }
+}
+
+/// F4: the same `judgment_id` a task reply carries reaches an event reply's `EventVerdict` too.
+#[test]
+fn an_event_reply_hands_its_judgment_id_to_the_verdict() {
+    let with_id = r#"{"verdict":{"verdict":"opportunity","why":"matches your interests","confidence":0.8},"tier":3,"outcome":"answered","judgment_id":"22222222-2222-2222-2222-222222222222"}"#;
+    let mut server = loopback(vec![(200, with_id.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model.judge_event(&event_item("engage:1")).expect("the service answered");
+    assert_eq!(got.verdict, "opportunity");
+    assert_eq!(got.judgment_id.as_deref(), Some("22222222-2222-2222-2222-222222222222"));
+    let _ = server.requests();
+}
+
+/// Stream J Task T1, CHECKPOINT J-1: defect B for the below-floor / no-verdict path.
+///
+/// Before this fix, `CloudModel::judge_event` propagated exactly the same shape of `Err` the task
+/// path still does (proven above), and `events::judge_roster` writes nothing on an `Err` — so the
+/// uid stayed unjudged and `judge_roster`'s own "already judged" filter would send it again every
+/// slot, forever. **The task path is deliberately unchanged** (the test above still expects an
+/// `Err`): only events get the fourth verdict word, so only events get this device-side rescue.
+#[test]
+fn a_below_floor_event_reply_becomes_unsure_instead_of_an_error_the_device_would_re_ask_forever() {
+    let refused = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"below floor"}"#;
+    let mut server = loopback(vec![(200, refused.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model
+        .judge_event(&event_item("engage:1"))
+        .expect("a below-floor reply must become a usable verdict, not an error");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("below floor"), "{}", got.why);
+    assert_eq!(got.confidence, 0.0, "the service never returns a number for this case (server log only)");
+    let _ = server.requests();
+}
+
+/// F4 decision 3: the rescued-`unsure` arm carries `judgment_id` too — `judge_pipeline.ts` writes
+/// a `judgments` row (and so a `judgment_id`) for the low-confidence reply exactly as it does for
+/// an honest one (`judge_pipeline.ts:233`), so the device-side rescue must not drop it.
+#[test]
+fn a_rescued_unsure_keeps_the_judgment_id() {
+    let refused = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"below floor","judgment_id":"33333333-3333-3333-3333-333333333333"}"#;
+    let mut server = loopback(vec![(200, refused.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model
+        .judge_event(&event_item("engage:1"))
+        .expect("a below-floor reply must become a usable verdict, not an error");
+    assert_eq!(got.verdict, "unsure");
+    assert_eq!(got.judgment_id.as_deref(), Some("33333333-3333-3333-3333-333333333333"));
+    let _ = server.requests();
+}
+
+/// The same rescue for an `incomplete` reply (a required field missing, not merely low confidence)
+/// — the second of the two shapes `verdict_of` folds into one `ModelError::Failed`.
+#[test]
+fn an_incomplete_event_reply_also_becomes_unsure() {
+    let incomplete = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"incomplete"}"#;
+    let mut server = loopback(vec![(200, incomplete.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model.judge_event(&event_item("engage:2")).expect("incomplete must not be a dead end either");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("incomplete"), "{}", got.why);
+    let _ = server.requests();
+}
+
+/// A spent cap answers every remaining event identically and must stay retryable TOMORROW, never
+/// recorded today as if the event itself had been weighed and found wanting.
+#[test]
+fn a_capped_event_reply_still_stops_the_batch_rather_than_becoming_unsure() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let mut server = loopback(vec![(200, capped.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:1"))
+        .expect_err("a spent cap must stay an error, never a recorded unsure");
+    assert!(matches!(err, judge::ModelError::Capped), "{err:?}");
+    assert_eq!(model.fatal(), Some(judge::CAPPED_LABEL));
+    let _ = server.requests();
+}
+
+/// A 401 (no session) must stay exactly as fatal for events as it is for tasks — this is a
+/// transport/auth failure from `self.call(...)`, never reaching `verdict_of` at all, so it must
+/// never be rescued into `unsure`.
+#[test]
+fn a_401_event_reply_is_still_an_error_naming_the_session() {
+    let mut server = loopback(vec![(401, r#"{"error":"invalid jwt"}"#.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model.judge_event(&event_item("engage:1")).expect_err("a 401 is an error");
+    assert!(err.to_string().contains("no session"), "{err}");
+    assert_eq!(model.fatal(), Some("no session"));
+    let _ = server.requests();
+}
+
+/// Final review item 1: `judge_pipeline.ts` answers a provider exception (OpenRouter 5xx/429/timeout)
+/// as HTTP 200 with `cause: "model failed"`. That is an outage, not a judgment of the event — it
+/// must stay an error so the uid is asked again next slot, never be buried as a recorded `unsure`.
+#[test]
+fn a_model_failed_event_reply_stays_an_error_so_an_outage_is_retried() {
+    let failed = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"model failed"}"#;
+    let mut server = loopback(vec![(200, failed.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:3"))
+        .expect_err("an upstream outage must never be recorded as unsure");
+    assert!(matches!(err, judge::ModelError::Failed(_)), "{err:?}");
+    assert!(err.to_string().contains("model failed"), "{err}");
+    let _ = server.requests();
+}
+
+/// The same for a verdict-less reply naming no cause the device recognises: only the four
+/// repeatable causes (`below floor`, `incomplete`, `refused`, `truncated`) become `unsure`.
+#[test]
+fn a_verdict_less_event_reply_with_no_recognised_cause_stays_an_error() {
+    for body in [
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence"}"#,
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"something new"}"#,
+    ] {
+        let mut server = loopback(vec![(200, body.to_string())]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let err = model.judge_event(&event_item("engage:4")).expect_err(body);
+        assert!(matches!(err, judge::ModelError::Failed(_)), "{body}: {err:?}");
+        let _ = server.requests();
+    }
+}
+
+/// The two remaining repeatable causes also become `unsure` (below floor and incomplete are above).
+#[test]
+fn refused_and_truncated_event_replies_become_unsure() {
+    for cause in ["refused", "truncated"] {
+        let body = format!(r#"{{"verdict":null,"tier":3,"outcome":"low confidence","cause":"{cause}"}}"#);
+        let mut server = loopback(vec![(200, body)]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let got = model.judge_event(&event_item("engage:5")).expect(cause);
+        assert_eq!(got.verdict, "unsure", "{cause}");
+        assert!(got.why.contains(cause), "{}", got.why);
+        let _ = server.requests();
+    }
+}
+
+/// Final review item 2: the device declares it understands the fourth verdict word, so the
+/// service may answer `unsure`; an engine that does not declare it gets the pre-T1 shape instead.
+#[test]
+fn the_event_request_declares_it_accepts_unsure() {
+    let body = knowlu_engine::cloudmodel::event_request(&event_item("engage:6"));
+    assert_eq!(body["accepts"], serde_json::json!(["unsure"]), "{body}");
+}
+
+fn email_item() -> judge::EmailItem {
+    judge::EmailItem {
+        message_id: "msg-1".to_string(),
+        subject: "Quiz due".to_string(),
+        from: "prof@example.edu".to_string(),
+        date: "Tue, 22 Sep 2026 23:30:00 +0000".to_string(),
+        text: "Submit tonight.".to_string(),
+        known_courses: vec!["cs-100".to_string()],
+    }
+}
+
+/// T4 follow-up: `email_request` (used by the eval harness's parity check and §13's forwarding
+/// fallback, per its own doc comment — not by the production Gmail path) carries the vault's
+/// timezone when it has one, and the key is absent, never null or empty, when it does not.
+#[test]
+fn the_email_request_carries_the_vaults_timezone_when_given_one() {
+    let with_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some("America/Chicago"));
+    assert_eq!(with_tz["timezone"], serde_json::json!("America/Chicago"), "{with_tz}");
+
+    let without_tz = knowlu_engine::cloudmodel::email_request(&email_item(), None);
+    assert!(without_tz.get("timezone").is_none(), "{without_tz}");
+
+    let blank_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some(""));
+    assert!(blank_tz.get("timezone").is_none(), "{blank_tz}");
+}
+
+const EMPTY_GMAIL_REPLY: &str = r#"{"items":[],"more":false,"deferred":0}"#;
+
+/// The other half of the T4 follow-up: `pull_gmail_queue`'s `/gmail-read` body is the DOMINANT
+/// production path for email judgment (Gmail text never reaches the device, D12), so this is
+/// where a live, UTC-stamped evening email actually gets fixed.
+#[test]
+fn the_gmail_read_body_carries_the_vaults_timezone_when_given_one() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], Some("America/Chicago"));
+    let sent = server.requests().remove(0);
+    assert!(sent.contains("\"timezone\": \"America/Chicago\""), "{sent}");
+}
+
+#[test]
+fn the_gmail_read_body_has_no_timezone_key_when_the_vault_names_none() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], None);
+    let sent = server.requests().remove(0);
+    assert!(!sent.contains("timezone"), "{sent}");
+}
+
 #[test]
 fn tier1_still_answers_without_the_service_being_reached_at_all() {
     // The seam is unchanged (cloud design §3.2): a vendor-stated effort plus a pinned course is a
@@ -460,4 +720,354 @@ fn rank_cannot_reach_a_judgment_endpoint() {
         cli.contains("cloudmodel::fetch_event_source"),
         "hand-off H4 has not been applied: `cli::run` still fetches event feeds on the device."
     );
+}
+
+// -----------------------------------------------------------------------------------------
+// F8: the judge step reports card answers and rejections, keyed by `judgment_id`, to /telemetry.
+// -----------------------------------------------------------------------------------------
+
+const LABEL_J: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const LABEL_J2: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+fn label_vault(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-f8-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for folder in ["tasks", "approvals", "archive", "config", "state"] {
+        std::fs::create_dir_all(dir.join(folder)).expect("make the scratch vault");
+    }
+    dir
+}
+
+fn agent_ctx(actor: &str) -> knowlu_engine::write::WriteContext {
+    knowlu_engine::write::WriteContext { actor: actor.to_string(), via: "local-runner".to_string(), run_id: None }
+}
+
+/// The console's own context (`app/src/commands.rs` `console_ctx()`): the one human actor
+/// `journal::human_set` recognises (global constraint 1).
+fn console_ctx() -> knowlu_engine::write::WriteContext {
+    knowlu_engine::write::WriteContext { actor: "quinn".to_string(), via: "dashboard".to_string(), run_id: None }
+}
+
+/// File a card as the agent that would have filed it, and return its `id:`. `extra` is extra
+/// frontmatter lines (the judgment pair, or nothing).
+fn file_card(v: &std::path::Path, stem: &str, kind: &str, extra: &str) -> String {
+    let text = format!(
+        "---\ntype: approval\nkind: {kind}\ntitle: A card about {stem}\nstatus: pending\n\
+         proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\nexpires: 2026-10-04\n\
+         snooze_until: null\ncreated_by: enrich\n{extra}---\n\nbody\n"
+    );
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    let rel = format!("approvals/{stem}.md");
+    knowlu_engine::write::create(v, &rel, &text, &agent_ctx("agent:knowlu.enrich"), &mut journal, None)
+        .expect("the card files");
+    card_field(v, &rel, "id").expect("create minted an id")
+}
+
+fn judged(kind: &str, jid: &str) -> String {
+    format!("judgment_id: {jid}\njudgment_kind: {kind}\n")
+}
+
+fn set_status(v: &std::path::Path, rel: &str, status: &str, ctx: &knowlu_engine::write::WriteContext) {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    knowlu_engine::write::write_literals(
+        v,
+        rel,
+        &[("status".to_string(), status.to_string())],
+        ctx,
+        &mut journal,
+        &knowlu_engine::write::WriteOpts::default(),
+    )
+    .expect("the status writes");
+}
+
+/// What `rank` does to a settled card: move it to `archive/`, keeping its frontmatter.
+fn archive(v: &std::path::Path, stem: &str) -> String {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    knowlu_engine::write::delete(v, &format!("approvals/{stem}.md"), &agent_ctx("agent:rank"), &mut journal)
+        .expect("the card archives");
+    format!("archive/{stem}.md")
+}
+
+fn card_field(v: &std::path::Path, rel: &str, key: &str) -> Option<String> {
+    let text = knowlu_engine::pystr::read_text(&v.join(rel)).ok()?;
+    let (meta, _) = knowlu_engine::models::split_frontmatter(&text).ok()?;
+    knowlu_engine::yaml::opt_text(knowlu_engine::yaml::get(&meta, key))
+}
+
+fn human_ts(v: &std::path::Path, id: &str) -> String {
+    let mut journal = knowlu_engine::journal::Journal::new(v);
+    let record = journal.human_set(id, "status").expect("a human status record");
+    record.get("ts").and_then(|t| t.as_str()).expect("a ts").to_string()
+}
+
+fn label_opts() -> knowlu_engine::enrich::Options<'static> {
+    knowlu_engine::enrich::Options {
+        via: "local-runner",
+        run_id: None,
+        runtime: None,
+        model: None,
+        log_dir: None,
+        limit: 10,
+        budget: knowlu_engine::enrich::BATCH_BUDGET,
+    }
+}
+
+fn report(v: &std::path::Path, client: &CloudClient) -> Vec<String> {
+    knowlu_engine::enrich::report_labels(v, client, &label_opts(), knowlu_engine::enrich::BATCH_BUDGET)
+}
+
+fn body_of(request: &str) -> &str {
+    request.split("\r\n\r\n").nth(1).unwrap_or_default()
+}
+
+const SAVED_ONE: &str = r#"{"events":0,"corrections":1,"unowned":0,"refused":0}"#;
+
+#[test]
+fn a_settled_event_check_is_reported_once_with_its_judgment_id() {
+    let v = label_vault("event-check");
+    let id = file_card(&v, "event-check-club", "event-check", &judged("event", LABEL_J));
+    set_status(&v, "approvals/event-check-club.md", "approved", &console_ctx());
+    // `rank` settles an approved event-check card as `executed` and archives it (F3).
+    set_status(&v, "approvals/event-check-club.md", "executed", &agent_ctx("agent:rank"));
+    let rel = archive(&v, "event-check-club");
+    let ts = human_ts(&v, &id);
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    let stamped = card_field(&v, &rel, "reported_at").expect("the card is stamped reported_at");
+    assert!(stamped.ends_with('Z') && stamped.contains('T'), "a UTC ISO stamp: {stamped}");
+
+    // A second call finds nothing waiting and makes no request at all.
+    let again = report(&v, &client);
+    assert!(again.is_empty(), "{again:?}");
+    let sent = server.requests();
+    assert_eq!(sent.len(), 1, "exactly one request: {sent:?}");
+    assert!(sent[0].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[0]);
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": ts, "item_id": id, "field": "verdict", "ours": "unsure", "theirs": "obligation",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "event",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_rejected_judged_amend_card_is_reported_as_a_decision() {
+    let v = label_vault("amend-rejected");
+    let id = file_card(&v, "amend-hw3", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-hw3.md", "rejected", &console_ctx());
+    let ts = human_ts(&v, &id);
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-hw3.md", "reported_at").is_some());
+    let sent = server.requests();
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": ts, "item_id": id, "field": "decision", "ours": "proposed", "theirs": "rejected",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "task",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn an_approved_amend_card_is_not_reported() {
+    let v = label_vault("amend-approved");
+    file_card(&v, "amend-live", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-live.md", "approved", &console_ctx());
+    file_card(&v, "amend-done", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-done.md", "approved", &console_ctx());
+    set_status(&v, "approvals/amend-done.md", "executed", &agent_ctx("agent:rank"));
+    let done = archive(&v, "amend-done");
+
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    assert!(card_field(&v, "approvals/amend-live.md", "reported_at").is_none());
+    assert!(card_field(&v, &done, "reported_at").is_none());
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_card_without_a_judgment_id_or_without_a_human_decision_is_not_reported() {
+    let v = label_vault("unreportable");
+    // Rejected by the student, but no judgment behind it (a tier-1 write).
+    file_card(&v, "amend-tier1", "amend", "");
+    set_status(&v, "approvals/amend-tier1.md", "rejected", &console_ctx());
+    // Carries a judgment, but no human ever set its status: there is no truthful `ts`.
+    file_card(&v, "amend-by-hand", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-by-hand.md", "rejected", &agent_ctx("agent:knowlu.enrich"));
+    // A malformed id is never sent either.
+    file_card(&v, "amend-bad-id", "amend", &judged("task", "not-a-uuid"));
+    set_status(&v, "approvals/amend-bad-id.md", "rejected", &console_ctx());
+
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    for stem in ["amend-tier1", "amend-by-hand", "amend-bad-id"] {
+        assert!(card_field(&v, &format!("approvals/{stem}.md"), "reported_at").is_none(), "{stem}");
+    }
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_rejected_email_kind_card_is_never_reported_or_stamped() {
+    let v = label_vault("email");
+    // A Gmail-derived task card and a Gmail completion card (F6b), both rejected by the student.
+    file_card(&v, "gmail-task", "task", &judged("email", LABEL_J));
+    set_status(&v, "approvals/gmail-task.md", "rejected", &console_ctx());
+    file_card(&v, "gmail-done", "amend", &judged("email", LABEL_J2));
+    set_status(&v, "approvals/gmail-done.md", "rejected", &console_ctx());
+    let archived = archive(&v, "gmail-done");
+
+    assert!(!knowlu_engine::enrich::labels_waiting(&v), "an email card is never waiting");
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(card_field(&v, "approvals/gmail-task.md", "reported_at").is_none());
+    assert!(card_field(&v, &archived, "reported_at").is_none());
+    assert!(server.requests().is_empty(), "no request for an email-kind decision");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn an_unowned_count_is_named_and_the_batch_is_still_stamped() {
+    let v = label_vault("unowned");
+    file_card(&v, "amend-a", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-a.md", "rejected", &console_ctx());
+    file_card(&v, "amend-b", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-b.md", "rejected", &console_ctx());
+
+    let reply = r#"{"events":0,"corrections":1,"unowned":1,"refused":0}"#;
+    let mut server = loopback(vec![(200, reply.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(
+        lines,
+        vec!["labels: sent 2, 1 not accepted (judgment not on this account)".to_string()],
+        "{lines:?}"
+    );
+    assert!(card_field(&v, "approvals/amend-a.md", "reported_at").is_some());
+    assert!(card_field(&v, "approvals/amend-b.md", "reported_at").is_some());
+    assert_eq!(server.requests().len(), 1);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_refused_batch_stamps_nothing_and_says_so() {
+    let v = label_vault("refused");
+    file_card(&v, "amend-a", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-a.md", "rejected", &console_ctx());
+
+    // What a handler from before F7 answers any batch holding a label row.
+    let reply = r#"{"error":"field \"decision\" is not a judged field"}"#;
+    let mut server = loopback(vec![(400, reply.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("labels: not sent ("), "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-a.md", "reported_at").is_none());
+    // Still waiting, so the next slot tries again.
+    assert!(knowlu_engine::enrich::labels_waiting(&v));
+    assert_eq!(server.requests().len(), 1);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_malformed_journal_ts_is_skipped_and_the_rest_of_the_batch_still_sends() {
+    let v = label_vault("badts");
+    let good = file_card(&v, "amend-good", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-good.md", "rejected", &console_ctx());
+    let good_ts = human_ts(&v, &good);
+
+    let bad = file_card(&v, "amend-badts", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-badts.md", "rejected", &console_ctx());
+    // A hand-edited journal line: `LABEL_TS_RE`-shaped (four digits, two digits, ...), but month
+    // 13 and hour 25 make it unparseable as a real instant.
+    let mut journal = knowlu_engine::journal::Journal::new(&v);
+    let spec = knowlu_engine::journal::NewRecord {
+        id: Some(bad.as_str()),
+        field: Some("status"),
+        old: serde_json::json!("pending"),
+        new: serde_json::json!("rejected"),
+        ts: Some("2026-13-40T25:61:00Z".to_string()),
+        ..knowlu_engine::journal::NewRecord::new("set", "approvals/amend-badts.md", "quinn", "dashboard")
+    };
+    let mut rec = knowlu_engine::journal::make_record(spec).expect("the record builds");
+    journal.append(&mut rec).expect("the malformed-ts record appends");
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-good.md", "reported_at").is_some());
+    assert!(
+        card_field(&v, "approvals/amend-badts.md", "reported_at").is_none(),
+        "an unparseable ts must not be stamped, so a corrected journal line can still be retried"
+    );
+    let sent = server.requests();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": good_ts, "item_id": good, "field": "decision", "ours": "proposed", "theirs": "rejected",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "task",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    // The malformed card is quietly excluded (its ts can never resolve without a hand-fixed
+    // journal), not blocked-and-retried: with the good card now stamped, nothing is waiting.
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn nothing_waiting_means_no_request() {
+    let v = label_vault("nothing");
+    let mut server = loopback(vec![]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    let lines = report(&v, &client);
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(server.requests().is_empty());
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn the_probe_fires_when_only_a_label_is_waiting() {
+    let v = label_vault("probe");
+    file_card(&v, "event-check-talk", "event-check", &judged("event", LABEL_J));
+    set_status(&v, "approvals/event-check-talk.md", "rejected", &console_ctx());
+    assert!(knowlu_engine::enrich::labels_waiting(&v));
+
+    // The probe (`GET /judge-rules`), `pull_rules`' offer read, then the label report.
+    let no_rules = r#"{"proposals":[]}"#.to_string();
+    let mut server = loopback(vec![(200, no_rules.clone()), (200, no_rules), (200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (code, lines) = knowlu_engine::enrich::run_lines_with(&v, &label_opts(), Some(&client));
+    assert_eq!(code, 0);
+    assert!(lines.iter().any(|l| l == "labels: sent 1"), "{lines:?}");
+    let sent = server.requests();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(sent[2].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[2]);
+    assert!(body_of(&sent[2]).contains(r#""theirs": "drop""#), "{}", sent[2]);
+    assert!(card_field(&v, "approvals/event-check-talk.md", "reported_at").is_some());
+    let _ = std::fs::remove_dir_all(&v);
 }
