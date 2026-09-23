@@ -3260,7 +3260,9 @@ fn shape(meta: &Mapping) -> Shape {
     }
 }
 
-/// `commitments/declined-<first 10 hex of sha256(key)>` (§2.3), the stem only.
+/// `commitments/declined-<first 10 hex of sha256(key)>` (§2.3), the stem only. The digest is
+/// `ring`'s — the same direct `ring` edge C3′ adds for the sync content hash; `ring` is already
+/// linked through `ureq` → `rustls`, so it costs no crate.
 fn marker_stem(key: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
     let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
@@ -3459,9 +3461,11 @@ pub fn create_confirmed(
 /// A field's value as `load` would read it, as comparable text (carry-forward 2): `meets` and
 /// `window` as the set of their **valid** entries' `(day, start, end)` triples (so `9:00` is
 /// `09:00`, and neither entry nor day order matters); `until`/`from` as a date, an unparseable one
-/// as absent (load warns and ignores it); any other scalar trimmed with its whitespace runs made
-/// one space; absent, `null` and empty alike as `""`. A collection anywhere else falls back to
-/// §5.4's canonical flow text.
+/// as absent (load warns and ignores it); any other field exactly as `load`'s `field_text` reads
+/// it — a scalar, trimmed with its whitespace runs made one space, and a **collection as absent**
+/// (fix round 1, I1: P12 writes `was: {where: null}` for a note whose `where:` is a list, so any
+/// other reading would supersede and re-file that card on every rank). Absent, `null` and empty
+/// alike are `""`.
 fn as_read(field: &str, value: Option<&Value>) -> String {
     let Some(value) = value.filter(|v| !matches!(v, Value::Null)) else {
         return String::new();
@@ -3472,7 +3476,6 @@ fn as_read(field: &str, value: Option<&Value>) -> String {
             format!("{:?}", meet_set(&meets))
         }
         ("until" | "from", _) => value_date(Some(value)).map(|d| d.to_string()).unwrap_or_default(),
-        (_, Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_)) => canonical(value),
         _ => text(value)
             .map(|t| t.split(pystr::is_python_space).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" "))
             .unwrap_or_default(),
@@ -3612,6 +3615,64 @@ fn twin_keys(vault: &Path, key: &str, mut sigs: Vec<Signature>, codes: &Codes) -
     out
 }
 
+/// Whether the note already holds every value the card's `change` names, as read (fix round 1,
+/// I2): the settlement wrote it and the run died before the card's stamp.
+fn change_applied(vault: &Path, target: &str, meta: &Mapping) -> bool {
+    let Some(rel) = target_rel(target) else { return false };
+    let Ok(Ok((note, _))) = pystr::read_text(&vault.join(rel)).map(|t| split_frontmatter(&t)) else {
+        return false;
+    };
+    let Some(Value::Mapping(change)) = get(meta, "change") else { return false };
+    !change.is_empty()
+        && change.iter().all(|(key, value)| {
+            let field = text(key).unwrap_or_default();
+            as_read(&field, get(&note, &field)) == as_read(&field, Some(value))
+        })
+}
+
+fn record_str<'a>(record: &'a crate::ledger::Record, key: &str) -> Option<&'a str> {
+    record.get(key).and_then(|v| v.as_str())
+}
+
+/// Whether this card's own settlement created the note it now finds (fix round 1, I2): in the
+/// journal's order, after the last record setting the card's `status` to `approved`, a `create`
+/// of a note in `commitments/` by `agent:commitments` on this device whose `new` matches — its
+/// `source_uid` is the card's key, or for the window its `kind` is `planning-day` — and whose file
+/// still exists. A note confirmed before the student approved (another desktop's answer, synced
+/// in) has its record earlier, so it is still refused.
+fn created_by_this_card(
+    vault: &Path,
+    meta: &Mapping,
+    key: Option<&str>,
+    journal: &mut crate::journal::Journal,
+) -> bool {
+    let Some(card_id) = field_text(meta, "id").filter(|id| !id.is_empty()) else { return false };
+    let records = journal.read(None, None);
+    let Some(approved) = records.iter().rposition(|r| {
+        record_str(r, "id") == Some(card_id.as_str())
+            && record_str(r, "op") == Some("set")
+            && record_str(r, "field") == Some("status")
+            && record_str(r, "new") == Some("approved")
+    }) else {
+        return false;
+    };
+    let device = crate::journal::device_name();
+    records[approved + 1..].iter().any(|r| {
+        let path = record_str(r, "path").unwrap_or_default();
+        let new = r.get("new").and_then(|n| n.as_object());
+        let matches = new.is_some_and(|n| match key {
+            Some(key) => n.get("source_uid").and_then(|v| v.as_str()) == Some(key),
+            None => n.get("kind").and_then(|v| v.as_str()) == Some(PLANNING_DAY),
+        });
+        record_str(r, "op") == Some("create")
+            && record_str(r, "actor") == Some(CARD_ACTOR)
+            && record_str(r, "device") == Some(device.as_str())
+            && path.starts_with("commitments/")
+            && matches
+            && vault.join(path).is_file()
+    })
+}
+
 /// Settle an approved `commitment-check` card (§5.2, §5.4). Writes nothing to the card itself —
 /// the arm stamps it with the result and archives it.
 ///
@@ -3640,6 +3701,9 @@ pub fn settle_approved(
                 Ok(literals) => literals,
                 Err(why) => return Ok(Settled::Refused(why)),
             };
+            if change_applied(vault, &target, meta) {
+                return Ok(Settled::Executed);
+            }
             if let Some(why) = stale_change(vault, &target, meta) {
                 return Ok(Settled::Superseded(format!("{why}; not applied")));
             }
@@ -3655,6 +3719,9 @@ pub fn settle_approved(
         }
         Shape::Window => {
             if let Some(day) = &set.planning_day {
+                if created_by_this_card(vault, meta, None, journal) {
+                    return Ok(Settled::Executed);
+                }
                 return Ok(Settled::Refused(format!("{} already sets the planning day", day.path.display())));
             }
             let Some(map) = commitment else {
@@ -3687,6 +3754,9 @@ pub fn settle_approved(
                     || sigs.contains(&n.signature(&codes))
             });
             if let Some(note) = held {
+                if !key.is_empty() && created_by_this_card(vault, meta, Some(&key), journal) {
+                    return Ok(Settled::Executed);
+                }
                 return Ok(Settled::Refused(format!(
                     "{} is already confirmed; nothing written",
                     note.path.display().to_string().replace('\\', "/")
@@ -3729,8 +3799,12 @@ pub fn settle_rejected(
             }
         }
     };
+    // Fix round 1, m5: a key a confirmed note already holds (another desktop confirmed it) gets no
+    // marker — the note still counts, and a marker beside it would say the opposite.
+    let confirmed: BTreeSet<String> =
+        load(vault).confirmed.into_iter().filter_map(|n| n.source_uid).collect();
     let mut written = Vec::new();
-    for key in keys {
+    for key in keys.into_iter().filter(|k| !confirmed.contains(k)) {
         written.extend(create_marker(vault, &key, ctx, journal)?);
     }
     Ok(written)
@@ -3740,7 +3814,8 @@ pub fn settle_rejected(
 /// card shape — plan review C1), or `None` while it stands:
 /// - **change**: its target is gone, or the note no longer holds `was` (the settlement's test);
 /// - **window**: a `planning-day` note or the `window` marker exists;
-/// - **proposal**: its key is under no calendar of the series file, a note (confirmed, a marker,
+/// - **proposal**: its key is under no calendar of the series file, its series is in the file's
+///   `ended` map or ends before `today` (fix round 1, m3), a note (confirmed, a marker,
 ///   the planning day) has its key, or a confirmed note has its signature. "Under no calendar"
 ///   is read only from a file that knows at least one calendar: an empty file (never written,
 ///   or unreadable this run) says nothing about what left it.
@@ -3750,6 +3825,7 @@ pub fn withdrawal_reason(
     file: &SeriesFile,
     set: &Commitments,
     codes: &Codes,
+    today: Date,
 ) -> Option<String> {
     match shape(meta) {
         Shape::Change(target) => stale_change(vault, &target, meta),
@@ -3766,8 +3842,17 @@ pub fn withdrawal_reason(
             if key.is_empty() {
                 return None;
             }
-            if !file.calendars.is_empty() && !file.by_key().contains_key(key.as_str()) {
+            let by_key = file.by_key();
+            if !file.calendars.is_empty() && !by_key.contains_key(key.as_str()) {
                 return Some(format!("{key} left the calendar"));
+            }
+            // Fix round 1, m3: its series ended (the file's `ended` map), or now ends before
+            // `today` — P9 proposes neither, so the question is gone.
+            if file.ended.contains_key(&key) {
+                return Some(format!("{key} ended"));
+            }
+            if by_key.get(key.as_str()).is_some_and(|s| s.until.is_some_and(|until| until < today)) {
+                return Some(format!("{key} has finished"));
             }
             let noted = set
                 .confirmed

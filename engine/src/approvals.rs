@@ -1244,6 +1244,14 @@ fn transition_note(
         return Ok(());
     }
 
+    if kind == COMMITMENT_CHECK && matches!(status.as_str(), "refused" | "superseded") {
+        // Fix round 1, m1 (controller ruling): the settlement's stamp landed and the run died
+        // before the move. Finish it, quietly. `commitment-check` only: the amend path keeps its
+        // behaviour.
+        delete(vault, &rel, ctx, journal)?;
+        return Ok(());
+    }
+
     if status == "executed" {
         // Stamped by the cloud calendar executor; archiving is our job.
         delete(vault, &rel, ctx, journal)?;
@@ -1460,8 +1468,8 @@ fn transition_note(
 ///
 /// **No cap-charge loop, by construction:** each condition also stops P9's `proposals` or P12's
 /// `detect_changes` producing that card again, except an edited `was`, where the change is asked
-/// once more with the new `was` and that card then survives. `today` is taken for the caller's
-/// symmetry with the other passes; there is no expiry (R9).
+/// once more with the new `was` and that card then survives. `today` dates the "series has
+/// finished" test (fix round 1, m3); there is no expiry (R9).
 ///
 /// Never raises into the run: returns `(withdrawn stems, warnings)`, one `transition failed:`
 /// warning per card that could not be moved.
@@ -1469,7 +1477,7 @@ pub fn withdraw_stale(
     vault: &Path,
     file: &SeriesFile,
     set: &Commitments,
-    _today: Date,
+    today: Date,
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> (Vec<String>, Vec<String>) {
@@ -1488,7 +1496,7 @@ pub fn withdraw_stale(
         {
             continue;
         }
-        if crate::commitments::withdrawal_reason(vault, &meta, file, set, &codes).is_none() {
+        if crate::commitments::withdrawal_reason(vault, &meta, file, set, &codes, today).is_none() {
             continue;
         }
         let rel = rel_path(vault, &path);
@@ -4615,6 +4623,186 @@ mod tests {
             let file = file_of(vec![], &[GOOGLE]);
             assert!(withdraw(&v, &file).0.is_empty());
             assert!(v.join("approvals").join("p.md").exists());
+        }
+
+        // ---- fix round 1 ----
+
+        /// One rank's commitment passes, as P16 will run them: withdraw, detect, file.
+        fn rank_once(vault: &Path, file: &SeriesFile) {
+            withdraw(vault, file);
+            let set = commitments::load(vault);
+            let (codes, _) = commitments::Codes::load(vault);
+            let fresh: BTreeSet<String> = file.calendars.keys().cloned().collect();
+            let (changes, _) = commitments::detect_changes(file, &set, &codes, &[], &fresh, TODAY);
+            let ctx = WriteContext::new("agent:rank", "cli");
+            let mut journal = Journal::new(vault);
+            commitments::emit_checks(vault, &[], &changes, TODAY, 15, &ctx, &mut journal);
+        }
+
+        #[test]
+        fn a_hand_written_list_where_is_read_as_absent_and_never_refiled() {
+            // I1: `load` reads a collection `where:` as absent, so P12 writes `was: {where: null}`;
+            // the staleness test must read it the same way, or the card loops file → withdraw → file.
+            let v = vault();
+            let target = note(
+                &v,
+                "cs-100.md",
+                "type: commitment\nkind: class\ntitle: \"CS 100\"\ncourse: cs-100\n\
+                 meets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]\n\
+                 where: [Room 1, Room 2]\nsource_uid: \"gcal-series:cs100\"\nstatus: confirmed",
+            );
+            let mut live = series(CS100, GOOGLE, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50));
+            live.where_ = Some("Room 2".into());
+            let file = file_of(vec![live], &[GOOGLE]);
+
+            rank_once(&v, &file);
+            rank_once(&v, &file);
+            let pending = files(&v, "approvals");
+            assert_eq!(pending.len(), 1, "{pending:?}");
+            assert!(files(&v, "archive").is_empty(), "{:?}", files(&v, "archive"));
+            let card = v.join("approvals").join(&pending[0]);
+            assert_eq!(read(&card).lines().filter(|l| l.starts_with("was: {where: null}")).count(), 1, "{}", read(&card));
+
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(field(&target, "where"), "Room 2");
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        /// The console's approval, then the settlement, then a crash before the stamp: the card is
+        /// left `approved` with its write done.
+        fn settle_then_crash(vault: &Path, card: &Path) {
+            let console = WriteContext::new("quinn", "dashboard");
+            let mut journal = Journal::new(vault);
+            let literals = vec![("status".to_string(), "approved".to_string())];
+            write_literals(vault, &rel_path(vault, card), &literals, &console, &mut journal, &WriteOpts::default())
+                .unwrap();
+            let settled = commitments::settle_approved(vault, &front(card), TODAY, &default_ctx(), &mut journal)
+                .unwrap();
+            assert_eq!(settled, commitments::Settled::Executed);
+        }
+
+        #[test]
+        fn a_change_settled_before_a_crash_is_stamped_executed_on_the_rerun() {
+            let v = vault();
+            let target = cs100_note(&v);
+            let card = emit(
+                &v,
+                &[],
+                &[change(mapping(&[("meets", tue_thu_value())]), mapping(&[("meets", mwf_value())]))],
+            );
+            settle_then_crash(&v, &card);
+            let after = read(&target);
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(read(&target), after);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn a_note_created_before_a_crash_is_stamped_executed_on_the_rerun() {
+            let v = vault();
+            let card = card(&v, cs100());
+            settle_then_crash(&v, &card);
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments"), vec!["cs-100.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_planning_day_created_before_a_crash_is_stamped_executed_on_the_rerun() {
+            let v = vault();
+            let card = card(&v, window());
+            settle_then_crash(&v, &card);
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments"), vec!["planning-day.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_note_confirmed_before_the_approval_is_still_refused() {
+            // The journal's create record predates the student's approval: another answer.
+            let v = vault();
+            let card = card(&v, cs100());
+            let mut journal = Journal::new(&v);
+            let mut map = Mapping::new();
+            for (k, val) in [
+                ("kind", s("class")),
+                ("title", s("CS 100")),
+                ("meets", tue_thu_value()),
+            ] {
+                map.insert(s(k), val);
+            }
+            commitments::create_confirmed(&v, &map, CS100, TODAY, &default_ctx(), &mut journal).unwrap();
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+            assert_eq!(field(&archived(&v, &card), "status"), "refused");
+        }
+
+        #[test]
+        fn a_stamped_card_left_in_approvals_by_a_crash_is_archived_quietly() {
+            // m1 (controller ruling): the stamp landed, the move did not.
+            for status in ["refused", "superseded"] {
+                let v = vault();
+                let card = card(&v, cs100());
+                let literals = vec![("status".to_string(), status.to_string())];
+                let mut journal = Journal::new(&v);
+                write_literals(&v, &rel_path(&v, &card), &literals, &default_ctx(), &mut journal, &WriteOpts::default())
+                    .unwrap();
+                let result = run(&v);
+                assert!(result.warnings.is_empty(), "{status}: {:?}", result.warnings);
+                assert!(!card.exists());
+                assert_eq!(field(&archived(&v, &card), "status"), status);
+            }
+        }
+
+        #[test]
+        fn a_refused_amend_left_in_approvals_still_warns() {
+            // m1 is for commitment-check cards only; the amend path is unchanged.
+            let v = vault();
+            super::proposal(&v, "a.md", &AMEND.replace("status: pending", "status: refused"), "");
+            let result = run(&v);
+            assert_eq!(result.warnings, vec!["unknown status: a.md".to_string()]);
+        }
+
+        #[test]
+        fn a_proposal_card_whose_series_ended_is_withdrawn() {
+            // m3 (controller ruling): the key is in the file's `ended` map.
+            let v = vault();
+            let pending = card(&v, cs100());
+            let mut file = SeriesFile::default();
+            file.ended.insert(
+                CS100.to_string(),
+                commitments::Ended { calendar: GOOGLE.into(), dropped: TODAY, last_instance: None, until: None },
+            );
+            assert_eq!(withdraw(&v, &file).0.len(), 1);
+            assert_eq!(field(&archived(&v, &pending), "status"), "superseded");
+        }
+
+        #[test]
+        fn a_proposal_card_whose_series_has_finished_is_withdrawn() {
+            // m3 (the review's case): the series now ends before today, so P9 no longer proposes it.
+            let v = vault();
+            let pending = card(&v, cs100());
+            let mut done = cs100_series(GOOGLE);
+            done.until = Some(Date::constant(2026, 8, 19));
+            let file = file_of(vec![done], &[GOOGLE]);
+            assert_eq!(withdraw(&v, &file).0.len(), 1);
+            assert_eq!(field(&archived(&v, &pending), "status"), "superseded");
+        }
+
+        #[test]
+        fn rejecting_a_card_whose_key_is_confirmed_writes_no_marker() {
+            // m5: another desktop confirmed it; a marker beside the note would say the opposite.
+            let v = vault();
+            let card = card(&v, cs100());
+            cs100_note(&v);
+            let result = decide(&v, &card, "rejected");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments"), vec!["cs-100.md"]);
         }
 
         #[test]
