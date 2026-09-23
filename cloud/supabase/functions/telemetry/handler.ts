@@ -142,9 +142,10 @@ export interface Deps {
   verify: VerifyToken;
   saveEvents: (rows: unknown[]) => Promise<void>;
   saveCorrections: (rows: unknown[]) => Promise<void>;
-  /** F7: which of `ids` are `judgments` rows of `accountId`. Called at most once per batch, and only
-   * when the batch holds an id-bearing row; a rejection fails the whole batch before anything saves. */
-  ownedJudgments: (accountId: string, ids: string[]) => Promise<Set<string>>;
+  /** F7: which of `ids` are `judgments` rows of `accountId`, each mapped to its real `judgments.kind`
+   * (lowercased id → kind). Called at most once per batch, and only when the batch holds an id-bearing
+   * row; a rejection fails the whole batch before anything saves. */
+  ownedJudgments: (accountId: string, ids: string[]) => Promise<Map<string, string>>;
 }
 
 /** The last row wins, keyed on exactly the migration's own unique-constraint columns — a batch
@@ -240,13 +241,30 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   // the device retries the whole batch next slot.
   const plain = dedupedCorrections.filter((r) => r.judgment_id === undefined);
   const labelled = dedupedCorrections.filter((r) => r.judgment_id !== undefined);
-  let owned = labelled;
-  if (labelled.length) {
-    const ids = [...new Set(labelled.map((r) => r.judgment_id as string))];
+  // Fix round 1 (review M-1): the event card exists only for an `unsure` judgment, so a verdict row
+  // whose `ours` is anything else, or whose answer is `unsure` again, labels nothing a student
+  // corrected; it would mark a judgment wrong that nobody disagreed with. Dropped and counted as
+  // `refused`, never 400ed, for the same retry reason as `unowned` below.
+  const answerable = labelled.filter((r) =>
+    r.field !== "verdict" || (r.ours === "unsure" && r.theirs !== "unsure")
+  );
+  let owned: CorrectionRow[] = [];
+  if (answerable.length) {
+    const ids = [...new Set(answerable.map((r) => r.judgment_id as string))];
     const mine = await deps.ownedJudgments(user.id, ids);
-    // Dropped and counted, never 400ed: a judgment can legitimately vanish (retention, account
-    // deletion), and a 400 would have the device resend the same batch forever.
-    owned = labelled.filter((r) => mine.has(r.judgment_id as string));
+    // Dropped and counted as `unowned`, never 400ed: a judgment can legitimately vanish (retention,
+    // account deletion), and a 400 would have the device resend the same batch forever.
+    // Fix round 1 (review I-1): ownership alone is not enough. The claimed kind must be the
+    // judgment's real kind, and a real `email` judgment is never labelled here, whatever the row
+    // claims (Gmail Limited Use: `promote_rules` joins on `judgment_id` and reads `j.kind` from the
+    // judgment, so a mislabelled row would carry an email-derived decision into the rules path).
+    // The saved row carries the server's kind, never the device's.
+    owned = answerable.flatMap((r) => {
+      const real = mine.get(r.judgment_id as string);
+      return real === undefined || real === "email" || real !== r.judgment_kind
+        ? []
+        : [{ ...r, judgment_kind: real }];
+    });
   }
 
   if (dedupedEvents.length) await deps.saveEvents(dedupedEvents);
@@ -256,9 +274,14 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (plain.length) await deps.saveCorrections(plain);
   if (owned.length) await deps.saveCorrections(owned);
   const counts = { events: dedupedEvents.length, corrections: plain.length + owned.length };
-  // `unowned` appears only when the batch held a labelled row, so a batch from today's app gets
-  // exactly the response it always got.
-  return json(200, labelled.length ? { ...counts, unowned: labelled.length - owned.length } : counts);
+  // `unowned` (not the caller's judgment, or not of the kind claimed) and `refused` (a verdict row
+  // that answers nothing) appear only when the batch held a labelled row, so a batch from today's
+  // app gets exactly the response it always got.
+  const refused = labelled.length - answerable.length;
+  return json(
+    200,
+    labelled.length ? { ...counts, unowned: answerable.length - owned.length, refused } : counts,
+  );
 }
 
 /** A saved `corrections` row. `judgment_id`/`judgment_kind` are present only on a label row: a

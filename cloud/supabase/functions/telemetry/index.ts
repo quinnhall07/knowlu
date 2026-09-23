@@ -16,12 +16,14 @@ Deno.serve(async (req) => {
       // nothing but hex and dashes reaches the `in.(...)` list; a failed select throws, and the batch
       // is a 5xx that saved nothing.
       ownedJudgments: async (accountId, ids) => {
-        const rows = await restSelect<{ id: string }>(
+        // The kind comes back too (review I-1): the handler keeps a label only when the claimed kind
+        // is the judgment's real one, and never when that is `email`.
+        const rows = await restSelect<{ id: string; kind: string }>(
           rest,
           "judgments",
-          `select=id&account_id=eq.${encodeURIComponent(accountId)}&id=in.(${ids.join(",")})`,
+          `select=id,kind&account_id=eq.${encodeURIComponent(accountId)}&id=in.(${ids.join(",")})`,
         );
-        return new Set(rows.map((r) => r.id.toLowerCase()));
+        return new Map(rows.map((r) => [r.id.toLowerCase(), r.kind]));
       },
     });
   } catch (e) {

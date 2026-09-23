@@ -13,7 +13,8 @@ const base = {
   saveEvents: () => Promise.resolve(),
   saveCorrections: () => Promise.resolve(),
   // F7: a batch with no id-bearing row never asks; a test that expects the lookup overrides this.
-  ownedJudgments: (): Promise<Set<string>> => Promise.reject(new Error("unexpected ownership lookup")),
+  ownedJudgments: (): Promise<Map<string, string>> =>
+    Promise.reject(new Error("unexpected ownership lookup")),
 };
 
 Deno.test("the action vocabulary is the engine's eleven, in the engine's order", () => {
@@ -373,10 +374,17 @@ Deno.test("an event batch carrying extra fields reaches saveEvents with exactly 
 const J1 = "11111111-1111-4111-8111-111111111111";
 const J2 = "22222222-2222-4222-8222-222222222222";
 
-/** `base`, plus an `ownedJudgments` that owns every id it is asked about. */
+/** The kind each test judgment really has on the server (`judgments.kind`). */
+const KINDS: Record<string, string> = { [J1]: "event", [J2]: "task" };
+
+/** `ids`, each owned with its real kind from `KINDS`: what `index.ts`'s lookup returns. */
+const ownedAs = (ids: string[], kinds: Record<string, string> = KINDS) =>
+  Promise.resolve(new Map(ids.filter((id) => id in kinds).map((id) => [id, kinds[id]])));
+
+/** `base`, plus an `ownedJudgments` that owns every test judgment it is asked about. */
 const owning = {
   ...base,
-  ownedJudgments: (_account: string, ids: string[]) => Promise.resolve(new Set(ids)),
+  ownedJudgments: (_account: string, ids: string[]) => ownedAs(ids),
 };
 
 const verdictRow = (overrides: Record<string, unknown> = {}) => ({
@@ -427,7 +435,7 @@ Deno.test("a verdict label with a judgment_id is saved with it", async () => {
     },
   });
   assertEquals(res.status, 200);
-  assertEquals(await res.json(), { events: 0, corrections: 1, unowned: 0 });
+  assertEquals(await res.json(), { events: 0, corrections: 1, unowned: 0, refused: 0 });
   assertEquals(saved, [{
     account_id: "acc-1",
     ts: "2026-09-23T12:00:00.000Z",
@@ -474,7 +482,7 @@ Deno.test("plain rows and id-bearing rows reach saveCorrections in separate call
     },
   });
   assertEquals(res.status, 200);
-  assertEquals(await res.json(), { events: 0, corrections: 3, unowned: 0 });
+  assertEquals(await res.json(), { events: 0, corrections: 3, unowned: 0, refused: 0 });
   assertEquals(calls.length, 2);
   const plain = calls.find((c) => c.some((r) => r.field === "effort_hours"))!;
   const labels = calls.find((c) => c.some((r) => r.field === "verdict"))!;
@@ -494,7 +502,7 @@ Deno.test("today's correction rows are saved exactly as before", async () => {
     ...base,
     ownedJudgments: () => {
       lookups++;
-      return Promise.resolve(new Set<string>());
+      return Promise.resolve(new Map<string, string>());
     },
     saveCorrections: (rows) => {
       saved = rows;
@@ -546,7 +554,7 @@ Deno.test("a judgment_id the caller does not own is dropped and counted", async 
     ...base,
     ownedJudgments: (account: string, ids: string[]) => {
       asked = [account, [...ids].sort()];
-      return Promise.resolve(new Set([J1]));
+      return ownedAs(ids, { [J1]: "event" });
     },
     saveCorrections: (rows) => {
       saved = rows as Record<string, unknown>[];
@@ -554,7 +562,7 @@ Deno.test("a judgment_id the caller does not own is dropped and counted", async 
     },
   });
   assertEquals(res.status, 200);
-  assertEquals(await res.json(), { events: 0, corrections: 1, unowned: 1 });
+  assertEquals(await res.json(), { events: 0, corrections: 1, unowned: 1, refused: 0 });
   assertEquals(asked, ["acc-1", [J1, J2]]);
   assertEquals(saved.map((r) => r.judgment_id), [J1]);
 });
@@ -580,3 +588,65 @@ Deno.test("an ownership lookup failure saves nothing", async () => {
 function plainEvent() {
   return { ts: "2026-09-23T12:00:00.000Z", session: "s", view: "today", action: "view_opened" };
 }
+
+// ---- F7 fix round 1 (review I-1, M-1, M-3) ----
+
+/** Runs one batch through `handle` with `ownedJudgments` answering from `kinds`, and returns the
+ * response body and every row that reached `saveCorrections`. */
+async function run(corrections: unknown[], kinds: Record<string, string>) {
+  const saved: Record<string, unknown>[] = [];
+  const res = await handle(req({ events: [], corrections }), {
+    ...base,
+    ownedJudgments: (_account: string, ids: string[]) => ownedAs(ids, kinds),
+    saveCorrections: (rows) => {
+      saved.push(...rows as Record<string, unknown>[]);
+      return Promise.resolve();
+    },
+  });
+  assertEquals(res.status, 200);
+  return { body: await res.json(), saved };
+}
+
+Deno.test("a label whose judgment is really an email judgment is not saved, whatever kind it claims", async () => {
+  // Review I-1: the caller owns J2, but it is an email judgment on the server. Claiming "task"
+  // must not carry an email-derived decision into promote_rules (Gmail Limited Use).
+  const { body, saved } = await run([decisionRow({ judgment_kind: "task" })], { [J2]: "email" });
+  assertEquals(body, { events: 0, corrections: 0, unowned: 1, refused: 0 });
+  assertEquals(saved, []);
+});
+
+Deno.test("a label whose claimed kind differs from the judgment's real kind is dropped and counted", async () => {
+  // J2 is really an event judgment; the row claims "task".
+  const { body, saved } = await run([decisionRow({ judgment_kind: "task" })], { [J2]: "event" });
+  assertEquals(body, { events: 0, corrections: 0, unowned: 1, refused: 0 });
+  assertEquals(saved, []);
+});
+
+Deno.test("a saved label carries the server's kind for its judgment", async () => {
+  const { saved } = await run([decisionRow({ judgment_kind: "event", kind: "event" })], { [J2]: "event" });
+  assertEquals(saved.map((r) => [r.judgment_id, r.judgment_kind]), [[J2, "event"]]);
+});
+
+Deno.test("a verdict row whose ours is not unsure is dropped and counted as refused", async () => {
+  // Review M-1: the event card exists only for an `unsure` judgment. A verdict row with any other
+  // `ours` (or an answer of `unsure` again) would mark a judgment wrong that nobody corrected.
+  const { body, saved } = await run(
+    [
+      verdictRow({ ours: "obligation", theirs: "obligation" }),
+      verdictRow({ ts: "2026-09-23T12:01:00.000Z", ours: "drop", theirs: "obligation" }),
+      verdictRow({ ts: "2026-09-23T12:02:00.000Z", ours: "unsure", theirs: "unsure" }),
+      verdictRow({ ts: "2026-09-23T12:03:00.000Z", ours: "unsure", theirs: "drop" }),
+    ],
+    KINDS,
+  );
+  assertEquals(body, { events: 0, corrections: 1, unowned: 0, refused: 3 });
+  assertEquals(saved.map((r) => [r.ours, r.theirs]), [["unsure", "drop"]]);
+});
+
+Deno.test("an uppercase judgment_id still matches its judgment and is saved lowercased", async () => {
+  // Review M-3: Postgres prints uuids in lowercase; a device sending uppercase must not be unowned.
+  const J3 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const { body, saved } = await run([verdictRow({ judgment_id: J3.toUpperCase() })], { [J3]: "event" });
+  assertEquals(body, { events: 0, corrections: 1, unowned: 0, refused: 0 });
+  assertEquals(saved.map((r) => r.judgment_id), [J3]);
+});
