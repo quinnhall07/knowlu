@@ -967,8 +967,11 @@ fn app_scheduled(v: &Path) {
 /// R-C1c-8: the first-run view reads `Scheduler.live` while a slot runs, because `Scheduler.last`
 /// is written only when the slot ends — by which time `rank` has written the day and the view is
 /// gone. So every step the slot records has to reach `live` as it lands, from every kind of site
-/// (a named skip, a child, the push, the backup, telemetry), and when the slot is over the two
-/// lists are the same list. `current` names a step in progress; a finished slot has none.
+/// (a named skip, a child, the backup, telemetry), and when the slot is over the two lists are the
+/// same list. `current` names a step in progress; a finished slot has none.
+///
+/// The sync steps are not named (R-C1c-final2 M2): C3′ replaces the pull and the push with a `sync`
+/// child, and `live.steps == summary.steps` already covers whatever the slot records.
 ///
 /// The `cmd` stand-in engine and a temp `LOCALAPPDATA`, under `ENGINE_ENV_LOCK`, exactly as the
 /// skip tests above.
@@ -993,7 +996,7 @@ fn a_slot_publishes_every_step_it_records_while_it_runs() {
     assert_eq!(live.steps, s.steps, "the published list is the slot's own list, step for step");
     assert!(live.current.is_none(), "a slot that has ended has nothing in progress: {live:?}");
     let named: Vec<&str> = live.steps.iter().map(|(n, _)| n.as_str()).collect();
-    for want in ["ingest (skipped: no ics_url)", "coursework", "rank", "push", "backup", "telemetry (skipped: no account)"] {
+    for want in ["ingest (skipped: no ics_url)", "coursework", "rank", "backup", "telemetry (skipped: no account)"] {
         assert!(named.contains(&want), "{want} did not reach the published list: {named:?}");
     }
     assert!(named.iter().any(|n| n.starts_with("judge (skipped:")), "{named:?}");

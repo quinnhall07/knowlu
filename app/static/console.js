@@ -601,7 +601,11 @@
   // The steps the student is told about, by the step name's first word (before any space or
   // parenthesis: `judge (skipped: no entitlement)` is `judge`). The slot's other steps (the sync pull
   // and push, the backup, the usage upload, an `engine: …` line) are the Runs view's, not this one's.
+  //
+  // `sync` is C3′'s step, not a step on this branch yet: its sentence is here before the merge so a
+  // merged first run shows its first seconds in progress (R-C1c-final2 M2).
   var FIRST_RUN_SAYS = {
+    sync: "Syncing with your account",
     entitlement: "Checking your account",
     coursework: "Fetching your coursework",
     ingest: "Reading your school calendar",
@@ -613,12 +617,14 @@
     return Object.prototype.hasOwnProperty.call(FIRST_RUN_SAYS, word) ? FIRST_RUN_SAYS[word] : null;
   }
   // One row: its mark (a shape per state, so it never rests on colour alone) and its sentence.
-  // A skip says the word; the other three states are named for a screen reader on the mark.
-  function firstRunRow(state, says) {
+  // A skip says the word; the other three states are named for a screen reader on the mark, and a
+  // row may carry a short note of its own.
+  function firstRunRow(state, says, note) {
     var label = { done: "done", now: "in progress", failed: "failed" }[state];
+    var said = state === "skipped" ? "skipped" : note;
     return '<li class="fr-step" data-state="' + state + '"><span class="fr-mark"' +
       (label ? ' role="img" aria-label="' + label + '"' : ' aria-hidden="true"') + "></span>" +
-      '<span class="fr-say">' + h(says) + "</span>" + (state === "skipped" ? '<span class="fr-note">skipped</span>' : "") + "</li>";
+      '<span class="fr-say">' + h(says) + "</span>" + (said ? '<span class="fr-note">' + h(said) + "</span>" : "") + "</li>";
   }
   function renderFirstRun(fr) {
     fr = fr || {};
@@ -627,8 +633,12 @@
     var rows = [];
     (fr.steps || []).forEach(function (s) {
       var says = firstRunSays(s[0]); if (!says) { return; }
-      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 ? "done" : "failed");
-      rows.push(firstRunRow(state, says));
+      // R-C1c-final2 M1: an account check that could not reach the service lands at code 0 (a
+      // network is not a failed slot, for the tray or the retry ladder), but a check mark would say
+      // it worked. It shows as failed, with a note; the "didn't finish" line below still reads codes.
+      var unchecked = String(s[0]).indexOf("entitlement (refresh failed") === 0;
+      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 && !unchecked ? "done" : "failed");
+      rows.push(firstRunRow(state, says, unchecked ? "couldn't check — will retry" : null));
     });
     // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
     var now = fr.running ? firstRunSays(fr.current) : null;

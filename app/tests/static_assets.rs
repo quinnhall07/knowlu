@@ -650,8 +650,15 @@ fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
     ] {
         assert!(js.contains(&format!("\"{say}\"")), "the step sentence {say:?}");
     }
+    // R-C1c-final2 M2: C3′ makes `sync` a slot step; its sentence is here before the merge, so the
+    // first seconds of a merged first run are not a view with nothing in progress.
+    assert!(js.contains("sync: \"Syncing with your account\""), "the sync step's sentence");
     let render = js.split("function renderFirstRun(").nth(1).and_then(|s| s.split("function hideFirstRun(").next()).expect("renderFirstRun");
     assert!(render.contains("fr.current"), "the step in progress is the live slot's own");
+    // R-C1c-final2 M1: a failed account check lands at code 0 (a network is not a failed slot), and
+    // is shown as what it is — the failed mark and a short note — never as a check mark.
+    assert!(render.contains("String(s[0]).indexOf(\"entitlement (refresh failed\") === 0"), "the failed account check is recognised by name");
+    assert!(render.contains("\"couldn't check — will retry\""), "…and says so in a short note");
     // R-C1c-exec-8a (M2): an ended slot with ANY failed step, listed or not (`engine: …` at -1 is
     // not), says it did not finish.
     assert!(

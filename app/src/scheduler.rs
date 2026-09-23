@@ -94,7 +94,7 @@ pub struct Scheduler {
 
 /// What `Scheduler.live` holds: the steps the running slot has recorded so far, in `RunSummary.steps`'
 /// own shape, and the step doing its work right now (named as it will be recorded, or by that name's
-/// first word when the recorded name adds a note: `pull`, `entitlement`). `None` between steps and
+/// first word when the recorded name adds a note, as `entitlement` does). `None` between steps and
 /// once the slot has ended.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct LiveSlot {

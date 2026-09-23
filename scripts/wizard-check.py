@@ -116,7 +116,8 @@ D7 = "Knowlu is doing its first run. Your day appears here in about a minute."
 CONSOLE_FAKE = r"""
 window.__FIRST_RUN = { running: true, current: "judge",
                        steps: [["pull", 0], ["ingest (skipped: no ics_url)", 0],
-                               ["entitlement (refreshed)", 0], ["coursework", 0]] };
+                               ["entitlement (refresh failed: the account service did not answer)", 0],
+                               ["coursework", 0]] };
 window.__RANKED = window.__STATE;
 window.__STATE = JSON.parse(JSON.stringify(window.__RANKED));
 window.__STATE.must_do.groups = [];
@@ -429,12 +430,16 @@ def check_first_run(page, errors) -> list:
     for sel, what in THE_DAY:
         if page.is_visible(sel): bad.append(f"{what} is on screen beside the first-run view")
     if D7 not in fr["text"]: bad.append(f"the first-run view does not say D7's sentence: {fr['text']!r}")
-    for say, state in [("Checking your account", "done"), ("Fetching your coursework", "done"),
+    for say, state in [("Checking your account", "failed"), ("Fetching your coursework", "done"),
                        ("Reading your school calendar", "skipped"), ("Working out what each task needs", "now")]:
         if listed(fr, say) != [state]: bad.append(f"{say!r} is not listed once as {state!r}: {fr['rows']!r}")
     if not any("Reading your school calendar" in r["text"] and "skipped" in r["text"] for r in fr["rows"]):
         bad.append(f"the skipped step does not say it was skipped: {fr['rows']!r}")
     if any("pull" in r["text"].lower() for r in fr["rows"]): bad.append(f"the pull, which is not listed, has a row: {fr['rows']!r}")
+    # R-C1c-final2 M1: the account check that could not reach the service lands at code 0, and the
+    # view shows it as failed with a short note — never as a check mark.
+    if not any("Checking your account" in r["text"] and "couldn't check" in r["text"] for r in fr["rows"]):
+        bad.append(f"the failed account check does not say it could not check: {fr['rows']!r}")
     if len(fr["rows"]) != 4: bad.append(f"the view does not list exactly the four named steps: {fr['rows']!r}")
     if page.is_visible("#first-run-end"): bad.append("a slot still running says the first run did not finish")
     if not fr["headline"].strip(): bad.append("the day did not paint behind the first-run view")
@@ -478,6 +483,14 @@ def check_first_run(page, errors) -> list:
     fr = first_run_block(page)
     if not page.is_visible("#first-run-end"): bad.append(f"a first slot that failed on an unlisted step did not say it did not finish: {fr['rows']!r}")
     if [r["state"] for r in fr["rows"]] != ["skipped"]: bad.append(f"the unlisted steps were listed: {fr['rows']!r}")
+    # …while the line itself keys on codes alone: an ended slot whose only trouble is that account
+    #    check (code 0) marks the row failed and does not say the run did not finish.
+    page.evaluate("""window.__FIRST_RUN = { running: false, current: null, steps: [
+      ["entitlement (refresh failed: the account service did not answer)", 0], ["coursework", 0]] }""")
+    page.wait_for_timeout(3600)
+    fr = first_run_block(page)
+    if listed(fr, "Checking your account") != ["failed"]: bad.append(f"an ended slot's failed account check is not marked failed: {fr['rows']!r}")
+    if page.is_visible("#first-run-end"): bad.append("a code-0 account check made the view say the first run did not finish")
     # 5. More than the two-second dwell has passed in first-run mode: a row nobody could see must
     #    never have been reported as seen.
     seen = page.evaluate("window.__CALLS.filter(c => c[0] === 'ui_event' && c[1] && c[1].action === 'object_seen').length")
