@@ -17,11 +17,15 @@
 //!    never validate against it;
 //! 3. a note whose `status` the journal shows the student set by hand (`op: set`) is left alone —
 //!    they have already taken a position on whether it is finished;
-//! 4. **one proposal per task, ever**: any `kind: amend` card for this target that moves `status`
+//! 4. **one proposal per task, ever**: any `kind: amend` card for this note that moves `status`
 //!    to `done` — pending, snoozed, approved, rejected, executed, in `approvals/` or `archive/` —
 //!    means the question has been asked. A rejection therefore sticks: `process_approvals` moves a
 //!    rejected card to `archive/` keeping its frontmatter, and this scan reads `archive/` too.
-//!    That is the same shape `coursework::asked_map_keys` gives coursework-map cards.
+//!    That is the same shape `coursework::asked_map_keys` gives coursework-map cards. The card
+//!    carries the note's opaque `target_id:` alongside its `target:` path, and [`already_proposed`]
+//!    matches by `target_id` whenever both the card and the note have one — a path is not the
+//!    note's identity (F11): a rollover can reuse a path for an unrelated note, and a note can be
+//!    renamed without losing its `id:`.
 //!
 //! [`propose_done`] is the one public entry point a second evidence source (T9's email receipts)
 //! calls; [`propose_vendor_completions`] is the tier-1 caller that maps vendor uids to task notes.
@@ -144,9 +148,17 @@ fn text_of(meta: &Mapping, key: &str) -> Option<String> {
     crate::yaml::get(meta, key).and_then(crate::yaml::text)
 }
 
-/// Has a `status → done` card ever been filed for `target_rel`? Reads `approvals/` **and**
+/// Has a `status → done` card ever been filed for this note? Reads `approvals/` **and**
 /// `archive/`, whatever the card's own status, so a rejected card keeps the question closed.
-pub fn already_proposed(vault: &Path, target_rel: &str) -> bool {
+///
+/// `target_id` is the note's own `id:`, if it has one. A card matches:
+/// - by `target_id`, when both the card and the note have one — that survives a rename and, at a
+///   reused path, tells last term's archived card apart from this term's new note (F11);
+/// - by path (`target_rel`) otherwise — a legacy card with no `target_id` (none have shipped; T8
+///   is unreleased), or a note with no `id:`.
+///
+/// `id:` is the vault's opaque identity (CLAUDE.md); a path is not.
+pub fn already_proposed(vault: &Path, target_rel: &str, target_id: Option<&str>) -> bool {
     for folder in ["approvals", "archive"] {
         let folder = vault.join(folder);
         if !folder.is_dir() {
@@ -156,8 +168,15 @@ pub fn already_proposed(vault: &Path, target_rel: &str) -> bool {
             let Some(meta) = read_meta(&path) else { continue };
             if text_of(&meta, "type").as_deref() != Some("approval")
                 || text_of(&meta, "kind").as_deref() != Some("amend")
-                || text_of(&meta, "target").as_deref() != Some(target_rel)
             {
+                continue;
+            }
+            let card_target_id = text_of(&meta, "target_id");
+            let matches_target = match (card_target_id.as_deref(), target_id) {
+                (Some(card_id), Some(note_id)) => card_id == note_id,
+                _ => text_of(&meta, "target").as_deref() == Some(target_rel),
+            };
+            if !matches_target {
                 continue;
             }
             let Some(Value::Mapping(changes)) = crate::yaml::get(&meta, "changes") else { continue };
@@ -198,15 +217,16 @@ pub fn propose_done(
         Some(other) => return Ok(Outcome::Skipped(format!("status is {other}"))),
         None => return Ok(Outcome::Skipped("no status field".to_string())),
     }
-    if let Some(id) = text_of(&meta, "id") {
+    let note_id = text_of(&meta, "id");
+    if let Some(id) = &note_id {
         let by_hand = journal
-            .human_set(&id, "status")
+            .human_set(id, "status")
             .filter(|r| r.get("op").and_then(Json::as_str) == Some("set"));
         if by_hand.is_some() {
             return Ok(Outcome::Skipped("status set by hand".to_string()));
         }
     }
-    if already_proposed(vault, &target_rel) {
+    if already_proposed(vault, &target_rel, note_id.as_deref()) {
         return Ok(Outcome::Skipped("already proposed".to_string()));
     }
     if dry_run {
@@ -216,12 +236,20 @@ pub fn propose_done(
     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let title = text_of(&meta, "title").unwrap_or_else(|| stem.clone());
     use crate::yamlemit::Node;
-    let front = Node::map(vec![
+    let mut front_pairs = vec![
         ("type", Node::text("approval")),
         ("kind", Node::text("amend")),
         ("title", Node::text(&format!("Mark done: {title}"))),
         ("status", Node::text("pending")),
         ("target", Node::text(&target_rel)),
+    ];
+    // The note's own `id:`, when it has one — `already_proposed` matches on this so a rollover's
+    // reused path and a rename cannot fool it (F11). `target` stays the path: `validate_amendment`
+    // and `resolve_amend_target` still apply the change by path.
+    if let Some(id) = &note_id {
+        front_pairs.push(("target_id", Node::text(id)));
+    }
+    front_pairs.extend([
         // Honest, and what `derive_urgency` falls back on: finishing work lowers urgency.
         ("urgency", Node::text("decreases")),
         // Two distinct dates, never an anchor — see the ruling in `src/yamlemit.rs`.
@@ -238,6 +266,7 @@ pub fn propose_done(
             )]),
         ),
     ]);
+    let front = Node::Map(front_pairs.into_iter().map(|(k, v)| (Node::text(k), v)).collect());
     let evidence_json = evidence.to_json();
     let why = format!(
         "{}, so this looks finished. Approve to mark it done; reject and it will not be proposed \
@@ -421,6 +450,7 @@ mod tests {
     fn the_card_is_a_status_amend_under_the_completion_agent_with_its_evidence() {
         let vault = scratch("card");
         task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
         propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
         let card = &cards(&vault, "approvals")[0];
         assert_eq!(card.file_name().unwrap(), "amend-hw-01-done.md");
@@ -428,6 +458,9 @@ mod tests {
         assert_eq!(text_of(&m, "kind").as_deref(), Some("amend"));
         assert_eq!(text_of(&m, "status").as_deref(), Some("pending"));
         assert_eq!(text_of(&m, "target").as_deref(), Some("tasks/hw-01.md"));
+        // F11: the card also carries the note's `id:`, so completion matching survives a rename
+        // or a reused path (`already_proposed`), and `validate_amendment` still applies by path.
+        assert_eq!(text_of(&m, "target_id").as_deref(), Some(id.as_str()));
         assert_eq!(text_of(&m, "created_by").as_deref(), Some(ACTOR));
         assert!(crate::provenance::is_agent(ACTOR));
         assert_eq!(crate::approvals::as_date(crate::yaml::get(&m, "proposed_at")), Some(today()));
@@ -543,6 +576,7 @@ mod tests {
     fn an_unrelated_amend_card_on_the_same_task_does_not_count_as_already_proposed() {
         let vault = scratch("unrelated");
         task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
         let card = |name: &str, changes: &str| {
             let text = format!(
                 "---\ntype: approval\nkind: amend\ntitle: \"x\"\nstatus: pending\ntarget: tasks/hw-01.md\n\
@@ -553,12 +587,80 @@ mod tests {
         };
         card("amend-hw-01-due.md", "  due:\n    from: 2026-09-30T23:59\n    to: 2026-10-02T23:59\n");
         card("amend-hw-01-archive.md", "  status:\n    from: active\n    to: archived\n");
-        assert!(!already_proposed(&vault, "tasks/hw-01.md"));
+        assert!(!already_proposed(&vault, "tasks/hw-01.md", Some(&id)));
 
         let (log, warnings) =
             propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
         assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
-        assert!(already_proposed(&vault, "tasks/hw-01.md"));
+        assert!(already_proposed(&vault, "tasks/hw-01.md", Some(&id)));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F11: a rollover reuses a path — the archived card belongs to a different note (a different
+    /// `id:`) that once lived at `tasks/hw-01.md`. The new note at that same path must still be
+    /// proposed: matching by `target_id` is what keeps a stale path from silencing it.
+    #[test]
+    fn a_new_task_at_a_reused_path_is_still_proposed() {
+        let vault = scratch("reused-path");
+        let archived = "---\ntype: approval\nkind: amend\ntitle: \"x\"\nstatus: rejected\n\
+             target: tasks/hw-01.md\ntarget_id: id-old-a\nproposed_at: 2026-09-01\n\
+             first_proposed_at: 2026-09-01\ncreated_by: agent:knowlu.completion\n\
+             changes:\n  status:\n    from: active\n    to: done\n---\n\nbody\n";
+        std::fs::write(vault.join("archive").join("amend-hw-01-done.md"), archived).unwrap();
+
+        task(&vault, "hw-01", "zybooks:9", "active");
+        let (log, warnings) =
+            propose_vendor_completions(&vault, &[figure("zybooks:9", 10.0, 10.0)], today(), &ctx(), false);
+        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        assert_eq!(cards(&vault, "approvals").len(), 1);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F11: the note keeps its `id:` across a rename. A card filed under the old stem, carrying
+    /// `target_id`, must still close the question for the note at its new path.
+    #[test]
+    fn a_renamed_task_is_not_proposed_twice() {
+        let vault = scratch("renamed");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
+        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        assert_eq!(cards(&vault, "approvals").len(), 1);
+        let card_meta = meta(&cards(&vault, "approvals")[0]);
+        assert_eq!(text_of(&card_meta, "target_id").as_deref(), Some(id.as_str()));
+
+        std::fs::rename(vault.join("tasks/hw-01.md"), vault.join("tasks/hw-01-renamed.md")).unwrap();
+        let mut journal = Journal::new(&vault);
+        let outcome = propose_done(
+            &vault,
+            Path::new("tasks/hw-01-renamed.md"),
+            &figure("zybooks:1", 193.0, 193.0).evidence(),
+            today(),
+            &ctx().with_actor(ACTOR),
+            &mut journal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Skipped("already proposed".to_string()));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F11: a card filed before `target_id` existed has none. It must still close the question by
+    /// path — legacy cards, of which none have shipped, still count.
+    #[test]
+    fn a_legacy_card_without_target_id_still_matches_by_path() {
+        let vault = scratch("legacy");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let text = "---\ntype: approval\nkind: amend\ntitle: \"x\"\nstatus: pending\n\
+             target: tasks/hw-01.md\nproposed_at: 2026-09-01\nfirst_proposed_at: 2026-09-01\n\
+             created_by: agent:knowlu.completion\nchanges:\n  status:\n    from: active\n    to: done\n\
+             ---\n\nbody\n";
+        std::fs::write(vault.join("approvals").join("amend-hw-01-done.md"), text).unwrap();
+
+        let (log, warnings) =
+            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        assert!(log.is_empty(), "{log:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cards(&vault, "approvals").len(), 1, "no second card filed");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
