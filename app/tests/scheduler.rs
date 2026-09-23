@@ -700,8 +700,14 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
 ///
 /// Fix round 1, item 4: driven through `run_slot_inner`, exactly as its `…no_entitlement…` sibling
 /// above, so the name is true of the whole slot — not just of `judge_plan` in isolation.
+///
+/// R-C1c-11: this cache is now past-grace, so `run_slot_inner` attempts its own refresh before the
+/// judge decision (`a_stale_entitlement_is_refreshed_inside_the_slot_before_it_decides` proves the
+/// ordering) — which reaches `valid_access_token_at` and the real Credential Manager, so this test
+/// takes this file's lock too, as CLAUDE.md requires of every test that touches the store.
 #[test]
 fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{save_cache, EntitlementCache};
     let v = scratch("pastgrace");
     std::fs::write(
@@ -798,11 +804,109 @@ fn a_first_slot_refreshes_the_entitlement_before_it_decides_about_judge() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
-/// …and a cache that already exists is never refreshed here, even a stale one: the six-hourly
-/// housekeeping refresh and the 72-hour grace own that question, and a slot is not the place to
-/// re-ask one that has an answer.
+/// R-C1c-11: the same race Task 2 fixed for a cache that was MISSING also applies to one that
+/// EXISTS but is past its 72-hour grace. `scheduler::spawn` starts the first slot and the launch
+/// refresh on two threads; a student who reopens the laptop after a long weekend used to get a
+/// first slot with every cloud step skipped (`judge (skipped: no entitlement)`) while the launch
+/// refresh — and the six-hourly housekeeping refresh behind it — was still hours away. This proves
+/// the slot itself asks once, synchronously, before it decides, exactly as it already does for a
+/// cache that has never been written at all.
 #[test]
-fn a_cached_entitlement_is_never_refreshed_inside_the_slot() {
+fn a_stale_entitlement_is_refreshed_inside_the_slot_before_it_decides() {
+    // The refresh reaches `valid_access_token_at`, which reads the real Credential Manager
+    // (CLAUDE.md: every test that touches the store takes this file's lock).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entstale");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entstale");
+    // Well past the grace, computed from the clock at run time — never a hard-coded date.
+    let stale = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(100)).to_string();
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: Some("monthly".into()), checked_at: stale,
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entstale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    // R-C1c-final-3: the runner log gets the sanitized line, never the service's failure reason.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok entitlement (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and the same is true of a cache that is fresh but no longer `active`/`trialing` — cancelled,
+/// for instance. `checked_at` being recent does not matter: `account::decide` reads the status
+/// first, and a lapsed status is asked again exactly as a stale one is.
+#[test]
+fn a_cancelled_entitlement_is_asked_again_inside_the_slot() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entcancelled");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entcancelled");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "canceled".into(), current_period_end: None, plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entcancelled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and a cache that is FRESH and `active` — `Entitled` — is still never refreshed here: the
+/// six-hourly housekeeping refresh alone owns re-asking a question that already has a good answer.
+/// R-C1c-11 changes every OTHER cache shape (missing, stale, or no longer active/trialing); this is
+/// the one case that must not.
+#[test]
+fn a_fresh_active_entitlement_is_never_refreshed_inside_the_slot() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let v = scratch("entcached");
     std::fs::write(

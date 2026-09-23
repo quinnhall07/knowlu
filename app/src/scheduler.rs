@@ -671,11 +671,25 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // judge was skipped for want of a cache that landed eleven seconds later, and the day's tasks
     // sat unenriched until the next slot. One HTTPS round trip, under `account::TIMEOUT`.
     //
-    // A cache that exists is never refreshed here, even a stale one — the six-hourly housekeeping
-    // refresh and the 72-hour grace own that. A failure leaves no cache and `judge_plan_for` names
-    // the skip exactly as it does today: only a refusal from the service, never a missing cache,
-    // is what a student reads as "no entitlement".
-    if crate::account::cloud_config(&cs.vault).is_ok() && !crate::account::cache_path(&cs.data_dir).exists() {
+    // R-C1c-11: the same hole existed for a cache that EXISTS but no longer grants entitlement —
+    // past the 72-hour grace, or a status that is no longer `active`/`trialing`. A student who
+    // reopens the laptop after a long weekend used to get a first slot with every cloud step
+    // skipped while the launch refresh — and the six-hourly housekeeping refresh behind it — was
+    // still hours away. Stream C3′'s engine-side gate makes asking here worth even more: once it
+    // lands, the engine itself refuses `sync`, `coursework` and `ingest` on this same stale cache,
+    // so a slot that never re-asks would leave every step named a skip for a student who may
+    // already be entitled again. So the condition is now two questions, not one: is this vault a
+    // cloud vault at all (unlike the old `cloud_config(...).is_ok()`, this says nothing about
+    // whether that config is well-formed — `Unreadable` is asked again too, and fails fast, locally,
+    // on the same call), and does the cache on disk right now — missing, unreadable, past the grace,
+    // or not `active`/`trialing` — fall short of `Entitled`. A cache that IS `Entitled` (fresh and
+    // active) is still never refreshed here: the six-hourly housekeeping refresh alone owns that
+    // case. A failure leaves the previous cache exactly where it was and `judge_plan_for` names the
+    // skip exactly as it does today: only a refusal from the service, never a missing or stale
+    // cache, is what a student reads as "no entitlement".
+    if cs.vault.join("config").join("cloud.yaml").exists()
+        && entitlement_state(cs) != crate::account::EntitlementState::Entitled
+    {
         // Exit code **0** on both arms, like every other named step here: an account service that
         // could not be reached is not a slot that failed, and an amber tray twice a day for a
         // network is the wrong answer.
