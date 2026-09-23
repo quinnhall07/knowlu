@@ -111,6 +111,8 @@ has. On a first run, an item whose `due` is before today (the vault's timezone, 
 `needs_enrichment: false`, `progress` as parsed — VHL's `percentage_complete` still seeds it), logged as
 `archived (imported-past) <stem>`, its uid recorded in the seen ledger, and counted in the run record as `archived`. The
 summary line mirrors ingest's: `coursework: first run — N item(s) already past were archived`. Not a first run: unchanged.
+(Note, 2026-09-23, R-C1c-final2 M5: since R-C1c-6 the summary line is the per-source wording, `coursework: N item(s)
+already past were archived from a source seen for the first time`.)
 `--dry-run`: `would archive (imported-past) <stem> (due …)`. An item due today is created, not archived (ingest's rule).
 
 Tests (engine, `coursework.rs`): first run with two past and one future item → two archived notes with the field, one
