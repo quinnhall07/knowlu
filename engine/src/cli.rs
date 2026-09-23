@@ -122,6 +122,24 @@ pub fn vault_zone(vault: &Path) -> TimeZone {
     TimeZone::try_system().unwrap_or(TimeZone::UTC)
 }
 
+/// The vault's timezone name, exactly as `config/ingest.yaml` names it — `None` when the file is
+/// missing, unreadable, leaves the key out, sets it null, or sets it to an empty (or all-blank)
+/// string. Unlike [`vault_zone`], this never falls back to the machine's own clock: a cloud
+/// request body (`cloudmodel::email_request`, `pull_gmail_queue`'s `/gmail-read` body) must say
+/// nothing rather than claim a zone the vault never named. Not validated against `jiff`'s zone
+/// table on purpose — the due resolver already degrades an unrecognised name to "no timezone"
+/// without throwing, so a typo here costs nothing extra by traveling.
+pub fn vault_timezone_name(vault: &Path) -> Option<String> {
+    let config = crate::yaml::mapping_from_file(&vault.join("config").join("ingest.yaml"));
+    let name = crate::yaml::get(&config, "timezone").and_then(crate::yaml::text)?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Wall-clock time in the vault's own timezone, as a naive datetime.
 ///
 /// `config/ingest.yaml`'s `timezone` is the vault's clock; everything on the page is local wall
@@ -1109,6 +1127,34 @@ calendars:
 
         pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: Not/AZone\n").unwrap();
         assert!(seconds_apart(local_now(&vault), expected) < 5.0, "unknown zone");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// `vault_timezone_name` feeds cloud request bodies, so — unlike `vault_zone` — it must say
+    /// `None` rather than the machine's own clock whenever the vault itself named nothing usable.
+    #[test]
+    fn vault_timezone_name_is_none_unless_the_vault_actually_names_one() {
+        let vault = bare_vault("tzname");
+        assert_eq!(vault_timezone_name(&vault), None, "no config file at all");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: America/Chicago\n")
+            .unwrap();
+        assert_eq!(vault_timezone_name(&vault), Some("America/Chicago".to_string()));
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "ics_url: https://x\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "key absent");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: ~\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "key present but null");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: \"\"\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "empty string");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: \"   \"\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "blank string");
+
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "ics_url: [unclosed\n").unwrap();
+        assert_eq!(vault_timezone_name(&vault), None, "malformed config");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
