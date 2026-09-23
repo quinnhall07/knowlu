@@ -1334,3 +1334,217 @@ fn o1_never_conflates_two_notes_that_merely_share_a_case_insensitive_name() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 4 (re-review round 3): R1, R2, D1 (R-C3′-exec-16).
+// ---------------------------------------------------------------------------
+
+/// Every LIVE amend card on `tasks/cs-100-hw-01.md` (in `approvals/`, not `archive/`), as
+/// `(created_by, status, changes)`, sorted. `changes` goes through `yaml::to_json`, so a test
+/// compares the values a card carries rather than the emitter's spelling of them.
+fn live_cards_on_the_note(dir: &Path) -> Vec<(String, String, serde_json::Value)> {
+    let mut out: Vec<(String, String, serde_json::Value)> = std::fs::read_dir(dir.join("approvals"))
+        .expect("approvals")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false))
+        .map(|p| {
+            let meta = knowlu_engine::ids::read_meta(&p).expect("a card");
+            let text = |k: &str| knowlu_engine::yaml::get(&meta, k).and_then(knowlu_engine::yaml::text).unwrap_or_default();
+            let changes = knowlu_engine::yaml::get(&meta, "changes").map(knowlu_engine::yaml::to_json).unwrap_or(serde_json::Value::Null);
+            (text("created_by"), text("status"), changes)
+        })
+        .collect();
+    out.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+    out
+}
+
+/// How many amend cards on `tasks/cs-100-hw-01.md` have been settled into `archive/`.
+fn archived_cards_on_the_note(dir: &Path) -> usize {
+    std::fs::read_dir(dir.join("archive"))
+        .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("amend-cs-100-hw-01-")).count())
+        .unwrap_or(0)
+}
+
+fn importance_and_effort(dir: &Path) -> (Option<i64>, Option<serde_json::Value>) {
+    let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
+    (
+        knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of),
+        knowlu_engine::yaml::get(&meta, "effort_hours").map(knowlu_engine::yaml::to_json),
+    )
+}
+
+#[test]
+fn a_write_a_card_withheld_never_decides_the_next_conflict_on_that_field() {
+    // R1 (probe N12). This device sets `importance` 2 -> 4 at T1. Pull 1 brings desktop B's later
+    // 2 -> 5 (T2): a conflict B wins, so it is carded and WITHHELD — this device keeps 4. Pull 2
+    // brings B's 5 -> 6 (T3). B's T2 record is now in this device's journal from an earlier pull,
+    // so it is not one of this pull's own records and stayed in `mine`; being later than T1 it
+    // became `up_latest`, but its `new` (5) is not what the note holds (4) — it never took effect
+    // here — so `reconcile::resolve` fell back to the file-mtime stand-in, and one unrelated local
+    // edit after T3 made that stand-in win: B's 6 lost with no card and no warning. Both with and
+    // without the unrelated edit, the answer is the same card, refiled as 4 -> 6.
+    for unrelated_after in [false, true] {
+        let dir = fixture_with_id(&format!("withheld-then-newer-{unrelated_after}"));
+        let mut journal = Journal::new(&dir);
+        let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("T1");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let t2 = knowlu_engine::journal::now_ts(None);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let t3 = knowlu_engine::journal::now_ts(None);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let first = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), &t2);
+        let r1 = sync::apply(&dir, &pulled(vec![first], vec![]), &ctx, &mut journal, today);
+        assert_eq!((r1.applied, r1.cards), (0, 1), "unrelated_after={unrelated_after}: B's 5 is carded and withheld: {r1:?}");
+        if unrelated_after {
+            // After T3: the file's mtime now outranks B's next write, which is the whole trap.
+            knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("progress".to_string(), "10".to_string())], &mine, &mut journal, &Default::default()).expect("an unrelated edit");
+        }
+        let second = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(6), &t3);
+        let r2 = sync::apply(&dir, &pulled(vec![second], vec![]), &ctx, &mut journal, today);
+        assert_ne!((r2.applied, r2.cards), (0, 0), "unrelated_after={unrelated_after}: B's later 6 lost silently: {r2:?}");
+        assert_eq!((r2.applied, r2.cards), (0, 1), "unrelated_after={unrelated_after}: {r2:?}");
+        assert_eq!(importance_and_effort(&dir).0, Some(4), "unrelated_after={unrelated_after}: still withheld pending the card");
+        assert_eq!(
+            live_cards_on_the_note(&dir),
+            vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 6}}))],
+            "unrelated_after={unrelated_after}: one live card, refiled as 4 -> 6, never the stale 4 -> 5 beside it",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn sync_never_settles_or_archives_a_proposal_it_did_not_file() {
+    // R2 (probes N11a, N11b). A judge-once proposal (`created_by: agent:knowlu.enrich`) is a
+    // decision the student has not made yet; "a proposal is deferred, never deleted". Sync's own
+    // stale-card handling may retire only the cards sync itself filed — neither when the desktops
+    // converge on the field (a) nor when a new sync conflict on the same field is carded (b).
+    for converge in [true, false] {
+        let dir = fixture_with_id(&format!("judge-card-{converge}"));
+        let mut journal = Journal::new(&dir);
+        let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+        let file = dir.join("tasks").join("cs-100-hw-01.md");
+        let meta = knowlu_engine::ids::read_meta(&file).expect("the note");
+        let judge = knowlu_engine::write::WriteContext::new("agent:knowlu.enrich", "local-runner");
+        knowlu_engine::write::propose_amendment(
+            &dir, &file, &meta,
+            &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
+            &judge, &mut journal, None, today,
+        ).expect("a judge-once proposal");
+        let rec = if converge {
+            foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z")
+        } else {
+            foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), "2036-09-17T11:00:00.000Z")
+        };
+        let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, today);
+        let judge_card = ("agent:knowlu.enrich".to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 3}}));
+        let live = live_cards_on_the_note(&dir);
+        assert_eq!(archived_cards_on_the_note(&dir), 0, "converge={converge}: sync archived a card it did not file: {live:?} {report:?}");
+        if converge {
+            assert_eq!(report.cards, 0, "{report:?}");
+            assert_eq!(live, vec![judge_card], "converge={converge}: the judge-once proposal is untouched: {report:?}");
+        } else {
+            assert_eq!(report.cards, 1, "{report:?}");
+            assert_eq!(
+                live,
+                vec![judge_card, (sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 5}}))],
+                "converge={converge}: the sync card is filed beside the judge-once proposal, never in place of it: {report:?}",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_sync_card_naming_any_field_this_pull_resolves_is_settled_and_one_current_card_remains() {
+    // D1 (probes N10a, N10b, N10c). One pull that carries two conflicting fields files ONE card
+    // naming both. A later pull that resolves only SOME of a card's fields — or resolves a field a
+    // card names alongside a newly conflicting one — must leave exactly one live card holding the
+    // current values, or none: never a stale card beside a fresh one, never a card still offering a
+    // value neither desktop holds, and never a still-open field dropped with the card that held it.
+    let t10 = "2036-09-17T10:00:00.000Z";
+    let t11 = "2036-09-17T11:00:00.000Z";
+    let set = |field: &str, old: serde_json::Value, new: serde_json::Value, ts: &str| {
+        foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", field, old, new, ts)
+    };
+    for variant in ['a', 'b', 'c'] {
+        let dir = fixture_with_id(&format!("multi-field-card-{variant}"));
+        let mut journal = Journal::new(&dir);
+        let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        knowlu_engine::write::write_literals(
+            &dir, "tasks/cs-100-hw-01.md",
+            &[("importance".to_string(), "4".to_string()), ("effort_hours".to_string(), "3".to_string())],
+            &mine, &mut journal, &Default::default(),
+        ).expect("this device's two edits");
+        let first = if variant == 'c' {
+            vec![set("importance", serde_json::json!(2), serde_json::json!(5), t10)]
+        } else {
+            vec![set("importance", serde_json::json!(2), serde_json::json!(5), t10), set("effort_hours", serde_json::json!(2.5), serde_json::json!(4), t10)]
+        };
+        let r1 = sync::apply(&dir, &pulled(first, vec![]), &ctx, &mut journal, today);
+        assert_eq!(r1.cards, 1, "variant {variant}: pull 1 files one card: {r1:?}");
+        let (second, expected) = match variant {
+            // (a) `importance` converges; `effort_hours` is still open and is carried to the new card.
+            'a' => (
+                vec![set("importance", serde_json::json!(5), serde_json::json!(4), t11)],
+                vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"effort_hours": {"from": 3, "to": 4}}))],
+            ),
+            // (b) both converge: nothing is left to ask.
+            'b' => (
+                vec![set("importance", serde_json::json!(5), serde_json::json!(4), t11), set("effort_hours", serde_json::json!(4), serde_json::json!(3), t11)],
+                vec![],
+            ),
+            // (c) a single-field card, then a newer `importance` and a newly conflicting `effort_hours`.
+            _ => (
+                vec![set("importance", serde_json::json!(5), serde_json::json!(6), t11), set("effort_hours", serde_json::json!(2.5), serde_json::json!(4), t11)],
+                vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"effort_hours": {"from": 3, "to": 4}, "importance": {"from": 4, "to": 6}}))],
+            ),
+        };
+        let r2 = sync::apply(&dir, &pulled(second, vec![]), &ctx, &mut journal, today);
+        assert_eq!(live_cards_on_the_note(&dir), expected, "variant {variant}: {r2:?}");
+        assert_eq!(r2.applied, 0, "variant {variant}: every field here is carded or converged, none written: {r2:?}");
+        assert_eq!(
+            importance_and_effort(&dir),
+            (Some(4), Some(serde_json::json!(3))),
+            "variant {variant}: the note keeps this device's values until a card is answered",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn an_identical_re_pull_keeps_the_card_already_filed_and_charges_nothing() {
+    // D1's guard. Settling every sync card that names a field this pull resolved must not turn the
+    // ordinary re-proposal into churn: when the one card on the note already carries exactly what
+    // this pull would file (same fields, same `from`, same `to`), it IS the re-proposal — kept, not
+    // archived and refiled, so it costs no second unit of the day's cap (probe N4, pull 2).
+    let dir = fixture_with_id("identical-re-pull");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    let first = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(6), "2036-09-17T10:00:00.000Z");
+    assert_eq!(sync::apply(&dir, &pulled(vec![first], vec![]), &ctx, &mut journal, today).cards, 1);
+    let before: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    let charged = knowlu_engine::approvals::count_proposals_created(&dir, today);
+    let again = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(6), "2036-09-17T11:00:00.000Z");
+    let r2 = sync::apply(&dir, &pulled(vec![again], vec![]), &ctx, &mut journal, today);
+    assert_eq!(r2.cards, 0, "{r2:?}");
+    let after: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    assert_eq!(after, before, "the same card, not a refiled copy");
+    assert_eq!(archived_cards_on_the_note(&dir), 0);
+    assert_eq!(knowlu_engine::approvals::count_proposals_created(&dir, today), charged, "no second charge against the cap");
+    let _ = std::fs::remove_dir_all(&dir);
+}
