@@ -4,7 +4,42 @@ import { sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { CALENDAR_SCOPE } from "../_shared/google_scopes.ts";
 import { guardedFetch, MAX_BODY_BYTES, MAX_REDIRECTS } from "../_shared/guarded_fetch.ts";
-import { calendarHandler } from "./handler.ts";
+import { calendarHandler, type GoogleCalendarEntry, type GooglePage } from "./handler.ts";
+
+// The fields series reads, and no others: data minimisation at the source.
+const EVENT_FIELDS = "nextPageToken,items(id,status,summary,location,description,eventType," +
+  "recurringEventId,recurrence,start,end,attendees(self,responseStatus))";
+
+async function googleGet(url: URL, accessToken: string, signal: AbortSignal): Promise<unknown> {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, signal });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return await response.json();
+}
+
+async function eventsPage(
+  accessToken: string,
+  calendarId: string,
+  from: Date,
+  to: Date,
+  pageToken: string | undefined,
+  signal: AbortSignal,
+  singleEvents: boolean,
+): Promise<GooglePage> {
+  const url = new URL(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+  );
+  url.searchParams.set("singleEvents", singleEvents ? "true" : "false");
+  url.searchParams.set("timeMin", from.toISOString());
+  url.searchParams.set("timeMax", to.toISOString());
+  url.searchParams.set("maxResults", "250");
+  url.searchParams.set("fields", EVENT_FIELDS);
+  if (pageToken !== undefined) url.searchParams.set("pageToken", pageToken);
+  const body = await googleGet(url, accessToken, signal) as GooglePage;
+  return { items: body.items ?? [], nextPageToken: body.nextPageToken };
+}
 
 // Imported once, lazily, and kept: `importAesKey` is a `crypto.subtle` call and re-importing it
 // per request is work for nothing. Built at first use, never at module scope, so a missing secret
@@ -77,6 +112,33 @@ Deno.serve(calendarHandler(requireActiveEntitlement, {
       end: (item.end.dateTime ?? item.end.date) as string,
       allDay: item.start.date !== undefined,
     }));
+  },
+  // Series (commitment model §4.1): three read-only calls, every one under the handler's budget
+  // signal. They return raw pages; which calendars, which items and every cap live in `handler.ts`.
+  // Nothing here stores or logs what Google returns (Limited Use, spec §9).
+  async calendarList(accessToken: string, signal: AbortSignal): Promise<GoogleCalendarEntry[]> {
+    const entries: GoogleCalendarEntry[] = [];
+    let pageToken: string | undefined = undefined;
+    for (let page = 0; page < 5; page++) {
+      const url = new URL("https://www.googleapis.com/calendar/v3/users/me/calendarList");
+      url.searchParams.set("minAccessRole", "owner");
+      url.searchParams.set("fields", "nextPageToken,items(id,accessRole,hidden,primary)");
+      if (pageToken !== undefined) url.searchParams.set("pageToken", pageToken);
+      const body = await googleGet(url, accessToken, signal) as {
+        items?: GoogleCalendarEntry[];
+        nextPageToken?: string;
+      };
+      entries.push(...(body.items ?? []));
+      if (!body.nextPageToken) break;
+      pageToken = body.nextPageToken;
+    }
+    return entries;
+  },
+  seriesInstances(accessToken, calendarId, from, to, pageToken, signal): Promise<GooglePage> {
+    return eventsPage(accessToken, calendarId, from, to, pageToken, signal, true);
+  },
+  seriesMasters(accessToken, calendarId, from, to, pageToken, signal): Promise<GooglePage> {
+    return eventsPage(accessToken, calendarId, from, to, pageToken, signal, false);
   },
   // C2 final review F-1 (regrading m36): the same guard `/events` and `/ingest-ics` use. The URL
   // here is the student's secret iCal address, decrypted from `sources` a few lines above — still
