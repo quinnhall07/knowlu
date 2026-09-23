@@ -596,6 +596,82 @@ fn quit_flush_backs_up_and_reports_within_the_cap() {
     let _ = std::fs::remove_dir_all(&bdir);
 }
 
+/// Fix round 1, review M4: a configured-but-signed-out vault is a named SKIP inside
+/// `run_lines_with` (`totals.errors` empty, `totals.skipped` set) — before this fix `q.synced` read
+/// only `errors.is_empty()`, so a quit that pushed nothing at all still reported `synced: true`.
+/// `QuitFlush`'s own contract is "this completed, never this was attempted".
+///
+/// **Reads Credential Manager, and the exemption is the same one `sync_contract.rs`'s own
+/// `a_vault_with_an_account_and_no_session_says_exactly_that` already records**: this only READS a
+/// target (`knowlu/c3-fix1-no-such-profile/session`) that nothing in this product ever writes, so
+/// there is no `CredWriteW`/`CredReadW` race on the SAME target to serialise against — the file's
+/// own `CREDMAN_LOCK` is for tests that WRITE a credential, which this one does not.
+#[test]
+fn m4_quit_flush_reports_a_skip_as_a_skip_never_synced() {
+    let v = scratch("quitflush-skip");
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/c3-fix1-no-such-profile/session'\naccount_id: 'acct-1'\n",
+    )
+    .unwrap();
+    let cs = open(&v, "quitflush-skip");
+    let q = quit_flush(&cs, Duration::from_secs(10), |_| {});
+    assert!(!q.synced, "a signed-out quit must not report synced: true: {q:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Fix round 1, review I4: the slot's own `sync` step is a CHILD PROCESS — `run_slot_inner` records
+/// only its exit code, and the lines it printed went to a log file, never to `cs.sync` — so the
+/// only way the page ever sees what a slot's sync did is by reading back the status file that
+/// child would have written. The `cmd` stand-in engine below writes no such file (it does not know
+/// sync exists), so this test writes one itself, exactly as a real engine's `sync` subcommand
+/// would, and checks that `run_slot_inner`'s own `state::refresh_sync` call — beside
+/// `refresh_head`/`refresh_history` — is what moves it into `cs.sync`, not `ConsoleState::open`
+/// (which ran first, before the file existed).
+#[test]
+fn a_slot_run_leaves_cs_sync_filled_from_the_status_file() {
+    let v = scratch("sync-status-fill");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    let cs = open(&v, "sync-status-fill");
+    assert_eq!(
+        *cs.sync.lock().unwrap(),
+        knowlu_engine::sync::SyncStatus::default(),
+        "no status file exists yet, so `open` left the ordinary default"
+    );
+
+    let status = knowlu_engine::sync::SyncStatus {
+        ok: true,
+        at: Some("2026-09-23T07:00:00.000Z".to_string()),
+        lines: vec!["sync: 2 record(s) and 0 note(s) down; 2 applied, 0 card(s), 0 refused".to_string()],
+        last_error: None,
+        skipped: None,
+    };
+    let status_path = v.join(knowlu_engine::sync::STATUS_FILE);
+    std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+    std::fs::write(&status_path, knowlu_engine::ledger::dumps_value(&serde_json::to_value(&status).unwrap())).unwrap();
+
+    let sch = Scheduler::default();
+    let fake_local_appdata = std::env::temp_dir().join(format!("qo-console-sched-localappdata-syncfill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    std::fs::create_dir_all(&fake_local_appdata).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake_local_appdata.as_os_str()),
+    ]);
+    let _summary = run_slot_inner(&cs, &sch, None, false);
+    assert_eq!(
+        *cs.sync.lock().unwrap(),
+        status,
+        "run_slot_inner's own refresh_sync should have picked up the file the child would have written"
+    );
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 #[test]
 #[ignore = "runs the real engine exe against a scratch vault; needs a built target/release/knowlu-engine.exe and network for rank's feeds — run by hand before Task 17"]
 fn run_slot_end_to_end() { unimplemented!("see the ignore reason") }

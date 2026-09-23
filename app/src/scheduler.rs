@@ -533,10 +533,11 @@ fn refuse(sch: &Scheduler, late: bool, reason: &str) -> RunSummary {
     summary
 }
 
-/// Runs one slot: pull (if the vault has a remote) → each step of `slot_argv` as a child process,
-/// stdio captured to a log file → push → backup → refresh the shell's caches → tray colour. Never
-/// two at once — a slot already in progress returns the last completed summary instead of
-/// starting a second.
+/// Runs one slot: each step of `slot_argv` as a child process (the first of them `sync`, which
+/// pulls and pushes inside the child) stdio captured to a log file → backup → refresh the shell's
+/// caches, the sync status among them → tray colour (fix round 1, review M2: no separate pull or
+/// push here any more, and no git). Never two at once — a slot already in progress returns the
+/// last completed summary instead of starting a second.
 ///
 /// Split into a window-free half (`run_slot_inner`) so a hidden CLI path (`--run-slot-once`) can
 /// run exactly this without an `AppHandle` or a tray to update.
@@ -650,6 +651,9 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     steps.push(telemetry);
     state::refresh_head(cs);
     state::refresh_history(cs);
+    // Fix round 1, review I4: the slot's own `sync` step is a child process and cannot fill
+    // `cs.sync` itself, so this reads back what it (or its own skip) left in `state/sync-status.json`.
+    state::refresh_sync(cs);
     let ok = steps.iter().all(|(_, c)| *c == 0);
     let summary = RunSummary { started, ended: knowlu_engine::journal::now_ts(None), steps, ok, engine_ok, late, reason: None, attempts: 1 };
     *lock(&sch.last) = Some(summary.clone());

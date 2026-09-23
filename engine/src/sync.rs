@@ -51,9 +51,13 @@ pub enum SyncError {
     NoAccount,
     /// There is an account but no usable session: the student is signed out on this machine.
     NoSession(String),
-    /// The service refused or could not be reached. Carries `CloudError`'s own sentence, which is
-    /// already scrubbed of the bearer.
-    Service(String),
+    /// The service could not be reached, or refused the call — named by **cause** (fix round 1,
+    /// review I3), never `CloudError`'s own generic "the service refused": `cause` is one of
+    /// "offline: the account could not be reached", "signed out", "no entitlement", or "the
+    /// service refused (<status>)". `transport` is true only for the first, which is what
+    /// [`run_lines_with`] (review M7) reads to skip the push rather than hold `vault_io` for a
+    /// second doomed call over the same dead connection.
+    Service { cause: String, transport: bool },
     /// A pulled row is not what it claims to be.
     Shape(&'static str),
     /// The vault, or the cursor file.
@@ -62,21 +66,54 @@ pub enum SyncError {
 
 impl SyncError {
     /// The word the `sync` step prints and the page shows. Never a path, never a body.
-    pub fn label(&self) -> &'static str {
+    ///
+    /// **Owned, not `&'static str`, since fix round 1**: "the service refused (429)" carries a
+    /// status this closed set cannot know in advance, so the promise a fixed word made no longer
+    /// holds for [`SyncError::Service`] — every other variant still returns the same fixed word it
+    /// always did, just wrapped.
+    pub fn label(&self) -> String {
         match self {
-            SyncError::NoAccount => "no account",
-            SyncError::NoSession(_) => "no session",
-            SyncError::Service(_) => "the service refused",
-            SyncError::Shape(_) => "an unreadable row",
-            SyncError::Io(_) => "the vault could not be read",
+            SyncError::NoAccount => "no account".to_string(),
+            SyncError::NoSession(_) => "no session".to_string(),
+            SyncError::Service { cause, .. } => cause.clone(),
+            SyncError::Shape(_) => "an unreadable row".to_string(),
+            SyncError::Io(_) => "the vault could not be read".to_string(),
         }
+    }
+
+    /// A transport-class failure — no route, a timeout, DNS — never a status the service actually
+    /// answered with. [`run_lines_with`] (review M7) reads this to skip the push after a failed
+    /// pull: a second call over the same dead connection only holds `vault_io` longer for a
+    /// captive-portal wifi that was never going to answer either half.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, SyncError::Service { transport: true, .. })
+    }
+
+    /// Classifies a `CloudError` by cause (review I3), for both halves of a sync: [`pull`] converts
+    /// its own `CloudClient::get` failure through this, and `run_lines_with` converts the push's
+    /// `CloudError` the same way, so the two halves never disagree about what a 402 is called.
+    /// `cloudmodel.rs` is outside this stream's ownership (see `run_lines_with`'s own note on
+    /// `CloudConfig`), so this reads `CloudError`'s public shape rather than adding a method to it
+    /// for one caller — every status this module has no bucket for (403, 429, a 5xx, an unreadable
+    /// reply, a Gmail `Quiet`) falls through to `CloudError`'s own already-scrubbed label.
+    fn service(e: crate::cloudmodel::CloudError) -> SyncError {
+        use crate::cloudmodel::CloudError;
+        let transport = matches!(e, CloudError::Transport(_));
+        let cause = match &e {
+            CloudError::Transport(_) => "offline: the account could not be reached".to_string(),
+            CloudError::Status { code: 401, .. } => "signed out".to_string(),
+            CloudError::Status { code: 402, .. } => "no entitlement".to_string(),
+            CloudError::Status { code, .. } => format!("the service refused ({code})"),
+            other => other.label().to_string(),
+        };
+        SyncError::Service { cause, transport }
     }
 }
 
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncError::NoSession(why) | SyncError::Service(why) | SyncError::Io(why) => {
+            SyncError::NoSession(why) | SyncError::Io(why) => {
                 write!(f, "{} ({why})", self.label())
             }
             SyncError::Shape(what) => write!(f, "{} ({what})", self.label()),
@@ -182,6 +219,94 @@ pub fn save_cursor(vault: &Path, cursor: &Cursor) -> Result<(), SyncError> {
         std::fs::create_dir_all(parent).map_err(|e| SyncError::Io(e.to_string()))?;
     }
     crate::pystr::write_text(&path, &crate::ledger::dumps_value(&value)).map_err(|e| SyncError::Io(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// One sync at a time (fix round 1, review I1).
+// ---------------------------------------------------------------------------
+
+/// Generated and device-local, like [`CURSOR_FILE`], and never synced — `build_push`'s note scan
+/// never looks under `state/`. Holds no bytes anyone reads; it exists only to be locked.
+pub const RUN_LOCK_FILE: &str = "state/sync.lock";
+
+/// The exclusive hold one call to [`run_lines_with`] keeps on [`RUN_LOCK_FILE`] for as long as it
+/// talks to the account, so the slot's own `sync` child, the console's *Sync now* and the quit
+/// push can never run at once and file the same conflict twice (review I1).
+///
+/// **Never named `SyncLock`** (fix round 1): `history.rs` already has a type of that name, for a
+/// different transport, and Task 10 deletes `history.rs` and then asserts the identifier is gone
+/// from `engine/src` altogether — a second thing answering to it here would defeat that test's own
+/// point even after the first is gone. `RunLock` is a different mechanism for a different
+/// transport and is named so no reader conflates the two.
+///
+/// Released by `Drop`ping the held `File`, which closes its handle and so releases the OS-level
+/// lock `try_lock` took — on every return path out of `run_lines_with`, panic or not, because the
+/// OS itself reclaims a lock its holder's process no longer has open.
+struct RunLock {
+    #[allow(dead_code)]
+    file: std::fs::File,
+}
+
+impl RunLock {
+    /// `Ok(None)` when another live handle already holds the lock — a named skip, never an error.
+    /// `File::try_lock` is std's own non-blocking exclusive OS lock (stable since Rust 1.89; this
+    /// toolchain is 1.98), so no new crate is needed for what `history.rs`'s `SyncLock` used to
+    /// reach for a whole file-existence-and-pid dance to approximate.
+    fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
+        let path = vault.join(RUN_LOCK_FILE);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).write(true).open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(RunLock { file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The persisted status (fix round 1, review I4).
+// ---------------------------------------------------------------------------
+
+/// Generated and device-local, like [`CURSOR_FILE`]: what the last run of [`run_lines_with`] did,
+/// so the app can fill `cs.sync` without reading a child process's own log file. Never synced —
+/// `build_push`'s note scan never looks under `state/`.
+pub const STATUS_FILE: &str = "state/sync-status.json";
+
+/// Written through `ledger::dumps_value`, atomically (a temp file in the same folder, then
+/// `rename`), the same two-step `backup.rs::place` uses elsewhere in this crate — a reader of the
+/// file (the app, on the console's own thread) must never observe a half-written one.
+fn save_status(vault: &Path, status: &SyncStatus) {
+    let Ok(value) = serde_json::to_value(status) else { return };
+    let path = vault.join(STATUS_FILE);
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let tmp = path.with_file_name(format!(
+        "{}.tmp-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    if crate::pystr::write_text(&tmp, &crate::ledger::dumps_value(&value)).is_err() {
+        return;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// A missing or unreadable file is the **default** status, never an error — the same rule
+/// `load_cursor` follows for [`CURSOR_FILE`]. `ConsoleState::open` reads this once at startup, and
+/// the slot reads it again right after its own `sync` child exits (that child cannot fill `cs.sync`
+/// itself, being a separate process); *Sync now* keeps filling `cs.sync` directly, in-process.
+pub fn load_status(vault: &Path) -> SyncStatus {
+    crate::pystr::read_text(&vault.join(STATUS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Inside the vault, under one of `ids::NOTE_FOLDERS`, markdown, and no segment that climbs out.
@@ -680,7 +805,7 @@ pub fn pulled_from_reply(reply: &Value) -> Result<Pulled, SyncError> {
 /// server (`READ_LAG_SECONDS`).
 pub fn pull(client: &crate::cloudmodel::CloudClient, records_after: i64, notes_after: i64) -> Result<Pulled, SyncError> {
     let path = format!("/sync-pull?records_after={records_after}&notes_after={notes_after}&limit={PAGE}");
-    let reply = client.get(&path).map_err(|e| SyncError::Service(e.to_string()))?;
+    let reply = client.get(&path).map_err(SyncError::service)?;
     pulled_from_reply(&reply)
 }
 
@@ -1430,12 +1555,20 @@ pub struct Totals {
 
 /// What the console's sync line renders. The ENGINE's type (hand-off H9a): the engine produces it,
 /// and a second struct in the app would be a second thing to keep in step with the run that fills it.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+///
+/// **`Deserialize`, since fix round 1** (review I4): `load_status` reads one back from
+/// [`STATUS_FILE`], the same round trip `Cursor`'s own `Deserialize` already does for
+/// [`CURSOR_FILE`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
     pub ok: bool,
     pub at: Option<String>,
     pub lines: Vec<String>,
     pub last_error: Option<String>,
+    /// Carried straight from `Totals.skipped` (fix round 1, review I2), so the page can read
+    /// "signed out" or "no account" — a normal state, never an error — instead of reading the same
+    /// `ok: true` a clean sync leaves and rendering "in step with your account" over nothing.
+    pub skipped: Option<String>,
 }
 
 impl SyncStatus {
@@ -1448,6 +1581,7 @@ impl SyncStatus {
             at: Some(crate::journal::now_ts(None)),
             lines,
             last_error: totals.errors.first().cloned(),
+            skipped: totals.skipped.clone(),
         }
     }
 }
@@ -1457,13 +1591,22 @@ pub fn is_configured(vault: &Path) -> bool {
     crate::cloudmodel::load(vault).is_some()
 }
 
-/// The whole command. **The return code is always 0** and the function says so by construction: it
-/// is the literal `0` in the one `return` and the one tail.
+/// Builds `SyncStatus` from what this call is about to return, saves it to [`STATUS_FILE`], and
+/// returns the same triple `run_lines_with` always has (fix round 1, review I4) — one seam so
+/// every return path persists, rather than a save duplicated at each one.
+fn finish(vault: &Path, lines: Vec<String>, totals: Totals) -> (i32, Vec<String>, Totals) {
+    save_status(vault, &SyncStatus::of(&totals, lines.clone()));
+    (0, lines, totals)
+}
+
+/// The whole command. **The return code is always 0** and the function says so by construction:
+/// every path funnels through [`finish`], whose own tail is the literal `0`.
 ///
-/// **The order of the first two checks is the message** (review I4). `load` before `resolve`: the
-/// common answer on a machine that has never signed in is "no account", and a student who is merely
-/// signed out must not read a sentence about their subscription. It also saves a Credential Manager
-/// read twice a day on every vault that has no account.
+/// **The order of the first two checks is the message** (review I4 of the original review — not
+/// to be confused with fix round 1's own I4, the status file). `load` before `resolve`: the common
+/// answer on a machine that has never signed in is "no account", and a student who is merely
+/// signed out must not read a sentence about their subscription. It also saves a Credential
+/// Manager read twice a day on every vault that has no account.
 pub fn run_lines_with(
     vault: &Path,
     direction: Direction,
@@ -1472,6 +1615,26 @@ pub fn run_lines_with(
 ) -> (i32, Vec<String>, Totals) {
     let mut lines = Vec::new();
     let mut totals = Totals::default();
+
+    // 0. **One sync at a time** (fix round 1, review I1). Ahead of both checks below, and of
+    //    everything they gate, so the property holds for every caller and every vault — the slot's
+    //    `sync` child, *Sync now* and the quit push all take this, whatever the account looks like.
+    //    `Ok(None)` — another live handle already holds it — is a named skip, never an error; a
+    //    real IO failure opening the lock file itself is folded into the same "vault could not be
+    //    read" the cursor and status files already use, rather than a fifth shape of failure.
+    let _lock = match RunLock::try_acquire(vault) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            totals.skipped = Some("another sync is running".to_string());
+            lines.push("sync (skipped: another sync is running)".to_string());
+            return finish(vault, lines, totals);
+        }
+        Err(e) => {
+            totals.errors.push(format!("the vault could not be read ({e})"));
+            lines.push(format!("sync (the vault could not be read ({e}))"));
+            return finish(vault, lines, totals);
+        }
+    };
 
     // 1. No account. Every fixture vault in this repository takes this path, which is why
     //    `oracle.rs` and `surface_oracle.rs` cannot move.
@@ -1483,7 +1646,7 @@ pub fn run_lines_with(
     let Some(cfg) = crate::cloudmodel::load(vault) else {
         totals.skipped = Some("no account".to_string());
         lines.push("sync (skipped: no account)".to_string());
-        return (0, lines, totals);
+        return finish(vault, lines, totals);
     };
     // 2. No session. C1 owns the refresh; this only reads, and waits for the app's next slot.
     let client = match crate::cloudmodel::resolve(vault) {
@@ -1491,10 +1654,32 @@ pub fn run_lines_with(
         Err(e) => {
             totals.skipped = Some(e.label().to_string());
             lines.push(format!("sync (skipped: {e})"));
-            return (0, lines, totals);
+            return finish(vault, lines, totals);
         }
     };
 
+    let (lines, totals) = run_lines_with_client(vault, direction, via, run_id, &client, &cfg, lines, totals);
+    finish(vault, lines, totals)
+}
+
+/// The network half of [`run_lines_with`], seamed on an already-resolved `CloudClient` and
+/// `CloudConfig` (fix round 1, review M5): every case that exercises a real pull or push builds its
+/// own loopback `CloudClient` and calls this directly, never touching Credential Manager or a real
+/// socket. `run_lines_with` is the only production caller, immediately after its own two skip
+/// checks and its own lock; this function does not repeat either.
+///
+/// Takes and returns the accumulated `lines`/`totals` rather than starting fresh, so the caller's
+/// two skip lines (or none, from a test that starts here directly) are never lost.
+pub fn run_lines_with_client(
+    vault: &Path,
+    direction: Direction,
+    via: &str,
+    run_id: Option<&str>,
+    client: &crate::cloudmodel::CloudClient,
+    cfg: &crate::cloudmodel::CloudConfig,
+    mut lines: Vec<String>,
+    mut totals: Totals,
+) -> (Vec<String>, Totals) {
     let mut cursor = load_cursor(vault);
     let mut journal = Journal::new(vault);
     let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: via.to_string(), run_id: run_id.map(str::to_string) };
@@ -1502,8 +1687,15 @@ pub fn run_lines_with(
 
     // 3. **Pull first.** A field another desktop set this morning must be in the note before the day
     //    is ordered, or every second desktop ranks a slot behind for ever.
+    //
+    //    `pull_offline` (fix round 1, review M7): a transport failure here means the account could
+    //    not be reached at all, and a push right after it would only hold `vault_io` for a second
+    //    doomed call over the same dead connection — a captive-portal wifi on a train is exactly
+    //    this. Any other pull failure (a session, an entitlement, a 5xx) still lets the push try,
+    //    since those are answers FROM the service, not proof it cannot be reached.
+    let mut pull_offline = false;
     if direction.pulls() {
-        match pull(&client, cursor.record_cursor, cursor.note_cursor) {
+        match pull(client, cursor.record_cursor, cursor.note_cursor) {
             Ok(page) => {
                 let report = apply(vault, &page, &ctx, &mut journal, today);
                 totals.pulled_records = page.records.len();
@@ -1520,12 +1712,13 @@ pub fn run_lines_with(
                 cursor.record_cursor = page.record_cursor;
                 cursor.note_cursor = page.note_cursor;
                 if let Err(e) = save_cursor(vault, &cursor) {
-                    totals.errors.push(e.label().to_string());
+                    totals.errors.push(e.label());
                     lines.push(format!("sync: the cursor could not be saved ({e})"));
                 }
             }
             Err(e) => {
-                totals.errors.push(e.label().to_string());
+                pull_offline = e.is_transport();
+                totals.errors.push(e.label());
                 lines.push(format!("sync ({e})"));
             }
         }
@@ -1534,23 +1727,32 @@ pub fn run_lines_with(
     // 4. **Push second, and the cursor moves only on a 200.** A cursor advanced over a batch the
     //    service never received is the one bug in this module that loses a record for good.
     if direction.pushes() {
-        let (batch, next) = build_push(vault, &cursor, &cfg.account_id, &mut journal);
-        lines.extend(batch.warnings.iter().cloned());
-        match push(&client, &batch) {
-            Ok((records, notes)) => {
-                totals.pushed_records = records;
-                totals.pushed_notes = notes;
-                lines.push(format!("sync: {records} record(s) and {notes} note(s) up"));
-                if let Err(e) = save_cursor(vault, &next) {
-                    totals.errors.push(e.label().to_string());
-                    lines.push(format!("sync: the cursor could not be saved ({e})"));
+        if pull_offline {
+            // Review M7: named rather than silently skipped, so a reader of the Runs view sees why
+            // only one line appeared instead of two.
+            lines.push("sync: the push waits for the network".to_string());
+        } else {
+            let (batch, next) = build_push(vault, &cursor, &cfg.account_id, &mut journal);
+            lines.extend(batch.warnings.iter().cloned());
+            match push(client, &batch) {
+                Ok((records, notes)) => {
+                    totals.pushed_records = records;
+                    totals.pushed_notes = notes;
+                    lines.push(format!("sync: {records} record(s) and {notes} note(s) up"));
+                    if let Err(e) = save_cursor(vault, &next) {
+                        totals.errors.push(e.label());
+                        lines.push(format!("sync: the cursor could not be saved ({e})"));
+                    }
                 }
-            }
-            // 5. Every refusal is one line and **is not a skip**: `sync (no network)` and
-            //    `sync (no entitlement)` are things that happened, not states the student chose.
-            Err(e) => {
-                totals.errors.push(e.label().to_string());
-                lines.push(format!("sync ({e})"));
+                // 5. Every refusal is one line and **is not a skip**: `sync (offline: ...)` and
+                //    `sync (no entitlement)` are things that happened, not states the student chose.
+                //    Classified by cause the same way the pull is (fix round 1, review I3), through
+                //    the one function both halves share.
+                Err(e) => {
+                    let e = SyncError::service(e);
+                    totals.errors.push(e.label());
+                    lines.push(format!("sync ({e})"));
+                }
             }
         }
     }
@@ -1559,7 +1761,7 @@ pub fn run_lines_with(
     if totals.more {
         lines.push("sync: more to come — the next slot continues".to_string());
     }
-    (0, lines, totals)
+    (lines, totals)
 }
 
 /// The printing twin, and one line of it.

@@ -2251,3 +2251,146 @@ fn the_status_the_page_reads_is_built_from_the_totals_and_never_from_a_line() {
     let skipped = sync::SyncStatus::of(&sync::Totals { skipped: Some("no account".into()), ..Default::default() }, vec![]);
     assert!(skipped.ok && skipped.last_error.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (ruling R-C3'-exec-24).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i2_sync_status_carries_the_skip_reason_separately_from_ok_and_last_error() {
+    // Review I2: before this fix, a skip and a clean sync were the same `SyncStatus` — both
+    // `ok: true, last_error: None` — so a page reading only those two fields could not tell
+    // "signed out" from "in step with your account".
+    let skipped = sync::SyncStatus::of(&sync::Totals { skipped: Some("no session".into()), ..Default::default() }, vec![]);
+    assert_eq!(skipped.skipped.as_deref(), Some("no session"));
+    assert!(skipped.ok && skipped.last_error.is_none(), "still not an error");
+    let clean = sync::SyncStatus::of(&sync::Totals::default(), vec![]);
+    assert_eq!(clean.skipped, None, "a clean run carries no skip reason");
+}
+
+#[test]
+fn i1_a_run_that_finds_the_lock_held_skips_and_writes_nothing() {
+    let dir = fixture("locked");
+    let lock_path = dir.join(sync::RUN_LOCK_FILE);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).expect("state/");
+    }
+    // This test process holds the lock first, exactly as a slot's `sync` child would while the
+    // console's own *Sync now* is clicked seconds later — two different `File` handles to the same
+    // path, which is what `try_lock` actually serialises against (review I1).
+    let held = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).expect("open the lock file");
+    held.try_lock().expect("this test process holds it first");
+    let cursor_before = std::fs::read(dir.join(knowlu_engine::sync::CURSOR_FILE)).ok();
+    let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    assert_eq!(code, 0);
+    assert_eq!(lines, vec!["sync (skipped: another sync is running)".to_string()]);
+    assert_eq!(
+        std::fs::read(dir.join(knowlu_engine::sync::CURSOR_FILE)).ok(),
+        cursor_before,
+        "no cursor was written while the lock was held"
+    );
+    drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn i3_pull_names_a_transport_failure_as_offline() {
+    // A closed port on loopback: no DNS, no route off the machine, and it fails fast — the same
+    // "closed 127.0.0.1 port" pattern `app/tests/scheduler.rs` already uses for `api_base` (CLAUDE.md).
+    let client = CloudClient::new(&cfg("http://127.0.0.1:9/functions/v1"), "jwt-not-a-secret");
+    let err = sync::pull(&client, 0, 0).expect_err("nothing listens on port 9");
+    assert!(err.is_transport(), "{err:?}");
+    assert_eq!(err.label(), "offline: the account could not be reached");
+}
+
+#[test]
+fn i3_pull_names_a_401_as_signed_out() {
+    let mut server = loopback(vec![(401, "{\"error\":\"jwt expired\"}".to_string())]);
+    let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
+    let err = sync::pull(&client, 0, 0).expect_err("a 401");
+    assert!(!err.is_transport(), "{err:?}");
+    assert_eq!(err.label(), "signed out");
+    let _ = server.requests();
+}
+
+#[test]
+fn i3_pull_names_a_402_as_no_entitlement() {
+    let mut server = loopback(vec![(402, "{\"error\":\"no active subscription\"}".to_string())]);
+    let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
+    let err = sync::pull(&client, 0, 0).expect_err("a 402");
+    assert!(!err.is_transport(), "{err:?}");
+    assert_eq!(err.label(), "no entitlement");
+    let _ = server.requests();
+}
+
+#[test]
+fn i3_pull_names_any_other_status_by_its_code() {
+    let mut server = loopback(vec![(500, "{\"error\":\"internal\"}".to_string())]);
+    let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
+    let err = sync::pull(&client, 0, 0).expect_err("a 500");
+    assert!(!err.is_transport(), "{err:?}");
+    assert_eq!(err.label(), "the service refused (500)");
+    let _ = server.requests();
+}
+
+#[test]
+fn i4_run_lines_persists_the_status_to_a_file_on_every_run_including_a_skip() {
+    let dir = fixture("status-persists");
+    let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    assert_eq!(code, 0);
+    assert_eq!(lines, vec!["sync (skipped: no account)".to_string()]);
+    let loaded = sync::load_status(&dir);
+    assert!(loaded.ok, "a skip is not a failure: {loaded:?}");
+    assert_eq!(loaded.skipped.as_deref(), Some("no account"));
+    assert_eq!(loaded.lines, lines);
+    assert!(loaded.at.is_some(), "a run that happened is stamped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn i4_load_status_of_a_vault_that_never_synced_is_the_default() {
+    let dir = fixture("no-status-yet");
+    assert_eq!(sync::load_status(&dir), sync::SyncStatus::default());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m5_run_lines_with_client_does_a_full_pull_apply_save_push_save_round() {
+    let dir = fixture("roundtrip");
+    let pull_body = serde_json::json!({ "records": [], "notes": [], "record_cursor": 5, "note_cursor": 2, "more": false });
+    let push_body = serde_json::json!({ "records": 1, "notes": 0 });
+    let mut server = loopback(vec![
+        (200, knowlu_engine::ledger::dumps_value(&pull_body)),
+        (200, knowlu_engine::ledger::dumps_value(&push_body)),
+    ]);
+    let cloud = cfg(&server.base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let (lines, totals) = sync::run_lines_with_client(
+        &dir, sync::Direction::Both, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default(),
+    );
+    assert!(totals.errors.is_empty(), "{lines:?}");
+    assert_eq!((totals.pulled_records, totals.pulled_notes), (0, 0));
+    assert_eq!(totals.pushed_records, 1, "{totals:?}");
+    // Both halves' own cursor saves landed: the pull's record/note cursors, and the push's
+    // `pushed_through` advance over the fixture's own seed record (review M5).
+    let saved = sync::load_cursor(&dir);
+    assert_eq!((saved.record_cursor, saved.note_cursor), (5, 2));
+    assert!(!saved.pushed_through.is_empty(), "the push half advanced the record cursor too");
+    let _ = server.requests();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m5_m7_an_offline_pull_names_itself_and_the_push_waits() {
+    let dir = fixture("offline-pull");
+    let cloud = cfg("http://127.0.0.1:9/functions/v1");
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let (lines, totals) = sync::run_lines_with_client(
+        &dir, sync::Direction::Both, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default(),
+    );
+    assert_eq!(totals.errors, vec!["offline: the account could not be reached".to_string()], "{totals:?}");
+    assert!(lines.iter().any(|l| l.contains("offline: the account could not be reached")), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "sync: the push waits for the network"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains(" up")), "no push was attempted: {lines:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

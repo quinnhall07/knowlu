@@ -62,16 +62,22 @@ pub struct ConsoleState {
     /// **Vault I/O, serialised (console spec §8 the sync lock, §9 the race).** The engine's `sync`
     /// can write a pulled note or file an amend card under it, while a console write is single-line
     /// surgery on a note it has just read. Interleave the two and the write lands on a file the
-    /// pull is about to write. Every path that touches the vault takes this one lock: `mutate` for
-    /// the duration of a write, `run_sync` for the duration of the engine's own `sync` call, so
-    /// housekeeping's backup, a scheduler slot's own sync step and the `sync` command all queue
-    /// behind each other instead of racing.
+    /// pull is about to write. Every IN-PROCESS path that touches the vault takes this one lock:
+    /// `mutate` for the duration of a write, `run_sync` for the duration of the engine's own
+    /// `sync` call — so a console write, *Sync now* and the quit push all queue behind each other
+    /// instead of racing, and housekeeping's own backup takes it too (F11) for the same reason.
+    ///
+    /// **The slot's own `sync` step is a CHILD PROCESS and takes no `vault_io`** (fix round 1,
+    /// review M1, correcting a false claim this doc used to make): it runs like every other slot
+    /// step, outside this lock entirely, because `vault_io` is never held across a child-process
+    /// wait, which may run for 20 minutes. What keeps it from racing the in-process callers above
+    /// is a different, cross-process mechanism: `run_lines_with`'s own exclusive file lock under
+    /// `state/` (review I1), taken and released inside every one of the three callers alike,
+    /// engine process or not.
     ///
     /// **Ordering, and it is one-way:** `vault_io` is taken BEFORE `lock`, never while `lock` is
     /// held. `lock` alone still guards the read polls, so a `state` poll never waits on a sync's
-    /// own network call. And `vault_io` is never held across a child-process wait — a scheduler
-    /// slot takes it inside its own sync step, never around `run_child`, which may run for 20
-    /// minutes.
+    /// own network call.
     pub vault_io: Mutex<()>,
     pub settings: Mutex<Settings>,
     /// `Some` when `settings.json` existed but did not parse at open — names the path and the
@@ -112,7 +118,13 @@ impl ConsoleState {
             head_sha: Mutex::new(None),
             history: Mutex::new(HistoryStatus::default()),
             backup: Mutex::new(BackupStatus { last_ok: None, behind_days: None, last_error: None, target_reachable: false }),
-            sync: Mutex::new(knowlu_engine::sync::SyncStatus::default()),
+            // Fix round 1, review I4: read back whatever the last run (this launch's or an
+            // earlier one's) left in `state/sync-status.json` — a missing or unreadable file is
+            // the default, never an error, the same rule `load_status` itself follows. Without
+            // this the line reads "not synced yet" on every launch even when the 07:00 slot synced
+            // clean, because the slot's own `sync` step is a child process and cannot fill this
+            // field itself.
+            sync: Mutex::new(knowlu_engine::sync::load_status(&vault)),
             last_write: Mutex::new(None),
             pending_edits: AtomicUsize::new(0),
             auto_sync: AtomicBool::new(true),
@@ -123,7 +135,8 @@ impl ConsoleState {
     pub fn seen_at(&self) -> Option<String> { std::fs::read_to_string(&self.seen_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) }
 
     /// Records that a note write just happened: bumps the pending-edit count and stamps
-    /// `last_write` for whatever debounces the next sync (Task 8+).
+    /// `last_write` for the housekeeping thread's debounced backup (fix round 1, review M2: it no
+    /// longer debounces a sync — that cadence is the slot, `Sync now`, and the quit push only).
     pub fn note_write(&self) {
         *self.last_write.lock().unwrap() = Some(std::time::Instant::now());
         self.pending_edits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -144,6 +157,17 @@ pub fn refresh_history(cs: &ConsoleState) {
 pub fn refresh_head(cs: &ConsoleState) {
     let h = knowlu_engine::runs::git_sha(&cs.vault);
     *cs.head_sha.lock().unwrap() = h;
+}
+
+/// Re-reads the persisted sync status into the cache (fix round 1, review I4). The slot's own
+/// `sync` step is a child process — `run_slot_inner` records only its exit code, and the lines it
+/// printed went to a log file, not to `cs.sync` — so this is how a slot's sync reaches the page at
+/// all. Called right after the slot's own child steps, beside `refresh_head`/`refresh_history`.
+/// `commands::sync_inner` needs no equivalent call: `state::run_sync` already fills `cs.sync`
+/// directly, in-process, for *Sync now*.
+pub fn refresh_sync(cs: &ConsoleState) {
+    let s = knowlu_engine::sync::load_status(&cs.vault);
+    *cs.sync.lock().unwrap_or_else(|e| e.into_inner()) = s;
 }
 
 /// Runs the engine's sync in-process and records what it did. **Takes `vault_io`, never `lock`**:
@@ -199,8 +223,9 @@ pub fn app_data_root() -> Option<PathBuf> {
 }
 
 /// What a quit flush actually managed before its cap fired. Every field means "this completed",
-/// never "this was attempted": a vault with no remote quits `synced: false`, and that is not an
-/// error — there was nothing to push.
+/// never "this was attempted": a vault with no account, or one that is signed out, quits
+/// `synced: false`, and that is not an error — there was nothing to push, or nothing this device
+/// could push it as (fix round 1, review M2: no vault here has ever had a git "remote" to speak of).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct QuitFlush {
     pub synced: bool,
@@ -210,18 +235,21 @@ pub struct QuitFlush {
 
 /// Push on close (console spec §8) and back up on quit (Knowlu spec §4), synchronously, bounded by
 /// `cap` — F10. The two engine calls run on a scoped worker and the caller waits at most `cap`: a
-/// hung remote must never hold the Quit click hostage.
+/// hung account must never hold the Quit click hostage.
 ///
 /// `then` is called exactly once, on the caller's thread, and **before the scope joins** — with the
 /// worker's result when it arrives, or with `timed_out: true` at the cap. That ordering is the
 /// whole design: the tray hands in a `then` that writes the quit log and ends the process, so a
-/// worker still stuck inside git never delays the quit past the cap (the scope's join is exactly
-/// the unbounded wait the cap exists to prevent). Nothing is lost when the cap fires — the edits
-/// are on disk and in the journal, and the next launch's housekeeping picks them up.
+/// worker still stuck inside a slow push never delays the quit past the cap (fix round 1, review
+/// M2: no git here to be stuck inside of; the scope's join is exactly the unbounded wait the cap
+/// exists to prevent). Nothing is lost when the cap fires — the edits are on disk and in the
+/// journal, and the next slot, `Sync now`, or another quit picks them up (housekeeping no longer
+/// syncs at all).
 ///
-/// The push is skipped outright on a vault with no account: there is nothing to push, and no
-/// session or entitlement to wait on either — the engine's own `sync` names each of those a skip,
-/// never a failure, exactly as it would inside a slot.
+/// The push is skipped outright on a vault with no account: there is nothing to push. A vault WITH
+/// one but signed out, or without an entitlement, is also `synced: false` — a normal state the
+/// engine names as a skip on stdout, but never one this struct's own contract (above) lets read as
+/// "completed" (fix round 1, review M4).
 pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce(QuitFlush) + Send) -> QuitFlush {
     let (tx, rx) = std::sync::mpsc::channel::<QuitFlush>();
     let mut out = QuitFlush { synced: false, backed_up: false, timed_out: false };
@@ -235,7 +263,11 @@ pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce
                 let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
                 let (_, _, totals) =
                     knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Push, "dashboard", None);
-                q.synced = totals.errors.is_empty();
+                // Fix round 1, review M4: a skip (signed out, no entitlement) is not a completed
+                // push either. `QuitFlush`'s own contract is "this completed, never this was
+                // attempted" — `errors.is_empty()` alone reads a skip as success, since a skip
+                // raises no error.
+                q.synced = totals.errors.is_empty() && totals.skipped.is_none();
             }
             let has_backup_dir = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).backup_dir.is_some();
             if has_backup_dir {

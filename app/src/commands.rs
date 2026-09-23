@@ -140,9 +140,10 @@ fn mutate(cs: &ConsoleState, view: &str, f: impl FnOnce(&mut Journal) -> Result<
     // `vault_io` FIRST, then `cs.lock` — always that order, never the reverse (console spec §8/§9;
     // see `ConsoleState::vault_io`). A write is single-line surgery on a note this call has just
     // read; the engine's `sync` can write a pulled note or file an amend card under it. Serialising
-    // the two here means a scheduler slot's own sync step and the `sync` command all queue against
-    // every write, while `cs.lock` alone still guards the read polls so a `state` poll never waits
-    // behind a sync's own network call.
+    // the two here means the `sync` command's own in-process call and every write queue against
+    // each other (the slot's own sync step is a CHILD PROCESS and takes no `vault_io` at all — see
+    // `ConsoleState::vault_io`, review M1), while `cs.lock` alone still guards the read polls so a
+    // `state` poll never waits behind a sync's own network call.
     let _io = cs.vault_io.lock().map_err(|_| "vault lock poisoned".to_string())?;
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     let mut journal = Journal::new(&cs.vault);
