@@ -1151,4 +1151,139 @@ mod tests {
             "proposed_at: 2026-09-07\nfirst_proposed_at: 2026-09-07\n"
         );
     }
+
+    // -------------------------------------------------------------------------------------
+    // P2 (commitment model, phase 1): `safe_dump_flow` already emits the shapes the
+    // commitment note, its `change`/`was` pair, and the planning day's `window:` need — the
+    // spec's §10 row says this module changes only if it cannot. These tests prove it can;
+    // every expected string below is `yaml.safe_dump(v, default_flow_style=True, width=10**6,
+    // allow_unicode=True)` under PyYAML 6.0.3, the pinned version, run by hand and never
+    // folded into `pyyaml-safe-dump-reference.json` (that corpus is frozen — CLAUDE.md rule
+    // 2 — and this task adds no case to it).
+    // -------------------------------------------------------------------------------------
+
+    /// R2: `meets:` is a single-line flow sequence, and a `"12:00"`-shaped string is quoted
+    /// because it resolves as a YAML-1.1 sexagesimal int if left plain (`resolves_to_str`'s
+    /// int pattern). Keys sort: `days`, `end`, `start`.
+    #[test]
+    fn flow_emits_a_meets_sequence_on_one_line() {
+        let value: Value = serde_yaml_ng::from_str(
+            "[{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]",
+        )
+        .unwrap();
+        assert_eq!(
+            safe_dump_flow(&value),
+            "[{days: [mon, wed, fri], end: '12:50', start: '12:00'}]\n"
+        );
+    }
+
+    /// §2.1's confirmed-commitment mapping: `null` for the two absent optional fields, the
+    /// nested `meets` sequence from the case above, and `from` — given here as a plain
+    /// **string** (not a `Node::Date`), matching how `commitments::front_matter` (P6) builds
+    /// it from a source date — quoted because its digits alone would resolve to a timestamp
+    /// (the same `resolves_to_str` rule, its timestamp pattern this time). Keys sort:
+    /// `course`, `from`, `kind`, `level`, `meets`, `title`, `until`, `where`.
+    #[test]
+    fn flow_emits_a_commitment_mapping_with_nulls_and_a_nested_sequence() {
+        let value: Value = serde_yaml_ng::from_str(
+            "kind: class\n\
+             level: hard\n\
+             title: \"CS 100\"\n\
+             course: cs-100\n\
+             meets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]\n\
+             where: null\n\
+             from: \"2026-08-19\"\n\
+             until: null\n",
+        )
+        .unwrap();
+        assert_eq!(
+            safe_dump_flow(&value),
+            "{course: cs-100, from: '2026-08-19', kind: class, level: hard, \
+             meets: [{days: [mon, wed, fri], end: '12:50', start: '12:00'}], \
+             title: CS 100, until: null, where: null}\n"
+        );
+    }
+
+    /// §5.2's `change:` and `was:` pair — a settlement's amend card carries both, each a
+    /// one-field flow mapping, `null` a bare literal.
+    #[test]
+    fn flow_emits_a_change_and_was_pair() {
+        let change: Value = serde_yaml_ng::from_str("until: \"2026-12-04\"").unwrap();
+        let was: Value = serde_yaml_ng::from_str("until: null").unwrap();
+        assert_eq!(safe_dump_flow(&change), "{until: '2026-12-04'}\n");
+        assert_eq!(safe_dump_flow(&was), "{until: null}\n");
+    }
+
+    /// A `:` forces single quotes in flow context (R2's own example, `agent:routine.enrich`);
+    /// an apostrophe needs none — PyYAML's plain style tolerates it. Both stay one line and
+    /// round-trip through `serde_yaml_ng` to the mapping that produced them. Expected bytes
+    /// measured against PyYAML 6.0.3.
+    #[test]
+    fn a_title_with_a_colon_or_quote_round_trips() {
+        let cases = [
+            ("CS 100: Lecture", "{title: 'CS 100: Lecture'}\n"),
+            ("Bob's club", "{title: Bob's club}\n"),
+        ];
+        for (title, expected) in cases {
+            let value: Value = serde_yaml_ng::from_str(&format!("title: {title:?}")).unwrap();
+            let literal = safe_dump_flow(&value);
+            assert_eq!(literal, expected);
+            assert_eq!(literal.matches('\n').count(), 1, "{literal:?} is not one line");
+            let parsed: Value = serde_yaml_ng::from_str(&format!("v: {literal}")).unwrap();
+            assert_eq!(parsed["v"], value, "{literal:?} did not round-trip");
+        }
+    }
+
+    /// Plan review I3 / Global Constraint 23: every one-line collection field a note writes —
+    /// `commitment:`, `change:`, `was:`, `meets:`, `window:` — goes through
+    /// `safe_dump_block` on the note's *scalar* fields plus `format!("{key}: {}\n",
+    /// write::to_literal(&collection))`, never through `safe_dump_block` on a map that nests
+    /// the collection (which spans many lines — the counter-case below proves why the
+    /// builder exists). `split_frontmatter` parses the one-line result back to the same
+    /// value.
+    #[test]
+    fn a_collection_after_block_scalars_is_one_frontmatter_line() {
+        let scalars = Node::map(vec![("type", Node::text("approval")), ("title", Node::text("CS 100"))]);
+        let commitment: Value = serde_yaml_ng::from_str(
+            "kind: class\n\
+             level: hard\n\
+             title: \"CS 100\"\n\
+             course: cs-100\n\
+             meets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]\n\
+             where: null\n\
+             from: \"2026-08-19\"\n\
+             until: null\n",
+        )
+        .unwrap();
+
+        let front = format!(
+            "{}commitment: {}\n",
+            safe_dump_block(&scalars),
+            crate::write::to_literal(&commitment)
+        );
+        assert_eq!(
+            front.matches('\n').count(),
+            3,
+            "type, title and commitment are each one line: {front:?}"
+        );
+
+        let text = format!("---\n{front}---\n\nFound as a weekly series.\n");
+        let (mapping, body) = crate::models::split_frontmatter(&text).expect("parses");
+        assert_eq!(mapping["type"], Value::String("approval".to_string()));
+        assert_eq!(mapping["title"], Value::String("CS 100".to_string()));
+        assert_eq!(mapping["commitment"], commitment);
+        assert_eq!(body, "Found as a weekly series.\n");
+
+        // Counter-case: the builder exists because nesting the same mapping in the map (the
+        // shape this task must NOT produce) spans more than one line.
+        let nested = Node::map(vec![
+            ("type", Node::text("approval")),
+            ("title", Node::text("CS 100")),
+            ("commitment", Node::from(&commitment)),
+        ]);
+        assert!(
+            safe_dump_block(&nested).matches('\n').count() > 3,
+            "nesting the collection in the map should span multiple lines"
+        );
+    }
 }
