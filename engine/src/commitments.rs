@@ -2104,7 +2104,14 @@ pub fn signature(
         .filter(|c| !c.is_empty());
     let title = match course {
         Some(_) => String::new(),
-        None => title.trim().to_lowercase(),
+        // Runs of whitespace, line breaks included, are one space (P11 review m2): a series
+        // titled `Chess\nClub` and the note its card confirmed as `Chess Club` are one meeting.
+        None => title
+            .split(pystr::is_python_space)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase(),
     };
     let meets = meets
         .iter()
@@ -2401,14 +2408,17 @@ const CHECK_CLOSING: &str = "Reject and it's ignored. Either way you won't be as
 const HARD_SENTENCE: &str = "Approve and Knowlu never plans anything over it.";
 const SOFT_SENTENCE: &str =
     "Approve and Knowlu counts it as busy; an event suggestion may overlap it, and will say so.";
-const OPTIONAL_SENTENCE: &str =
-    "Approve and Knowlu shows it on your week; it plans around it only if nothing else fits.";
+const OPTIONAL_SENTENCE: &str = "Optional: Knowlu won't plan around it.";
+/// The window card's own answer paragraph (controller ruling, fix round 1: rejecting keeps the
+/// usual hours, it does not "ignore" anything), then [`WINDOW_CLOSING`].
 const WINDOW_SENTENCE: &str =
-    "Approve and Knowlu plans your days in these hours. You can change them any time.";
-const CHANGE_WHY: &str =
-    "**Has this changed?** Your calendar now shows it differently from your note.";
-const CHANGE_CLOSING: &str = "Approve and Knowlu updates the note. Reject and it stays as it \
-is. Either way you won't be asked again.";
+    "Approve to plan inside these hours. Reject to keep your usual hours.";
+const WINDOW_CLOSING: &str = "Either way you won't be asked again.";
+const CHANGE_WHY: &str = "**Has this changed?** Your calendar entry for this now looks different.";
+const CHANGE_CLOSING: &str = "Approve and Knowlu updates this. Reject and it stays as it is. \
+You won't be asked about this change again.";
+/// What a change card's detail line shows for an absent old (or new) value.
+const NOT_SET: &str = "(not set)";
 
 /// A change to a confirmed commitment (§5.4), detected by P12 and filed here. `target` is
 /// `commitments/<file>.md`; `source_uid` and `title` are the note's; `change` holds the new values
@@ -2630,6 +2640,10 @@ fn proposal_body(p: &Proposal) -> String {
         }
     };
     let mut parts = vec![CHECK_WHY.to_string(), sentence.to_string()];
+    if p.is_window() {
+        parts.push(WINDOW_CLOSING.to_string());
+        return parts.join("\n\n") + "\n";
+    }
     if let Some(place) = p.where_.as_deref().map(single_line).filter(|w| !w.trim().is_empty()) {
         parts.push(format!("Where: {}", place.trim()));
     }
@@ -2690,7 +2704,7 @@ fn change_body(c: &Change) -> String {
             _ => value.and_then(text).map(|t| crate::judge::one_line(&t, 80)),
         }
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "none".to_string())
+        .unwrap_or_else(|| NOT_SET.to_string())
     };
     let mut parts = vec![CHANGE_WHY.to_string()];
     for (key, value) in &c.change {
@@ -2698,7 +2712,7 @@ fn change_body(c: &Change) -> String {
         if field == "source_uid" {
             continue;
         }
-        let label = capitalised(&field);
+        let label = field_label(&field);
         parts.push(format!(
             "{label}: now {}, was {}.",
             show(&field, Some(value)),
@@ -2709,20 +2723,33 @@ fn change_body(c: &Change) -> String {
     parts.join("\n\n") + "\n"
 }
 
-/// `meets` → `Meets`.
-fn capitalised(field: &str) -> String {
-    let mut chars = field.chars();
-    chars.next().map_or_else(String::new, |c| c.to_uppercase().collect::<String>() + chars.as_str())
+/// The student-facing name of a changed field: `Meets`, `Where`, `Ends`, `Level`; any other field
+/// capitalised.
+fn field_label(field: &str) -> String {
+    match field {
+        "meets" => "Meets".to_string(),
+        "where" => "Where".to_string(),
+        "until" => "Ends".to_string(),
+        "level" => "Level".to_string(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map_or_else(String::new, |c| c.to_uppercase().collect::<String>() + chars.as_str())
+        }
+    }
 }
 
 /// What `approvals/` and `archive/` already ask, read once at the start of [`emit_checks`].
 #[derive(Default)]
 struct Asked {
-    /// Every approval's `source_uid`, but a `superseded` card's (§5.2, M-f).
+    /// Every approval's `source_uid`, but a `superseded` or `expired` card's (§5.2, M-f, §5.5).
     keys: BTreeSet<String>,
-    /// A card whose `source_uid` starts `window:` and is not `superseded` exists (plan review C1).
+    /// A card whose `source_uid` starts `window:` and is neither `superseded` nor `expired`
+    /// exists (plan review C1).
     window: bool,
-    /// `(target, canonical change)` of every change card not `superseded` (§5.4, §5.5).
+    /// `(target, canonical change)` of every change card neither `superseded` nor `expired`
+    /// (§5.4, §5.5).
     changes: BTreeSet<(String, String)>,
     /// `commitment-check` cards whose `first_proposed_at` is today, whatever their status.
     today: i64,
@@ -2748,7 +2775,10 @@ fn asked(vault: &Path, today: Date) -> Asked {
             {
                 out.today += 1;
             }
-            if field("status") == "superseded" {
+            // Withdrawn (`superseded`) or expired unanswered: the question is still open (M-f, and
+            // the §5.5 ruling of fix round 1, as G1 rules for event cards). A card the student
+            // deleted is archived with the status it had, and closes the question like an answer.
+            if matches!(field("status").as_str(), "superseded" | "expired") {
                 continue;
             }
             let key = field("source_uid");
@@ -2797,15 +2827,18 @@ fn proposal_order(p: &Proposal) -> (usize, usize, Time, &str) {
 /// today)` are filed, so `defer_over_budget` never has overflow to snooze (R9, constraint 7).
 /// **Asked once** (§5.5): one snapshot of `approvals/` and `archive/` is read on entry and every
 /// key and change filed in this call joins it, so one key never files twice in a run —
-/// - a proposal is skipped when any card not `superseded` has its `source_uid` (M-f);
-/// - the window proposal is skipped while any card not `superseded` has a `window:` key,
-///   **whatever its routine keys** — the window's `source_uid` changes as routines come and go,
-///   so it is never compared by its exact value (P9 M6, plan review C1);
-/// - a change is skipped when a card not `superseded` has the same `target` and the same
-///   canonical `change` text.
+/// - a proposal is skipped when any card has its `source_uid` — answered, pending, snoozed, or
+///   deleted from the app (archived as it stood) — unless that card is `superseded` or
+///   `expired` (M-f; §5.5 as ruled in fix round 1);
+/// - the window proposal is skipped while any card neither `superseded` nor `expired` has a
+///   `window:` key, **whatever its routine keys** — the window's `source_uid` changes as
+///   routines come and go, so it is never compared by its exact value (P9 M6, plan review C1);
+/// - a change is skipped when a card neither `superseded` nor `expired` has the same `target`
+///   and the same canonical `change` text.
 ///
 /// An `office-hours` proposal is never filed (R8; P9's `for_cards` already leaves them out). A
-/// card that cannot be filed is a warning and the next one is tried.
+/// card that cannot be filed is one warning and ends this run's cards, as F2's emitter does (P11
+/// review m3): the next run tries again.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_checks(
     vault: &Path,
@@ -2849,7 +2882,11 @@ pub fn emit_checks(
                 seen.changes.insert(asked_key);
                 filed.push(path);
             }
-            Err(err) => warnings.push(err),
+            Err(err) => {
+                warnings.push(err);
+                let count = filed.len();
+                return (filed, count, warnings);
+            }
         }
     }
 
@@ -2875,7 +2912,10 @@ pub fn emit_checks(
                 seen.window |= window;
                 filed.push(path);
             }
-            Err(err) => warnings.push(err),
+            Err(err) => {
+                warnings.push(err);
+                break;
+            }
         }
     }
     let count = filed.len();
@@ -6225,11 +6265,27 @@ mod card_tests {
 
     const TODAY: Date = Date::constant(2026, 9, 24);
 
-    fn vault(name: &str) -> PathBuf {
+    /// A scratch vault removed when the test ends, pass or fail (review m4).
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn vault(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("knowlu-card-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     fn ctx() -> WriteContext {
@@ -6353,7 +6409,7 @@ mod card_tests {
     fn file_card_refuses_a_kind_outside_local_card_kinds() {
         let v = vault("refuse");
         for kind in ["event-check", "amend"] {
-            let mut journal = Journal::new(&v);
+            let mut journal = Journal::new(v.as_path());
             let filed = file_card(
                 &v,
                 kind,
@@ -6525,7 +6581,12 @@ mod card_tests {
         )
         .unwrap();
         assert_eq!(get(&meta, "commitment"), Some(&expected));
-        assert!(body.contains("Approve and Knowlu plans your days in these hours. You can change them any time."));
+        assert_eq!(
+            body.trim_start_matches('\n'),
+            "**Is this part of your week?** Knowlu found it repeating on your calendar.\n\n\
+             Approve to plan inside these hours. Reject to keep your usual hours.\n\n\
+             Either way you won't be asked again.\n"
+        );
     }
 
     // --- the change card ------------------------------------------------------------------
@@ -6545,7 +6606,14 @@ mod card_tests {
         assert_eq!(get(&meta, "change"), Some(&Value::Mapping(meets_change().change)));
         assert_eq!(get(&meta, "was"), Some(&Value::Mapping(meets_change().was)));
         assert!(!lines.iter().any(|l| l.starts_with("commitment")));
-        assert!(body.contains("Meets: now Tue/Thu 9:30–10:45am, was Mon/Wed/Fri 12–12:50pm."), "{body}");
+        assert_eq!(
+            body.trim_start_matches('\n'),
+            "**Has this changed?** Your calendar entry for this now looks different.\n\n\
+             Meets: now Tue/Thu 9:30–10:45am, was Mon/Wed/Fri 12–12:50pm.\n\n\
+             Approve and Knowlu updates this. Reject and it stays as it is. \
+             You won't be asked about this change again.\n"
+        );
+        assert!(!body.contains("note"), "{body}");
 
         let v = vault("change-until");
         let (paths, ..) = emit(&v, &[], &[until_change()], 15);
@@ -6555,7 +6623,86 @@ mod card_tests {
         assert!(lines.contains(&"change: {until: '2026-12-04'}".to_string()), "{raw}");
         assert!(lines.contains(&"was: {until: null}".to_string()), "{raw}");
         assert_eq!(get(&meta, "was"), Some(&Value::Mapping(until_change().was)));
-        assert!(body.contains("Until: now Dec 4, was none."), "{body}");
+        assert!(body.contains("\n\nEnds: now Dec 4, was (not set).\n\n"), "{body}");
+        assert!(!body.contains("until") && !body.contains("Until"), "{body}");
+
+        let v = vault("change-labels");
+        let labelled = Change {
+            change: mapping("where: \"Room 2\"\nlevel: soft"),
+            was: mapping("where: null\nlevel: hard"),
+            ..meets_change()
+        };
+        let (paths, ..) = emit(&v, &[], &[labelled], 15);
+        let (meta, body, _) = read(&paths[0]);
+        assert_eq!(field(&meta, "title"), "CS 100 is now in Room 2 · update?");
+        assert!(body.contains("\n\nWhere: now Room 2, was (not set).\n\n"), "{body}");
+        assert!(body.contains("\n\nLevel: now soft, was hard.\n\n"), "{body}");
+    }
+
+    #[test]
+    fn an_optional_proposal_says_knowlu_wont_plan_around_it() {
+        let v = vault("optional");
+        let p = Proposal {
+            level: Level::Optional,
+            ..proposal("club", "Chess Club", "gcal-series:chess", vec![meet(&["wed"], t(18, 0), t(19, 0))])
+        };
+        let (paths, ..) = emit(&v, &[p], &[], 15);
+        let (_, body, _) = read(&paths[0]);
+        assert!(body.contains("\n\nOptional: Knowlu won't plan around it.\n\n"), "{body}");
+    }
+
+    #[test]
+    fn a_whitespace_or_line_break_in_a_title_is_the_same_signature() {
+        let codes = Codes::default();
+        let meets = vec![meet(&["wed"], t(18, 0), t(19, 0))];
+        let note = signature("club", None, "Chess Club", &meets, &codes);
+        for title in ["Chess\nClub", "Chess\r\nClub", "  chess   club ", "Chess\u{2028}Club"] {
+            assert_eq!(signature("club", None, title, &meets, &codes), note, "{title:?}");
+        }
+        assert_ne!(signature("club", None, "Chess Clubs", &meets, &codes), note);
+    }
+
+    #[test]
+    fn a_card_deleted_in_the_app_closes_the_question() {
+        let v = vault("deleted");
+        let (paths, ..) = emit(&v, &[cs100(), window("window:a")], &[until_change()], 15);
+        assert_eq!(paths.len(), 3);
+        for path in &paths {
+            let rel = format!("approvals/{}", path.file_name().unwrap().to_string_lossy());
+            let mut journal = Journal::new(v.as_path());
+            crate::write::delete(&v, &rel, &WriteContext::new("quinn", "dashboard"), &mut journal).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(v.join("archive")).unwrap().count(), 3);
+        let mut journal = Journal::new(v.as_path());
+        let tomorrow = TODAY.tomorrow().unwrap();
+        let (again, ..) =
+            emit_checks(&v, &[cs100(), window("window:a,b")], &[until_change()], tomorrow, 15, &ctx(), &mut journal);
+        assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_card_that_expired_unanswered_does_not_close_the_question() {
+        let v = vault("expired");
+        card(&v, "archive", "commitment-check-cs-100.md", "status: expired\nsource_uid: gcal-series:cs100\nfirst_proposed_at: 2026-09-01\n");
+        card(&v, "archive", "commitment-check-your-day.md", "status: expired\nsource_uid: \"window:a\"\nfirst_proposed_at: 2026-09-01\n");
+        card(
+            &v,
+            "archive",
+            "commitment-check-cs-100-ends.md",
+            "status: expired\nsource_uid: gcal-series:cs100\ntarget: commitments/cs-100.md\n\
+             change: {until: '2026-12-04'}\nwas: {until: null}\nfirst_proposed_at: 2026-09-01\n",
+        );
+        let (paths, ..) = emit(&v, &[cs100(), window("window:a")], &[until_change()], 15);
+        assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn a_filing_error_stops_the_run_with_one_warning() {
+        let v = vault("io-error");
+        std::fs::write(v.join("approvals"), "not a folder").unwrap();
+        let (paths, n, warnings) = emit(&v, &clubs(4), &[until_change()], 15);
+        assert_eq!((paths.len(), n), (0, 0));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     // --- the cap and the order ------------------------------------------------------------
@@ -6627,7 +6774,7 @@ mod card_tests {
             proposal("class", "HIS 150", "gcal-series:y", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
         ];
         ps.reverse();
-        let mut journal = Journal::new(&v);
+        let mut journal = Journal::new(v.as_path());
         let (paths, ..) = emit_checks(&v, &ps, &[meets_change()], TODAY, 100, &ctx(), &mut journal);
         // Five a day: the change, then four classes by (day, start), then source_uid.
         assert_eq!(
@@ -6641,7 +6788,7 @@ mod card_tests {
             ]
         );
         // The next day, the rest in kind order.
-        let mut journal = Journal::new(&v);
+        let mut journal = Journal::new(v.as_path());
         let tomorrow = TODAY.tomorrow().unwrap();
         let (paths, ..) = emit_checks(&v, &ps, &[meets_change()], tomorrow, 100, &ctx(), &mut journal);
         assert_eq!(
@@ -6671,7 +6818,7 @@ mod card_tests {
         let ps = vec![cs100(), window("window:gcal-series:wake")];
         let (first, ..) = emit(&v, &ps, &[meets_change()], 15);
         assert_eq!(first.len(), 3);
-        let mut journal = Journal::new(&v);
+        let mut journal = Journal::new(v.as_path());
         let tomorrow = TODAY.tomorrow().unwrap();
         let (second, n, warnings) = emit_checks(&v, &ps, &[meets_change()], tomorrow, 15, &ctx(), &mut journal);
         assert_eq!((second.len(), n, warnings.len()), (0, 0, 0));
@@ -6731,10 +6878,10 @@ mod card_tests {
         let v = vault("change-once");
         assert_eq!(emit(&v, &[], &[until_change()], 15).0.len(), 1);
         let tomorrow = TODAY.tomorrow().unwrap();
-        let mut journal = Journal::new(&v);
+        let mut journal = Journal::new(v.as_path());
         let (again, ..) = emit_checks(&v, &[], &[until_change(), until_change()], tomorrow, 15, &ctx(), &mut journal);
         assert!(again.is_empty());
-        let mut journal = Journal::new(&v);
+        let mut journal = Journal::new(v.as_path());
         let later = Change { change: mapping("until: \"2026-12-11\""), ..until_change() };
         let (different, ..) = emit_checks(&v, &[], &[later], tomorrow, 15, &ctx(), &mut journal);
         assert_eq!(titles(&different), vec!["CS 100 ends Dec 11 · update?"]);
