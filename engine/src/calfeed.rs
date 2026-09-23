@@ -484,7 +484,7 @@ impl Component {
         self.first(name).is_some_and(|(_, v)| pystr::strip(v).eq_ignore_ascii_case(value))
     }
 
-    /// The raw `ATTENDEE`/`ORGANIZER` lines, read from the line text rather than
+    /// The raw lines named `name` (e.g. `ATTENDEE`), read from the line text rather than
     /// `parse_property`, so a quoted `CN` holding a colon cannot hide a `PARTSTAT`.
     fn people(&self, name: &str) -> Vec<(String, bool)> {
         self.lines
@@ -540,22 +540,43 @@ fn vevents(text: &str) -> Vec<Component> {
     out
 }
 
-/// How the feed's owner is told: the one `ORGANIZER` address in the whole feed, or unknown.
+static EMAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^@\s:]+@[^@\s]+\.[^@\s]+$").unwrap());
+
+/// Who the feed belongs to: the address a calendar-level `X-WR-CALNAME` names, or unknown.
+///
+/// Google's export of a primary calendar names it by the owner's address. The owner is never
+/// inferred from `ORGANIZER` lines (review I1, controller ruling): a feed whose only organizer
+/// is the one person who sends the student invites would make that person the owner and turn
+/// the student's own decline into a guest's. Unknown is the conservative side: any declined
+/// attendee then makes the series ineligible.
 enum Owner {
     Known(String),
     Unknown,
 }
 
 impl Owner {
-    fn of(events: &[Component]) -> Owner {
-        let addresses: BTreeSet<String> = events
-            .iter()
-            .flat_map(|e| e.people("ORGANIZER"))
-            .map(|(address, _)| address)
-            .filter(|a| !a.is_empty())
-            .collect();
-        match addresses.len() {
-            1 => Owner::Known(addresses.into_iter().next().unwrap()),
+    fn of(ics: &str) -> Owner {
+        let mut depth = 0usize;
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for line in unfold(ics) {
+            if line.starts_with("BEGIN:") {
+                depth += 1;
+            } else if line.starts_with("END:") {
+                depth = depth.saturating_sub(1);
+            } else if depth == 1 {
+                if let Some((name, _, value)) = parse_property(&line) {
+                    if name == "X-WR-CALNAME" {
+                        names.insert(pystr::strip(&unescape(&value)).to_lowercase());
+                    }
+                }
+            }
+        }
+        match names.len() {
+            1 => {
+                let name = names.into_iter().next().unwrap();
+                if EMAIL.is_match(&name) { Owner::Known(name) } else { Owner::Unknown }
+            }
             _ => Owner::Unknown,
         }
     }
@@ -587,7 +608,15 @@ fn flag(slot: &mut Option<String>, why: &str) {
     }
 }
 
-const DOUBTFUL_DECLINE: &str = "a declined attendee and no single organizer to tell the owner by";
+/// Which occurrence an override decides: a generated original, or a time the rule never made.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum OverrideSlot {
+    Original(usize),
+    Unmatched(String),
+}
+
+const DOUBTFUL_DECLINE: &str =
+    "a declined attendee and no X-WR-CALNAME address to tell the owner by";
 
 fn series_key(uid: &str) -> String {
     match uid.strip_suffix("@google.com") {
@@ -644,16 +673,18 @@ fn find_original(originals: &[DateTime], named: &Due) -> Option<usize> {
 /// Pure. Masters (a `VEVENT` with an `RRULE` or `RDATE` and no `RECURRENCE-ID`) and their
 /// overrides are grouped by `UID`; the master is expanded with [`occurrence_starts`], `EXDATE`s
 /// are removed, and each override replaces the occurrence its `RECURRENCE-ID` names — or removes
-/// it when the override is cancelled, transparent or declined by the owner. A master that is
-/// cancelled, transparent or declined by the owner yields nothing. A series is returned when it
-/// has an instance in `[from, to)`, or — when its rule cannot be expanded — while that rule has
-/// not expired; `ineligible` says why the latter can never be proposed. Sorted by `key`.
+/// it when the override is cancelled, transparent or declined by the owner; of two overrides
+/// naming one occurrence, the later in the feed wins. A master that is cancelled, transparent
+/// or declined by the owner yields nothing. A series is returned when it has an instance in
+/// `[from, to)`, or — when its rule cannot be expanded — while that rule's `UNTIL` has not
+/// passed (a `COUNT`-bounded one: only while it starts inside the horizon); `ineligible` says why
+/// the latter can never be proposed. Sorted by `key`.
 ///
 /// The warnings name masters that could not be read; the busy-time path warns about the same
 /// events, so a caller may keep these off the runner log.
 pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<IcsSeries>, Vec<String>) {
     let events = vevents(ics);
-    let owner = Owner::of(&events);
+    let owner = Owner::of(ics);
     let mut masters: BTreeMap<String, Vec<&Component>> = BTreeMap::new();
     let mut overrides: BTreeMap<String, Vec<&Component>> = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -729,7 +760,14 @@ pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<Ics
                 match occurrence_starts(start, &rule, tz) {
                     Ok(starts) => starts,
                     Err(why) => {
-                        if !rule_expired(&rule, tz, window_start) && series.first < to {
+                        // `rule_expired` reads only UNTIL; a COUNT-bounded rule it cannot expand is
+                        // kept only while it starts inside the horizon, so an exhausted one is
+                        // never "seen" forever.
+                        let counted = rule.get("COUNT").is_some_and(|c| !c.is_empty());
+                        let live = !rule_expired(&rule, tz, window_start)
+                            && series.first < to
+                            && (!counted || series.first >= from);
+                        if live {
                             flag(&mut ineligible, &format!("unsupported rule ({why})"));
                             series.ineligible = ineligible;
                             out.push(series);
@@ -743,7 +781,7 @@ pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<Ics
         // Each original occurrence becomes Some((start, end)) or None once removed.
         let mut spans: Vec<Option<(DateTime, DateTime)>> =
             originals.iter().map(|s| s.checked_add(duration).ok().map(|e| (*s, e))).collect();
-        let mut extra: Vec<(DateTime, DateTime)> = Vec::new();
+        let mut decided: BTreeMap<OverrideSlot, Option<(DateTime, DateTime)>> = BTreeMap::new();
         for (params, value) in master.all("EXDATE") {
             for chunk in value.split(',') {
                 if let Some(named) = parse_dt(pystr::strip(chunk), params, tz) {
@@ -762,10 +800,12 @@ pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<Ics
                 flag(&mut ineligible, "unparseable RECURRENCE-ID");
                 continue;
             };
-            let slot = find_original(&originals, &named);
-            if let Some(i) = slot {
-                spans[i] = None;
-            }
+            // One decision per occurrence, the last override in feed order winning: keyed by the
+            // original it names, else by the named time itself.
+            let slot = match find_original(&originals, &named) {
+                Some(i) => OverrideSlot::Original(i),
+                None => OverrideSlot::Unmatched(format!("{named:?}")),
+            };
             let removed = over.is("STATUS", "CANCELLED") || over.is("TRANSP", "TRANSPARENT");
             let removed = removed
                 || match reply(over, &owner) {
@@ -777,12 +817,25 @@ pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<Ics
                     Reply::Fine => false,
                 };
             if removed {
+                decided.insert(slot, None);
                 continue;
             }
             match component_span(over, tz, Some(duration)) {
-                Ok((s, e, _)) => extra.push((s, e)),
-                Err(_) => flag(&mut ineligible, "an override that cannot be read"),
+                Ok((s, e, _)) => {
+                    decided.insert(slot, Some((s, e)));
+                }
+                Err(_) => {
+                    flag(&mut ineligible, "an override that cannot be read");
+                    decided.insert(slot, None);
+                }
             }
+        }
+        let mut extra: Vec<(DateTime, DateTime)> = Vec::new();
+        for (slot, span) in decided {
+            if let OverrideSlot::Original(i) = slot {
+                spans[i] = None;
+            }
+            extra.extend(span);
         }
 
         let mut instances: BTreeSet<(Date, Time, Time)> = BTreeSet::new();
@@ -1871,6 +1924,15 @@ mod tests {
         vevent(&refs)
     }
 
+    /// A feed whose calendar-level `X-WR-CALNAME` is `name` (Google's primary-calendar export
+    /// names the owner's address there).
+    fn owned(name: &str, vevents: &[String]) -> String {
+        format!("BEGIN:VCALENDAR
+X-WR-CALNAME:{name}
+{}END:VCALENDAR
+", vevents.concat())
+    }
+
     fn inst(d: Date, h1: i8, m1: i8, h2: i8, m2: i8) -> (Date, Time, Time) {
         (d, Time::constant(h1, m1, 0, 0), Time::constant(h2, m2, 0, 0))
     }
@@ -2025,8 +2087,8 @@ mod tests {
 
     #[test]
     fn the_owner_declined_yields_no_series() {
-        // One ORGANIZER address in the whole feed: that is the owner.
-        let text = wrap(&[
+        // An email-shaped X-WR-CALNAME names the owner.
+        let text = owned("sam@example.edu", &[
             master(
                 "declined",
                 &[
@@ -2052,7 +2114,7 @@ mod tests {
 
     #[test]
     fn an_override_declined_by_the_owner_removes_its_instance() {
-        let text = wrap(&[
+        let text = owned("Sam@Example.edu", &[
             master("cs100", &["ORGANIZER:mailto:sam@example.edu"]),
             vevent(&[
                 "UID:cs100",
@@ -2071,7 +2133,7 @@ mod tests {
 
     #[test]
     fn an_unknown_owner_with_any_declined_attendee_is_ineligible() {
-        // Two organizers in the feed: the owner cannot be told.
+        // No X-WR-CALNAME: the owner cannot be told.
         let text = wrap(&[
             master(
                 "cs100",
@@ -2277,6 +2339,111 @@ mod tests {
             ]
         );
     }
+
+    // --- fix round 1 ----------------------------------------------------------------------
+
+    #[test]
+    fn a_decline_in_invites_from_one_other_organizer_is_never_eligible() {
+        // Review I1: the student's own events carry no ORGANIZER; every invite comes from one
+        // officer. The one organizer in the feed is not the owner, so the student's decline
+        // must not read as "a guest declined".
+        let invite = master(
+            "club",
+            &[
+                "ORGANIZER;CN=Officer:mailto:officer@example.org",
+                "ATTENDEE;CN=Officer;PARTSTAT=ACCEPTED:mailto:officer@example.org",
+                "ATTENDEE;CN=Sam Student;PARTSTAT=DECLINED:mailto:sam@example.edu",
+            ],
+        );
+        let own = vevent(&[
+            "UID:own",
+            "SUMMARY:Dentist",
+            "DTSTART;TZID=America/Chicago:20260909T090000",
+            "DTEND;TZID=America/Chicago:20260909T100000",
+        ]);
+        for text in [wrap(&[invite.clone(), own.clone()]), owned("Personal", &[invite.clone(), own])] {
+            let (out, _) = series(&text);
+            assert!(out.iter().all(|s| s.ineligible.is_some()), "{out:?}");
+        }
+        // With the owner named, the decline removes the series outright.
+        let (out, _) = series(&owned("sam@example.edu", &[invite]));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn two_calendar_names_leave_the_owner_unknown() {
+        let text = format!(
+            "BEGIN:VCALENDAR
+X-WR-CALNAME:sam@example.edu
+X-WR-CALNAME:pat@example.edu
+{}END:VCALENDAR
+",
+            master("cs100", &["ATTENDEE;PARTSTAT=DECLINED:mailto:sam@example.edu"])
+        );
+        let (out, _) = series(&text);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].ineligible.is_some());
+    }
+
+    #[test]
+    fn the_last_override_for_one_occurrence_wins() {
+        let moved = vevent(&[
+            "UID:cs100",
+            "RECURRENCE-ID;TZID=America/Chicago:20260915T100000",
+            "DTSTART;TZID=America/Chicago:20260916T140000",
+            "DTEND;TZID=America/Chicago:20260916T145000",
+        ]);
+        let cancelled = vevent(&[
+            "UID:cs100",
+            "RECURRENCE-ID;TZID=America/Chicago:20260915T100000",
+            "STATUS:CANCELLED",
+            "DTSTART;TZID=America/Chicago:20260915T100000",
+            "DTEND;TZID=America/Chicago:20260915T105000",
+        ]);
+        let (out, _) = series(&wrap(&[master("cs100", &[]), moved.clone(), cancelled.clone()]));
+        let days = days_of(&out[0]);
+        assert!(!days.contains(&"2026-09-15".to_string()));
+        assert!(!days.contains(&"2026-09-16".to_string()));
+        assert_eq!(days.len(), 7);
+
+        let (out, _) = series(&wrap(&[master("cs100", &[]), cancelled, moved]));
+        assert!(out[0].instances.contains(&inst(date(2026, 9, 16), 14, 0, 14, 50)));
+        assert_eq!(out[0].instances.len(), 8);
+    }
+
+    #[test]
+    fn a_count_ended_weekly_series_is_not_returned() {
+        let text = wrap(&[vevent(&[
+            "UID:short",
+            "SUMMARY:Workshop",
+            "DTSTART;TZID=America/Chicago:20260825T100000",
+            "DTEND;TZID=America/Chicago:20260825T110000",
+            "RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=2",
+        ])]);
+        let (out, _) = series(&text);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_unsupported_rule_with_count_is_returned_only_while_it_starts_in_the_horizon() {
+        let at = |start: &str| {
+            wrap(&[vevent(&[
+                "UID:m",
+                "SUMMARY:Monthly thing",
+                &format!("DTSTART;TZID=America/Chicago:{start}T100000"),
+                &format!("DTEND;TZID=America/Chicago:{start}T110000"),
+                "RRULE:FREQ=MONTHLY;COUNT=3",
+            ])])
+        };
+        // Years ago: COUNT long exhausted, never returned again.
+        assert!(series(&at("20240910")).0.is_empty());
+        // Last month: its start is before the horizon, so it is not returned either.
+        assert!(series(&at("20260810")).0.is_empty());
+        // Starting inside the horizon: returned, ineligible.
+        let (out, _) = series(&at("20260910"));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].ineligible.as_deref().unwrap().contains("MONTHLY"));
+    }
 }
 
 #[cfg(test)]
@@ -2348,5 +2515,4 @@ mod reference {
         let restored = read_snapshot(Path::new("tests/fixtures/calendar-snapshot-gcal.md"));
         assert_eq!(restored["personal"], events);
     }
-
 }
