@@ -11,7 +11,7 @@
 //!
 //! 495 minutes = 8.25h. If this module produces anything else, every later number is wrong too.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use jiff::civil::{Date, DateTime, Time};
@@ -200,8 +200,13 @@ impl WeekCalendar {
 
     /// A copy whose window for `day`'s weekday is replaced. *Reason:* P18 plans today under the
     /// baseline window and the `--window` preview under a proposed one, from the same calendar
-    /// otherwise.
+    /// otherwise. An inverted or zero-length window (`start >= end`) is ignored (M-1): this is the
+    /// one place a `--window` preview string reaches `WeekCalendar`, and a malformed one must not
+    /// silently corrupt the day rather than being ignored.
     pub fn with_day_window(mut self, day: Date, start: Time, end: Time) -> Self {
+        if start >= end {
+            return self;
+        }
         if let Some(idx) = weekday_index(day) {
             self.window[idx] = Some((start, end));
         }
@@ -233,19 +238,14 @@ impl WeekCalendar {
             .unwrap_or_default()
     }
 
-    /// Whether `span` is active on `day` and, if so, its actual busy time that day: inside its
-    /// source's horizon in `instances`, the source's actual instance on that date (none if
-    /// cancelled, the moved time if moved); otherwise the weekly span on its weekday when
-    /// `from <= day <= until`. *Reason:* §6.1, R21.
-    fn span_block(&self, day: Date, span: &CommitmentSpan) -> Option<(Time, Time)> {
-        if let Some((horizon_start, horizon_end, instances)) = self.instances.get(&span.source_uid)
-        {
-            if *horizon_start <= day && day < *horizon_end {
-                return instances
-                    .iter()
-                    .find(|(date, _, _)| *date == day)
-                    .map(|(_, start, end)| (*start, *end));
-            }
+    /// The weekly rule alone, with no idea of `instances`: busy on `span`'s weekday when
+    /// `from <= day <= until`. An inverted or zero-length span (`end <= start`) is dropped rather
+    /// than fed to the cursor walk, which would double-count (M-1: defence in depth — a span
+    /// arrives from a note or a series, and P6/§6.3 validate upstream, but this file never trusts
+    /// that alone). *Reason:* §6.1, R21.
+    fn weekly_span_block(day: Date, span: &CommitmentSpan) -> Option<(Time, Time)> {
+        if span.end <= span.start {
+            return None;
         }
         if day_key(day) != span.day {
             return None;
@@ -260,11 +260,40 @@ impl WeekCalendar {
     }
 
     /// Every commitment span active on `day`, with the time it is actually busy that day.
+    ///
+    /// A source with an `instances` entry whose horizon covers `day` is handled **once**, on the
+    /// first span in `commitment_spans` that names it: every instance dated `day` for that source
+    /// is emitted (not just the first — two instances of one source on the same date, such as a
+    /// moved class landing on another class's day, are both busy), tagged with that first span (so
+    /// the drawn title/kind come from one place). Every other span sharing that `source_uid` emits
+    /// nothing here — P6 emits one span per `(meet, day)` sharing a `source_uid`, so without this,
+    /// each of a multi-day note's spans would independently find the same instance and draw it
+    /// once per weekday. A span whose source has no horizon entry, or whose horizon does not cover
+    /// `day`, falls back to `weekly_span_block`, per span as before.
     fn active_spans(&self, day: Date) -> Vec<(Time, Time, &CommitmentSpan)> {
-        self.commitment_spans
-            .iter()
-            .filter_map(|span| self.span_block(day, span).map(|(s, e)| (s, e, span)))
-            .collect()
+        let mut out = Vec::new();
+        let mut handled_sources: HashSet<&str> = HashSet::new();
+        for span in &self.commitment_spans {
+            let horizon = self
+                .instances
+                .get(span.source_uid.as_str())
+                .filter(|(start, end, _)| *start <= day && day < *end);
+            if let Some((_, _, instances)) = horizon {
+                if handled_sources.insert(span.source_uid.as_str()) {
+                    out.extend(
+                        instances
+                            .iter()
+                            .filter(|(date, start, end)| *date == day && start < end)
+                            .map(|(_, start, end)| (*start, *end, span)),
+                    );
+                }
+                continue;
+            }
+            if let Some((start, end)) = Self::weekly_span_block(day, span) {
+                out.push((start, end, span));
+            }
+        }
+        out
     }
 
     /// The active spans as drawn: the same rule `template_blocks` uses to fold spans into the busy
@@ -710,5 +739,217 @@ mod tests {
         let with_span = cal(Vec::new()).with_commitments(vec![duplicate], [None; 7]);
 
         assert_eq!(with_span.template_blocks(monday), without_span.template_blocks(monday));
+    }
+
+    // --- P3 fix round 1: I-1 (instances handled once per source), M-1 (inverted spans/windows),
+    // M-2 (partial-overlap and early-window coverage) ---
+
+    fn cal_with_yaml(yaml: &str, events: Vec<CalEvent>) -> WeekCalendar {
+        let config = match serde_yaml_ng::from_str::<Value>(yaml).expect("valid test yaml") {
+            Value::Mapping(m) => m,
+            _ => Mapping::new(),
+        };
+        WeekCalendar::new(&config, events)
+    }
+
+    #[test]
+    fn a_multi_day_note_inside_the_horizon_is_drawn_once() {
+        let source_uid = "test:mw-class";
+        let spans = vec![
+            CommitmentSpan {
+                day: "mon",
+                start: Time::constant(12, 0, 0, 0),
+                end: Time::constant(12, 50, 0, 0),
+                from: None,
+                until: None,
+                title: "CS 200".into(),
+                kind: "class".into(),
+                source_uid: source_uid.into(),
+            },
+            CommitmentSpan {
+                day: "wed",
+                start: Time::constant(12, 0, 0, 0),
+                end: Time::constant(12, 50, 0, 0),
+                from: None,
+                until: None,
+                title: "CS 200".into(),
+                kind: "class".into(),
+                source_uid: source_uid.into(),
+            },
+        ];
+        let horizon_start = Date::constant(2026, 8, 24);
+        let horizon_end = Date::constant(2026, 9, 21);
+        let monday = Date::constant(2026, 8, 24);
+        let mut instances = BTreeMap::new();
+        instances.insert(
+            source_uid.to_string(),
+            (
+                horizon_start,
+                horizon_end,
+                vec![(monday, Time::constant(12, 0, 0, 0), Time::constant(12, 50, 0, 0))],
+            ),
+        );
+        let calendar = WeekCalendar::new(&Mapping::new(), Vec::new())
+            .with_commitments(spans, [None; 7])
+            .with_instances(instances);
+
+        assert_eq!(
+            calendar.spans_on(monday).len(),
+            1,
+            "the Mon and Wed spans share one source_uid, so Monday's one instance is drawn once, \
+             not twice"
+        );
+    }
+
+    #[test]
+    fn two_instances_on_one_date_are_both_busy() {
+        let span = CommitmentSpan {
+            day: "thu",
+            start: Time::constant(9, 0, 0, 0),
+            end: Time::constant(9, 50, 0, 0),
+            from: None,
+            until: None,
+            title: "Doubled session".into(),
+            kind: "class".into(),
+            source_uid: "test:doubled".into(),
+        };
+        let horizon_start = Date::constant(2026, 8, 24);
+        let horizon_end = Date::constant(2026, 9, 21);
+        let thursday = Date::constant(2026, 8, 27);
+        let mut instances = BTreeMap::new();
+        instances.insert(
+            "test:doubled".to_string(),
+            (
+                horizon_start,
+                horizon_end,
+                vec![
+                    (thursday, Time::constant(10, 0, 0, 0), Time::constant(10, 50, 0, 0)),
+                    (thursday, Time::constant(14, 0, 0, 0), Time::constant(14, 50, 0, 0)),
+                ],
+            ),
+        );
+        let calendar = WeekCalendar::new(&Mapping::new(), Vec::new())
+            .with_commitments(vec![span], [None; 7])
+            .with_instances(instances);
+
+        assert_eq!(
+            calendar.spans_on(thursday).len(),
+            2,
+            "both instances of the one source on the same date are drawn"
+        );
+        assert_eq!(
+            calendar.template_blocks(thursday),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 8, 27, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 8, 27, 10, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 27, 10, 50, 0, 0),
+                    end: DateTime::constant(2026, 8, 27, 14, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 27, 14, 50, 0, 0),
+                    end: DateTime::constant(2026, 8, 27, 18, 0, 0, 0),
+                },
+            ],
+            "both instances subtract capacity, not just the first found"
+        );
+    }
+
+    #[test]
+    fn an_inverted_span_is_dropped_rather_than_double_counted() {
+        let monday = Date::constant(2026, 8, 24);
+        let inverted = CommitmentSpan {
+            day: "mon",
+            start: Time::constant(12, 0, 0, 0),
+            end: Time::constant(11, 0, 0, 0), // end before start
+            from: None,
+            until: None,
+            title: "Bad span".into(),
+            kind: "club".into(),
+            source_uid: "test:inverted".into(),
+        };
+        let calendar =
+            WeekCalendar::new(&Mapping::new(), Vec::new()).with_commitments(vec![inverted], [None; 7]);
+
+        assert_eq!(
+            calendar.template_blocks(monday),
+            vec![Block {
+                start: DateTime::constant(2026, 8, 24, 8, 0, 0, 0),
+                end: DateTime::constant(2026, 8, 24, 18, 0, 0, 0),
+            }],
+            "an inverted span subtracts nothing, rather than producing overlapping free blocks"
+        );
+    }
+
+    #[test]
+    fn with_day_window_ignores_an_inverted_or_zero_length_window() {
+        let day = Date::constant(2026, 8, 26);
+
+        let inverted = cal(Vec::new()).with_day_window(
+            day,
+            Time::constant(10, 0, 0, 0),
+            Time::constant(9, 0, 0, 0),
+        );
+        assert_eq!(inverted.window(day), (inverted.day_start, inverted.day_end));
+
+        let zero_length = cal(Vec::new()).with_day_window(
+            day,
+            Time::constant(10, 0, 0, 0),
+            Time::constant(10, 0, 0, 0),
+        );
+        assert_eq!(zero_length.window(day), (zero_length.day_start, zero_length.day_end));
+    }
+
+    #[test]
+    fn a_span_partially_overlapping_a_class_unions_the_busy_time() {
+        let yaml = "day_start: \"08:00\"\nday_end: \"18:00\"\nmin_block_minutes: 45\nclasses:\n  mon:\n    - [\"12:00\", \"12:50\"]\n";
+        let monday = Date::constant(2026, 8, 24);
+        let span = CommitmentSpan {
+            day: "mon",
+            start: Time::constant(12, 30, 0, 0),
+            end: Time::constant(13, 30, 0, 0),
+            from: None,
+            until: None,
+            title: "Overlapping club".into(),
+            kind: "club".into(),
+            source_uid: "test:overlap".into(),
+        };
+        let calendar = cal_with_yaml(yaml, Vec::new()).with_commitments(vec![span], [None; 7]);
+
+        assert_eq!(
+            calendar.template_blocks(monday),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 12, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 13, 30, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 18, 0, 0, 0),
+                },
+            ],
+            "the class and the overlapping span union into one busy stretch, with no gap between \
+             them"
+        );
+    }
+
+    #[test]
+    fn a_window_starting_before_the_template_actually_starts_earlier() {
+        let friday = Date::constant(2026, 8, 28); // TEMPLATE fixture, day_start 08:00
+        let calendar = cal(Vec::new()).with_day_window(
+            friday,
+            Time::constant(7, 0, 0, 0),
+            Time::constant(18, 0, 0, 0),
+        );
+
+        let blocks = calendar.template_blocks(friday);
+        let first = blocks.first().expect("Friday has at least one free block");
+        assert_eq!(
+            first.start,
+            DateTime::constant(2026, 8, 28, 7, 0, 0, 0),
+            "an earlier window start is honoured, not clamped to the template's day_start"
+        );
     }
 }
