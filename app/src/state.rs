@@ -224,8 +224,10 @@ pub fn app_data_root() -> Option<PathBuf> {
 
 /// What a quit flush actually managed before its cap fired. Every field means "this completed",
 /// never "this was attempted": a vault with no account, or one that is signed out, quits
-/// `synced: false`, and that is not an error — there was nothing to push, or nothing this device
-/// could push it as (fix round 1, review M2: no vault here has ever had a git "remote" to speak of).
+/// `synced: false`, and that is not an error — there was nothing to push, or no session to push it
+/// under (fix round 2, review M2: the parenthetical this replaced claimed no vault here ever had a
+/// git "remote", which is false — `HistoryStatus::has_remote` existed for exactly that; the point
+/// is only that this struct's own vocabulary is the engine's now, not git's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct QuitFlush {
     pub synced: bool,
@@ -247,9 +249,12 @@ pub struct QuitFlush {
 /// syncs at all).
 ///
 /// The push is skipped outright on a vault with no account: there is nothing to push. A vault WITH
-/// one but signed out, or without an entitlement, is also `synced: false` — a normal state the
-/// engine names as a skip on stdout, but never one this struct's own contract (above) lets read as
-/// "completed" (fix round 1, review M4).
+/// one but signed out is a named SKIP inside `run_lines_with` (`totals.skipped`, printed
+/// `sync (skipped: no session)`); one without an entitlement is instead an ERROR there
+/// (`totals.errors`, printed `sync (no entitlement)`) — fix round 2, review M2, correcting a claim
+/// that a 402 was also "a skip on stdout". Either way `synced` reads `false`, never `true`, which
+/// is this struct's own contract (above) and what M4's fix (below) makes true of both (fix round 1,
+/// review M4).
 pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce(QuitFlush) + Send) -> QuitFlush {
     let (tx, rx) = std::sync::mpsc::channel::<QuitFlush>();
     let mut out = QuitFlush { synced: false, backed_up: false, timed_out: false };

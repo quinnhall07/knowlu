@@ -2281,6 +2281,9 @@ fn i1_a_run_that_finds_the_lock_held_skips_and_writes_nothing() {
     let held = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).expect("open the lock file");
     held.try_lock().expect("this test process holds it first");
     let cursor_before = std::fs::read(dir.join(knowlu_engine::sync::CURSOR_FILE)).ok();
+    // review N3: not even the status file — the holder saves its own result, and a save from the
+    // skip could land between the holder's save and its exit, showing the skip over a real result.
+    assert!(!dir.join(knowlu_engine::sync::STATUS_FILE).exists(), "no status file exists yet");
     let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
     assert_eq!(code, 0);
     assert_eq!(lines, vec!["sync (skipped: another sync is running)".to_string()]);
@@ -2288,6 +2291,10 @@ fn i1_a_run_that_finds_the_lock_held_skips_and_writes_nothing() {
         std::fs::read(dir.join(knowlu_engine::sync::CURSOR_FILE)).ok(),
         cursor_before,
         "no cursor was written while the lock was held"
+    );
+    assert!(
+        !dir.join(knowlu_engine::sync::STATUS_FILE).exists(),
+        "the lock-held skip must write NOTHING, not even the status file (review N3)"
     );
     drop(held);
     let _ = std::fs::remove_dir_all(&dir);
@@ -2324,13 +2331,79 @@ fn i3_pull_names_a_402_as_no_entitlement() {
 }
 
 #[test]
-fn i3_pull_names_any_other_status_by_its_code() {
+fn i3_pull_names_any_other_status_by_its_code_and_reason() {
+    // Fix round 2, review N2: the server's own reason survives for every status this module has no
+    // named bucket for — not just the code.
     let mut server = loopback(vec![(500, "{\"error\":\"internal\"}".to_string())]);
     let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
     let err = sync::pull(&client, 0, 0).expect_err("a 500");
     assert!(!err.is_transport(), "{err:?}");
-    assert_eq!(err.label(), "the service refused (500)");
+    assert_eq!(err.label(), "the service refused (500: internal)");
     let _ = server.requests();
+}
+
+#[test]
+fn i3_pull_names_any_other_status_by_its_code_alone_when_the_body_carries_no_reason() {
+    // Fix round 2, review N2: an empty reason keeps the plain "(<code>)" form rather than a
+    // trailing ": ".
+    let mut server = loopback(vec![(503, "{}".to_string())]);
+    let client = CloudClient::new(&cfg(&server.base), "jwt-not-a-secret");
+    let err = sync::pull(&client, 0, 0).expect_err("a 503");
+    assert!(!err.is_transport(), "{err:?}");
+    assert_eq!(err.label(), "the service refused (503)");
+    let _ = server.requests();
+}
+
+#[test]
+fn n2_a_403_size_limit_refusal_keeps_the_servers_reason() {
+    // review N2: `/sync-push`'s own account-size-ceiling 403 is exactly the shape the classifier
+    // used to drop — the exact scenario the review named. Pinned through `run_lines_with_client`,
+    // as the review's own fix suggestion asks, so both the printed line and `last_error` are
+    // proven, not just `push`'s raw `CloudError` (which `a_403_is_the_named_ceiling_refusal`
+    // already covers).
+    let dir = fixture("size-limit");
+    let pull_body = serde_json::json!({ "records": [], "notes": [], "record_cursor": 0, "note_cursor": 0, "more": false });
+    let mut server = loopback(vec![
+        (200, knowlu_engine::ledger::dumps_value(&pull_body)),
+        (403, r#"{"error":"this account's copy is at its size limit"}"#.to_string()),
+    ]);
+    let cloud = cfg(&server.base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let (lines, totals) = sync::run_lines_with_client(
+        &dir, sync::Direction::Both, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default(),
+    );
+    assert_eq!(
+        totals.errors,
+        vec!["the service refused (403: this account's copy is at its size limit)".to_string()],
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("this account's copy is at its size limit")),
+        "{lines:?}"
+    );
+    let status = sync::SyncStatus::of(&totals, lines.clone());
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("the service refused (403: this account's copy is at its size limit)")
+    );
+    let _ = server.requests();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn n5_a_status_save_failure_is_named_on_the_run_rather_than_swallowed() {
+    // A directory sitting where the status file would go makes the final `rename` fail (the temp
+    // file itself writes fine, beside it) — a deterministic way to exercise the "save refused"
+    // branch without touching anything platform-specific.
+    let dir = fixture("status-save-fails");
+    std::fs::create_dir_all(dir.join(knowlu_engine::sync::STATUS_FILE)).expect("a directory in its place");
+    let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    assert_eq!(code, 0, "still always 0 even when the status itself could not be saved");
+    assert!(
+        lines.iter().any(|l| l.starts_with("sync: the status could not be saved")),
+        "a failed save must be named on the run's own output, not swallowed: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

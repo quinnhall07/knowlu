@@ -94,8 +94,9 @@ impl SyncError {
     /// `CloudError` the same way, so the two halves never disagree about what a 402 is called.
     /// `cloudmodel.rs` is outside this stream's ownership (see `run_lines_with`'s own note on
     /// `CloudConfig`), so this reads `CloudError`'s public shape rather than adding a method to it
-    /// for one caller — every status this module has no bucket for (403, 429, a 5xx, an unreadable
-    /// reply, a Gmail `Quiet`) falls through to `CloudError`'s own already-scrubbed label.
+    /// for one caller — every `Status` this module has no bucket for keeps the server's own reason
+    /// (fix round 2, review N2), and only `Body`/a Gmail `Quiet` fall through to `CloudError`'s own
+    /// already-scrubbed label (fix round 2, review N6: `Status` is matched first and exhaustively).
     fn service(e: crate::cloudmodel::CloudError) -> SyncError {
         use crate::cloudmodel::CloudError;
         let transport = matches!(e, CloudError::Transport(_));
@@ -103,7 +104,18 @@ impl SyncError {
             CloudError::Transport(_) => "offline: the account could not be reached".to_string(),
             CloudError::Status { code: 401, .. } => "signed out".to_string(),
             CloudError::Status { code: 402, .. } => "no entitlement".to_string(),
-            CloudError::Status { code, .. } => format!("the service refused ({code})"),
+            // review N2: `/sync-push`'s own 403 ("this account's copy is at its size limit") is
+            // exactly the shape this used to drop — every OTHER status is a shape neither this
+            // module nor the server's own comment ever promised a fixed word for, so the server's
+            // reason is what the student needs to read. `detail` already passed through
+            // `CloudClient::finish`'s own `judge::clip(_, 200)` and the bearer-scrub; `one_line`
+            // here only collapses a reason that happened to carry a newline into the one line this
+            // whole module promises. An empty reason (no `error` field in the body) keeps the
+            // plain "(<code>)" form rather than printing a trailing ": ".
+            CloudError::Status { code, detail } if detail.is_empty() => format!("the service refused ({code})"),
+            CloudError::Status { code, detail } => {
+                format!("the service refused ({code}: {})", crate::judge::one_line(detail, 200))
+            }
             other => other.label().to_string(),
         };
         SyncError::Service { cause, transport }
@@ -233,11 +245,13 @@ pub const RUN_LOCK_FILE: &str = "state/sync.lock";
 /// talks to the account, so the slot's own `sync` child, the console's *Sync now* and the quit
 /// push can never run at once and file the same conflict twice (review I1).
 ///
-/// **Never named `SyncLock`** (fix round 1): `history.rs` already has a type of that name, for a
-/// different transport, and Task 10 deletes `history.rs` and then asserts the identifier is gone
-/// from `engine/src` altogether — a second thing answering to it here would defeat that test's own
-/// point even after the first is gone. `RunLock` is a different mechanism for a different
-/// transport and is named so no reader conflates the two.
+/// **Deliberately not given `history.rs`'s own lock type's name** (fix round 1; fix round 2,
+/// review N1 — spelling that name here at all, even in a comment, fails Task 10's own gate the
+/// moment `history.rs` is deleted, since the gate scans this file's text for it): `history.rs`
+/// already has an exclusive-file-lock type for a different transport, and Task 10 asserts that
+/// identifier is gone from `engine/src` once it deletes `history.rs`. `RunLock` is a different
+/// mechanism for a different transport, named so no reader conflates the two and so no later grep
+/// finds a ghost of the first.
 ///
 /// Released by `Drop`ping the held `File`, which closes its handle and so releases the OS-level
 /// lock `try_lock` took — on every return path out of `run_lines_with`, panic or not, because the
@@ -250,8 +264,8 @@ struct RunLock {
 impl RunLock {
     /// `Ok(None)` when another live handle already holds the lock — a named skip, never an error.
     /// `File::try_lock` is std's own non-blocking exclusive OS lock (stable since Rust 1.89; this
-    /// toolchain is 1.98), so no new crate is needed for what `history.rs`'s `SyncLock` used to
-    /// reach for a whole file-existence-and-pid dance to approximate.
+    /// toolchain is 1.98), so no new crate is needed for what `history.rs`'s own git-shaped lock
+    /// type used to reach for a whole file-existence-and-pid dance to approximate.
     fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
         let path = vault.join(RUN_LOCK_FILE);
         if let Some(parent) = path.parent() {
@@ -278,24 +292,25 @@ pub const STATUS_FILE: &str = "state/sync-status.json";
 /// Written through `ledger::dumps_value`, atomically (a temp file in the same folder, then
 /// `rename`), the same two-step `backup.rs::place` uses elsewhere in this crate — a reader of the
 /// file (the app, on the console's own thread) must never observe a half-written one.
-fn save_status(vault: &Path, status: &SyncStatus) {
-    let Ok(value) = serde_json::to_value(status) else { return };
+///
+/// **One fixed temp name** (fix round 2, review N5), not one per process id: every save overwrites
+/// the SAME `sync-status.json.tmp`, so a crash between the write and the `rename` leaves at most
+/// one stale file behind, ever, and the very next save's own write simply replaces it rather than
+/// leaving a fresh `.tmp-<pid>` behind on every crash forever.
+///
+/// **Reports failure rather than swallowing it** (fix round 2, review N5): the caller (`finish`)
+/// adds a line to the run's own output when this returns `Err`, so a refused `rename` — a scanner
+/// holding the target without delete-sharing, say — is a fact the student can see rather than a
+/// page that silently keeps showing yesterday's status forever.
+fn save_status(vault: &Path, status: &SyncStatus) -> Result<(), String> {
+    let value = serde_json::to_value(status).map_err(|e| e.to_string())?;
     let path = vault.join(STATUS_FILE);
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_file_name(format!(
-        "{}.tmp-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    if crate::pystr::write_text(&tmp, &crate::ledger::dumps_value(&value)).is_err() {
-        return;
-    }
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+    crate::pystr::write_text(&tmp, &crate::ledger::dumps_value(&value)).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// A missing or unreadable file is the **default** status, never an error — the same rule
@@ -1593,14 +1608,24 @@ pub fn is_configured(vault: &Path) -> bool {
 
 /// Builds `SyncStatus` from what this call is about to return, saves it to [`STATUS_FILE`], and
 /// returns the same triple `run_lines_with` always has (fix round 1, review I4) — one seam so
-/// every return path persists, rather than a save duplicated at each one.
-fn finish(vault: &Path, lines: Vec<String>, totals: Totals) -> (i32, Vec<String>, Totals) {
-    save_status(vault, &SyncStatus::of(&totals, lines.clone()));
+/// every return path but one persists, rather than a save duplicated at each one. **The lock-held
+/// skip never calls this** (fix round 2, review N3): see its own call site.
+///
+/// **A save that fails is named, not swallowed** (fix round 2, review N5): the line goes into the
+/// RUN's own output — what `sync::run_lines` prints and the Runs view shows — never into the
+/// `SyncStatus` this call just failed to write, which would be circular.
+fn finish(vault: &Path, mut lines: Vec<String>, totals: Totals) -> (i32, Vec<String>, Totals) {
+    let status = SyncStatus::of(&totals, lines.clone());
+    if let Err(e) = save_status(vault, &status) {
+        lines.push(format!("sync: the status could not be saved ({e})"));
+    }
     (0, lines, totals)
 }
 
 /// The whole command. **The return code is always 0** and the function says so by construction:
-/// every path funnels through [`finish`], whose own tail is the literal `0`.
+/// every path but the lock-held skip funnels through [`finish`], whose own tail is the literal
+/// `0`; that one skip (review N3) returns the same literal directly, since it must NOT call
+/// `finish` at all.
 ///
 /// **The order of the first two checks is the message** (review I4 of the original review — not
 /// to be confused with fix round 1's own I4, the status file). `load` before `resolve`: the common
@@ -1624,10 +1649,14 @@ pub fn run_lines_with(
     //    read" the cursor and status files already use, rather than a fifth shape of failure.
     let _lock = match RunLock::try_acquire(vault) {
         Ok(Some(lock)) => lock,
+        // review N3: returns here, before `finish`, and writes NOTHING — not even the status
+        // file. The process that actually holds the lock is mid-run and will save its own result
+        // when it finishes; a save from this skip could land between that holder's own save and
+        // its exit, and show "another sync is running" over a result that already happened.
         Ok(None) => {
             totals.skipped = Some("another sync is running".to_string());
             lines.push("sync (skipped: another sync is running)".to_string());
-            return finish(vault, lines, totals);
+            return (0, lines, totals);
         }
         Err(e) => {
             totals.errors.push(format!("the vault could not be read ({e})"));
