@@ -1757,7 +1757,7 @@ fn series_json(s: &Series) -> serde_json::Value {
 
 /// The file's bytes: `ledger::dumps_value` (keys sorted), series by `(source_uid, calendar)`,
 /// and a trailing newline (§3.3). The same data is the same bytes.
-fn file_bytes(file: &SeriesFile) -> String {
+pub(crate) fn file_bytes(file: &SeriesFile) -> String {
     let mut series: Vec<&Series> = file.series.iter().collect();
     series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
     let calendars: serde_json::Map<String, serde_json::Value> = file
@@ -3212,6 +3212,579 @@ pub fn successor_keys(vault: &Path) -> BTreeSet<String> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------------------------
+// P13 — settlement: the confirmed note, the decline marker, the change, withdrawal (§2.3, §2.5,
+// §5.2, §5.4, §5.5). `approvals::transition_note` and `approvals::withdraw_stale` call in here.
+// ---------------------------------------------------------------------------------------------
+
+/// The only fields a change card may write (§5.4, §2.5): `kind`, `level`, `title`, `course` and
+/// `status` are never written by an agent after creation, so a card naming anything else — only
+/// a hand edit can — is refused.
+pub const CHANGE_FIELDS: [&str; 4] = ["meets", "where", "until", "source_uid"];
+
+/// What settling an approved `commitment-check` card decided; the arm stamps the card with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// The note was created, or the change written: stamped `executed`.
+    Executed,
+    /// Nothing was written, and never will be for this card: stamped `refused`, one warning.
+    Refused(String),
+    /// The question went away before the answer landed — the target is gone, or the student
+    /// edited the note since the card was filed: stamped `superseded`, one warning. Not
+    /// `refused`, so the asked-once index and P12's `successor_keys` treat the question as still
+    /// open and a change is asked once more with the new `was` (§5.5).
+    Superseded(String),
+}
+
+/// The three shapes of `commitment-check` card (plan review C1, spec §5.2 as amended).
+enum Shape {
+    /// It has a `target`: a change to a confirmed note (§5.4).
+    Change(String),
+    /// Its `source_uid` starts [`WINDOW_PREFIX`].
+    Window,
+    /// Neither: a proposal, keyed by its `source_uid`.
+    Proposal(String),
+}
+
+fn shape(meta: &Mapping) -> Shape {
+    let target = field_text(meta, "target").map(|t| t.trim().to_string()).unwrap_or_default();
+    let key = field_text(meta, "source_uid").map(|t| t.trim().to_string()).unwrap_or_default();
+    if !target.is_empty() {
+        Shape::Change(target)
+    } else if key.starts_with(WINDOW_PREFIX) {
+        Shape::Window
+    } else {
+        Shape::Proposal(key)
+    }
+}
+
+/// `commitments/declined-<first 10 hex of sha256(key)>` (§2.3), the stem only.
+fn marker_stem(key: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
+    let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("declined-{}", &hex[..10])
+}
+
+/// `commitments/<stem>.md`, `-2`, `-3` on a collision (as `approvals::materialize` does).
+fn free_rel(vault: &Path, stem: &str) -> String {
+    let folder = vault.join(FOLDER);
+    let mut name = format!("{stem}.md");
+    let mut suffix = 2;
+    while folder.join(&name).exists() {
+        name = format!("{stem}-{suffix}.md");
+        suffix += 1;
+    }
+    format!("{FOLDER}/{name}")
+}
+
+fn io(err: String) -> crate::write::WriteError {
+    crate::write::WriteError::Io(err)
+}
+
+/// Write the decline marker for `key` (§2.3): `id`, `type: commitment`, `status: declined` and
+/// `source_uid`, nothing else — no title, time, place or body. A no-op (`Ok(None)`) when a
+/// marker for the key exists already. Actor `agent:commitments`: the student's decision is the
+/// journal record on the card (§2.5).
+pub fn create_marker(
+    vault: &Path,
+    key: &str,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Option<PathBuf>, crate::write::WriteError> {
+    if load(vault).declined.contains(key) {
+        return Ok(None);
+    }
+    let front = front_matter(&[
+        ("id", Field::Scalar(Node::text(&crate::ids::new_id("cmt")))),
+        ("type", Field::Scalar(Node::text("commitment"))),
+        ("status", Field::Scalar(Node::text("declined"))),
+        ("source_uid", Field::Scalar(Node::text(&single_line(key)))),
+    ])
+    .map_err(|e| io(format!("marker not written: {e}")))?;
+    let rel = free_rel(vault, &marker_stem(key));
+    let path = crate::write::create(
+        vault,
+        &rel,
+        &format!("---\n{front}---\n"),
+        &ctx.with_actor(CARD_ACTOR),
+        journal,
+        None,
+    )?;
+    Ok(Some(path))
+}
+
+/// A card's `commitment:` mapping read as §2.2 reads a note, or why it cannot be a note.
+struct Proposed {
+    kind: String,
+    level: Level,
+    title: String,
+    course: Option<String>,
+    meets: Vec<Meet>,
+    where_: Option<String>,
+    from: Option<Date>,
+    until: Option<Date>,
+}
+
+fn opt_field(map: &Mapping, key: &str) -> Option<String> {
+    field_text(map, key).map(|t| single_line(&t).trim().to_string()).filter(|t| !t.is_empty())
+}
+
+fn opt_date(map: &Mapping, key: &str) -> Result<Option<Date>, String> {
+    match opt_field(map, key) {
+        None => Ok(None),
+        Some(raw) => raw.parse::<Date>().map(Some).map_err(|_| format!("{key} {raw} is not a date")),
+    }
+}
+
+/// Every entry of `key` (a `meets` or `window` sequence), all valid, at least one.
+fn strict_meets(map: &Mapping, key: &str) -> Result<Vec<Meet>, String> {
+    let Some(Value::Sequence(items)) = get(map, key) else {
+        return Err(format!("no {key}"));
+    };
+    let meets: Vec<Meet> = items
+        .iter()
+        .map(|item| parse_entry(item).map_err(|(d, s, e)| format!("{key} entry {d}: {s}–{e} invalid")))
+        .collect::<Result<_, _>>()?;
+    if meets.is_empty() {
+        return Err(format!("no {key}"));
+    }
+    Ok(meets)
+}
+
+fn proposed(map: &Mapping) -> Result<Proposed, String> {
+    let kind = opt_field(map, "kind").unwrap_or_default();
+    if kind == PLANNING_DAY {
+        return Ok(Proposed {
+            kind,
+            level: Level::Optional,
+            title: WINDOW_TITLE.to_string(),
+            course: None,
+            meets: strict_meets(map, "window")?,
+            where_: None,
+            from: None,
+            until: None,
+        });
+    }
+    if kind.is_empty() {
+        return Err("commitment has no kind".to_string());
+    }
+    let title = opt_field(map, "title").ok_or("commitment has no title")?;
+    let level = opt_field(map, "level")
+        .and_then(|l| Level::parse(&l))
+        .or_else(|| default_level(&kind))
+        .unwrap_or(Level::Soft);
+    Ok(Proposed {
+        level,
+        title: cut(&title, TITLE_MAX),
+        course: opt_field(map, "course"),
+        meets: strict_meets(map, "meets")?,
+        where_: opt_field(map, "where").map(|w| cut(&w, WHERE_MAX)),
+        from: opt_date(map, "from")?,
+        until: opt_date(map, "until")?,
+        kind,
+    })
+}
+
+/// The confirmed note a card's `commitment:` describes (§2.1), or — for `kind: planning-day` —
+/// the planning day (§2.4): `write::create`, journal first, actor `agent:commitments`. Every line
+/// through [`front_matter`], so `meets:` and `window:` are each one line (Global Constraint 23);
+/// an absent optional field is left out, never written `null`. `commitments/<slugify(title)>.md`
+/// (`planning-day.md` for the window), `-2` on a collision. `source_uid` is the card's; the
+/// planning day carries none (§2.4). Nothing here checks for duplicates — the settlement does.
+pub fn create_confirmed(
+    vault: &Path,
+    commitment: &Mapping,
+    source_uid: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<PathBuf, crate::write::WriteError> {
+    let p = proposed(commitment).map_err(|e| io(format!("commitment not created: {e}")))?;
+    let id = crate::ids::new_id("cmt");
+    let mut fields: Vec<(&str, Field)> = vec![
+        ("id", Field::Scalar(Node::text(&id))),
+        ("type", Field::Scalar(Node::text("commitment"))),
+        ("kind", Field::Scalar(Node::text(&p.kind))),
+    ];
+    let (stem, body) = if p.kind == PLANNING_DAY {
+        fields.push(("status", Field::Scalar(Node::text("confirmed"))));
+        fields.push(("window", Field::Flow(meets_json(&p.meets))));
+        (
+            PLANNING_DAY.to_string(),
+            "The part of each day Knowlu plans in: from when you are up to when you stop.\n",
+        )
+    } else {
+        fields.push(("level", Field::Scalar(Node::text(p.level.as_str()))));
+        fields.push(("title", Field::Scalar(Node::text(&p.title))));
+        if let Some(course) = &p.course {
+            fields.push(("course", Field::Scalar(Node::text(course))));
+        }
+        fields.push(("meets", Field::Flow(meets_json(&p.meets))));
+        if let Some(place) = &p.where_ {
+            fields.push(("where", Field::Scalar(Node::text(place))));
+        }
+        if let Some(from) = p.from {
+            fields.push(("from", Field::Scalar(Node::Date(from))));
+        }
+        if let Some(until) = p.until {
+            fields.push(("until", Field::Scalar(Node::Date(until))));
+        }
+        let key = single_line(source_uid).trim().to_string();
+        let body = if key.starts_with("gcal-series:") {
+            "Found as a weekly series on your Google Calendar.\n"
+        } else {
+            "Found as a weekly series on your calendar.\n"
+        };
+        if !key.is_empty() {
+            fields.push(("source_uid", Field::Scalar(Node::text(&key))));
+        }
+        fields.push(("status", Field::Scalar(Node::text("confirmed"))));
+        (crate::ingest::slugify(&p.title), body)
+    };
+    fields.push(("confirmed_at", Field::Scalar(Node::Date(today))));
+    let front = front_matter(&fields).map_err(|e| io(format!("commitment not created: {e}")))?;
+    let rel = free_rel(vault, &stem);
+    crate::write::create(
+        vault,
+        &rel,
+        &format!("---\n{front}---\n\n{body}"),
+        &ctx.with_actor(CARD_ACTOR),
+        journal,
+        None,
+    )
+}
+
+/// A field's value as `load` would read it, as comparable text (carry-forward 2): `meets` and
+/// `window` as the set of their **valid** entries' `(day, start, end)` triples (so `9:00` is
+/// `09:00`, and neither entry nor day order matters); `until`/`from` as a date, an unparseable one
+/// as absent (load warns and ignores it); any other scalar trimmed with its whitespace runs made
+/// one space; absent, `null` and empty alike as `""`. A collection anywhere else falls back to
+/// §5.4's canonical flow text.
+fn as_read(field: &str, value: Option<&Value>) -> String {
+    let Some(value) = value.filter(|v| !matches!(v, Value::Null)) else {
+        return String::new();
+    };
+    match (field, value) {
+        ("meets" | "window", Value::Sequence(items)) => {
+            let meets: Vec<Meet> = items.iter().filter_map(|v| parse_entry(v).ok()).collect();
+            format!("{:?}", meet_set(&meets))
+        }
+        ("until" | "from", _) => value_date(Some(value)).map(|d| d.to_string()).unwrap_or_default(),
+        (_, Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_)) => canonical(value),
+        _ => text(value)
+            .map(|t| t.split(pystr::is_python_space).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default(),
+    }
+}
+
+/// A change card's `target`, only when it is exactly `commitments/<name>.md` (no deeper path, no
+/// `..`): a hand-edited card can point nowhere else.
+fn target_rel(target: &str) -> Option<&str> {
+    let name = target.strip_prefix("commitments/")?;
+    let ok = name.ends_with(".md")
+        && name.len() > 3
+        && !name.contains(['/', '\\'])
+        && !name.starts_with('.');
+    ok.then_some(target)
+}
+
+/// Whether the student changed the note since the card was filed (§5.4, §5.5): the target is
+/// gone, unreadable, or for some field of `change` its current value, as read, differs from
+/// `was`'s. `None` when the note still holds `was` everywhere.
+fn stale_change(vault: &Path, target: &str, meta: &Mapping) -> Option<String> {
+    let rel = target_rel(target)?;
+    let path = vault.join(rel);
+    if !path.is_file() {
+        return Some(format!("{rel} is gone"));
+    }
+    let note = match pystr::read_text(&path).map(|t| split_frontmatter(&t)) {
+        Ok(Ok((note, _))) => note,
+        _ => return Some(format!("{rel} is unreadable")),
+    };
+    let change = match get(meta, "change") {
+        Some(Value::Mapping(m)) => m.clone(),
+        _ => Mapping::new(),
+    };
+    let was = match get(meta, "was") {
+        Some(Value::Mapping(m)) => m.clone(),
+        _ => Mapping::new(),
+    };
+    for key in change.keys() {
+        let Some(field) = text(key) else { continue };
+        if as_read(&field, get(&note, &field)) != as_read(&field, get(&was, &field)) {
+            return Some(format!("{rel}: {field} was edited since the card was filed"));
+        }
+    }
+    None
+}
+
+/// The literals an approved change writes, or why it cannot be written: a target that is not a
+/// note in `commitments/`, an empty `change`, a field outside [`CHANGE_FIELDS`], a `null` value,
+/// or a `meets` with an invalid entry.
+fn change_literals(target: &str, meta: &Mapping) -> Result<Vec<(String, String)>, String> {
+    if target_rel(target).is_none() {
+        return Err(format!("target {} is not a note in commitments/", single_line(target)));
+    }
+    let Some(Value::Mapping(change)) = get(meta, "change") else {
+        return Err("change is not a mapping".to_string());
+    };
+    if change.is_empty() {
+        return Err("change is empty".to_string());
+    }
+    let mut out = Vec::new();
+    for (key, value) in change {
+        let field = text(key).unwrap_or_default();
+        if !CHANGE_FIELDS.contains(&field.as_str()) {
+            return Err(format!("{} is not a field a change may write", single_line(&field)));
+        }
+        let usable = match (field.as_str(), value) {
+            (_, Value::Null) => false,
+            ("meets", Value::Sequence(items)) => {
+                !items.is_empty() && items.iter().all(|i| parse_entry(i).is_ok())
+            }
+            ("meets", _) => false,
+            ("until", _) => value_date(Some(value)).is_some(),
+            (_, v) => text(v).is_some_and(|t| !t.trim().is_empty()),
+        };
+        if !usable {
+            return Err(format!("{field}: not a value the note can hold"));
+        }
+        // A sequence through `to_literal` of the parsed value, so it reads back as the sequence
+        // `load` accepts (§5.4); a scalar the same way (a date stays a bare date).
+        let literal = match (field.as_str(), value) {
+            ("until", _) => value_date(Some(value)).map(|d| d.to_string()).unwrap_or_default(),
+            ("meets", _) => crate::write::to_literal(value),
+            (_, v) => crate::write::to_literal(&Value::String(single_line(&text(v).unwrap_or_default()).trim().to_string())),
+        };
+        if pystr::splitlines(&literal).len() != 1 {
+            return Err(format!("{field}: would span more than one line"));
+        }
+        out.push((field, literal));
+    }
+    Ok(out)
+}
+
+/// The signatures that close a card's question: its `commitment:`'s, by course and by title,
+/// as [`proposals`] closes a signature.
+fn card_signatures(meta: &Mapping, codes: &Codes) -> Vec<Signature> {
+    let Some(Value::Mapping(map)) = get(meta, "commitment") else {
+        return Vec::new();
+    };
+    let Ok(p) = proposed(map) else { return Vec::new() };
+    if p.kind == PLANNING_DAY {
+        return Vec::new();
+    }
+    vec![
+        signature(&p.kind, p.course.as_deref(), &p.title, &p.meets, codes),
+        signature(&p.kind, None, &p.title, &p.meets, codes),
+    ]
+}
+
+/// `key` and its twins (carry-forward 1): every key of the series file whose series classifies
+/// to a signature in `sigs`, or to the signature `key`'s own series has — one real series under a
+/// `gcal-series:` and an `ics-series:` key (P9's twins). Classified with no planning names: a
+/// twin the template's names would keep from being proposed gets a marker it does not need,
+/// which closes nothing that was open.
+fn twin_keys(vault: &Path, key: &str, mut sigs: Vec<Signature>, codes: &Codes) -> BTreeSet<String> {
+    let (file, _) = read_series_file(vault);
+    let by_key = file.by_key();
+    let classified = |series: &Series| match classify(series, codes, &[]) {
+        Some(Class::Kind { kind, course }) => Some((
+            signature(&kind, course.as_deref(), &series.title, &series.meets, codes),
+            signature(&kind, None, &series.title, &series.meets, codes),
+        )),
+        _ => None,
+    };
+    if let Some((sig, by_title)) = by_key.get(key).and_then(|s| classified(s)) {
+        sigs.push(sig);
+        sigs.push(by_title);
+    }
+    let mut out: BTreeSet<String> = [key.to_string()].into_iter().collect();
+    for (other, series) in by_key {
+        if let Some((sig, by_title)) = classified(series) {
+            if sigs.contains(&sig) || sigs.contains(&by_title) {
+                out.insert(other.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Settle an approved `commitment-check` card (§5.2, §5.4). Writes nothing to the card itself —
+/// the arm stamps it with the result and archives it.
+///
+/// - **change** → [`Settled::Refused`] for a card the note cannot take (see `change_literals`);
+///   [`Settled::Superseded`] when the target is gone or the student edited a changed field since
+///   (carry-forward 3); else each field through `write::write_literals`, actor
+///   `agent:commitments`.
+/// - **window** → refused when a `planning-day` note exists; else the planning day.
+/// - **proposal** → refused when a confirmed note has the card's key or signature (§2.5: a
+///   second desktop's answer is a no-op), or the `commitment:` cannot be a note; else the note.
+pub fn settle_approved(
+    vault: &Path,
+    meta: &Mapping,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Settled, crate::write::WriteError> {
+    let set = load(vault);
+    let commitment = match get(meta, "commitment") {
+        Some(Value::Mapping(m)) => Some(m),
+        _ => None,
+    };
+    match shape(meta) {
+        Shape::Change(target) => {
+            let literals = match change_literals(&target, meta) {
+                Ok(literals) => literals,
+                Err(why) => return Ok(Settled::Refused(why)),
+            };
+            if let Some(why) = stale_change(vault, &target, meta) {
+                return Ok(Settled::Superseded(format!("{why}; not applied")));
+            }
+            crate::write::write_literals(
+                vault,
+                &target,
+                &literals,
+                &ctx.with_actor(CARD_ACTOR),
+                journal,
+                &crate::write::WriteOpts::default(),
+            )?;
+            Ok(Settled::Executed)
+        }
+        Shape::Window => {
+            if let Some(day) = &set.planning_day {
+                return Ok(Settled::Refused(format!("{} already sets the planning day", day.path.display())));
+            }
+            let Some(map) = commitment else {
+                return Ok(Settled::Refused("the card has no commitment".to_string()));
+            };
+            if let Err(why) = proposed(map).and_then(|p| match p.kind == PLANNING_DAY {
+                true => Ok(()),
+                false => Err("a window card's commitment is not a planning day".to_string()),
+            }) {
+                return Ok(Settled::Refused(why));
+            }
+            create_confirmed(vault, map, "", today, ctx, journal)?;
+            Ok(Settled::Executed)
+        }
+        Shape::Proposal(key) => {
+            let Some(map) = commitment else {
+                return Ok(Settled::Refused("the card has no commitment".to_string()));
+            };
+            match proposed(map) {
+                Err(why) => return Ok(Settled::Refused(why)),
+                Ok(p) if p.kind == PLANNING_DAY => {
+                    return Ok(Settled::Refused("a planning day needs a window: key".to_string()))
+                }
+                Ok(_) => {}
+            }
+            let (codes, _) = Codes::load(vault);
+            let sigs = card_signatures(meta, &codes);
+            let held = set.confirmed.iter().find(|n| {
+                (!key.is_empty() && n.source_uid.as_deref() == Some(key.as_str()))
+                    || sigs.contains(&n.signature(&codes))
+            });
+            if let Some(note) = held {
+                return Ok(Settled::Refused(format!(
+                    "{} is already confirmed; nothing written",
+                    note.path.display().to_string().replace('\\', "/")
+                )));
+            }
+            create_confirmed(vault, map, &key, today, ctx, journal)?;
+            Ok(Settled::Executed)
+        }
+    }
+}
+
+/// Settle a rejected `commitment-check` card (§5.2, §5.4, §5.5): a proposal's decline marker —
+/// one for its key **and each twin's** (carry-forward 1) — the window's one `window` marker, or,
+/// for a change card whose `change` carries a new `source_uid`, that successor's marker (and its
+/// twins'); a plain change writes nothing. Returns the markers written.
+pub fn settle_rejected(
+    vault: &Path,
+    meta: &Mapping,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Vec<PathBuf>, crate::write::WriteError> {
+    let keys: BTreeSet<String> = match shape(meta) {
+        Shape::Window => [WINDOW_MARKER.to_string()].into_iter().collect(),
+        Shape::Proposal(key) if key.is_empty() => BTreeSet::new(),
+        Shape::Proposal(key) => {
+            let (codes, _) = Codes::load(vault);
+            twin_keys(vault, &key, card_signatures(meta, &codes), &codes)
+        }
+        Shape::Change(_) => {
+            let successor = match get(meta, "change") {
+                Some(Value::Mapping(change)) => opt_field(change, "source_uid"),
+                _ => None,
+            };
+            match successor {
+                Some(key) => {
+                    let (codes, _) = Codes::load(vault);
+                    twin_keys(vault, &key, Vec::new(), &codes)
+                }
+                None => BTreeSet::new(),
+            }
+        }
+    };
+    let mut written = Vec::new();
+    for key in keys {
+        written.extend(create_marker(vault, &key, ctx, journal)?);
+    }
+    Ok(written)
+}
+
+/// Why a pending or snoozed `commitment-check` card's question went away (§5.2 "Withdrawn", by
+/// card shape — plan review C1), or `None` while it stands:
+/// - **change**: its target is gone, or the note no longer holds `was` (the settlement's test);
+/// - **window**: a `planning-day` note or the `window` marker exists;
+/// - **proposal**: its key is under no calendar of the series file, a note (confirmed, a marker,
+///   the planning day) has its key, or a confirmed note has its signature. "Under no calendar"
+///   is read only from a file that knows at least one calendar: an empty file (never written,
+///   or unreadable this run) says nothing about what left it.
+pub fn withdrawal_reason(
+    vault: &Path,
+    meta: &Mapping,
+    file: &SeriesFile,
+    set: &Commitments,
+    codes: &Codes,
+) -> Option<String> {
+    match shape(meta) {
+        Shape::Change(target) => stale_change(vault, &target, meta),
+        Shape::Window => {
+            if set.planning_day.is_some() {
+                Some("a planning day exists".to_string())
+            } else if set.declined.contains(WINDOW_MARKER) {
+                Some("the window was declined".to_string())
+            } else {
+                None
+            }
+        }
+        Shape::Proposal(key) => {
+            if key.is_empty() {
+                return None;
+            }
+            if !file.calendars.is_empty() && !file.by_key().contains_key(key.as_str()) {
+                return Some(format!("{key} left the calendar"));
+            }
+            let noted = set
+                .confirmed
+                .iter()
+                .chain(set.planning_day.iter())
+                .any(|n| n.source_uid.as_deref() == Some(key.as_str()))
+                || set.declined.contains(&key);
+            if noted {
+                return Some(format!("{key} was answered"));
+            }
+            let sigs = card_signatures(meta, codes);
+            if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+                return Some(format!("{key} is already confirmed"));
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]
