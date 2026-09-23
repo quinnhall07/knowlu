@@ -441,9 +441,14 @@ const LOCALIST_KEYS: [&str; 3] = ["days", "pp", "page"];
 const ENGAGE_KEYS: [&str; 6] =
     ["endsAfter", "orderByField", "orderByDirection", "status", "take", "skip"];
 
-/// Strip `keys` from `base`'s query wherever they already appear, then append `values` in order.
-/// Nothing is percent-decoded or re-encoded.
+/// Strip `keys` from `base`'s query wherever they already appear, then append `values` in order. A
+/// fragment (`#...`) is set aside first and re-appended after the query, so it is never swallowed
+/// into it (review M-4). Nothing is percent-decoded or re-encoded.
 fn paged_url(base: &str, keys: &[&str], values: &[(&str, String)]) -> String {
+    let (base, fragment) = match base.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (base, None),
+    };
     let (path, query) = base.split_once('?').unwrap_or((base, ""));
     let mut parts: Vec<String> = query
         .split('&')
@@ -455,7 +460,12 @@ fn paged_url(base: &str, keys: &[&str], values: &[(&str, String)]) -> String {
         .map(str::to_string)
         .collect();
     parts.extend(values.iter().map(|(k, v)| format!("{k}={v}")));
-    format!("{path}?{}", parts.join("&"))
+    let mut url = format!("{path}?{}", parts.join("&"));
+    if let Some(f) = fragment {
+        url.push('#');
+        url.push_str(f);
+    }
+    url
 }
 
 /// `int(value)` over a JSON number — Localist's `page.total` and Engage's `@odata.count`.
@@ -483,40 +493,73 @@ fn budget_stop(
     None
 }
 
+/// What one Localist/Engage page said about continuation. `declared` is whether the page carried a
+/// parseable `page.total`/`@odata.count` at all — independent of `keep_going` — so the *next*
+/// page's unexpected emptiness can be named instead of silently truncating the roster (review M-2).
+/// `raw_empty` is whether the page's own item array had nothing in it.
+struct PageInfo {
+    keep_going: bool,
+    declared: bool,
+    raw_empty: bool,
+}
+
+/// A paged source's read-only fetch context and its accumulators, bundled so `page_json_source`
+/// takes one argument for each rather than seven (review M-7).
+struct PagingCtx<'a> {
+    tz: &'a TimeZone,
+    fetch: &'a dyn Fn(&str) -> Result<String, String>,
+    limits: &'a PagingLimits,
+    elapsed: &'a dyn Fn() -> Duration,
+    warnings: &'a mut Vec<String>,
+    seen: &'a mut std::collections::HashSet<String>,
+    by_uid: &'a mut Vec<DiscoveredEvent>,
+}
+
 /// Page one Localist or Engage source until its own stop condition, the page cap or a time budget
 /// ends it. Every failure is contained to this source: a dead page warns and paging — or the whole
 /// run — continues.
 fn page_json_source(
     source: &EventsSource,
-    tz: &TimeZone,
-    fetch: &dyn Fn(&str) -> Result<String, String>,
-    limits: &PagingLimits,
-    elapsed: &dyn Fn() -> Duration,
-    warnings: &mut Vec<String>,
-    seen: &mut std::collections::HashSet<String>,
-    by_uid: &mut Vec<DiscoveredEvent>,
+    ctx: &mut PagingCtx,
     build_url: impl Fn(usize) -> String,
-    should_continue: impl Fn(&Json, usize) -> bool,
+    should_continue: impl Fn(&Json, usize) -> PageInfo,
     parse: fn(&Json, &str, &TimeZone) -> (Vec<DiscoveredEvent>, Vec<String>),
 ) {
-    let source_start = elapsed();
+    let source_start = (ctx.elapsed)();
     let mut kept = 0usize;
     let mut page = 1usize;
+    // This source's own raw progress, kept apart from the cross-source `seen`: a server that
+    // ignores `page`/`skip` and re-serves earlier content must not look like a second source's
+    // legitimate duplicate (review M-1).
+    let mut source_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Whether the page just processed declared, via `page.total`/`@odata.count`, that another page
+    // should exist — so an unexpectedly empty next page can be named rather than swallowed (M-2).
+    let mut expected_more = false;
     loop {
-        match budget_stop(page, source_start, elapsed, limits) {
+        // Checked before the budget: at the cap, this page was never going to be fetched
+        // regardless of the clock, so the cap message — not a budget one — is the true reason
+        // (review M-3).
+        if page > MAX_PAGES {
+            ctx.warnings.push(format!(
+                "{}: stopped after {MAX_PAGES} pages; later events wait for the window to move",
+                source.name
+            ));
+            return;
+        }
+        match budget_stop(page, source_start, ctx.elapsed, ctx.limits) {
             Some(true) if page == 1 => {
-                warnings.push(format!("{}: skipped (run time budget)", source.name));
+                ctx.warnings.push(format!("{}: skipped (run time budget)", source.name));
                 return;
             }
             Some(true) => {
-                warnings.push(format!(
+                ctx.warnings.push(format!(
                     "{}: stopped at page {page} (run time budget); kept {kept} events",
                     source.name
                 ));
                 return;
             }
             Some(false) => {
-                warnings.push(format!(
+                ctx.warnings.push(format!(
                     "{}: stopped at page {page} (time budget); kept {kept} events",
                     source.name
                 ));
@@ -524,21 +567,14 @@ fn page_json_source(
             }
             None => {}
         }
-        if page > MAX_PAGES {
-            warnings.push(format!(
-                "{}: stopped after {MAX_PAGES} pages; later events wait for the window to move",
-                source.name
-            ));
-            return;
-        }
         let url = build_url(page);
-        let text = match fetch(&url) {
+        let text = match (ctx.fetch)(&url) {
             Ok(text) => text,
             Err(err) => {
                 if page == 1 {
-                    warnings.push(format!("{}: fetch failed ({err})", source.name));
+                    ctx.warnings.push(format!("{}: fetch failed ({err})", source.name));
                 } else {
-                    warnings.push(format!(
+                    ctx.warnings.push(format!(
                         "{}: page {page} failed ({err}); kept {kept} events",
                         source.name
                     ));
@@ -550,9 +586,9 @@ fn page_json_source(
             Ok(payload) => payload,
             Err(err) => {
                 if page == 1 {
-                    warnings.push(format!("{}: parse failed ({err})", source.name));
+                    ctx.warnings.push(format!("{}: parse failed ({err})", source.name));
                 } else {
-                    warnings.push(format!(
+                    ctx.warnings.push(format!(
                         "{}: page {page} failed ({err}); kept {kept} events",
                         source.name
                     ));
@@ -560,18 +596,44 @@ fn page_json_source(
                 return;
             }
         };
-        let (parsed, source_warnings) = parse(&payload, &source.name, tz);
+        let (parsed, source_warnings) = parse(&payload, &source.name, ctx.tz);
         for w in source_warnings {
-            warnings.push(format!("{}: {w}", source.name));
+            ctx.warnings.push(format!("{}: {w}", source.name));
         }
-        let keep_going = should_continue(&payload, page);
+        let info = should_continue(&payload, page);
+
+        let mut source_progressed = false;
+        for event in &parsed {
+            if source_seen.insert(event.uid.clone()) {
+                source_progressed = true;
+            }
+        }
+        let had_parsed = !parsed.is_empty();
         for event in parsed {
-            if seen.insert(event.uid.clone()) {
-                by_uid.push(event);
+            if ctx.seen.insert(event.uid.clone()) {
+                ctx.by_uid.push(event);
                 kept += 1;
             }
         }
-        if !keep_going {
+
+        if info.raw_empty {
+            if expected_more {
+                ctx.warnings.push(format!(
+                    "{}: page {page} was empty; kept {kept} events",
+                    source.name
+                ));
+            }
+            return;
+        }
+        if had_parsed && !source_progressed {
+            ctx.warnings.push(format!(
+                "{}: page {page} repeated an earlier page; kept {kept} events",
+                source.name
+            ));
+            return;
+        }
+        expected_more = info.keep_going && info.declared;
+        if !info.keep_going {
             return;
         }
         page += 1;
@@ -653,18 +715,29 @@ pub fn load_discovered_events_at(
         if !source.enabled {
             continue;
         }
+        // Every kind answers to the run budget, not just the paged ones (review I-1): a JSON
+        // source that burns the whole `per_run` budget must not leave a later `ics`/`html` source
+        // still to be fetched at up to 150s of its own — past the 330s worst case `PagingLimits`
+        // is sized against.
+        if elapsed() >= limits.per_run {
+            warnings.push(format!("{}: skipped (run time budget)", source.name));
+            continue;
+        }
         match source.kind.as_str() {
             "localist" => {
                 let base = source.url.clone();
+                let mut ctx = PagingCtx {
+                    tz: &tz,
+                    fetch,
+                    limits: &limits,
+                    elapsed,
+                    warnings: &mut warnings,
+                    seen: &mut seen,
+                    by_uid: &mut by_uid,
+                };
                 page_json_source(
                     source,
-                    &tz,
-                    fetch,
-                    &limits,
-                    elapsed,
-                    &mut warnings,
-                    &mut seen,
-                    &mut by_uid,
+                    &mut ctx,
                     |page| {
                         paged_url(
                             &base,
@@ -683,11 +756,19 @@ pub fn load_discovered_events_at(
                             .map(|a| a.len())
                             .unwrap_or(0);
                         if raw_count == 0 {
-                            return false;
+                            return PageInfo { keep_going: false, declared: false, raw_empty: true };
                         }
                         match json_i64(payload.get("page").and_then(|p| p.get("total"))) {
-                            Some(total) => (page as i64) < total,
-                            None => raw_count >= PAGE_SIZE,
+                            Some(total) => PageInfo {
+                                keep_going: (page as i64) < total,
+                                declared: true,
+                                raw_empty: false,
+                            },
+                            None => PageInfo {
+                                keep_going: raw_count >= PAGE_SIZE,
+                                declared: false,
+                                raw_empty: false,
+                            },
                         }
                     },
                     parse_localist,
@@ -696,15 +777,18 @@ pub fn load_discovered_events_at(
             "engage" => {
                 let base = source.url.clone();
                 let ends_after = ends_after.clone();
+                let mut ctx = PagingCtx {
+                    tz: &tz,
+                    fetch,
+                    limits: &limits,
+                    elapsed,
+                    warnings: &mut warnings,
+                    seen: &mut seen,
+                    by_uid: &mut by_uid,
+                };
                 page_json_source(
                     source,
-                    &tz,
-                    fetch,
-                    &limits,
-                    elapsed,
-                    &mut warnings,
-                    &mut seen,
-                    &mut by_uid,
+                    &mut ctx,
                     move |page| {
                         let skip = (page - 1) * PAGE_SIZE;
                         paged_url(
@@ -727,12 +811,20 @@ pub fn load_discovered_events_at(
                             .map(|a| a.len())
                             .unwrap_or(0);
                         if raw_count == 0 {
-                            return false;
+                            return PageInfo { keep_going: false, declared: false, raw_empty: true };
                         }
                         let skip = (page - 1) * PAGE_SIZE;
                         match json_i64(payload.get("@odata.count")) {
-                            Some(count) => ((skip + PAGE_SIZE) as i64) < count,
-                            None => raw_count >= PAGE_SIZE,
+                            Some(count) => PageInfo {
+                                keep_going: ((skip + PAGE_SIZE) as i64) < count,
+                                declared: true,
+                                raw_empty: false,
+                            },
+                            None => PageInfo {
+                                keep_going: raw_count >= PAGE_SIZE,
+                                declared: false,
+                                raw_empty: false,
+                            },
                         }
                     },
                     parse_engage,
@@ -1148,7 +1240,7 @@ mod tests {
         "2026-09-23T12:00:00Z".parse().unwrap()
     }
 
-    fn no_budget() -> PagingLimits {
+    fn default_limits() -> PagingLimits {
         PagingLimits::DEFAULT
     }
 
@@ -1157,11 +1249,15 @@ mod tests {
     }
 
     fn localist_event(id: i64, title: &str) -> Json {
+        localist_event_at(id, title, "2026-09-02T12:00:00-05:00")
+    }
+
+    fn localist_event_at(id: i64, title: &str, start: &str) -> Json {
         json!({"event": {
             "id": id,
             "title": title,
             "event_instances": [
-                {"event_instance": {"start": "2026-09-02T12:00:00-05:00"}}
+                {"event_instance": {"start": start}}
             ]
         }})
     }
@@ -1204,15 +1300,23 @@ mod tests {
     #[test]
     fn localist_pages_until_page_total() {
         let vault = localist_vault("localist3", "http://x");
+        // Page 1's event starts LATEST and page 3's EARLIEST, so a correct final order (earliest
+        // first) proves `sort_events` actually re-sorted by start rather than merely preserving
+        // fetch/uid order (review M-6).
+        let starts = ["2026-09-05T12:00:00-05:00", "2026-09-03T12:00:00-05:00", "2026-09-01T12:00:00-05:00"];
         let urls = RefCell::new(Vec::new());
         let fetch = |url: &str| {
             let mut u = urls.borrow_mut();
             u.push(url.to_string());
             let n = u.len() as i64;
-            Ok(localist_payload(vec![localist_event(n, &format!("Event {n}"))], Some(3)).to_string())
+            Ok(localist_payload(
+                vec![localist_event_at(n, &format!("Event {n}"), starts[(n - 1) as usize])],
+                Some(3),
+            )
+            .to_string())
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(
             urls.into_inner(),
             vec![
@@ -1223,7 +1327,7 @@ mod tests {
         );
         assert_eq!(
             events.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(),
-            vec!["Event 1", "Event 2", "Event 3"]
+            vec!["Event 3", "Event 2", "Event 1"]
         );
         assert!(warnings.is_empty(), "{warnings:?}");
     }
@@ -1242,7 +1346,7 @@ mod tests {
             Ok(engage_payload(n, 250).to_string())
         };
         let (_, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             urls.into_inner(),
@@ -1266,7 +1370,7 @@ mod tests {
             Ok(localist_payload(vec![localist_event(n, "Event")], Some(999)).to_string())
         };
         let (_, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(urls.borrow().len(), 20);
         assert_eq!(
             warnings,
@@ -1283,7 +1387,7 @@ mod tests {
             Ok(localist_payload(vec![localist_event(1, "Solo")], None).to_string())
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(urls.into_inner(), vec!["http://x?group=x&days=90&pp=100&page=1"]);
         assert_eq!(events.len(), 1);
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1293,7 +1397,7 @@ mod tests {
     fn a_failed_later_page_keeps_earlier_pages_and_warns() {
         let vault = localist_vault("localistfail2", "http://x");
         let calls = Cell::new(0usize);
-        let fetch = move |_: &str| {
+        let fetch = |_: &str| {
             let n = calls.get() + 1;
             calls.set(n);
             if n == 1 {
@@ -1303,7 +1407,7 @@ mod tests {
             }
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].title, "Keep");
         assert_eq!(warnings, vec!["campus: page 2 failed (boom); kept 1 events".to_string()]);
@@ -1318,7 +1422,7 @@ mod tests {
             Err("boom".to_string())
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert!(events.is_empty());
         assert_eq!(warnings, vec!["campus: fetch failed (boom)".to_string()]);
         assert_eq!(urls.borrow().len(), 1);
@@ -1333,7 +1437,7 @@ mod tests {
             Ok(localist_payload(vec![localist_event(1, "Solo")], None).to_string())
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(urls.borrow().len(), 1);
         assert_eq!(events.len(), 1);
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1341,19 +1445,219 @@ mod tests {
 
     #[test]
     fn a_duplicate_uid_across_pages_collapses_first_wins() {
+        // Page 2 repeats page 1's id (5, "Second") but also adds a genuinely new one (6), so this
+        // is dedup — not the whole-page repeat review M-1 detects and stops on separately (see
+        // `a_repeated_page_stops_paging_and_names_it`).
         let vault = localist_vault("localistdupe", "http://x");
         let calls = Cell::new(0usize);
-        let fetch = move |_: &str| {
+        let fetch = |_: &str| {
             let n = calls.get() + 1;
             calls.set(n);
-            let title = if n == 1 { "First" } else { "Second" };
-            Ok(localist_payload(vec![localist_event(5, title)], Some(2)).to_string())
+            let body = if n == 1 {
+                localist_payload(vec![localist_event(5, "First")], Some(2))
+            } else {
+                localist_payload(
+                    vec![localist_event(5, "Second"), localist_event(6, "New")],
+                    Some(2),
+                )
+            };
+            Ok(body.to_string())
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].title, "First");
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.iter().find(|e| e.uid == "localist:5").unwrap().title, "First");
+        assert!(events.iter().any(|e| e.uid == "localist:6"));
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_repeated_page_stops_paging_and_names_it() {
+        // A server ignoring `page` and re-serving the same content (review M-1): every page
+        // returns the identical event, so page 2 adds nothing new to this source.
+        let vault = localist_vault("localistrepeat", "http://x");
+        let calls = Cell::new(0usize);
+        let fetch = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(localist_payload(vec![localist_event(7, "Same")], Some(999)).to_string())
+        };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            warnings,
+            vec!["campus: page 2 repeated an earlier page; kept 1 events".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unexpectedly_empty_page_after_a_declared_total_warns() {
+        // Page 1 declares `page.total: 3`; page 2 is shapeless (`{}`) rather than a genuine next
+        // page — the promise page 1 made means this is worth naming (review M-2).
+        let vault = localist_vault("localistempty", "http://x");
+        let calls = Cell::new(0usize);
+        let fetch = |_: &str| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n == 1 {
+                Ok(localist_payload(vec![localist_event(1, "Keep")], Some(3)).to_string())
+            } else {
+                Ok(json!({}).to_string())
+            }
+        };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(events.len(), 1);
+        // `parse_localist` itself also warns on the shapeless page (`{}` has no "events" array) —
+        // that warning is real and expected; the M-2 warning about the broken promise is on top.
+        assert_eq!(
+            warnings,
+            vec![
+                "campus: unexpected Localist payload shape".to_string(),
+                "campus: page 2 was empty; kept 1 events".to_string(),
+            ]
+        );
+    }
+
+    /// Not one of the brief's 12 — a genuinely empty page with no prior declared total ends
+    /// silently, same as `a_short_page_without_a_total_ends_paging`. Confirms M-2's fix only fires
+    /// when a prior page promised more.
+    #[test]
+    fn a_genuinely_empty_page_with_no_declared_total_stays_silent() {
+        let vault = localist_vault("localistemptysilent", "http://x");
+        let urls = RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            urls.borrow_mut().push(url.to_string());
+            Ok(json!({"events": []}).to_string())
+        };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
+        assert_eq!(urls.borrow().len(), 1);
+        assert!(events.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_page_cap_wins_over_a_simultaneous_run_time_budget() {
+        // Tuned so the run budget and the page cap become true at the SAME check (before the 21st
+        // fetch): if the budget were checked first, the message would wrongly read as a run-budget
+        // stop instead of the cap (review M-3).
+        let vault = localist_vault("localistcapbudget", "http://x");
+        let clock = Cell::new(Duration::ZERO);
+        let calls = Cell::new(0usize);
+        let fetch = |_: &str| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            clock.set(clock.get() + Duration::from_secs(10));
+            Ok(localist_payload(vec![localist_event(n as i64, "Event")], Some(999)).to_string())
+        };
+        let elapsed = || clock.get();
+        // 19 calls -> 190s < 195s (every one of pages 2-20's checks passes); 20 calls -> 200s >=
+        // 195s, true at exactly the same check where page 21 > MAX_PAGES is also true.
+        let limits =
+            PagingLimits { per_source: Duration::from_secs(100_000), per_run: Duration::from_secs(195) };
+        let (_, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), limits, &elapsed);
+        assert_eq!(calls.get(), 20);
+        assert_eq!(
+            warnings,
+            vec!["campus: stopped after 20 pages; later events wait for the window to move".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_mid_source_run_time_budget_stop_is_named() {
+        // No test in round 1 covered the mid-source "(run time budget)" shape, as opposed to the
+        // per-source "(time budget)" shape or the pre-page-1 "skipped" shape (review M-6).
+        let vault = localist_vault("localistmidrun", "http://x");
+        let clock = Cell::new(Duration::ZERO);
+        let calls = Cell::new(0usize);
+        let fetch = |_: &str| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            clock.set(clock.get() + Duration::from_secs(70));
+            Ok(localist_payload(vec![localist_event(n as i64, "Event")], Some(999)).to_string())
+        };
+        let elapsed = || clock.get();
+        // per_source is large enough to never fire; per_run (100s) is crossed by the check before
+        // page 3 (elapsed 140s after two 70s fetches), which is `page > 1`.
+        let limits =
+            PagingLimits { per_source: Duration::from_secs(100_000), per_run: Duration::from_secs(100) };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), limits, &elapsed);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            warnings,
+            vec!["campus: stopped at page 3 (run time budget); kept 2 events".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_later_pages_json_parse_failure_keeps_earlier_pages_and_warns() {
+        // Round 1 only covered a later page's fetch (transport) failure; this covers a later
+        // page's JSON parse failure (review M-6).
+        let vault = localist_vault("localistbadjson", "http://x");
+        let calls = Cell::new(0usize);
+        let fetch = |_: &str| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n == 1 {
+                Ok(localist_payload(vec![localist_event(1, "Keep")], Some(2)).to_string())
+            } else {
+                Ok("{ not json".to_string())
+            }
+        };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
+        assert_eq!(events.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("campus: page 2 failed ("), "{warnings:?}");
+        assert!(warnings[0].ends_with("; kept 1 events"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_run_time_budget_skips_every_kind_not_just_the_paged_ones() {
+        // Review I-1: an `ics` source after a JSON source has burned the run budget must never be
+        // fetched either — the 330s worst case `PagingLimits` is sized against assumed this.
+        let vault = vault_with(
+            "runbudgetics",
+            "sources:\n  - name: first\n    type: localist\n    url: http://a\n    enabled: true\n  - name: second\n    type: ics\n    url: http://b\n    enabled: true\n",
+        );
+        let clock = Cell::new(Duration::ZERO);
+        let urls = RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            urls.borrow_mut().push(url.to_string());
+            clock.set(Duration::from_secs(200));
+            Ok(localist_payload(vec![localist_event(1, "First source event")], None).to_string())
+        };
+        let elapsed = || clock.get();
+        let limits =
+            PagingLimits { per_source: Duration::from_secs(90), per_run: Duration::from_secs(180) };
+        let (events, warnings) =
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), limits, &elapsed);
+        assert_eq!(urls.borrow().len(), 1, "the ics source must never be fetched");
+        assert_eq!(events.len(), 1);
+        assert_eq!(warnings, vec!["second: skipped (run time budget)".to_string()]);
+    }
+
+    #[test]
+    fn paged_url_preserves_a_fragment() {
+        // Review M-4: a fragment must not swallow the appended query.
+        assert_eq!(
+            paged_url("http://x/feed#top", &LOCALIST_KEYS, &[("days", "90".to_string())]),
+            "http://x/feed?days=90#top"
+        );
+        assert_eq!(
+            paged_url(
+                "http://x/feed?group=y&pp=10#top",
+                &LOCALIST_KEYS,
+                &[("days", "90".to_string()), ("pp", "100".to_string()), ("page", "1".to_string())]
+            ),
+            "http://x/feed?group=y&days=90&pp=100&page=1#top"
+        );
     }
 
     #[test]
@@ -1372,7 +1676,7 @@ mod tests {
             }
         };
         let (events, warnings) =
-            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), no_budget(), &zero_clock);
+            load_discovered_events_at(&vault, Some(&fetch), fixed_now(), default_limits(), &zero_clock);
         assert_eq!(urls.into_inner(), vec!["http://a?x=1", "http://b?y=2"]);
         assert_eq!(titles(&events), vec!["Blount Thing"]);
         assert!(warnings.is_empty(), "{warnings:?}");
