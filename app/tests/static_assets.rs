@@ -652,14 +652,32 @@ fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
     }
     let render = js.split("function renderFirstRun(").nth(1).and_then(|s| s.split("function hideFirstRun(").next()).expect("renderFirstRun");
     assert!(render.contains("fr.current"), "the step in progress is the live slot's own");
-    assert!(render.contains("first-run-end"), "…and the didn't-finish line is the render's to show");
+    // R-C1c-exec-8a (M2): an ended slot with ANY failed step, listed or not (`engine: …` at -1 is
+    // not), says it did not finish.
+    assert!(
+        render.contains("var failed = (fr.steps || []).some(function (s) { return s[1] !== 0; });"),
+        "the didn't-finish line counts every step, listed or not"
+    );
+    assert!(render.contains("EL(\"first-run-end\").hidden = !(!fr.running && failed);"), "…once the slot has ended");
     assert!(!render.contains("class=\"meta\"") && !render.contains("lede"), "the rows borrow no day styles");
+    // R-C1c-exec-8a (I1): leaving the view forgets the displayed day, as a view change does, so the
+    // first ranked state paints whole instead of holding the pre-slot order behind "refresh order".
+    // Only on the way OUT: clearing on every poll without the block would defeat the hold for good.
+    let hide = js.split("function hideFirstRun(").nth(1).and_then(|s| s.split("function poll(").next()).expect("hideFirstRun");
+    assert!(hide.contains("if (app.classList.contains(\"first-run\")) {"), "the reset runs only on the transition out");
+    assert!(hide.contains("current.state = null; current.revision = null; current.pendingOrder = null;"), "…and forgets the displayed day");
     let poll = js.split("function poll(").nth(1).and_then(|s| s.split("function openDrawer(").next()).expect("poll");
     // R-C1c-plan-1: the view stands on the presence of the block — which is `is_first_run` — and
     // never on a failed state, because `surface::build_state` has no failure path to wait for.
     assert!(poll.contains("if (env.first_run) {"), "the first-run view stands on is_first_run alone");
     assert!(poll.contains("renderFirstRun("), "…poll paints it");
     assert!(poll.contains("hideFirstRun()"), "…and takes it away when the key stops coming");
+    // R-C1c-exec-8a (M1): a rejected call re-arms the cadence while the view stands, since the error
+    // line it writes is hidden in this mode.
+    assert!(
+        poll.contains("if (document.querySelector(\".app\").classList.contains(\"first-run\")) { armFirstRun(); }"),
+        "a rejected state call keeps the first-run cadence going"
+    );
 
     let css = read("console.css");
     for sel in [".app.first-run > nav", ".app.first-run > aside", ".app.first-run > main > :not(#first-run)"] {

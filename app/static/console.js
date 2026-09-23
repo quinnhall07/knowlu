@@ -586,11 +586,15 @@
   // The state still paints underneath (poll's revision logic is untouched), so the hand-over is
   // instant; and a `display: none` row never intersects, so the 2 s dwell below sends no
   // `object_seen` for a row nobody saw. Nothing visible paints in this mode but the view itself.
+  // Leaving the view forgets the displayed day (`hideFirstRun`), so the first ranked state paints
+  // whole rather than behind R28's reorder hold (R-C1c-exec-8a).
   //
   // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
-  // failing polls on forever. That is honest rather than silent: once a first slot has ended with a
-  // failed step, the view says so under the list and that Knowlu will try again, and the Runs view
-  // has the rest. A cap would replace a true "will try again" with a false "gave up".
+  // failing polls on forever, and a rejected call re-arms it too. That is honest rather than
+  // silent: once a first slot has ended with any failed step, listed here or not (an `engine: …`
+  // line counts), the view says so under the list and that Knowlu will try again. The Runs view
+  // and the sync line that would say more are hidden in this mode. A cap would replace a true
+  // "will try again" with a false "gave up".
   var FIRST_RUN_MS = 3000;
   var firstRunTimer = null;
   var firstRunHtml = null;
@@ -620,11 +624,10 @@
     fr = fr || {};
     document.querySelector(".app").classList.add("first-run");
     EL("first-run").hidden = false;
-    var rows = [], failed = false;
+    var rows = [];
     (fr.steps || []).forEach(function (s) {
       var says = firstRunSays(s[0]); if (!says) { return; }
       var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 ? "done" : "failed");
-      if (state === "failed") { failed = true; }
       rows.push(firstRunRow(state, says));
     });
     // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
@@ -635,9 +638,15 @@
     var html = rows.join("");
     if (html !== firstRunHtml) { EL("first-run-steps").innerHTML = html; firstRunHtml = html; }
     // A first slot that ended without a day (M6, above): one more line, and the cadence carries on.
+    // Any failed step counts, listed or not: the engine missing is `engine: …` at -1, which has no row.
+    var failed = (fr.steps || []).some(function (s) { return s[1] !== 0; });
     EL("first-run-end").hidden = !(!fr.running && failed);
-    // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
-    // call poll() too, and a chain per call would multiply every three seconds.
+    armFirstRun();
+  }
+
+  // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
+  // call poll() too, and a chain per call would multiply every three seconds.
+  function armFirstRun() {
     if (firstRunTimer) { clearTimeout(firstRunTimer); }
     firstRunTimer = setTimeout(poll, FIRST_RUN_MS);
   }
@@ -645,7 +654,17 @@
   function hideFirstRun() {
     if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
     EL("first-run").hidden = true;
-    document.querySelector(".app").classList.remove("first-run");
+    var app = document.querySelector(".app");
+    // R-C1c-exec-8a (I1): on the way OUT only, forget the displayed day, as `route()` does for a
+    // view change. The day painted under the view is the vault as it was before the slot, and every
+    // state since has a new order, so R28's hold would keep that pre-slot Must do beneath the ranked
+    // headline behind "refresh order". Cleared here, the same poll paints the ranked day whole: poll
+    // calls this before its revision check. Cleared on every poll without the block, the hold would
+    // never work again.
+    if (app.classList.contains("first-run")) {
+      app.classList.remove("first-run");
+      current.state = null; current.revision = null; current.pendingOrder = null;
+    }
   }
 
   function poll() {
@@ -661,7 +680,12 @@
       if (!env.state) { return; }
       if (env.state.revision === current.revision) { return; }
       paint(env.state, false);
-    }).catch(function (e) { EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")"; });
+    }).catch(function (e) {
+      EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")";
+      // R-C1c-exec-8a (M1): while the view stands the line above is hidden, and nothing else would
+      // re-arm the three-second cadence after a rejected call.
+      if (document.querySelector(".app").classList.contains("first-run")) { armFirstRun(); }
+    });
   }
 
   // Task 13: the four fields the write path always refuses (app/src/commands.rs's comment on

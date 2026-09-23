@@ -11,7 +11,7 @@ changed a moment ago — those are what this drives.
 A second page boots the same files as a CONSOLE over a vault `rank` has not reached yet (C1c Task
 5, D7, re-ruled by R-C1c-8): while `state` carries `first_run` the first-run view replaces the day
 and names each step the live slot has published, it says so when the first slot ends without a
-day, and on the next poll after the block stops coming the day takes its place.
+day, and on the next poll after the block stops coming the ranked day takes its place whole.
 
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
@@ -107,15 +107,29 @@ window.__CALLS = [];
 # the live slot's steps and the one in progress — until the check clears `window.__FIRST_RUN`, which
 # is `rank` having written `state/today.md`. The day is the s1 read-model reference, read here and
 # never written.
+#
+# R-C1c-exec-8a (I1): the window opens on the vault as it was before the slot (nothing in Must do
+# yet), and the check swaps in the ranked s1 day while the view still stands, as the real first slot
+# does once coursework has imported work. `window.__REJECT` makes that many `state` calls reject.
 STATE_FIXTURE = REPO / "engine" / "tests" / "fixtures" / "surface-today-s1.json"
 D7 = "Knowlu is doing its first run. Your day appears here in about a minute."
 CONSOLE_FAKE = r"""
 window.__FIRST_RUN = { running: true, current: "judge",
-                       steps: [["entitlement (refreshed)", 0], ["coursework", 0]] };
+                       steps: [["pull", 0], ["ingest (skipped: no ics_url)", 0],
+                               ["entitlement (refreshed)", 0], ["coursework", 0]] };
+window.__RANKED = window.__STATE;
+window.__STATE = JSON.parse(JSON.stringify(window.__RANKED));
+window.__STATE.must_do.groups = [];
+window.__STATE.revision = "pre-slot";
+window.__REJECT = 0;
 window.__CALLS = [];
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
   window.__CALLS.push([cmd, args]);
   if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
+  if (cmd === 'state' && window.__REJECT > 0) {
+    window.__REJECT -= 1;
+    return Promise.reject(new Error('the state call was rejected'));
+  }
   if (cmd === 'state') {
     var env = { ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)) };
     if (window.__FIRST_RUN) { env.first_run = window.__FIRST_RUN; }
@@ -406,8 +420,9 @@ THE_DAY = [("nav", "the nav"), (".app > aside", "the rail"), ("#main-today", "th
 def check_first_run(page, errors) -> list:
     bad = []
     # 1. A slot in flight: the view REPLACES the day (R-C1c-8) — judged by what is on screen, never
-    #    by an attribute — and names each published step in plain words: the two that have landed
-    #    as done and the live `current` as in progress. The day still paints, hidden.
+    #    by an attribute — and names each published step in plain words: the account and coursework
+    #    as done, the calendar as skipped (saying so), the live `current` as in progress, and nothing
+    #    for the pull, which is the Runs view's. The day still paints, hidden.
     fr = first_run_block(page)
     if fr["display"] == "none" or not page.is_visible("#first-run"):
         bad.append(f"the first-run view is not on screen while state carries first_run (display {fr['display']!r})")
@@ -415,9 +430,12 @@ def check_first_run(page, errors) -> list:
         if page.is_visible(sel): bad.append(f"{what} is on screen beside the first-run view")
     if D7 not in fr["text"]: bad.append(f"the first-run view does not say D7's sentence: {fr['text']!r}")
     for say, state in [("Checking your account", "done"), ("Fetching your coursework", "done"),
-                       ("Working out what each task needs", "now")]:
+                       ("Reading your school calendar", "skipped"), ("Working out what each task needs", "now")]:
         if listed(fr, say) != [state]: bad.append(f"{say!r} is not listed once as {state!r}: {fr['rows']!r}")
-    if len(fr["rows"]) != 3: bad.append(f"the view does not list exactly the three published steps: {fr['rows']!r}")
+    if not any("Reading your school calendar" in r["text"] and "skipped" in r["text"] for r in fr["rows"]):
+        bad.append(f"the skipped step does not say it was skipped: {fr['rows']!r}")
+    if any("pull" in r["text"].lower() for r in fr["rows"]): bad.append(f"the pull, which is not listed, has a row: {fr['rows']!r}")
+    if len(fr["rows"]) != 4: bad.append(f"the view does not list exactly the four named steps: {fr['rows']!r}")
     if page.is_visible("#first-run-end"): bad.append("a slot still running says the first run did not finish")
     if not fr["headline"].strip(): bad.append("the day did not paint behind the first-run view")
     # The topline gear is hidden with the day, so the view carries its own way to Settings, routed by
@@ -428,7 +446,19 @@ def check_first_run(page, errors) -> list:
         page.click("#first-run [data-settings]"); page.wait_for_timeout(150)
         if not page.is_visible("#settings"): bad.append("the first-run view's Settings button did not open Settings")
         page.click("#set-close"); page.wait_for_timeout(100)
-    # 2. The slot ends without a day: the list stays, the failed step is marked, nothing is in
+    # 2. M1: a rejected `state` call does not end the three-second cadence — the error line is hidden
+    #    in this mode, so a stalled view would say nothing. A focus poll afterwards restarts a chain
+    #    that did end, so the steps below still test what they are about.
+    page.evaluate("window.__REJECT = 1")
+    page.wait_for_timeout(3600)
+    if page.evaluate("window.__REJECT") != 0: bad.append("the rejected state call never happened")
+    after_reject = state_polls(page)
+    page.wait_for_timeout(3600)
+    if state_polls(page) <= after_reject: bad.append("a rejected state call ended the first-run view's three-second cadence")
+    page.evaluate("window.dispatchEvent(new Event('focus'))"); page.wait_for_timeout(300)
+    # Mid-slot, coursework has imported work and the day under the view changes (I1).
+    page.evaluate("window.__STATE = window.__RANKED")
+    # 3. The slot ends without a day: the list stays, the failed step is marked, nothing is in
     #    progress, and one more line says Knowlu will try again. The cadence carries on (M6).
     before = state_polls(page)
     page.evaluate("""window.__FIRST_RUN = { running: false, current: null, steps: [
@@ -440,11 +470,22 @@ def check_first_run(page, errors) -> list:
     if any(r["state"] == "now" for r in fr["rows"]): bad.append(f"an ended slot still shows a step in progress: {fr['rows']!r}")
     if not page.is_visible("#first-run-end") or "didn't finish" not in page.inner_text("#first-run-end"):
         bad.append("a first slot that ended without a day did not say so")
-    # 3. More than the two-second dwell has passed in first-run mode: a row nobody could see must
+    # 4. M2 (R-C1c-exec-8a): the failure can be a step this view does not list — the engine missing,
+    #    at -1. The line still says the run did not finish, and the unlisted step still has no row.
+    page.evaluate("""window.__FIRST_RUN = { running: false, current: null, steps: [
+      ["judge (skipped: no entitlement)", 0], ["engine: not found", -1], ["push", 0]] }""")
+    page.wait_for_timeout(3600)
+    fr = first_run_block(page)
+    if not page.is_visible("#first-run-end"): bad.append(f"a first slot that failed on an unlisted step did not say it did not finish: {fr['rows']!r}")
+    if [r["state"] for r in fr["rows"]] != ["skipped"]: bad.append(f"the unlisted steps were listed: {fr['rows']!r}")
+    # 5. More than the two-second dwell has passed in first-run mode: a row nobody could see must
     #    never have been reported as seen.
     seen = page.evaluate("window.__CALLS.filter(c => c[0] === 'ui_event' && c[1] && c[1].action === 'object_seen').length")
     if seen: bad.append(f"{seen} object_seen event(s) were sent for rows hidden behind the first-run view")
-    # 4. `rank` writes the day: the three-second poll drops the view and the day takes its place…
+    # 6. `rank` writes the day: the three-second poll drops the view and the ranked day takes its
+    #    place whole — Must do as ranked, never the pre-slot rows held behind a refresh-order button
+    #    (I1). This state's revision is the one the view last saw, the harder case: a poll that
+    #    matched it would return before painting at all.
     before = state_polls(page)
     page.evaluate("window.__FIRST_RUN = null")
     page.wait_for_timeout(3600)
@@ -454,10 +495,23 @@ def check_first_run(page, errors) -> list:
     for sel, what in THE_DAY:
         if not page.is_visible(sel): bad.append(f"{what} did not come back once the day arrived")
     if not page.inner_text("#headline").strip(): bad.append("the day came back without its headline")
-    # 5. …and the cadence ends with it: nothing but the minute-long interval polls after that.
+    shown = page.evaluate("Array.from(document.querySelectorAll('#mustdo .row[data-id]')).map(r => r.getAttribute('data-id'))")
+    ranked = page.evaluate("window.__RANKED.must_do.groups.flatMap(g => g.rows.map(r => r.id))")
+    if not ranked or shown != ranked:
+        bad.append(f"the hand-over showed Must do as {shown!r}, not the ranked day's {ranked!r}")
+    if page.is_visible("#refresh-order"): bad.append("the hand-over offered a refresh-order button instead of the ranked day")
+    # 7. …and the cadence ends with it: nothing but the minute-long interval polls after that.
     settled = state_polls(page)
     page.wait_for_timeout(3600)
     if state_polls(page) != settled: bad.append("the three-second first-run poll kept running after the day arrived")
+    # 8. The reset was the hand-over's alone: once the day is up, R28's hold works as it always did.
+    #    A new order arrives, Must do keeps the order on screen, and "refresh order" offers the new one.
+    page.evaluate("""(() => { const s = JSON.parse(JSON.stringify(window.__RANKED));
+      s.must_do.groups.forEach(g => g.rows.reverse()); s.revision = 'reordered'; window.__STATE = s; })()""")
+    page.evaluate("window.dispatchEvent(new Event('focus'))"); page.wait_for_timeout(400)
+    held = page.evaluate("Array.from(document.querySelectorAll('#mustdo .row[data-id]')).map(r => r.getAttribute('data-id'))")
+    if held != ranked or not page.is_visible("#refresh-order"):
+        bad.append(f"after the hand-over a reorder no longer holds behind refresh order (Must do {held!r})")
     for e in errors: bad.append(f"console page error: {e}")
     return bad
 

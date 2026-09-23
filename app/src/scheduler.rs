@@ -80,9 +80,11 @@ pub struct Scheduler {
     /// The slot in flight, published step by step (R-C1c-8) for the console's first-run view.
     /// `last` is written only when a slot ends, and on a first run that succeeds `rank` has written
     /// the day by then, so the view that polled `last` never listed a step. `run_slot_inner` clears
-    /// this in the same locked block that sets `running`, then mirrors every step into it as the step
-    /// lands (`SlotSteps`); when the slot ends, `live.steps` equals `RunSummary.steps`. A refusal and
-    /// the "already running" return never touch it.
+    /// this in the same locked block that sets `running` for a slot, then mirrors every step into it
+    /// as the step lands (`SlotSteps`); when the slot ends, `live.steps` equals `RunSummary.steps`. A
+    /// refusal and the "already running" return never touch it, and neither does the update-install
+    /// hold (`updates::hold_for_install`), which sets `running` with no slot at all: for those few
+    /// seconds before the relaunch a poll reads `running: true` beside the last slot's list.
     ///
     /// **Lock order: `running` before `live`**, wherever both are taken (`run_slot_inner`'s start and
     /// `commands::first_run_value`), and nothing else nests them. The lock is held for one push or one
@@ -626,7 +628,8 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         }
         *r = true;
         // R-C1c-8: cleared under the `running` guard (lock order: `running`, then `live`), so no
-        // poll can ever read `running: true` beside the previous slot's steps.
+        // poll sees a slot's start beside the previous slot's steps. (The update-install hold sets
+        // `running` without a slot and leaves `live` as it was; see `Scheduler.live`.)
         *lock(&sch.live) = LiveSlot::default();
     }
     let _guard = RunGuard(sch);
