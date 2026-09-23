@@ -603,9 +603,6 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a
     // day for someone who has simply not paid, or not connected.
     //
-    // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
-    // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
-    // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
     // §2 / D1: a cloud vault whose entitlement has NEVER been cached refreshes it here,
     // synchronously, before the judge decision. `scheduler::spawn` starts the first slot and the
     // launch refresh on two threads, and the first live onboarding proved the slot can win: the
@@ -626,6 +623,9 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         };
         steps.push((step, 0));
     }
+    // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
+    // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
+    // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
     let est = entitlement_state(cs);
     let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
@@ -638,23 +638,39 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // (`cli::append_run_log` → `runs::log_line`, the single renderer, F11), so a line this app
     // wrote and a line the engine wrote are the same bytes.
     //
-    // The two named skips only — a `pull (skipped: busy)` is a transient lock collision between
-    // this slot and the housekeeping thread, not something a student opens a file to read.
+    // The named skips and the entitlement step only — a `pull (skipped: busy)` is a transient lock
+    // collision between this slot and the housekeeping thread, not something a student opens a
+    // file to read.
     //
     // **Ruling R-C1c-plan-4: the status is `ok`, not `skip`.** `cli::line_status` reads the fifth
     // token and `trim_log_lines` keeps only the newest hundred NON-`ok` lines, for one stated
     // reason: a failure must not age out while routine runs keep flowing. A skip repeats every slot
     // — twice a day, forever, on a vault with no feed — and is not a problem, so filing it as
     // non-`ok` would spend a failure's budget on routine. `ok` puts it in the fifty-line routine
-    // bucket, where it ages out like every other ordinary line. The step itself is still a step in
-    // the run record, which is what the Runs view reads.
+    // bucket, where it ages out like every other ordinary line. The step is visible in
+    // `state/runner-log.md`, not in the Runs view: that page reads the engine's own run record
+    // (`runs::Runs`), which this app-side step never enters.
     //
     // Under `vault_io`, and taken here rather than around the loop below: `vault_io` is never held
     // across a child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    //
+    // R-C1c-final-3 (I3): the entitlement steps land here too, but sanitized — never the service's
+    // failure reason. `steps` (what `RunSummary`/the settings page reads) keeps the full
+    // `entitlement (refresh failed: <reason>)` from the push above; the vault gets the bare
+    // sentence only, so no service error text ever reaches a file a student can open.
     let skips: Vec<String> = steps
         .iter()
-        .filter(|(n, _)| n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:"))
-        .map(|(n, _)| n.clone())
+        .filter_map(|(n, _)| {
+            if n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:") {
+                Some(n.clone())
+            } else if n == "entitlement (refreshed)" {
+                Some(n.clone())
+            } else if n.starts_with("entitlement (refresh failed") {
+                Some("entitlement (refresh failed)".to_string())
+            } else {
+                None
+            }
+        })
         .collect();
     if !skips.is_empty() {
         let _io = lock(&cs.vault_io);

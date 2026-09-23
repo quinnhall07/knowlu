@@ -93,6 +93,11 @@ Tests: a scheduler test with a fake `cloud.yaml`, no cache and an unreachable `a
 failed: …)` step precedes `judge (skipped: no entitlement)`, and that with a cache present no refresh step appears; a test
 that the skip line lands in `runner-log.md` in the engine's format.
 
+**Correction (2026-09-22, final review I3):** "visible in the Runs view like every other named step" above is wrong. The
+entitlement step lives only in `RunSummary` (`Scheduler.last`) and, since this fix, as an `ok` line in
+`state/runner-log.md` — `entitlement (refreshed)` or `entitlement (refresh failed)`, never the reason. It never reaches
+the engine's run record, so the Runs view (which reads `runs::Runs`) does not show it.
+
 ## 3. Coursework's first run (D3)
 
 `coursework::sync_coursework` (engine/src/coursework.rs ~245) gains the `first_run: bool` its sibling `ingest::sync_tasks`
@@ -163,6 +168,11 @@ first-run line, then the day; the run record shows `entitlement (refreshed)` and
 `usage_daily` has a row for the day; no zyBooks task due before onboarding day is active; the courses are `bui-100`-style
 with `name:` lines; the VHL row's blank course produced the count sentence and the engine's card. Then the scratch profile
 and its Credential Manager entries are removed.
+
+**Correction (2026-09-22, final review I3):** "the run record shows `entitlement (refreshed)`" is not checkable as
+written — that step never enters the engine's run record. Read `state/runner-log.md` instead: it carries the `local ok
+entitlement (refreshed)` line. The `judge` step that ran is still the run record's, and is the witness for that half of
+the sentence.
 
 ## 8. Recorded for later streams
 

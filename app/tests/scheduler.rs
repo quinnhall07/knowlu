@@ -788,6 +788,12 @@ fn a_first_slot_refreshes_the_entitlement_before_it_decides_about_judge() {
     let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
     assert!(log.contains("local ok judge (skipped: no entitlement)"), "{log}");
     assert!(!log.contains("local skip"), "a skip must not be a non-ok line: {log}");
+    // Final review, I3: the entitlement step reaches `state/runner-log.md` too, as an `ok` line —
+    // but never with the service's failure reason. `s.steps` (asserted above via `refresh`) keeps
+    // the full `entitlement (refresh failed: <reason>)` for the in-memory `RunSummary`; the file a
+    // student can open gets the bare sentence only.
+    assert!(log.contains("local ok entitlement (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
