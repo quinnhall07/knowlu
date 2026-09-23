@@ -8,6 +8,10 @@ Screenshots do not catch a Next button that skips a panel, a validation that nev
 password field that is still full after the write, or a summary that states a slot time the user
 changed a moment ago — those are what this drives.
 
+A second page boots the same files as a CONSOLE over a vault `rank` has not reached yet (C1c Task
+5, D7): the first-run block has to be on screen while `state` carries `first_run`, and gone on the
+next poll once it stops.
+
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
 Prints one line: `ok`, or one `FAIL: …` per broken behaviour and a count. Exit 0 only when clean,
@@ -93,6 +97,29 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
 window.__ENTITLED = false;
 window.__DISCOVER_EMPTY = false;
 window.__CALLS = [];
+"""
+
+# The console's first-run view (C1c Task 5, D7). The 2026-09-23 live proof saw no first-run line and
+# the view's only check was a string search of the source, so this boots the real page as a console.
+# `state` answers what `commands::state_envelope` answers for a never-ranked vault with a slot in
+# flight (`app/tests/commands.rs` pins that half): `ok`, a day to paint, and `first_run` — until the
+# check clears `window.__FIRST_RUN`, which is `rank` having written `state/today.md`. The day is the
+# s1 read-model reference, read here and never written.
+STATE_FIXTURE = REPO / "engine" / "tests" / "fixtures" / "surface-today-s1.json"
+CONSOLE_FAKE = r"""
+window.__FIRST_RUN = { running: true, steps: [["coursework", 0]] };
+window.__CALLS = [];
+window.__TAURI__ = { core: { invoke: function (cmd, args) {
+  window.__CALLS.push([cmd, args]);
+  if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
+  if (cmd === 'state') {
+    var env = { ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)) };
+    if (window.__FIRST_RUN) { env.first_run = window.__FIRST_RUN; }
+    return Promise.resolve(env);
+  }
+  if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
+  return Promise.resolve({ ok: true, error: null });
+} } };
 """
 
 
@@ -346,6 +373,46 @@ def check(page) -> list:
     return bad
 
 
+def state_polls(page) -> int:
+    return page.evaluate("window.__CALLS.filter(c => c[0] === 'state').length")
+
+
+def first_run_block(page) -> dict:
+    """What the block actually is on screen: its computed display, not its `hidden` attribute —
+    `console.css` has taught three times that a class `display` beats the UA's `[hidden]`."""
+    return page.evaluate("""() => {
+      const el = document.getElementById('first-run');
+      return { display: getComputedStyle(el).display, text: el.innerText,
+               steps: Array.from(document.querySelectorAll('#first-run-steps .meta')).map(d => d.textContent) };
+    }""")
+
+
+def check_first_run(page, errors) -> list:
+    bad = []
+    # 1. While `state` carries `first_run`, the block is displayed with its sentence and the steps
+    #    the slot has finished, and the day paints behind it (R-C1c-plan-1).
+    fr = first_run_block(page)
+    if fr["display"] == "none" or not page.is_visible("#first-run"):
+        bad.append(f"the first-run block is not on screen while state carries first_run (display {fr['display']!r})")
+    if "doing its first run" not in fr["text"]: bad.append(f"the first-run block says {fr['text']!r}")
+    if "coursework" not in fr["steps"]: bad.append(f"the first-run block did not list the finished step: {fr['steps']!r}")
+    if not any("still working" in s for s in fr["steps"]): bad.append("a running first slot did not say it is still working")
+    if not page.inner_text("#headline").strip(): bad.append("the day did not paint behind the first-run block")
+    # 2. `rank` writes the day: the three-second poll drops the block…
+    before = state_polls(page)
+    page.evaluate("window.__FIRST_RUN = null")
+    page.wait_for_timeout(3600)
+    if state_polls(page) <= before: bad.append("the first-run view did not poll again within its three-second cadence")
+    fr = first_run_block(page)
+    if fr["display"] != "none": bad.append(f"the first-run block stayed on screen after the day arrived (display {fr['display']!r})")
+    # 3. …and the cadence ends with it: nothing but the minute-long interval polls after that.
+    settled = state_polls(page)
+    page.wait_for_timeout(3600)
+    if state_polls(page) != settled: bad.append("the three-second first-run poll kept running after the day arrived")
+    for e in errors: bad.append(f"console page error: {e}")
+    return bad
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="knowlu-wizard-check-"))
     try:
@@ -361,6 +428,12 @@ def main() -> int:
                 page.add_init_script(FAKE)
                 page.goto(url); page.wait_for_timeout(400)
                 bad = check(page)
+                console = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
+                errors = []
+                console.on("pageerror", lambda e: errors.append(str(e)))
+                console.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + CONSOLE_FAKE)
+                console.goto(url); console.wait_for_timeout(400)
+                bad += check_first_run(console, errors)
                 browser.close()
             for line in bad: print("FAIL:", line)
             print("ok" if not bad else f"{len(bad)} failure(s)")
