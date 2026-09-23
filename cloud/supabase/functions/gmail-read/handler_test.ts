@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
 import {
+  forDevice,
   type GmailApi,
   type ListPage,
   MAX_LIST_PAGES,
@@ -25,7 +26,9 @@ type Message = { subject: string; from: string; date: string; text: string };
 
 function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], message?: Message) {
   const rows: JudgmentRow[] = [];
-  const queued: Array<{ uid: string; tier: string; payload: Record<string, unknown> }> = [];
+  const queued: Array<
+    { uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }
+  > = [];
   const delivered: string[] = [];
   const seen = new Set<string>();
   const asked: string[] = [];
@@ -56,8 +59,8 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
       seen.add(uid);
       return Promise.resolve();
     },
-    enqueue: (_a, uid, tier, payload) => {
-      queued.push({ uid, tier, payload });
+    enqueue: (_a, uid, tier, payload, judgmentId) => {
+      queued.push({ uid, tier, payload, judgment_id: judgmentId });
       return Promise.resolve();
     },
     undelivered: () => Promise.resolve(queued.filter((q) => !delivered.includes(q.uid))),
@@ -152,6 +155,27 @@ Deno.test("an acknowledged row is delivered and never returned twice", async () 
   assertEquals(first.items.length, 1);
   const second = await (await readHandler(OK, deps)(post({ ack: ["gmail:m1"] }))).json();
   assertEquals(second.items.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// F6a — the judgment_id `enqueue` already writes rides back out to the device, so a later label
+// report (F8) can post it to `/telemetry` and `calibration_query.sql`'s `c.judgment_id = j.id`
+// join finds it with no heuristic.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("an undelivered row's judgment_id reaches the device", async () => {
+  const { deps } = fakes([TASK_ANSWER]);
+  const reply = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(reply.items.length, 1);
+  assertEquals(reply.items[0].judgment_id, "judgment-1");
+});
+
+Deno.test("forDevice keeps judgment_id when it rewrites a tier", () => {
+  const items = [{ uid: "gmail:m1", tier: "completion", payload: {}, judgment_id: "judgment-1" }];
+  // No accepts: "completion" is a declared-only tier and gets rewritten to "information".
+  const out = forDevice(items, []);
+  assertEquals(out[0].tier, "information");
+  assertEquals(out[0].judgment_id, "judgment-1", "the id must survive the tier rewrite");
 });
 
 Deno.test("attachments are never fetched, because there is no code path that could", async () => {

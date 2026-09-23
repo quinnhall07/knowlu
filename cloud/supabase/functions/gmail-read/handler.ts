@@ -143,7 +143,9 @@ export interface ReadDeps {
     payload: Record<string, unknown>,
     judgmentId: string | null,
   ): Promise<void>;
-  undelivered(accountId: string): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown> }>>;
+  undelivered(
+    accountId: string,
+  ): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>>;
   deliver(accountId: string, uids: string[]): Promise<void>;
   knownCourses(accountId: string): Promise<string[]>;
   pipeline(): Promise<PipelineDeps>;
@@ -172,11 +174,12 @@ export function query(excluded: string[]): string {
 export const DECLARED_TIERS = ["completion"] as const;
 
 /** The undelivered rows as this device may see them: every declared-only tier it did not declare
- * reads as `information`. */
+ * reads as `information`. `judgment_id` carries through unchanged either way (F6a): the id names
+ * the judgment that produced the row, not the tier it is currently labelled with. */
 export function forDevice(
-  items: Array<{ uid: string; tier: string; payload: Record<string, unknown> }>,
+  items: Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>,
   accepts: string[],
-): Array<{ uid: string; tier: string; payload: Record<string, unknown> }> {
+): Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }> {
   return items.map((item) =>
     (DECLARED_TIERS as readonly string[]).includes(item.tier) && !accepts.includes(item.tier)
       ? { ...item, tier: "information" }
