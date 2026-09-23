@@ -110,6 +110,10 @@ pub mod enrich;
 // same account wrote comes down and is applied through `write`. Transport, never judgment: `rank`
 // does not reach it, and `sync` always exits 0.
 pub mod sync;
+// Knowlu C3′ — the entitlement gate (cloud design, amendment 2026-09-17, ruling 3). The app caches
+// `GET /entitlement` with a 72-hour grace; past it, the four cloud slot steps refuse to run and say
+// so in one line at exit 0. Reads the app's cache, never the network, and never writes it.
+pub mod entitle;
 
 // The console's backup mirror + zip snapshots (Knowlu plan 1, Task 4). The console is the
 // only caller; never read by the engine.
