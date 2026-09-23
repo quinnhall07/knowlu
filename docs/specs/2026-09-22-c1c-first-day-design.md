@@ -113,6 +113,9 @@ task, the seen ledger holds all three, the log and counts match; second run → 
 created; dry run writes nothing. No frozen reference is touched (`zybooks-parsed-reference.json` and
 `vhl-parsed-reference.json` are the parses, not the sync).
 
+Amended 2026-09-22 (Quinn, R-C1c-6): the archive is judged per source — a (vendor, course) group with no
+uid in the seen ledger and no note in the vault — not per vault.
+
 ## 4. One course, one name (D4, D5)
 
 - `scaffold::suggest_course` (app/src/scaffold.rs ~235) is unchanged for LMS ids. A new `scaffold::course_code_in_name(name)
