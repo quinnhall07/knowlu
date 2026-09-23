@@ -194,6 +194,14 @@ pub fn already_proposed(vault: &Path, target_rel: &str, target_id: Option<&str>)
 /// `task` is the note's path, absolute or vault-relative. `ctx` is used as given — tier 1 passes
 /// `ctx.with_actor(ACTOR)`. A dry run checks everything and writes nothing. `Err` only for a
 /// write that was attempted and failed; every "nothing to do" is `Ok(Outcome::Skipped(..))`.
+///
+/// `judgment` is `(judgment_id, judgment_kind)` (F6b): `Some` only when the evidence behind this
+/// proposal came from a service verdict that carried its own id — today that is only a Gmail
+/// `tier: completion` message, so the Gmail caller passes `Some((id, "email"))` and tier 1 (a
+/// vendor's own number, never judged) passes `None`. When `Some`, the card gets `judgment_id:`
+/// and `judgment_kind:` right after `created_by`, the same place F5 puts them on an amend card
+/// filed from a judged write. `None` produces the exact same bytes this card had before this
+/// parameter existed.
 pub fn propose_done(
     vault: &Path,
     task: &Path,
@@ -202,6 +210,7 @@ pub fn propose_done(
     ctx: &WriteContext,
     journal: &mut Journal,
     dry_run: bool,
+    judgment: Option<(&str, &str)>,
 ) -> Result<Outcome, WriteError> {
     let path = if task.is_absolute() { task.to_path_buf() } else { vault.join(task) };
     let target_rel = crate::ids::rel(vault, &path);
@@ -258,14 +267,20 @@ pub fn propose_done(
         ("expires", Node::Null),
         ("snooze_until", Node::Null),
         ("created_by", Node::text(&ctx.actor)),
-        (
-            "changes",
-            Node::Map(vec![(
-                Node::text("status"),
-                Node::map(vec![("from", Node::text("active")), ("to", Node::text("done"))]),
-            )]),
-        ),
     ]);
+    // F6b: after `created_by`, before `changes` — both keys or neither, the same placement F5
+    // gives an amend card from a judged write.
+    if let Some((judgment_id, judgment_kind)) = judgment {
+        front_pairs.push(("judgment_id", Node::text(judgment_id)));
+        front_pairs.push(("judgment_kind", Node::text(judgment_kind)));
+    }
+    front_pairs.push((
+        "changes",
+        Node::Map(vec![(
+            Node::text("status"),
+            Node::map(vec![("from", Node::text("active")), ("to", Node::text("done"))]),
+        )]),
+    ));
     let front = Node::Map(front_pairs.into_iter().map(|(k, v)| (Node::text(k), v)).collect());
     let evidence_json = evidence.to_json();
     let why = format!(
@@ -318,7 +333,8 @@ pub fn propose_vendor_completions(
         let Some(path) = known.get(&figure.uid) else { continue };
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let evidence = figure.evidence();
-        match propose_done(vault, path, &evidence, today, &ctx, &mut journal, dry_run) {
+        // A vendor figure is not a judgment: tier 1 never carries a `judgment_id`.
+        match propose_done(vault, path, &evidence, today, &ctx, &mut journal, dry_run, None) {
             Ok(Outcome::Proposed(_)) => {
                 log.push(format!("proposed done: {stem} ({} {}%)", figure.source, figure.percent()))
             }
@@ -638,6 +654,7 @@ mod tests {
             &ctx().with_actor(ACTOR),
             &mut journal,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(outcome, Outcome::Skipped("already proposed".to_string()));
@@ -745,12 +762,94 @@ mod tests {
         let mut journal = Journal::new(&vault);
         let ctx = ctx().with_actor(ACTOR);
         let target = Path::new("tasks/hw-07.md");
-        let first = propose_done(&vault, target, &evidence, today(), &ctx, &mut journal, false).unwrap();
+        let first =
+            propose_done(&vault, target, &evidence, today(), &ctx, &mut journal, false, None).unwrap();
         assert!(matches!(first, Outcome::Proposed(_)), "{first:?}");
-        let again = propose_done(&vault, target, &evidence, today(), &ctx, &mut journal, false).unwrap();
+        let again =
+            propose_done(&vault, target, &evidence, today(), &ctx, &mut journal, false, None).unwrap();
         assert_eq!(again, Outcome::Skipped("already proposed".to_string()));
         let body = crate::pystr::read_text(&cards(&vault, "approvals")[0]).unwrap();
         assert!(body.contains("\"source\": \"email\""), "{body}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F6b: tier 1 (`propose_vendor_completions`) always passes `None` for `judgment` — a vendor's
+    /// own figure is not a judgment. The card carries neither `judgment_id` nor `judgment_kind`,
+    /// byte-identical to F11's shape (`target_id` included, since the note has an `id:`).
+    #[test]
+    fn a_vendor_completion_card_carries_no_judgment_keys() {
+        let vault = scratch("no-judgment");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
+        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        let card = &cards(&vault, "approvals")[0];
+        let text = crate::pystr::read_text(card).unwrap();
+        assert!(!text.contains("judgment_id"), "{text}");
+        assert!(!text.contains("judgment_kind"), "{text}");
+        let card_id = text_of(&meta(card), "id").expect("write::create mints an id");
+        let expected = format!(
+            "---\ntype: approval\nkind: amend\ntitle: 'Mark done: CS 100 hw-01'\nstatus: pending\n\
+             target: tasks/hw-01.md\ntarget_id: {id}\nurgency: decreases\nproposed_at: 2026-09-22\n\
+             first_proposed_at: 2026-09-22\nexpires: null\nsnooze_until: null\n\
+             created_by: agent:knowlu.completion\nchanges:\n  status:\n    from: active\n    to: done\n\
+             id: {card_id}\n---\n\n**Why proposed:** zyBooks reports 193 of 193 points earned (100%), \
+             so this looks finished. Approve to mark it done; reject and it will not be proposed \
+             again. Evidence: \
+             {{\"earned\": 193, \"percent\": 100, \"possible\": 193, \"source\": \"zybooks\", \"uid\": \"zybooks:1\"}}\n\
+             {}",
+            crate::write::AMEND_BUTTONS
+        );
+        assert_eq!(text, expected);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F6b: when the Gmail completion caller passes `Some((judgment_id, "email"))`, the card gets
+    /// both keys right after `created_by`, before `changes` — the same placement F5 gives an amend
+    /// card from a judged write — and still validates (`validate_amendment` reads named keys only,
+    /// so the two extra ones are ignored exactly like an unknown frontmatter key on a note).
+    #[test]
+    fn the_judged_completion_card_still_validates() {
+        let vault = scratch("judged");
+        task(&vault, "hw-09", "zybooks:9", "active");
+        let mut detail = Map::new();
+        detail.insert("uid".to_string(), Json::String("gmail:r9".to_string()));
+        let evidence = Evidence {
+            source: "email".to_string(),
+            summary: "An email confirms this was submitted".to_string(),
+            detail,
+        };
+        let mut journal = Journal::new(&vault);
+        let ctx = ctx().with_actor(ACTOR);
+        let target = Path::new("tasks/hw-09.md");
+        let outcome = propose_done(
+            &vault,
+            target,
+            &evidence,
+            today(),
+            &ctx,
+            &mut journal,
+            false,
+            Some(("3fa85f64-5717-4562-b3fc-2c963f66afa6", "email")),
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Proposed(_)), "{outcome:?}");
+
+        let card = &cards(&vault, "approvals")[0];
+        let m = meta(card);
+        assert_eq!(
+            text_of(&m, "judgment_id").as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(text_of(&m, "judgment_kind").as_deref(), Some("email"));
+
+        let text = crate::pystr::read_text(card).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let created_by_at = lines.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines[created_by_at + 2], "judgment_kind: email");
+        assert_eq!(lines[created_by_at + 3], "changes:");
+
+        assert!(crate::approvals::validate_amendment(&vault, &m).is_ok());
         let _ = std::fs::remove_dir_all(&vault);
     }
 }

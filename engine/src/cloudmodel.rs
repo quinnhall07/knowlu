@@ -545,6 +545,12 @@ pub struct GmailItem {
     pub importance: Option<i64>,
     pub why: String,
     pub confidence: f64,
+    /// F6b: `gmail-read`'s row itself (not `payload`) carries `judgment_id` — the `judgments` row
+    /// the service wrote for this message, whenever it wrote one — parsed with F4's
+    /// [`judgment_id_of`]. Under the Limited Use ruling (global constraint 14) this id stays in
+    /// the vault only: `enrich.rs` stamps it onto the note or card it writes, and the device never
+    /// reports it, so it is never cross-account material.
+    pub judgment_id: Option<String>,
 }
 
 /// The body of `POST /judge-email`. Used by the eval harness's parity check and by §13's
@@ -646,6 +652,9 @@ pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPul
             importance: p.get("importance").and_then(Value::as_i64).map(|i| i.clamp(1, 5)),
             why: judge::one_line(&text("why").unwrap_or_default(), 140),
             confidence: p.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+            // F6b: the row's own `judgment_id`, not `payload`'s — same door `judge`/`judge_event`
+            // already use, so a malformed or absent id reads exactly like an old server's reply.
+            judgment_id: judgment_id_of(row),
         });
     }
     Ok(GmailPull { items: out, more, deferred })

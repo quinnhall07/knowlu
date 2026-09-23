@@ -530,10 +530,15 @@ pub const PULL_ROUNDS: usize = 3;
 /// The template a `tier: task` message becomes. `needs_enrichment: false` because the service has
 /// already judged effort and importance — flagging it would send it straight back for a second
 /// judgment of the same thing.
+///
+/// `{judgment_lines}` is `judgment_id: <id>\njudgment_kind: email\n` when the item carried a
+/// `judgment_id` (F6b), or empty otherwise — both keys or neither, right after `source_uid` and
+/// before `needs_enrichment`. Under the Limited Use ruling (global constraint 14) the id stays in
+/// the vault only, for a later per-user join; the device never reports it.
 const GMAIL_NOTE: &str = "---\ntitle: {title}\ncourse: {course}\ndomain: school\ndue: {due}\n\
 effort_hours: {effort_hours}\neffort_confidence: low\neffort_source: inferred\n\
 importance: {importance}\nimportance_reason: {why}\nstatus: active\nprogress: 0\n\
-created_by: gmail\nsource_uid: {uid}\nneeds_enrichment: false\n---\n\n{body}\n";
+created_by: gmail\nsource_uid: {uid}\n{judgment_lines}needs_enrichment: false\n---\n\n{body}\n";
 
 /// Pull the service's queued Gmail judgments and write them, then acknowledge them.
 ///
@@ -814,7 +819,10 @@ fn propose_gmail_completion(
         detail,
     };
     let ctx = ctx.with_actor(crate::completion::ACTOR);
-    match crate::completion::propose_done(vault, task, &evidence, today, &ctx, journal, false) {
+    // F6b: the service's own judgment id for this message, when it wrote one — the id stays in
+    // the vault only (Global Constraint 14); the device never reports an `email`-kind judgment.
+    let judgment = item.judgment_id.as_deref().map(|id| (id, "email"));
+    match crate::completion::propose_done(vault, task, &evidence, today, &ctx, journal, false, judgment) {
         Ok(crate::completion::Outcome::Proposed(_)) => {
             Ok(Some(task.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
         }
@@ -880,6 +888,11 @@ fn gmail_note_text(item: &crate::cloudmodel::GmailItem) -> String {
     let effort = write::to_literal(&Value::Number(serde_yaml_ng::Number::from(
         item.effort_hours.unwrap_or(1.0),
     )));
+    // F6b: both keys or neither — a UUID from `judgment_id_of` never needs YAML quoting.
+    let judgment_lines = match item.judgment_id.as_deref() {
+        Some(id) => format!("judgment_id: {id}\njudgment_kind: email\n"),
+        None => String::new(),
+    };
     GMAIL_NOTE
         .replace("{title}", &lit(&item.title))
         .replace("{course}", &course)
@@ -888,6 +901,7 @@ fn gmail_note_text(item: &crate::cloudmodel::GmailItem) -> String {
         .replace("{importance}", &item.importance.unwrap_or(3).to_string())
         .replace("{why}", &lit(&item.why))
         .replace("{uid}", &lit(&item.uid))
+        .replace("{judgment_lines}", &judgment_lines)
         .replace("{body}", &format!("From email. {}", item.why))
 }
 
@@ -912,10 +926,16 @@ fn write_gmail_card(
         .strftime("%Y-%m-%d")
         .to_string();
     let stem = format!("task-{}", crate::ingest::slugify(&item.title));
+    // F6b: right after `created_by`, before `source_uid` — the same placement an amend card from
+    // a judged write gives `judgment_id`/`judgment_kind` (F5), both keys or neither.
+    let judgment_lines = match item.judgment_id.as_deref() {
+        Some(id) => format!("judgment_id: {id}\njudgment_kind: email\n"),
+        None => String::new(),
+    };
     let text = format!(
         "---\ntype: approval\nkind: task\ntitle: {}\nstatus: pending\nproposed_at: {stamp}\n\
          first_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\ncreated_by: gmail\n\
-         source_uid: {}\n---\n\n{}\n\n```task\n{}```\n",
+         {judgment_lines}source_uid: {}\n---\n\n{}\n\n```task\n{}```\n",
         lit(&item.title),
         lit(&item.uid),
         item.why,
@@ -1948,6 +1968,7 @@ mod tests {
             title: "PH 106 problem set 4".into(), course: Some("ph-106".into()),
             due: Some("2026-09-11".into()), effort_hours: Some(2.5), importance: Some(4),
             why: "the email states a Friday deadline".into(), confidence: 0.86,
+            judgment_id: None,
         };
         let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -1993,6 +2014,7 @@ mod tests {
                 uid: format!("gmail:m{n}"), tier: "opportunity".into(),
                 title: format!("Opportunity {n}"), course: None, due: None,
                 effort_hours: None, importance: None, why: "worth a look".into(), confidence: 0.8,
+                judgment_id: None,
             };
             write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("card");
         }
@@ -2074,6 +2096,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// F6b: a `tier: task` row whose reply carries a `judgment_id` (alongside `uid`/`tier`, not
+    /// inside `payload` — `gmail-read`'s own shape) stamps `judgment_id:` and
+    /// `judgment_kind: email` into the note's frontmatter. Under the Limited Use ruling (global
+    /// constraint 14) the id stays in the vault only; the device never reports it.
+    #[test]
+    fn a_pulled_task_note_carries_the_email_judgment_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-task-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","judgment_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let meta = meta_of(&v, "ph-106-problem-set-4.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+        handle.join().expect("the listener thread did not panic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: an item with no `judgment_id` (the common case: an old server, or a reply the service
+    /// never wrote a `judgments` row for) writes the exact bytes this note had before this field
+    /// existed — no `judgment_id`/`judgment_kind` line anywhere.
+    #[test]
+    fn an_item_without_one_writes_todays_bytes() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-task-no-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let text = crate::pystr::read_text(&v.join("tasks").join("ph-106-problem-set-4.md")).unwrap();
+        assert!(!text.contains("judgment_id"), "{text}");
+        assert!(!text.contains("judgment_kind"), "{text}");
+        let meta = meta_of(&v, "ph-106-problem-set-4.md");
+        let id = crate::yaml::opt_text(crate::yaml::get(&meta, "id")).expect("write::create mints an id");
+        let expected = format!(
+            "---\ntitle: \"PH 106 problem set 4\"\ncourse: \"ph-106\"\ndomain: school\n\
+             due: 2026-09-11\neffort_hours: 2.5\neffort_confidence: low\neffort_source: inferred\n\
+             importance: 4\nimportance_reason: \"the email states a Friday deadline\"\n\
+             status: active\nprogress: 0\ncreated_by: gmail\nsource_uid: \"gmail:m1\"\n\
+             needs_enrichment: false\nid: {id}\n---\n\nFrom email. the email states a Friday \
+             deadline\n"
+        );
+        assert_eq!(text, expected);
+        handle.join().expect("the listener thread did not panic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     /// `borderline` (and, by the same code path, `event` and `opportunity`) becomes a `kind: task`
     /// approval card, never a note directly — the student decides, not the pull.
     #[test]
@@ -2103,6 +2193,46 @@ mod tests {
 
         let requests = handle.join().expect("the listener thread did not panic");
         assert_eq!(requests.len(), 2, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: the three middle tiers build a `kind: task` approval card, not a note. When the row
+    /// carries a `judgment_id` the card gets it too, right after `created_by` — the same placement
+    /// F5 gives an amend card from a judged write.
+    #[test]
+    fn a_pulled_card_carries_it() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-card-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m2","tier":"borderline","judgment_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","payload":{"title":"CS midterm review session","course":"cs-100","due":null,"effort_hours":1.0,"importance":3,"why":"might be worth attending","confidence":0.6}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let meta = meta_of_approval(&v, "task-cs-midterm-review-session.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+
+        let text =
+            crate::pystr::read_text(&v.join("approvals").join("task-cs-midterm-review-session.md")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let created_by_at = lines.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines[created_by_at + 2], "judgment_kind: email");
+        assert_eq!(lines[created_by_at + 3], "source_uid: \"gmail:m2\"");
+
+        handle.join().expect("the listener thread did not panic");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -3009,6 +3139,50 @@ mod tests {
         assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 1 proposed, 0 dropped as information", "{lines:?}");
         let requests = handle.join().expect("the listener thread did not panic");
         assert!(requests[1].contains("gmail:r1"), "the receipt must be acknowledged: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: a `tier: completion` row's `judgment_id` reaches the completion card
+    /// (`completion::propose_done`'s `judgment` parameter), right after `created_by` — same
+    /// placement as the task-tier card (F6b) and an amend card from a judged write (F5). Under the
+    /// Limited Use ruling (global constraint 14) the id stays in the vault only.
+    #[test]
+    fn a_gmail_completion_card_carries_the_email_judgment_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-judgment");
+        let item = serde_json::json!({
+            "uid": "gmail:r1", "tier": "completion",
+            "judgment_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "payload": {"title": "cs-100  homework 3", "course": null, "due": null,
+                        "effort_hours": null, "importance": null,
+                        "why": "Blackboard submission receipt", "confidence": 1},
+        });
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{item}]"), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        let card = meta_of_approval(&v, "amend-hw3-done.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&card, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&card, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+
+        let text = crate::pystr::read_text(&v.join("approvals").join("amend-hw3-done.md")).unwrap();
+        let lines_of: Vec<&str> = text.lines().collect();
+        let created_by_at = lines_of.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines_of[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines_of[created_by_at + 2], "judgment_kind: email");
+        assert_eq!(lines_of[created_by_at + 3], "changes:");
+
+        assert!(crate::approvals::validate_amendment(&v, &card).is_ok());
+        handle.join().expect("the listener thread did not panic");
         let _ = std::fs::remove_dir_all(&v);
     }
 
