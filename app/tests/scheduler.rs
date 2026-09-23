@@ -975,6 +975,36 @@ fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// Task 10 review (Important): a `config/cloud.yaml` that exists but is unreadable must NOT trigger
+/// the R-C1c-11 in-slot refresh either — `refresh_entitlement`'s own first call is the identical
+/// `cloud_config` that already fails the gate, so a refresh attempt here could only ever record a
+/// doomed `entitlement (refresh failed: …)` step, forever, for a vault that will never recover on
+/// its own. `judge_plan_for` already names this vault's own skip (`cloud.yaml unreadable`); a second,
+/// separate step naming the same broken file a second way adds nothing a student can act on.
+#[test]
+fn an_unreadable_cloud_yaml_never_triggers_an_entitlement_refresh_either() {
+    let v = scratch("unreadablecloudent");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Garbage: present, but neither valid YAML nor a mapping with the required keys — exactly its
+    // sibling test's fixture above, kept in its own vault so the two tests never share state.
+    std::fs::write(v.join("config").join("cloud.yaml"), "not: [valid\n").unwrap();
+    let cs = open(&v, "unreadablecloudent");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-unreadablecloudent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// The telemetry step never fails a slot. This vault has an account, no reachable cloud (the api_base
 /// points at a port nothing is listening on) and therefore an offline send — and the slot is green.
 #[test]

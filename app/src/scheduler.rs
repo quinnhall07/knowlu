@@ -679,15 +679,17 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // lands, the engine itself refuses `sync`, `coursework` and `ingest` on this same stale cache,
     // so a slot that never re-asks would leave every step named a skip for a student who may
     // already be entitled again. So the condition is now two questions, not one: is this vault a
-    // cloud vault at all (unlike the old `cloud_config(...).is_ok()`, this says nothing about
-    // whether that config is well-formed — `Unreadable` is asked again too, and fails fast, locally,
-    // on the same call), and does the cache on disk right now — missing, unreadable, past the grace,
-    // or not `active`/`trialing` — fall short of `Entitled`. A cache that IS `Entitled` (fresh and
-    // active) is still never refreshed here: the six-hourly housekeeping refresh alone owns that
-    // case. A failure leaves the previous cache exactly where it was and `judge_plan_for` names the
-    // skip exactly as it does today: only a refusal from the service, never a missing or stale
-    // cache, is what a student reads as "no entitlement".
-    if cs.vault.join("config").join("cloud.yaml").exists()
+    // cloud vault whose config actually reads (`cloud_config(...).is_ok()`, unchanged from before
+    // this task — a vault with no `config/cloud.yaml` at all, or one that is unreadable, still
+    // never triggers a refresh attempt: `judge_plan_for` already names that as its own skip, and a
+    // refresh that calls the very same `cloud_config` first would only fail the identical way, for
+    // no reason, on every slot from then on), and does the cache on disk right now — missing, past
+    // the grace, or not `active`/`trialing` — fall short of `Entitled`. A cache that IS `Entitled`
+    // (fresh and active) is still never refreshed here: the six-hourly housekeeping refresh alone
+    // owns that case. A failure leaves the previous cache exactly where it was and `judge_plan_for`
+    // names the skip exactly as it does today: only a refusal from the service, never a missing or
+    // stale cache, is what a student reads as "no entitlement".
+    if crate::account::cloud_config(&cs.vault).is_ok()
         && entitlement_state(cs) != crate::account::EntitlementState::Entitled
     {
         // Exit code **0** on both arms, like every other named step here: an account service that
@@ -700,9 +702,13 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         };
         steps.push((step, 0));
     }
-    // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
-    // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
-    // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
+    // Fix round 1 (M3): reused for the telemetry step below too, rather than re-reading
+    // `config/cloud.yaml` and the entitlement cache from disk a second time in the same slot — and
+    // guaranteeing the two steps agree even if the file changes mid-slot. Task 10 review (minor):
+    // `entitlement_state(cs)` is now read twice in this function, not once — once above, inside the
+    // `if`, to decide whether to ask for a refresh; once here, after that refresh may have run, to
+    // decide the slot's own judge and telemetry steps. The two reads answer different questions at
+    // different points and must not be collapsed into one.
     let est = entitlement_state(cs);
     let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
