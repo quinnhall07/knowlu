@@ -29,6 +29,7 @@ use ring::digest;
 use serde_json::Value;
 
 use crate::journal::Journal;
+use crate::ledger::Record;
 
 /// The largest journal record this device will send, in bytes, matching
 /// `sync_records.body`'s `octet_length` check. A record is a handful of scalars and, for a
@@ -428,6 +429,361 @@ pub fn push(client: &crate::cloudmodel::CloudClient, batch: &PushBatch) -> Resul
     let reply = client.post("/sync-push", &body)?;
     let count = |key: &str| reply.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
     Ok((count("records"), count("notes")))
+}
+
+// ---------------------------------------------------------------------------
+// The pull, `reconcile`, and the amend card (C3' Task 6).
+// ---------------------------------------------------------------------------
+
+/// One note as the account holds it. `text: None` is a tombstone: the account knows the path is
+/// settled and carries no bytes for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulledNote {
+    /// Which desktop pushed it — the opaque sixteen-hex token, never a hostname.
+    pub device: String,
+    pub path: String,
+    pub text: Option<String>,
+}
+
+/// One page of `/sync-pull`, opened. `Default` is what `pulled_from_reply` builds from and what a
+/// restore test starts from, so it is derived rather than hand-written (review R6).
+#[derive(Debug, Clone, Default)]
+pub struct Pulled {
+    /// `(device token, the record)`. The record is the journal record itself, parsed out of the
+    /// row's `body` and checked against the row's own hash before it ever gets here.
+    pub records: Vec<(String, Record)>,
+    pub notes: Vec<PulledNote>,
+    pub record_cursor: i64,
+    pub note_cursor: i64,
+    pub more: bool,
+    /// Rows this device refused on the way in, as lines the run prints. Never a path, never a value.
+    pub warnings: Vec<String>,
+}
+
+/// Is this a journal record at all? **Six checks, and every one of them is a shape a malformed or
+/// hostile row could otherwise slip through into `state/journal/`** (review I7).
+pub fn record_is_well_formed(record: &Record) -> Result<(), &'static str> {
+    let s = |k: &str| record.get(k).and_then(Value::as_str).unwrap_or_default();
+    if !crate::journal::OPS.contains(&s("op")) { return Err("unknown op"); }
+    if !crate::journal::VIAS.contains(&s("via")) { return Err("unknown via"); }
+    if s("ts").parse::<jiff::Timestamp>().is_err() { return Err("unparseable ts"); }
+    if s("actor").is_empty() { return Err("no actor"); }
+    if s("device").is_empty() { return Err("no device"); }
+    let id = s("id");
+    if !id.is_empty() && !crate::ids::is_id(id) { return Err("not an id"); }
+    Ok(())
+}
+
+/// The reply, parsed. **Every field the device trusts is re-derived from the row's own body**
+/// (Task 2's carried obligation (a) from the sealed design's review): the record is parsed out of
+/// `body` and its hash recomputed, so a row whose `record_hash` disagrees with its bytes is a
+/// warning and a skip rather than a record with a borrowed identity.
+pub fn pulled_from_reply(reply: &Value) -> Result<Pulled, SyncError> {
+    let mut out = Pulled { record_cursor: reply.get("record_cursor").and_then(Value::as_i64).unwrap_or(0),
+                           note_cursor: reply.get("note_cursor").and_then(Value::as_i64).unwrap_or(0),
+                           more: reply.get("more").and_then(Value::as_bool).unwrap_or(false),
+                           ..Default::default() };
+    for row in reply.get("records").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let device = row.get("device").and_then(Value::as_str).unwrap_or_default().to_string();
+        let body = row.get("body").and_then(Value::as_str).unwrap_or_default();
+        if row.get("record_hash").and_then(Value::as_str) != Some(sha256_hex(body.as_bytes()).as_str()) {
+            out.warnings.push("sync: one pulled record did not match its own hash and was skipped".to_string());
+            continue;
+        }
+        match serde_json::from_str::<Value>(body) {
+            Ok(Value::Object(map)) => out.records.push((device, map)),
+            _ => out.warnings.push("sync: one pulled record was not a record and was skipped".to_string()),
+        }
+    }
+    for row in reply.get("notes").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let path = row.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+        let text = if row.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
+            None
+        } else {
+            Some(row.get("body").and_then(Value::as_str).unwrap_or_default().to_string())
+        };
+        out.notes.push(PulledNote { device: row.get("device").and_then(Value::as_str).unwrap_or_default().to_string(), path, text });
+    }
+    Ok(out)
+}
+
+/// One `GET`. The device asks for both cursors in one call so the two windows share a clock on the
+/// server (`READ_LAG_SECONDS`).
+pub fn pull(client: &crate::cloudmodel::CloudClient, records_after: i64, notes_after: i64) -> Result<Pulled, SyncError> {
+    let path = format!("/sync-pull?records_after={records_after}&notes_after={notes_after}&limit={PAGE}");
+    let reply = client.get(&path).map_err(|e| SyncError::Service(e.to_string()))?;
+    pulled_from_reply(&reply)
+}
+
+/// What one `apply` did. Every field is a count the run's own line reads; none is a path or a value.
+#[derive(Debug, Clone, Default)]
+pub struct ApplyReport {
+    pub records: usize,
+    pub notes_written: usize,
+    pub applied: usize,
+    pub cards: usize,
+    pub superseded: usize,
+    /// Notes this pull **relocated or settled** — a performed `move` and a tombstone both land here,
+    /// because to a reader of the Runs view they are the same fact: a note is no longer where it was.
+    pub moved: usize,
+    pub refused: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Apply one pulled page to this vault.
+///
+/// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
+/// history and because the note effects below are derived from them; then the note-level effect is
+/// settled per note; then the pulled note texts land, and only for paths this device has never seen.
+/// A record that fails a guard is counted and named and never reaches the ledger.
+pub fn apply(
+    vault: &Path,
+    page: &Pulled,
+    ctx: &crate::write::WriteContext,
+    journal: &mut Journal,
+    today: jiff::civil::Date,
+) -> ApplyReport {
+    let mut report = ApplyReport { warnings: page.warnings.clone(), ..Default::default() };
+
+    // 1. What this device already has. A record is identified by the hash of its canonical bytes,
+    //    which is the same identity `sync_records_once` uses, so a record that came down twice — or
+    //    came back down after this device pushed it (precondition P4) — is applied once.
+    let known: std::collections::BTreeSet<String> = journal
+        .read(None, None)
+        .into_iter()
+        .map(|r| sha256_hex(crate::ledger::dumps_value(&Value::Object(r)).as_bytes()))
+        .collect();
+
+    // 2 + 3. Guard, then append verbatim. `JsonlLedger::append` files by the record's OWN `ts`, so a
+    //    record made on 15 September lands in `state/journal/2026-09-15.jsonl` and not in today's.
+    let ledger = crate::ledger::JsonlLedger::new(vault.join("state").join("journal"));
+    let mut touched: std::collections::BTreeMap<String, Vec<Record>> = std::collections::BTreeMap::new();
+    let mut moves: Vec<(String, String)> = Vec::new();
+    for (_, record) in &page.records {
+        let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
+        if known.contains(&sha256_hex(body.as_bytes())) {
+            continue;
+        }
+        if let Err(why) = record_is_well_formed(record) {
+            report.refused += 1;
+            report.warnings.push(format!("sync: a pulled record was refused ({why})"));
+            continue;
+        }
+        let path = record.get("path").and_then(Value::as_str).unwrap_or_default();
+        if !is_note_path(vault, path) {
+            report.refused += 1;
+            report.warnings.push("sync: a pulled record named a path outside the vault's notes".to_string());
+            continue;
+        }
+        // A `move`'s destination is a string another machine sent, and it is checked BEFORE
+        // `write::move_note` is called — not after, when the file would already be somewhere else.
+        // The move itself is **performed**, in its own pass below (review R4): a foreign rename that
+        // was only journalled would leave the old file sitting where it was, and the renamed note's
+        // text would arrive at the new path as a note this device had never seen — one note in two
+        // places, which is the silent divergence this whole module exists to prevent.
+        let mut pending_move: Option<(String, String)> = None;
+        if record.get("op").and_then(Value::as_str) == Some("move") {
+            let dest = record.get("new").and_then(Value::as_str).unwrap_or_default();
+            if !is_note_path(vault, dest) {
+                report.refused += 1;
+                report.warnings.push("sync: a pulled move named a destination outside the vault's notes".to_string());
+                continue;
+            }
+            pending_move = Some((path.to_string(), dest.to_string()));
+        }
+        if let Err(e) = ledger.append(record) {
+            report.warnings.push(format!("sync: a pulled record could not be journalled ({e})"));
+            continue;
+        }
+        report.records += 1;
+        if let Some(pair) = pending_move {
+            moves.push(pair);
+        }
+        let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        if !id.is_empty() {
+            touched.entry(id).or_default().push(record.clone());
+        }
+    }
+    journal.invalidate();
+
+    // 3a. **Perform the moves, after the whole record pass and before any reconcile.** After,
+    //     because a move mid-loop would move a file out from under a later record's `path`; before,
+    //     because the per-note pass below reads the note through `ids::read_meta` and has to find it
+    //     where it now is. `write::move_note` journals this device's own `move` record under `ACTOR`
+    //     beside the foreign one — which is right and is the same shape a tombstone takes below: the
+    //     foreign record is the other desktop's history, and this one is what happened here.
+    for (from, dest) in moves {
+        if !vault.join(&from).exists() {
+            // Already where it should be (a re-pull, or this device made the same move itself).
+            continue;
+        }
+        match crate::write::move_note(vault, &from, &dest, ctx, journal) {
+            Ok(_) => report.moved += 1,
+            // The destination is taken. Not a failure of the sync, and **not retried**: `Cursor`
+            // carries no retry queue, so if the destination frees up later this device does not
+            // notice. Pilot-acceptable and recorded as such (round-2 re-review, R4(b)): the record
+            // is journalled either way so nothing is lost, the note stays at its old path rather
+            // than overwriting whatever is there, and the warning names both paths. A retry queue is
+            // a feature, not a one-line fix, and it needs two desktops independently choosing one
+            // destination filename — a case this plan says has never been exercised even once.
+            Err(crate::write::WriteError::Exists(_)) => {
+                report.warnings.push(format!("sync: {from} could not be renamed to {dest} — a note is already there"));
+            }
+            Err(e) => report.warnings.push(format!("sync: {from} could not be renamed ({e})")),
+        }
+    }
+    journal.invalidate();
+
+    // 4. Per note, with the roles reversed exactly as the table above says.
+    for (id, foreign) in &touched {
+        let Some(first_ts) = foreign.iter().filter_map(|r| r.get("ts").and_then(Value::as_str)).min() else { continue };
+        let path = foreign
+            .iter()
+            .rev()
+            .find_map(|r| r.get("path").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        let file = vault.join(&path);
+        let Some(meta) = crate::ids::read_meta(&file) else {
+            // No local file: nothing to reconcile. The note's own text arrives below, if it came.
+            continue;
+        };
+        // THIS device's records for the note since the foreign side's earliest `ts` — the
+        // `upstream_records` argument, because on this machine the file on disk is upstream.
+        let mine: Vec<Record> = journal
+            .records_for(id, None)
+            .into_iter()
+            .filter(|r| {
+                r.get("device").and_then(Value::as_str) != foreign[0].get("device").and_then(Value::as_str)
+                    && r.get("ts").and_then(Value::as_str).unwrap_or_default() >= first_ts
+            })
+            .collect();
+        let mtime_ts = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .map(|t| crate::journal::now_ts(jiff::Timestamp::try_from(t).ok()))
+            .unwrap_or_else(|_| crate::journal::now_ts(None));
+        let resolution = crate::reconcile::resolve(&meta, &mine, foreign, &mtime_ts, Some(id), &path, ctx.via.as_str());
+
+        // 5. **A carded field is withheld from `apply`: the card IS the write** (review C2). A field
+        //    with a supersede record is a field both desktops moved; if a card could ever apply to
+        //    it, writing the foreign value here would overwrite this device's and leave the card's
+        //    `from` no longer matching the note, which `approvals::validate_amendment` refuses. So
+        //    the note keeps what this device had until the student answers.
+        let folder = path.split('/').next().unwrap_or_default();
+        let card_folder = crate::approvals::AMENDABLE_FOLDERS.contains(&folder);
+        let superseded_fields: std::collections::BTreeSet<String> = resolution
+            .supersede
+            .iter()
+            .filter_map(|r| r.get("field").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let cardable = |field: &str| card_folder && crate::approvals::AMENDABLE_FIELDS.contains(&field);
+
+        let mut literals: Vec<(String, String)> = Vec::new();
+        for (field, value) in &resolution.apply {
+            if superseded_fields.contains(field) && cardable(field) {
+                continue;
+            }
+            if superseded_fields.contains(field) {
+                // A conflict no card could ever apply keeps reconcile's rule (later `ts` wins) and
+                // is named, so the losing value is visible and nothing is dropped in silence.
+                report.warnings.push(format!("sync: {path} — both machines set `{field}`; the later write won and the other is in the journal"));
+            }
+            // `write::to_literal` takes a **serde_yaml_ng** `Value` (`write.rs:18` imports `Value`
+            // from `serde_yaml_ng`), and `Resolution::apply` holds **serde_json** values
+            // (`reconcile.rs:24`). `yaml::from_json` is the one conversion, and it is the same one
+            // `write_literals` does internally with `parse_literal` (review R3).
+            literals.push((field.clone(), crate::write::to_literal(&crate::yaml::from_json(value))));
+            report.applied += 1;
+        }
+        for record in &resolution.supersede {
+            // The losing write, on the record. `JsonlLedger::append` files it by its own `ts`, like
+            // every other record this function appends.
+            if ledger.append(record).is_ok() {
+                report.superseded += 1;
+            }
+        }
+        if !literals.is_empty() {
+            // `write_literals` journals, like every `write::` path function — so this produces one
+            // `op: set` record per field under `ACTOR`, with this machine's `device_name()` and a
+            // fresh `ts`, beside the foreign record already appended verbatim above. That echo is
+            // correct history for THIS device and is exactly what `build_push`'s actor filter keeps
+            // off the wire (review S1). It is also why the ruling covers every op rather than
+            // `move`/`delete`: the field path is the common case and fires on nearly every pull.
+            if let Err(e) = crate::write::write_literals(vault, &path, &literals, ctx, journal, &Default::default()) {
+                report.warnings.push(format!("sync: {path} could not be written ({e})"));
+            }
+        }
+        // **One card for the whole conflicting set, not one per field.** `find_pending_amendment`
+        // keys on `(target_rel, fields)` and `propose_amendment` takes `(field, from, to)` triples,
+        // so a note whose `importance` and `due` both conflict is one card a student answers once.
+        // `from` is what the note holds NOW — this device's value, because the field was withheld
+        // from `apply` above — which is exactly what `approvals::validate_amendment` compares
+        // against before it applies anything.
+        let carded: std::collections::BTreeSet<String> =
+            superseded_fields.iter().filter(|f| cardable(f)).cloned().collect();
+        if !carded.is_empty() && crate::write::find_pending_amendment(vault, &path, &carded).is_none() {
+            // **YAML values on both sides** (review R3): `propose_amendment`'s `changes` is
+            // `&[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]`. `from` comes straight out of
+            // the note's own frontmatter mapping — no round trip through JSON — and `to` is the
+            // foreign value converted once.
+            let changes: Vec<(String, serde_yaml_ng::Value, serde_yaml_ng::Value)> = carded
+                .iter()
+                .filter_map(|field| {
+                    let to = crate::yaml::from_json(resolution.apply.get(field)?);
+                    let from = crate::yaml::get(&meta, field).cloned().unwrap_or(serde_yaml_ng::Value::Null);
+                    Some((field.clone(), from, to))
+                })
+                .collect();
+            if !changes.is_empty() {
+                match crate::write::propose_amendment(vault, &file, &meta, &changes, ctx, journal, None, today) {
+                    // One card, however many fields it carries — the fifteen-a-day cap the deck
+                    // already applies counts cards, and so does this.
+                    Ok(_) => report.cards += 1,
+                    Err(e) => report.warnings.push(format!("sync: {path} — the amend card could not be filed ({e})")),
+                }
+            }
+        }
+    }
+
+    // 6. The pulled note texts. **The second recorded exception**, bounded here and nowhere else.
+    for note in &page.notes {
+        if !is_note_path(vault, &note.path) {
+            report.refused += 1;
+            report.warnings.push("sync: a pulled note named a path outside the vault's notes".to_string());
+            continue;
+        }
+        let file = vault.join(&note.path);
+        match &note.text {
+            // A tombstone settles the note through `write::delete`, which moves it to `archive/` and
+            // journals the move. Nothing in this vault is ever unlinked.
+            None => {
+                if file.exists() {
+                    match crate::write::delete(vault, &note.path, ctx, journal) {
+                        Ok(_) => report.moved += 1,
+                        Err(e) => report.warnings.push(format!("sync: {} could not be settled ({e})", note.path)),
+                    }
+                }
+            }
+            Some(text) => {
+                // **Never overwrites a note this device already has.** Its frontmatter was settled
+                // above by `reconcile` and its body is never merged, so the local file wins. What
+                // this writes is a note another desktop CREATED, whose own `create` record was
+                // appended verbatim a few lines ago — which is why it cannot go through
+                // `write::create`, and is the exception the fidelity ledger argues.
+                if file.exists() {
+                    continue;
+                }
+                if let Some(parent) = file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match crate::pystr::write_text(&file, text) {
+                    Ok(()) => report.notes_written += 1,
+                    Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
+                }
+            }
+        }
+    }
+    report
 }
 
 #[cfg(test)]
