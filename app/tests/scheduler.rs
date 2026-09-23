@@ -97,21 +97,24 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
     assert!(!has_ics_url(&v));
     // No judge args: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
+    // `sync` is always first (C3′, cloud design §5.5 as amended): the pull half has to land before
+    // `rank` orders the day, and the push half carries everything written since the last sync.
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "rank"]);
-    assert_eq!(argv[0].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
-    assert_eq!(argv[1].1, vec!["rank", "--vault", v.to_string_lossy().as_ref(), "--runner", "local"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "rank"]);
+    assert_eq!(argv[0].1, vec!["sync", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(argv[1].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(argv[2].1, vec!["rank", "--vault", v.to_string_lossy().as_ref(), "--runner", "local"]);
 
     let cfg = v.join("config").join("ingest.yaml");
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     assert!(has_ics_url(&v));
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
-    assert_eq!(argv[1].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
+    assert_eq!(argv[2].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert!(argv.iter().all(|(e, _)| e == exe));
 
-    // With judge args: FOUR steps, and judge sits BEFORE rank so the day's ranking sees what it
+    // With judge args: FIVE steps, and judge sits BEFORE rank so the day's ranking sees what it
     // just wrote. `--via local-runner`, the same value coursework and ingest pass — journal::VIAS
     // does not grow for this.
     let ja = JudgeArgs {
@@ -120,8 +123,8 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
         log_dir: PathBuf::from(r"C:\data\judgments"),
     };
     let argv = slot_argv(&v, exe, &JudgePlan::Local(ja));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "judge", "rank"]);
-    assert_eq!(argv[2].1, vec![
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "judge", "rank"]);
+    assert_eq!(argv[3].1, vec![
         "judge".to_string(), "--vault".to_string(), v.to_string_lossy().to_string(),
         "--via".to_string(), "local-runner".to_string(),
         "--runtime".to_string(), r"C:\rt\llama-cli.exe".to_string(),
@@ -162,7 +165,23 @@ fn a_cloud_vault_runs_ingest_with_no_ics_url() {
     .unwrap();
 
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
+}
+
+/// The plan's own case for hand-off H8a: `sync` is the slot's first step, always, and it displaces
+/// nothing that was there before. One row in the Runs view, not two, because `run_slot_inner` names
+/// a step by `args[0]` and two rows both reading `sync` would say less than one row does.
+#[test]
+fn sync_is_the_slots_first_step() {
+    let v = scratch("sync-first");
+    let exe = Path::new("knowlu-engine.exe");
+    let steps = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    assert_eq!(steps[0].1[0], "sync", "{steps:?}");
+    assert_eq!(steps[1].1[0], "coursework", "and nothing was displaced");
+    assert!(steps.iter().any(|(_, a)| a[0] == "rank"), "{steps:?}");
+    // One row in the Runs view, not two: `run_slot_inner` names a step by `args[0]`.
+    assert_eq!(steps.iter().filter(|(_, a)| a[0] == "sync").count(), 1);
+    let _ = std::fs::remove_dir_all(&v);
 }
 
 /// D7: no runtime and no model are NORMAL. The step is recorded with code 0 and a name that says

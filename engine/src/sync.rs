@@ -1389,6 +1389,185 @@ pub fn apply(
     report
 }
 
+// ---------------------------------------------------------------------------
+// The command (C3' Task 7): `sync::run_lines`, always exit 0, one line each.
+// ---------------------------------------------------------------------------
+
+/// Which halves of a sync this run does. The slot runs `Both`; the console's *Sync now* runs `Both`;
+/// the two are separable for a smoke test and for a quit flush that must not pull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction { Pull, Push, Both }
+
+impl Direction {
+    pub fn parse(word: &str) -> Option<Direction> {
+        match word {
+            "pull" => Some(Direction::Pull),
+            "push" => Some(Direction::Push),
+            "both" => Some(Direction::Both),
+            _ => None,
+        }
+    }
+    fn pulls(self) -> bool { matches!(self, Direction::Pull | Direction::Both) }
+    fn pushes(self) -> bool { matches!(self, Direction::Push | Direction::Both) }
+}
+
+/// What one run did, for the page and the report. Counts and words; never a path or a value.
+#[derive(Debug, Clone, Default)]
+pub struct Totals {
+    pub pulled_records: usize,
+    pub pulled_notes: usize,
+    pub applied: usize,
+    pub cards: usize,
+    pub superseded: usize,
+    pub pushed_records: usize,
+    pub pushed_notes: usize,
+    pub more: bool,
+    /// A normal state the student can act on — "no account", "no session". **Not an error.**
+    pub skipped: Option<String>,
+    /// Something went wrong that a later slot may fix. `SyncStatus::ok` is `errors.is_empty()`.
+    pub errors: Vec<String>,
+}
+
+/// What the console's sync line renders. The ENGINE's type (hand-off H9a): the engine produces it,
+/// and a second struct in the app would be a second thing to keep in step with the run that fills it.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SyncStatus {
+    pub ok: bool,
+    pub at: Option<String>,
+    pub lines: Vec<String>,
+    pub last_error: Option<String>,
+}
+
+impl SyncStatus {
+    /// **A skip is not an error.** A student who has not signed in must not paint the tray amber;
+    /// a 5xx should. `ok` is therefore `errors.is_empty()`, and `at` is stamped whatever happened,
+    /// because "we tried at 07:02 and there was no account" is still a fact the page should show.
+    pub fn of(totals: &Totals, lines: Vec<String>) -> SyncStatus {
+        SyncStatus {
+            ok: totals.errors.is_empty(),
+            at: Some(crate::journal::now_ts(None)),
+            lines,
+            last_error: totals.errors.first().cloned(),
+        }
+    }
+}
+
+/// Does this vault have an account at all? `state::quit_flush` asks before pushing.
+pub fn is_configured(vault: &Path) -> bool {
+    crate::cloudmodel::load(vault).is_some()
+}
+
+/// The whole command. **The return code is always 0** and the function says so by construction: it
+/// is the literal `0` in the one `return` and the one tail.
+///
+/// **The order of the first two checks is the message** (review I4). `load` before `resolve`: the
+/// common answer on a machine that has never signed in is "no account", and a student who is merely
+/// signed out must not read a sentence about their subscription. It also saves a Credential Manager
+/// read twice a day on every vault that has no account.
+pub fn run_lines_with(
+    vault: &Path,
+    direction: Direction,
+    via: &str,
+    run_id: Option<&str>,
+) -> (i32, Vec<String>, Totals) {
+    let mut lines = Vec::new();
+    let mut totals = Totals::default();
+
+    // 1. No account. Every fixture vault in this repository takes this path, which is why
+    //    `oracle.rs` and `surface_oracle.rs` cannot move.
+    //
+    //    **The config is kept, not discarded** (review R2): `CloudClient` is `{ base, anon_key,
+    //    token, agent }` and has no `account_id()` accessor — the account id is `CloudConfig`'s
+    //    field. `cloudmodel.rs` is outside this stream's ownership, so the value travels from here
+    //    rather than through an accessor added for one caller.
+    let Some(cfg) = crate::cloudmodel::load(vault) else {
+        totals.skipped = Some("no account".to_string());
+        lines.push("sync (skipped: no account)".to_string());
+        return (0, lines, totals);
+    };
+    // 2. No session. C1 owns the refresh; this only reads, and waits for the app's next slot.
+    let client = match crate::cloudmodel::resolve(vault) {
+        Ok(c) => c,
+        Err(e) => {
+            totals.skipped = Some(e.label().to_string());
+            lines.push(format!("sync (skipped: {e})"));
+            return (0, lines, totals);
+        }
+    };
+
+    let mut cursor = load_cursor(vault);
+    let mut journal = Journal::new(vault);
+    let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: via.to_string(), run_id: run_id.map(str::to_string) };
+    let today = crate::journal::now_ts(None)[..10].parse::<jiff::civil::Date>().unwrap_or(jiff::civil::date(1970, 1, 1));
+
+    // 3. **Pull first.** A field another desktop set this morning must be in the note before the day
+    //    is ordered, or every second desktop ranks a slot behind for ever.
+    if direction.pulls() {
+        match pull(&client, cursor.record_cursor, cursor.note_cursor) {
+            Ok(page) => {
+                let report = apply(vault, &page, &ctx, &mut journal, today);
+                totals.pulled_records = page.records.len();
+                totals.pulled_notes = page.notes.len();
+                totals.applied = report.applied;
+                totals.cards = report.cards;
+                totals.superseded = report.superseded;
+                totals.more = page.more;
+                lines.extend(report.warnings.iter().cloned());
+                lines.push(format!(
+                    "sync: {} record(s) and {} note(s) down; {} applied, {} card(s), {} refused",
+                    totals.pulled_records, totals.pulled_notes, report.applied, report.cards, report.refused
+                ));
+                cursor.record_cursor = page.record_cursor;
+                cursor.note_cursor = page.note_cursor;
+                if let Err(e) = save_cursor(vault, &cursor) {
+                    totals.errors.push(e.label().to_string());
+                    lines.push(format!("sync: the cursor could not be saved ({e})"));
+                }
+            }
+            Err(e) => {
+                totals.errors.push(e.label().to_string());
+                lines.push(format!("sync ({e})"));
+            }
+        }
+    }
+
+    // 4. **Push second, and the cursor moves only on a 200.** A cursor advanced over a batch the
+    //    service never received is the one bug in this module that loses a record for good.
+    if direction.pushes() {
+        let (batch, next) = build_push(vault, &cursor, &cfg.account_id, &mut journal);
+        lines.extend(batch.warnings.iter().cloned());
+        match push(&client, &batch) {
+            Ok((records, notes)) => {
+                totals.pushed_records = records;
+                totals.pushed_notes = notes;
+                lines.push(format!("sync: {records} record(s) and {notes} note(s) up"));
+                if let Err(e) = save_cursor(vault, &next) {
+                    totals.errors.push(e.label().to_string());
+                    lines.push(format!("sync: the cursor could not be saved ({e})"));
+                }
+            }
+            // 5. Every refusal is one line and **is not a skip**: `sync (no network)` and
+            //    `sync (no entitlement)` are things that happened, not states the student chose.
+            Err(e) => {
+                totals.errors.push(e.label().to_string());
+                lines.push(format!("sync ({e})"));
+            }
+        }
+    }
+
+    // 6. A term of catching up is visible rather than silent.
+    if totals.more {
+        lines.push("sync: more to come — the next slot continues".to_string());
+    }
+    (0, lines, totals)
+}
+
+/// The printing twin, and one line of it.
+pub fn run_lines(vault: &Path, direction: Direction, via: &str, run_id: Option<&str>) -> (i32, Vec<String>) {
+    let (code, lines, _) = run_lines_with(vault, direction, via, run_id);
+    (code, lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

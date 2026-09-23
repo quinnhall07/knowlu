@@ -2162,3 +2162,92 @@ fn approving_a_sync_card_is_unchanged_and_the_other_desktop_converges() {
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
 }
+
+// ---------------------------------------------------------------------------
+// The command (C3' Task 7): `sync::run_lines`, always exit 0, one line each.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_vault_with_no_account_says_so_and_exits_zero() {
+    let dir = fixture("noaccount");
+    let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    assert_eq!(code, 0);
+    assert_eq!(lines, vec!["sync (skipped: no account)".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_vault_with_an_account_and_no_session_says_exactly_that() {
+    // **The check order is the message** (review I4, inherited): `load` → `resolve`. The common
+    // answer on a machine with a `cloud.yaml` and no credential is "no session", and a student who
+    // has signed out must not read a sentence about their subscription. Reversing the order makes
+    // this assertion impossible to write, which is how the review found it the first time.
+    //
+    // **This case reaches Windows Credential Manager, and the exemption is recorded** (review M10).
+    // `CLAUDE.md` asks a new test file that touches the store to carry a file-scoped lock; that rule
+    // exists because parallel `CredWriteW`/`CredReadW` on the SAME target race. This test only
+    // READS, and it reads a target (`knowlu/c3-no-such-profile/session`) that no test and no build of
+    // this product ever writes — so there is nothing to serialise with. `sync_contract.rs` therefore
+    // carries no lock, deliberately, and this comment is the record of that decision.
+    let dir = fixture("nosession");
+    std::fs::write(
+        dir.join("config").join("cloud.yaml"),
+        "api_base: 'https://example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/c3-no-such-profile/session'\naccount_id: 'acct-1'\n",
+    ).expect("cloud.yaml");
+    let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    assert_eq!(code, 0);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("sync (skipped: no session"), "{lines:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_refusal_is_a_named_line_and_never_a_non_zero_exit() {
+    // The property `judge` has and the one this step must have: a non-zero exit sets
+    // `RunSummary.engine_ok = false`, which paints the tray amber and puts the slot into retry
+    // backoff twice a day forever.
+    // **Why none of these reaches a socket, stated because it is load-bearing** (review M9):
+    // `cloudmodel::load` returns `Some` only when all four keys are present and non-empty, so every
+    // shape below answers `None` and `run_lines_with` stops at check one. If `CloudConfig` ever
+    // gained a defaulted field, the second case would resolve `example.invalid` and this test would
+    // start doing DNS while still passing — so a reader who adds a default to that struct owes this
+    // test a `.invalid` host it can never leave the machine through, which is why the host is one.
+    let dir = fixture("exitzero");
+    for yaml in ["", "api_base: 'https://example.invalid'\n", "not: yaml: at: all\n"] {
+        std::fs::write(dir.join("config").join("cloud.yaml"), yaml).expect("cloud.yaml");
+        let (code, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+        assert_eq!(code, 0, "{yaml:?} -> {lines:?}");
+        assert!(!lines.is_empty(), "{yaml:?} said nothing");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_line_never_carries_a_vault_path_a_bearer_or_a_hostname() {
+    let dir = fixture("quiet-lines");
+    let (_, lines) = sync::run_lines(&dir, sync::Direction::Both, "cli", None);
+    let joined = lines.join("\n");
+    // Bound first: an array literal mixing a `&str` with two `&String` over temporaries does not
+    // compile, and the first draft of this test did exactly that (review M1).
+    let vault_path = dir.to_string_lossy().to_string();
+    let host = knowlu_engine::journal::device_name();
+    let forbidden: [&str; 3] = ["Bearer", vault_path.as_str(), host.as_str()];
+    for word in forbidden {
+        assert!(!joined.contains(word), "a line carried {word}: {joined}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_status_the_page_reads_is_built_from_the_totals_and_never_from_a_line() {
+    let totals = sync::Totals { pushed_records: 3, applied: 1, cards: 1, ..Default::default() };
+    let s = sync::SyncStatus::of(&totals, vec!["sync: 3 up, 1 applied, 1 card".to_string()]);
+    assert!(s.ok && s.last_error.is_none());
+    assert!(s.at.is_some(), "a run that happened is stamped");
+    let failed = sync::SyncStatus::of(&sync::Totals { errors: vec!["no network".into()], ..Default::default() }, vec![]);
+    assert!(!failed.ok);
+    assert_eq!(failed.last_error.as_deref(), Some("no network"));
+    // A skip is not an error: the tray must not go amber because a student is signed out.
+    let skipped = sync::SyncStatus::of(&sync::Totals { skipped: Some("no account".into()), ..Default::default() }, vec![]);
+    assert!(skipped.ok && skipped.last_error.is_none());
+}
