@@ -24,7 +24,7 @@
 //! like any other record. The fidelity ledger's `§5.5 Down` row argues it.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ring::digest;
 use serde_json::Value;
@@ -595,6 +595,85 @@ fn exact_case_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The real, on-disk path in `path`'s own parent directory whose name matches `path`'s, ignoring
+/// case — or `None` if nothing there matches even case-insensitively.
+///
+/// **O1 (re-review round 2).** A case-only rename made on the OTHER desktop pushes a live row under
+/// the NEW spelling and, separately, a tombstone for the OLD one; by the time the live row is
+/// processed, this device's own file is still sitting under the old spelling. `exact_case_exists`
+/// alone would answer "not here" and try to create a brand-new file, which then collides with the
+/// still-live old-cased file at the filesystem's own case-insensitive layer — exactly what left an
+/// archived duplicate behind before this fix. This is what tells "genuinely new" (`None`) apart from
+/// "the same note, cased differently" (`Some`).
+fn case_insensitive_match(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    let parent = path.parent()?;
+    std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().to_lowercase() == name)
+        .map(|e| e.path())
+}
+
+/// Rename `from` to `to` — both already resolved, real paths — in two `std::fs::rename` steps
+/// through a temp name in `to`'s own folder (review O1).
+///
+/// A single `rename(from, to)` is unreliable for a CASE-ONLY change on Windows: some filesystem/API
+/// combinations treat the two spellings as the same existing path and refuse or silently no-op the
+/// call, rather than actually updating the on-disk name. Moving off the colliding name entirely
+/// first, then onto the final spelling, is not that ambiguous case either time. If the second step
+/// fails, this restores the original spelling rather than leaving the note stranded under the temp
+/// name — "keep the old spelling" (the ruling's own words) means exactly the name it started with.
+fn rename_case_only(from: &Path, to: &Path) -> std::io::Result<()> {
+    let parent = to.parent().unwrap_or_else(|| Path::new("."));
+    let temp = parent.join(format!(".sync-case-{}-{}", std::process::id(), crate::journal::now_ts(None).replace(['-', ':', '.'], "")));
+    std::fs::rename(from, &temp)?;
+    match std::fs::rename(&temp, to) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::rename(&temp, from);
+            Err(e)
+        }
+    }
+}
+
+/// Like `write::find_pending_amendment`, except a `snoozed` card counts as pending too (review O3):
+/// the fifteen-a-day cap defers a proposal past budget rather than deleting it, so a card the cap
+/// snoozed is still an open decision on the same field set — leaving it out here let a newer pull
+/// file a second, live card beside it, and the snoozed one would later wake up still offering its
+/// now-stale value. Kept as its own small scan rather than widening the shared
+/// `write::find_pending_amendment` (also used by the judge-once re-propose path in `write_literals`,
+/// out of scope for this fix) to a second status.
+fn find_amend_card(vault: &Path, target_rel: &str, fields: &std::collections::BTreeSet<String>) -> Option<PathBuf> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(vault.join("approvals"))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "md") == Some(true))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let Some(meta) = crate::ids::read_meta(&path) else { continue };
+        let status = crate::yaml::get(&meta, "status").and_then(crate::yaml::text);
+        if crate::yaml::get(&meta, "type").and_then(crate::yaml::text).as_deref() != Some("approval")
+            || crate::yaml::get(&meta, "kind").and_then(crate::yaml::text).as_deref() != Some("amend")
+            || !matches!(status.as_deref(), Some("pending") | Some("snoozed"))
+            || crate::yaml::get(&meta, "target").and_then(crate::yaml::text).as_deref() != Some(target_rel)
+        {
+            continue;
+        }
+        if let Some(serde_yaml_ng::Value::Mapping(changes)) = crate::yaml::get(&meta, "changes") {
+            let names: std::collections::BTreeSet<String> =
+                changes.keys().filter_map(crate::yaml::text).collect();
+            if &names == fields {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// Apply one pulled page to this vault.
 ///
 /// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
@@ -741,11 +820,23 @@ pub fn apply(
         // desktops then stay different for good. `resolve` itself already limits a chain to `op ==
         // "set"` records and groups by field, so passing every record for the note, of any age, costs
         // nothing: a field the foreign side never touched simply has no chain to compare against.
+        // O2 (re-review round 2): every device THIS PAGE'S OWN foreign records came from, not just
+        // `foreign[0]`'s. When one page carries two other desktops' records for the same note (a
+        // real case: both pushed while this device was offline), `foreign` holds records from
+        // BOTH — and a record excluded only against `foreign[0]`'s device let the SECOND desktop's
+        // own, just-appended record stay in `mine`. It then becomes `up_latest` under its own
+        // field, its `new` does not match the note (nothing wrote it here), and `resolve` falls back
+        // to the mtime stand-in exactly as if this device's real record were missing — I1's bug,
+        // reopened by a second foreign device instead of a `ts` floor.
+        let foreign_devices: std::collections::BTreeSet<&str> = foreign
+            .iter()
+            .filter_map(|r| r.get("device").and_then(Value::as_str))
+            .collect();
         let mine: Vec<Record> = journal
             .records_for(id, None)
             .into_iter()
             .filter(|r| {
-                r.get("device").and_then(Value::as_str) != foreign[0].get("device").and_then(Value::as_str)
+                !foreign_devices.contains(r.get("device").and_then(Value::as_str).unwrap_or_default())
                     // Also drop this device's own SYNC echoes (review I1/M2): an echo carries a
                     // fresh `ts` for a value that is really the foreign write restated, so once a
                     // third desktop is in the mix an echo could out-rank a genuinely later write it
@@ -826,11 +917,29 @@ pub fn apply(
                 .filter_map(|field| {
                     let to = crate::yaml::from_json(resolution.apply.get(field)?);
                     let from = crate::yaml::get(&meta, field).cloned().unwrap_or(serde_yaml_ng::Value::Null);
+                    // O4 (re-review round 2): the note already holds `to` — the natural end of every
+                    // approved sync card, once the other desktop's own approval record catches up to
+                    // a value this device already set. `reconcile::resolve` still treats this as a
+                    // conflict (the foreign `old` disagrees with the note), but proposing "change
+                    // this to what it already is" answers no real question and still spends a cap
+                    // slot doing it.
+                    if from == to {
+                        return None;
+                    }
                     Some((field.clone(), from, to))
                 })
                 .collect();
             if !changes.is_empty() {
-                let pending = crate::write::find_pending_amendment(vault, &path, &carded);
+                // O3 (re-review round 2): keyed on the fields THIS card would actually carry — the
+                // `changes` just built — not on `carded`, which can hold extra fields this device
+                // WON (and which the `?` above already dropped out of `changes`, since a winning
+                // field has no entry in `resolution.apply`). Keying on `carded` let a pull that mixed
+                // a win on one field and a loss on another miss its own earlier card for the losing
+                // field and file a second one beside it. `find_amend_card` also matches a `snoozed`
+                // card, not only `pending` — see its own doc comment.
+                let changes_fields: std::collections::BTreeSet<String> =
+                    changes.iter().map(|(f, _, _)| f.clone()).collect();
+                let pending = find_amend_card(vault, &path, &changes_fields);
                 // M3 (fix round 1): `find_pending_amendment` matches on the FIELD-NAME set, not the
                 // values, so a card left over from an earlier, since-superseded foreign write reads
                 // as "already proposed" even after a NEWER foreign value has moved past what the card
@@ -865,6 +974,18 @@ pub fn apply(
     }
 
     // 6. The pulled note texts. **The second recorded exception**, bounded here and nowhere else.
+    //
+    // O1 (re-review round 2): a case-only rename made on the OTHER desktop pushes BOTH a live row
+    // under the new spelling and a tombstone for the old one — `build_push`'s own note pass always
+    // emits that pair for a rename, in either order. Comparing every tombstone in THIS page against
+    // every LIVE row in this page, case-insensitively, is what tells that pair apart from a genuine
+    // delete (which carries no live row at all); a real delete is untouched by this. Precomputed
+    // once, over the whole page, so both wire orders land the same way.
+    let live_lower: std::collections::BTreeMap<String, &str> = page
+        .notes
+        .iter()
+        .filter_map(|n| n.text.as_ref().map(|_| (n.path.to_lowercase(), n.path.as_str())))
+        .collect();
     for note in &page.notes {
         if !is_note_path(vault, &note.path) {
             report.refused += 1;
@@ -880,6 +1001,18 @@ pub fn apply(
             // answers case-insensitively on NTFS and would archive the still-live, differently-cased
             // note. `exact_case_exists` answers at the byte level a directory listing would.
             None => {
+                if let Some(&live_path) = live_lower.get(&note.path.to_lowercase()) {
+                    if live_path != note.path {
+                        // O1: this tombstone and a live row in the SAME page name the same note,
+                        // cased differently — a rename, not a deletion. The live row's own handling
+                        // below performs the actual rename; this tombstone names nothing left to
+                        // settle and is dropped, never archived.
+                        report.warnings.push(format!(
+                            "sync: {} — a case-only rename to {live_path}, not an archive", note.path
+                        ));
+                        continue;
+                    }
+                }
                 if exact_case_exists(&file) {
                     match crate::write::delete(vault, &note.path, ctx, journal) {
                         Ok(_) => report.moved += 1,
@@ -900,6 +1033,22 @@ pub fn apply(
                 // check-then-write race: this can never overwrite a file that appears between the
                 // check above and this write, even one from a concurrent console `write` command.
                 if exact_case_exists(&file) {
+                    continue;
+                }
+                // O1: a case-insensitive match that is NOT the exact spelling is this device's own
+                // copy of the SAME note, cased differently — the other half of the rename pair
+                // above. Renaming this device's file keeps its own id and body untouched; any
+                // foreign `move` record for the note is journalled in the ordinary record pass
+                // above (and, on NTFS, fails there at its own case-insensitive `exists()` check —
+                // by design, see the moves pass — leaving the rename to land here instead).
+                if let Some(existing) = case_insensitive_match(&file) {
+                    match rename_case_only(&existing, &file) {
+                        Ok(()) => report.moved += 1,
+                        Err(e) => report.warnings.push(format!(
+                            "sync: {} could not be renamed to match the account's spelling ({e}); keeping the old spelling",
+                            note.path
+                        )),
+                    }
                     continue;
                 }
                 if let Some(parent) = file.parent() {

@@ -1073,3 +1073,151 @@ fn a_pulled_records_non_canonical_ts_is_refused() {
     assert!(report.warnings.iter().any(|w| w.contains("ts")), "{:?}", report.warnings);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 2 (re-review round 1): O1, O2, O3, O4 (R-C3′-exec-14).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_case_only_rename_made_on_another_desktop_never_archives_the_note_here() {
+    // O1. `build_push` sends the live row under the NEW spelling and a tombstone for the OLD one in
+    // the same push — the two rows are one rename event, not a delete. Comparing every tombstone in
+    // this page against every live row, case-insensitively, is what tells them apart; the live
+    // row's own handling does not depend on the tombstone at all. Both wire orders and both
+    // with/without a companion `move` record must all land the same way: one live note under the
+    // new spelling, this device's OWN content untouched, and nothing archived.
+    for with_move in [false, true] {
+        for tombstone_first in [false, true] {
+            let dir = fixture_with_id(&format!("case-rename-elsewhere-{with_move}-{tombstone_first}"));
+            let mut journal = Journal::new(&dir);
+            let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+            let old_rel = "tasks/cs-100-hw-01.md";
+            let new_rel = "tasks/CS-100-HW-01.md";
+            let local_text = knowlu_engine::pystr::read_text(&dir.join(old_rel)).expect("the fixture note");
+            // Different from the local copy, so a wrongly-overwritten note is distinguishable from a
+            // correctly-renamed one: the rename must keep THIS device's body, never the pulled one.
+            let foreign_text = local_text.replace("Body text.", "Body text from elsewhere.");
+            let mut records = Vec::new();
+            if with_move {
+                let mut spec = knowlu_engine::journal::NewRecord::new("move", old_rel, "quinn", "dashboard");
+                spec.id = Some("task_0000000001");
+                spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+                spec.device = Some("OtherDesktop".to_string());
+                spec.new = serde_json::json!(new_rel);
+                records.push(knowlu_engine::journal::make_record(spec).expect("a record"));
+            }
+            let live = sync::PulledNote { device: "fedcba9876543210".into(), path: new_rel.into(), text: Some(foreign_text) };
+            let tomb = sync::PulledNote { device: "fedcba9876543210".into(), path: old_rel.into(), text: None };
+            let notes = if tombstone_first { vec![tomb, live] } else { vec![live, tomb] };
+            let report = sync::apply(&dir, &pulled(records, notes), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+            assert!(dir.join(new_rel).exists(), "with_move={with_move} tombstone_first={tombstone_first}: {report:?}");
+            let archived_any = std::fs::read_dir(dir.join("archive")).map(|d| {
+                d.flatten().any(|e| e.file_name().to_string_lossy().to_lowercase().contains("100-hw-01"))
+            }).unwrap_or(false);
+            assert!(!archived_any, "with_move={with_move} tombstone_first={tombstone_first}: never archived: {report:?}");
+            let in_tasks: Vec<String> = std::fs::read_dir(dir.join("tasks")).expect("tasks").flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.to_lowercase().contains("100-hw-01")).collect();
+            assert_eq!(
+                in_tasks, vec!["CS-100-HW-01.md".to_string()],
+                "with_move={with_move} tombstone_first={tombstone_first}: exactly one live copy, under the new spelling: {in_tasks:?}"
+            );
+            let final_text = knowlu_engine::pystr::read_text(&dir.join(new_rel)).expect("the renamed note");
+            assert_eq!(
+                final_text, local_text,
+                "with_move={with_move} tombstone_first={tombstone_first}: the rename must keep this device's own id and body, never the pulled copy"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[test]
+fn mine_excludes_every_foreign_device_in_the_page_not_only_the_first() {
+    // O2 (probe N6). Two OTHER desktops' records for the same note landed in ONE page: B set
+    // importance 2->5, then C set importance 5->7, later than B and later than this device's own
+    // edit. The old filter excluded only `foreign[0]`'s device (B), so C's own just-appended record
+    // — itself one of `foreign`, not a real local edit — stayed in `mine` and masked this device's
+    // real record behind the mtime fallback whenever an unrelated local edit landed after C's `ts`.
+    let dir = fixture_with_id("two-foreign-devices");
+    let mut journal = Journal::new(&dir);
+    let mine_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine_ctx, &mut journal, &Default::default()).expect("this device's edit");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let t1 = knowlu_engine::journal::now_ts(None);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let t2 = knowlu_engine::journal::now_ts(None);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // An unrelated local edit, after both foreign timestamps — the mtime-fallback trap.
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("progress".to_string(), "10".to_string())], &mine_ctx, &mut journal, &Default::default()).expect("an unrelated edit");
+    let b = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), &t1);
+    // C's device differs from B's — the case the old, singular `foreign[0]` filter missed.
+    let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+    spec.id = Some("task_0000000001");
+    spec.field = Some("importance");
+    spec.old = serde_json::json!(5);
+    spec.new = serde_json::json!(7);
+    spec.ts = Some(t2.clone());
+    spec.device = Some("DeskC".to_string());
+    let c = knowlu_engine::journal::make_record(spec).expect("a record");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let report = sync::apply(&dir, &pulled(vec![b, c], vec![]), &ctx, &mut journal, "2026-09-22".parse().unwrap());
+    assert_ne!((report.applied, report.cards), (0, 0), "a genuinely later foreign write must never lose silently: {report:?}");
+    assert_eq!((report.applied, report.cards), (0, 1), "{report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_snoozed_stale_card_is_settled_and_refiled_like_a_pending_one() {
+    // O3. `find_pending_amendment` only ever looks at `status: pending`, so a card the fifteen-a-day
+    // cap has SNOOZED (never deleted, per this vault's own rule) was invisible to the stale-card
+    // check: a newer conflicting value filed a second, live card beside the snoozed one instead of
+    // replacing it, and the snoozed card would later wake up still offering its now-stale value.
+    let dir = fixture_with_id("snoozed-then-newer");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    // First conflict: files a pending card offering `to: 5`.
+    let first = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
+    let r1 = sync::apply(&dir, &pulled(vec![first], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(r1.cards, 1, "{r1:?}");
+    let cards_before: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    assert_eq!(cards_before.len(), 1, "{cards_before:?}");
+    let card_rel = knowlu_engine::ids::rel(&dir, &cards_before[0]);
+    // The fifteen-a-day cap snoozes it, exactly as `defer_over_budget` would — never deleted.
+    knowlu_engine::write::write_literals(&dir, &card_rel, &[("status".to_string(), "snoozed".to_string()), ("snooze_until".to_string(), "2026-09-18".to_string())], &mine, &mut journal, &Default::default()).expect("snooze it");
+    // A newer conflicting value arrives.
+    let second = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(8), "2036-09-17T11:00:00.000Z");
+    let r2 = sync::apply(&dir, &pulled(vec![second], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(r2.cards, 1, "a newer value must replace the snoozed stale card, not sit beside it: {r2:?}");
+    let live_cards: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    assert_eq!(live_cards.len(), 1, "exactly one LIVE card must remain in approvals/: {live_cards:?}");
+    let text = knowlu_engine::pystr::read_text(&live_cards[0]).expect("the live card");
+    assert!(text.contains("to: 8") && !text.contains("to: 5"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_carded_change_whose_from_equals_to_files_no_card() {
+    // O4 (probe N2). The other desktop approved ITS OWN sync card, adopting the value this device
+    // already held; its approval record (old 4, new 5) then comes down here, where the note already
+    // holds 5. `reconcile::resolve` still treats this as a conflict — the foreign `old` disagrees
+    // with the note — but the natural end of every approved sync card is a proposal with nothing
+    // left to change, which should cost no cap slot.
+    let dir = fixture_with_id("converged-value");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "5".to_string())], &mine, &mut journal, &Default::default()).expect("this device already holds 5");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let t4 = knowlu_engine::journal::now_ts(None);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let approval = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(4), serde_json::json!(5), &t4);
+    let report = sync::apply(&dir, &pulled(vec![approval], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.cards, 0, "a change that proposes nothing must file no card: {report:?}");
+    let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
+    assert_eq!(knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(5));
+    let _ = std::fs::remove_dir_all(&dir);
+}
