@@ -1270,6 +1270,733 @@ pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<C
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// P8 — normalising a series (§3.2) and the series file `state/calendar-series.json` (§3.3).
+// ---------------------------------------------------------------------------------------------
+
+/// The series file, vault-relative (§3.3). Generated state: not a note, never journaled, never
+/// synced; it holds titles, a place-like `where` and times, and **never a description** (§9).
+pub const SERIES_FILE: &str = "state/calendar-series.json";
+
+/// The horizon a read covers: `[read date, read date + 28)` (§3.2.1).
+const HORIZON_DAYS: i64 = 28;
+/// A series its fresh calendar stopped returning — or a removed feed's — lasts this long (§3.3).
+const UNSEEN_DAYS: i64 = 14;
+/// An `ended` entry lasts this long after `dropped` (§3.3, plan review I1).
+const ENDED_DAYS: i64 = 28;
+/// §2.2's bounds, applied on the device on both routes (the function already cuts Google's
+/// title to 200; `where` is cut to 80 on both).
+const TITLE_MAX: usize = 200;
+const WHERE_MAX: usize = 80;
+
+/// §3.2.5: a line carrying any of these (case-insensitive) is a link or a way into a meeting,
+/// never a place. Matched as substrings — the safe side: a lost `where` costs nothing, a stored
+/// passcode would sync with a confirmed note.
+const NOT_A_PLACE: [&str; 11] = [
+    "://",
+    "www.",
+    "zoom",
+    "teams",
+    "meet.google",
+    "webex",
+    "pwd",
+    "passcode",
+    "password",
+    "pin",
+    "meeting id",
+];
+
+/// §3.2.5's "run of six or more digits", read so a meeting id or phone number written with
+/// spaces or dashes between its groups ("555 123 456", "205-555-0100") is a run too.
+static DIGIT_RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d(?:[ \t-]?\d){5,}").unwrap());
+
+/// One series the file dropped because its calendar was read fresh and it went unseen for
+/// 14 days (§3.3, plan review I1) — never one a removed feed took with it, never a key another
+/// calendar still holds. Kept 28 days, so §5.4's **ended** rule can still file its end card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ended {
+    pub calendar: String,
+    pub dropped: Date,
+    /// The last instance date the file held for it; `None` when it held none.
+    pub last_instance: Option<Date>,
+    /// Its last-known `until`.
+    pub until: Option<Date>,
+}
+
+/// `state/calendar-series.json`, read into plain data (§3.3).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SeriesFile {
+    /// Each calendar key → the date it was last read fresh and complete.
+    pub calendars: BTreeMap<String, Date>,
+    /// `source_uid` → the series that ended (decision 6).
+    pub ended: BTreeMap<String, Ended>,
+    /// Sorted by `(source_uid, calendar)`; one key may be held under two calendars (I2), so a
+    /// reader takes [`SeriesFile::by_key`], never this list.
+    pub series: Vec<Series>,
+}
+
+/// The one precedence between two records of one key (I2): a `google:` calendar first, then the
+/// lower calendar key. Smaller wins.
+fn precedence(series: &Series) -> (bool, &str) {
+    (!series.calendar.starts_with("google:"), series.calendar.as_str())
+}
+
+impl SeriesFile {
+    /// One record per `source_uid`, by [`precedence`] (plan review I2): one key is one set of
+    /// instances, one proposal and one card. A key is absent only when no calendar holds it.
+    pub fn by_key(&self) -> BTreeMap<&str, &Series> {
+        let mut out: BTreeMap<&str, &Series> = BTreeMap::new();
+        for series in &self.series {
+            match out.get(series.source_uid.as_str()) {
+                Some(held) if precedence(held) <= precedence(series) => {}
+                _ => {
+                    out.insert(series.source_uid.as_str(), series);
+                }
+            }
+        }
+        out
+    }
+
+    /// P3's `instances` shape (`WeekCalendar::with_instances`), from [`SeriesFile::by_key`]: per
+    /// key, its calendar's read date, that + 28 (exclusive), and its timed instances. An all-day
+    /// instance has no span, so it is left out.
+    pub fn instances_map(&self) -> BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)> {
+        self.by_key()
+            .into_iter()
+            .filter_map(|(key, series)| {
+                let read = self.calendars.get(&series.calendar).copied().or(series.last_seen)?;
+                let timed = series
+                    .instances
+                    .iter()
+                    .filter_map(|i| Some((i.date, i.start?, i.end?)))
+                    .collect();
+                Some((key.to_string(), (read, add_days(read, HORIZON_DAYS), timed)))
+            })
+            .collect()
+    }
+}
+
+fn add_days(date: Date, days: i64) -> Date {
+    jiff::Span::new()
+        .try_days(days)
+        .ok()
+        .and_then(|span| date.checked_add(span).ok())
+        .unwrap_or(date)
+}
+
+/// Whole days from `from` to `to` (negative when `to` is earlier).
+fn days_since(from: Date, to: Date) -> i64 {
+    from.until(to).map(|span| i64::from(span.get_days())).unwrap_or(0)
+}
+
+/// At most `max` characters (code points, never a split one), trailing space trimmed.
+fn cut(text: &str, max: usize) -> String {
+    text.chars().take(max).collect::<String>().trim_end().to_string()
+}
+
+/// A title as both routes store it: trimmed, `(untitled)` when empty (as the busy path titles
+/// an event), cut to 200.
+fn title_text(raw: &str) -> String {
+    let title = raw.trim();
+    cut(if title.is_empty() { "(untitled)" } else { title }, TITLE_MAX)
+}
+
+/// No link, no way into a meeting, no long digit run (§3.2.5).
+fn safe_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    !NOT_A_PLACE.iter().any(|word| lower.contains(word)) && !DIGIT_RUN_RE.is_match(line)
+}
+
+/// §3.2.5: the location, trimmed and cut to 80 — unless it is itself a link or passcode (a
+/// meeting URL is a common Google location), which is never stored (§9); else the first
+/// description line that looks like a place (≤ 80 characters, [`safe_line`]); else none. The
+/// description goes no further than this function (R4).
+fn where_of(location: &str, description: &str) -> Option<String> {
+    let location = location.trim();
+    if !location.is_empty() && safe_line(location) {
+        return Some(cut(location, WHERE_MAX));
+    }
+    description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && line.chars().count() <= WHERE_MAX && safe_line(line))
+        .map(str::to_string)
+}
+
+/// §3.2.3: `(weekday, start, end)` triples seen at least twice, grouped by `(start, end)`, days
+/// in `DAY_KEYS` order, entries by `(first day, start)`. All-day instances carry no triple.
+fn meets_of(instances: &[Instance]) -> Vec<Meet> {
+    let mut seen: BTreeMap<(usize, Time, Time), usize> = BTreeMap::new();
+    for i in instances {
+        if let (Some(start), Some(end)) = (i.start, i.end) {
+            let day = i.date.weekday().to_monday_zero_offset() as usize;
+            *seen.entry((day, start, end)).or_default() += 1;
+        }
+    }
+    let mut groups: BTreeMap<(Time, Time), BTreeSet<usize>> = BTreeMap::new();
+    for ((day, start, end), count) in seen {
+        if count >= 2 {
+            groups.entry((start, end)).or_default().insert(day);
+        }
+    }
+    let mut out: Vec<(usize, Meet)> = groups
+        .into_iter()
+        .map(|((start, end), days)| {
+            let first = *days.iter().next().expect("a group holds at least one day");
+            (first, Meet { days: days.into_iter().map(|d| DAY_KEYS[d]).collect(), start, end })
+        })
+        .collect();
+    out.sort_by(|a, b| (a.0, a.1.start, a.1.end).cmp(&(b.0, b.1.start, b.1.end)));
+    out.into_iter().map(|(_, meet)| meet).collect()
+}
+
+/// A master's recurrence, read on the device (§3.2.2, §3.2.4).
+struct RuleRead {
+    rule: Rule,
+    rdate: bool,
+    unsupported: bool,
+    until: Option<Date>,
+}
+
+/// Reads `RRULE`/`EXDATE`/`RDATE` lines (Google's `recurrence`, or `IcsSeries::rule_lines` —
+/// one shape). `UNTIL` becomes a date in `tz` (`20261205T055959Z` is 4 December in Chicago);
+/// `COUNT` is expanded from `first` with `calfeed`'s own helper to its last date. A rule that
+/// helper refuses, a second `RRULE`, an `EXRULE`, or no `RRULE` at all is `unsupported`.
+fn read_rule(lines: &[String], first: Option<Date>, tz: &jiff::tz::TimeZone) -> RuleRead {
+    let mut rrules: Vec<String> = Vec::new();
+    let (mut rdate, mut exrule) = (false, false);
+    for line in lines {
+        match crate::ingest::parse_property(line.trim()) {
+            Some((name, _, value)) if name == "RRULE" => rrules.push(value),
+            Some((name, _, _)) if name == "RDATE" => rdate = true,
+            Some((name, _, _)) if name == "EXRULE" => exrule = true,
+            _ => {}
+        }
+    }
+    let mut rule = Rule { freq: String::new(), interval: 1, until: None, count: None };
+    let Some(raw) = rrules.first() else {
+        return RuleRead { rule, rdate, unsupported: true, until: None };
+    };
+    // `calfeed::rrule_dict`'s reading: keys upper-cased, values as written.
+    let mut dict: BTreeMap<String, String> = BTreeMap::new();
+    for part in raw.split(';') {
+        if let Some((key, value)) = part.split_once('=') {
+            dict.insert(key.to_uppercase(), value.to_string());
+        }
+    }
+    let mut unsupported = rrules.len() > 1 || exrule;
+    let field = |key: &str| dict.get(key).map(|v| v.trim()).filter(|v| !v.is_empty());
+    rule.freq = field("FREQ").map(str::to_uppercase).unwrap_or_default();
+    if let Some(raw) = field("INTERVAL") {
+        match raw.parse::<u32>() {
+            Ok(n) if n > 0 => rule.interval = n,
+            _ => unsupported = true,
+        }
+    }
+    if let Some(raw) = field("UNTIL") {
+        match crate::ingest::parse_dt(raw, &BTreeMap::new(), tz) {
+            Some(crate::ingest::Due::Date(d)) => rule.until = Some(d),
+            Some(crate::ingest::Due::DateTime(dt)) => rule.until = Some(dt.date()),
+            None => unsupported = true,
+        }
+    }
+    if let Some(raw) = field("COUNT") {
+        match raw.parse::<u32>() {
+            Ok(n) => rule.count = Some(n),
+            Err(_) => unsupported = true,
+        }
+    }
+    let mut until = rule.until;
+    if let Some(first) = first {
+        match crate::calfeed::occurrence_starts(first.to_datetime(Time::midnight()), &dict, tz) {
+            Ok(starts) => {
+                if let (None, Some(count)) = (until, rule.count) {
+                    // Only a full expansion names the last date (the helper stops at 1000).
+                    if starts.len() == count as usize {
+                        until = starts.last().map(|s| s.date());
+                    }
+                }
+            }
+            Err(_) => unsupported = true,
+        }
+    }
+    RuleRead { rule, rdate, unsupported, until }
+}
+
+/// A Google instance time (`…Z`) or `first` (`…-05:00`, or a bare date) as a local date-time in
+/// `tz`, to the minute.
+fn google_time(raw: &str, tz: &jiff::tz::TimeZone) -> Option<jiff::civil::DateTime> {
+    let local = match raw.parse::<jiff::Timestamp>() {
+        Ok(ts) => ts.to_zoned(tz.clone()).datetime(),
+        Err(_) => raw.parse::<Date>().ok()?.to_datetime(Time::midnight()),
+    };
+    let minute = Time::new(local.hour(), local.minute(), 0, 0).ok()?;
+    Some(local.date().to_datetime(minute))
+}
+
+/// One Google item → a series, or why it cannot be read. `Ok(None)`: read, but no instance falls
+/// in `[today, today + 28)` — not returned, as on the ICS route.
+fn google_item(
+    item: &serde_json::Value,
+    tz: &jiff::tz::TimeZone,
+    today: Date,
+) -> Result<Option<Series>, &'static str> {
+    let text = |key: &str| -> Result<Option<&str>, &'static str> {
+        match item.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.as_str())),
+            Some(_) => Err("a field that is not text"),
+        }
+    };
+    let calendar = text("calendar")?.ok_or("no calendar")?;
+    let id = text("id")?.filter(|id| !id.is_empty()).ok_or("no id")?;
+    let first = match text("first")? {
+        None => None,
+        Some(raw) => Some(google_time(raw, tz).ok_or("an unreadable first")?.date()),
+    };
+    let recurrence: Option<Vec<String>> = match item.get("recurrence") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(lines)) => Some(
+            lines
+                .iter()
+                .map(|l| l.as_str().map(str::to_string).ok_or("a recurrence line that is not text"))
+                .collect::<Result<_, _>>()?,
+        ),
+        Some(_) => return Err("a recurrence that is not a list"),
+    };
+    let end_of_horizon = add_days(today, HORIZON_DAYS);
+    let mut instances: BTreeSet<(Date, Time, Time)> = BTreeSet::new();
+    let listed = item.get("instances").and_then(|v| v.as_array()).ok_or("no instances")?;
+    for instance in listed {
+        let at = |key: &str| {
+            instance.get(key).and_then(|v| v.as_str()).and_then(|raw| google_time(raw, tz))
+        };
+        let (start, end) = at("start").zip(at("end")).ok_or("an unreadable instance")?;
+        if start.date() >= today && start.date() < end_of_horizon {
+            instances.insert((start.date(), start.time(), end.time()));
+        }
+    }
+    if instances.is_empty() {
+        return Ok(None);
+    }
+    let instances: Vec<Instance> = instances
+        .into_iter()
+        .map(|(date, start, end)| Instance { date, start: Some(start), end: Some(end) })
+        .collect();
+    let has_master = first.is_some() && recurrence.is_some();
+    let read = match (&recurrence, has_master) {
+        (Some(lines), true) => read_rule(lines, first, tz),
+        _ => RuleRead {
+            rule: Rule { freq: String::new(), interval: 1, until: None, count: None },
+            rdate: false,
+            unsupported: false,
+            until: None,
+        },
+    };
+    Ok(Some(Series {
+        source_uid: format!("gcal-series:{id}"),
+        calendar: calendar.to_string(),
+        title: title_text(text("title")?.unwrap_or("")),
+        where_: where_of(text("location")?.unwrap_or(""), text("description")?.unwrap_or("")),
+        event_type: text("event_type")?.map(str::to_string),
+        rule: read.rule,
+        has_master,
+        rdate: read.rdate,
+        unsupported: read.unsupported,
+        meets: meets_of(&instances),
+        instances,
+        first,
+        until: read.until,
+        last_seen: Some(today),
+    }))
+}
+
+/// §3.2 for the Google route: `value` is the reply's `series` field (§4.1). Returns the series,
+/// the calendars read fresh and complete, and warnings. A value with no `calendars_read` or no
+/// `items` list is not a read at all (no calendar). An item that cannot be read takes its
+/// calendar out of the fresh list — a partial read never ages anything (§3.3) — with one
+/// warning; its other items are dropped with it. A calendar in `calendars_read` with no items is
+/// a fresh, empty read. Sorted by `(source_uid, calendar)`.
+pub fn series_from_google(
+    value: &serde_json::Value,
+    tz: &jiff::tz::TimeZone,
+    today: Date,
+) -> (Vec<Series>, Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let read = value.get("calendars_read").and_then(|v| v.as_array());
+    let items = value.get("items").and_then(|v| v.as_array());
+    let (Some(read), Some(items)) = (read, items) else {
+        warnings.push("series: a Google reply without calendars_read and items; not read".to_string());
+        return (Vec::new(), Vec::new(), warnings);
+    };
+    let mut calendars: BTreeSet<String> =
+        read.iter().filter_map(|c| c.as_str()).map(str::to_string).collect();
+    let mut broken: BTreeSet<String> = BTreeSet::new();
+    let mut series = Vec::new();
+    for item in items {
+        let calendar = item.get("calendar").and_then(|c| c.as_str()).unwrap_or("");
+        if !calendars.contains(calendar) {
+            continue; // §4.1 never sends one; a calendar not read is not ours to age.
+        }
+        match google_item(item, tz, today) {
+            Ok(Some(found)) => series.push(found),
+            Ok(None) => {}
+            Err(why) => {
+                if broken.insert(calendar.to_string()) {
+                    warnings.push(format!("series: {calendar} not read ({why})"));
+                }
+            }
+        }
+    }
+    calendars.retain(|c| !broken.contains(c));
+    series.retain(|s| calendars.contains(&s.calendar));
+    series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+    (series, calendars.into_iter().collect(), warnings)
+}
+
+/// §3.2 for an ICS feed, through `calfeed::weekly_series` over `[today, today + 28)`. `None`
+/// when the text is not a calendar (no `BEGIN:VCALENDAR`): not read, so nothing ages (§3.3). A
+/// calendar with no recurring master is `Some(empty)` — a fresh read (re-review M-e).
+/// `weekly_series`' own warnings are not repeated: the busy path warns about the same events.
+pub fn series_from_ics(
+    feed_name: &str,
+    ics: &str,
+    tz: &jiff::tz::TimeZone,
+    today: Date,
+) -> (Option<Vec<Series>>, Vec<String>) {
+    if !ics.to_ascii_uppercase().contains("BEGIN:VCALENDAR") {
+        return (None, vec![format!("series: {feed_name} is not a calendar; not read")]);
+    }
+    let (found, _) = crate::calfeed::weekly_series(ics, tz, today, add_days(today, HORIZON_DAYS));
+    let series = found
+        .into_iter()
+        .map(|ics| {
+            let read = read_rule(&ics.rule_lines, Some(ics.first), tz);
+            // `weekly_series` keeps the first reason it cannot be proposed; an RDATE is `rdate`,
+            // any other reason is as good as a rule it refused.
+            let refused = ics.ineligible.as_deref().is_some_and(|why| why != "RDATE");
+            let instances: Vec<Instance> = ics
+                .instances
+                .iter()
+                .map(|&(date, start, end)| match ics.all_day {
+                    true => Instance { date, start: None, end: None },
+                    false => Instance { date, start: Some(start), end: Some(end) },
+                })
+                .collect();
+            Series {
+                source_uid: ics.key,
+                calendar: feed_name.to_string(),
+                title: title_text(&ics.title),
+                where_: where_of(&ics.location, &ics.description),
+                event_type: None,
+                rule: read.rule,
+                has_master: true,
+                rdate: read.rdate,
+                unsupported: read.unsupported || refused,
+                meets: meets_of(&instances),
+                instances,
+                first: Some(ics.first),
+                until: read.until,
+                last_seen: Some(today),
+            }
+        })
+        .collect();
+    (Some(series), Vec::new())
+}
+
+fn hm(time: Time) -> String {
+    format!("{:02}:{:02}", time.hour(), time.minute())
+}
+
+fn date_json(date: Option<Date>) -> serde_json::Value {
+    date.map_or(serde_json::Value::Null, |d| serde_json::Value::String(d.to_string()))
+}
+
+fn series_json(s: &Series) -> serde_json::Value {
+    let instances: Vec<serde_json::Value> = s
+        .instances
+        .iter()
+        .map(|i| serde_json::json!([i.date.to_string(), i.start.map(hm), i.end.map(hm)]))
+        .collect();
+    let meets: Vec<serde_json::Value> = s
+        .meets
+        .iter()
+        .map(|m| serde_json::json!({"days": m.days, "end": hm(m.end), "start": hm(m.start)}))
+        .collect();
+    serde_json::json!({
+        "calendar": s.calendar, "event_type": s.event_type, "first": date_json(s.first),
+        "has_master": s.has_master, "instances": instances, "last_seen": date_json(s.last_seen),
+        "meets": meets, "rdate": s.rdate,
+        "rule": {"count": s.rule.count, "freq": s.rule.freq, "interval": s.rule.interval,
+                 "until": date_json(s.rule.until)},
+        "source_uid": s.source_uid, "title": s.title, "unsupported": s.unsupported,
+        "until": date_json(s.until), "where": s.where_,
+    })
+}
+
+/// The file's bytes: `ledger::dumps_value` (keys sorted), series by `(source_uid, calendar)`,
+/// and a trailing newline (§3.3). The same data is the same bytes.
+fn file_bytes(file: &SeriesFile) -> String {
+    let mut series: Vec<&Series> = file.series.iter().collect();
+    series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+    let calendars: serde_json::Map<String, serde_json::Value> = file
+        .calendars
+        .iter()
+        .map(|(k, d)| (k.clone(), date_json(Some(*d))))
+        .collect();
+    let ended: serde_json::Map<String, serde_json::Value> = file
+        .ended
+        .iter()
+        .map(|(k, e)| {
+            let entry = serde_json::json!({
+                "calendar": e.calendar, "dropped": e.dropped.to_string(),
+                "last_instance": date_json(e.last_instance), "until": date_json(e.until),
+            });
+            (k.clone(), entry)
+        })
+        .collect();
+    let value = serde_json::json!({
+        "calendars": calendars, "ended": ended,
+        "series": series.into_iter().map(series_json).collect::<Vec<_>>(),
+    });
+    format!("{}\n", crate::ledger::dumps_value(&value))
+}
+
+type Parsed<T> = Result<T, String>;
+
+fn json_date(value: Option<&serde_json::Value>, what: &str) -> Parsed<Option<Date>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<Date>().map(Some).map_err(|_| format!("bad {what}"))
+        }
+        Some(_) => Err(format!("bad {what}")),
+    }
+}
+
+fn json_text(value: Option<&serde_json::Value>, what: &str) -> Parsed<Option<String>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("bad {what}")),
+    }
+}
+
+fn json_bool(value: Option<&serde_json::Value>, what: &str) -> Parsed<bool> {
+    value.and_then(|v| v.as_bool()).ok_or_else(|| format!("bad {what}"))
+}
+
+fn json_u32(value: Option<&serde_json::Value>, what: &str) -> Parsed<Option<u32>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| format!("bad {what}")),
+    }
+}
+
+fn json_time(value: Option<&serde_json::Value>, what: &str) -> Parsed<Option<Time>> {
+    match json_text(value, what)? {
+        None => Ok(None),
+        Some(raw) => parse_time(&raw).map(Some).ok_or_else(|| format!("bad {what}")),
+    }
+}
+
+fn parse_series(value: &serde_json::Value) -> Parsed<Series> {
+    let need = |text: Option<String>, what: &str| text.ok_or_else(|| format!("no {what}"));
+    let rule = value.get("rule").filter(|r| r.is_object()).ok_or("no rule")?;
+    let mut instances = Vec::new();
+    for i in value.get("instances").and_then(|v| v.as_array()).ok_or("no instances")? {
+        let parts = i.as_array().filter(|p| p.len() == 3).ok_or("bad instance")?;
+        let date = json_date(parts.first(), "instance")?.ok_or("bad instance")?;
+        let (start, end) = (json_time(parts.get(1), "instance")?, json_time(parts.get(2), "instance")?);
+        if start.is_some() != end.is_some() {
+            return Err("bad instance".into());
+        }
+        instances.push(Instance { date, start, end });
+    }
+    let mut meets = Vec::new();
+    for m in value.get("meets").and_then(|v| v.as_array()).ok_or("no meets")? {
+        let days = m.get("days").and_then(|d| d.as_array()).ok_or("bad meets")?;
+        let days = days
+            .iter()
+            .map(|d| d.as_str().and_then(day_of).ok_or_else(|| "bad meets".to_string()))
+            .collect::<Parsed<Vec<DayKey>>>()?;
+        let start = json_time(m.get("start"), "meets")?.ok_or("bad meets")?;
+        let end = json_time(m.get("end"), "meets")?.ok_or("bad meets")?;
+        meets.push(Meet { days, start, end });
+    }
+    Ok(Series {
+        source_uid: need(json_text(value.get("source_uid"), "source_uid")?, "source_uid")?,
+        calendar: need(json_text(value.get("calendar"), "calendar")?, "calendar")?,
+        title: need(json_text(value.get("title"), "title")?, "title")?,
+        where_: json_text(value.get("where"), "where")?,
+        event_type: json_text(value.get("event_type"), "event_type")?,
+        rule: Rule {
+            freq: need(json_text(rule.get("freq"), "freq")?, "freq")?,
+            interval: json_u32(rule.get("interval"), "interval")?.ok_or("no interval")?,
+            until: json_date(rule.get("until"), "until")?,
+            count: json_u32(rule.get("count"), "count")?,
+        },
+        has_master: json_bool(value.get("has_master"), "has_master")?,
+        rdate: json_bool(value.get("rdate"), "rdate")?,
+        unsupported: json_bool(value.get("unsupported"), "unsupported")?,
+        instances,
+        meets,
+        first: json_date(value.get("first"), "first")?,
+        until: json_date(value.get("until"), "until")?,
+        last_seen: json_date(value.get("last_seen"), "last_seen")?,
+    })
+}
+
+fn parse_file(text: &str) -> Parsed<SeriesFile> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| "not JSON".to_string())?;
+    let object = value.as_object().ok_or("not an object")?;
+    let mut file = SeriesFile::default();
+    for (key, read) in object.get("calendars").and_then(|v| v.as_object()).ok_or("no calendars")? {
+        let read = json_date(Some(read), "calendar date")?.ok_or("bad calendar date")?;
+        file.calendars.insert(key.clone(), read);
+    }
+    for (key, entry) in object.get("ended").and_then(|v| v.as_object()).ok_or("no ended")? {
+        let ended = Ended {
+            calendar: json_text(entry.get("calendar"), "ended")?.ok_or("bad ended")?,
+            dropped: json_date(entry.get("dropped"), "ended")?.ok_or("bad ended")?,
+            last_instance: json_date(entry.get("last_instance"), "ended")?,
+            until: json_date(entry.get("until"), "ended")?,
+        };
+        file.ended.insert(key.clone(), ended);
+    }
+    for series in object.get("series").and_then(|v| v.as_array()).ok_or("no series")? {
+        file.series.push(parse_series(series)?);
+    }
+    file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+    Ok(file)
+}
+
+fn series_path(vault: &Path) -> PathBuf {
+    vault.join("state").join("calendar-series.json")
+}
+
+/// `state/calendar-series.json` (§3.3). Missing: silent and empty. Unreadable or malformed in
+/// any part: empty, with one warning — the next fresh read rewrites it.
+pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
+    let text = match std::fs::read_to_string(series_path(vault)) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (SeriesFile::default(), Vec::new());
+        }
+        Err(err) => {
+            let warning = format!("series file: {SERIES_FILE} unreadable ({}); starting empty", err.kind());
+            return (SeriesFile::default(), vec![warning]);
+        }
+    };
+    match parse_file(&text) {
+        Ok(file) => (file, Vec::new()),
+        Err(why) => (
+            SeriesFile::default(),
+            vec![format!("series file: {SERIES_FILE} malformed ({why}); starting empty")],
+        ),
+    }
+}
+
+/// §3.3's per-calendar refresh. `fresh` holds each calendar read fresh and complete this run
+/// with every series it returned (an ICS feed with no master is fresh with none).
+///
+/// - A fresh calendar's date becomes `today`; its series are replaced (`last_seen` today). One it
+///   no longer returns keeps its old `last_seen` until that is 14 days old; then it is dropped
+///   and — unless another calendar still holds its key — moves to `ended`.
+/// - A calendar not in `fresh` is untouched, unless its feed left `config/ingest.yaml` (an ICS
+///   calendar key is its feed's name; every `google:` key belongs to the `cloud:google` feed,
+///   plan review M13): then its series and its date go 14 days after its last read, never to
+///   `ended` — the student removed the source, not the class.
+/// - An `ended` entry goes 28 days after `dropped`, or at once when its key is held again.
+///
+/// The file is written only when `fresh` is non-empty and the bytes differ. Warnings: the old
+/// file's, and a failed write's.
+pub fn refresh_series(
+    vault: &Path,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+) -> (SeriesFile, Vec<String>) {
+    let (old, mut warnings) = read_series_file(vault);
+    let feeds = crate::calfeed::calendar_entries(vault);
+    let names: BTreeSet<&str> = feeds.iter().map(|(name, _)| name.as_str()).collect();
+    let google = feeds.iter().any(|(_, url)| url == "cloud:google");
+    let configured = |calendar: &str| match calendar.starts_with("google:") {
+        true => google,
+        false => names.contains(calendar),
+    };
+    let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
+
+    let mut calendars = old.calendars;
+    let mut series: Vec<Series> = Vec::new();
+    let mut returned: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (calendar, list) in fresh {
+        calendars.insert(calendar.clone(), today);
+        let keys = returned.entry(calendar.as_str()).or_default();
+        for found in list {
+            if keys.insert(found.source_uid.as_str()) {
+                let mut found = found.clone();
+                found.calendar = calendar.clone();
+                found.last_seen = Some(today);
+                series.push(found);
+            }
+        }
+    }
+    let mut aged_out: Vec<Series> = Vec::new();
+    for held in old.series {
+        match returned.get(held.calendar.as_str()) {
+            Some(keys) if keys.contains(held.source_uid.as_str()) => {}
+            Some(_) if recent(held.last_seen) => series.push(held),
+            Some(_) => aged_out.push(held),
+            None if configured(&held.calendar) => series.push(held),
+            None => {
+                let read = calendars.get(&held.calendar).copied().or(held.last_seen);
+                if recent(read) {
+                    series.push(held);
+                }
+            }
+        }
+    }
+    calendars.retain(|calendar, read| {
+        returned.contains_key(calendar.as_str()) || configured(calendar) || recent(Some(*read))
+    });
+    series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+
+    let held: BTreeSet<&str> = series.iter().map(|s| s.source_uid.as_str()).collect();
+    let mut ended = old.ended;
+    ended.retain(|key, e| !held.contains(key.as_str()) && days_since(e.dropped, today) < ENDED_DAYS);
+    aged_out.sort_by(|a, b| precedence(a).cmp(&precedence(b)));
+    for gone in aged_out {
+        if held.contains(gone.source_uid.as_str()) || ended.contains_key(&gone.source_uid) {
+            continue;
+        }
+        let entry = Ended {
+            calendar: gone.calendar.clone(),
+            dropped: today,
+            last_instance: gone.instances.iter().map(|i| i.date).max(),
+            until: gone.until,
+        };
+        ended.insert(gone.source_uid, entry);
+    }
+
+    let file = SeriesFile { calendars, ended, series };
+    if !fresh.is_empty() {
+        let bytes = file_bytes(&file);
+        let path = series_path(vault);
+        if std::fs::read(&path).ok().as_deref() != Some(bytes.as_bytes()) {
+            let written = std::fs::create_dir_all(vault.join("state"))
+                .and_then(|()| std::fs::write(&path, bytes.as_bytes()));
+            if let Err(err) = written {
+                warnings.push(format!("series file: could not write {SERIES_FILE} ({})", err.kind()));
+            }
+        }
+    }
+    (file, warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2699,5 +3426,662 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(!codes.contains_key("FA26"), "{codes:?}");
         assert_eq!(codes.get("CS100"), Some(&"cs-100".to_string()));
+    }
+}
+
+/// P8's tests: normalisation (§3.2) and the series file (§3.3). Invented data only.
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+    use jiff::civil::date;
+    use jiff::tz::TimeZone;
+    use serde_json::json;
+
+    fn chicago() -> TimeZone {
+        TimeZone::get("America/Chicago").unwrap()
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn plus(d: Date, days: i64) -> Date {
+        d.checked_add(jiff::Span::new().days(days)).unwrap()
+    }
+
+    /// A scratch vault whose `config/ingest.yaml` names `personal` (a direct ICS feed) and the
+    /// Google grant (`cloud:google`), plus any extra feed names.
+    fn vault(name: &str, extra: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-ser-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        config(&dir, true, extra);
+        dir
+    }
+
+    fn config(dir: &Path, google: bool, extra: &[&str]) {
+        let mut text = String::from(
+            "timezone: America/Chicago\ncalendars:\n  - name: personal\n    ics_url: https://a.test/a.ics\n",
+        );
+        if google {
+            text.push_str("  - name: google\n    ics_url: 'cloud:google'\n");
+        }
+        for name in extra {
+            text.push_str(&format!("  - name: {name}\n    ics_url: https://b.test/{name}.ics\n"));
+        }
+        std::fs::write(dir.join("config").join("ingest.yaml"), text).unwrap();
+    }
+
+    fn file_text(v: &Path) -> Option<String> {
+        std::fs::read_to_string(v.join(SERIES_FILE)).ok()
+    }
+
+    /// A plain weekly series on `dates`, 09:00–09:50, as a normaliser would hand it over.
+    fn ser(uid: &str, cal: &str, dates: &[Date]) -> Series {
+        let instances: Vec<Instance> = dates
+            .iter()
+            .map(|d| Instance { date: *d, start: Some(t(9, 0)), end: Some(t(9, 50)) })
+            .collect();
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: format!("Invented {uid}"),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            meets: meets_of(&instances),
+            instances,
+            first: dates.first().copied(),
+            until: None,
+            last_seen: None,
+        }
+    }
+
+    fn keys(file: &SeriesFile) -> Vec<(String, String)> {
+        file.series.iter().map(|s| (s.source_uid.clone(), s.calendar.clone())).collect()
+    }
+
+    fn pair(uid: &str, cal: &str) -> (String, String) {
+        (uid.to_string(), cal.to_string())
+    }
+
+    /// §4.1's example reply, with instances over two weeks around `today` = 2026-09-21 (a Monday).
+    fn google_reply() -> serde_json::Value {
+        let days = ["2026-09-18", "2026-09-21", "2026-09-23", "2026-09-25", "2026-09-28", "2026-09-30", "2026-10-02"];
+        let instances: Vec<serde_json::Value> = days
+            .iter()
+            .map(|d| json!({"start": format!("{d}T17:00:00Z"), "end": format!("{d}T17:50:00Z")}))
+            .collect();
+        json!({"calendars_read": ["google:3b9e0c1d2a4f5e60"],
+               "items": [{"calendar": "google:3b9e0c1d2a4f5e60", "id": "4k2q9x7m1abc",
+                          "title": "CS 100", "location": "", "description": "Room 101",
+                          "event_type": "default", "first": "2026-08-19T12:00:00-05:00",
+                          "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+                          "instances": instances}]})
+    }
+
+    #[test]
+    fn google_value_normalises_to_one_series_with_meets_and_until() {
+        let today = date(2026, 9, 21);
+        let (series, read, warnings) = series_from_google(&google_reply(), &chicago(), today);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(read, vec!["google:3b9e0c1d2a4f5e60".to_string()]);
+        assert_eq!(series.len(), 1);
+        let s = &series[0];
+        assert_eq!(s.source_uid, "gcal-series:4k2q9x7m1abc");
+        assert_eq!(s.calendar, "google:3b9e0c1d2a4f5e60");
+        assert_eq!(s.title, "CS 100");
+        assert_eq!(s.where_.as_deref(), Some("Room 101"));
+        assert_eq!(s.event_type.as_deref(), Some("default"));
+        assert_eq!(
+            s.rule,
+            Rule { freq: "WEEKLY".into(), interval: 1, until: Some(date(2026, 12, 4)), count: None }
+        );
+        assert!(s.has_master && !s.rdate && !s.unsupported);
+        // 2026-09-18 is before today: outside [today, today + 28).
+        assert_eq!(s.instances.len(), 6);
+        assert_eq!(s.instances[0], Instance { date: today, start: Some(t(12, 0)), end: Some(t(12, 50)) });
+        assert_eq!(s.meets, vec![Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, 50) }]);
+        assert_eq!(s.first, Some(date(2026, 8, 19)));
+        assert_eq!(s.until, Some(date(2026, 12, 4)));
+        assert_eq!(s.last_seen, Some(today));
+
+        // §3.3's example shape, through refresh_series.
+        let v = vault("google-example", &[]);
+        let fresh = vec![("google:3b9e0c1d2a4f5e60".to_string(), series)];
+        let (_, warnings) = refresh_series(&v, &fresh, today);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let inst = |d: &str| format!("[\"{d}\", \"12:00\", \"12:50\"]");
+        let expected = format!(
+            "{{\"calendars\": {{\"google:3b9e0c1d2a4f5e60\": \"2026-09-21\"}}, \"ended\": {{}}, \
+             \"series\": [{{\"calendar\": \"google:3b9e0c1d2a4f5e60\", \"event_type\": \"default\", \
+             \"first\": \"2026-08-19\", \"has_master\": true, \"instances\": [{}], \
+             \"last_seen\": \"2026-09-21\", \
+             \"meets\": [{{\"days\": [\"mon\", \"wed\", \"fri\"], \"end\": \"12:50\", \"start\": \"12:00\"}}], \
+             \"rdate\": false, \
+             \"rule\": {{\"count\": null, \"freq\": \"WEEKLY\", \"interval\": 1, \"until\": \"2026-12-04\"}}, \
+             \"source_uid\": \"gcal-series:4k2q9x7m1abc\", \"title\": \"CS 100\", \"unsupported\": false, \
+             \"until\": \"2026-12-04\", \"where\": \"Room 101\"}}]}}\n",
+            ["2026-09-21", "2026-09-23", "2026-09-25", "2026-09-28", "2026-09-30", "2026-10-02"]
+                .iter()
+                .map(|d| inst(d))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(file_text(&v).unwrap(), expected);
+    }
+
+    /// One Google item with the given recurrence, `first` and Tuesday/Thursday instances.
+    fn google_one(recurrence: &[&str], first: &str, location: &str, description: &str) -> serde_json::Value {
+        let instances: Vec<serde_json::Value> = ["2026-09-22", "2026-09-24", "2026-09-29", "2026-10-01"]
+            .iter()
+            .map(|d| json!({"start": format!("{d}T14:30:00Z"), "end": format!("{d}T15:45:00Z")}))
+            .collect();
+        json!({"calendars_read": ["google:aa"],
+               "items": [{"calendar": "google:aa", "id": "inv1", "title": "Invented Seminar",
+                          "location": location, "description": description, "event_type": "default",
+                          "first": first, "recurrence": recurrence, "instances": instances}]})
+    }
+
+    #[test]
+    fn until_z_is_a_local_date_in_the_vault_timezone() {
+        let reply = google_one(
+            &["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261205T055959Z"],
+            "2026-09-01T09:30:00-05:00",
+            "Hall 1",
+            "",
+        );
+        let today = date(2026, 9, 21);
+        let (chi, _, _) = series_from_google(&reply, &chicago(), today);
+        assert_eq!(chi[0].rule.until, Some(date(2026, 12, 4)));
+        assert_eq!(chi[0].until, Some(date(2026, 12, 4)));
+        let (utc, _, _) = series_from_google(&reply, &TimeZone::UTC, today);
+        assert_eq!(utc[0].until, Some(date(2026, 12, 5)));
+        // A bare-date UNTIL is that date.
+        let reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261204"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        let (s, _, _) = series_from_google(&reply, &chicago(), today);
+        assert_eq!(s[0].until, Some(date(2026, 12, 4)));
+    }
+
+    #[test]
+    fn count_gives_until() {
+        // Tue 2026-09-01, Thu 09-03, Tue 09-08, …: the 10th occurrence is Thu 2026-10-01.
+        let reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=10"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        let (s, _, _) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert_eq!(s[0].rule.count, Some(10));
+        assert_eq!(s[0].rule.until, None);
+        assert_eq!(s[0].until, Some(date(2026, 10, 1)));
+        assert_eq!(s[0].first, Some(date(2026, 9, 1)));
+        // Neither UNTIL nor COUNT: no until.
+        let reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        let (s, _, _) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert_eq!(s[0].until, None);
+        assert!(!s[0].unsupported);
+        // An RDATE is irregular; a rule calfeed cannot expand is unsupported; no master at all.
+        let reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU", "RDATE:20261002T093000"], "2026-09-01T09:30:00-05:00", "", "");
+        assert!(series_from_google(&reply, &chicago(), date(2026, 9, 21)).0[0].rdate);
+        let reply = google_one(&["RRULE:FREQ=MONTHLY;BYDAY=1TU"], "2026-09-01T09:30:00-05:00", "", "");
+        let (s, _, _) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert!(s[0].unsupported);
+        assert_eq!(s[0].rule.freq, "MONTHLY");
+        let mut reply = google_one(&[], "", "", "");
+        let item = reply["items"][0].as_object_mut().unwrap();
+        item.remove("first");
+        item.remove("recurrence");
+        let (s, _, w) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!s[0].has_master);
+        assert_eq!((s[0].first, s[0].until), (None, None));
+    }
+
+    #[test]
+    fn meets_keeps_triples_seen_twice_and_groups_by_time() {
+        let i = |d: Date, s: Time, e: Time| Instance { date: d, start: Some(s), end: Some(e) };
+        let mon = date(2026, 9, 21);
+        let instances = vec![
+            i(mon, t(9, 0), t(9, 50)),
+            i(plus(mon, 7), t(9, 0), t(9, 50)),
+            i(plus(mon, 2), t(9, 0), t(9, 50)),
+            i(plus(mon, 9), t(9, 0), t(9, 50)),
+            i(plus(mon, 1), t(14, 0), t(15, 15)),
+            i(plus(mon, 8), t(14, 0), t(15, 15)),
+            i(plus(mon, 3), t(14, 0), t(15, 15)),
+            i(plus(mon, 10), t(14, 0), t(15, 15)),
+            i(mon, t(16, 0), t(17, 0)),
+            i(plus(mon, 7), t(16, 0), t(17, 0)),
+            // Seen once: a moved instance, not a meeting time.
+            i(plus(mon, 4), t(9, 0), t(9, 50)),
+            // All-day instances carry no triple.
+            Instance { date: plus(mon, 5), start: None, end: None },
+            Instance { date: plus(mon, 12), start: None, end: None },
+        ];
+        assert_eq!(
+            meets_of(&instances),
+            vec![
+                Meet { days: vec!["mon", "wed"], start: t(9, 0), end: t(9, 50) },
+                Meet { days: vec!["mon"], start: t(16, 0), end: t(17, 0) },
+                Meet { days: vec!["tue", "thu"], start: t(14, 0), end: t(15, 15) },
+            ]
+        );
+    }
+
+    #[test]
+    fn where_takes_the_location_else_a_place_like_description_line() {
+        assert_eq!(where_of("  Hall 2  ", "Room 9"), Some("Hall 2".to_string()));
+        assert_eq!(where_of("", "\n  Science Hall 3  \nRoom 9"), Some("Science Hall 3".to_string()));
+        assert_eq!(
+            where_of("   ", "https://zoom.us/j/1\nPasscode: 4242\nRoom 101\n"),
+            Some("Room 101".to_string())
+        );
+        let long = "x".repeat(81);
+        assert_eq!(where_of("", &format!("{long}\nRoom 7")), Some("Room 7".to_string()));
+        assert_eq!(where_of("", ""), None);
+        assert_eq!(where_of("", "\n \n"), None);
+    }
+
+    #[test]
+    fn a_zoom_link_or_passcode_line_is_never_where() {
+        for line in [
+            "https://example.test/room",
+            "see www.example.test",
+            "Zoom room B",
+            "MS Teams call",
+            "meet.google.com/abc-defg-hij",
+            "Webex 5",
+            "pwd=abcd",
+            "Passcode 42",
+            "Password: invented",
+            "PIN 4242",
+            "Meeting ID 5",
+            "Dial 555123456",
+            "Dial 555 123 456",
+            "Call 205-555-0100",
+        ] {
+            assert_eq!(where_of("", line), None, "{line}");
+        }
+        // A meeting link as the location is never stored either (§9); the description may still
+        // name the room.
+        assert_eq!(where_of("https://zoom.us/j/1?pwd=abc", "Room 3"), Some("Room 3".to_string()));
+        assert_eq!(where_of("Zoom", ""), None);
+    }
+
+    /// A one-master ICS feed: Tuesdays and Thursdays 09:30–10:45 from 2026-09-01.
+    fn ics(summary: &str, location: &str, description: &str) -> String {
+        let mut lines = vec![
+            "BEGIN:VCALENDAR".to_string(),
+            "VERSION:2.0".to_string(),
+            "BEGIN:VEVENT".to_string(),
+            "UID:inv-seminar@example.test".to_string(),
+            format!("SUMMARY:{summary}"),
+        ];
+        if !location.is_empty() {
+            lines.push(format!("LOCATION:{location}"));
+        }
+        if !description.is_empty() {
+            lines.push(format!("DESCRIPTION:{description}"));
+        }
+        lines.extend(
+            [
+                "DTSTART;TZID=America/Chicago:20260901T093000",
+                "DTEND;TZID=America/Chicago:20260901T104500",
+                "RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261205T055959Z",
+                "END:VEVENT",
+                "END:VCALENDAR",
+            ]
+            .iter()
+            .map(|l| l.to_string()),
+        );
+        lines.join("\r\n") + "\r\n"
+    }
+
+    #[test]
+    fn the_description_is_never_in_the_file() {
+        let today = date(2026, 9, 21);
+        let v = vault("no-description", &[]);
+        // Google: no location, and no description line is place-like.
+        let secret = "https://zoom.us/j/99 pwd=SECRETCODE\\nMeeting ID 555 1234 9999";
+        let reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", "", &secret.replace("\\n", "\n"));
+        let (g, read, _) = series_from_google(&reply, &chicago(), today);
+        assert_eq!(g[0].where_, None);
+        // ICS: a location, and a description that would be place-like on its own.
+        let (i, _) = series_from_ics("personal", &ics("Invented Seminar", "Hall 4", "Private agenda line"), &chicago(), today);
+        let i = i.unwrap();
+        assert_eq!(i[0].where_.as_deref(), Some("Hall 4"));
+        let fresh = vec![(read[0].clone(), g), ("personal".to_string(), i)];
+        refresh_series(&v, &fresh, today);
+        let text = file_text(&v).unwrap();
+        for leaked in ["SECRETCODE", "zoom", "Meeting ID", "Private agenda", "description"] {
+            assert!(!text.contains(leaked), "{leaked} in {text}");
+        }
+    }
+
+    #[test]
+    fn an_ics_title_is_cut_to_200_and_where_to_80() {
+        let today = date(2026, 9, 21);
+        let title = "T".repeat(250);
+        let place = "P".repeat(120);
+        let (got, warnings) = series_from_ics("personal", &ics(&title, &place, ""), &chicago(), today);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let got = got.unwrap();
+        assert_eq!(got.len(), 1);
+        let s = &got[0];
+        assert_eq!(s.title.chars().count(), 200);
+        assert_eq!(s.where_.as_ref().unwrap().chars().count(), 80);
+        // The rest of the ICS route, while here.
+        assert_eq!(s.source_uid, "ics-series:inv-seminar@example.test");
+        assert_eq!(s.calendar, "personal");
+        assert_eq!(s.event_type, None);
+        assert_eq!(s.rule.until, Some(date(2026, 12, 4)));
+        assert_eq!(s.first, Some(date(2026, 9, 1)));
+        assert_eq!(s.meets, vec![Meet { days: vec!["tue", "thu"], start: t(9, 30), end: t(10, 45) }]);
+        assert_eq!(s.instances.first().unwrap().date, date(2026, 9, 22));
+        assert_eq!(s.instances.last().unwrap().date, date(2026, 10, 15));
+        assert_eq!(s.last_seen, Some(today));
+        // A Google title is cut on the device too.
+        let mut reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", &place, "");
+        reply["items"][0]["title"] = json!(title);
+        let (g, _, _) = series_from_google(&reply, &chicago(), today);
+        assert_eq!(g[0].title.chars().count(), 200);
+        assert_eq!(g[0].where_.as_ref().unwrap().chars().count(), 80);
+    }
+
+    #[test]
+    fn a_fresh_calendar_replaces_its_series() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("replaces", &[]);
+        let (a, b) = (ser("ics-series:a", "personal", &[d0]), ser("ics-series:b", "personal", &[d0]));
+        refresh_series(&v, &[("personal".into(), vec![a.clone(), b])], d0);
+        let d1 = plus(d0, 1);
+        let mut a2 = a.clone();
+        a2.title = "Invented renamed".into();
+        let c = ser("ics-series:c", "personal", &[d1]);
+        let (file, warnings) = refresh_series(&v, &[("personal".into(), vec![a2, c])], d1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(file.calendars.get("personal"), Some(&d1));
+        assert_eq!(
+            keys(&file),
+            vec![pair("ics-series:a", "personal"), pair("ics-series:b", "personal"), pair("ics-series:c", "personal")]
+        );
+        assert_eq!(file.series[0].title, "Invented renamed");
+        assert_eq!(file.series[0].last_seen, Some(d1));
+        // b went unseen: kept with its old last_seen.
+        assert_eq!(file.series[1].last_seen, Some(d0));
+        assert_eq!(read_series_file(&v).0, file);
+    }
+
+    #[test]
+    fn a_series_unseen_for_14_days_is_dropped_not_before() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("unseen-14", &[]);
+        let (a, b) = (ser("ics-series:a", "personal", &[d0]), ser("ics-series:b", "personal", &[d0]));
+        refresh_series(&v, &[("personal".into(), vec![a.clone(), b])], d0);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a.clone()])], plus(d0, 13));
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal"), pair("ics-series:b", "personal")]);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a])], plus(d0, 14));
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal")]);
+    }
+
+    #[test]
+    fn an_unread_calendar_keeps_its_series_and_date() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("unread", &[]);
+        let a = ser("ics-series:a", "personal", &[d0]);
+        let g = ser("gcal-series:g", "google:aa", &[d0]);
+        refresh_series(&v, &[("personal".into(), vec![a.clone()]), ("google:aa".into(), vec![g])], d0);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a])], plus(d0, 40));
+        assert_eq!(file.calendars.get("google:aa"), Some(&d0));
+        assert_eq!(file.calendars.get("personal"), Some(&plus(d0, 40)));
+        let g = file.series.iter().find(|s| s.calendar == "google:aa").unwrap();
+        assert_eq!(g.last_seen, Some(d0));
+    }
+
+    #[test]
+    fn an_ics_fetched_with_zero_series_is_fresh_and_ages_its_old_series() {
+        let d0 = date(2026, 9, 21);
+        let empty = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        assert_eq!(series_from_ics("personal", empty, &chicago(), d0).0, Some(Vec::new()));
+        assert_eq!(series_from_ics("personal", "<html>sign in</html>", &chicago(), d0).0, None);
+        let v = vault("zero-fresh", &[]);
+        refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, 5));
+        assert_eq!(file.calendars.get("personal"), Some(&plus(d0, 5)));
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal")]);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, 14));
+        assert!(file.series.is_empty());
+        assert!(file.ended.contains_key("ics-series:a"));
+    }
+
+    #[test]
+    fn a_removed_feed_keeps_its_series_14_days_then_drops_them() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("removed-feed", &["clients"]);
+        let a = ser("ics-series:a", "personal", &[d0]);
+        let k = ser("ics-series:k", "clients", &[d0]);
+        refresh_series(&v, &[("personal".into(), vec![a.clone()]), ("clients".into(), vec![k])], d0);
+        config(&v, true, &[]);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a.clone()])], plus(d0, 13));
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal"), pair("ics-series:k", "clients")]);
+        assert_eq!(file.calendars.get("clients"), Some(&d0));
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a])], plus(d0, 14));
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal")]);
+        assert!(!file.calendars.contains_key("clients"));
+        assert!(file.ended.is_empty());
+    }
+
+    #[test]
+    fn a_removed_feeds_series_never_enter_ended() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("removed-not-ended", &["clients"]);
+        let k = ser("ics-series:k", "clients", &[d0]);
+        refresh_series(&v, &[("clients".into(), vec![k])], d0);
+        config(&v, true, &[]);
+        for day in [14, 20, 40] {
+            let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, day));
+            assert!(file.series.is_empty(), "day {day}");
+            assert!(file.ended.is_empty(), "day {day}: {:?}", file.ended);
+        }
+    }
+
+    #[test]
+    fn a_google_calendar_key_ages_as_removed_when_cloud_google_leaves_the_config() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("google-removed", &[]);
+        let g = ser("gcal-series:g", "google:aa", &[d0]);
+        refresh_series(&v, &[("google:aa".into(), vec![g])], d0);
+        // Still configured, never read again: untouched however old.
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, 60));
+        assert_eq!(keys(&file), vec![pair("gcal-series:g", "google:aa")]);
+        config(&v, false, &[]);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, 13));
+        assert_eq!(keys(&file), vec![pair("gcal-series:g", "google:aa")]);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(d0, 14));
+        assert!(file.series.is_empty());
+        assert!(!file.calendars.contains_key("google:aa"));
+        assert!(file.ended.is_empty());
+    }
+
+    #[test]
+    fn an_aged_out_series_moves_to_ended_with_its_last_instance_and_until() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("ended", &[]);
+        let mut a = ser("ics-series:a", "personal", &[plus(d0, 1), plus(d0, 8)]);
+        a.until = Some(date(2026, 12, 4));
+        refresh_series(&v, &[("personal".into(), vec![a])], d0);
+        let drop_day = plus(d0, 14);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], drop_day);
+        assert!(file.series.is_empty());
+        assert_eq!(
+            file.ended.get("ics-series:a"),
+            Some(&Ended {
+                calendar: "personal".into(),
+                dropped: drop_day,
+                last_instance: Some(date(2026, 9, 29)),
+                until: Some(date(2026, 12, 4)),
+            })
+        );
+        assert!(file_text(&v).unwrap().contains(
+            "\"ended\": {\"ics-series:a\": {\"calendar\": \"personal\", \"dropped\": \"2026-10-05\", \
+             \"last_instance\": \"2026-09-29\", \"until\": \"2026-12-04\"}}"
+        ));
+        // A series that held no instance ends with `last_instance: null`.
+        let v = vault("ended-empty", &[]);
+        let b = ser("ics-series:b", "personal", &[]);
+        refresh_series(&v, &[("personal".into(), vec![b])], d0);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], drop_day);
+        assert_eq!(file.ended["ics-series:b"].last_instance, None);
+        assert_eq!(file.ended["ics-series:b"].until, None);
+    }
+
+    #[test]
+    fn an_ended_entry_goes_after_28_days_or_when_the_key_returns() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("ended-expiry", &[]);
+        let a = ser("ics-series:a", "personal", &[d0]);
+        refresh_series(&v, &[("personal".into(), vec![a.clone()])], d0);
+        let dropped = plus(d0, 14);
+        refresh_series(&v, &[("personal".into(), Vec::new())], dropped);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(dropped, 27));
+        assert!(file.ended.contains_key("ics-series:a"));
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], plus(dropped, 28));
+        assert!(file.ended.is_empty());
+        // The key comes back in a fresh read: its entry goes at once.
+        let v = vault("ended-returns", &[]);
+        refresh_series(&v, &[("personal".into(), vec![a.clone()])], d0);
+        refresh_series(&v, &[("personal".into(), Vec::new())], dropped);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![a])], plus(dropped, 1));
+        assert!(file.ended.is_empty());
+        assert_eq!(keys(&file), vec![pair("ics-series:a", "personal")]);
+    }
+
+    #[test]
+    fn a_key_still_held_under_another_calendar_never_enters_ended() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("ended-held", &[]);
+        let k = "gcal-series:twin";
+        refresh_series(
+            &v,
+            &[("personal".into(), vec![ser(k, "personal", &[d0])]), ("google:aa".into(), vec![ser(k, "google:aa", &[d0])])],
+            d0,
+        );
+        let (file, _) = refresh_series(
+            &v,
+            &[("personal".into(), Vec::new()), ("google:aa".into(), vec![ser(k, "google:aa", &[d0])])],
+            plus(d0, 14),
+        );
+        assert_eq!(keys(&file), vec![pair(k, "google:aa")]);
+        assert!(file.ended.is_empty());
+    }
+
+    #[test]
+    fn the_file_is_written_only_when_fresh_and_changed() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("write-once", &[]);
+        let a = ser("ics-series:a", "personal", &[d0]);
+        refresh_series(&v, &[("personal".into(), vec![a.clone()])], d0);
+        let path = v.join(SERIES_FILE);
+        let before = std::fs::read(&path).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        // The same fresh read on the same day: the same bytes, so no write.
+        refresh_series(&v, &[("personal".into(), vec![a])], d0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        // Nothing fresh: never written, even when aging would change the file.
+        refresh_series(&v, &[], plus(d0, 60));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn the_file_bytes_are_sorted_dumps_value_with_a_trailing_newline() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("bytes", &[]);
+        let fresh = vec![
+            ("personal".to_string(), vec![ser("ics-series:b", "personal", &[d0]), ser("gcal-series:z", "personal", &[])]),
+            ("google:aa".to_string(), vec![ser("gcal-series:z", "google:aa", &[])]),
+        ];
+        let (file, _) = refresh_series(&v, &fresh, d0);
+        assert_eq!(
+            keys(&file),
+            vec![pair("gcal-series:z", "google:aa"), pair("gcal-series:z", "personal"), pair("ics-series:b", "personal")]
+        );
+        let text = file_text(&v).unwrap();
+        assert!(text.ends_with("}\n") && !text.ends_with("\n\n"));
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(text, format!("{}\n", crate::ledger::dumps_value(&parsed)));
+        assert_eq!(text, file_bytes(&file));
+        assert!(text.starts_with("{\"calendars\": {\"google:aa\": \"2026-09-21\", \"personal\": \"2026-09-21\"}, \"ended\": {}, \"series\": [{\"calendar\": \"google:aa\", \"event_type\": null, \"first\": null, \"has_master\": true, \"instances\": [], "));
+        // Round trip: what is read is what was written.
+        assert_eq!(read_series_file(&v), (file, Vec::new()));
+    }
+
+    #[test]
+    fn a_malformed_file_reads_empty_with_one_warning() {
+        let v = vault("malformed", &[]);
+        assert_eq!(read_series_file(&v), (SeriesFile::default(), Vec::new()));
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        for bad in ["{not json", "[]", "{\"calendars\": {}, \"ended\": {}, \"series\": [{\"title\": 5}]}"] {
+            std::fs::write(v.join(SERIES_FILE), bad).unwrap();
+            let (file, warnings) = read_series_file(&v);
+            assert_eq!(file, SeriesFile::default(), "{bad}");
+            assert_eq!(warnings.len(), 1, "{bad}: {warnings:?}");
+        }
+        // The next fresh read rewrites it.
+        let d0 = date(2026, 9, 21);
+        let (file, warnings) = refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(read_series_file(&v), (file, Vec::new()));
+    }
+
+    #[test]
+    fn no_fresh_calendar_writes_no_file() {
+        let v = vault("no-fresh", &[]);
+        let (file, warnings) = refresh_series(&v, &[], date(2026, 9, 21));
+        assert_eq!(file, SeriesFile::default());
+        assert!(warnings.is_empty());
+        assert!(!v.join(SERIES_FILE).exists());
+        assert!(!v.join("state").exists());
+    }
+
+    #[test]
+    fn by_key_takes_one_record_per_key_google_first_then_calendar_key() {
+        let d0 = date(2026, 9, 21);
+        let mut series = vec![];
+        for cal in ["zeta", "alpha", "google:bb", "google:aa"] {
+            series.push(ser("gcal-series:k", cal, &[d0]));
+        }
+        for cal in ["zeta", "alpha"] {
+            series.push(ser("ics-series:l", cal, &[d0]));
+        }
+        let file = SeriesFile { series, ..SeriesFile::default() };
+        let by = file.by_key();
+        assert_eq!(by.len(), 2);
+        assert_eq!(by["gcal-series:k"].calendar, "google:aa");
+        assert_eq!(by["ics-series:l"].calendar, "alpha");
+    }
+
+    #[test]
+    fn instances_map_prefers_the_google_calendar() {
+        let d0 = date(2026, 9, 21);
+        let mut g = ser("gcal-series:k", "google:aa", &[plus(d0, 1)]);
+        g.instances[0].start = Some(t(12, 0));
+        g.instances[0].end = Some(t(12, 50));
+        let p = ser("gcal-series:k", "personal", &[plus(d0, 1)]);
+        let mut day = ser("ics-series:allday", "personal", &[]);
+        day.instances.push(Instance { date: plus(d0, 2), start: None, end: None });
+        let mut calendars = BTreeMap::new();
+        calendars.insert("google:aa".to_string(), d0);
+        calendars.insert("personal".to_string(), plus(d0, 3));
+        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day] };
+        let map = file.instances_map();
+        assert_eq!(
+            map["gcal-series:k"],
+            (d0, plus(d0, 28), vec![(plus(d0, 1), t(12, 0), t(12, 50))])
+        );
+        // An all-day instance has no span to draw.
+        assert_eq!(map["ics-series:allday"], (plus(d0, 3), plus(d0, 31), Vec::new()));
     }
 }
