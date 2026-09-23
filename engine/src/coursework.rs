@@ -3094,8 +3094,13 @@ mod tests {
         write_note(&vault.join("config").join("ingest.yaml"), config);
         // D3: these tests are about a vault that has already been through a slot — per-source
         // counts, the run-log summary, the via and run_id on a journal record. `rank` writes this
-        // page at the end of every slot, and without it every one of them would be a FIRST run and
-        // would archive its fixture's already-past assignments instead of creating them.
+        // page at the end of every slot. Under R-C1c-6 `state/today.md`'s presence no longer decides
+        // whether an already-past item archives — a group's own history in `known`/`seen` does — so
+        // a test built on this vault that fetches a group with no prior history still needs its due
+        // dates kept out of that group's past (see `main_writes_a_coursework_run_record_with_per_source_counts`
+        // and `a_clean_run_logs_ok_with_the_created_and_updated_counts`). Writing this page here is
+        // still correct: it is what makes this vault "runnable" (a slot already happened) for every
+        // other test built on it that isn't about the archive rule at all.
         write_note(&vault.join("state").join("today.md"), "# Today\n");
         vault
     }
@@ -3228,12 +3233,14 @@ mod tests {
             "cw-runs",
             "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n  vhl:\n    enabled: true\n",
         );
-        // R-C1c-6: `main` passes `today: None`, so the cutoff is the real clock — a hardcoded past
-        // due date on a vault with no history for this group would now archive instead of create,
-        // which is not what this test is about (run-record counts and steps). Due dates are pinned
-        // safely in the future of whenever this test runs, the same guard
-        // `a_first_run_counts_and_names_what_it_archived` already uses.
-        let soon = jiff::Zoned::now().date().checked_add(jiff::Span::new().days(3)).unwrap();
+        // R-C1c-6: `main` passes `today: None`, so the cutoff is `crate::cli::local_now(vault)` —
+        // the VAULT's clock (`America/Chicago`, per the config above), not the machine's. A
+        // hardcoded past due date on a vault with no history for this group would now archive
+        // instead of create, which is not what this test is about (run-record counts and steps).
+        // Reading the same clock the code under test reads (rather than `jiff::Zoned::now()`, the
+        // machine's clock, which a prior version of this fix wrongly used) keeps the due dates
+        // always in that vault's future without depending on the machine's timezone or date.
+        let soon = crate::cli::local_now(&vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
         let later = soon.tomorrow().unwrap();
         let two = move |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
             Ok(vec![
@@ -3333,12 +3340,14 @@ mod tests {
             "mainok",
             "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
         );
-        // R-C1c-6: `main` passes `today: None`, so the cutoff is the real clock — `plain()`'s
+        // R-C1c-6: `main` passes `today: None`, so the cutoff is `crate::cli::local_now(vault)` —
+        // the VAULT's clock (`America/Chicago`, per the config above), not the machine's. `plain()`'s
         // hardcoded due date, on a vault with no history for its group, would now archive instead
-        // of create, which is not what this test is about (the run-log summary line's counts). A
-        // due date pinned safely in the future of whenever this test runs avoids that, the same
-        // guard `a_first_run_counts_and_names_what_it_archived` already uses.
-        let soon = jiff::Zoned::now().date().checked_add(jiff::Span::new().days(3)).unwrap();
+        // of create, which is not what this test is about (the run-log summary line's counts).
+        // Reading the same clock the code under test reads (rather than `jiff::Zoned::now()`, the
+        // machine's clock, which a prior version of this fix wrongly used) keeps the due date
+        // always in that vault's future without depending on the machine's timezone or date.
+        let soon = crate::cli::local_now(&vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
         let ok = move |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
             Ok(vec![make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", soon.at(23, 59, 0, 0), 0)])
         };
