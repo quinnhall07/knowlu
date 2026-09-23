@@ -598,3 +598,261 @@ Spec section by section: carried by which task, or not carried.
   code will have, that they contain none of `engine/tests/site.rs`'s four banned claim words, and
   that Task 11's assertions match the drafts. Whether they are adequate is Q6's question for Quinn
   and the lawyer, which the plan correctly refuses to answer itself.
+
+---
+
+## Re-review after fix round 1 (2026-09-17)
+
+**Verdict: Execute after fix round 2 (R1-R10).** Two block. **R1**: the pause's exit is a wizard-only Tauri
+command the console cannot invoke, and the card tells the student to "Open Settings", which has no logins row —
+C2's deadlock survives R-C5-plan-1 by one hop. **R3**: `ureq::Cookie` exposes `name()` and `value()` and nothing
+else, so I11's `expires_at`, its pruning and its `Max-Age=0` deletion cannot be built as written. The other eight
+are bounded, and everything the round did structurally is the right shape, argued from the code. Scope, ownership,
+0 CR and no BOM in both files, the frozen references, `.no_console()`, `ring`, the no-new-crate rule and the
+command counts are intact; M10's single-user literal is gone and no other appeared.
+
+### The original findings
+
+**C1 resolved** — `relay_contract.rs` is gone (plan:159, :243, :396, :2149-2176), every portal suite is in-module
+with `Captures::get_for_test`, and the precedent is real (`coursework.rs:3095-3160`). See **R5**. **C2 not
+resolved in the product**: the call shape is right (`info::close_info`, `engine/src/info.rs:157`, 7 params,
+`journal: None` builds its own), the reachability is not — **R1**. **C3 resolved in shape** (`parsed` column,
+`checkParsed`, incremental parse, no shelf cap: plan:2717-2724, :2856-2905; spec:398-414) — gaps **R6**, **R7**,
+**R8**. **C4 half resolved**: the run clock is monotonic and consulted (plan:2411-2441, :2501-2519), the step
+clock is not — **R4**. **C5 resolved in shape**: `PLANS` by job, `SOURCE_PLANS`, `cursor.sources`, per-source
+retirement, `plan_version` now `text` (plan:2996-3040, :3221-3245, :2708-2713) — **R6**. **I1 partly** (derived in
+prose; the pin's arithmetic is wrong and the named test is nowhere — **R2**). **I2 resolved**: `quote_plus` joins
+`scrub`, doc says four, fourth case with a space-bearing secret, plus a form-body transport test (plan:1371-1384,
+:2509-2512). **I3 resolved for UTF-8 bodies only** (plan:2545-2551; spec:155-165) — **R9**. **I4 resolved**:
+`check_host` again on `filled.url`, both cases, still after the host check and before the credential read
+(plan:2496-2501). **I5 resolved**: pointer redaction re-serialised only when a capture fired, so the BOM case
+keeps its bytes (plan:2536-2544). **I6 right in intent, defeated by the file's layout** — **R5**. **I7 resolved**:
+`coursework_request` (`coursework.rs:639`) and `FetchedSource` (:631, plan says :630) deleted, `post_coursework`
+(:670) split, `decode_coursework_reply` kept (plan:400-414, :3822-3840). **I8 resolved**: `sectionMapping`
+exported and called by `parseDashboard` (plan:1760-1783); it matches `parse_vhl.ts:99-101`, and
+`vhl-parsed-reference.json` (via `parse_vhl_test.ts:37`) really does pin it. **I9 resolved** (plan:750-756). **I10
+resolved**: written not extended, Q6 plus lawyer, both halves pinned (plan:902-935, :3688-3697; spec:527-536) — no
+ToS literal exists in `app/static/` or `site/`. **I11 not implementable as written** — **R3**. **I12 resolved**
+(plan:2833-2843, :3228-3236). **I13 resolved**: `expires_at=lt.now` plus a fifth staging proof (plan:2802-2812,
+:2957-2970); `restDelete` does throw via `ok()` (`_shared/db.ts:95-101`). **I14 resolved**: four warnings carrying
+`fetch failed`, ordering asserted, no marker added so `FAILURE_MARKERS.len() == 7` (`coursework.rs:1437`, :2671)
+is untouched. **M1-M12 resolved**, three residues in **R10**; M3, M4, M5, M7 (`ci.yml:84` byte-compared), M8, M9,
+M11 and M12 all check out against the files they name.
+
+### The author's five concerns
+
+1. **`parsed` unmeasured — accept, one sentence to add.** It is already bounded: `MAX_RUN_BYTES` (8 MiB
+   raw per run) bounds every body that can be parsed into it. Say that in the migration comment.
+2. **The extraction — accept the shape, correct the oracle claim.** `handler_test.ts` (7 cases, dead
+   session and one-source-fails among them) is the oracle; the frozen references are not — they pin
+   `parseAssignments`/`parseDashboard`, untouched by the extraction. **R7** is what it still misses.
+3. **The edge body ceiling — finding; here is the offline answer.** Measure it at Task 5 step 9, where the
+   controller has staging and a session: POST one padded body at the cap and record the status and whether
+   it reached the function. Name the fallback now (if the platform refuses below the cap, `MAX_BYTES` drops
+   to 1 MiB and `MAX_POST_BYTES` with it) and give the device a runtime one: a 413 mid-run is already `the
+   service refused`, so halve the batch and continue.
+4. **H6's wording — accept.** It is Q6's, marked Quinn's and the lawyer's, and H6 lands after them.
+5. **Nothing executed — accept.** Every compile claim here is read, not observed, as before.
+
+### New findings
+
+**R1 — the pause's exit is a command the console cannot call, and the card names a screen that does not exist.**
+Task 8 step 5 (plan:3577-3592) closes `login:<source>` inside `onboarding::store_credentials`
+(`app/src/onboarding.rs:850`) — registered **only in the wizard window** (`app/src/main.rs:107`), absent from the
+console's list (`app/src/main.rs:186`), called only by the wizard's panel-5 `storeCredentials()`
+(`app/static/console.js:1485-1497`) on a vault that does not exist yet. There is no post-onboarding path: Settings
+has ten rows and none is a login (`app/static/index.html:156-166`), adopt opens the profile directly
+(`console.js:1345-1352`), "Add" starts the wizard on a *new* vault. So the card's *"Open Settings and save the
+password again"* (plan:3561) is false, and a student's only exit is closing the card by hand via
+`commands::close_info` (`app/src/commands.rs:246`) — which un-pauses with the same wrong password, the loop Q2
+exists to prevent. 15(d) would still pass, because a scratch profile is made *by the wizard*. **Fix:** (a) a
+logins row in the console plus the command in the second handler (a new command, so Quinn's call and the counts
+move); (b) compare the credential's `LastWritten` with the card's `opened_at` in `collect_cloud` (C2's third
+option, no app change); or (c) rule that closing the card *is* the exit, and say so in the card body.
+
+**R2 — `MAX_POST_BYTES` disagrees with the derivation its own test pins, and the factor is wrong.** plan:2409 sets
+`16 << 20` (16,777,216); plan:2267 asserts `(MAX_RUN_BYTES * 4) / 3 + (1 << 20)` = 12,233,386, so it fails the day
+it is written — I6's defect one task over. `readJson` measures the JSON **text** (`_shared/http.ts:49-52`) and a
+UTF-8 page travels JSON-escaped, every double quote and escape character doubling: worse than base64's 4/3,
+approaching 2x. 16 MiB is right; pin `MAX_POST_BYTES == MAX_RUN_BYTES * 2` and say escaping. Also `readJson(req,
+MAX_POST_BYTES)` (plan:2818) names a constant `protocol.ts` does not export, the reader test compares only the
+other three, and `a_results_batch_over_the_cap_is_a_413_not_a_500` is prose (plan:595) in no task; and
+`check_post`'s trim (plan:2438-2440) calls a fetched page `too_large` to fit a batch, losing a book — send two
+posts.
+
+**R3 — the session report cannot be built on ureq 3.4.0.** plan:1994-2000 gives `ObservedCookie` an `expires_at`
+"parsed once ... through the same `ureq::Cookie::parse` the replay uses — never re-derived by hand", and
+plan:2050-2058, both new tests and `observe`'s pruning depend on it. `ureq::Cookie` is a newtype over
+`cookie_store::Cookie` with a private inner; its public surface is `parse`, `name`, `value` and `Display` as
+`name=value` (`ureq-3.4.0/src/cookies.rs:44-92`), `as_cookie_store` being `#[cfg(test)]`. `Expires`/`Max-Age` are
+unreadable, and `cookie_store` as a dependency is refused by this stream's own `dependency_boundary.rs` case.
+**Fix, pick one:** (a) parse them off the raw line under a stated rule (RFC 6265 5.2.1/5.2.2) and test it — twenty
+lines, and the module already owns raw lines; (b) let a throwaway jar be the count's truth and drop
+`earliest_expiry`/`session_cookies`, the bare count I11 rejected; (c) the review's fallback, one extra round trip
+for VHL. (a) keeps 15(c) meaningful.
+
+**R4 — the step clock is a per-request bound under a new name.** plan:2429-2431 hands each request
+`budget.remaining()` "clamped at `STEP_TIMEOUT`", plan:2507 per request: min(run-remaining, 60 s) **per hop**, so
+six hops of 59 s is a six-minute step — C4's arithmetic one level down — and plan:2516's "the whole chain is
+bounded by `STEP_TIMEOUT`" has no mechanism. Both new tests pass a *run* deadline, so neither tests the step
+bound. **Fix:** a second deadline in `perform` at `now + STEP_TIMEOUT`, passing `min(step_remaining,
+budget.remaining())`, and a chain test with a far run deadline.
+
+**R5 — I6's split truncates `relay.rs` at Task 1's own test-only row.** plan:1617 counts `.expose()` over
+`src.split("#[cfg(test)]").next()`; plan:1279 puts `#[cfg(test)] fn extra_source` mid-file, before
+`substitute_one` exists. The head holds no `.expose()`: the assertion reads 0, fails, and the obvious fix is to
+change the number — the defeat I6 exists to prevent. The same split is
+`the_engine_holds_no_portal_url_and_no_login_flow`'s (plan:3788), so that scan would read only the head of the one
+file that could hold a portal URL. **Fix:** split on the attribute *followed by* `mod tests`.
+
+**R6 — the composite driver has no interface to carry itself.** `PlanCtx`, `PlanStep`, `Parsed` and `RunRow` are
+consumed (plan:2880, :2897, :3189, :3223-3228) and declared nowhere — M5's shape, fixed in Rust and reintroduced
+in TS. It bites: `next(ctx, results)` carries no batch budget, yet plan:3209 has zyBooks "batched at whatever the
+composite driver's round-robin left of `MAX_BATCH`" — so either the module is told (and `PlanCtx` must say so) or
+the driver trims steps a module already advanced past, silently dropping a book — a missing assignment no warning
+reports. And `parseArrival` (plan:2880-2886) switches on `source === "zybooks"`, against the rule stated three
+times (plan:376, :2834, :3231) that `handler.ts` names no source. **Fix:** declare `PlanCtx` with the budget and
+give each module a `parse(result)` the driver calls.
+
+**R7 — the extraction leaves the try/catch behind, and that is where the warning bytes are decided.** The three
+functions (plan:613-621) are the happy path. `ingestHandler`'s per-source `try/catch` (`handler.ts:135`,
+`:168-176`) turns `NotLoggedIn` into `session invalid (...)` and anything else into `parse failed (...)`,
+**discards that source's `own` while keeping the proposals already pushed**, and skips the `0 assignments parsed`
+line. Incrementally a dead session on book 7 of 12 must do all of that across round trips, and must decide whether
+it is `reauth` (I12) or a warning; Task 5 says neither. **Fix:** extract the catch as a fourth function and state
+the rule — the equality test cannot see it.
+
+**R8 — `parsed`'s declared shape is not what the code writes, and its guard has no length rule.** The column
+defaults to `{assignments, warnings, proposals}` (plan:2724) while the handler accumulates `parsed.own[source]`
+(plan:2877, :3005, :3034). `checkCursor` caps strings at 4 KiB; `checkParsed` is only "rows only, never bytes" —
+and a `parse failed (<vendor message>)` warning can quote page text, the one way something page-shaped reaches the
+column and then `state/runner-log.md`. Give `checkParsed` the same cap; `parsed_holds_only_parsed_rows`
+(plan:2723) is named in the migration and is in no task.
+
+**R9 — I3's scrub never runs on the body that most needs it.** plan:2545-2552 scrubs, then chooses UTF-8 or
+`body_b64`. A body that is not valid UTF-8 has no `String` to scrub and travels base64 unscrubbed — a vendor
+re-serving a login page in a legacy encoding is I3's own case. **Fix:** scrub the bytes before the decode
+decision, or refuse such a body when the request carried a secret.
+
+**R10 — three residual cites.** Q6's row (plan:282) still says `privacy.html:37` and `:22` where M2 corrected the
+rest to `:38` and `:24`; two of the three new extraction cites are wrong (`pickZybooks`'s loop body is
+`handler.ts:84-109`, not `:78-110`; the tail is `:177-182`, not `:179-186`; the VHL arm starts at `:137`); and
+`parse_vhl.ts:81` is the `sections` extraction — the lookups are `:99-101`.
+
+### Security after the round
+
+`check_host` still precedes `fill`, the second check on `filled.url` closes I4, the pointer redaction closes I5
+without costing the BOM, `scrub` grows the fourth encoding VHL's form POST needed, and both placeholder namespaces
+keep a test each. No password reaches a log, a card, a warning or a non-allow-listed host on any path I can trace:
+one `.expose()`, error text through a four-form `scrub`, no column for one. Two narrow residues — **R9** and
+**R8**; raw bodies survive nowhere else (`checkCursor` bans them, `parsed` holds rows, `done` is assembled from
+rows, nothing logs a body). **R5** is a security finding too.
+
+## Re-review after fix round 2 (2026-09-17)
+
+**Execute after fix round 3.** One gap: **R7**'s "already-parsed items are discarded too" clause has
+no mechanism and no test. Everything else — both rulings, R1-R6, R8-R10, and concern 3 — is resolved
+as written and checks out against the code.
+
+- **R-C5-plan-4 (R1) — resolved.** `commands::save_portal_login` (plan:3968-3980) is registered by
+  H11 (plan:1058) in the **console** list only (`app/src/main.rs:186`, confirmed 43 entries today by
+  parsing both `generate_handler!` lists); it closes `login:<source>` for the exact `source` argument
+  it was called with, so a save for A cannot close B's card. The row lands in `app/static/index.html`,
+  which only the console window (an existing vault) renders — confirmed today's Settings has ten rows
+  and none is a login (`index.html:156-166`). H11's recount is right and stated as after C1b: `main`
+  is 30/43 today (verified), C1b's own plan computes 29/42 (`docs/plans/2026-09-17-c1b-sign-in-plan.md:79`,
+  "29+42, 61 distinct"), and C5 adds one console-only command to reach 29/43.
+- **R-C5-plan-5 (R3) — resolved.** Checked against the vendored `ureq-3.4.0/src/cookies.rs`:
+  `Cookie`'s public surface really is `parse`/`name`/`value`, `as_cookie_store` really is
+  `#[cfg(test)]`. `Expires`/`Max-Age` are parsed off the raw line under RFC 6265 §5.2.1/§5.2.2,
+  `Max-Age` winning, unreadable ignored, case-insensitive, tested five ways (plan:2054-2075). `cookie_store`
+  is forbidden by a case **Task 1 itself adds** to `dependency_boundary.rs` (plan:1526) — that file
+  carries no such case today, so "this stream's own case" correctly names the plan's own addition.
+- **R2 — resolved.** `MAX_POST_BYTES = MAX_RUN_BYTES * 2` = 16 MiB (plan:2573), matching `readJson`'s
+  actual behaviour (`cloud/supabase/functions/_shared/http.ts:48-52`: measures `text.length`, throws
+  "body over N characters" — plan:2978-2988 tests exactly that string). `protocol.ts` exports both
+  constants; `check_post` is replaced by `split_post`, which posts overflow as a further call.
+- **R4 — resolved.** `StepClock` (plan:2597-2616) opens at `perform`'s step 0; every request gets
+  `min(step.remaining(), budget.remaining())` (plan:2703); every redirect hop re-checks it; the chain
+  test now holds the run deadline open (10 min) and only the step deadline (250 ms) can stop it.
+- **R5 — resolved.** `split_before_test_module` (plan:1378) splits on the attribute followed by
+  `mod tests`, used by both the `.expose()` count (plan:1720) and the login-flow scan (plan:4186).
+- **R6 — resolved.** `PlanCtx`, `PlanStep`, `Parsed`, `RunRow`, `SourcePlan` all declared in
+  `plans/mod.ts` (from plan:3533); `PlanCtx.budget` carries what the round-robin left, and
+  `parseArrival` dispatches through `SOURCE_PLANS[source].parse` rather than a literal source name.
+- **R7 — not fully resolved.** See **S1**.
+- **R8 — resolved.** The column default and `RunRow.parsed` both say `{assignments, own, proposals}`
+  (plan:2938, :3573); `checkParsed` gets `checkCursor`'s 4 KiB cap and a real test (plan:2996-3007).
+- **R9 — resolved.** The scrub now runs over the raw bytes, per secret, per `scrub`'s four encodings,
+  before the UTF-8/base64 decode decision.
+- **R10 — resolved.** All four citations corrected (plan:292 privacy.html; plan:634, :641 handler.ts;
+  parse_vhl.ts per plan:4851).
+- **Concern 3 (edge body ceiling) — resolved.** Measured at Task 5 step 9 (plan:3076) by the
+  controller on staging; fallback named (`MAX_BYTES` 2 MiB → 1 MiB, `MAX_POST_BYTES` with it), and
+  the device gets a runtime halve-and-continue on a 413 (plan:3082).
+
+### New findings
+
+**S1 — R7's hardest clause has no mechanism and no test.** The rule (plan:655-666) requires that when
+a source throws on round trip N, its items from round trips 1..N-1 — already merged into
+`relay_runs.parsed` — are **removed**. But `RunRow.parsed.assignments` is one flat, unsourced
+`Assignment[]` (plan:3573), and `Parsed.items` (plan:3562) carries no per-arrival source or index tag,
+so nothing in the merge — described only as "`appendParsed` whatever it parsed" (plan:3091) — can
+identify which entries belong to the failing source to remove them. `own` got exactly this fix
+(`Record<string, string[]>`, plan:2924) but `assignments` did not. `finishRun`'s own comment
+(plan:3172-3178) needs the same partition to "concatenate by `PORTAL_SOURCES` order and, within a
+source, by arrival index," which a flat array also cannot do once two sources' round trips interleave.
+The one retirement test, `a source that fails retires and the other finishes` (plan:3319-3323), fails
+VHL on its very first step (`vhlLoginRejectedTwice()`) — before it has contributed any item — so it
+cannot and does not exercise "six books' rows do not survive book 7," the rule's own example. The R7
+resolution row's claim that "Task 5 asserts each clause" (plan:4848) is not true for this one.
+**Fix:** partition `parsed` the same way `own` already is — e.g. `assignments: Record<string,
+Assignment[]>` — flattened into `PORTAL_SOURCES` + arrival order only by `finishRun`, and add a test
+where a source succeeds on an earlier round trip and fails on a later one.
+
+## Re-review after fix round 3 (2026-09-17)
+
+**Execute.** S1 is resolved as written. One new finding, **T1**, is minor, pre-existing (not a
+round-3 regression), and self-correcting under concern 5's own tolerance for a step that will not
+compile — it does not change the verdict.
+
+1. **S1 resolved.** `assignments`, `own` and `proposals` are each `Record<string, …>` (plan:3690-92,
+   spec:421), `Parsed.source` is set by `parseArrival`/`sourceFailure` from their own argument
+   (plan:3668-70). `appendParsed`'s rule is explicit: append under the arriving source; on `failed`,
+   `delete parsed.assignments[source]` and `delete parsed.own[source]`, **keep**
+   `parsed.proposals[source]` (plan:3111-14), then record the one failure line. Keeping a retired
+   source's proposals is argued — "what `ingestHandler`'s own catch does" — and is exactly R7's
+   clause. `finishRun` is the only flattener, `PORTAL_SOURCES` order then arrival order by
+   construction (plan:3205-18). Column default and `RunRow` both say `{}/{}/{}`  in plan (plan:2951)
+   and spec (spec:421). The R7 resolution row is corrected on the record (plan:4971). Exit-gate 10b
+   restates the partition and names the new test (plan:4680-85).
+2. **The three tests hold up.** The retirement test scripts six zyBooks rows across trips 1-2, book
+   7 failing `success: false` twice on trip 3 (so `failed`, not `reauth`), VHL finishing, and asserts
+   the reply is all-VHL, one zyBooks warning (the failure, no `0 assignments parsed`), and zyBooks'
+   pre-failure proposals survive (plan:3378-3402). The structural guard fails on a second flattener
+   two ways — a DB scan asserting neither map is an array, and a source-text count of
+   `.assignments.push(` pinned at 1 (plan:3408-19). The twelve-book test's new assertion requires the
+   actual uid-source sequence equal its own `PORTAL_SOURCES`-index-sorted self, on top of the
+   pre-existing full-equality-to-one-shot check that already pins arrival order within a source.
+3. **Consistent.** `finishRun`'s `if (!(name in run.parsed.own)) continue` (plan:3211) mirrors
+   `ingestHandler`, which only ever iterates `body.sources`: a source never sent is never touched and
+   produces no warning, same as one absent from `parsed.own`. A source that *was* processed but had a
+   clean parse (no `own`, `items.length > 0`) also reports nothing, by the same handler.ts logic —
+   "reports nothing" is the endpoint's own behavior, not new.
+4. **Mostly consistent — see T1.** Task 6/7's `SourcePlan.parse(ctx, result): Parsed` matches the new
+   interface everywhere `parseArrival` calls it. Task 8/9 never see `RunRow.parsed` at all — they see
+   only `finishRun`'s already-flattened `{assignments, warnings, proposals}` over the wire, so the
+   partition is correctly invisible past Task 5.
+5. **Nothing new.** No placeholder, no name of a person, machine or credential in the round-3 diff.
+
+### New findings
+
+**T1 — Task 6's own composite-driver test doesn't fit the `Parsed` shape S1 just declared.**
+`courseworkPlan.next(...)` returns a `PlanResult`, whose `parsed?: Parsed` (plan:3616) is the same
+per-**one**-source interface S1 gave `own: string[]` (plan:3668-72). But
+`a source that fails on its first step retires and the other finishes` (plan:3375, untouched by this
+diff) asserts `r.parsed.own.vhl` — treating `own` as `Record<string, string[]>`, `RunRow.parsed.own`'s
+shape, not `Parsed.own`'s. Either the composite `next()` needs its own return shape or this test is
+stale from before `own` moved onto per-source `Parsed`. Pre-existing, not a round-3 regression — a
+type error Task 6 hits at compile time, concern 5's own "expected traffic" — so it does not change
+the verdict, but Task 6 should not start without deciding which shape `next()` actually returns.
