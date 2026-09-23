@@ -346,9 +346,14 @@ anything the student declined — is **never** proposed (C5). The first rule tha
 matching is on the title with surrounding punctuation trimmed, case-insensitive unless stated.
 
 0. **Not proposed at all.** The title contains a word or phrase that marks the student's own work
-   time — `study`, `homework`, `hw`, `review`, `prep`, `tutoring`, `work on`, `focus` — or equals
-   the name of a `config/planning.yaml` `recurring:` entry (already budgeted in hours; counting it
-   again as busy time would double it). These are piece 3's `task-block` territory.
+   time — `study`, `studying`, `homework`, `hw`, `review`, `prep`, `tutoring`, `focus`, `work on`,
+   `working on`, `work session`, `work block`, `work time` — or equals the name of a
+   `config/planning.yaml` `recurring:` entry (already budgeted in hours; counting it again as busy
+   time would double it). These are piece 3's `task-block` territory. **Ruling (fix round 1, I3):**
+   "Work session", "Work block", "Work time", "Work on …" and "Working on …" are the student's own
+   study time, in any spacing and any case — never kind `work`, and never proposed as a commitment.
+   Rule 4's `work` is reserved for a job shift: a bare "Work", "Shift", "Work @ <place>" or
+   "<Employer> shift". When unsure, not `work`.
 1. **Routine.** The whole title is one of `wake`, `wake up`, `get up`, `alarm` → wake side; or
    `bed`, `bedtime`, `go to bed`, `sleep`, `lights out` → bed side. Whole-title only, so "Sleep
    study" is not a routine. A `sleep` series that crosses midnight is both: its start is the bed
@@ -360,10 +365,15 @@ matching is on the title with surrounding punctuation trimmed, case-insensitive 
    it is empty, or a section word — `lab`, `laboratory`, `lecture`, `lec`, `recitation`, `rec`,
    `discussion`, `disc`, `seminar`, `section`, `sec`, `studio`, `class` — optionally with a section
    number, or words that all appear in that course note's own `name`/`title` ("CS 100 – Intro to
-   Computer Science"). Separators between code and remainder are space, `-`, `–`, `:`, `(`.
+   Computer Science"). Separators between code and remainder are space, `-`, `–`, `:`, `(`, `.`.
    `lab`/`laboratory` → `lab`; otherwise `class`; `course` = the course's slug. A title that starts
    with a known code but continues with anything else ("CS 100 TA hours") is not a class and falls
-   through to rules 4–6.
+   through to rules 4–6. A section word's own trailing token counts only when it is a section
+   number, not a second word: it holds a digit, or is a single letter — "CS 100 Lab 01" and "CS 100
+   Sec 1" are a class, "CS 100 Lab Hours" and "CS 100 Class Party" are not. **Ruling (fix round 1,
+   I4):** a remainder that is a bare section designator, with no leading section word, is also a
+   class — `-001`, ` 001`, `.001`, `001 LEC`, `LEC`, `SEC 1`. A lab designator such as `LAB`, `L01`
+   or `-L01` makes it a lab instead.
 4. **Work.** The title starts with the word `work`, or has the word `shift` → `work`.
 5. **Club.** The title has the word `club`, `society`, `team`, `practice`, `rehearsal` or `chapter`
    → `club`.
