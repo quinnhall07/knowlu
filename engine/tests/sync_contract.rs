@@ -1625,13 +1625,14 @@ fn card_rels_on_the_note(vault: &Path) -> Vec<String> {
 
 #[test]
 fn a_card_another_desktop_filed_is_never_settled_here_and_no_tombstone_goes_out_for_it() {
-    // N16 (load-bearing), two desktops end to end through `build_push`. A card is a note, so the
-    // card desktop B files travels to desktop A like any other note — carrying the same
-    // `created_by: agent:knowlu.sync` A's own cards carry. A's stale-card settle must touch only the
-    // cards A itself filed (a `create` record for the card's id in A's own journal, under A's own
-    // device name): otherwise A archives its copy of B's still-open card, A's next push carries a
-    // tombstone for it, and B's own card is archived on B — the conflict it held is then lost on
-    // both desktops with nothing left to raise it again.
+    // N16 (load-bearing), two desktops end to end through `build_push`. A card desktop B files
+    // never leaves B (R-C3′-exec-18, N18) — but a copy can still sit in A's vault, delivered by a
+    // build from before that rule, and it carries the same `created_by: agent:knowlu.sync` A's own
+    // cards carry. A's stale-card settle must touch only the cards A itself filed (a `create` record
+    // for the card's id, under `sync::ACTOR`, in A's own journal): otherwise A archives its copy of
+    // B's still-open card, and — before R-C3′-exec-18 — A's next push carried a tombstone for it and
+    // B's own card was archived on B, the conflict it held lost on both desktops with nothing left
+    // to raise it again.
     let a = fixture_with_id("n16-desk-a");
     let b = fixture_with_id("n16-desk-b");
     let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
@@ -1648,11 +1649,16 @@ fn a_card_another_desktop_filed_is_never_settled_here_and_no_tombstone_goes_out_
     let b_card = card_rels_on_the_note(&b);
     assert_eq!(b_card.len(), 1, "{b_card:?}");
     let b_card = b_card[0].clone();
-    // 2. A pulls B's edits (A's are later, so A files nothing) and B's card, which lands as a note.
+    // 2. A pulls B's edits (A's are later, so A files nothing). B's card is not in B's push at all
+    //    (R-C3′-exec-18) — so a copy is delivered to A by hand, exactly as a build from before that
+    //    rule delivered one, to prove A still leaves a card it did not file alone.
     let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let b_card_id = card_id(&b, &b_card);
+    assert_eq!(traces_of(&page, &b_card_id, &b_card), Vec::<String>::new(), "B's push carried its card");
     let r2 = deliver(&a, &page, &mut ja);
-    assert_eq!((r2.cards, r2.notes_written), (0, 1), "{r2:?}");
-    assert!(a.join(&b_card).exists(), "B's card arrived on A as a note");
+    assert_eq!((r2.cards, r2.notes_written), (0, 0), "{r2:?}");
+    assert!(!a.join(&b_card).exists(), "B's card never reached A through the account");
+    std::fs::copy(b.join(&b_card), a.join(&b_card)).expect("an old build's copy of B's card");
     let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
     let _ = deliver(&b, &page, &mut jb);
     // 3. B's student sets `importance` by hand; A pulls it. A files a card of ITS OWN for the new
@@ -1663,10 +1669,12 @@ fn a_card_another_desktop_filed_is_never_settled_here_and_no_tombstone_goes_out_
     let r3 = deliver(&a, &page, &mut ja);
     assert_eq!(r3.cards, 1, "{r3:?}");
     assert!(a.join(&b_card).exists(), "A settled its copy of a card B filed: {r3:?} {:?}", card_rels_on_the_note(&a));
-    // 4. A's next push carries no tombstone for B's card, and B's own card survives B's pull.
+    // 4. A's next push carries nothing about B's card — no tombstone, no row — and B's own card
+    //    survives B's pull.
     let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
     let tombstones: Vec<&str> = page.notes.iter().filter(|n| n.text.is_none()).map(|n| n.path.as_str()).collect();
     assert!(!tombstones.contains(&b_card.as_str()), "a tombstone went out for B's card: {tombstones:?}");
+    assert_eq!(traces_of(&page, &b_card_id, &b_card), Vec::<String>::new(), "A's push carried B's card");
     let r4 = deliver(&b, &page, &mut jb);
     assert_eq!(r4.moved, 0, "{r4:?}");
     let meta = knowlu_engine::ids::read_meta(&b.join(&b_card)).expect("B's own card is still live on B");
@@ -1760,5 +1768,237 @@ fn a_clean_apply_on_a_carded_field_settles_the_card_that_offered_an_older_value(
     assert_eq!(importance_and_effort(&dir).0, Some(7));
     assert_eq!(live_cards_on_the_note(&dir), vec![], "the card offering B's older 5 over C's later 7 is settled: {r2:?}");
     assert_eq!(archived_cards_on_the_note(&dir), 1, "settled into archive/, never unlinked");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The breaker fix (re-review round 5): (i) N18, (iii) N19 (R-C3′-exec-18).
+// ---------------------------------------------------------------------------
+
+/// The `id:` a card note carries.
+fn card_id(vault: &Path, rel: &str) -> String {
+    let meta = knowlu_engine::ids::read_meta(&vault.join(rel)).expect("the card");
+    knowlu_engine::yaml::get(&meta, "id").and_then(knowlu_engine::yaml::text).expect("a card has an id")
+}
+
+/// Everything in one pulled page that is ABOUT the card `card_rel`: a note row (live or tombstone)
+/// under its name, in `approvals/` or `archive/`, and any record carrying its `id` or naming its
+/// file. A sync card never leaves its device (R-C3′-exec-18), so for one this is always empty.
+fn traces_of(page: &sync::Pulled, card_id: &str, card_rel: &str) -> Vec<String> {
+    let stem = Path::new(card_rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let mut out: Vec<String> = page.notes.iter()
+        .filter(|n| n.path.contains(&stem))
+        .map(|n| format!("note {} ({})", n.path, if n.text.is_some() { "live" } else { "tombstone" }))
+        .collect();
+    for (_, record) in &page.records {
+        let body = knowlu_engine::ledger::dumps_value(&serde_json::Value::Object(record.clone()));
+        if record.get("id").and_then(|v| v.as_str()) == Some(card_id) || body.contains(&stem) {
+            out.push(format!("record {body}"));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_sync_card_never_leaves_its_device_and_a_decision_on_a_copy_never_reaches_it() {
+    // (i), probe N18 — two desktops end to end through `build_push` and the deck's own
+    // `process_approvals`. A sync card's `from` is its own device's withheld value, so it can only
+    // ever be answered there. Before R-C3′-exec-18 the card travelled as a note: on the other
+    // desktop its `to` is that desktop's own value, so approving it there took `apply_amendment`'s
+    // already-applied branch, and the `approved`/`executed` (or `rejected`) status records travelled
+    // back and killed the REAL card on the filing desktop without applying it — silent divergence
+    // after an explicit decision. Now nothing about a sync card goes to the account: not its note,
+    // not its settle, not a status change, not a tombstone.
+    for approve in [true, false] {
+        let tag = if approve { "approve" } else { "reject" };
+        let a = fixture_with_id(&format!("n18-{tag}-desk-a"));
+        let b = fixture_with_id(&format!("n18-{tag}-desk-b"));
+        let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+        let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        let now: jiff::civil::DateTime = "2026-09-22T12:00".parse().unwrap();
+        let me = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        let _ = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+        let _ = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+        by_hand(&a, &mut ja, &[("importance", "4")]);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        by_hand(&b, &mut jb, &[("importance", "5")]);
+        // B's later 5 comes down to A: A files a card and withholds 5.
+        let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+        let r1 = deliver(&a, &page, &mut ja);
+        assert_eq!(r1.cards, 1, "{tag}: {r1:?}");
+        let a_card = card_rels_on_the_note(&a);
+        assert_eq!(a_card.len(), 1, "{tag}: {a_card:?}");
+        let a_card = a_card[0].clone();
+        let a_card_id = card_id(&a, &a_card);
+        let a_card_text = knowlu_engine::pystr::read_text(&a.join(&a_card)).expect("A's card");
+        // 1. A's push carries nothing about the card, and B never gets a copy through the account.
+        let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+        assert_eq!(traces_of(&page, &a_card_id, &a_card), Vec::<String>::new(), "{tag}: A's push carried its card");
+        let r2 = deliver(&b, &page, &mut jb);
+        assert!(card_rels_on_the_note(&b).is_empty(), "{tag}: the card reached B: {r2:?}");
+        // 2. A copy reaches B anyway — as a build from before this rule delivered one — and the
+        //    student decides THAT copy on B, through the deck's own path.
+        std::fs::copy(a.join(&a_card), b.join(&a_card)).expect("an old build's copy");
+        knowlu_engine::write::write_literals(
+            &b, &a_card, &[("status".to_string(), (if approve { "approved" } else { "rejected" }).to_string())],
+            &me, &mut jb, &Default::default(),
+        ).expect("the student's decision on B");
+        let _ = knowlu_engine::approvals::process_approvals(&b, today, now, &me, &mut jb);
+        assert!(card_rels_on_the_note(&b).is_empty(), "{tag}: the deck settled the copy on B");
+        // 3. B's push carries nothing about the copy: no note in approvals/ or archive/, no status
+        //    record, no settle, no tombstone.
+        let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+        assert_eq!(traces_of(&page, &a_card_id, &a_card), Vec::<String>::new(), "{tag}: B's push carried the copy's decision");
+        let r3 = deliver(&a, &page, &mut ja);
+        // 4. A's card is untouched and still live, and A's own approvals pass leaves it pending.
+        assert_eq!(knowlu_engine::pystr::read_text(&a.join(&a_card)).ok(), Some(a_card_text.clone()), "{tag}: {r3:?}");
+        let res = knowlu_engine::approvals::process_approvals(&a, today, now, &me, &mut ja);
+        assert!(res.executed.is_empty() && res.rejected.is_empty(), "{tag}: {:?} {:?}", res.executed, res.rejected);
+        let meta = knowlu_engine::ids::read_meta(&a.join(&a_card)).expect("A's card is still live");
+        assert_eq!(knowlu_engine::yaml::get(&meta, "status").and_then(knowlu_engine::yaml::text).as_deref(), Some("pending"), "{tag}");
+        assert_eq!(importance_and_effort(&a).0, Some(4), "{tag}: still withheld pending A's own card");
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+}
+
+/// Every record this vault has journalled so far, re-labelled from `from` to `to` — what the
+/// journal looks like when the machine was called `to` when it wrote them. Rewritten on the temp
+/// copy only, one record per line through `ledger::dumps_value`, because `KNOWLU_DEVICE` is
+/// process-global and every other test in this file reads it in parallel.
+fn relabel_journal_device(vault: &Path, from: &str, to: &str) {
+    for entry in std::fs::read_dir(vault.join("state").join("journal")).expect("a journal").flatten() {
+        let path = entry.path();
+        let text = std::fs::read_to_string(&path).expect("a journal file");
+        let mut out = String::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let mut record: serde_json::Value = serde_json::from_str(line).expect("a record");
+            if record.get("device").and_then(|v| v.as_str()) == Some(from) {
+                record["device"] = serde_json::json!(to);
+            }
+            out.push_str(&knowlu_engine::ledger::dumps_value(&record));
+            out.push('\n');
+        }
+        std::fs::write(&path, out).expect("the relabelled journal");
+    }
+}
+
+#[test]
+fn a_card_filed_before_this_machine_was_renamed_is_still_its_own_to_settle() {
+    // (iii), probe N19. "A card this device filed" was keyed on the create record's `device` equal
+    // to `device_name()`, so renaming the machine — or moving the vault to a new PC — orphaned
+    // every card filed before: never settled, left offering a value neither desktop holds. The key
+    // is now a `create` record under `sync::ACTOR` in this vault's own journal: `build_push` never
+    // sends one and `apply` refuses a pulled one, so any such record was written right here.
+    let dir = fixture_with_id("renamed-machine");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    let set = |old: serde_json::Value, new: serde_json::Value, ts: &str| {
+        foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", old, new, ts)
+    };
+    by_hand(&dir, &mut journal, &[("importance", "4")]);
+    let r1 = sync::apply(&dir, &pulled(vec![set(serde_json::json!(2), serde_json::json!(5), "2036-09-17T10:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+    assert_eq!(r1.cards, 1, "{r1:?}");
+    // The machine is renamed: everything so far was journalled under the old name.
+    relabel_journal_device(&dir, &knowlu_engine::journal::device_name(), "OldName");
+    journal.invalidate();
+    let r2 = sync::apply(&dir, &pulled(vec![set(serde_json::json!(5), serde_json::json!(6), "2036-09-17T11:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+    assert_eq!(
+        live_cards_on_the_note(&dir),
+        vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 6}}))],
+        "the card filed under the old name is settled and refiled, never left beside the new one: {r2:?}",
+    );
+    let r3 = sync::apply(&dir, &pulled(vec![set(serde_json::json!(6), serde_json::json!(4), "2036-09-17T12:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+    assert_eq!(live_cards_on_the_note(&dir), vec![], "converged: no card left offering 5 or 6: {r3:?}");
+    assert_eq!(archived_cards_on_the_note(&dir), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_record_under_the_sync_actor_is_refused_and_never_journalled() {
+    // (iii)'s hardening, in the wedge principle's style. `sync::ACTOR` records are what `apply`
+    // writes on THIS device, and `build_push` never sends one — so a pulled record under that actor
+    // is not one any desktop's sync sent. Refused with a named line before the journal append, so a
+    // `create` under `ACTOR` in this journal always means "filed here" (the ownership key above).
+    let dir = fixture_with_id("pulled-sync-actor");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", sync::ACTOR, "local-runner");
+    spec.id = Some("task_0000000001");
+    spec.field = Some("importance");
+    spec.old = serde_json::json!(2);
+    spec.new = serde_json::json!(9);
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    let bad = knowlu_engine::journal::make_record(spec).expect("a record");
+    let good = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "progress", serde_json::json!(0), serde_json::json!(10), "2026-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![bad, good], vec![]), &ctx, &mut journal, "2026-09-22".parse().unwrap());
+    assert_eq!((report.refused, report.records), (1, 1), "{report:?}");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("sync actor")),
+        "the refusal is a named line: {:?}", report.warnings,
+    );
+    journal.invalidate();
+    assert!(
+        !journal.read(None, None).iter().any(|r| r.get("actor").and_then(|v| v.as_str()) == Some(sync::ACTOR)
+            && r.get("device").and_then(|v| v.as_str()) == Some("OtherDesktop")),
+        "a pulled sync-actor record reached the journal",
+    );
+    assert_eq!(importance_and_effort(&dir).0, Some(2), "and it touched nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cursor_from_before_the_rule_never_carries_or_tombstones_a_sync_card() {
+    // (i), path 5. A cursor written before R-C3′-exec-18 can already remember a sync card's path,
+    // from a push that sent the card as a note. From then on the card must still never go out: not
+    // as a row while it is live (its path is dropped from the cursor instead), and not as a
+    // tombstone once the deck settles it into `archive/` (a path a sync card has had is never
+    // tombstoned), even when the old cursor is the one the push starts from.
+    let dir = fixture_with_id("legacy-cursor-card");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    by_hand(&dir, &mut journal, &[("importance", "4")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // Later than this device's edit, earlier than the approval below — so the approval's own record
+    // falls after everything the old cursor had pushed.
+    let t2 = knowlu_engine::journal::now_ts(None);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let r = sync::apply(&dir, &pulled(vec![foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), &t2)], vec![]), &ctx, &mut journal, today);
+    assert_eq!(r.cards, 1, "{r:?}");
+    let card = card_rels_on_the_note(&dir)[0].clone();
+    let id = card_id(&dir, &card);
+    // The old build's cursor: everything on disk as pushed, the card's path under a stale hash, as
+    // it was when that build sent it before the card last changed.
+    let (_, mut legacy) = sync::build_push(&dir, &Cursor::default(), "acct-test", &mut journal);
+    legacy.notes.insert(card.clone(), "0".repeat(64));
+    let (batch, next) = sync::build_push(&dir, &legacy, "acct-test", &mut journal);
+    let rows: Vec<String> = batch.notes.iter().filter_map(|n| n["path"].as_str().map(str::to_string)).collect();
+    assert!(!rows.iter().any(|p| p.contains(&id) || p == &card), "the live card went out as a row: {rows:?}");
+    assert!(!next.notes.contains_key(&card), "the card's path stays in the cursor: {:?}", next.notes.keys().collect::<Vec<_>>());
+    // The student approves the card through the deck; it is executed and settled into archive/.
+    let me = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, &card, &[("status".to_string(), "approved".to_string())], &me, &mut journal, &Default::default()).expect("approve");
+    let now: jiff::civil::DateTime = "2026-09-22T12:00".parse().unwrap();
+    let res = knowlu_engine::approvals::process_approvals(&dir, today, now, &me, &mut journal);
+    assert_eq!(res.executed.len(), 1, "{:?}", res.executed);
+    assert!(card_rels_on_the_note(&dir).is_empty() && archived_cards_on_the_note(&dir) == 1);
+    // From the OLD cursor again: no tombstone for the card's old path, no row for its archive copy,
+    // no record about it — but the approved value on the task itself does travel.
+    let (batch, next) = sync::build_push(&dir, &legacy, "acct-test", &mut journal);
+    let stem = Path::new(&card).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let about_the_card: Vec<String> = batch.notes.iter().chain(batch.records.iter())
+        .map(knowlu_engine::ledger::dumps_value)
+        .filter(|row| row.contains(&stem) || row.contains(&id))
+        .collect();
+    assert_eq!(about_the_card, Vec::<String>::new(), "the settled card left this device");
+    assert!(!next.notes.keys().any(|p| p.contains(&stem)), "{:?}", next.notes.keys().collect::<Vec<_>>());
+    assert!(
+        batch.records.iter().any(|r| r["body"].as_str().is_some_and(|b| b.contains("\"field\": \"importance\"") && b.contains("\"new\": 5") && b.contains("task_0000000001"))),
+        "the approved value on the task travels like any edit",
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

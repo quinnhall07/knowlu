@@ -133,6 +133,14 @@ pub const PUSH_BUDGET_BYTES: usize = 3_145_728;
 /// `build_push` is what has to recognise it: every record under this actor is a mirror of something
 /// the account already holds, and pushing one would tell every other desktop about an event that
 /// only ever happened on this one (review S1, ruling R-C3′-plan-2).
+///
+/// **The amend cards it files never leave this device either** (R-C3′-exec-18, probe N18): a sync
+/// card's `from` is this device's withheld value, so it can only ever be answered here, and a copy
+/// anywhere else can only mislead — worse, its status records would travel back and settle the real
+/// card unanswered. See [`SyncCards`]. And because nothing under this actor is ever sent, a `create`
+/// under it in this vault's journal always means "filed on this vault's machine" — which is what
+/// `apply` keys card ownership on, so a machine rename cannot orphan a card (probe N19); a PULLED
+/// record under this actor is refused outright for the same reason.
 pub const ACTOR: &str = "agent:knowlu.sync";
 
 /// Generated, device-local, and **never synced**: it holds two integers, one timestamp and a map of
@@ -251,6 +259,94 @@ fn note_paths_and_unreadable(vault: &Path) -> (Vec<String>, std::collections::BT
     (out, unreadable)
 }
 
+/// Every sync amend card this vault holds — by `id` and by every path it has ever had — so
+/// `build_push` can keep each one, and everything about it, off the wire (R-C3′-exec-18, probe N18).
+///
+/// A card's existence and state could reach the account by five paths, and this is what closes
+/// each one in `build_push`:
+/// 1. **its note**, live in `approvals/` or settled into `archive/` — a note whose `created_by` is
+///    [`ACTOR`] is never sent as a row (the notes loop);
+/// 2. **its `create`**, under [`ACTOR`] — already never sent (the actor filter);
+/// 3. **its settle** by sync (`write::delete` under [`ACTOR`]) — already never sent (the actor
+///    filter);
+/// 4. **its status and its settle by anyone else** — the student's `approved`/`rejected`, the
+///    deck's `executed`, the cap's snooze, `process_approvals`' archive move — ordinary `set` and
+///    `delete` records under the student's or the runner's actor, each carrying the CARD's `id`:
+///    a record whose `id` is a sync card's, or whose path is one of its paths, is never sent (the
+///    records loop);
+/// 5. **its tombstone**, once it leaves `approvals/` — its paths are never recorded in the cursor
+///    (the notes loop drops them), and a path that is one of its paths is never tombstoned (the
+///    tombstone pass), so even a cursor from before this rule sends nothing.
+///
+/// What an approved card DOES to its target — `apply_amendment`'s write of the new value onto the
+/// task — is a record carrying the TASK's `id`, and travels like any other edit: that is how the
+/// other desktop converges.
+#[derive(Debug, Default)]
+struct SyncCards {
+    ids: std::collections::BTreeSet<String>,
+    paths: std::collections::BTreeSet<String>,
+}
+
+impl SyncCards {
+    /// From the notes on disk (every `approvals/` and `archive/` note whose frontmatter says
+    /// `created_by: agent:knowlu.sync` — a read, never a re-dump) and from this vault's journal
+    /// (every `create` under [`ACTOR`], or of a note whose frontmatter says so), then every path any
+    /// journalled record ever gave one of those ids: its `path`, and a move's or settle's `old`/`new`.
+    fn find(vault: &Path, on_disk: &[String], journal: &mut Journal) -> SyncCards {
+        let mut cards = SyncCards::default();
+        for rel in on_disk.iter().filter(|r| r.starts_with("approvals/") || r.starts_with("archive/")) {
+            let Ok(text) = crate::pystr::read_text(&vault.join(rel)) else { continue };
+            if let Some(id) = sync_card_note(&text) {
+                cards.paths.insert(rel.clone());
+                if let Some(id) = id {
+                    cards.ids.insert(id);
+                }
+            }
+        }
+        let records = journal.read(None, None);
+        let str_of = |r: &Record, k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        for record in &records {
+            let by_sync = str_of(record, "actor") == ACTOR
+                || record.get("new").and_then(|n| n.get("created_by")).and_then(Value::as_str) == Some(ACTOR);
+            if str_of(record, "op") == "create" && by_sync && !str_of(record, "id").is_empty() {
+                cards.ids.insert(str_of(record, "id"));
+            }
+        }
+        for record in &records {
+            if !cards.ids.contains(&str_of(record, "id")) {
+                continue;
+            }
+            for key in ["path", "old", "new"] {
+                let value = str_of(record, key);
+                if value.ends_with(".md") {
+                    cards.paths.insert(value);
+                }
+            }
+        }
+        cards
+    }
+
+    fn covers(&self, record: &Record) -> bool {
+        let str_of = |k: &str| record.get(k).and_then(Value::as_str).unwrap_or_default();
+        (!str_of("id").is_empty() && self.ids.contains(str_of("id"))) || self.paths.contains(str_of("path"))
+    }
+}
+
+/// `Some(the card's id, if it has one)` when `text` is a note whose frontmatter says
+/// `created_by: agent:knowlu.sync` — a sync amend card. A plain substring test first, so the
+/// frontmatter of a note that never mentions the actor is never parsed; then a real read of the
+/// frontmatter, so a body line that merely mentions it is not mistaken for one.
+fn sync_card_note(text: &str) -> Option<Option<String>> {
+    if !text.contains(ACTOR) {
+        return None;
+    }
+    let (meta, _) = crate::models::split_frontmatter(text).ok()?;
+    if crate::yaml::get(&meta, "created_by").and_then(crate::yaml::text).as_deref() != Some(ACTOR) {
+        return None;
+    }
+    Some(crate::yaml::get(&meta, "id").and_then(crate::yaml::text))
+}
+
 /// What one push carries. `warnings` are lines the run prints; they are never sent.
 #[derive(Debug, Clone, Default)]
 pub struct PushBatch {
@@ -295,6 +391,14 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
     let mut next = cursor.clone();
     let mut budget_used: usize = 0;
 
+    // M2: a folder `read_dir` could not list at all (not merely "does not exist yet") must not be
+    // read as "empty" by the tombstone pass below, or a transient listing failure would mark every
+    // note the cursor remembers in it as deleted. Listed first, because `SyncCards` needs it too.
+    let (on_disk, unreadable_folders) = note_paths_and_unreadable(vault);
+    // R-C3′-exec-18: every sync amend card, by id and by every path it has had. Nothing about one is
+    // ever sent — see `SyncCards` for the five paths and where each is closed below.
+    let sync_cards = SyncCards::find(vault, &on_disk, journal);
+
     let since = if cursor.pushed_through.is_empty() { None } else { Some(cursor.pushed_through.as_str()) };
     let already: std::collections::BTreeSet<&String> = cursor.boundary.iter().collect();
     for record in journal.read(since, None) {
@@ -325,6 +429,10 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // under `ACTOR`, excluded above like any other echo). `ACTOR`'s own doc comment lists "the
         // supersede record" among what stays local, and this is the line that keeps it there.
         if record.get("op").and_then(Value::as_str) == Some("supersede") { continue; }
+        // R-C3′-exec-18, path 4: a record about a sync card — its status, its snooze, its settle by
+        // the deck — stays here like the card itself. A `continue`, like the two filters above, so
+        // it never advances `next` and can never wedge a page.
+        if sync_cards.covers(&record) { continue; }
         // R-C3′-exec-12 (the wedge principle): predict every refusal `sync_rows.ts::checkRecord`
         // makes and never send the row that would trigger it. `sync_rows.ts:89-93` refuses a record
         // whose body has no non-empty string `op` or `actor` — `ledger::read` itself validates only
@@ -356,10 +464,6 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         batch.records.push(row);
     }
 
-    // M2: a folder `read_dir` could not list at all (not merely "does not exist yet") must not be
-    // read as "empty" by the tombstone pass below, or a transient listing failure would mark every
-    // note the cursor remembers in it as deleted.
-    let (on_disk, unreadable_folders) = note_paths_and_unreadable(vault);
     // I1: tombstone against the COMPLETE listing, never against which paths this loop happened to
     // *visit* — a `PAGE` or budget `break` below must not read as "everything after this point in
     // the sorted listing is gone". `on_disk` already holds every note this build can see; comparing
@@ -372,10 +476,22 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
             ));
             continue;
         }
+        // R-C3′-exec-18, paths 1 and 5: a sync card is never a row, and its path is dropped from the
+        // cursor so no tombstone can ever follow it — even from a cursor written before this rule.
+        if sync_cards.paths.contains(rel) {
+            next.notes.remove(rel);
+            continue;
+        }
         let Ok(text) = crate::pystr::read_text(&vault.join(rel)) else {
             batch.warnings.push(format!("sync: {rel} could not be read; it stays on this machine"));
             continue;
         };
+        // The same rule for a sync card outside `approvals/` and `archive/`, where `SyncCards` does
+        // not look — none should exist, and none leaves if one does.
+        if sync_card_note(&text).is_some() {
+            next.notes.remove(rel);
+            continue;
+        }
         // R-C3′-exec-12: `sync_rows.ts:111` refuses an empty body ("a note has no body") and
         // `sync_rows.ts:114` refuses a raw NUL byte — predicted here so neither ever reaches the
         // wire, rather than wedging every future push until the file is fixed by hand.
@@ -402,6 +518,11 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // I1: still on disk (whether or not this build's first loop got as far as visiting it) — not
         // deleted, so never a tombstone.
         if on_disk_set.contains(rel) { continue; }
+        // R-C3′-exec-18, path 5: a path a sync card has had is never tombstoned.
+        if sync_cards.paths.contains(rel) {
+            next.notes.remove(rel);
+            continue;
+        }
         // M2: this folder's listing failed transiently; conclude nothing about what is or is not in
         // it this build.
         if let Some(folder) = rel.split('/').next() {
@@ -664,14 +785,13 @@ fn rename_case_only(from: &Path, to: &Path) -> std::io::Result<()> {
 ///   `agent:knowlu.enrich` — or any card a person or another agent filed — is a decision the student
 ///   has not made, and "a proposal is deferred, never deleted". Sync's convergence or a newer sync
 ///   conflict on the same field says nothing about it, so sync never settles or archives it.
-/// - **Filed by THIS device** (probe N16, fix round 5): the card's `id` is in `own`, the ids that
-///   have a `create` record in this device's own journal under this device's own `device_name()`.
-///   A card is a note, so a card another desktop filed travels here like any other note — carrying
-///   the same `created_by` — and settling this device's copy of it would archive it, send a
-///   tombstone, and archive the other desktop's still-open card there too, with nothing left on
-///   either desktop to raise the conflict it held. `propose_amendment` goes through `write::create`,
-///   which journals exactly that record; the other desktop's `create` is under `ACTOR` and is never
-///   pushed, so a card that arrived as a note has none here. No frontmatter key is added for this.
+/// - **Filed on THIS vault's machine** (probe N16, fix round 5; rename-safe since R-C3′-exec-18,
+///   probe N19): the card's `id` is in `own`, the ids with a `create` record under [`ACTOR`] in
+///   this vault's journal. `propose_amendment` goes through `write::create`, which journals exactly
+///   that record; no `ACTOR` record ever leaves a device, and `apply` refuses a pulled one. A copy of
+///   another desktop's card — one a build from before R-C3′-exec-18 delivered as a note — has no
+///   such record here, and settling it would archive a card this device cannot answer (and, before
+///   that ruling, tombstone the other desktop's still-open original). No frontmatter key is added.
 /// - **Any field set**: the caller decides which cards a pull resolves (review D1, fix round 4);
 ///   matching one exact field set is what let a two-field card survive a pull that resolved one of
 ///   its fields.
@@ -770,6 +890,18 @@ pub fn apply(
             report.warnings.push(format!("sync: a pulled record was refused ({why})"));
             continue;
         }
+        // R-C3′-exec-18 (iii), hardening: `build_push` never sends a record under `ACTOR`, so no
+        // desktop's sync sent this one. Refused before the journal append, so a `create` under
+        // `ACTOR` in this journal always means "filed on this vault's machine" — the key card
+        // ownership rests on below.
+        if record.get("actor").and_then(Value::as_str) == Some(ACTOR) {
+            report.refused += 1;
+            report.warnings.push(
+                "sync: a pulled record under this app's own sync actor was refused (sync's own records never leave their device)"
+                    .to_string(),
+            );
+            continue;
+        }
         let path = record.get("path").and_then(Value::as_str).unwrap_or_default();
         if !is_note_path(vault, path) {
             report.refused += 1;
@@ -844,16 +976,20 @@ pub fn apply(
     }
     journal.invalidate();
 
-    // This machine's own device name, and the ids of the notes it CREATED itself — read once, after
-    // the record pass. R1 below uses the first; `live_sync_cards` uses the second to tell the amend
-    // cards this device filed from the ones that arrived as notes from another desktop (probe N16).
+    // This machine's own device name (R1 below), and the ids of the cards filed on THIS vault's
+    // machine — read once, after the record pass. `live_sync_cards` uses the second to tell this
+    // device's own amend cards from a copy that arrived some other way (probe N16). Keyed on a
+    // `create` under `ACTOR` (R-C3′-exec-18, probe N19), not on `device == device_name()`: no
+    // `ACTOR` record ever leaves a device and a pulled one is refused above, so such a record was
+    // written right here — under whatever this machine was called at the time, which is why a
+    // rename no longer orphans a card.
     let this_device = crate::journal::device_name();
     let own_created: std::collections::BTreeSet<String> = journal
         .read(None, None)
         .into_iter()
         .filter(|r| {
             r.get("op").and_then(Value::as_str) == Some("create")
-                && r.get("device").and_then(Value::as_str) == Some(this_device.as_str())
+                && r.get("actor").and_then(Value::as_str) == Some(ACTOR)
         })
         .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
