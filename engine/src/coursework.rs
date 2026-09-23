@@ -262,6 +262,28 @@ fn effort_changed(existing: Option<&Yaml>, new_effort: f64) -> bool {
     }
 }
 
+/// Every `(created_by, course)` pair a note in `tasks/` or `archive/` carries, the course as
+/// `sync_coursework` keys a group (`null` or absent is the empty string). A note whose frontmatter
+/// does not parse counts for nothing here: this answers "has the vault held this source's work",
+/// and `existing_by_uid`'s regex fallback exists for dedup, which is not this question (M3).
+fn note_groups(vault: &Path) -> std::collections::HashSet<(String, String)> {
+    let mut groups = std::collections::HashSet::new();
+    for folder in ["tasks", "archive"] {
+        let Ok(entries) = std::fs::read_dir(vault.join(folder)) else { continue };
+        for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+            if path.extension().is_none_or(|x| x != "md") {
+                continue;
+            }
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            let Some(created_by) = crate::yaml::get(&meta, "created_by").and_then(crate::yaml::text) else { continue };
+            let course = crate::yaml::get(&meta, "course").and_then(crate::yaml::text).unwrap_or_default();
+            groups.insert((created_by, course));
+        }
+    }
+    groups
+}
+
 /// Create or surgically update task notes. Never deletes, never rewrites wholesale.
 ///
 /// The three fields this may touch are `title`, `due` and `effort_hours` — and `effort_hours` only
@@ -293,7 +315,8 @@ pub fn sync_coursework(
     // R-C1c-6: judged per SOURCE, not per vault. A source group is the pair `(item.created_by,
     // item.course)` — every item one zyBooks book or one VHL section yields shares its group. A
     // group is new iff NONE of the current fetch's items in it has a uid this vault already knows
-    // about (a task or archive note, `known`) or has already recorded (the seen ledger, `seen`).
+    // about (a task or archive note, `known`) or has already recorded (the seen ledger, `seen`),
+    // and no note in the vault carries the group at all (M3, below).
     // Computed once, from the incoming `assignments` against `known`/`seen` as loaded above —
     // before this pass's own loop writes anything below — so the first item this call archives
     // does not make its own group look old. A vendor's fetch re-lists a book or section in full,
@@ -307,10 +330,23 @@ pub fn sync_coursework(
         let entry = group_has_history.entry(group).or_insert(false);
         *entry = *entry || has_history;
     }
-    let new_groups: std::collections::HashSet<(String, String)> = group_has_history
+    let unheard: std::collections::HashSet<(String, String)> = group_has_history
         .into_iter()
         .filter_map(|(group, has_history)| (!has_history).then_some(group))
         .collect();
+    // R-C1c-final2 M3: …AND no note in `tasks/` or `archive/` carries that `(created_by, course)`.
+    // A vendor page may list only a window of a section (VHL's dashboard shows the weeks after the
+    // day it is read), so after a long gap every row it lists can be unseen while the section is one
+    // this vault has held all along; its past-due rows are overdue work, not a stale import. The
+    // notes are read once per call, and only when some group would otherwise be new (the M5 cost
+    // argument above). A source that failed its first fetch, or was mapped later through its card,
+    // still has no note here, so it still archives its past.
+    let new_groups: std::collections::HashSet<(String, String)> = if unheard.is_empty() {
+        unheard
+    } else {
+        let held = note_groups(vault);
+        unheard.into_iter().filter(|group| !held.contains(group)).collect()
+    };
     let tasks_dir = vault.join("tasks");
     // `mkdir(exist_ok=True)`, without `parents=True`: a missing vault is an error, not something
     // to create on the way past.
@@ -1599,6 +1635,25 @@ const FAILURE_MARKERS: [&str; 7] = [
     "parse failed",
 ];
 
+/// R-C1c-10 (R-C1c-final2 I1): the line `propose_map_cards` writes when it files a map card,
+/// `<source>: not mapped; proposed (<stem>)`, is a question for the student, asked on the card, not
+/// a failure. It rides in the source step's message and in the run's summary like any other line,
+/// but it never makes the step or the run `WARN`: the card is the channel, and a Runs nav reading
+/// "1 warn" from a new student's first slot would say the opposite. Exactly this shape and no other:
+/// every `FAILURE_MARKERS` line, and every other warning, still WARNs as it always has.
+fn is_map_proposal_note(line: &str) -> bool {
+    match line.split_once(": not mapped; proposed (") {
+        Some((source, stem)) => {
+            !source.is_empty()
+                && !source.contains(char::is_whitespace)
+                && stem.len() > 1
+                && stem.ends_with(')')
+                && !stem[..stem.len() - 1].contains(['(', ')'])
+        }
+        None => false,
+    }
+}
+
 /// Failures first, benign per-item notes last; **stable** within each group.
 ///
 /// Only one warning reaches `state/runner-log.md` — the rest collapse into `(+N more)` — and under
@@ -1722,7 +1777,8 @@ pub fn main_with_fetchers(
                 .filter(|w| w.starts_with(&format!("{source}: ")))
                 .map(String::as_str)
                 .collect();
-            let result = if source_warns.is_empty() { "ok" } else { "WARN" };
+            // A proposal line is a note (I1): a source whose only line is one stays `ok`.
+            let result = if source_warns.iter().all(|w| is_map_proposal_note(w)) { "ok" } else { "WARN" };
             let message = source_warns.join("\n");
             let counts = vec![("items", items)];
             crate::runs::add_step(vault, rid, source, result, &counts, &message, None);
@@ -1775,7 +1831,8 @@ pub fn main_with_fetchers(
             summary.push_str(&format!("; {}{extra}", ranked[0]));
         }
         summary.push(')');
-        let status = if warnings.is_empty() { "ok" } else { "WARN" };
+        // I1: the proposal line stays in the summary above, as a note; alone, it is not a WARN.
+        let status = if warnings.iter().all(|w| is_map_proposal_note(w)) { "ok" } else { "WARN" };
         let _ = crate::cli::append_run_log(vault, "local", status, &summary, None);
         if let Some(rid) = run_id.as_deref() {
             // `journal_records` is 0 deliberately: `sync_coursework` journals through
@@ -2110,6 +2167,39 @@ mod tests {
                     .to_string(),
             ]
         );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// R-C1c-final2 M3: a vendor page may list only a window of a section (VHL's dashboard shows the
+    /// weeks after the day it is read), so after a long gap every row it lists can be unseen. A
+    /// group the vault already holds a note for — here an archived zyBooks `cs-100` note whose uid
+    /// this fetch no longer lists — is not new: its past-due rows are overdue work and arrive as
+    /// active tasks, never `imported-past`.
+    #[test]
+    fn a_group_the_vault_already_holds_a_note_for_is_never_new() {
+        let vault = vault_with("cwheldgroup");
+        std::fs::write(vault.join("state").join("today.md"), "").unwrap();
+        std::fs::write(
+            vault.join("archive").join("cs-100-hw-00.md"),
+            "---\ntitle: \"CS 100 HW 00\"\ncourse: \"cs-100\"\ndomain: school\ndue: 2026-08-10T23:59\n\
+             status: archived\narchived_reason: imported-past\ncreated_by: zybooks\n\
+             source_uid: \"zybooks:old\"\n---\n\nAn item from before the dashboard's window.\n",
+        )
+        .unwrap();
+        // Every uid below is unseen and unknown, two of them already past on 2026-08-25.
+        let log = sync(&past_and_future(), &vault, false);
+        assert_eq!(
+            log,
+            vec![
+                "created cs-100-hw-01".to_string(),
+                "created cs-100-hw-02".to_string(),
+                "created cs-100-hw-03".to_string(),
+            ]
+        );
+        for stem in ["cs-100-hw-01", "cs-100-hw-02", "cs-100-hw-03"] {
+            assert!(vault.join("tasks").join(format!("{stem}.md")).is_file(), "{stem} is not an active task");
+        }
+        assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 1, "nothing new was archived");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -3425,6 +3515,121 @@ mod tests {
             log.contains("local ok coursework (1 assignments; 1 created, 0 updated)"),
             "{log}"
         );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The line `propose_map_cards` writes when it files a map card, taken from a real filing so
+    /// the tests below hold the exact production shape, less the `zybooks: ` prefix `collect` adds
+    /// back to whatever a fetcher reports.
+    fn a_real_proposal_line(vault: &Path) -> String {
+        std::fs::create_dir_all(vault.join("approvals")).unwrap();
+        let proposal = MapProposal {
+            source: "zybooks".into(),
+            key: "AnotherBook2026".into(),
+            label: "AnotherBook2026".into(),
+            suggested_course: None,
+        };
+        let mut filed = Vec::new();
+        let ctx = WriteContext::new(MAP_ACTOR, "local-runner");
+        let today = crate::cli::local_now(vault).date();
+        propose_map_cards(vault, std::slice::from_ref(&proposal), today, &ctx, false, &mut filed);
+        assert_eq!(filed.len(), 1, "one card, one line: {filed:?}");
+        let line = filed[0].strip_prefix("zybooks: ").expect("the line names its source").to_string();
+        assert!(line.starts_with("not mapped; proposed (map-zybooks-"), "{line}");
+        line
+    }
+
+    /// The coursework run's records, in order: start, the steps, end.
+    fn coursework_run(vault: &Path) -> Vec<crate::ledger::Record> {
+        let day = crate::runs::Runs::new(vault).read(None);
+        let rid = day
+            .iter()
+            .find(|r| r.get("runner").and_then(|v| v.as_str()) == Some("coursework"))
+            .and_then(|r| r.get("run_id").and_then(|v| v.as_str()))
+            .expect("a coursework run was started")
+            .to_string();
+        day.into_iter().filter(|r| r.get("run_id").and_then(|v| v.as_str()) == Some(rid.as_str())).collect()
+    }
+
+    /// R-C1c-final2 I1 (R-C1c-10): a map card is a question for the student, not a failure. When
+    /// the proposal line is the run's only warning, the source step and the run both end `ok`, the
+    /// line still rides in the step's message and the summary as a note, and the Runs nav counts
+    /// nothing — from a new student's first slot, whose blank mapping row files exactly this card.
+    #[test]
+    fn a_run_whose_only_warning_is_a_map_proposal_ends_ok() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let vault = runnable_vault(
+            "cw-proposal-ok",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
+        );
+        let note = a_real_proposal_line(&vault);
+        let soon = crate::cli::local_now(&vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
+        let fetch = move |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            warnings.push(note.clone());
+            Ok(vec![make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", soon.at(23, 59, 0, 0), 0)])
+        };
+        let fetchers: [(&str, Fetcher); 1] = [("zybooks", &fetch)];
+        assert_eq!(main_with_fetchers(&vault, false, "local-runner", None, Some(&fetchers)), 0);
+
+        let cw = coursework_run(&vault);
+        let zy = cw.iter().find(|r| r["phase"] == "step" && r["name"] == "zybooks").expect("a zybooks step");
+        assert_eq!(zy["result"], "ok", "a proposal is not a failed source: {zy:?}");
+        assert!(zy["message"].as_str().unwrap().contains(": not mapped; proposed (map-zybooks-"), "the note stays: {zy:?}");
+        let end = cw.iter().find(|r| r["phase"] == "end").expect("the run ended");
+        assert_eq!(end["result"], "ok", "{end:?}");
+        assert!(end["summary"].as_str().unwrap().contains("not mapped; proposed ("), "{end:?}");
+        let log = run_log(&vault);
+        assert!(log.contains("local ok coursework (1 assignments; 1 created, 0 updated; zybooks: not mapped; proposed ("), "{log}");
+        let panel = crate::surface::runs_panel(&vault, jiff::Timestamp::now());
+        assert!(panel.recent.iter().any(|r| r.runner == "coursework" && r.result == "ok"), "{:?}", panel.recent);
+        assert_eq!(panel.warn_count, 0, "the Runs nav must not read \"1 warn\" for a question");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// …and it hides nothing: beside a real failure, or beside any other warning, the run still
+    /// WARNs exactly as before, and only the failing source's own step does.
+    #[test]
+    fn a_map_proposal_never_hides_a_real_failure_or_another_warning() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let vault = runnable_vault(
+            "cw-proposal-warn",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n  vhl:\n    enabled: true\n",
+        );
+        let note = a_real_proposal_line(&vault);
+        let soon = crate::cli::local_now(&vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
+        let zy = move |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            warnings.push(note.clone());
+            Ok(vec![make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", soon.at(23, 59, 0, 0), 0)])
+        };
+        let dead = |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            Err(SourceError::Failed("no session".into()))
+        };
+        let fetchers: [(&str, Fetcher); 2] = [("zybooks", &zy), ("vhl", &dead)];
+        main_with_fetchers(&vault, false, "local-runner", None, Some(&fetchers));
+        let cw = coursework_run(&vault);
+        let step = |name: &str| cw.iter().find(|r| r["phase"] == "step" && r["name"] == name).unwrap()["result"].clone();
+        assert_eq!(step("zybooks"), "ok");
+        assert_eq!(step("vhl"), "WARN");
+        assert_eq!(cw.iter().find(|r| r["phase"] == "end").unwrap()["result"], "WARN");
+        assert!(run_log(&vault).contains("local WARN coursework ("), "{}", run_log(&vault));
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // Any other warning, even a benign per-item note, still WARNs as it always has.
+        let vault = runnable_vault(
+            "cw-proposal-note",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
+        );
+        let note = a_real_proposal_line(&vault);
+        let other = move |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            warnings.push(note.clone());
+            warnings.push("CS 100 HW 01: uncategorised; using default importance".to_string());
+            Ok(vec![make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", soon.at(23, 59, 0, 0), 0)])
+        };
+        let fetchers: [(&str, Fetcher); 1] = [("zybooks", &other)];
+        main_with_fetchers(&vault, false, "local-runner", None, Some(&fetchers));
+        let cw = coursework_run(&vault);
+        assert_eq!(cw.iter().find(|r| r["phase"] == "step" && r["name"] == "zybooks").unwrap()["result"], "WARN");
+        assert_eq!(cw.iter().find(|r| r["phase"] == "end").unwrap()["result"], "WARN");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
