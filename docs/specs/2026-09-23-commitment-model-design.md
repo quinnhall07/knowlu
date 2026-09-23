@@ -1,15 +1,17 @@
 # The commitment model — piece 1 of "know what's next"
 
-**Date:** 2026-09-23. **Status: DRAFT for Quinn's review.** Nothing here is built; the plan follows
-this spec. **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` (signed; its §1 decisions
-and the 2026-09-17 amendment bind this document), then
-`docs/notes/2026-09-23-know-whats-next-direction.md` (the program; this is its piece 1), then
-`CLAUDE.md`'s two overriding rules and engine invariants. Where this spec and the cloud design
-disagree, the cloud design wins and this spec is wrong.
+**Date:** 2026-09-23. **Status: REVISED for Quinn's review** — the adversarial review's findings and
+Quinn's two rulings of 2026-09-23 are folded in (§12 lists every finding and what became of it).
+Nothing here is built; the plan follows this spec. **Authority:**
+`docs/specs/2026-09-09-knowlu-cloud-design.md` (signed; its §1 decisions and the 2026-09-17
+amendment bind this document), then `docs/notes/2026-09-23-know-whats-next-direction.md` (the
+program; this is its piece 1), then `CLAUDE.md`'s two overriding rules and engine invariants. Where
+this spec and the cloud design disagree, the cloud design wins and this spec is wrong.
 
 **Read with:** `docs/specs/2026-09-22-c1c-first-day-design.md` on branch `c1c-first-day` (D4: one
 course code, one slug); `docs/plans/2026-09-23-engine-follow-ups-plan.md` on branch `j-followups`
-(F2/F3: the `event-check` card this spec's card copies).
+(F2/F3: the `event-check` card this spec's card copies); `c3-sync:engine/src/sync.rs` (what leaves
+the device, and the local-only sync cards of R-C3′-exec-18 that this spec's cards copy).
 
 **Two senses of "commitment".** `config/planning.yaml`'s `recurring:` entries (an effort budget in
 hours, no clock time — "German practice, 0.75h, Mon/Wed") already render as `commitments` in the
@@ -19,9 +21,17 @@ commitments are clock-time obligations — a class, a shift, a club meeting — 
 field is not renamed (it is a contract with the console).
 
 **The gap this closes (direction note §2).** A wizard-created vault's `config/week_template.yaml`
-has an empty class list every day, and the LMS feed carries assignments, not class meetings. Today
-nothing knows when a student is in class, so "never plan over a class" has no data and every
-capacity number is too high.
+has an empty class list every day and a fixed 08:00–18:00 day, and the LMS feed carries
+assignments, not class meetings. Today nothing knows when a student is in class or when their day
+really starts and ends, so "never plan over a class" has no data and every capacity number is wrong.
+
+**The shape in one paragraph.** Repeating events are read on the device and kept in a generated,
+unsynced state file. A deterministic classifier turns them into *proposals*, which exist only in
+that file and in local-only cards. Only what the student **confirms** becomes a note in
+`commitments/` (and syncs like every note); what they decline leaves an anonymous marker holding
+nothing but the source's opaque key. Confirmed hard and soft commitments are busy time for ranking
+and capacity; one `planning-day` note holds the student's wake-to-bed window, which replaces the
+template's fixed day.
 
 ---
 
@@ -36,48 +46,62 @@ capacity number is too high.
 | Q3 | **Commitments live in the vault** (option A). Each carries a kind and a level: **hard** (never overlapped), **soft** (a proposal may overlap it), **optional**. Google Calendar stays read-only (`calendar.readonly`). |
 | Q4 | **Class source.** Onboarding shows a confirm list pre-filled from the student's Google Calendar weekly recurring series, matched to the courses the wizard already captured (c1c D4). Where Google has no match, **both**: a registrar login at supported schools, and otherwise one confirm card per unmatched course over the first week. |
 | Q5 | Observed calendars (patterns only): classes are weekly series titled by course code ("CS 100", "PH 106", "CS 100 Lab") with the room in the description; the same calendar holds club and team meetings (weekly series with non-course titles), routines ("Wake Up", "Bedtime"), office hours, one-off events and Gmail-created events (`eventType: fromGmail`). |
+| Q6 | **Planning day.** The student's routine window — wake to bed, 8am–10pm in the observed case — replaces the fixed 8am–6pm "usable" window. It is editable by the student at any time, and they can see how an edit changes the suggestions. An edit takes effect on the next rank, and the day view says what moved ("2 items moved to this evening"). |
+| Q7 | **Registrar.** Before the pilot: the University of Alabama (myBama/Banner) registrar login only; other schools after. UA gets its own phase before the pilot: credentials on the device (Credential Manager, like zyBooks/VHL), fetch on the device, and the schedule becomes confirmed-or-proposed commitments with `source_uid: registrar:ua:<crn>`. This spec holds the design only, not the scraping. |
 
 ### 1.2 The controller's, delegated by Quinn and adopted
 
 | # | Decision | Where |
 |---|---|---|
-| C1 | One note per commitment in a new vault folder `commitments/`, written through the engine's `write` (journal first, opaque `id:`). Default levels: class, lab, work → hard; club, meeting → soft; office-hours → optional. The student changes a level by editing the note; judge-once protects every field a human set. | §2 |
-| C2 | Routines are not overlap commitments. They set the day window, used wherever `week_template.yaml`'s `day_start`/`day_end` are used. Config files are never rewritten. | §6.3 |
+| C1 | One note per **confirmed** commitment in a new vault folder `commitments/`, written through the engine's `write` (journal first, opaque `id:`). Default levels: class, lab, work → hard; club, meeting → soft; office-hours → optional. | §2 |
+| C2 | Routines (wake, bed) are not overlap commitments. They propose the `planning-day` note (Q6), which sets each weekday's window wherever `week_template.yaml`'s `day_start`/`day_end` are used today. Config files are never rewritten. | §2.4, §6.3 |
 | C3 | `WeekCalendar` reads confirmed hard and soft commitments' meeting spans **in addition to** `week_template.yaml`'s classes (a union), so ranking and capacity pick them up with no ranking change. A vault with no `commitments/` behaves byte-identically. | §6, §8 |
-| C4 | Series data from Google reaches the device as a new JSON field beside the ICS in `/ingest-calendar`'s reply, capability-negotiated with `accepts`, and lands in a new generated state file — never in `state/calendar.md`, whose frozen format does not change. Description retention is minimised. | §4, §9 |
-| C5 | A deterministic classifier (no model) turns series into proposals; one-offs and `fromGmail` events are never commitments; everything proposed is `status: proposed` until confirmed. | §3 |
-| C6 | Three confirmation paths: the onboarding confirm screen (phase 2, not charged to the cap); a `kind: commitment-check` card per proposed series found later (charged to the 15-a-day cap, never re-asked); the per-course fallback card, the one place typing is allowed (phase 2). | §5 |
-| C7 | The registrar login gets its own later spec. Here only the `registrar:` source shape, and that it writes proposals like any other source. | §3.1 |
+| C4 | Series data from Google reaches the device as a new JSON field beside the ICS in `/ingest-calendar`'s reply, capability-negotiated with `accepts`, and lands in a new generated, device-local state file — never in `state/calendar.md`, whose frozen format does not change. | §4 |
+| C5 | A deterministic classifier (no model) turns series into proposals; one-offs, `fromGmail` events, biweekly and irregular series are never proposed. **When in doubt, do not propose**: a missed class costs one card; a false hard block costs a lost study slot every week. | §3 |
+| C6 | Three confirmation paths: the onboarding confirm screen (phase 2, not charged to the cap); a local-only `kind: commitment-check` card per proposal found later (charged to the 15-a-day cap, never re-asked); the per-course fallback card, the one place typing is allowed (phase 2). | §5 |
+| C7 | Registrar logins: UA only before the pilot (Q7), its own phase and plan; other schools later, each a code change. They produce proposals and confirmations through §3.4 like any source. | §3.1, §10 |
 | C8 | Piece 2's overlap API: a pure `conflicts(span) -> Vec<(commitment, level)>`. Piece 2's proposals never overlap hard, may overlap soft (the card says so), ignore optional. | §7 |
 | C9 | Out of scope: write-back to Google, the calendar view (piece 5), preference learning (piece 4). | — |
 
-### 1.3 The controller's refinements, each with its cost if wrong
+### 1.3 The controller's refinements, each with its reason and its cost if wrong
+
+Rows marked **(rev.)** changed in the 2026-09-23 revision; **(new)** were added by it.
 
 | # | Refinement (reason) | Cost if wrong |
 |---|---|---|
-| R1 | C1's `source` field is named **`source_uid`**, holding `gcal-series:<id>`, `ics-series:<uid>`, `registrar:<school>:<key>` or `card:<course-slug>`. A hand-written note has none. *Reason:* CLAUDE.md names `source_uid` as the vault's external key, and the dedupe helpers already read it. | A rename in one module and the notes it wrote; no user sees the field. |
-| R2 | `meets:` is a **single-line flow sequence** (`[{days: [mon, wed], start: "12:00", end: "12:50"}]`). *Reason:* every note edit is single-line frontmatter surgery; a block list could not be amended. | None found; a block form would need a second emitter path. |
-| R3 | A new id kind **`cmt`**, and `commitments` joins `ids::NOTE_FOLDERS` (id repair, backups and C3′ sync all key on it). | Id kinds are a vault contract; changing `cmt` later means re-iding every commitment. |
-| R4 | A description is **never stored**. The function forwards at most 200 characters of it, only for recurring events with an empty location; the device reduces it to `where` (≤ 80 characters) and drops it. | A room the reduction misses shows no `where`; nothing ranks on `where`. |
-| R5 | Series are read from **every calendar the student has selected** in Google (at most 10), not only `primary`. The `ics` field stays primary-only, so busy time does not change. *Reason:* a class schedule is often a separate subscribed calendar. | Extra API calls per fetch; a shared club calendar yields proposals the student declines. |
-| R6 | A plain ICS feed (the secret iCal address, `cloud:personal`, or a direct URL) yields series too, from `RRULE:FREQ=WEEKLY` masters. A Google UID's `@google.com` suffix is stripped so both routes key the same series. | Students who only paste the secret address would otherwise get no pre-filled list at all. |
-| R7 | A course-code-shaped title that matches **no vault course** is not a class; it is classified as a meeting. *Reason:* "Room 101" and "Bus 100" are code-shaped; Q4 says *matched to the courses the wizard captured*. | A real class missing from the LMS reads "a meeting?" and the student edits its kind. |
-| R8 | Office-hours proposals get **no card**: an optional commitment changes nothing the morning answer shows. The phase-2 screen lists them. | An office-hours series stays `proposed` until the student confirms it on the screen or by hand. |
-| R9 | `commitment-check` cards: at most **5 a day**, classes first; **no expiry**. | A slow onboarding without the phase-2 screen takes two or three days of cards. |
-| R10 | The fallback card becomes eligible on **day 3** of the vault, paced 2 a day, not day 7. *Reason:* Q4 says "over the first week"; a week without class times is a week of wrong capacity. A pending fallback card is withdrawn if a series later matches the course. | One redundant card when a class shows up on Google late in week 1. |
-| R11 | Routine window: `day_start` = the earliest confirmed wake routine's **end**; `day_end` = the latest confirmed bed routine's **start**. An inverted window is ignored with a warning. (See §11 Q1.) | Capacity changes on every day a student confirms a routine. |
-| R12 | A change to a **confirmed** commitment's series (times, room, end) is an `amend` card; `commitments` joins `AMENDABLE_FOLDERS`. A series absent from Google for 14 days files an `amend` card proposing `until`. | Two more card shapes to maintain; the alternative is silent drift or silent edits. |
-| R13 | **No new run-record step.** The pass's warnings join the existing `calendar` step's message. *Reason:* run records are a byte contract and `run-records-reference.json` is frozen. | No trend line of proposals; add a counted step later in its own commit. |
-| R14 | A new engine command **`commitments`** (always exits 0) fetches, writes proposal notes (never cards) and prints them as JSON — the phase-2 screen's data source, testable now. | One more command in CLAUDE.md's list. |
-| R15 | In the read model a commitment's span is a day block (`class` for class/lab, `busy` otherwise, labelled by its title), and a calendar event with the identical span that day is not drawn twice. No console change. | A console that wants a new block style for soft commitments needs a later `kind`. |
-| R16 | Phase 1 executes **after `j-followups` merges**: it reuses F2's `what_and_when` time-range formatter and shares `cli.rs`, `approvals.rs`, `cloudmodel.rs` and `tests/cloud_contract.rs`. | Phase 1 waits on that branch. |
-| R17 | An unknown `kind` loads with its written `level` (default soft), so `event`, `exam` and `task-block` from pieces 2–3 need no loader change. | A typo in `kind` still counts as busy time, and says so in a warning. |
+| R1 | A note's source key is **`source_uid`**: `gcal-series:<id>`, `ics-series:<uid>`, `registrar:ua:<term>-<crn>` or `card:<course-slug>`. A hand-written note has none. *Reason:* CLAUDE.md names `source_uid` as the vault's external key. The registrar key carries the Banner term because a CRN is unique only within a term (Q7's `<crn>`, qualified). | A rename in one module and the notes it wrote; no user sees the field. |
+| R2 | `meets:` (and the planning day's `window:`) is a **single-line flow sequence**. *Reason:* every note edit is single-line frontmatter surgery. The emitter (`yamlemit::safe_dump_flow`) sorts mapping keys and quotes times as PyYAML does, so its bytes are `{days: [mon, wed], end: '12:50', start: '12:00'}`; examples in this spec show the fields, not the exact bytes. | None found. |
+| R3 | A new id kind **`cmt`**, and `commitments` joins `ids::NOTE_FOLDERS`. **(rev.)** Release gate: the phase 1s migration is live on prod before any build that carries `cmt` ships (§10, I9). | Id kinds are a vault contract; changing `cmt` later means re-iding every commitment. |
+| R4 | **(rev.)** A description is **never stored**. The function forwards at most 200 characters of it, only for series with an empty location; the device keeps one line as `where` only if it looks like a place (§3.2 step 5) and drops the rest. | A room the reduction misses shows no `where`; nothing ranks on `where`. |
+| R5 | **(rev.)** Series are read from **calendars the student owns**: `primary`, then other `calendarList` entries with `accessRole: owner` that are not hidden, in calendar-id order, at most 10. Subscribed and shared calendars are not read. *Reason:* another person's "Work" series or a club's public calendar must never become the student's hard busy time (review I1). | A class schedule kept on a subscribed calendar is not pre-filled; the student gets the fallback card, or adds that calendar's secret address as a feed (R6). |
+| R6 | **(rev.)** A plain ICS feed yields series too, through **new** code in `calfeed::weekly_series` that honours `RECURRENCE-ID` overrides, `STATUS:CANCELLED`, the student's `PARTSTAT=DECLINED` and `TRANSP:TRANSPARENT` (§3.2). A Google UID's `@google.com` suffix is stripped so both routes key the same series. `parse_calendar_ics`'s busy time is not changed. | Students who only paste the secret address would otherwise get no pre-filled list. |
+| R7 | **(rev.)** A series is a class only when its title **starts with one of this vault's own course codes**, however the vault's course notes and `course_map` spell them, followed by nothing or a known section word (§3.3). A fixed code pattern is only a fallback source of codes, with named blind spots. *Reason:* numbering differs by school (CS 1110, COMPSCI 61A, MATH 20A), and "Work on CS 100" or "CS 100 study group" is the student's own time, not a class (review C3, I2). | A class titled in a way no course note spells is not pre-filled; the fallback card asks. |
+| R8 | Office-hours proposals get **no card**: an optional commitment changes nothing the morning answer shows. The phase-2 screen and the phase-2 "Your week" panel list them. | An office-hours series is never confirmed without the app. |
+| R9 | **(rev.)** `commitment-check` cards: at most **5 a day**, classes first; **no expiry**; a pending card whose series vanished from the series file is withdrawn (archived `superseded`). | A slow onboarding without the phase-2 screen takes two or three days of cards. |
+| R10 | The fallback card becomes eligible on **day 3** of the vault, paced 2 a day. A pending fallback card is withdrawn if a class proposal for the course appears. | One redundant card when a class shows up on Google late in week 1. |
+| R11 | **(rev., Q6)** The planning day is **one note**, `commitments/planning-day.md` (`kind: planning-day`), holding a per-weekday `window`. Routines only *propose* it. A weekday the note leaves out keeps the template's `day_start`/`day_end`. *Reason:* the ranking reads the vault, not app data, so the window must be in the vault to take effect on the next rank; a note (not `week_template.yaml`) because config files are never rewritten and a note edit is journaled and syncs. With no routine found, the phase-2 screen suggests 08:00–22:00 (the observed case) for the student to adjust. | A student with no confirmed window keeps 08:00–18:00 until they set one; a suggested 22:00 end over-plans the evenings of a student who stops earlier and does not adjust it. |
+| R12 | **(rev., C1)** A change to a **confirmed** commitment (times, room, end date) is a `commitment-check` card with a `change:` field, settled by its own arm in `approvals.rs` — **not** the `amend` machinery, whose validator refuses null and sequence values (§5.4). `commitments` does **not** join `AMENDABLE_FOLDERS`. | One more settlement arm; the alternative (amend) can never apply these changes. |
+| R13 | **(rev.)** **No new run-record step.** The pass's warnings join the existing `calendar` step's message. *Reason:* a new step would change every run's record shape and the console's Runs view for no reader; `run-records-reference.json` pins the serializer on fixed input, so this is a choice, not a constraint. | No trend line of proposals; add a counted step later in its own commit. |
+| R14 | **(rev.)** A new engine command **`commitments`** (always exits 0) fetches, refreshes the series file and prints the current proposals as JSON — the phase-2 screen's data source. It writes **no note and no card**. | One more command in CLAUDE.md's list. |
+| R15 | **(rev.)** In the read model a commitment's span is a day block (`class` for class/lab, `busy` otherwise, labelled by its title), clamped to that day's window and dropped if outside it; a calendar event with the identical span is not drawn twice. | A console that wants a new block style for soft commitments needs a later `kind`. |
+| R16 | Phase 1 executes **after `j-followups` merges**: it reuses F2's time formatting (`eventemit::clock`, made `pub(crate)`) and shares `cli.rs`, `approvals.rs`, `cloudmodel.rs` and `tests/cloud_contract.rs`. | Phase 1 waits on that branch. |
+| R17 | **(rev.)** Reserved kinds are declared now with default levels — `event` soft, `exam` hard, `task-block` soft — and load without a warning. Only a kind outside the full list (§2.2) loads as soft **with** a warning. *Reason:* a WARN on every run trains the reader to ignore warnings (review I7). | A typo in `kind` still counts as busy time, and says so. |
+| R18 | **(new)** **Proposals are never notes.** They live in `state/calendar-series.json` (generated, device-local; C3′ sends only `state/journal/` records and notes under `NOTE_FOLDERS`) and in local-only cards. *Reason:* a proposal is an unconfirmed guess about someone's week — a therapy group, another person's shift — and must not reach our servers or the journal before the student says yes (review C2). | A second desktop can ask once about a proposal the first desktop has a card pending for. |
+| R19 | **(new)** A **decline** writes an anonymous marker note: `type`, `status: declined`, `source_uid`, nothing else, at `commitments/declined-<10 hex of sha256(source_uid)>.md`. *Reason:* never-re-ask must hold across desktops, and the marker says nothing about the event. | A series declined through Google and later arriving from a registrar under another key is asked once more. |
+| R20 | **(new)** `commitment-check` and `commitment-ask` cards are **local-only**, exactly like C3′'s sync cards: never pushed, nor any journal record about them. Their settlement's note write (a confirmed note, a decline marker) syncs as usual. | Phase 1s extends sync's exclusion predicate by one test (§10). |
+| R21 | **(new)** Within the last fresh fetch's 28-day horizon, a confirmed `gcal-series:`/`ics-series:` commitment subtracts only its **actual instances** (moved instances where they moved, cancelled ones — holidays — not at all); beyond it, the weekly pattern. *Reason:* review I3. | `rank` reads one more generated file; a stale file falls back to the pattern. |
+| R22 | **(new)** Google's "this and following" split (review I4): a confirmed note counts as **seen** when a fresh series has its `source_uid` **or** its signature; a successor series with the same signature is never proposed; a successor for the same course with different meets, starting as its predecessor ends, becomes **one** change card that also moves `source_uid`. | A split with a new title as well as new times is proposed as a new class, and the old one ends by its own change card: two cards. |
+| R23 | **(new, Q6)** "What moved" is computed by `rank` itself: when the window it uses differs from the one recorded in `state/plan.json`, it also designates today under the recorded window and diffs the two plans (§6.4). `state/plan.json` is written only when a `planning-day` note exists. | One more generated file; a vault without the note is unchanged. |
+| R24 | **(new, Q7)** UA registrar rows whose course matches a vault course are written **confirmed** (the registrar is the authority on enrolment, and the student gave the login for exactly this); other rows become ordinary proposals; rows with no meeting time (online, TBA) produce nothing. | A dropped course still on the registrar stays busy time until the next fetch says otherwise. |
 
 ---
 
-## 2. The note
+## 2. The notes
 
-### 2.1 An example (invented values)
+`commitments/` holds three shapes of note: a **confirmed commitment**, a **decline marker** and the
+one **planning day**. No note in it is ever `proposed` (R18).
+
+### 2.1 A confirmed commitment (invented values; fields, not exact bytes — R2)
 
 `commitments/cs-100.md`:
 
@@ -94,8 +118,8 @@ where: "Room 101"
 from: 2026-08-19
 until: 2026-12-04
 source_uid: "gcal-series:4k2q9x7m1abc"
-status: proposed
-proposed_at: 2026-09-24
+status: confirmed
+confirmed_at: 2026-09-24
 ---
 
 Found as a weekly series on your Google Calendar.
@@ -107,123 +131,253 @@ Found as a weekly series on your Google Calendar.
 |---|---|
 | `id` | `cmt_` + 10 hex, set by `write::create` like every note (R3). |
 | `type` | `commitment`. `ids::kind_for` maps it to `cmt`; a note in `commitments/` without `type:` is also `cmt`. |
-| `kind` | `class`, `lab`, `work`, `club`, `meeting`, `office-hours`, `routine`. Anything else loads under R17. |
-| `level` | `hard`, `soft`, `optional`. Written at proposal from the kind's default (C1); absent → the kind's default; unknown → `soft` with a warning. **Ignored for `routine`**, which never takes part in overlap. |
-| `routine` | only on `kind: routine`: `wake` or `bed` (§3.3 rule 1). A routine note without it is ignored with a warning. |
+| `kind` | `class`, `lab`, `work`, `club`, `meeting`, `office-hours`, `planning-day`, and the reserved `event`, `exam`, `task-block` (R17). Anything else loads as soft with a warning. |
+| `level` | `hard`, `soft`, `optional`. Written at confirmation from the kind's default (C1, R17) or the level the student chose; absent → the kind's default; unknown → `soft` with a warning. Not used by `planning-day`. |
 | `title` | the source's title, verbatim, ≤ 200 characters. The classifier never rewrites it. |
 | `course` | a course slug; set for class and lab (always) and office-hours (when a code matched); absent otherwise. |
-| `meets` | a flow sequence (R2) of `{days, start, end}`: `days` from `planning::DAY_KEYS` (`mon`…`sun`), `start` < `end`, both `"HH:MM"` 24-hour, **wall-clock in the vault's timezone** exactly like `week_template.yaml`. A meeting that crosses midnight is not representable and is not proposed. On a `confirmed` note an invalid entry is skipped with a warning, and a note with no valid entry is ignored with a warning; `proposed` notes are validated when written, and `declined` notes (which may carry no `meets` at all, §5.3) are not validated. |
+| `meets` | a flow sequence (R2) of `{days, start, end}`: `days` from `planning::DAY_KEYS` (`mon`…`sun`), `start` < `end`, both `"HH:MM"` 24-hour, **wall-clock in the vault's timezone** exactly like `week_template.yaml`. A meeting that crosses midnight is not representable and is not proposed. An invalid entry is skipped with a warning; a note with no valid entry is ignored with a warning. |
 | `where` | ≤ 80 characters, optional (R4). Display only; nothing ranks on it. |
 | `from`, `until` | inclusive dates, both optional. Absent `from` = always started; absent `until` = open-ended. |
-| `source_uid` | R1. Absent on a hand-written note. Two notes never share one: the proposer checks every note in `commitments/` before it creates. |
-| `status` | `proposed` \| `confirmed` \| `declined`. **Only `confirmed` counts for anything** (capacity, overlap, the routine window). |
-| `proposed_at` | the day the note was proposed; informational (the note is not an approval and is never charged to the cap). |
+| `source_uid` | R1. Absent on a hand-written note. The settlement checks every note in `commitments/` before it creates; a duplicate that arrives anyway (two desktops, a race) is handled by §2.5. |
+| `status` | `confirmed` \| `declined`. **Only `confirmed` counts for anything** (capacity, overlap, the window). A note with any other status — including a hand-written `proposed` — is ignored with a warning. |
+| `confirmed_at` | the day the note was confirmed; informational. |
 
 A student may create a note by hand with `status: confirmed` and no `source_uid`; id repair gives it
 an `id`. Unknown extra fields are kept and ignored, as everywhere in the vault.
 
 **File name.** `commitments/<ingest::slugify(title)>.md` ("CS 100" → `cs-100.md`, "CS 100 Lab" →
-`cs-100-lab.md`); an empty slug becomes `commitment`. A collision takes `-2`, `-3`, as
-`approvals::materialize` does. The name is never an identity; `id` and `source_uid` are.
+`cs-100-lab.md`; `slugify` never returns an empty string — it returns `item`). A collision takes
+`-2`, `-3`, as `approvals::materialize` does. The name is never an identity; `id` and `source_uid`
+are.
 
-### 2.3 Who writes which field
+### 2.3 A decline marker (R19)
 
-- **At proposal** (`agent:commitments`): every field above except `status` beyond `proposed`.
-- **While `proposed`**, the proposer may refresh `meets`, `where`, `until` and `from` from the
-  source, each only if `journal.human_set(id, field)` is empty — judge once, re-propose freely.
-- **Once `confirmed` or `declined`**, the proposer never writes the note again. A changed source
-  becomes an `amend` card (R12, §5.5).
-- **`kind`, `level`, `title`, `course`, `status`** are never rewritten by any agent after creation.
-  `status` moves only by a card's settlement, the phase-2 screen, or the student's own edit.
+```yaml
+---
+id: cmt_8c1d0e5a44
+type: commitment
+status: declined
+source_uid: "gcal-series:4k2q9x7m1abc"
+---
+```
+
+At `commitments/declined-<first 10 hex of sha256(source_uid)>.md`. No title, kind, meets, where or
+body: the marker exists only so that no desktop asks about that series again. The loader reads only
+its `source_uid`; it is exempt from §2.2's other rules.
+
+### 2.4 The planning day (Q6, R11)
+
+`commitments/planning-day.md`:
+
+```yaml
+---
+id: cmt_51b7aa90c3
+type: commitment
+kind: planning-day
+status: confirmed
+window: [{days: [mon, tue, wed, thu, fri], start: "08:00", end: "22:00"}, {days: [sat, sun], start: "10:00", end: "22:00"}]
+confirmed_at: 2026-09-24
+---
+
+The part of each day Knowlu plans in: from when you are up to when you stop.
+```
+
+- `window` has the shape of `meets`; each weekday appears in at most one entry (a later entry's
+  duplicate day is skipped with a warning). A weekday not listed keeps `week_template.yaml`'s
+  `day_start`/`day_end`. `end` is at most `"23:59"`: a window past midnight is not representable
+  (a student who works past midnight gets `23:59`; named, not solved).
+- Exactly one is used: if several `planning-day` notes are confirmed, the lowest `id` wins and the
+  rest are named in one warning.
+- The student edits it at any time — by hand now, by the phase-2 editor later (§6.4) — through the
+  engine's `write` like any note. No agent ever writes `window` on a note that exists: routines
+  found later never override the student's window (§3.5).
+- The note syncs like every note. That is the student's own setting, confirmed by them.
+
+### 2.5 Who writes what
+
+- **At confirmation** (a card's settlement, the phase-2 screen, the registrar pass for R24 rows):
+  `write::create` of the whole note, actor `agent:commitments` for a settlement (the student's
+  decision is the journal record on the card) or the console's human context for the screen.
+- **After confirmation** no agent writes the note except by the settlement of an approved change
+  card (§5.4). `kind`, `level`, `title`, `course` and `status` are never written by an agent after
+  creation; `journal.human_set` protects anything the student edited.
+- **Duplicates.** If two confirmed notes share a `source_uid` (two desktops confirming before
+  either syncs, or a race between the `commitments` command and a slot), `commitments::load` keeps
+  the lowest `id`, ignores the rest and names them in one warning, and the settlement never creates
+  a third. Nothing is deleted automatically; the doubled span would subtract nothing extra anyway
+  (§6.1).
 
 ---
 
-## 3. Sources and the classifier
+## 3. Sources, the series file and the classifier
 
 ### 3.1 Sources
 
 | `source_uid` | from | phase |
 |---|---|---|
-| `gcal-series:<recurringEventId>` | the Google grant, through `/ingest-calendar?name=google&accepts=series` (§4.1) | 1 |
-| `gcal-series:<id>` / `ics-series:<UID>` | any ICS feed the vault reads — the secret iCal address (`cloud:personal` or a direct URL): a `VEVENT` with `RRULE:FREQ=WEEKLY` and no `RECURRENCE-ID`. A UID ending in `@google.com` has the suffix stripped and is keyed `gcal-series:`, so the same series seen through both routes is one note (R6). | 1 |
-| `registrar:<school>:<key>` | a registrar login at a supported school, e.g. `registrar:ua:202640-CS-100-001`. The registrar spec decides `<key>`; it must be stable across a term. Its proposals go through §3.4 exactly like any series, with `kind` and `course` set by the registrar rows rather than the classifier. | 3 |
-| `card:<course-slug>` | the answer to a fallback card (§5.3); written `confirmed`. | 2 |
+| `gcal-series:<recurringEventId>` | the Google grant, through `/ingest-calendar?name=google&accepts=series` (§4.1), owned calendars only (R5) | 1 |
+| `gcal-series:<id>` / `ics-series:<UID>` | any ICS feed the vault reads (the secret iCal address as `cloud:personal`, or a direct URL): a master `VEVENT` with an `RRULE`. A UID ending in `@google.com` has the suffix stripped and is keyed `gcal-series:`, so one series seen through both routes is one key (R6). | 1 |
+| `registrar:ua:<term>-<crn>` | the UA registrar (Q7, R24), fetched on the device | 3 (pre-pilot) |
+| `card:<course-slug>` | the answer to a fallback card (§5.3); written confirmed | 2 |
 | *(none)* | a note the student wrote | any |
 
 ### 3.2 Normalising a series
 
-Every source is reduced to one record before classification, so the classifier has one input shape:
+Every source is reduced to one record, so the classifier has one input shape:
 
 ```
-Series { source_uid, title, where, event_type, meets: [(days, start, end)], first, until,
-         next_14d, last_seen }
+Series { source_uid, calendar, title, where, event_type, rule: {freq, interval, until, count},
+         has_master, instances: [(date, start, end)], meets: [(days, start, end)], first, until,
+         last_seen }
 ```
 
-1. **Instances.** Google: the reply's `instances` (§4.1), converted to the vault's timezone (the
-   `timezone:` of `config/ingest.yaml`, as `calfeed` does). ICS: the master expanded by `calfeed`'s
-   existing recurrence code over the same 28-day horizon, EXDATEs honoured, overrides
-   (`RECURRENCE-ID`) replacing their instance.
-2. **Meets.** Count each `(weekday, start, end)` triple among the instances; keep the triples seen
-   **at least twice** in the horizon (a single moved instance is an exception, not a meeting), then
-   group kept triples by `(start, end)` into `{days, start, end}` entries, days in `DAY_KEYS` order,
-   entries ordered by `(first day, start)`.
-3. **`next_14d`** = instances starting in `[today, today + 14 days)`.
-4. **`first`** = the master's start date when known, else the earliest instance. **`until`** = the
-   RRULE's `UNTIL` as a date; a `COUNT`-bounded or open rule gives none (R12 catches the end).
-5. **`where`** = the location, trimmed; else the first non-empty line of the description; cut to 80
-   characters at a character boundary. The description goes no further (R4).
-6. **`last_seen`** = today for every series a fresh fetch returned.
+1. **Instances**, in the vault's timezone (`config/ingest.yaml`'s `timezone:`, as `calfeed` does),
+   over the horizon `[today, today + 28 days)`.
+   - *Google:* the reply's `instances` (§4.1). Cancelled instances are not in them (Google omits
+     them from `singleEvents=true` without `showDeleted`); moved ones appear at their new time.
+   - *ICS:* **new logic in `calfeed::weekly_series`**, not the existing busy-time path. Masters and
+     overrides are grouped by `UID`; the master is expanded with `calfeed`'s recurrence helpers,
+     `EXDATE`s removed; an override `VEVENT` (one carrying `RECURRENCE-ID`) replaces the instance
+     it names, or removes it if it has `STATUS:CANCELLED`. A master with `STATUS:CANCELLED`, with
+     `TRANSP:TRANSPARENT`, or with an `ATTENDEE` line for the feed owner carrying
+     `PARTSTAT=DECLINED` yields no series. (The feed owner is the `ORGANIZER`'s address when the
+     feed has one line naming it; if the owner cannot be told, any `DECLINED` attendee line makes
+     the series ineligible — when in doubt, do not propose.) Each rule has its own test.
+   - `parse_calendar_ics`'s busy time keeps today's override-blind behaviour: it feeds the frozen
+     `calendar-snapshot-gcal.md` reference, and a doubled busy span subtracts nothing extra.
+2. **Rule.** From the master's `RRULE`: `FREQ`, `INTERVAL` (absent = 1), `UNTIL` (the raw value,
+   converted on the device to a date in the vault's timezone — `UNTIL=20261205T055959Z` is
+   4 December in Chicago), `COUNT`. An `RDATE` on the master makes the series irregular.
+   `has_master` is false when no master was seen (Google: the masters call failed or missed it).
+3. **Meets.** Count each `(weekday, start, end)` triple among the instances; keep triples seen at
+   least twice; group kept triples by `(start, end)` into `{days, start, end}` entries, days in
+   `DAY_KEYS` order, entries ordered by `(first day, start)`.
+4. **`first`** = the master's start date. **`until`** = the `UNTIL` date; else, with `COUNT`, the
+   date of the rule's last occurrence, expanded on the device from the master's start; else none.
+5. **`where`** = the location, trimmed; else the first description line that **looks like a
+   place**: at most 80 characters, no `://` or `www.`, none of `zoom`, `teams`, `meet.google`,
+   `webex`, `pwd`, `passcode`, `password`, `pin`, `meeting id` (case-insensitive), and no run of
+   six or more digits. Otherwise no `where`. The description goes no further (R4).
+6. **`calendar`** = the opaque calendar key the reply names (Google, §4.1) or the feed name (ICS).
+   **`last_seen`** = today for every series a fresh, complete read of its calendar returned.
 
-### 3.3 The classifier
+### 3.3 The series file — `state/calendar-series.json`
 
-Pure: `classify(series, courses) -> Option<(kind, course, routine)>`. **Eligible** only if all hold:
-`event_type` is `default` or absent (ICS); the instances are timed, not all-day; `next_14d >= 2`;
-`meets` is non-empty. Everything else — one-offs, `fromGmail`, `outOfOffice`, `focusTime`,
-`workingLocation`, biweekly series, anything the student declined in Google (§4.1) — is **never** a
-commitment. The first rule that matches wins; all matching is case-insensitive on the title with
-surrounding punctuation trimmed.
+Generated state, like `state/calendar.md`: not a note, never journaled, **never synced** (C3′ sends
+only `state/journal/` records and notes under `NOTE_FOLDERS`), rebuilt from the sources. It is the
+only place a proposal exists before a card asks about it (R18).
 
-1. **Routine.** The whole title is one of `wake`, `wake up`, `get up`, `alarm` → `routine: wake`;
-   or `bed`, `bedtime`, `go to bed`, `sleep`, `lights out` → `routine: bed`. Whole-title only, so
-   "Sleep study" is not a routine.
-2. **Office hours.** `\boffice hours?\b` or a standalone `OH` → `office-hours`, with `course` when
-   rule 3's code match also succeeds.
-3. **Course.** The first course-code-shaped token, `\b([A-Za-z]{2,4})[ -]?(\d{3}[A-Za-z]?)\b`,
-   normalised to `"<DEPT> <NUM>"` in capitals ("CS 100", "CS100" and "CS-100" are all `CS 100`),
-   that equals a **vault course code** → `lab` if the rest of the title has the word `lab` or
-   `laboratory`, else `class`; `course` = that course's slug. Any other suffix ("Recitation", "PYB")
-   stays `class` of the same course. A code that matches no vault course falls through (R7).
-4. **Work.** The title starts with the word `work` not followed by `on`, or has the word `shift` →
-   `work`.
+```json
+{"calendars": {"google:3b9e0c1d2a4f5e60": "2026-09-24", "personal": "2026-09-24"},
+ "series": [{"calendar": "google:3b9e0c1d2a4f5e60", "event_type": "default", "first": "2026-08-19",
+  "instances": [["2026-09-24", "12:00", "12:50"]], "last_seen": "2026-09-24",
+  "meets": [{"days": ["mon", "wed", "fri"], "end": "12:50", "start": "12:00"}],
+  "rule": {"count": null, "freq": "WEEKLY", "interval": 1, "until": "2026-12-04"},
+  "source_uid": "gcal-series:4k2q9x7m1abc", "title": "CS 100", "until": "2026-12-04",
+  "where": "Room 101"}]}
+```
+
+- `calendars` maps each calendar key to the date it was last read **freshly and completely**.
+  Series sorted by `source_uid`; keys sorted, as `ledger::dumps_value` always sorts them; a trailing
+  newline. The same data is the same bytes.
+- **Per-calendar fallback.** A calendar read fresh and complete this run replaces its series; one
+  it no longer returns is kept with its old `last_seen` until that is 14 days old, then dropped
+  (§5.4 files the end card first). A calendar not read this run — failed, partial (§4.1), hidden,
+  over the cap, or a feed that served no series — keeps its series and its date untouched, so a
+  series is never "absent" because its calendar was not looked at (review I6).
+- **A removed feed** (a `calendars:` entry deleted from `config/ingest.yaml`) keeps its series for
+  14 days after its last read date, then they are dropped; no end card is filed for them, since the
+  student removed the source, not the class.
+- **Written only when some calendar produced a fresh result and the bytes differ.** A vault whose
+  feeds are all unconfigured or unreachable — every oracle fixture — never gets the file. A
+  **missing** file is silent and empty; an unreadable or malformed one is empty with one warning
+  and is rewritten on the next fresh fetch.
+
+### 3.4 The classifier
+
+Pure: `classify(series, courses, planning) -> Option<Class>`, where `Class` is `(kind, course)` or
+a routine side (`wake`/`bed`). **Eligible** only if all hold:
+
+- `event_type` is `default` or absent (ICS) — never `fromGmail`, `outOfOffice`, `focusTime`,
+  `workingLocation`;
+- `has_master`, `rule.freq` is `WEEKLY`, `rule.interval` is 1, no `RDATE`;
+- the instances are timed, not all-day, and none crosses midnight (except for rule 1 below);
+- at least two instances in the 28-day horizon, and for every kept triple, consecutive instances
+  are a multiple of 7 days apart with at least one pair exactly 7 apart (a holiday gap is allowed;
+  an every-other-week series is not);
+- `meets` is non-empty, and `until`, if any, is not before today.
+
+Everything else — one-offs, biweekly and irregular series, a series whose master is missing,
+anything the student declined — is **never** proposed (C5). The first rule that matches wins;
+matching is on the title with surrounding punctuation trimmed, case-insensitive unless stated.
+
+0. **Not proposed at all.** The title contains a word or phrase that marks the student's own work
+   time — `study`, `homework`, `hw`, `review`, `prep`, `tutoring`, `work on`, `focus` — or equals
+   the name of a `config/planning.yaml` `recurring:` entry (already budgeted in hours; counting it
+   again as busy time would double it). These are piece 3's `task-block` territory.
+1. **Routine.** The whole title is one of `wake`, `wake up`, `get up`, `alarm` → wake side; or
+   `bed`, `bedtime`, `go to bed`, `sleep`, `lights out` → bed side. Whole-title only, so "Sleep
+   study" is not a routine. A `sleep` series that crosses midnight is both: its start is the bed
+   side for its start day, its end the wake side for the next day. Routines feed §3.5's window
+   proposal, never a commitment.
+2. **Office hours.** `\boffice hours?\b`, or the token `OH` in capitals (case-sensitive, so "oh"
+   never matches) → `office-hours`, with `course` when rule 3's code test also finds one.
+3. **Course.** The title **starts with** a code in the vault's code table (below), and what follows
+   it is empty, or a section word — `lab`, `laboratory`, `lecture`, `lec`, `recitation`, `rec`,
+   `discussion`, `disc`, `seminar`, `section`, `sec`, `studio`, `class` — optionally with a section
+   number, or words that all appear in that course note's own `name`/`title` ("CS 100 – Intro to
+   Computer Science"). Separators between code and remainder are space, `-`, `–`, `:`, `(`.
+   `lab`/`laboratory` → `lab`; otherwise `class`; `course` = the course's slug. A title that starts
+   with a known code but continues with anything else ("CS 100 TA hours") is not a class and falls
+   through to rules 4–6.
+4. **Work.** The title starts with the word `work`, or has the word `shift` → `work`.
 5. **Club.** The title has the word `club`, `society`, `team`, `practice`, `rehearsal` or `chapter`
    → `club`.
 6. **Otherwise** → `meeting`.
 
-**Vault course codes** are read, never fetched: each `courses/*.md` note's `title`, then `name`,
-then `code`, each passed through the same token rule (the c1c D4 reading — a code in an LMS name
-like `202640-BUI-100-101` is `BUI 100`), mapped to the note's `slug:` or file stem; then every
-`config/ingest.yaml` `course_map` fragment that normalises to a code, mapped to its slug. The first
-mapping for a code wins, in that order. A vault with no courses has no classes, only meetings and
-routines, until its courses exist.
+**The vault's code table** (C3, R7) is read, never fetched, in this order, first mapping wins:
 
-### 3.4 Writing proposals
+1. every `courses/*.md` note, in **file-name order**: its `code`, `title` and `name` fields and its
+   slug (`cs-100` → `CS100`), each reduced to a code by the **leading-code reading** —
+   `^[A-Za-z]{2,8}[ ._-]?[0-9]{1,4}[A-Za-z]?\b` at the start of the string — and, as a fallback
+   for LMS names like `202640-BUI-100-101`, by c1c D4's reading anywhere in the string;
+2. every `config/ingest.yaml` `course_map` key that reduces to a code, mapped to its slug.
 
-`commitments::propose(vault, series, courses, today, ctx, journal) -> (created, warnings)`, pure
-apart from its writes, in `source_uid` order:
+Codes are compared in **compact form**: capitals, separators removed (`CS 100`, `cs-100`, `CS100`
+→ `CS100`; `COMPSCI 61A` → `COMPSCI61A`; `CS 1110` → `CS1110`). A title's leading code is reduced
+the same way. A compact code claimed by two different courses is dropped with one warning — when in
+doubt, do not propose. A vault with no courses has no classes until its courses exist. **Blind
+spots, named:** codes with no letters (`01:198:111`), codes with two separators inside (`CS-UY
+1114`), and titles that put the code after words ("Intro to CS (CS 100)"). Those classes are not
+pre-filled; the fallback card (§5.3) or the registrar asks instead. Tests pin a four-digit school
+(`CS 1110`), a long department (`COMPSCI 61A`), a two-digit number (`MATH 20A`), and that "Work on
+CS 100", "CS 100 study group" and "Study for PH 106" are never proposed.
 
-- **Skip** a series if any note in `commitments/` has its `source_uid` — whatever that note's status.
-  A declined series is never proposed again; that is the never-re-ask rule for proposals.
-- **Skip** it if a note already has the same **signature** — `(kind, course or lower-cased title,
-  meets)` — whatever its source. This catches the same class arriving from two routes (Google and a
-  registrar) or matching a hand-written note.
-- Otherwise `write::create` the note of §2 with `status: proposed`, actor `agent:commitments`, the
-  run's `via` and `run_id`. The body is one sentence naming the source ("Found as a weekly series on
-  your Google Calendar." / "…in your calendar feed." / "…in your registrar schedule.").
-- A **still-proposed** note whose series changed has `meets`/`where`/`from`/`until` refreshed by
-  `write_literals`, field by field, skipping any field a human set (§2.3).
+### 3.5 Proposals
 
-Proposals are notes, not approvals: they are never charged to the 15-a-day cap. Only the card that
-asks about one is (§5.2).
+`commitments::proposals(series_file, notes, courses, planning, template, today) -> Vec<Proposal>`,
+pure, in `source_uid` order. A series becomes a proposal only if it is eligible and classified,
+and:
+
+- **no note** in `commitments/` has its `source_uid` — a confirmed note or a decline marker (the
+  never-re-ask rule for proposals);
+- **no confirmed note has its signature** `(kind, course or lower-cased title, meets)` — the same
+  class from a second route, a registrar row, a hand-written note, or a "this and following"
+  successor (R22);
+- it is not `office-hours` when the caller is the card emitter (R8; the screen lists them).
+
+Proposals carry what a confirmed note needs: `kind`, default `level`, `title`, `course`, `meets`,
+`where`, `from` (= `first`), `until`, `source_uid`.
+
+**The window proposal.** When the vault has no `planning-day` note and no decline marker for the
+routine series involved, the eligible wake and bed series propose one: for each
+weekday, `start` = the latest wake-side time that day (a wake event's end), `end` = the earliest
+bed-side time (a bed event's start); a weekday with only one side takes the other from the
+template; a weekday whose result is inverted or shorter than `min_block_minutes`, or has neither
+side, is left out. It is one proposal whose `source_uid`s are the routine series' keys. A vault
+that already has a `planning-day` note never gets another proposal: the student's window stands.
+
+Nothing in §3 writes a note, a card or a journal record. Proposals are recomputed each run.
 
 ---
 
@@ -238,68 +392,66 @@ source}`). With it, and only for `name=google`, the reply gains one field:
 
 ```json
 {"ics": "BEGIN:VCALENDAR…", "source": "google_calendar",
- "series": [{"id": "4k2q9x7m1abc", "title": "CS 100", "location": "", "description": "Room 101",
-             "event_type": "default", "until": "2026-12-04",
-             "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]}]}
+ "series": {"calendars_read": ["google:3b9e0c1d2a4f5e60"],
+  "items": [{"calendar": "google:3b9e0c1d2a4f5e60", "id": "4k2q9x7m1abc", "title": "CS 100",
+             "location": "", "description": "Room 101", "event_type": "default",
+             "first": "2026-08-19T12:00:00-05:00",
+             "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+             "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]}]}}
 ```
 
-- **Which events.** From every calendar in the student's `calendarList` with `selected: true`, at
-  most 10 (R5): `events.list` with `singleEvents=true` over the same 28-day window, keeping only
-  items that carry a `recurringEventId`, have a `dateTime` start (timed), and whose `attendees`
-  entry with `self: true`, if any, is not `responseStatus: declined`. `eventType` is passed through
-  (`default` when Google omits it); the device, not the function, decides eligibility (§3.3), so the
-  rule lives in one place.
-- **`until`.** One `events.list` with `singleEvents=false` per calendar returns the recurring
-  masters; the `UNTIL` of a master's `RRULE` gives `until` as a date. No `UNTIL` → `null`.
-- **Bounds.** At most 100 series and 40 instances per series; `title` and `location` cut to 200
-  characters; **`description` is sent only when `location` is empty, cut to 200 characters** (R4).
-  Nothing is written to a table or a log; the function's error lines name only exception classes,
-  as today.
-- **Failure.** If anything in the series gathering fails, `series` is **omitted** and `ics` is
-  returned exactly as today — a series problem never costs the day's busy time.
+- **Which calendars (R5).** From `calendarList`: `primary`, then entries with `accessRole: owner`
+  and not `hidden`, ordered primary first and then by calendar id; the first 10. Each is named in
+  the reply only by `google:` + the first 16 hex of `sha256(account_id + "\n" + calendar id)` — an
+  identity for "the same calendar as last time", and nothing else.
+- **Which events.** Per calendar, `events.list` with `singleEvents=true` over the same 28-day
+  window, **following `nextPageToken`** up to 5 pages; keep items that carry a `recurringEventId`,
+  have a `dateTime` start, are not `status: cancelled`, and whose `self: true` attendee, if any, has
+  not declined. `eventType` passes through (`default` when Google omits it); the device, not the
+  function, decides eligibility (§3.4), so the rule lives in one place.
+- **Masters.** Per calendar, `events.list` with `singleEvents=false` over the same window (same
+  pagination) gives each series' master: its `recurrence` lines, **filtered to `RRULE`, `EXDATE`
+  and `RDATE`**, verbatim, and its start as `first`. `UNTIL` and `COUNT` are interpreted on the
+  device (§3.2), in the vault's timezone. A series whose master was not returned is sent without
+  `recurrence` and is ineligible.
+- **Complete or not at all.** A calendar goes into `calendars_read` only if every page of both
+  calls was read and none of its series was cut by a cap. A calendar that ran past 5 pages, or
+  whose series would pass the 100-series cap (applied in calendar order, then series id order),
+  is left out of `calendars_read` **and its items are not sent** — its series on the device stay
+  as they were (§3.3). A series with more than 40 instances in the window is dropped (it cannot be
+  weekly-eligible).
+- **Bounds.** `title` and `location` cut to 200 characters; **`description` sent only when
+  `location` is empty, cut to 200 characters** (R4). Nothing is written to a table or a log; error
+  lines name only exception classes, as today.
+- **A time budget.** Series gathering (up to ~40 Google calls) runs under its own 5-second
+  wall-clock budget after `ics` is built. Past it, or on any failure in it, `series` is **omitted**
+  and `ics` is returned exactly as today — a series problem never costs the day's busy time.
 - **The `ics` field does not change**: still `primary` only, still `toIcs`'s five properties. A
   test pins `toIcs` output byte-for-byte against today's for the same input.
-- **`name=personal`** gets no `series` field: its ICS already carries RRULEs and the device derives
-  series from it (§3.1).
+- **`name=personal`** gets no `series` field: its ICS already carries the masters, overrides and
+  RRULEs, and the device derives series from it (§3.2).
 
 ### 4.2 The engine
 
 - `cloudmodel::fetch_calendar(client, name)` sends `&accepts=series` and returns `(ics,
-  Option<Vec<serde_json::Value>>)`; the absence of `series` is `None`. `engine/tests/cloud_contract.rs`'s
-  request-line assertion (`GET /functions/v1/ingest-calendar?name=google HTTP/1.1`) is updated to the
-  new line in the same commit, and a second assertion pins that a reply without `series` parses.
-- `cli.rs`'s `calendar` closure (the one `Fetchers.calendar` is built from) keeps its
-  `Fn(&str) -> Result<String, String>` shape, so `calfeed::load_calendar_events` and every oracle
-  test are untouched. It **stashes**, per feed, what the series step needs: the Google `series`
-  array for a `cloud:google` feed, the fetched ICS text for any other. A feed that fails stashes
-  nothing.
+  Option<serde_json::Value>)`; the absence of `series` is `None`. `engine/tests/cloud_contract.rs`'s
+  request-line assertion is updated to the new line in the same commit, and a second assertion
+  pins that a reply without `series` parses.
+- **The stash is explicit** (review I8). `cli::Fetchers` gains `series: Option<&'a SeriesStash>`,
+  where `SeriesStash` is a `RefCell<BTreeMap<String, StashEntry>>` keyed by the feed's **URL** as
+  the calendar closure receives it (`cloud:google`, a direct `https://` address), and `StashEntry`
+  is the Google `series` value or the fetched ICS text. `cli::run` owns one stash and its calendar
+  closure fills it; `run_with`, the seam every test drives, takes it through `Fetchers`, so tests
+  inject series without a network. `Fetchers` derives `Default`; the one struct literal outside the
+  engine, `app/tests/scaffold.rs:99`, gains `..Default::default()` (listed in §10). A feed that
+  fails stashes nothing. URLs map to feed names through `calfeed::calendar_entries`.
+- The calendar closure keeps its `Fn(&str) -> Result<String, String>` shape, so
+  `calfeed::load_calendar_events` and every oracle test are untouched.
 - After `load_calendar_events`, `commitments::refresh_series(vault, stash, tz, today)` normalises
-  (§3.2) — Google arrays directly, ICS text through a **new** pure `calfeed::weekly_series(text, tz,
-  today)` that reuses the recurrence helpers and leaves `parse_calendar_ics` and `write_snapshot`
-  alone — and updates `state/calendar-series.json`.
+  (§3.2) — Google values directly, ICS text through the new pure `calfeed::weekly_series` — and
+  updates `state/calendar-series.json` (§3.3). Then the card passes of §5 run.
 
-### 4.3 `state/calendar-series.json`
-
-Generated state, like `state/calendar.md`; not a note, never synced, rebuilt from the sources.
-
-```json
-{"feeds": {"google": [{"source_uid": "gcal-series:4k2q9x7m1abc", "title": "CS 100",
-  "where": "Room 101", "event_type": "default",
-  "meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}],
-  "first": "2026-08-19", "until": "2026-12-04", "next_14d": 6, "last_seen": "2026-09-24"}]}}
-```
-
-- One array per feed name, series sorted by `source_uid`, keys in the order shown; serialised with
-  `ledger::dumps_value` plus a trailing newline, so the same data is the same bytes.
-- **Per-feed fallback, like the snapshot:** a feed fetched fresh this run replaces its array, but a
-  series it no longer returns is kept with its old `last_seen` until that is 14 days old, then
-  dropped (R12 files its `until` card first). A feed that failed, or served no `series`, keeps its
-  array untouched.
-- **Written only when some feed produced a fresh result and the bytes differ.** A vault whose
-  feeds are all unconfigured or unreachable — every oracle fixture — never gets the file.
-- Unreadable or malformed → treated as empty, one warning, rewritten on the next fresh fetch.
-
-### 4.4 Compatibility
+### 4.3 Compatibility
 
 | engine | function | result |
 |---|---|---|
@@ -307,7 +459,8 @@ Generated state, like `state/calendar.md`; not a note, never synced, rebuilt fro
 | new | old | `series` absent → `None` → that feed's series keep their previous state; no proposals, no error. |
 | new, no account | — | direct ICS feeds still yield series (R6); `cloud:` feeds degrade to the snapshot as today. |
 | new | new, Google not connected | the existing 409 → "using snapshot"; series unchanged. |
-| old engine reading a vault a new engine wrote | — | `commitments/` is an unknown folder to it: ignored by ranking, by id repair and by backups. Capacity is simply what it was before this spec. C3′ multi-desktop version skew is the only way to reach this, and the app and engine ship as a pair. |
+| old engine, a vault a new engine wrote | — | `commitments/` is an unknown folder: ignored by ranking, id repair and backups; capacity is what it was before this spec. |
+| old engine on a second desktop, after C3′ | — | its sync refuses pulled `cmt_` ids and `commitments/` paths (`is_id`, `is_note_path`) and does not get them back after it updates. The updated desktop then re-proposes those series (no local note has their key), the student approves once more, and §2.5's duplicate rule absorbs the pair when both sync. Bounded by the release gate (R3) and auto-update; accepted and named. |
 
 ---
 
@@ -315,121 +468,152 @@ Generated state, like `state/calendar.md`; not a note, never synced, rebuilt fro
 
 ### 5.1 The onboarding confirm screen (phase 2)
 
-Lands after c1b and c1c merge (both own `app/static/*` and `app/src/onboarding.rs`). Behaviour:
+Lands after c1b, c1c and C3′ merge (they own `app/static/*` and `app/src/onboarding.rs`).
 
 - Shown right after the calendar connection step, before the first slot. It runs
-  `knowlu-engine commitments --vault <v> --json` (R14), which fetches, writes the proposal notes and
-  prints them; the screen renders that list. A fetch that yields nothing skips the screen with one
-  line ("Nothing repeating on your calendar yet — Knowlu will ask as it finds your classes").
-- **Grouped by what matters:** *Your classes* (class and lab, one row per course, each labelled with
-  the course code, days and times in the §5.2 format), then *Your week* (work, clubs, meetings),
-  then *Your day* (wake and bed routines), then *Office hours*.
-- **Pre-checked:** every class, lab and work row, and the routines. **Unchecked:** clubs, meetings,
-  office hours. One control per row changes the level (hard / soft / optional) where the kind allows
-  it; nothing on the screen asks for typing.
+  `knowlu-engine commitments --vault <v> --json` (R14): fetch, refresh the series file, print the
+  proposals — **no note is written**. A fetch that yields nothing shows only *Your day* (below).
+- **Grouped:** *Your classes* — **one row per series**, labelled with the course code, days and
+  times in the §5.2 format, so a lecture and its lab are two rows; *Your week* (work, clubs,
+  meetings); *Your day* — the planning window (Q6), pre-filled per weekday from the routines when
+  there are any, otherwise from 08:00–22:00 (the observed case), with the times editable by pickers;
+  *Office hours*.
+- **Pre-checked:** every class, lab and work row. **Unchecked:** clubs, meetings, office hours. One
+  control per row changes the level (hard / soft / optional). Nothing asks for typing.
 - A course the wizard captured with no class row is listed under *Your classes* as "no class times
-  found — Knowlu will ask this week" (the fallback card, §5.3), or, at a school with a registrar
-  source, offers that login (phase 3).
-- **Finish** writes, through the engine's `write` with the console's human context, `status:
-  confirmed` on every checked row (and its `level` if changed) and `status: declined` on every
-  unchecked one. These are ordinary journaled note edits: **no approval is created, so nothing is
-  charged to the cap.** Leaving the screen without Finish writes nothing; the proposals then reach
-  the student as §5.2 cards.
-- Which app command performs the writes (the existing `set_fields` or one new command) is the
-  phase-2 plan's call; either way the engine's `write` does the work, and the Tauri command count
-  in CLAUDE.md is recounted.
+  found — Knowlu will ask this week" (§5.3), or at UA offers the registrar login (phase 3).
+- **Finish** confirms every checked row (a confirmed note, with its chosen level), declines every
+  unchecked one (a decline marker, R19), and writes the `planning-day` note. The writes go through
+  the engine, which re-derives each proposal from the series file by its `source_uid` — the app
+  passes keys, levels and the window, never event data. The console's human context; **no card, so
+  nothing is charged to the cap.** Leaving without Finish writes nothing; the proposals then reach
+  the student as §5.2 cards. Whether this is a mode of the `commitments` command or a new app
+  command is the phase-2 plan's call; either way the Tauri command count is recounted.
 
 ### 5.2 The `commitment-check` card (phase 1)
 
-For every `proposed` commitment found after onboarding (or left unanswered by it), one card, built
-on F2's `event-check` pattern:
+One card per proposal not yet answered (§3.5), built on F2's `event-check` pattern. **Local-only
+(R20).**
 
-- **Emitter.** `commitments::emit_checks(vault, today, budget, ctx, journal)`, called by `rank` after
-  the proposal pass. It asks about a note only if its status is `proposed`, its kind is not
-  `office-hours` (R8), and no card in `approvals/` or `archive/` has `target:` equal to that note's
-  path or `source_uid` equal to its `source_uid` — any card, answered, pending or snoozed, closes
-  the question for good.
-- **Cap.** `allowance = min(budget, 5 − commitment cards whose first_proposed_at is today)` (R9) —
-  "commitment cards" being `commitment-check` cards plus `amend` cards whose `target` is under
-  `commitments/` (§5.5), in `approvals/` or `archive/`. `budget` is `daily_approval_budget −
-  count_proposals_created(vault, today)` after the events pass has taken its share. The emitter sizes itself, so `defer_over_budget` never has overflow to
-  snooze. Order: `class`, `lab`, `work`, `routine`, `club`, `meeting`, then any other kind; within a
+- **Emitter.** `commitments::emit_checks(vault, proposals, today, budget, ctx, journal)`, run by
+  `rank` after `refresh_series`. It asks about a proposal only if it is not `office-hours` (R8) and
+  no card in `approvals/` or `archive/` has its `source_uid` — any card, answered, pending,
+  snoozed or withdrawn, closes the question for good.
+- **Cap.** `allowance = min(budget, 5 − commitment-check cards whose first_proposed_at is today)`
+  (R9). `budget` is `daily_approval_budget − count_proposals_created(vault, today)` after the events
+  pass has taken its share, so `defer_over_budget` never has overflow to snooze. Order: change
+  cards (§5.4), then `class`, `lab`, `work`, the window, `club`, `meeting`, any other kind; within a
   kind by the first meeting's `(day, start)`, then `source_uid`.
 - **Title** (structured fields only, never a model): `{title≤40} · {days} {range} · {question}`.
-  `days` joins the first `meets` entry's days as `Mon/Wed/Fri` (a run of three or more consecutive
-  days collapses to `Mon–Fri`); `range` is F2's `what_and_when` range (`12–12:50pm`, `1–2:45pm`);
-  a second `meets` entry adds ` +1 more time`. `question` by kind: `a class?`, `a lab?`, `work?`,
-  `a club?`, `a meeting?`, and for routines `your wake-up time?` / `your bedtime?`. Example:
+  `days` joins the first `meets` entry's days as `Mon/Wed/Fri` (three or more consecutive days
+  collapse to `Mon–Fri`); `range` uses F2's clock format (`12–12:50pm`, `1–2:45pm`); a second
+  `meets` entry adds ` +1 more time`. `question` by kind: `a class?`, `a lab?`, `work?`, `a club?`,
+  `a meeting?`. The window: `Your day · Mon–Fri 8am–10pm · plan in this window?`. Example:
   `CS 100 · Mon/Wed/Fri 12–12:50pm · a class?`.
 - **Frontmatter:** `type: approval`, `kind: commitment-check`, `title`, `status: pending`,
-  `target: commitments/<file>.md`, `source_uid` (the note's, when it has one), `proposed_at` and
+  `source_uid` (the proposal's; for the window, `window:` + its routine keys joined by `,`),
+  `commitment:` — the proposal as one single-line flow mapping (`kind`, `level`, `title`, `course`,
+  `meets`, `where`, `from`, `until`; for the window, `window`) — `proposed_at` and
   `first_proposed_at` (both today), `expires: null`, `snooze_until: null`, `created_by:
-  commitments`. Written with `write::create`; the journal actor is `agent:commitments`.
-- **Body.** First paragraph (the card's `why` in the console): `**Is this part of your week?**
-  Knowlu found it repeating on your calendar.` Then one line of what approving does, by level —
-  hard: "Approve and Knowlu never plans anything over it."; soft: "Approve and Knowlu counts it as
-  busy; an event suggestion may overlap it, and will say so."; routine: "Approve and Knowlu plans
-  your days from 7:30am" / "…until 11pm" (the time from the note). Then `where` when present, and
-  `Reject and it's ignored. Either way you won't be asked again. You can change its level later.`
-  Path: `approvals/commitment-check-<note stem>.md`, `-2` on collision.
-- **Settlement** in `approvals::transition_note`, beside F3's `event-check` arm:
-  - `approved` → `write_literals(target, status: confirmed)`, then the card is stamped `executed`
-    with `executed_at` and archived — the `amend` arm's tail.
-  - `rejected` → `write_literals(target, status: declined)` before the generic archive.
+  agent:commitments`. Written with `write::create`; journal actor `agent:commitments`. Path
+  `approvals/commitment-check-<slugify(title)>.md`, `-2` on collision.
+- **Body.** First paragraph (the card's `why`): `**Is this part of your week?** Knowlu found it
+  repeating on your calendar.` Then what approving does, by level — hard: "Approve and Knowlu never
+  plans anything over it."; soft: "Approve and Knowlu counts it as busy; an event suggestion may
+  overlap it, and will say so."; the window: "Approve and Knowlu plans your days in these hours.
+  You can change them any time." Then `where` when present, and `Reject and it's ignored. Either
+  way you won't be asked again.`
+- **Settlement**, a new arm in `approvals::transition_note` beside F3's `event-check` arm:
+  - `approved` → if a confirmed note already has the card's `source_uid` or signature (or, for the
+    window, a `planning-day` note exists), the card is archived `refused` with one warning and
+    nothing is written. Otherwise `write::create` the confirmed note from `commitment:` (§2.1; the
+    window as §2.4), `confirmed_at` today, then the card is stamped `executed` and archived.
+  - `rejected` → `write::create` the decline marker (for the window, one per routine key), unless
+    one exists; then the generic archive.
   - `pending` / `snoozed` → unchanged machinery. There is no expiry (R9).
-  - A target that is gone or no longer `proposed` (the student edited it by hand) → the card is
-    archived as `refused` with no write, and one warning.
-- **No app change.** `decide` already writes the card's status with the console's context and runs
-  `process_approvals` in the same process (F3 decision 3); the console renders any `kind` with
-  Approve, Reject and Snooze. The note's `status` is written by the approvals pass; the human's
-  decision is the journal record on the card, as with every other kind.
-- **An old engine** meeting an approved `commitment-check` warns `unknown kind` and leaves it; a
-  rejected one is archived without writing `declined`, so the note stays `proposed` and, the card
-  being archived, is never asked again. Reachable only across version skew; accepted and named.
+  - **Withdrawn** (M14): a pending card whose series left the series file, or which a confirmed
+    note now covers, is archived `superseded` with no write.
+- **The day's count.** Cards filed after `process_approvals` are counted into this run's
+  `Approvals: N pending` line, as F2 does for its event-checks.
+- **No app change in phase 1.** `decide` writes the card's status and runs `process_approvals` in
+  the same process (F3 decision 3); the console renders any `kind` with Approve, Reject and Snooze.
+  Choosing a level on the card, or correcting a kind after the fact, is the phase-2 *Your week*
+  panel (§10), not typing (review I10).
+- **An old engine** meeting an approved `commitment-check` warns `unknown kind` and leaves it;
+  reachable only across version skew; accepted and named.
 
 ### 5.3 The per-course fallback card (phase 2)
 
-"When does BUI 100 meet?" — the one place the student types.
+"When does BUI 100 meet?" — the one place the student types. Local-only (R20).
 
-- **Eligible:** a course in `courses/` with no `class` commitment in any status other than
-  `declined`, from **day 3** of the vault (the date of its earliest `state/journal/` file), at most
-  **2 a day**, each charged to the 15 like any card (R10). Registrar schools try the registrar first.
+- **Eligible:** a course in `courses/` with no confirmed class note, no pending class proposal and
+  no `card:<slug>` decline marker, from **day 3** of the vault (the date of its earliest
+  `state/journal/` file), at most **2 a day**, charged to the 15 like any card (R10). At UA, a vault
+  with the registrar connected waits for the registrar pass instead.
 - **Card:** `kind: commitment-ask`, `course: <slug>`, title `When does BUI 100 meet?`, body naming
   what the answer does and that the student can reject if the course has no meetings (an online
-  course). Rejecting writes a `class` note with `status: declined` and `source_uid:
-  card:<slug>`, which closes the question.
-- **Collecting the answer** needs the app: the card renders a small form — day toggles
-  Mon…Sun, a start and an end time picker, "add another time" — whose submit writes the answer onto
-  the card as one flow field, `answer_meets: [{days: [...], start: "HH:MM", end: "HH:MM"}]`, then
-  approves it. The approvals pass validates `answer_meets` exactly as §2.2 validates `meets` and
-  creates `commitments/<slug>.md` with `kind: class`, `level: hard`, `course`, `meets`,
-  `source_uid: card:<slug>`, `status: confirmed`. An invalid answer returns the card to `pending`
-  with a warning, like a recoverable amend refusal.
-- **Withdrawn:** if a series matching the course is proposed while the card is pending, the card is
-  archived as `superseded` and the series' own card asks instead.
-- Phase 2 because the form is `app/static` work. The engine half (emitter, settlement, withdrawal)
-  ships with it, never alone: a card the console cannot answer would teach the student to reject.
+  course). Rejecting writes the decline marker for `card:<slug>`, which closes the question.
+- **The answer:** a small form — day toggles Mon…Sun, start and end pickers, "add another time" —
+  writes `answer_meets: [{days: [...], start: "HH:MM", end: "HH:MM"}]` onto the card and approves
+  it. The settlement validates it as §2.2 validates `meets` and creates `commitments/<slug>.md`
+  (`kind: class`, `level: hard`, `course`, `meets`, `source_uid: card:<slug>`, `status:
+  confirmed`). An invalid answer returns the card to `pending` with a warning.
+- **Withdrawn** (archived `superseded`) if a class proposal for the course appears while it is
+  pending; that proposal's own card asks instead.
+- The engine half ships with the form, never alone: a card the console cannot answer would teach
+  the student to reject.
 
-### 5.4 Never re-asked
+### 5.4 Changes to confirmed commitments (R12, R22)
+
+The `amend` machinery is not used: `approvals::validate_amendment` refuses a null `from` ("from/to
+must both be present and non-null") and any sequence ("must be a scalar"), and those refusals are
+recoverable, so an amend of `until` or `meets` would return to `pending` for ever (review C1).
+`commitments` does not join `AMENDABLE_FOLDERS`, and `AMENDABLE_FIELDS` is unchanged.
+
+- **Detection** (in `rank`, after `refresh_series`), only for a confirmed note whose `source_uid`
+  is a `gcal-series:`/`ics-series:` key and whose calendar was read fresh this run:
+  - **changed** — its series differs from the note in `meets`, in a non-empty `where`, or in
+    `until` (the series now ends, or ends earlier);
+  - **ended** — its series was dropped from the file (14 days unseen while its calendar was read)
+    and no fresh series has the note's signature (R22) → propose `until` = the last instance date
+    the file held;
+  - **succeeded** (R22) — an eligible class or lab series for the same course, with different
+    meets, whose first instance falls on or after the note's series' last instance, while that
+    series is ending → propose `meets` (and `where`) of the new series **and** `source_uid` = the
+    new key, in one card. That new series is not a proposal of its own while the card is pending
+    or once it is approved.
+- **The card** is a `commitment-check` with `target: commitments/<file>.md`, `change:` — the new
+  values of the changed fields only, one single-line flow mapping — and `was:` — the note's
+  current values of the same fields, absent written as `null`. Title: `CS 100 now meets Tue/Thu
+  9:30–10:45am · update?` / `CS 100 ends Dec 4 · update?`. `source_uid` is the note's. Local-only
+  (R20); charged to the cap and filed before new proposals' cards (§5.2).
+- **Settlement** (the same arm): `approved` → for each field in `change`, the note's current value
+  (absent = null) and the card's `was` value are compared as canonical text —
+  `safe_dump_flow(parse(value))` for both — and any mismatch means the student changed the note
+  since: the card is archived `refused` with a warning and nothing is written. Otherwise each field
+  is written with `write::write_literals` (a sequence through `to_literal` of the parsed value, so
+  it reads back as the sequence `commitments::load` accepts), the card is stamped `executed` and
+  archived. `rejected` → archived, no write. No field is ever proposed as `null`.
+- **Never re-asked:** a card with the same `target` and the same canonical `change` text in
+  `approvals/` or `archive/` suppresses another; a different change is a new question.
+- **Tests:** an `until` change onto a note with no `until` applies; a `meets` change applies and
+  reads back as a sequence `load` accepts; a stale `was` is refused and archived; a split series
+  with the same meets files nothing; a split with new meets files exactly one card.
+
+### 5.5 Never re-asked
 
 | situation | what closes it |
 |---|---|
-| a series already has a note | `source_uid` match, any status (§3.4) |
-| the same meeting arrives from a second source | the signature match (§3.4) |
-| a proposal has had a card | any card with that `target` or `source_uid`, in `approvals/` or `archive/` |
-| a course was asked when it meets | its `card:<slug>` note, confirmed or declined |
-| a confirmed commitment's series changed | one `amend` card per change; an `amend` already pending for the same target and field suppresses another (§5.5) |
+| a series was confirmed or declined | a note with its `source_uid` — the confirmed note or the decline marker (§3.5) |
+| the same meeting arrives from a second route | the signature match against confirmed notes (§3.5) |
+| a proposal has had a card | any card with its `source_uid`, in `approvals/` or `archive/` |
+| a course was asked when it meets | its `card:<slug>` note, confirmed or a decline marker |
+| a confirmed commitment changed | a card with the same `target` and `change` (§5.4) |
+| the student has a planning day | the `planning-day` note: no window is proposed again |
 
-### 5.5 Changes to confirmed commitments (R12)
-
-When a fresh series differs from its **confirmed** note in `meets`, `where` or `until`, `rank` files
-one `kind: amend` card per changed field with `target:` the note — the existing amend machinery,
-with `commitments` added to `AMENDABLE_FOLDERS` and `meets`, `where`, `until` amendable **in that
-folder only** (a per-folder allowance beside `AMENDABLE_FIELDS`, so a task's fields do not widen).
-The amend's `from` is compared as the field's single-line text, exactly as the note holds it. Its
-title follows §5.2 (`CS 100 now meets Tue/Thu 9:30–10:45am`). A series
-dropped from `state/calendar-series.json` after 14 unseen days files an amend proposing `until:
-<last_seen>`. Amend cards are charged to the cap as today, share the 5-a-day ceiling of §5.2, and are filed before that day's new `commitment-check` cards.
+Cards are local-only (R20), so on a second desktop the third and fifth rows hold only once the
+first desktop's answer — a note — has synced. Until then that desktop may ask once; the settlement's
+duplicate check (§5.2) makes the second answer a no-op.
 
 ---
 
@@ -440,54 +624,98 @@ dropped from `state/calendar-series.json` after 14 unseen days files an amend pr
 Today every production path builds its calendar the same way —
 `WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), events)` in
 `cli::run_with` (the `rank` step) and in `surface::load` (the read model). Both become
-`WeekCalendar::for_vault(vault, events)`, which is `from_file` followed by
-`with_commitments(commitments::load(vault))`. The test-only `from_file` calls on fixtures in
-`ranking.rs`, `scheduling.rs`, `render.rs` and `surface.rs` stay as they are.
+`WeekCalendar::for_vault(vault, events)`: `from_file`, then
+`with_commitments(commitments::load(vault))`, then `with_instances(series file)` (R21). The
+test-only `from_file` calls on fixtures in `ranking.rs`, `scheduling.rs`, `render.rs` and
+`surface.rs` stay as they are.
 
-`WeekCalendar` keeps the template's `classes` exactly as today and gains one field,
-`commitment_spans: Vec<Span>` where `Span { day: DayKey, start: Time, end: Time, from:
-Option<Date>, until: Option<Date>, title, kind }`, filled only from **confirmed** notes whose level
-is `hard` or `soft` (optional and routine notes contribute nothing here). Then:
+`WeekCalendar` keeps the template's `classes`, `day_start` and `day_end` exactly as today and gains:
 
-- **`template_blocks(day)`** takes its busy list as the template's spans for `day_key(day)` **plus**
-  every commitment span on that weekday whose `from ≤ day ≤ until`. The rest of the function — the
-  sort, the cursor walk, the clamp to `day_end` — is unchanged, so overlapping or duplicate spans
+- `commitment_spans: Vec<Span>` — `Span { day: DayKey, start, end, from: Option<Date>, until:
+  Option<Date>, title, kind, source_uid }` — from **confirmed** notes whose level is `hard` or
+  `soft` (optional notes, decline markers and the planning day contribute nothing here);
+- `instances: BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)>` — per `source_uid`, the
+  fresh-read horizon `[read date, read date + 28)` of its calendar and its actual instances (R21);
+- `window: [Option<(Time, Time)>; 7]` — the planning day per weekday (§6.3).
+
+Then:
+
+- **`window(day)`** returns the planning day's `(start, end)` for `day_key(day)`, or the template's
+  `(day_start, day_end)`. Every use of `day_start`/`day_end` on a date goes through it —
+  `template_blocks` and `surface::the_day` (lines 892–893 today).
+- **`template_blocks(day)`** takes its busy list as the template's spans for `day_key(day)`
+  **plus** each commitment span active that day: when `day` is inside the span's source horizon in
+  `instances`, the span's actual instances on that date (none on a cancelled date, the moved time on
+  a moved one); otherwise the weekly span on its weekday when `from ≤ day ≤ until`. The sort, the
+  cursor walk and the clamp to the window's end are unchanged, so overlapping or duplicate spans
   behave exactly as overlapping template classes already do.
 - **`free_blocks`, `capacity`, `template_capacity`** follow from `template_blocks` with no change,
   so `rank`, `designate_today`, `start_by`, `slack_days`, the must-do partition and the gauge all
-  see commitments with **no ranking change** (C3).
+  see commitments and the window with **no ranking change** (C3).
 - A class that is both a confirmed commitment and a Google event in `state/calendar.md` is
-  subtracted twice; subtraction of an already-busy span removes nothing, so capacity is right. The
-  only visible shift is in `render::capacity_breakdown`'s wording, where that hour moves from
-  "calendar" to "template" — correct, since it is now part of the timetable.
+  subtracted twice; subtracting an already-busy span removes nothing, so capacity is right. The
+  visible shift is in `render::capacity_breakdown`'s wording, where that hour moves from "calendar"
+  to "template" — correct, since it is now part of the timetable.
 
 ### 6.2 The read model
 
 `surface::the_day` draws classes as the gaps between `template_blocks`. With commitments in that
 busy list, a club would be drawn as `class`. So (R15): the gap walk runs over a new
-`template_only_blocks(day)` (the template's classes alone, today's exact computation), and each
-commitment span active that day is added as its own block — `kind: "class"` for class and lab,
-`"busy"` otherwise, `label` = the note's title. A `busy` block from `events_on(day)` whose start and
-end equal a commitment block's is dropped, so a class on both Google and in `commitments/` is drawn
-once. Both kinds already exist, so the console renders them unchanged; `docs/surface/anatomy.md`
-gains one paragraph saying where these blocks come from.
+`template_only_blocks(day)` (the template's classes alone within `window(day)` — today's exact
+computation when there is no planning day), and each commitment span active that day is added as
+its own block — `kind: "class"` for class and lab, `"busy"` otherwise, `label` = the note's title —
+**clamped to `window(day)`, and not drawn if wholly outside it**. A `busy` block from `events_on(day)`
+whose start and end equal a commitment block's is dropped, so a class on both Google and in
+`commitments/` is drawn once. Both kinds already exist, so the console renders them unchanged;
+`docs/surface/anatomy.md` gains one paragraph on where these blocks come from and on `moved`
+(§6.4).
 
-### 6.3 The routine window (C2, R11)
+### 6.3 The planning day (Q6, C2, R11)
 
-`with_commitments` also reads confirmed `kind: routine` notes. If any `routine: wake` note is
-confirmed, `day_start` becomes the earliest `end` among their meetings; if any `routine: bed` note
-is confirmed, `day_end` becomes the latest `start` among theirs. Each side is independent; a side
-with no routine keeps the template's value. If the result has `day_start >= day_end`, both sides
-keep the template's values and `commitments::load` returns the warning `routine window inverted
-(<start>–<end>); using week_template`. `config/week_template.yaml` is never written.
+`with_commitments` reads the one confirmed `planning-day` note (§2.4) into `window`. A weekday the
+note lists uses its `start`–`end`; any other weekday keeps the template's `day_start`/`day_end`. An
+entry with `start >= end` or an unparseable time is skipped with the warning `planning day
+<days>: <start>–<end> ignored; using week_template`. `config/week_template.yaml` is never
+written. Routines reach the window only through the note (§3.5): no confirmed note, no change. The
+window is per weekday, so a 7:30 weekday wake-up does not also start the student's weekend.
 
-### 6.4 Warnings and determinism
+### 6.4 What moved (Q6, R23)
+
+An edit to the window takes effect on the next rank. That rank says what moved; it does not
+guess.
+
+- **`state/plan.json`**, generated and device-local, written by `rank` **only when a confirmed
+  `planning-day` note exists** (so a vault without one — every fixture — is byte-identical):
+  `{"date": <today>, "moved": <object or null>, "window": <the note's window, canonical
+  safe_dump_flow text>}` through `ledger::dumps_value`.
+- **The diff.** When the recorded `window` differs from the note's current one, `rank` also runs
+  `designate_today_explained` under the recorded window (a second `WeekCalendar` identical but for
+  `window`) and compares the two plans by task id. A take's **part of day** is the start of its
+  free block (`free_blocks(today)[block_index]`): before 12:00 *morning*, before 17:00
+  *afternoon*, otherwise *evening*. A task counts as **moved to** its new part when its part changed
+  or it is new today; one present only in the old plan counts as **no longer fits today**. Both
+  plans come from the same ranked list, so the diff is exactly the window's effect.
+- `moved` = `{"on": <today>, "to": {"morning": n, "afternoon": n, "evening": n}, "dropped": n,
+  "text": "2 items moved to this evening"}` — `text` built by the engine from the counts (largest
+  group first, ties in morning→evening order; `dropped` adds "; 1 no longer fits today"), or `null`
+  when nothing moved. When the windows are equal, a `moved` whose `on` is today is carried forward,
+  so the line stays for the rest of that day; on another day it becomes `null`.
+- **The read model** gains an optional `moved` on the today view, omitted when `state/plan.json`
+  has none — so `surface-today-{s1,s1-migrated,full}.json` do not change.
+- **Preview.** `surface --view today --window '<flow sequence>'` computes the day under a proposed
+  window and its `moved` against the current one, and writes nothing. It is the phase-2 editor's
+  data source ("see how an edit changes the suggestions"); the editor itself — pickers, the
+  preview, the edit through `set_fields` — is **app phase** (phase 2).
+- `today.md` gains nothing: its format is the golden references' contract; the line is the
+  console's.
+
+### 6.5 Warnings and determinism
 
 `commitments::load` never fails: a missing folder is empty, an unreadable note or invalid field is
-skipped with a warning, notes are read in file-name order. Its warnings, the proposal pass's and the
-card emitter's join the `calendar` step's message in the run record (R13). Nothing in this section
-reads the clock, the network or a model — `rank never calls a model` holds, and
-`rank_cannot_reach_a_judgment_endpoint` is unaffected.
+skipped with a warning, notes are read in file-name order. Its warnings, the series pass's and the
+card passes' join the `calendar` step's message in the run record (R13). Nothing in §6 reads the
+clock, the network or a model; `rank_cannot_reach_a_judgment_endpoint`, which today scans
+`cli.rs`, is extended to `commitments.rs` and the `commitments` command's arm in `main.rs` (M5).
 
 ---
 
@@ -498,9 +726,10 @@ In `engine/src/commitments.rs`, pure, no I/O:
 ```rust
 pub enum Level { Hard, Soft, Optional }
 
-/// Every confirmed, non-routine commitment whose meeting overlaps [start, end) — half-open, local
-/// wall-clock, in the vault's timezone. Sorted by (level: hard first, meeting start, title, id).
-pub fn conflicts<'a>(commitments: &'a [Commitment], start: DateTime, end: DateTime)
+/// Every confirmed commitment whose meeting overlaps [start, end) — half-open, local wall-clock,
+/// in the vault's timezone, honouring actual instances inside the fresh horizon (R21). Sorted by
+/// (level: hard first, meeting start, title, id). The planning day is not a commitment here.
+pub fn conflicts<'a>(set: &'a Commitments, start: DateTime, end: DateTime)
     -> Vec<(&'a Commitment, Level)>;
 
 pub enum Fit { Clear, OverlapsSoft(Vec<String>), OverlapsHard(Vec<String>) }
@@ -510,51 +739,53 @@ pub enum Fit { Clear, OverlapsSoft(Vec<String>), OverlapsHard(Vec<String>) }
 pub fn fit(conflicts: &[(&Commitment, Level)]) -> Fit;
 ```
 
-- A span that crosses midnight is split at midnight and each part is checked against its own
-  weekday. `from`/`until` are checked against the date of each part.
-- `conflicts` returns optional commitments too, so a caller that wants to say "during office hours"
-  can; `fit` is where they are ignored.
-- The input is the same `commitments::load(vault)` result `WeekCalendar::for_vault` uses, so the
-  overlap rule and the capacity rule can never disagree about what is confirmed.
+- `Commitments` is the `load(vault)` result plus the series file's instances — the same data
+  `WeekCalendar::for_vault` uses, so the overlap rule and the capacity rule can never disagree.
+- A span that crosses midnight is split at midnight and each part is checked against its own date.
+- `conflicts` returns optional commitments too, so a caller can say "during office hours"; `fit`
+  ignores them.
 - Tests pin: a hard class overlapping by one minute is `OverlapsHard`; touching end-to-start is
-  `Clear`; a soft club gives `OverlapsSoft(["Chess Club"])`; `proposed` and `declined` notes never
-  conflict; a span outside `from`/`until` is `Clear`; a midnight-crossing span meets the next
-  day's commitment.
+  `Clear`; a soft club gives `OverlapsSoft(["Chess Club"])`; decline markers never conflict; a span
+  outside `from`/`until` is `Clear`; a cancelled instance inside the horizon is `Clear`; a
+  midnight-crossing span meets the next day's commitment.
 
 ---
 
 ## 8. What cannot change
 
 - **The eight frozen Python references** (CLAUDE.md rule 2). `golden-today-s1.md` and
-  `golden-today-full.md`: the fixture vaults have no `commitments/`, so the calendar, capacity and
-  page are computed exactly as today. `calendar-snapshot-gcal.md`: `write_snapshot`,
-  `read_snapshot` and `parse_calendar_ics` are not edited; series go to a different file.
+  `golden-today-full.md`: the fixture vaults have no `commitments/`, no `courses/` and no reachable
+  feed, so the calendar, window, capacity and page are computed exactly as today, and `today.md`
+  gains no line (§6.4). `calendar-snapshot-gcal.md`: `write_snapshot`, `read_snapshot` and
+  `parse_calendar_ics` are not edited; series use new code and a different file.
   `vault-full/state/events.md`, the parsed references, `run-records-reference.json` (no new step,
-  R13) and `pyyaml-safe-dump-reference.json` (`meets` goes through the existing flow emitter) are
-  untouched by construction.
+  R13) and `pyyaml-safe-dump-reference.json` (`meets`, `window`, `commitment`, `change` and `was`
+  go through the existing flow emitter) are untouched by construction.
 - **The three read-model references** `surface-today-{s1,s1-migrated,full}.json`: no commitment
-  blocks exist in them, and the gap walk over `template_only_blocks` is today's computation. They are
-  not regenerated.
+  blocks, no planning day and no `state/plan.json` exist for them; `template_only_blocks` is
+  today's computation; `moved` is omitted. They are not regenerated.
 - **Byte contracts.** No new `journal::VIAS` entry (`agent:commitments` is an actor, and
   `provenance::is_agent` is a `starts_with` test). Every JSON line goes through
   `ledger::dumps_value`. `/ingest-calendar` without `accepts=series` replies byte-for-byte as
   today, and `toIcs` is pinned.
-- **Old engines** — §4.4.
-- **A vault with no `commitments/`.** By construction `commitment_spans` is empty, so
-  `template_blocks` builds the identical busy list; the routine window applies only when a
-  confirmed routine exists; the de-duplication in §6.2 fires only beside a commitment block; and
-  with no configured, reachable feed no series file is written. Four tests prove it:
+- **Old engines** — §4.3.
+- **A vault with no `commitments/`.** By construction `commitment_spans` is empty and `window`
+  falls back to the template, so `template_blocks` builds the identical busy list; the
+  de-duplication in §6.2 fires only beside a commitment block; with no configured, reachable feed
+  no series file is written; with no planning-day note no plan file is written. Tests prove it:
   1. `for_vault_equals_from_file_without_commitments` — for each of `vault-s1`,
      `vault-s1-migrated` and `vault-full`, over the 35 days from 2026-08-24, `for_vault` and
-     `from_file` give equal `template_blocks`, `free_blocks`, `capacity`, `template_capacity`,
-     `day_start` and `day_end`.
-  2. `proposed_and_declined_commitments_change_nothing` — the same comparison on a scratch vault
-     whose `commitments/` holds only `proposed` and `declined` notes (routines included).
-  3. `cargo test --test oracle --test surface_oracle` green with `git diff --exit-code
+     `from_file` give equal `template_blocks`, `free_blocks`, `capacity`, `template_capacity` and
+     `window(day)`.
+  2. `template_only_blocks_equals_template_blocks_without_commitments` — the same fixtures and
+     days (M7).
+  3. `decline_markers_change_nothing` — the first comparison on a scratch vault whose
+     `commitments/` holds only decline markers.
+  4. `cargo test --test oracle --test surface_oracle` green with `git diff --exit-code
      engine/tests/fixtures` clean.
-  4. `rank_on_vault_full_writes_no_series_file_and_no_commitments` — a copy of `vault-full` ranked
-     with the fixture's feed configuration gains neither `state/calendar-series.json` nor
-     `commitments/`.
+  5. `rank_on_vault_full_writes_no_new_state` — a copy of `vault-full` ranked with the fixture's
+     feed configuration gains no `state/calendar-series.json`, no `state/plan.json`, no
+     `commitments/` and no card, and its `calendar` step message equals today's (M7).
 - **`ids::NOTE_FOLDERS` grows to seven.** Id repair and backups iterate it and already skip a
   missing folder; `note_folders_is_a_subset_of_backup_folders` keeps checking the derivation, and
   `BACKUP_FOLDERS` grows to ten.
@@ -563,38 +794,48 @@ pub fn fit(conflicts: &[(&Commitment, Level)]) -> Fit;
 
 ## 9. Privacy
 
-- **What leaves the device:** nothing new. The request gains `accepts=series`.
-- **What our function reads from Google:** the recurring events on the calendars the student has
-  selected — title, times, location, description, event type and the student's own response —
-  all within `calendar.readonly`, which the account already holds. It is read in memory for the
-  request, sent to the device, and **not stored or logged**; error lines name exception classes
-  only.
-- **What reaches the device:** per series, the title, times, location, event type, `until` and — only
-  when the location is empty — at most 200 characters of description (R4).
-- **What the device keeps:** `state/calendar-series.json` (title, `where`, meeting times) and the
-  commitment notes. **The description is never written anywhere**; `where` is at most 80
-  characters.
-- **What our servers keep:** under the 2026-09-17 amendment (ruling 2) the account holds the vault.
-  `commitments/` notes and `commitment-check` cards therefore sync like every note: a confirmed
-  class's title, times and room are stored server-side, readable by the service, and deleted with
-  the account. `state/` never syncs, so the series file does not.
-- **No model.** Nothing in this piece sends calendar data to an inference provider; the classifier
-  is deterministic and runs on the device.
+- **What leaves the device:** nothing new. The request gains `accepts=series`. Proposals, the
+  series file and the cards never leave (R18, R20).
+- **What our function reads from Google:** the recurring events on the calendars the student
+  **owns** (R5) — title, times, location, description, event type, recurrence rule and the
+  student's own response — all within `calendar.readonly`, which the account already holds. It is
+  read in memory for the request, sent to the device, and **not stored or logged**; error lines
+  name exception classes only.
+- **What reaches the device:** per series, the title, times, location, event type, recurrence
+  lines, and — only when the location is empty — at most 200 characters of description (R4).
+- **What the device keeps and never sends:** `state/calendar-series.json` — the title, a place-like
+  `where` and the times of every eligible repeating event on the student's own calendars,
+  including ones they never confirm — and the local-only cards. **The description is never
+  written anywhere.**
+- **What syncs** (after C3′, under the 2026-09-17 amendment's ruling 2 that the account holds the
+  vault), and nothing else from this piece: **confirmed** commitment notes (title, kind, level,
+  course, times, `where`, dates, source key); **decline markers** (an opaque source key and
+  nothing more); the `planning-day` note (the student's hours); and the journal records of those
+  writes. A therapy group, a shift on someone else's calendar or a declined club never reaches our
+  servers. All of it is readable by the service, exported with the account and deleted with it.
+- **The registrar (phase 3, UA):** the login stays in Credential Manager on the device and the
+  fetch runs on the device; only rows that become confirmed notes sync, as above.
+- **No model.** Nothing in this piece sends calendar or registrar data to an inference provider;
+  the classifier is deterministic and runs on the device.
 - **Limited Use.** Calendar data is used only for the user-facing feature — planning around the
-  student's week — which is prominent (every card says it came from the calendar); it is transferred
-  nowhere beyond our own service; no human reads it; nothing trains on it; export and deletion cover
-  it because it is notes.
-- **`site/privacy.html` needs a line.** Today it says what the calendar links are and that
-  Calendar events go to the inference providers for judgments; it does not say that repeating
-  events become notes the account keeps. The line (its wording is C3′'s privacy task, read by
-  Quinn and the lawyer, per ruling 6) should say, in substance: *when you connect Google Calendar,
-  Knowlu reads your repeating events to learn your week; the ones you confirm are kept as notes in
-  your folder, which your account keeps in step; an event's description is never stored.* It lands
-  in phase 1s (§10), because `site/privacy.html` is edited on `c1b-sign-in`, `c1c-first-day` and
-  `c3-sync`.
-- **Quinn-owned, no decision needed:** the `calendar.readonly` scope justification on the Google
-  consent screen gains "learns the student's class and work schedule from repeating events" at its
-  next submission.
+  student's week — which is prominent (every card says it came from the calendar); only what the
+  student confirms is transferred, and only to our own service; no human reads it; nothing trains
+  on it; export and deletion cover it because it is notes. Data minimisation holds because
+  unconfirmed events never leave the device.
+- **`site/privacy.html` needs lines before shipping — a release gate, not a follow-up.** Today's
+  page (on `main` and on `c3-sync`) says Calendar events go to inference providers for judgments
+  and does not say that repeating events are read to learn the week. Two lines, worded for Quinn
+  and the lawyer's read (per ruling 6), in substance:
+  1. with **phase 1's first release**: *when you connect Google Calendar, Knowlu reads the
+     repeating events on your own calendars to learn your week; it asks before keeping any, the
+     ones you don't confirm stay on your computer, and an event's description is never stored;*
+  2. with **whichever of phase 1 and C3′ ships second**: *the ones you confirm, and your
+     wake-to-bed hours, are kept as notes in your folder, which your account keeps in step.*
+  Phase 3 needs its own line about the registrar login, and it collides with the page's current
+  "No campus password" paragraph (§11 Q1).
+- **The consent screen.** The `calendar.readonly` justification could name "learns the student's
+  class and work schedule from repeating events". Changing it may restart Google's verification,
+  so whether and when is Quinn's (§11 Q2).
 
 ---
 
@@ -602,70 +843,154 @@ pub fn fit(conflicts: &[(&Commitment, Level)]) -> Fit;
 
 ### Phase 1 — engine and cloud (planned now; executes after `j-followups` merges, R16)
 
-Delivers: the note format and loader, series transport and normalisation, the classifier, proposal
-notes, `commitment-check` cards and their settlement, amend cards for changed series, capacity and
-the read model, the routine window, `conflicts`/`fit`, and the `commitments` command. No
-`app/**` file.
+Delivers: the three note shapes and the loader; series transport, the series file and the ICS
+series logic; the classifier and proposals; local-only `commitment-check` cards (proposals, the
+window, changes) and their settlement; capacity, the planning day, `state/plan.json` and `moved`;
+the read model's blocks and preview; `conflicts`/`fit`; the `commitments` command. The only
+`app/**` edit is one test line.
 
 | file | change |
 |---|---|
-| `engine/src/commitments.rs` | **new** — `Commitment`, `Level`, `load`, `Series`, `refresh_series`, `classify`, `propose`, `emit_checks`, `conflicts`, `fit` |
+| `engine/src/commitments.rs` | **new** — `Commitment`, `Commitments`, `Level`, `load`, `Series`, `refresh_series`, `classify`, the code table, `proposals`, `emit_checks`, change detection, the settlement helpers, the plan diff, `conflicts`, `fit` |
 | `engine/src/lib.rs` | one `pub mod commitments;` |
 | `engine/src/ids.rs` | `NOTE_FOLDERS` + `commitments`; `KINDS`, `ID_RE` + `cmt`; `kind_for` maps `type: commitment` |
 | `engine/src/backup.rs` | `BACKUP_FOLDERS` derivation grows by one |
-| `engine/src/weekcal.rs` | `for_vault`, `with_commitments`, `commitment_spans`, `template_only_blocks`, the routine window |
-| `engine/src/calfeed.rs` | **new** pure `weekly_series`; nothing existing edited |
-| `engine/src/cloudmodel.rs` | `fetch_calendar` sends `accepts=series`, returns the optional array |
-| `engine/src/cli.rs` | the stashing closure; `refresh_series`, `propose`, `emit_checks` and the R12 amend pass after `load_calendar_events`; `for_vault`; warnings into the `calendar` step |
-| `engine/src/main.rs` | the `commitments --vault <v> [--today] [--json]` command (always exits 0) |
-| `engine/src/approvals.rs` | `commitment-check` settlement; `commitments` in `AMENDABLE_FOLDERS` with its per-folder fields |
-| `engine/src/surface.rs` | `for_vault` in `load`; commitment blocks and the duplicate drop in `the_day` |
-| `engine/src/yamlemit.rs` | only if `safe_dump_flow` cannot already emit `meets` on one line (the plan checks first) |
-| `engine/tests/cloud_contract.rs` | the new request line; a reply without `series` |
-| `cloud/supabase/functions/ingest-calendar/{handler.ts,handler_test.ts,index.ts}` | `accepts`, `series`, `calendarList`, masters, bounds, failure omission, `toIcs` pin |
-| `docs/surface/anatomy.md` | one paragraph (§6.2) and the `commitment-check` card |
-| `CLAUDE.md` | `commitments/` in the vault folder list; the `commitments` command |
+| `engine/src/weekcal.rs` | `for_vault`, `with_commitments`, `with_instances`, `window(day)`, `commitment_spans`, `template_only_blocks` |
+| `engine/src/calfeed.rs` | **new** pure `weekly_series` (overrides, cancellations, declines, transparency, rule fields); nothing existing edited |
+| `engine/src/cloudmodel.rs` | `fetch_calendar` sends `accepts=series`, returns the optional value |
+| `engine/src/cli.rs` | `Fetchers.series` + `#[derive(Default)]`, `SeriesStash`, the stashing closure; `refresh_series`, change detection and `emit_checks` after `load_calendar_events`; `for_vault`; `state/plan.json`; warnings into the `calendar` step |
+| `engine/src/main.rs` | `commitments --vault <v> [--today] [--json]` (always exits 0, writes no note); `surface --window` |
+| `engine/src/approvals.rs` | the `commitment-check` arm: create, decline marker, change, withdraw; **not** `AMENDABLE_FOLDERS` |
+| `engine/src/eventemit.rs` | `clock` made `pub(crate)` for the card titles (M4) |
+| `engine/src/surface.rs` | `for_vault` in `load`; `window(day)` in `the_day`; commitment blocks, clamp, duplicate drop; `moved`; the `--window` preview |
+| `engine/src/render.rs` | the day's `Approvals: N pending` count includes cards filed this run, as F2 does (M8) |
+| `engine/src/yamlemit.rs` | only if `safe_dump_flow` cannot already emit `meets`, `commitment` and `change` on one line (the plan checks first) |
+| `engine/tests/cloud_contract.rs` | the new request line; a reply without `series`; `rank_cannot_reach_a_judgment_endpoint` extended to `commitments.rs` and the command (M5) |
+| `app/tests/scaffold.rs` | `..Default::default()` in the one `Fetchers` literal (review I8) |
+| `cloud/supabase/functions/ingest-calendar/{handler.ts,handler_test.ts,index.ts}` | `accepts`, `series`, owned calendars, pagination, masters, completeness, caps, time budget, failure omission, `toIcs` pin |
+| `docs/surface/anatomy.md` | commitment blocks, `moved`, the `commitment-check` card |
+| `CLAUDE.md` | `commitments/` in the vault folder list; the `commitments` command; `surface --window` |
 
-**Phase 1s — sync (executes after C3′ merges, or inside it if phase 1 lands first):** a new
-migration adding `commitments` to `sync_notes_path_check`; `NOTE_PATH_RE` in
-`cloud/supabase/functions/_shared/sync_rows.ts` and its test; the `site/privacy.html` line (§9).
+**Phase 1s — sync (with C3′: after it merges, or inside it if phase 1 lands first).** A migration
+adding `commitments` to `sync_notes_path_check`; `NOTE_PATH_RE` in
+`cloud/supabase/functions/_shared/sync_rows.ts` and its test; `sync.rs`'s local-card predicate
+extended to `kind: commitment-check` and `commitment-ask` notes and every journal record carrying
+their ids (R20), with a test that a card's `create` record and its `decide` record are never in a
+push batch while the confirmed note's `create` is; privacy line 2 (§9). **Gates:**
+`is_note_path_and_the_servers_regex_agree` fails the build of whichever of phase 1 and C3′ merges
+second until 1s is in it (a refused `commitments/` path would wedge every push, R-C3′-exec-12);
+and the migration is live on prod before any release carrying `cmt` ships (R3).
 
 ### Phase 2 — the app (after c1b, c1c and C3′ merge)
 
-The onboarding confirm screen (§5.1), the fallback card's form and its engine half (§5.3). Files:
-`app/static/index.html`, `console.js`, `console.css`, `app/src/onboarding.rs`, possibly
-`app/src/commands.rs` and `main.rs` (a command, recounted), `app/tests/{onboarding,static_assets}.rs`,
-`scripts/wizard-check.py`, and `engine/src/commitments.rs` / `approvals.rs` for `commitment-ask`.
+The onboarding confirm screen (§5.1); a **Your week** panel in the console — every confirmed
+commitment with its kind and level as controls, office-hours proposals to confirm, and the planning
+day editor with the `surface --window` preview and the today view's `moved` line (Q6); the fallback
+card's form and its engine half (§5.3). Files: `app/static/index.html`, `console.js`,
+`console.css`, `app/src/onboarding.rs`, `app/src/commands.rs` and `main.rs` (commands, recounted),
+`app/tests/{onboarding,commands,static_assets}.rs`, `scripts/wizard-check.py`, and
+`engine/src/commitments.rs` / `approvals.rs` / `main.rs` for `commitment-ask` and the screen's
+writes.
 
-### Phase 3 — registrar logins
+### Phase 3 — the UA registrar (before the pilot; Q7)
 
-Its own spec (C7): the school list, the scraping, credentials in Credential Manager as
-`knowlu/<profile_id>/registrar-<school>` read through the vault's `credential_target` like zyBooks
-and VHL, and — after the 2026-09-17 amendment — the fetch sequence server-side through C5's relay.
-It produces `registrar:` proposals through §3.4 and nothing else in this spec changes.
+Its own plan; this is the design it implements. Other schools come after the pilot, each a code
+change.
+
+- **Credentials on the device.** The app stores the myBama login in Credential Manager as
+  `knowlu/<profile_id>/registrar-ua` (`app/src/credentials.rs`); the vault names it as a
+  `credential_target`, exactly as zyBooks and VHL are named, and the engine reads it through
+  `wincred.rs`. It never leaves the device.
+- **Fetch on the device**, as a third portal inside the `coursework` step — the slot's portal step,
+  which already owns this credential pattern, always exits 0, and treats an empty parse as a
+  failure, never an empty semester. At most once a day; a failure is a named warning.
+- **Output.** Each schedule row with a meeting time becomes a series record keyed
+  `registrar:ua:<term>-<crn>` (R1), kind `lab` or `class` from the row's schedule type, `course`
+  from the vault's code table (§3.4). Rows that match a vault course are written **confirmed**
+  (R24) — the connection screen lists them first; the others become ordinary proposals and cards;
+  rows with no meeting time produce nothing. A later fetch that differs files a §5.4 change card; a
+  row that disappears (a dropped course) files an end card.
+- **Everything downstream** — capacity, overlap, never-re-ask, the signature match against Google
+  series — is this spec's, unchanged.
+- **Not here:** the login sequence, MFA and parsing — the plan's, after §11 Q1 is answered.
 
 ### Conflict check (`git diff --name-only main...<branch>`, 2026-09-23)
 
-| branch | files it shares with phase 1 | risk |
+| branch | files it shares with this spec's phases | risk |
 |---|---|---|
-| `j-followups` | `cloudmodel.rs`, `lib.rs`, `tests/cloud_contract.rs`, `CLAUDE.md`; its plan adds `cli.rs`, `approvals.rs`, `eventemit.rs` (F2/F3) | **High if run in parallel** — the same functions in `cli.rs` and `approvals.rs`. Resolved by R16: phase 1 starts after it merges. |
-| `c3-sync` | `lib.rs`, `CLAUDE.md` (textual, one line each); **semantic:** its `sync.rs` pushes every `ids::NOTE_FOLDERS` path and its server check allows only six folders | Whichever merges second carries phase 1s' migration; until then a `commitments/` path would be refused by sync. Named in both branches' hand-off. |
-| `c1b-sign-in` | `CLAUDE.md`; `site/privacy.html` (phase 1s only) | Low. |
-| `c1c-first-day` | `CLAUDE.md`. Its D4 changes course-note titles, which §3.3 reads; the reading accepts both the old and the D4 shapes | Low. |
+| `j-followups` | **already changed:** `cli.rs`, `cloudmodel.rs`, `eventemit.rs`, `lib.rs`, `tests/cloud_contract.rs`, `CLAUDE.md`; its plan adds `approvals.rs` (F2/F3) | **High if run in parallel** — the same functions in `cli.rs` and `approvals.rs`. Resolved by R16: phase 1 starts after it merges. |
+| `c3-sync` | `lib.rs`, `CLAUDE.md` (textual); **semantic:** `sync.rs` pushes every `NOTE_FOLDERS` path and its server check allows six folders; `write.rs`, which phase 1 calls; `site/privacy.html` | Phase 1s and its gates (above). Named in both branches' hand-off. |
+| `c1c-first-day` | `CLAUDE.md`, `site/privacy.html`, `app/tests/scaffold.rs` (phase 1's one line); **semantic:** `coursework.rs` and `app/src/scaffold.rs` set the course-note shape §3.4's code table reads | Low: the code table accepts both the old and the D4 shapes; the test line rebases trivially. |
+| `c1b-sign-in` | `CLAUDE.md`; `site/privacy.html` (the §9 lines) | Low. |
 
-No branch touches `weekcal.rs`, `surface.rs`, `ids.rs`, `backup.rs`, `calfeed.rs`, `main.rs` or
-`ingest-calendar/`.
+No branch touches `weekcal.rs`, `surface.rs`, `ids.rs`, `backup.rs`, `calfeed.rs`, `main.rs`,
+`render.rs` or `ingest-calendar/`.
 
 ---
 
 ## 11. Open questions for Quinn
 
-1. **Does a confirmed wake and bed routine widen the planning day?** As written (R11), confirming
-   "Wake Up 7:00–7:30" and "Bedtime 11pm" makes Knowlu plan from 7:30am to 11pm, so capacity grows
-   into the evenings; the other reading is that routines may only narrow the template's
-   8am–6pm window, never widen it. *Recommendation: widen.* Students do their work in the evening,
-   the wizard's 8–6 default undercounts every student who does, and the card states the times
-   before the student approves.
-2. **Is the registrar login (phase 3) needed before the pilot?** *Recommendation: after.* Google
-   series plus the fallback card give every student a path, and a registrar integration is
-   school-by-school scraping with its own legal read under the relay-fetch amendment.
+1. **The UA login and the privacy page.** Q7 puts the myBama password in Credential Manager.
+   `site/privacy.html` promises today that "Knowlu never asks for your university sign-in, and
+   there is nowhere in the app to type one" — sign-in happens on the school's own page in a window
+   Knowlu opens, and the session is thrown away. myBama is the same campus sign-in (and likely
+   behind Duo, which an unattended fetch cannot pass). *Recommendation:* keep the promise — fetch
+   the schedule through the school's own sign-in window, as the LMS link already does, once per
+   term and on demand, storing nothing; if you want the stored login instead, the page's paragraph
+   changes before phase 3 ships, with the lawyer's read.
+2. **The consent-screen justification.** Adding "learns the student's class and work schedule from
+   repeating events" to the `calendar.readonly` justification may restart Google's verification.
+   *Recommendation:* change it at the next submission you were making anyway, not on its own;
+   the scope itself does not change.
+
+---
+
+## 12. Review (2026-09-23)
+
+The adversarial review (`.superpowers/sdd/2026-09-23-commitment-model/spec-review.md`, on
+af4f138) found 4 Critical, 10 Important and 17 Minor issues. Each is listed with what this revision
+did. "Fixed" means the spec text now says what the finding asked, or an equivalent that the row
+names. The claims were checked against the code: `approvals::validate_amendment` (null and
+sequence refusals), `calfeed.rs` (no `RECURRENCE-ID`, `STATUS`, `PARTSTAT` or `TRANSP` handling),
+`ingest::slugify` (returns `item`), `cli::Fetchers` (two fields, no `Default`), and
+`c3-sync:engine/src/sync.rs` (pushes every journal record and every note under `NOTE_FOLDERS`,
+nothing else from `state/`; sync cards stay local).
+
+| # | Finding | Disposition |
+|---|---|---|
+| C1 | R12's amend cards can never be applied | **Fixed differently:** no amend machinery. Changes are `commitment-check` cards with `change:`/`was:`, settled by their own arm with canonical-text staleness checks and `write_literals` (§5.4, R12). `AMENDABLE_FOLDERS` unchanged. |
+| C2 | Proposals and declines are synced data | **Fixed:** proposals exist only in the unsynced series file and local-only cards (R18, R20); only confirmed notes, anonymous decline markers (R19) and the planning day sync. §9 rewritten; two privacy lines made release gates. |
+| C3 | Course-code shape assumes one school | **Fixed:** the vault's own code table in compact form, D4 as fallback, blind spots named, tests for four-digit, long-department and two-digit schools (§3.4, R7). |
+| C4 | ICS override handling claimed but absent | **Fixed:** `weekly_series` is new logic for overrides, cancellations, declines and transparency, each tested; busy time keeps today's behaviour, with the reason (§3.2 step 1, R6). |
+| I1 | Other people's calendars | **Fixed:** owned, non-hidden calendars only, ordered, capped at 10 (R5, §4.1). |
+| I2 | Time-blocking and study groups become classes | **Fixed:** code must start the title with only a section word or the course's name after it; study/work-block titles never proposed; one screen row per series (§3.4, §5.1). |
+| I3 | Biweekly, count-ended and cancelled series | **Fixed:** recurrence lines sent; interval 1 and 7-day spacing required; `COUNT` gives `until`; actual instances subtract inside the horizon (§3.2, §3.4, R21). |
+| I4 | "This and following" split | **Fixed:** signature-seen rule, successor change card moving `source_uid` (R22, §5.4). |
+| I5 | `where` from a meeting link | **Fixed:** place-like lines only (§3.2 step 5). |
+| I6 | Flicker from caps, pagination, hidden calendars | **Fixed:** deterministic caps, pagination, `calendars_read`, per-calendar freshness, removed-feed rule (§3.3, §4.1). |
+| I7 | Warnings on every run from reserved kinds | **Fixed:** reserved kinds declared with levels (R17). |
+| I8 | Stash plumbing | **Fixed:** explicit `Fetchers.series`, URL-keyed, `Default`, the app test line listed (§4.2, §10). |
+| I9 | Sync wedge and old-engine skew | **Fixed:** named gate test, prod-migration release gate, old-engine behaviour stated (§4.3, §10, R3). |
+| I10 | Post-onboarding changes need typing | **Fixed as phase-2 scope:** the *Your week* panel (§10); phase 1 cards offer approve/reject only. |
+| M1 | Key order vs `dumps_value` | Fixed (§3.3). |
+| M2 | Example bytes | Fixed (R2; examples say they are not byte-exact). |
+| M3 | `UNTIL` to date | Fixed: raw lines sent, converted on the device (§3.2 step 2). |
+| M4 | Conflict table gaps | Fixed (§10: `eventemit.rs`, `write.rs`, `coursework.rs`, `scaffold.rs`). |
+| M5 | Model-reach test scope | Fixed (§6.5, §10). |
+| M6 | R13's reason | Fixed (R13). |
+| M7 | Missing file silent; two more tests | Fixed (§3.3, §8 tests 2 and 5). |
+| M8 | Approvals count | Fixed: counted, as F2 does (§5.2, `render.rs`). |
+| M9 | `OH`, "practice", course order | Fixed: `OH` case-sensitive; `planning.yaml` names excluded; file-name order (§3.4). |
+| M10 | Routines: one window for all days, midnight sleep, pre-check | Fixed by Q6's design: per-weekday window, midnight `sleep` handled, the window is proposed and editable (§2.4, §3.4, §6.3). |
+| M11 | Clamping | Fixed (§6.2, R15). |
+| M12 | `next_14d` before term | Fixed: 28-day horizon (§3.4). |
+| M13 | Duplicate `source_uid` | Fixed: load keeps lowest id, settlement never adds a third (§2.5). |
+| M14 | Vanished proposals still carded | Fixed: withdrawn `superseded` (§5.2, R9). |
+| M15 | `slugify` never empty | Fixed (§2.2). |
+| M16 | Privacy line gate; consent screen is Quinn's | Fixed: release gates (§9); consent screen to §11 Q2. |
+| M17 | Series time budget | Fixed: 5-second budget, omit on overrun (§4.1). |
+
+**Quinn's rulings of 2026-09-23** replaced the former §11: Q6 (the planning day) settles the old
+question 1 — R11 is rewritten around one editable note, with `state/plan.json` and `moved` for
+"what moved" (§2.4, §6.3, §6.4); Q7 (UA registrar before the pilot) settles the old question 2 —
+phase 3 is now pre-pilot and UA-only (§10).
