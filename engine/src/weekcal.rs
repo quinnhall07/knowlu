@@ -11,13 +11,30 @@
 //!
 //! 495 minutes = 8.25h. If this module produces anything else, every later number is wrong too.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use jiff::civil::{Date, DateTime, Time};
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::planning::{day_key, DAY_KEYS};
+
+/// One of `planning::DAY_KEYS` — the weekday a commitment span recurs on.
+pub type DayKey = &'static str;
+
+/// A confirmed hard/soft commitment's weekly meeting time — the spec's `Span`, renamed to stay
+/// clear of `jiff::Span`. Plain data: this module knows nothing of `commitments.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitmentSpan {
+    pub day: DayKey,
+    pub start: Time,
+    pub end: Time,
+    pub from: Option<Date>,
+    pub until: Option<Date>,
+    pub title: String,
+    pub kind: String,
+    pub source_uid: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
@@ -70,6 +87,11 @@ fn subtract(blocks: &[Block], start: DateTime, end: DateTime) -> Vec<Block> {
     out
 }
 
+/// `DAY_KEYS`' index for `day`'s weekday, the slot `window` and `with_day_window` use.
+fn weekday_index(day: Date) -> Option<usize> {
+    DAY_KEYS.iter().position(|k| *k == day_key(day))
+}
+
 pub fn parse_hm(text: &str) -> Time {
     let mut parts = text.trim().split(':');
     let hour: i8 = parts.next().and_then(|h| h.trim().parse().ok()).unwrap_or(0);
@@ -77,12 +99,16 @@ pub fn parse_hm(text: &str) -> Time {
     Time::new(hour, minute, 0, 0).unwrap_or(Time::midnight())
 }
 
+#[derive(Clone)]
 pub struct WeekCalendar {
     pub day_start: Time,
     pub day_end: Time,
     pub min_block_minutes: i64,
     classes: HashMap<&'static str, Vec<(Time, Time)>>,
     events: Vec<CalEvent>,
+    commitment_spans: Vec<CommitmentSpan>,
+    instances: BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)>,
+    window: [Option<(Time, Time)>; 7],
 }
 
 use crate::yaml::{get, opt_text as as_text};
@@ -129,7 +155,16 @@ impl WeekCalendar {
                 .then(a.title.cmp(&b.title))
         });
 
-        WeekCalendar { day_start, day_end, min_block_minutes, classes, events }
+        WeekCalendar {
+            day_start,
+            day_end,
+            min_block_minutes,
+            classes,
+            events,
+            commitment_spans: Vec::new(),
+            instances: BTreeMap::new(),
+            window: [None; 7],
+        }
     }
 
     pub fn from_file(path: &Path, events: Vec<CalEvent>) -> WeekCalendar {
@@ -141,10 +176,51 @@ impl WeekCalendar {
         WeekCalendar::new(&config, events)
     }
 
-    /// Free blocks from the timetable alone, WITHOUT the minimum-length filter.
-    pub fn template_blocks(&self, day: Date) -> Vec<Block> {
-        let mut busy: Vec<(DateTime, DateTime)> = self
-            .classes
+    /// Plain data in: confirmed hard/soft commitment spans, plus the planning-day window per
+    /// weekday. *Reason:* §6.1 — keeps `weekcal` buildable and pure before `commitments.rs` exists.
+    pub fn with_commitments(
+        mut self,
+        spans: Vec<CommitmentSpan>,
+        window: [Option<(Time, Time)>; 7],
+    ) -> Self {
+        self.commitment_spans = spans;
+        self.window = window;
+        self
+    }
+
+    /// Per `source_uid`, the fresh-read horizon `[read date, read date + 28)` and that source's
+    /// actual instances inside it (R21).
+    pub fn with_instances(
+        mut self,
+        instances: BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)>,
+    ) -> Self {
+        self.instances = instances;
+        self
+    }
+
+    /// A copy whose window for `day`'s weekday is replaced. *Reason:* P18 plans today under the
+    /// baseline window and the `--window` preview under a proposed one, from the same calendar
+    /// otherwise.
+    pub fn with_day_window(mut self, day: Date, start: Time, end: Time) -> Self {
+        if let Some(idx) = weekday_index(day) {
+            self.window[idx] = Some((start, end));
+        }
+        self
+    }
+
+    /// The planning day's entry for `day_key(day)`, else the template's `(day_start, day_end)`.
+    /// Every date-based use of `day_start`/`day_end` in this file goes through this. *Reason:*
+    /// §6.1.
+    pub fn window(&self, day: Date) -> (Time, Time) {
+        weekday_index(day)
+            .and_then(|idx| self.window[idx])
+            .unwrap_or((self.day_start, self.day_end))
+    }
+
+    /// The template's classes for `day`'s weekday, as `(DateTime, DateTime)` busy spans. No
+    /// commitment spans.
+    fn class_busy(&self, day: Date) -> Vec<(DateTime, DateTime)> {
+        self.classes
             .get(day_key(day))
             .map(|spans| {
                 spans
@@ -154,11 +230,62 @@ impl WeekCalendar {
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// Whether `span` is active on `day` and, if so, its actual busy time that day: inside its
+    /// source's horizon in `instances`, the source's actual instance on that date (none if
+    /// cancelled, the moved time if moved); otherwise the weekly span on its weekday when
+    /// `from <= day <= until`. *Reason:* §6.1, R21.
+    fn span_block(&self, day: Date, span: &CommitmentSpan) -> Option<(Time, Time)> {
+        if let Some((horizon_start, horizon_end, instances)) = self.instances.get(&span.source_uid)
+        {
+            if *horizon_start <= day && day < *horizon_end {
+                return instances
+                    .iter()
+                    .find(|(date, _, _)| *date == day)
+                    .map(|(_, start, end)| (*start, *end));
+            }
+        }
+        if day_key(day) != span.day {
+            return None;
+        }
+        let after_from = span.from.map_or(true, |f| f <= day);
+        let before_until = span.until.map_or(true, |u| day <= u);
+        if after_from && before_until {
+            Some((span.start, span.end))
+        } else {
+            None
+        }
+    }
+
+    /// Every commitment span active on `day`, with the time it is actually busy that day.
+    fn active_spans(&self, day: Date) -> Vec<(Time, Time, &CommitmentSpan)> {
+        self.commitment_spans
+            .iter()
+            .filter_map(|span| self.span_block(day, span).map(|(s, e)| (s, e, span)))
+            .collect()
+    }
+
+    /// The active spans as drawn: the same rule `template_blocks` uses to fold spans into the busy
+    /// list. *Reason:* one rule, two readers (P17 draws from this).
+    pub fn spans_on(&self, day: Date) -> Vec<(DateTime, DateTime, &CommitmentSpan)> {
+        self.active_spans(day)
+            .into_iter()
+            .map(|(s, e, span)| {
+                (DateTime::from_parts(day, s), DateTime::from_parts(day, e), span)
+            })
+            .collect()
+    }
+
+    /// Sort, cursor walk and clamp to `window(day)`'s end — unchanged from before commitments, now
+    /// shared by `template_blocks` and `template_only_blocks`.
+    fn blocks_from_busy(&self, day: Date, mut busy: Vec<(DateTime, DateTime)>) -> Vec<Block> {
         busy.sort();
 
-        let mut cursor = DateTime::from_parts(day, self.day_start);
-        let end_of_day = DateTime::from_parts(day, self.day_end);
+        let (window_start, window_end) = self.window(day);
+        let mut cursor = DateTime::from_parts(day, window_start);
+        let end_of_day = DateTime::from_parts(day, window_end);
         let mut blocks = Vec::new();
         for (start, end) in busy {
             let boundary = start.min(end_of_day);
@@ -171,6 +298,25 @@ impl WeekCalendar {
             blocks.push(Block { start: cursor, end: end_of_day });
         }
         blocks
+    }
+
+    /// Free blocks from the timetable alone, WITHOUT the minimum-length filter. The busy list is
+    /// the template's classes for `day`'s weekday plus each commitment span active that day.
+    pub fn template_blocks(&self, day: Date) -> Vec<Block> {
+        let mut busy = self.class_busy(day);
+        busy.extend(
+            self.active_spans(day)
+                .into_iter()
+                .map(|(s, e, _)| (DateTime::from_parts(day, s), DateTime::from_parts(day, e))),
+        );
+        self.blocks_from_busy(day, busy)
+    }
+
+    /// Today's computation (template classes only) within `window(day)` — no commitment spans.
+    /// *Reason:* §6.2's gap walk must not paint a club as a class (R15).
+    pub fn template_only_blocks(&self, day: Date) -> Vec<Block> {
+        let busy = self.class_busy(day);
+        self.blocks_from_busy(day, busy)
     }
 
     /// Applied AFTER subtraction, never to the class list. Filtering earlier gives 8.417h for the
@@ -322,5 +468,247 @@ mod tests {
     fn parse_hm_reads_the_template_format() {
         assert_eq!(parse_hm("08:00"), Time::constant(8, 0, 0, 0));
         assert_eq!(parse_hm("13:45"), Time::constant(13, 45, 0, 0));
+    }
+
+    // --- P3: commitment spans, instances and the window ---
+
+    #[test]
+    fn window_falls_back_to_template_day_start_and_end() {
+        let friday = Date::constant(2026, 8, 28);
+        let calendar = cal(Vec::new());
+        assert_eq!(calendar.window(friday), (calendar.day_start, calendar.day_end));
+    }
+
+    #[test]
+    fn a_window_entry_replaces_that_weekday_only() {
+        let wednesday = Date::constant(2026, 8, 26);
+        let saturday = Date::constant(2026, 8, 29);
+        let mut window = [None; 7];
+        for slot in window.iter_mut().take(5) {
+            // mon..fri
+            *slot = Some((Time::constant(8, 0, 0, 0), Time::constant(22, 0, 0, 0)));
+        }
+        let calendar = cal(Vec::new()).with_commitments(Vec::new(), window);
+
+        let wed_blocks = calendar.template_blocks(wednesday);
+        let last = wed_blocks.last().expect("Wednesday has at least one free block");
+        assert_eq!(
+            last.end,
+            DateTime::constant(2026, 8, 26, 22, 0, 0, 0),
+            "the window entry moves the last block's end to 22:00"
+        );
+
+        assert_eq!(
+            calendar.template_blocks(saturday),
+            vec![Block {
+                start: DateTime::constant(2026, 8, 29, 8, 0, 0, 0),
+                end: DateTime::constant(2026, 8, 29, 18, 0, 0, 0),
+            }],
+            "Saturday has no window entry, so it keeps the template's day_start/day_end"
+        );
+    }
+
+    #[test]
+    fn a_commitment_span_is_busy_on_its_weekday_within_from_until() {
+        let from = Date::constant(2026, 8, 24); // Monday
+        let until = Date::constant(2026, 9, 4); // Friday, two weeks later
+        let spans = vec![
+            CommitmentSpan {
+                day: "mon",
+                start: Time::constant(12, 0, 0, 0),
+                end: Time::constant(12, 50, 0, 0),
+                from: Some(from),
+                until: Some(until),
+                title: "Study group".into(),
+                kind: "club".into(),
+                source_uid: "test:study-group-mon".into(),
+            },
+            CommitmentSpan {
+                day: "wed",
+                start: Time::constant(12, 0, 0, 0),
+                end: Time::constant(12, 50, 0, 0),
+                from: Some(from),
+                until: Some(until),
+                title: "Study group".into(),
+                kind: "club".into(),
+                source_uid: "test:study-group-wed".into(),
+            },
+        ];
+        let calendar =
+            WeekCalendar::new(&Mapping::new(), Vec::new()).with_commitments(spans, [None; 7]);
+
+        let monday_in_range = Date::constant(2026, 8, 24);
+        assert_eq!(
+            calendar.template_blocks(monday_in_range),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 12, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 12, 50, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 18, 0, 0, 0),
+                },
+            ],
+            "the span splits Monday's block around 12:00-12:50"
+        );
+
+        let wednesday_in_range = Date::constant(2026, 8, 26);
+        assert_eq!(
+            calendar.template_blocks(wednesday_in_range).len(),
+            2,
+            "Wednesday's span splits its day too"
+        );
+
+        let monday_before_from = Date::constant(2026, 8, 17);
+        assert_eq!(
+            calendar.template_blocks(monday_before_from),
+            vec![Block {
+                start: DateTime::constant(2026, 8, 17, 8, 0, 0, 0),
+                end: DateTime::constant(2026, 8, 17, 18, 0, 0, 0),
+            }],
+            "before from, the span is absent"
+        );
+
+        let monday_after_until = Date::constant(2026, 9, 7);
+        assert_eq!(
+            calendar.template_blocks(monday_after_until),
+            vec![Block {
+                start: DateTime::constant(2026, 9, 7, 8, 0, 0, 0),
+                end: DateTime::constant(2026, 9, 7, 18, 0, 0, 0),
+            }],
+            "after until, the span is absent"
+        );
+    }
+
+    #[test]
+    fn inside_the_horizon_actual_instances_replace_the_weekly_span() {
+        let span = CommitmentSpan {
+            day: "tue",
+            start: Time::constant(15, 0, 0, 0),
+            end: Time::constant(15, 50, 0, 0),
+            from: None,
+            until: None,
+            title: "Tuesday club".into(),
+            kind: "club".into(),
+            source_uid: "test:tue-club".into(),
+        };
+        let horizon_start = Date::constant(2026, 8, 24);
+        let horizon_end = Date::constant(2026, 9, 21); // horizon_start + 28 days
+        let moved_date = Date::constant(2026, 8, 25); // Tuesday, inside the horizon, moved
+        let mut instances = BTreeMap::new();
+        instances.insert(
+            "test:tue-club".to_string(),
+            (
+                horizon_start,
+                horizon_end,
+                vec![(moved_date, Time::constant(16, 0, 0, 0), Time::constant(16, 50, 0, 0))],
+            ),
+        );
+        let calendar = WeekCalendar::new(&Mapping::new(), Vec::new())
+            .with_commitments(vec![span], [None; 7])
+            .with_instances(instances);
+
+        assert_eq!(
+            calendar.template_blocks(moved_date),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 8, 25, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 8, 25, 16, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 25, 16, 50, 0, 0),
+                    end: DateTime::constant(2026, 8, 25, 18, 0, 0, 0),
+                },
+            ],
+            "a moved instance is busy at its new time, not the weekly 15:00-15:50"
+        );
+
+        let cancelled_date = Date::constant(2026, 9, 1); // Tuesday, inside the horizon, no instance
+        assert_eq!(
+            calendar.template_blocks(cancelled_date),
+            vec![Block {
+                start: DateTime::constant(2026, 9, 1, 8, 0, 0, 0),
+                end: DateTime::constant(2026, 9, 1, 18, 0, 0, 0),
+            }],
+            "a cancelled date has no instance, so the day is free"
+        );
+
+        let past_horizon_date = Date::constant(2026, 9, 22); // Tuesday, past horizon_end
+        assert_eq!(
+            calendar.template_blocks(past_horizon_date),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 9, 22, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 9, 22, 15, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 9, 22, 15, 50, 0, 0),
+                    end: DateTime::constant(2026, 9, 22, 18, 0, 0, 0),
+                },
+            ],
+            "a day past the horizon uses the weekly span"
+        );
+    }
+
+    #[test]
+    fn template_only_blocks_ignores_commitment_spans() {
+        let wednesday = Date::constant(2026, 8, 26);
+        let span = CommitmentSpan {
+            day: "wed",
+            start: Time::constant(8, 15, 0, 0),
+            end: Time::constant(8, 30, 0, 0),
+            from: None,
+            until: None,
+            title: "Morning club".into(),
+            kind: "club".into(),
+            source_uid: "test:morning-club".into(),
+        };
+        let without_spans = cal(Vec::new());
+        let with_spans = cal(Vec::new()).with_commitments(vec![span], [None; 7]);
+
+        // The span would split the 08:00-09:00 free block if it were not ignored.
+        assert_ne!(with_spans.template_blocks(wednesday), without_spans.template_blocks(wednesday));
+        assert_eq!(
+            with_spans.template_only_blocks(wednesday),
+            without_spans.template_blocks(wednesday),
+            "template_only_blocks must not paint a club as a class"
+        );
+    }
+
+    #[test]
+    fn with_day_window_changes_only_that_weekday() {
+        let wednesday = Date::constant(2026, 8, 26);
+        let thursday = Date::constant(2026, 8, 27);
+        let calendar = cal(Vec::new()).with_day_window(
+            wednesday,
+            Time::constant(8, 0, 0, 0),
+            Time::constant(22, 0, 0, 0),
+        );
+
+        assert_eq!(
+            calendar.window(wednesday),
+            (Time::constant(8, 0, 0, 0), Time::constant(22, 0, 0, 0))
+        );
+        assert_eq!(calendar.window(thursday), (calendar.day_start, calendar.day_end));
+    }
+
+    #[test]
+    fn overlapping_spans_behave_like_overlapping_classes() {
+        let monday = Date::constant(2026, 8, 24); // TEMPLATE's Monday has CS 100 at 12:00-12:50
+        let duplicate = CommitmentSpan {
+            day: "mon",
+            start: Time::constant(12, 0, 0, 0),
+            end: Time::constant(12, 50, 0, 0),
+            from: None,
+            until: None,
+            title: "CS 100".into(),
+            kind: "class".into(),
+            source_uid: "test:cs-100-dup".into(),
+        };
+        let without_span = cal(Vec::new());
+        let with_span = cal(Vec::new()).with_commitments(vec![duplicate], [None; 7]);
+
+        assert_eq!(with_span.template_blocks(monday), without_span.template_blocks(monday));
     }
 }
