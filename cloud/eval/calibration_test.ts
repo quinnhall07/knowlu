@@ -208,8 +208,11 @@ Deno.test("auc: all one class is undefined (NaN)", () => {
   assert(Number.isNaN(auc([], [])));
 });
 
+Deno.test("MIN_CLASS_N is thirty, the T6 floor", () => {
+  assertEquals(MIN_CLASS_N, 30);
+});
+
 Deno.test("aurocForWrong: fewer than MIN_CLASS_N in either class reports verdict 'undefined' and no CI", () => {
-  assertEquals(MIN_CLASS_N, 10);
   const rows = rowsFromRanks(12, new Set([1, 2])); // 2 wrong, 10 correct — 2 < MIN_CLASS_N
   const result = aurocForWrong(rows);
   assertEquals(result.verdict, "undefined");
@@ -217,8 +220,20 @@ Deno.test("aurocForWrong: fewer than MIN_CLASS_N in either class reports verdict
   assertEquals(result.ci95, null);
 });
 
+Deno.test("29 in a class is undefined and 30 is graded", () => {
+  // 29 wrong, 30 correct (n=59) — one class one below the floor: undefined.
+  const under = rowsFromRanks(59, new Set(Array.from({ length: 29 }, (_, i) => i + 1)));
+  assertEquals(aurocForWrong(under).verdict, "undefined");
+
+  // 30 wrong, 30 correct (n=60) — both classes exactly at the floor: graded, not undefined.
+  const at = rowsFromRanks(60, new Set(Array.from({ length: 30 }, (_, i) => i + 1)));
+  assert(aurocForWrong(at).verdict !== "undefined");
+});
+
 Deno.test("aurocForWrong: perfect separation is graded 'usable' and matches auc() on the same rows", () => {
-  const rows = rowsFromRanks(20, new Set([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]));
+  // 30 wrong, 30 correct (n=60), wrong ranks are the top 30 — every wrong rank outranks every
+  // correct one, so AUC is exactly 1.0 regardless of class size.
+  const rows = rowsFromRanks(60, new Set(Array.from({ length: 30 }, (_, i) => i + 31)));
   const result = aurocForWrong(rows, { samples: 50 });
   assertEquals(result.value, 1.0);
   assertEquals(result.verdict, "usable");
@@ -226,24 +241,37 @@ Deno.test("aurocForWrong: perfect separation is graded 'usable' and matches auc(
   assert(!result.possiblyInverted);
 });
 
-Deno.test("aurocForWrong: 0.45 (below the cosmetic line) is graded 'cosmetic'", () => {
-  const rows = rowsFromRanks(20, new Set([1, 3, 5, 7, 9, 11, 13, 15, 17, 19]));
+Deno.test("aurocForWrong: 0.483 (below the cosmetic line) is graded 'cosmetic'", () => {
+  // 30 wrong, 30 correct (n=60), wrong ranks are the odd ranks 1,3,...,59.
+  // rank-sum(positives) = 1+3+...+59 = 30^2 = 900. nPos=nNeg=30.
+  // U = 900 - 30*31/2 = 900 - 465 = 435. AUC = 435/900 = 29/60 ≈ 0.483.
+  const rows = rowsFromRanks(60, new Set(Array.from({ length: 30 }, (_, i) => i * 2 + 1)));
   const result = aurocForWrong(rows, { samples: 50 });
-  assertAlmostEquals(result.value!, 0.45);
+  assertAlmostEquals(result.value!, 29 / 60);
   assertEquals(result.verdict, "cosmetic");
   assert(result.value! < AUROC_COSMETIC_MAX);
 });
 
-Deno.test("aurocForWrong: 0.75 (between the two lines) is graded 'marginal', not 'usable'", () => {
-  const rows = rowsFromRanks(20, new Set([1, 5, 12, 13, 14, 15, 16, 17, 18, 19]));
+Deno.test("aurocForWrong: 0.733 (between the two lines) is graded 'marginal', not 'usable'", () => {
+  // 30 wrong, 30 correct (n=60): wrong ranks are the lowest 8 {1..8} plus the highest 22 {39..60}.
+  // rank-sum(positives) = (1+...+8) + (39+...+60) = 36 + 1089 = 1125. nPos=nNeg=30.
+  // U = 1125 - 30*31/2 = 1125 - 465 = 660. AUC = 660/900 ≈ 0.733 — inside the marginal band.
+  const rows = rowsFromRanks(
+    60,
+    new Set([
+      ...Array.from({ length: 8 }, (_, i) => i + 1),
+      ...Array.from({ length: 22 }, (_, i) => i + 39),
+    ]),
+  );
   const result = aurocForWrong(rows, { samples: 50 });
-  assertAlmostEquals(result.value!, 0.75);
+  assertAlmostEquals(result.value!, 660 / 900);
   assertEquals(result.verdict, "marginal");
 });
 
 Deno.test("aurocForWrong: possiblyInverted flags a clearly-below-chance AUROC", () => {
-  // All 10 wrong ranks are the 10 LOWEST -confidence ranks -> AUC 0.0, well under 1 - 0.80 = 0.20.
-  const rows = rowsFromRanks(20, new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+  // All 30 wrong ranks are the 30 LOWEST -confidence ranks (n=60) -> AUC 0.0, well under
+  // 1 - 0.80 = 0.20.
+  const rows = rowsFromRanks(60, new Set(Array.from({ length: 30 }, (_, i) => i + 1)));
   const result = aurocForWrong(rows, { samples: 50 });
   assertEquals(result.value, 0.0);
   assert(result.possiblyInverted);
@@ -379,7 +407,8 @@ Deno.test("buildGroupReport reports 'insufficient_data' when a class is too smal
 });
 
 Deno.test("buildGroupReport stops at step 2, 'does_not_rank', on a cosmetic AUROC", () => {
-  const rows = rowsFromRanks(20, new Set([1, 3, 5, 7, 9, 11, 13, 15, 17, 19])); // AUROC 0.45
+  // Same 30/30 construction as the "0.483 (below the cosmetic line)" aurocForWrong test above.
+  const rows = rowsFromRanks(60, new Set(Array.from({ length: 30 }, (_, i) => i * 2 + 1))); // AUROC ≈ 0.483
   const report = buildGroupReport(rows);
   assertEquals(report.stoppedAt, 2);
   assertEquals(report.b2Outcome, "does_not_rank");
@@ -388,7 +417,14 @@ Deno.test("buildGroupReport stops at step 2, 'does_not_rank', on a cosmetic AURO
 });
 
 Deno.test("buildGroupReport stops at step 2, 'does_not_rank', on a marginal (0.70-0.80) AUROC — the middle band does not clear the bar", () => {
-  const rows = rowsFromRanks(20, new Set([1, 5, 12, 13, 14, 15, 16, 17, 18, 19])); // AUROC 0.75
+  // Same 30/30 construction as the "0.733 (between the two lines)" aurocForWrong test above.
+  const rows = rowsFromRanks(
+    60,
+    new Set([
+      ...Array.from({ length: 8 }, (_, i) => i + 1),
+      ...Array.from({ length: 22 }, (_, i) => i + 39),
+    ]),
+  ); // AUROC ≈ 0.733
   const report = buildGroupReport(rows);
   assertEquals(report.auroc!.verdict, "marginal");
   assertEquals(report.stoppedAt, 2);
@@ -428,15 +464,16 @@ Deno.test("buildGroupReport reaches step 3 and reports 'ranks_and_calibrated' on
 });
 
 Deno.test("buildGroupReport reaches step 3 and reports 'ranks_but_miscalibrated' on a usable but badly calibrated field, naming T7 without implementing it", () => {
-  // Two clusters, each jittered across 5 distinct confidence values (10 distinct overall, clear of
-  // the 3-value decoration line) so this exercises calibration rather than tripping step 1: a low
-  // cluster (~0.50-0.58) that is ALWAYS wrong against its own stated confidence, and a high cluster
-  // (~0.90-0.98) that is always correct and close to well-calibrated. The gap between clusters
-  // (~0.35) is many multiples of the resulting Silverman bandwidth, so cross-cluster smoothing is
-  // negligible and the low cluster's ~0.5 point calibration error dominates the mean.
+  // Two 30-row clusters (clear of the MIN_CLASS_N=30 floor), each jittered across 5 distinct
+  // confidence values (10 distinct overall, clear of the 3-value decoration line) so this exercises
+  // calibration rather than tripping step 1 or step 2: a low cluster (~0.50-0.58) that is ALWAYS
+  // wrong against its own stated confidence, and a high cluster (~0.90-0.98) that is always correct
+  // and close to well-calibrated. The gap between clusters (~0.35) is many multiples of the
+  // resulting Silverman bandwidth, so cross-cluster smoothing is negligible and the low cluster's
+  // ~0.5 point calibration error dominates the mean.
   const rows: CalibrationRow[] = [
-    ...Array.from({ length: 20 }, (_, i) => row({ confidence: 0.50 + (i % 5) * 0.02, wrong: true })),
-    ...Array.from({ length: 20 }, (_, i) => row({ confidence: 0.90 + (i % 5) * 0.02, wrong: false })),
+    ...Array.from({ length: 30 }, (_, i) => row({ confidence: 0.50 + (i % 5) * 0.02, wrong: true })),
+    ...Array.from({ length: 30 }, (_, i) => row({ confidence: 0.90 + (i % 5) * 0.02, wrong: false })),
   ];
   const report = buildGroupReport(rows, { ciOptions: { samples: 100 } });
   assertEquals(report.discrimination.decoration, false);
