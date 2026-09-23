@@ -535,7 +535,7 @@ fn append(vault: &Path, line: &str) -> std::io::Result<()> {
 /// The one place any writer builds a title onto a line (review I-6): [`record_verdict`],
 /// [`record_judged_verdict`] and [`record_answer`] all go through this, so none of them can put a
 /// raw title on a line.
-fn clean_title(title: &str) -> String {
+pub(crate) fn clean_title(title: &str) -> String {
     let cleaned: String = title.replace('·', "-").replace('\n', " ").replace('\r', " ");
     let cleaned = cleaned.trim_matches(is_python_space);
     if cleaned.is_empty() { "(untitled)".to_string() } else { cleaned.to_string() }
