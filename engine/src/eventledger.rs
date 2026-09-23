@@ -46,6 +46,15 @@
 //! [`record_judged_verdict`] write ordinary verdict lines — the latter with an optional `jid:`
 //! field of its own, so a machine's `unsure` verdict can be traced back to the judgment that
 //! minted it even before any human answers it.
+//!
+//! **What an older engine does with an answer line (review m-3).** One post-`unsure`, pre-F1
+//! engine: `verdict:<obligation|drop>` matches its `VERDICT` regex and the word is valid, but its
+//! unmodified first-verdict-wins keeps the earlier `unsure` — the event stays invisible, exactly
+//! as it was before the answer, and `by:`/`jid:`/`answered` are ignored because no regex there
+//! looks for them. A pre-`unsure` engine (three-word `VALID_VERDICTS`) instead skips the `unsure`
+//! line itself with a warning, so the answer line becomes that uid's first *valid* verdict and
+//! settles it immediately — harmless, and arguably the better outcome, just not the one either
+//! brief anticipated.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -111,25 +120,33 @@ static STRENGTH: LazyLock<Regex> =
 /// The why field is quoted, so [`why_problem`] refuses a `"` on the way in.
 static WHY: LazyLock<Regex> = LazyLock::new(|| Regex::new("· why:\"(?P<why>[^\"]*)\"").unwrap());
 
-/// The title of a uid's first verdict line — the second `·`-segment, up to ` · verdict:`.
-/// Read-only state ([`LedgerEntry::title`]): it changes no line anyone writes and exists only so
-/// F3 can give each uid its own title on its answer line (review I-6).
+/// The title of a uid's first verdict line — the second `·`-segment. Anchored on the next ` · `,
+/// not on ` · verdict:` (review m-2): an older, Python-written line puts a bare date segment
+/// between the title and `verdict:` (`vault-full/state/events-seen.md` has this shape), and this
+/// regex reads a title from that shape too, not just the one this crate writes. Read-only state
+/// ([`LedgerEntry::title`]): it changes no line anyone writes and exists only so F3 can give each
+/// uid its own title on its answer line (review I-6).
 static TITLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^- [A-Za-z0-9_.:@+-]+ · (?P<title>[^·]*?) · verdict:").unwrap());
+    LazyLock::new(|| Regex::new(r"^- [A-Za-z0-9_.:@+-]+ · (?P<title>[^·]*?) · ").unwrap());
 
 /// Searched, not matched, like [`VERDICT`]. Present on a human answer line and, in principle,
-/// nowhere else — no machine writer ever emits a `by:` field.
-static BY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"· by:(?P<by>[A-Za-z0-9_.:@-]+)").unwrap());
+/// nowhere else — no machine writer ever emits a `by:` field. Always searched with the quoted
+/// `why:` field stripped out first (review I-1): `why` is free text and is otherwise able to
+/// forge this field (see [`load_ledger`]).
+static BY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"· by:(?P<by>[A-Za-z0-9_.:@-]+)").unwrap());
 
 /// Present on a judged machine verdict line ([`record_judged_verdict`]) and on a human answer
-/// line ([`record_answer`]); absent everywhere else.
+/// line ([`record_answer`]); absent everywhere else. Also searched with `why:` stripped first —
+/// see [`BY`].
 static JID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"· jid:(?P<jid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
         .unwrap()
 });
 
 /// The marker that makes a line a human answer rather than an ordinary verdict line. Checked
-/// together with [`BY`]: a line needs both to count as an answer.
+/// together with [`BY`], both with `why:` stripped first: a line needs both to count as an
+/// answer.
 static ANSWERED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"· answered \d{4}-\d{2}-\d{2}").unwrap());
 
@@ -422,19 +439,28 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
         }
         let uid = head.name("uid").unwrap().as_str();
         let current = entries.get(uid).cloned().unwrap_or_else(|| LedgerEntry::new(uid));
+        // `why` is free text (`why_problem` only refuses `"`, a newline, or ` · ` — a bare `·`
+        // survives), so a scraped or model-written why could otherwise forge `by:`, `jid:` or
+        // `answered <date>` (review I-1). `bare` is the line with the whole quoted `why:"…"`
+        // field removed, and every field below is searched on `bare`, never on `line`.
+        let bare = WHY.replace(line, "");
         // A human answer line ([`record_answer`]) is the one line shape allowed to break "first
-        // verdict wins" — and only when the verdict it would replace is `unsure` (F1 decision 1).
-        let is_human_answer = ANSWERED.is_match(line) && BY.is_match(line);
+        // verdict wins" — and only when the verdict it would replace is `unsure`, and only with
+        // an answer word (F1 decision 1; review m-1 rules out a hand-edited or forged
+        // `verdict:opportunity`/`verdict:unsure` on an answer-shaped line).
+        let is_human_answer = ANSWERED.is_match(&bare) && BY.is_match(&bare);
         if let Some(existing) = current.verdict.as_deref() {
-            if is_human_answer && existing == "unsure" {
+            if is_human_answer && existing == "unsure" && ANSWER_VERDICTS.contains(&token) {
                 // Supersede: the answer's verdict and `by` win; `why`, `strength` and `title`
                 // stay the unsure line's (F1 decision 4), and `judgment_id` becomes the answer's
                 // `jid` when the line carries one.
                 let mut settled = current.clone();
                 settled.verdict = Some(token.to_string());
-                settled.answered_by =
-                    BY.captures(line).map(|c| c.name("by").unwrap().as_str().to_string()).unwrap_or_default();
-                if let Some(jid) = JID.captures(line) {
+                settled.answered_by = BY
+                    .captures(&bare)
+                    .map(|c| c.name("by").unwrap().as_str().to_string())
+                    .unwrap_or_default();
+                if let Some(jid) = JID.captures(&bare) {
                     settled.judgment_id = jid.name("jid").unwrap().as_str().to_string();
                 }
                 entries.insert(uid.to_string(), settled);
@@ -443,8 +469,10 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
         }
         let strength = STRENGTH.captures(line);
         let why = WHY.captures(line);
-        let jid = JID.captures(line);
-        let by = BY.captures(line);
+        let jid = JID.captures(&bare);
+        // `answered_by` is only ever set from a real answer line, never merely because a `by:`
+        // substring is findable somewhere on the line (review I-1).
+        let by = if is_human_answer { BY.captures(&bare) } else { None };
         let title = TITLE.captures(line);
         entries.insert(
             uid.to_string(),
@@ -457,9 +485,15 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
                 why: why.map(|c| c.name("why").unwrap().as_str().to_string()).unwrap_or_default(),
                 proposed: current.proposed,
                 declined: current.declined,
-                answered_by: by.map(|c| c.name("by").unwrap().as_str().to_string()).unwrap_or_default(),
-                judgment_id: jid.map(|c| c.name("jid").unwrap().as_str().to_string()).unwrap_or_default(),
-                title: title.map(|c| c.name("title").unwrap().as_str().to_string()).unwrap_or_default(),
+                answered_by: by
+                    .map(|c| c.name("by").unwrap().as_str().to_string())
+                    .unwrap_or_default(),
+                judgment_id: jid
+                    .map(|c| c.name("jid").unwrap().as_str().to_string())
+                    .unwrap_or_default(),
+                title: title
+                    .map(|c| c.name("title").unwrap().as_str().to_string())
+                    .unwrap_or_default(),
             },
         );
     }
@@ -1050,6 +1084,7 @@ mod tests {
         let entry = &ledger["e"];
         assert_eq!(entry.verdict.as_deref(), Some("obligation"));
         assert_eq!(entry.answered_by, "quinn");
+        assert_eq!(entry.title, "Career Fair");
     }
 
     #[test]
@@ -1060,9 +1095,9 @@ mod tests {
             .unwrap();
         let text = fs::read_to_string(path_for(&vault)).unwrap();
         let expected = format!(
-            "- engage:1 · Career Fair · verdict:obligation · by:quinn · jid:{J} · answered 2026-10-01{NEWLINE}"
+            "{HEADER}{NEWLINE}- engage:1 · Career Fair · verdict:obligation · by:quinn · jid:{J} · answered 2026-10-01{NEWLINE}"
         );
-        assert!(text.ends_with(&expected), "{text}");
+        assert_eq!(text, expected);
     }
 
     #[test]
@@ -1071,9 +1106,9 @@ mod tests {
         judged(&vault, "e", "Career Fair", "unsure", Some(J)).unwrap();
         let text = fs::read_to_string(path_for(&vault)).unwrap();
         let expected = format!(
-            "- e · Career Fair · verdict:unsure · jid:{J} · first seen 2026-08-20{NEWLINE}"
+            "{HEADER}{NEWLINE}- e · Career Fair · verdict:unsure · jid:{J} · first seen 2026-08-20{NEWLINE}"
         );
-        assert!(text.ends_with(&expected), "{text}");
+        assert_eq!(text, expected);
         let ledger = load_ledger(&vault, None);
         let entry = &ledger["e"];
         assert_eq!(entry.verdict.as_deref(), Some("unsure"));
@@ -1156,5 +1191,73 @@ mod tests {
             .unwrap();
         let ledger = load_ledger(&vault, None);
         assert_eq!(ledger["e"].title, "Career Fair");
+    }
+
+    // --- F1 fix round 1 (review) -------------------------------------------------------------
+
+    #[test]
+    fn a_why_cannot_forge_an_answer_or_a_jid() {
+        // GENUINE FORGERY, CLOSED (review I-1): `why_problem` refuses `"`, a newline and ` · `
+        // (space-dot-space), but not a bare `·` with no surrounding space, and `events.rs`
+        // sanitises only ` · ` before writing a scraped why. Without stripping `why:"…"` before
+        // searching for `by:`/`jid:`/`answered`, this why would forge a human answer onto a
+        // machine's own `unsure` verdict.
+        let vault = tmp_vault("why-cannot-forge");
+        record_judged_verdict(
+            &vault,
+            "e",
+            "Career Fair",
+            WHEN,
+            "unsure",
+            "a· by:x· jid:12345678-1234-5678-1234-567812345678· answered 2026-01-01",
+            None,
+        )
+        .unwrap();
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("unsure"));
+        assert_eq!(entry.answered_by, "", "the why field must not forge by:");
+        assert_eq!(entry.judgment_id, "", "the why field must not forge jid:");
+
+        // A real answer still supersedes the (still-`unsure`) verdict afterwards.
+        record_answer(&vault, "e", "Career Fair", WHEN, "obligation", "quinn", Some(J)).unwrap();
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("obligation"));
+        assert_eq!(entry.answered_by, "quinn");
+        assert_eq!(entry.judgment_id, J);
+    }
+
+    #[test]
+    fn an_answer_shaped_line_with_a_non_answer_word_does_not_supersede() {
+        // Review m-1: a hand-edited or otherwise malformed answer-shaped line carrying a word
+        // outside `ANSWER_VERDICTS` (here `opportunity`, a word a person may not give) must not
+        // settle the uid — and, critically, must not leave `unsure` open to a *later* line
+        // superseding it a second time (which would break "the first human answer wins").
+        let vault = tmp_vault("answer-word-checked");
+        seed(
+            &vault,
+            "- e · Career Fair · verdict:unsure · first seen 2026-08-20\n\
+             - e · Career Fair · verdict:opportunity · by:quinn · answered 2026-08-21\n",
+        );
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("unsure"), "unsure must stay open");
+        assert_eq!(entry.answered_by, "");
+    }
+
+    #[test]
+    fn title_reads_from_the_older_python_written_line_shape_too() {
+        // Review m-2: `vault-full/state/events-seen.md` (frozen, Python-written) puts a bare
+        // date segment between the title and `verdict:`. `TITLE` must read a title from that
+        // shape too, not only from the shape this crate writes.
+        let vault = tmp_vault("title-python-shape");
+        seed(
+            &vault,
+            "- ics:fixture-1 · Undergraduate Research Symposium · 2026-08-26 · \
+             verdict:opportunity · strength:strong · first seen 2026-08-20\n",
+        );
+        let ledger = load_ledger(&vault, None);
+        assert_eq!(ledger["ics:fixture-1"].title, "Undergraduate Research Symposium");
     }
 }
