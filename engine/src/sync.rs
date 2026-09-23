@@ -824,6 +824,146 @@ pub fn pull(client: &crate::cloudmodel::CloudClient, records_after: i64, notes_a
     pulled_from_reply(&reply)
 }
 
+// ---------------------------------------------------------------------------
+// Restore: a vault's journal replayed into an empty folder (C3' Task 9).
+// ---------------------------------------------------------------------------
+
+/// What one restore put on disk. `empty` is the fact the wizard's finish panel reads.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Restored {
+    pub notes: usize,
+    pub records: usize,
+    pub empty: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Every note already in `dest` that the caller did not name. Sorted, so the message is stable.
+pub fn unexpected_notes(vault: &Path, tolerate: &[String]) -> Vec<String> {
+    note_paths(vault).into_iter().filter(|rel| !tolerate.contains(rel)).collect()
+}
+
+/// One page, materialised. **The first recorded exception to "every note write goes through
+/// `write`"**, and the fidelity ledger argues it: every record here ALREADY EXISTS and carries the
+/// `ts`, the `device` and the `seq` of the machine that made it. Putting them through `write` would
+/// fabricate a second `create` record, stamped with THIS device's name and TODAY's `ts`, for a note
+/// created three months ago on another laptop — and `journal::human_set`, which is what judge-once
+/// reads, would then answer with the restore instead of with the student's own decision. The
+/// invariant exists to make attribution complete; re-journalling a restore is the one way to break
+/// it while appearing to obey it.
+///
+/// The bound is `restore`'s allowlist, checked once by the caller before the first page.
+pub fn materialise(dest: &Path, page: &Pulled) -> Restored {
+    let mut out = Restored { warnings: page.warnings.clone(), ..Default::default() };
+    let ledger = crate::ledger::JsonlLedger::new(dest.join("state").join("journal"));
+    for (_, record) in &page.records {
+        if let Err(why) = record_is_well_formed(record) {
+            out.warnings.push(format!("restore: a record was refused ({why})"));
+            continue;
+        }
+        if !is_note_path(dest, record.get("path").and_then(Value::as_str).unwrap_or_default()) {
+            out.warnings.push("restore: a record named a path outside the vault's notes".to_string());
+            continue;
+        }
+        match ledger.append(record) {
+            Ok(()) => out.records += 1,
+            Err(e) => out.warnings.push(format!("restore: a record could not be journalled ({e})")),
+        }
+    }
+    for note in &page.notes {
+        // A tombstone is a path the account knows is settled. A restore does not resurrect it and
+        // does not have to move anything either: there is nothing on disk yet.
+        let Some(text) = note.text.as_deref() else { continue };
+        if !is_note_path(dest, &note.path) {
+            out.warnings.push("restore: a note named a path outside the vault's notes".to_string());
+            continue;
+        }
+        let file = dest.join(&note.path);
+        if let Some(parent) = file.parent() {
+            // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match crate::pystr::write_text(&file, text) {
+            Ok(()) => out.notes += 1,
+            Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
+        }
+    }
+    out.empty = out.notes == 0 && out.records == 0;
+    out
+}
+
+/// One page into a folder whose contents the caller vouches for.
+pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restored, SyncError> {
+    if let Some(stray) = unexpected_notes(dest, tolerate).first() {
+        // Named, not counted: a student reading this needs to know WHICH note made the folder
+        // unsafe to fill, and a restore that silently overwrote it would be the one unrecoverable
+        // thing this module could do.
+        return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
+    }
+    Ok(materialise(dest, page))
+}
+
+/// The whole copy, paged from zero. The allowlist is checked **once**, before the first page: the
+/// second page would otherwise see the notes the first one wrote and refuse itself.
+pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerate: &[String]) -> Result<Restored, SyncError> {
+    if let Some(stray) = unexpected_notes(dest, tolerate).first() {
+        return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
+    }
+    let mut total = Restored { empty: true, ..Default::default() };
+    let (mut records_after, mut notes_after) = (0i64, 0i64);
+    loop {
+        let page = pull(client, records_after, notes_after)?;
+        let one = materialise(dest, &page);
+        total.notes += one.notes;
+        total.records += one.records;
+        total.warnings.extend(one.warnings);
+        // A page that moved neither cursor would loop for ever; the server holds both where they
+        // were on an empty page, which is exactly the condition to stop on.
+        let stalled = page.record_cursor == records_after && page.note_cursor == notes_after;
+        records_after = page.record_cursor;
+        notes_after = page.note_cursor;
+        if !page.more || stalled {
+            break;
+        }
+    }
+    total.empty = total.notes == 0 && total.records == 0;
+    // The cursor the next slot starts from, so the first sync after onboarding does not re-pull the
+    // whole copy it has just written.
+    let cursor = Cursor { record_cursor: records_after, note_cursor: notes_after, ..Default::default() };
+    if let Err(e) = save_cursor(dest, &cursor) {
+        total.warnings.push(format!("restore: the cursor could not be saved ({e})"));
+    }
+    Ok(total)
+}
+
+/// The wizard's one call (hand-off H11a). Resolve, take what is on disk right now as the allowlist,
+/// page to the end.
+///
+/// **A network failure is NOT an `Err`.** A student making their first vault on a hotel Wi-Fi should
+/// get a vault and a first slot that fills it, not a refusal and a rolled-back folder; the `Err` arm
+/// is for a copy that exists and will not read, which is the case where a half-filled folder would
+/// be worse than none.
+pub fn restore_into(dest: &Path) -> Result<Restored, String> {
+    let client = match crate::cloudmodel::resolve(dest) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Restored { empty: true, warnings: vec![format!("restore: {e}; the first slot will fill this vault")], ..Default::default() });
+        }
+    };
+    let tolerate = note_paths(dest);
+    match restore_all(dest, &client, &tolerate) {
+        Ok(r) => Ok(r),
+        // N4 carry-forward: Task 7 gave `SyncError::Service` its `{ cause, transport }` shape, so the
+        // brief's own `Service(why)` tuple match is adapted here to match it — `cause` is the same
+        // "the word the `sync` step prints and the page shows" `SyncError::label`/`Display` already
+        // use, and `transport` (offline vs. a real server refusal) makes no difference to this arm:
+        // either way the account could not be read just now, and the first slot will fill the vault.
+        Err(SyncError::Service { cause, .. }) => {
+            Ok(Restored { empty: true, warnings: vec![format!("restore: {cause}; the first slot will fill this vault")], ..Default::default() })
+        }
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 /// What one `apply` did. Every field is a count the run's own line reads; none is a path or a value.
 #[derive(Debug, Clone, Default)]
 pub struct ApplyReport {

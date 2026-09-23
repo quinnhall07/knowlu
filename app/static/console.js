@@ -1420,6 +1420,24 @@
     }).catch(function () {});
   });
 
+  // C3' Task 9, step 6 (P3: built to yes): the LOCAL `Backups\` mirror, never the account — the
+  // account's own copy arrives by signing in, through the wizard's own Finish (H11a), with no route
+  // and no code to type. `pick_folder` and `restore_vault` have both existed since C1 with no caller;
+  // this is the first one. Only two fields of a restored vault's plan are ever read
+  // (`finish_or_roll_back` -> `finish_profile_in`: the autostart choice and the local-judgment offer
+  // marker), so the rest of this minimal plan is never looked at — the fields still have to be the
+  // shapes `WizardPlan` requires to deserialize.
+  EL("pick-restore-backup").addEventListener("click", function () {
+    invoke("pick_folder", { title: "Choose the Backups folder to restore from" }).then(function (r) {
+      if (!r || !r.path) { return; }
+      var plan = { ics_url: null, personal_calendar: null, timezone: "", slots: ["12:00", "18:00"], zybooks: false, vhl: false, autostart: true };
+      return invoke("restore_vault", { backup: r.path, name: "Knowlu", plan: plan }).then(function (a) {
+        if (!a.ok) { EL("pick-lede").textContent = a.error; return; }
+        return invoke("open_profile", { id: a.profile.id });
+      });
+    }).catch(function () {});
+  });
+
   // R-P4a-15, the picker's other door: the same wizard, opened from a machine that already has a
   // profile. The shell carries every wizard command, so nothing has to be relaunched to get here.
   EL("pick-add").addEventListener("click", function () {
@@ -1561,6 +1579,11 @@
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
+    // C3' Task 9 (cloud design amendment, ruling 2): restoring is signing in on a new desktop, not a
+    // route on this page — Finish also brings back the account's own copy of the vault here, and this
+    // says so up front so a first sign-in, where the account has nothing to bring back yet, reads as
+    // ordinary rather than as something having gone wrong.
+    EL("wiz-restore-note").textContent = "If you've used Knowlu before, Finish also brings back your account's copy of your vault — your account had no vault yet the first time, so this one will be it.";
   }
 
   // Panel 6 leaves: write whatever was typed straight into Credential Manager, then clear the

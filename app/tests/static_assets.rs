@@ -1364,3 +1364,38 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(account_entry.contains("your name") && account_entry.contains("a link to your profile picture"),
         "the Your account entry must agree with the Google paragraph: {account_entry}");
 }
+
+/// C3' Task 9, Step 5: Finish now restores the account's own copy of the vault (H11a) before it ever
+/// reaches this panel's copy, and an account that has nothing to bring back yet is a fact, not a
+/// failure — the finish panel says so in its own sentence rather than leaving the case to read as
+/// something having gone wrong.
+#[test]
+fn the_finish_panel_says_when_the_account_had_nothing_to_restore() {
+    let js = read("console.js");
+    assert!(js.contains("your account had no vault yet"), "the empty-copy sentence is the page's, not an error");
+}
+
+/// C3' Task 9, Step 6 (P3: built to yes — Quinn is away; logged for Quinn, not asked). The picker's
+/// third door: a LOCAL `Backups\` folder, never the account — the account's own copy arrives by
+/// signing in, at Finish, with no route and no code to type (H11a). `pick_folder` and `restore_vault`
+/// have both existed since C1 with no caller; this pins the first one.
+#[test]
+fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"pick-restore-backup\""), "index.html has no #pick-restore-backup");
+    let button = html.split("id=\"pick-restore-backup\"").nth(1).and_then(|s| s.split('>').next()).expect("the button's own attributes");
+    assert!(button.contains("title=\""), "the button names what it is in its own title");
+    assert!(
+        button.to_lowercase().contains("never from your account") || button.to_lowercase().contains("nothing to do with the account"),
+        "the title says this is the local mirror, not the account: {button}"
+    );
+    let js = read("console.js");
+    let handler = js
+        .find("EL(\"pick-restore-backup\").addEventListener(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("EL(\"pick-add\").addEventListener(").next())
+        .expect("the pick-restore-backup click handler");
+    assert!(handler.contains("invoke(\"pick_folder\""), "it picks a folder first");
+    assert!(handler.contains("invoke(\"restore_vault\""), "…then restores from it");
+    assert!(handler.contains("invoke(\"open_profile\""), "…and opens the restored profile, like pick-adopt does");
+}

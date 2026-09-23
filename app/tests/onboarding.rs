@@ -245,6 +245,20 @@ struct PendingSession {
     /// parse is still put back byte for byte. `None` means there was nothing there.
     had_previous: Option<(String, String)>,
     moved_to: Vec<String>,
+    /// The process-global `KNOWLU_API_BASE` from before this guard pointed it at a closed loopback
+    /// port, restored on drop — the same shape `app/tests/account.rs::ApiBase` uses, and covered by
+    /// the same `CREDMAN_LOCK` this struct already holds for its whole life (`_guard` above), so the
+    /// two kinds of process-global state never race each other either.
+    ///
+    /// **C3' Task 9, H11a's consequence.** `create_vault_in` now calls `sync::restore_into(&dest)`
+    /// right after `move_session` succeeds, and that reads `config/cloud.yaml`'s `api_base` — which
+    /// this file's `VaultPlan` always sets from `account::api_base()`. Every test below that reaches
+    /// a live `create_vault_in` would otherwise make a real request to the compiled-in project
+    /// (`DEFAULT_API_BASE`) the moment it does; a closed loopback port refuses in microseconds
+    /// instead, and `restore_into` reports that as an empty result with a warning rather than an
+    /// error (a network that is simply down is never this path's failure), so every existing
+    /// assertion here is unaffected.
+    prev_api_base: Option<std::ffi::OsString>,
 }
 #[cfg(windows)]
 impl PendingSession {
@@ -267,7 +281,9 @@ impl PendingSession {
         };
         knowlu::account::save_session(knowlu::account::PENDING_TARGET, account_id, &s)
             .expect("write the pending session this wizard test signs in with");
-        Self { _guard: guard, had_previous, moved_to: Vec::new() }
+        let prev_api_base = std::env::var_os("KNOWLU_API_BASE");
+        unsafe { std::env::set_var("KNOWLU_API_BASE", closed_loopback_base()) };
+        Self { _guard: guard, had_previous, moved_to: Vec::new(), prev_api_base }
     }
     /// The profile-keyed target the session moves onto once a vault named `profile_id` exists,
     /// tracked for cleanup regardless of whether the move actually happened.
@@ -287,7 +303,23 @@ impl Drop for PendingSession {
         for t in &self.moved_to {
             let _ = knowlu::credentials::delete(t);
         }
+        match self.prev_api_base.take() {
+            Some(v) => unsafe { std::env::set_var("KNOWLU_API_BASE", v) },
+            None => unsafe { std::env::remove_var("KNOWLU_API_BASE") },
+        }
     }
+}
+
+/// A loopback base **nothing is listening on**: a port is bound only long enough to learn that it is
+/// free, then released — the same construction `app/tests/account.rs::closed_loopback_base` uses, so
+/// a request to it is refused in microseconds rather than reaching the network or waiting out a
+/// timeout.
+#[cfg(windows)]
+fn closed_loopback_base() -> String {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = l.local_addr().expect("addr").port();
+    drop(l);
+    format!("http://127.0.0.1:{port}/functions/v1")
 }
 
 /// R-P4a-23(a)(b): the user renamed the vault after panel 5, so the entry moves. The secret is
@@ -429,6 +461,100 @@ fn create_vault_without_a_pending_session_refuses_and_creates_nothing() {
         None => {}
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A loopback server that answers exactly one `GET` (`/sync-pull`) with a page that carries nothing
+/// — the shape `sync::pulled_from_reply` builds when an account has never pushed. Modelled on
+/// `engine/tests/sync_contract.rs`'s own `loopback` (same protocol: `cloudmodel::CloudClient` is the
+/// client on both sides of it), kept to one reply since that is all H11a's restore call ever sends
+/// from a vault this fresh — one page, `more: false`.
+#[cfg(windows)]
+fn empty_account_loopback() -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        // Drain the request head so a client that flushes only after a full write is never left
+        // waiting on us — the request is a `GET` with no body, so a blank line ends it.
+        {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone the accepted stream"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+        }
+        let body = r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        use std::io::Write;
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    });
+    (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+}
+
+/// C3' Task 9, H11a: Finish now calls `sync::restore_into(&dest)` right after the session moves onto
+/// the new profile, and an account that has never pushed answers with a real, successful, empty page
+/// — never a network failure. This is that case, end to end: the vault Finish just made is kept
+/// (`ok: true`), and the envelope names what the restore found (`restored.empty == true`, nothing
+/// counted), the sentence the finish panel reads rather than an error.
+///
+/// `PendingSession::new` already points `KNOWLU_API_BASE` at a closed loopback port so no OTHER test
+/// in this file makes a live request; this one overrides that with a server that actually answers,
+/// for the length of this test only — `PendingSession`'s own drop restores whatever came before
+/// `new()`, which is unaffected by this second, later write.
+#[cfg(windows)]
+#[test]
+fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
+    let root = tmp("restore-empty");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-restore-empty");
+    let (base, handle) = empty_account_loopback();
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    assert_eq!(out["restored"]["empty"], true, "{out}");
+    assert_eq!(out["restored"]["notes"], 0, "{out}");
+    assert_eq!(out["restored"]["records"], 0, "{out}");
+    assert!(home.join("Knowlu").join("Fall 2026").is_dir(), "an empty account copy keeps the vault");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// C3' Task 9, H11a's OTHER arm — a copy that will not read rolls the vault Finish just made back
+/// and answers `ok: false` — is not reachable through this call by any input a test can hand it:
+/// `sync::restore_into` computes its OWN allowlist from `note_paths(dest)` in the same breath it
+/// checks a stray note against it (`restore_all`'s one `unexpected_notes` check runs before the
+/// first page, with no write and no yield in between), so the check that arm exists to report can
+/// never see a note the same call did not just allow. `engine/tests/sync_replay.rs`'s
+/// `a_restore_refuses_a_note_it_did_not_put_there_and_tolerates_exactly_the_seeds` (Task 9, Step 2)
+/// already proves that refusal fires correctly against `sync::restore`, called with a hand-picked
+/// allowlist narrower than disk — the one shape that CAN happen, and the shape a real second-desktop
+/// caller of the lower-level function could hit. What is left to pin here is that `create_vault_in`'s
+/// own handling of THAT arm — should `restore_into` ever return one — is the same
+/// scaffold-then-roll-back shape every other failure in this function already uses: read the source,
+/// the way `no_test_in_this_file_can_reach_the_compiled_in_project`
+/// (`app/tests/account.rs`) and `no_multi_word_command_argument_is_sent_in_the_wrong_case`
+/// (`app/tests/static_assets.rs`) already do for a runtime path this codebase cannot otherwise reach.
+#[test]
+fn h11a_rolls_the_vault_back_when_the_restore_cannot_read_the_account() {
+    let src = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
+    let at = src.find("let restored = match knowlu_engine::sync::restore_into(&dest)").expect("H11a's restore call is in create_vault_in");
+    let window = &src[at..(at + 1100).min(src.len())];
+    assert!(window.contains("Ok(r) => r,"), "an Ok result is kept, not matched away");
+    assert!(window.contains("Err(e) => {"), "the restore's own Err arm");
+    assert!(window.contains("std::fs::remove_dir_all(&dest)"), "a copy that will not read rolls the new vault back");
+    assert!(window.contains("\"ok\": false"), "and the envelope says so");
+    assert!(window.contains("\"error\": e"), "naming the reason `restore_into` gave, not a fixed sentence");
 }
 
 /// Fix round 1, item 2: `personal_calendar` is validated on the device before it ever reaches a
