@@ -139,7 +139,8 @@ apply to you?". The card rides the existing approvals machinery: the daily cap, 
 Settling happens in `approvals::process_approvals`, which runs inside `rank` and also runs in-process
 at the end of the app's `decide_inner` (`app/src/commands.rs:248`). An approved card writes a
 human-answer line to the event ledger meaning `obligation`, and a rejected card writes one meaning
-`drop`. **So the app needs no change**, and the answer takes effect the moment the student clicks.
+`drop`. **So the app needs no change**, and the card leaves the deck on the click; the event joins
+Coming up at the next `rank`.
 
 **Why not file the card from `judge`, where `unsure` is minted.** `events::judge_roster` has no
 `WriteContext` and no approval budget. `rank` already emits the events digest with both
