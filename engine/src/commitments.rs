@@ -526,12 +526,16 @@ static TERM_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Rule 0's own-work-time words and phrases, whole-word (`\b`), case-insensitive, matched against
 /// the normalised title (`normalize_words`) so "any spacing" phrases like `work   on` collapse to
-/// one space first. §3.3 ruling I3 (fix round 1): "Work session", "Work block", "Work time",
+/// one space first. §3.4 ruling I3 (fix round 1): "Work session", "Work block", "Work time",
 /// "Work on …" and "Working on …" are the student's own study time, never kind `work` and never
-/// proposed — rule 4's bare "starts with work" is reserved for a job shift.
+/// proposed — rule 4's bare "starts with work" is reserved for a job shift. `review(ing)?` (fix
+/// round 2, M4) so "Reviewing" is caught the same way "Studying" already is. `work ?out`/`working
+/// out` (fix round 2): "Work out", "Workout" and "Working out" are exercise, not a job shift —
+/// applying I3's "when unsure, not `work`" the conservative way, as a never-proposed phrase rather
+/// than guessing it is a routine the lexicon does not name.
 static NOT_PROPOSED_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(studying|study|homework|hw[0-9]*|review|prep|tutoring|focus|work(ing)? on|work session|work block|work time)\b",
+        r"(?i)\b(studying|study|homework|hw[0-9]*|review(ing)?|prep|tutoring|focus|work(ing)? on|work session|work block|work time|work ?out|working out)\b",
     )
     .unwrap()
 });
@@ -642,18 +646,31 @@ fn d4_fallback(text: &str) -> Option<String> {
 /// A string reduced to one compact code (§3.4): the leading-code reading first, then c1c D4's
 /// reading anywhere in the string as a fallback for an LMS name. A leading match that is itself a
 /// term prefix (`TERM_RE`, fix round 1 I2) is not a code, so that case falls through to D4 too —
-/// `FA26-CS-100-001` reads `CS 100`, not `FA26`.
-fn to_code(text: &str) -> Option<String> {
+/// `FA26-CS-100-001` reads `CS 100`, not `FA26` — **unless** `exempt` already names that exact
+/// compact code (fix round 2): a real two-digit department code like `FA 10` is never skipped when
+/// the vault's own `code:` field says that is the code.
+fn to_code_exempt(text: &str, exempt: &BTreeSet<String>) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
     if let Some(m) = LEADING_CODE_RE.find(text) {
-        if !TERM_RE.is_match(m.as_str()) {
-            return Some(compact(m.as_str()));
+        let code = compact(m.as_str());
+        if !TERM_RE.is_match(m.as_str()) || exempt.contains(&code) {
+            return Some(code);
         }
     }
     d4_fallback(text).map(|s| compact(&s))
+}
+
+/// `to_code_exempt` with no exemptions — every caller but `code_table` itself; kept for the tests
+/// that exercise the plain reading directly.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "code_table calls to_code_exempt directly; tests call this")
+)]
+fn to_code(text: &str) -> Option<String> {
+    to_code_exempt(text, &BTreeSet::new())
 }
 
 /// The code table under construction: a code's first claimant is remembered even after the code
@@ -695,6 +712,7 @@ impl Table {
 pub fn code_table(vault: &Path) -> (BTreeMap<String, String>, Vec<String>) {
     let mut table = Table::default();
 
+    let mut courses: Vec<(String, Mapping)> = Vec::new();
     let dir = vault.join("courses");
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let mut names: Vec<String> = entries
@@ -715,16 +733,35 @@ pub fn code_table(vault: &Path) -> (BTreeMap<String, String>, Vec<String>) {
             let slug = field_text(&meta, "slug")
                 .filter(|s| !s.is_empty())
                 .unwrap_or(stem);
-            for field in ["code", "title", "name"] {
-                if let Some(raw) = field_text(&meta, field) {
-                    if let Some(code) = to_code(&raw) {
-                        table.claim(code, &slug);
-                    }
+            courses.push((slug, meta));
+        }
+    }
+
+    // Fix round 2: a course's own explicit `code:` field is the vault's own ground truth. The
+    // term-prefix skip (I2) exists for LMS junk like `FA26-CS-100-001`, never for a code the
+    // student (or the wizard) wrote down deliberately, so it never applies to a compact code this
+    // set already names — gathered up front, before any claim, so a course's own `code:` field
+    // exempts every field's reading of it, including its own.
+    let mut exempt: BTreeSet<String> = BTreeSet::new();
+    for (_, meta) in &courses {
+        if let Some(raw) = field_text(meta, "code") {
+            let c = compact(&raw);
+            if !c.is_empty() {
+                exempt.insert(c);
+            }
+        }
+    }
+
+    for (slug, meta) in &courses {
+        for field in ["code", "title", "name"] {
+            if let Some(raw) = field_text(meta, field) {
+                if let Some(code) = to_code_exempt(&raw, &exempt) {
+                    table.claim(code, slug);
                 }
             }
-            if let Some(code) = to_code(&slug) {
-                table.claim(code, &slug);
-            }
+        }
+        if let Some(code) = to_code_exempt(slug, &exempt) {
+            table.claim(code, slug);
         }
     }
 
@@ -733,7 +770,7 @@ pub fn code_table(vault: &Path) -> (BTreeMap<String, String>, Vec<String>) {
             if let Some(mapping) = cfg.get("course_map").and_then(|v| v.as_mapping()) {
                 for (k, v) in mapping.iter() {
                     if let (Some(key), Some(slug)) = (k.as_str(), v.as_str()) {
-                        if let Some(code) = to_code(key) {
+                        if let Some(code) = to_code_exempt(key, &exempt) {
                             table.claim(code, slug);
                         }
                     }
@@ -857,6 +894,39 @@ pub enum Class {
     Routine { wake: bool, bed: bool },
 }
 
+/// Drops emoji and other symbol characters (fix round 2, M1): "Bedtime 🛏" reads as "Bedtime" for
+/// lexicon matching. Keeps letters, digits and marks from any script (`is_alphanumeric`),
+/// whitespace, and the punctuation §3.4's rules already give meaning to (word separators, code
+/// separators, quotes) — everything else (pictographs, dingbats, other symbol characters) is
+/// dropped outright, not just trimmed from the ends, since an emoji can sit mid-title too.
+fn strip_symbols(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| {
+            c.is_alphanumeric()
+                || c.is_whitespace()
+                || matches!(
+                    c,
+                    '-' | '_'
+                        | '.'
+                        | ':'
+                        | '('
+                        | ')'
+                        | '\''
+                        | '–'
+                        | '—'
+                        | '/'
+                        | '['
+                        | ']'
+                        | '\u{2018}'
+                        | '\u{2019}'
+                        | '\u{201c}'
+                        | '\u{201d}'
+                )
+        })
+        .collect()
+}
+
 /// The title with surrounding whitespace and punctuation trimmed (§3.4: "matching is on the
 /// title trimmed of surrounding punctuation").
 fn trimmed_title(title: &str) -> String {
@@ -901,7 +971,7 @@ fn routine_side(lower_trimmed: &str) -> Option<(bool, bool)> {
 /// The trimmed, normalised title is exactly `sleep` (case-insensitive) — rule 1's one
 /// midnight-crossing exception.
 fn is_sleep(title: &str) -> bool {
-    normalize_words(&trimmed_title(title)).eq_ignore_ascii_case("sleep")
+    normalize_words(&trimmed_title(&strip_symbols(title))).eq_ignore_ascii_case("sleep")
 }
 
 /// Any instance's end time is strictly before its start time — a nightly wraparound (§3.4's
@@ -999,8 +1069,10 @@ fn eligible(series: &Series) -> bool {
 
 /// The slug a title starts with, per the vault's code table, and everything after it (rule 3's
 /// leading-code test; rule 2 reuses it just for the slug). `None` when the title does not start
-/// with a known code, or the character right after it is not one of rule 3's separators
-/// (space, `-`, `–`, `:`, `(`, `.` — the last one added for I4's "CS 100.001").
+/// with a known code, or the character right after it is not one of rule 3's separators (space,
+/// `-`, `–`, `:`, `(`, `.` — the last for I4's "CS 100.001"; `—`, `/`, `[`, `]` added fix round 2,
+/// M7, so "CS 100 — Lab", "CS 100 / Lab" and "[CS 100] Lecture" (`trimmed_title` already strips
+/// the leading `[`, leaving a stray `]` right after the code) all reach rule 3 too).
 fn class_course(title: &str, codes: &BTreeMap<String, String>) -> Option<(String, String)> {
     let m = LEADING_CODE_RE.find(title)?;
     let slug = codes.get(&compact(m.as_str()))?.clone();
@@ -1009,7 +1081,7 @@ fn class_course(title: &str, codes: &BTreeMap<String, String>) -> Option<(String
         return Some((slug, String::new()));
     }
     let sep = rest.chars().next().unwrap();
-    if !matches!(sep, ' ' | '-' | '–' | ':' | '(' | '.') {
+    if !matches!(sep, ' ' | '-' | '–' | '—' | ':' | '(' | '.' | '/' | '[' | ']') {
         return None;
     }
     Some((slug, rest[sep.len_utf8()..].to_string()))
@@ -1051,18 +1123,26 @@ fn is_number_ish(tok: &str) -> bool {
     tok.chars().any(|c| c.is_ascii_digit()) || tok.chars().count() == 1
 }
 
-/// I4's bare section number, with no leading section word ("-001", " 001", ".001"): at least one
-/// digit, at most four characters, otherwise plain alphanumeric.
-fn is_section_number(tok: &str) -> bool {
-    tok.len() <= 4
-        && tok.chars().any(|c| c.is_ascii_digit())
-        && tok.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
-/// I4's bare lab designator ("L01"): `l` followed by one or more digits. `lab`/`laboratory`
-/// themselves are already `SECTION_WORDS`.
-fn is_lab_designator(tok: &str) -> bool {
-    tok.len() > 1 && tok.starts_with('l') && tok[1..].chars().all(|c| c.is_ascii_digit())
+/// I4's bare section designator, with no leading section word — purely numeric (`001`, `1`), a
+/// single letter (`A`), or a known designator letter followed by digits (`l`/lab, `r`/recitation,
+/// `d`/discussion — `L01`, `R01`, `D01`). Fix round 2: this is deliberately narrower than "any
+/// short alphanumeric token with a digit" — `PS1`, `HW1` and `1on1` are none of these three shapes
+/// and so are never a designator, unlike the old `is_section_number`.
+fn designator_kind(tok: &str) -> Option<&'static str> {
+    if !tok.is_empty() && tok.len() <= 4 && tok.chars().all(|c| c.is_ascii_digit()) {
+        return Some("class");
+    }
+    if tok.chars().count() == 1 && tok.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return Some("class");
+    }
+    let mut chars = tok.chars();
+    let first = chars.next()?;
+    let rest = &tok[first.len_utf8()..];
+    if matches!(first, 'l' | 'r' | 'd') && !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(if first == 'l' { "lab" } else { "class" });
+    }
+    None
 }
 
 /// Rule 3's remainder test (§3.4, the review's spec-gap fix, and ruling I4): empty; a section word
@@ -1089,17 +1169,16 @@ fn section_kind(
         return Some(section_word_kind(&tokens[0]));
     }
 
-    if tokens.len() == 1 && is_lab_designator(&tokens[0]) {
-        return Some("lab");
-    }
-    if tokens.len() <= 2 && is_section_number(&tokens[0]) {
-        if tokens.len() == 1 {
-            return Some("class");
+    if tokens.len() <= 2 {
+        if let Some(kind) = designator_kind(&tokens[0]) {
+            if tokens.len() == 1 {
+                return Some(kind);
+            }
+            if SECTION_WORDS.contains(&tokens[1].as_str()) {
+                return Some(section_word_kind(&tokens[1]));
+            }
+            return None;
         }
-        if SECTION_WORDS.contains(&tokens[1].as_str()) {
-            return Some(section_word_kind(&tokens[1]));
-        }
-        return None;
     }
 
     if let Some(words) = course_words.get(slug) {
@@ -1117,16 +1196,17 @@ pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<C
     if !eligible(series) {
         return None;
     }
-    // M1: normalised once — internal whitespace/`-`/`_` collapsed to one space — so every rule
-    // below sees "Wake-up" and "Wake  Up" the same way it sees "Wake up".
-    let title = normalize_words(&trimmed_title(&series.title));
+    // M1: symbols (emoji, dingbats) dropped, then trimmed, then normalised — internal
+    // whitespace/`-`/`_` collapsed to one space — so every rule below sees "Bedtime 🛏" as
+    // "Bedtime" and "Wake-up"/"Wake  Up" the same way it sees "Wake up".
+    let title = normalize_words(&trimmed_title(&strip_symbols(&series.title)));
 
-    // Rule 0: not proposed at all. M2: the planning name is trimmed and normalised the same way
-    // the title is, so a planning entry "Gym." matches a series titled "Gym." too.
+    // Rule 0: not proposed at all. M2: the planning name goes through the same pipeline as the
+    // title, so a planning entry "Gym." matches a series titled "Gym." too.
     if NOT_PROPOSED_RE.is_match(&title)
-        || planning
-            .iter()
-            .any(|name| normalize_words(&trimmed_title(name)).eq_ignore_ascii_case(&title))
+        || planning.iter().any(|name| {
+            normalize_words(&trimmed_title(&strip_symbols(name))).eq_ignore_ascii_case(&title)
+        })
     {
         return None;
     }
@@ -2501,5 +2581,123 @@ mod tests {
                 course: Some("cs-100".to_string())
             })
         );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Fix round 2 (re-review of eeed0fe/756692f).
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn work_out_workout_and_working_out_are_never_kind_work() {
+        let codes = codes_with(&[]);
+        for title in ["Work out", "Workout", "Working out"] {
+            let series = weekly(title, 2, t(17, 0), t(18, 0));
+            assert_eq!(
+                classify(&series, &codes, &[]),
+                None,
+                "{title}: I3's \"when unsure, not work\", the conservative way"
+            );
+        }
+        // A real job shift is unaffected.
+        let shift = weekly("Work", 2, t(17, 0), t(21, 0));
+        assert_eq!(
+            classify(&shift, &codes, &[]),
+            Some(Class::Kind {
+                kind: "work".to_string(),
+                course: None
+            })
+        );
+    }
+
+    #[test]
+    fn alphanumeric_tokens_like_ps1_and_1on1_are_not_section_designators() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        for title in ["CS 100 PS1", "CS 100 1on1"] {
+            let series = weekly(title, 2, t(9, 0), t(9, 50));
+            let got = classify(&series, &codes, &[]);
+            assert_ne!(
+                got,
+                Some(Class::Kind {
+                    kind: "class".to_string(),
+                    course: Some("cs-100".to_string())
+                }),
+                "{title}: {got:?}"
+            );
+            assert_ne!(
+                got,
+                Some(Class::Kind {
+                    kind: "lab".to_string(),
+                    course: Some("cs-100".to_string())
+                }),
+                "{title}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bedtime_with_a_trailing_emoji_is_still_a_routine() {
+        let codes = codes_with(&[]);
+        let series = weekly("Bedtime \u{1F6CF}", 2, t(22, 0), t(22, 5));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Routine {
+                wake: false,
+                bed: true
+            })
+        );
+    }
+
+    #[test]
+    fn reviewing_is_rule_0_the_same_way_studying_is() {
+        let codes = codes_with(&[]);
+        let series = weekly("Reviewing for CS 100", 2, t(19, 0), t(20, 0));
+        assert_eq!(classify(&series, &codes, &[]), None);
+    }
+
+    #[test]
+    fn extra_separators_reach_rule_3_and_a_leading_bracket_is_trimmed() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let want_lab = Some(Class::Kind {
+            kind: "lab".to_string(),
+            course: Some("cs-100".to_string()),
+        });
+        let em_dash = weekly("CS 100—Lab", 2, t(9, 0), t(9, 50));
+        assert_eq!(classify(&em_dash, &codes, &[]), want_lab, "em dash");
+        let slash = weekly("CS 100/Lab", 2, t(9, 0), t(9, 50));
+        assert_eq!(classify(&slash, &codes, &[]), want_lab, "slash");
+        let bracket = weekly("[CS 100] Lecture", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&bracket, &codes, &[]),
+            Some(Class::Kind {
+                kind: "class".to_string(),
+                course: Some("cs-100".to_string())
+            }),
+            "leading bracket"
+        );
+    }
+
+    #[test]
+    fn a_courses_own_explicit_code_field_is_never_treated_as_a_term() {
+        let v = vault("codes-fa10-exempt");
+        course_note(
+            &v,
+            "fa-10.md",
+            "code: \"FA 10\"\ntitle: \"Intro to Fine Arts\"\nslug: fa-10\n",
+        );
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.get("FA10"), Some(&"fa-10".to_string()));
+    }
+
+    #[test]
+    fn without_an_explicit_code_field_a_two_digit_term_like_prefix_still_skips() {
+        // Regression guard: the exemption is scoped to an explicit `code:` field, so a plain LMS
+        // name with a term-shaped prefix and no matching `code:` field is still read past it.
+        let v = vault("codes-fa10-not-exempt");
+        course_note(&v, "cs-100.md", "name: \"FA26-CS-100-001\"\nslug: cs-100\n");
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!codes.contains_key("FA26"), "{codes:?}");
+        assert_eq!(codes.get("CS100"), Some(&"cs-100".to_string()));
     }
 }
