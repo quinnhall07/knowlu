@@ -338,6 +338,39 @@ fn restore_all_rolls_back_every_page_this_call_wrote_when_a_later_page_fails() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+/// N5 (fix round 2): the rollback undoes exactly what this call itself wrote — tracked as it
+/// happened, never guessed from a whole-tree snapshot. Page 1 writes a note at a NESTED path, which
+/// makes `materialise` create a brand-new folder for it; page 2 fails. The rollback must remove the
+/// note, prune the folder it made (and only that folder), and never so much as touch an unrelated
+/// note sitting elsewhere in the vault.
+#[test]
+fn restore_all_rollback_removes_only_what_it_wrote_and_prunes_only_folders_it_made() {
+    let dest = temp("restore-all-rollback-precise");
+    std::fs::create_dir_all(dest.join("tasks")).expect("mkdir");
+    let untouched = dest.join("tasks").join("untouched.md");
+    knowlu_engine::pystr::write_text(&untouched, "---\nid: task_0000000010\n---\nleave me alone\n").expect("untouched note");
+    let before = std::fs::read(&untouched).expect("bytes");
+
+    let device = "aaaaaaaaaaaaaaaa";
+    let rec1 = serde_json::json!({"op":"create","path":"tasks/sub/nested.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:00.000Z","id":"task_0000000011","new":{"id":"task_0000000011"}});
+    let page1 = page_reply(
+        vec![(device, rec1)],
+        vec![serde_json::json!({"path":"tasks/sub/nested.md","device":device,"deleted":false,"body":"---\nid: task_0000000011\n---\nnested\n"})],
+        1, 1, true,
+    );
+    let (base, handle) = loopback(vec![(200, page1), (503, r#"{"error":"down"}"#.to_string())]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    let err = sync::restore_all(&dest, &client, &tolerate).expect_err("page 2 fails the whole call");
+    handle.join().expect("the loopback thread did not panic");
+    assert!(format!("{err}").contains("503") || format!("{err}").contains("refused"), "{err}");
+    assert!(!dest.join("tasks").join("sub").join("nested.md").exists(), "the nested note was rolled back");
+    assert!(!dest.join("tasks").join("sub").exists(), "the folder this call created for it is pruned too");
+    assert!(dest.join("tasks").is_dir(), "the SCAFFOLD's own folder is never pruned");
+    assert_eq!(std::fs::read(&untouched).expect("bytes"), before, "an unrelated note is untouched, byte for byte");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
 /// I3 (fix round 1): after a completed restore, the cursor left behind must read exactly like a
 /// completed pull-then-push already happened — so the very first push after Finish, with nothing
 /// else touched, sends nothing at all. Otherwise every restored note re-uploads on the first slot,
@@ -365,6 +398,48 @@ fn the_first_push_after_a_completed_restore_sends_nothing_from_an_untouched_vaul
     let (batch, _next) = sync::build_push(&dest, &cursor, "acct-1", &mut journal);
     assert!(batch.notes.is_empty(), "no note is unsent after a caught-up restore: {:?}", batch.notes);
     assert!(batch.records.is_empty(), "no record is unsent after a caught-up restore: {:?}", batch.records);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// N1 (fix round 2): the round 1 cursor hashed EVERY note on disk and set `pushed_through` to the
+/// WHOLE journal's own end — so a course the wizard created before the restore ever ran (the account
+/// has never seen it) was marked as already pushed, and its own `create` record never left the
+/// device. This is the reviewer's probe: a wizard-made seed the account does not have IS in the
+/// first push after a restore, and a restored note is NOT.
+#[test]
+fn the_first_push_after_a_restore_sends_a_wizard_made_seed_but_not_a_restored_note() {
+    let dest = temp("restore-then-push-with-seed");
+    std::fs::create_dir_all(dest.join("courses")).expect("mkdir");
+    // The wizard's own seed — created locally, journalled the way `scaffold::seed_writes` really
+    // does (`write::create`), and never touched again. The account has never seen it.
+    let mut seed_journal = Journal::new(&dest);
+    let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::create(
+        &dest, "courses/new-101.md", "---\nid: course_0000000001\n---\nNew 101\n",
+        &seed_ctx, &mut seed_journal, None,
+    ).expect("seed the course, the way scaffold does");
+
+    let device = "aaaaaaaaaaaaaaaa";
+    let rec1 = serde_json::json!({"op":"create","path":"tasks/e.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-08-01T10:00:00.000Z","id":"task_0000000005","new":{"id":"task_0000000005"}});
+    let page1 = page_reply(
+        vec![(device, rec1)],
+        vec![serde_json::json!({"path":"tasks/e.md","device":device,"deleted":false,"body":"---\nid: task_0000000005\n---\nrestored\n"})],
+        1, 1, false,
+    );
+    let (base, handle) = loopback(vec![(200, page1)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    let report = sync::restore_all(&dest, &client, &tolerate).expect("restore completes");
+    handle.join().expect("the loopback thread did not panic");
+    assert!(!report.empty);
+
+    let cursor = sync::load_cursor(&dest);
+    let mut journal = Journal::new(&dest);
+    let (batch, _next) = sync::build_push(&dest, &cursor, "acct-1", &mut journal);
+    let note_paths: Vec<&str> = batch.notes.iter().map(|n| n["path"].as_str().unwrap_or("")).collect();
+    assert!(note_paths.contains(&"courses/new-101.md"), "the wizard's own seed goes out: {note_paths:?}");
+    assert!(!note_paths.contains(&"tasks/e.md"), "the restored note must not be re-sent: {note_paths:?}");
+    assert!(!batch.records.is_empty(), "the seed's own create record travels too");
     let _ = std::fs::remove_dir_all(&dest);
 }
 

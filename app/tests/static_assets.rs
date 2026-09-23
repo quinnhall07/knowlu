@@ -1379,15 +1379,30 @@ fn the_finish_panel_says_when_the_account_had_nothing_to_restore() {
     let sentence_fn = js.split("function restoreSentence(").nth(1).and_then(|s| s.split("\n  }").next()).expect("restoreSentence");
     for (label, sentence) in [
         ("restored", "Your account already had a vault here"),
-        ("could not be reached", "could not be reached just now; your vault will fill in at the next sync"),
+        // N3/item 2 (fix round 2): "over the next syncs", plural — a large account takes more than
+        // one page, and the round 1 wording ("at the next sync") understated that.
+        ("could not be reached", "could not be reached just now; your vault will fill in over the next syncs"),
         ("had no vault yet", "Your account had no vault yet"),
     ] {
         assert!(sentence_fn.contains(sentence), "{label}: the sentence is not in restoreSentence: {sentence_fn}");
     }
+    // N3 (fix round 2): keyed on the explicit `ok` field, never on `warnings.length` — a
+    // successful pull can carry warnings too (a refused sync card, an oversize row), and the round 1
+    // version would have misread those as "could not be reached".
+    assert!(sentence_fn.contains("!restored.ok"), "restoreSentence keys on the explicit ok field: {sentence_fn}");
+    assert!(!sentence_fn.contains("warnings"), "restoreSentence no longer reads warnings.length at all: {sentence_fn}");
     // The static claim is gone: no fixed sentence is painted before Finish has run.
     assert!(js.contains("restoreNote: \"\""), "WIZ.restoreNote starts blank — nothing is claimed before Finish runs");
     assert!(js.contains("WIZ.restoreNote = restoreSentence("), "wizFinish reads the real result into it");
     assert!(js.contains("EL(\"wiz-restore-note\").textContent = WIZ.restoreNote"), "renderWizard paints it, like every other wizard field");
+    // N3: stays visible until the relaunch and does not race entitlement_now — the sentence is set,
+    // and painted, strictly BEFORE entitlement_now/finish_onboarding are ever invoked, and nothing
+    // in between clears or repaints over it.
+    let set_at = js.find("WIZ.restoreNote = restoreSentence(").expect("the assignment");
+    let entitlement_at = js[set_at..].find("invoke(\"entitlement_now\"").map(|i| i + set_at).expect("entitlement_now follows it");
+    assert!(set_at < entitlement_at, "the sentence is set before entitlement_now is ever invoked");
+    let between = &js[set_at..entitlement_at];
+    assert_eq!(between.matches("WIZ.restoreNote").count(), 1, "nothing between the two touches WIZ.restoreNote again: {between}");
 }
 
 /// C3' Task 9, Step 6 (P3: built to yes — Quinn is away; logged for Quinn, not asked). The picker's
@@ -1424,4 +1439,16 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     assert!(!handler.contains("autostart: true"), "autostart is read from the checkbox, never hardcoded true");
     assert!(handler.contains("EL(\"pick-restore-autostart\").checked"), "autostart is read from the checkbox");
     assert!(handler.contains("name: name"), "the typed name is sent, not a literal");
+    // N6 (fix round 2): the button is disabled before the call, like the wizard's own Finish
+    // (R2-3), and re-enabled on either outcome — a refusal must leave it pressable again.
+    let go_handler = js
+        .find("EL(\"pick-restore-go\").addEventListener(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("EL(\"pick-add\").addEventListener(").next())
+        .expect("the pick-restore-go click handler");
+    let disable_at = go_handler.find("go.disabled = true").expect("disabled before the call");
+    let call_at = go_handler.find("invoke(\"restore_vault\"").expect("the call itself");
+    assert!(disable_at < call_at, "the button is disabled BEFORE restore_vault is invoked");
+    assert!(go_handler.contains("go.disabled = false"), "it is re-enabled somewhere");
+    assert_eq!(go_handler.matches("go.disabled = false").count(), 2, "re-enabled on the refusal AND the catch: {go_handler}");
 }

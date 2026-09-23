@@ -698,13 +698,12 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     // this path produced one keeps their own envelopes exactly as they were.
     let mut out = finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups));
     if out["ok"] == true {
-        // M1 (fix round 1): `warnings` travels too — it is what the finish panel reads to tell "the
-        // account had no vault yet" (an empty, successful pull; no warning) from "the account could
-        // not be reached" (an empty result folded from a failure; one warning naming why), which
-        // `restored.empty` alone cannot distinguish.
+        // M1 (fix round 1): `warnings` travels too. N3 (fix round 2): so does `ok` — the field the
+        // finish panel now keys its sentence on, since `warnings` being non-empty does not by itself
+        // mean the account could not be reached (a perfectly successful pull can carry one too).
         out["restored"] = json!({
             "notes": restored.notes, "records": restored.records, "empty": restored.empty,
-            "warnings": restored.warnings,
+            "warnings": restored.warnings, "ok": restored.ok,
         });
     }
     out

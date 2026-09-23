@@ -544,6 +544,12 @@ fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
     assert_eq!(out["restored"]["empty"], true, "{out}");
     assert_eq!(out["restored"]["notes"], 0, "{out}");
     assert_eq!(out["restored"]["records"], 0, "{out}");
+    // N4 (fix round 2): the accept deadline proves a request arrived; it does not by itself prove
+    // the reply was ACCEPTED — a parse or status failure folds into the same `empty: true`. Since
+    // `warnings` is in the envelope, asserting it is empty is what actually distinguishes "a real,
+    // successful, empty pull" from a failure `restore_into` folded to look like one.
+    assert_eq!(out["restored"]["warnings"], serde_json::json!([]), "a real empty pull carries no warnings: {out}");
+    assert_eq!(out["restored"]["ok"], true, "{out}");
     assert!(home.join("Knowlu").join("Fall 2026").is_dir(), "an empty account copy keeps the vault");
     handle.join().expect("the loopback thread did not panic");
     let _ = std::fs::remove_dir_all(&root);
@@ -586,6 +592,7 @@ fn a_finish_whose_account_copy_has_content_writes_it_into_the_new_vault() {
     assert_eq!(out["restored"]["empty"], false, "{out}");
     assert_eq!(out["restored"]["notes"], 1, "{out}");
     assert_eq!(out["restored"]["records"], 1, "{out}");
+    assert_eq!(out["restored"]["ok"], true, "{out}");
     let restored_note = home.join("Knowlu").join("Fall 2026").join("tasks").join("from-account.md");
     assert_eq!(
         knowlu_engine::pystr::read_text(&restored_note).expect("the restored note"),

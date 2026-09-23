@@ -1444,15 +1444,21 @@
     }).catch(function () {});
   });
   EL("pick-restore-go").addEventListener("click", function () {
+    // N6 (fix round 2): disabled before the call, the same guard the wizard's own Finish already
+    // has (R2-3) — a double click used to start two `restore_vault` calls, the second losing the
+    // rename race and writing its error into #pick-lede while the first was already relaunching.
+    // Re-enabled on EITHER outcome: a refusal must leave the button pressable again.
+    var go = EL("pick-restore-go");
+    go.disabled = true;
     var name = EL("pick-restore-name").value.trim() || "Knowlu";
     var plan = {
       ics_url: null, personal_calendar: null, timezone: "", slots: ["12:00", "18:00"],
       zybooks: false, vhl: false, autostart: EL("pick-restore-autostart").checked,
     };
     invoke("restore_vault", { backup: PICK_RESTORE_BACKUP, name: name, plan: plan }).then(function (a) {
-      if (!a.ok) { EL("pick-lede").textContent = a.error; return; }
+      if (!a.ok) { EL("pick-lede").textContent = a.error; go.disabled = false; return; }
       return invoke("open_profile", { id: a.profile.id });
-    }).catch(function () {});
+    }).catch(function () { go.disabled = false; });
   });
 
   // R-P4a-15, the picker's other door: the same wizard, opened from a machine that already has a
@@ -1795,10 +1801,16 @@
   // `restore_into` folds a failed pull into the same `empty: true` so Finish never rolls the vault
   // back over a hotel Wi-Fi — so `warnings` (non-empty only on the failed-pull fold) is what tells
   // the two apart here.
+  // N3 (fix round 2): keyed on `ok` (an explicit field `create_vault`'s own envelope carries,
+  // C3' Task 9's `sync::Restored.ok`), never on `warnings.length` — a perfectly successful pull can
+  // carry warnings too (a refused sync card, an oversize row), and reading those as "could not be
+  // reached" was the round 1 bug. Item 2 (N2's own follow-on): the offline sentence now says the
+  // notes arrive over the next SYNCS, plural — one page at a time, so a large account takes more
+  // than one.
   function restoreSentence(restored) {
     if (!restored) { return ""; }
+    if (!restored.ok) { return "Your account could not be reached just now; your vault will fill in over the next syncs."; }
     if (!restored.empty) { return "Your account already had a vault here — it just came back."; }
-    if ((restored.warnings || []).length) { return "Your account could not be reached just now; your vault will fill in at the next sync."; }
     return "Your account had no vault yet — this is the first one.";
   }
 

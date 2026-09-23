@@ -1976,6 +1976,69 @@ fn a_pulled_live_sync_amend_card_is_refused_and_never_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// N2 (fix round 2, the reviewer's own probe). The seed here is UNTOUCHED — this device's whole
+/// journal history for it is exactly its own `create`, the way `scaffold::seed_writes` leaves a
+/// course note the wizard made and nobody has edited since. The account already has a real note at
+/// the same path, from a desktop that filled in the actual grade weights. Without this fix, `apply`'s
+/// blanket "never overwrite a note this device already has" would leave the seed's placeholder on
+/// disk forever, and the next push would send that placeholder back OVER the account's real content.
+#[test]
+fn an_untouched_wizard_seed_loses_to_the_accounts_own_copy_at_the_same_path() {
+    let dir = fixture_with_id("untouched-seed-loses");
+    let mut journal = Journal::new(&dir);
+    let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::create(
+        &dir, "courses/cs-100.md", "---\nid: course_0000000001\n---\nExams: TBD\n",
+        &seed_ctx, &mut journal, None,
+    ).expect("the wizard's own seed");
+
+    let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let note = sync::PulledNote {
+        device: "fedcba9876543210".to_string(),
+        path: "courses/cs-100.md".to_string(),
+        text: Some("---\nid: course_00000000ab\n---\nExams 60%, labs 40%\n".to_string()),
+    };
+    let report = sync::apply(&dir, &pulled(vec![], vec![note]), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-100.md")).expect("the note"),
+        "---\nid: course_00000000ab\n---\nExams 60%, labs 40%\n",
+        "the account's own copy wins over an untouched seed"
+    );
+    assert_eq!(report.notes_written, 1, "{report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// N2's other half: a seed the student HAS edited since — a second record beyond its own `create` —
+/// is an ordinary conflict, handled exactly as today: the account's copy does NOT silently overwrite
+/// it, because a real decision has already been made here.
+#[test]
+fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
+    let dir = fixture_with_id("edited-seed-keeps-rule");
+    let mut journal = Journal::new(&dir);
+    let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::create(
+        &dir, "courses/cs-200.md", "---\nid: course_0000000002\n---\nExams: TBD\n",
+        &seed_ctx, &mut journal, None,
+    ).expect("the wizard's own seed");
+    // The student typed something — a SECOND record beyond the seed's own `create`.
+    knowlu_engine::write::write_literals(
+        &dir, "courses/cs-200.md", &[("importance".to_string(), "5".to_string())],
+        &seed_ctx, &mut journal, &Default::default(),
+    ).expect("the student's own edit");
+
+    let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let note = sync::PulledNote {
+        device: "fedcba9876543210".to_string(),
+        path: "courses/cs-200.md".to_string(),
+        text: Some("---\nid: course_00000000cd\n---\nExams 60%, labs 40%\n".to_string()),
+    };
+    let report = sync::apply(&dir, &pulled(vec![], vec![note]), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
+    let now = knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-200.md")).expect("the note");
+    assert!(!now.contains("Exams 60%"), "an edited seed is not silently overwritten: {now:?}");
+    assert_eq!(report.notes_written, 0, "{report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_cursor_from_before_the_rule_never_carries_or_tombstones_a_sync_card() {
     // (i), path 5. A cursor written before R-C3′-exec-18 can already remember a sync card's path,
