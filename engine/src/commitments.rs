@@ -513,9 +513,27 @@ pub(crate) fn front_matter(fields: &[(&str, Field)]) -> String {
 static LEADING_CODE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{2,8}[ ._-]?[0-9]{1,4}[A-Za-z]?\b").unwrap());
 
-/// Rule 0's own-work-time words and phrases, whole-word (`\b`), case-insensitive.
+/// A season+year term prefix or a bare numeric term id (fix round 1, I2): `FA26`, `SP27`, `SU26`,
+/// `WI27`, `FALL2026`, `Fall 2026`, `Spring 2027`, `202640`. `to_code` skips a leading-code match
+/// that is really one of these, so an LMS name like `FA26-CS-100-001` reads its course code from
+/// the D4 fallback instead of reading the term as the code.
+static TERM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(fa|sp|su|wi)[ ._-]?[0-9]{2}$|^(fall|spring|summer|winter)[ ._-]?[0-9]{4}$|^[0-9]{6}$",
+    )
+    .unwrap()
+});
+
+/// Rule 0's own-work-time words and phrases, whole-word (`\b`), case-insensitive, matched against
+/// the normalised title (`normalize_words`) so "any spacing" phrases like `work   on` collapse to
+/// one space first. §3.3 ruling I3 (fix round 1): "Work session", "Work block", "Work time",
+/// "Work on …" and "Working on …" are the student's own study time, never kind `work` and never
+/// proposed — rule 4's bare "starts with work" is reserved for a job shift.
 static NOT_PROPOSED_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(study|homework|hw|review|prep|tutoring|work on|focus)\b").unwrap()
+    Regex::new(
+        r"(?i)\b(studying|study|homework|hw[0-9]*|review|prep|tutoring|focus|work(ing)? on|work session|work block|work time)\b",
+    )
+    .unwrap()
 });
 
 /// Rule 2's `office hours?`, case-insensitive.
@@ -556,9 +574,18 @@ const SECTION_WORDS: [&str; 13] = [
     "class",
 ];
 
-/// Rule 1's whole-title words, lower-cased.
-const WAKE_WORDS: [&str; 4] = ["wake", "wake up", "get up", "alarm"];
-const BED_WORDS: [&str; 5] = ["bed", "bedtime", "go to bed", "sleep", "lights out"];
+/// Rule 1's whole-title words, lower-cased, matched against the normalised title
+/// (`normalize_words`) so "Wake-up", "Wake  Up" and "Wakeup" all reach `wake up`/`wakeup`, and
+/// "Bed time" reaches `bedtime`'s own spaced form (fix round 1, M1).
+const WAKE_WORDS: [&str; 5] = ["wake", "wake up", "get up", "alarm", "wakeup"];
+const BED_WORDS: [&str; 6] = [
+    "bed",
+    "bedtime",
+    "go to bed",
+    "sleep",
+    "lights out",
+    "bed time",
+];
 
 /// A compact code: capitals, separators removed (`CS 100`, `cs-100`, `CS100` → `CS100`).
 fn compact(code: &str) -> String {
@@ -613,14 +640,18 @@ fn d4_fallback(text: &str) -> Option<String> {
 }
 
 /// A string reduced to one compact code (§3.4): the leading-code reading first, then c1c D4's
-/// reading anywhere in the string as a fallback for an LMS name.
+/// reading anywhere in the string as a fallback for an LMS name. A leading match that is itself a
+/// term prefix (`TERM_RE`, fix round 1 I2) is not a code, so that case falls through to D4 too —
+/// `FA26-CS-100-001` reads `CS 100`, not `FA26`.
 fn to_code(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
     if let Some(m) = LEADING_CODE_RE.find(text) {
-        return Some(compact(m.as_str()));
+        if !TERM_RE.is_match(m.as_str()) {
+            return Some(compact(m.as_str()));
+        }
     }
     d4_fallback(text).map(|s| compact(&s))
 }
@@ -836,6 +867,26 @@ fn trimmed_title(title: &str) -> String {
         .to_string()
 }
 
+/// Collapses runs of whitespace, `-` and `_` to one space (fix round 1, M1): "Wake-up" and
+/// "Wake  Up" both read as "wake up" for rules 0 and 1. A title with no separator at all
+/// ("Wakeup") is untouched, which is why `WAKE_WORDS`/`BED_WORDS` also carry the glued spelling.
+fn normalize_words(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut at_space = true;
+    for c in title.chars() {
+        if c.is_whitespace() || c == '-' || c == '_' {
+            if !at_space {
+                out.push(' ');
+                at_space = true;
+            }
+        } else {
+            out.push(c);
+            at_space = false;
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// Rule 1's side(s) for a trimmed, lower-cased whole title — `None` when it names no routine.
 fn routine_side(lower_trimmed: &str) -> Option<(bool, bool)> {
     if WAKE_WORDS.contains(&lower_trimmed) {
@@ -847,20 +898,22 @@ fn routine_side(lower_trimmed: &str) -> Option<(bool, bool)> {
     None
 }
 
-/// The trimmed title is exactly `sleep` (case-insensitive) — rule 1's one midnight-crossing
-/// exception.
+/// The trimmed, normalised title is exactly `sleep` (case-insensitive) — rule 1's one
+/// midnight-crossing exception.
 fn is_sleep(title: &str) -> bool {
-    trimmed_title(title).eq_ignore_ascii_case("sleep")
+    normalize_words(&trimmed_title(title)).eq_ignore_ascii_case("sleep")
 }
 
-/// Any instance's end time is not after its start time — a nightly wraparound (§3.4's midnight
-/// bullet; `Instance` carries no explicit "next day" flag, so a start/end pair on the *same* date
-/// with `end <= start` is how the record says "crosses midnight").
+/// Any instance's end time is strictly before its start time — a nightly wraparound (§3.4's
+/// midnight bullet; `Instance` carries no explicit "next day" flag, so a start/end pair on the
+/// *same* date with `end < start` is how the record says "crosses midnight"). A **zero-length**
+/// event (`end == start`, an alarm or a marker) never counts (fix round 1, I1): it is a point in
+/// time, not a span that wraps around one.
 fn crosses_midnight(series: &Series) -> bool {
     series
         .instances
         .iter()
-        .any(|i| matches!((i.start, i.end), (Some(s), Some(e)) if e <= s))
+        .any(|i| matches!((i.start, i.end), (Some(s), Some(e)) if e < s))
 }
 
 /// One "kept triple"'s instance dates (§3.2.3, §3.4): fewer than two is not "kept" at all and
@@ -887,11 +940,13 @@ fn spacing_ok(mut dates: Vec<Date>) -> bool {
     saw_seven
 }
 
-/// §3.4's eligibility bullets, in order. `series.until`'s "not before today" reads `last_seen` as
-/// today: normalisation sets `last_seen` to today for every series a fresh read returns (§3.2.6),
-/// and `classify` takes no `today` of its own (decision 2's signature is exactly `series, codes,
-/// planning`) — so the series' own record is where "today" comes from. A series with no
-/// `last_seen` (never freshly read) skips the check rather than guess.
+/// §3.4's eligibility bullets, in order. `series.until`'s "not before today" is approximated with
+/// `last_seen` — the calendar's own read date (§3.2.6), **never "today" itself** (fix round 1,
+/// M5): `classify` takes no `today` of its own (decision 2's signature is exactly `series, codes,
+/// planning`), and a calendar not read this run keeps an older `last_seen`, so this is the
+/// freshest date the record carries, not a guarantee. P9 should either filter on the real today
+/// before calling `classify`, or `classify` should grow a `today` argument. A series with no
+/// `last_seen` (never read at all) skips the check rather than guess.
 fn eligible(series: &Series) -> bool {
     match series.event_type.as_deref() {
         None | Some("default") => {}
@@ -934,8 +989,8 @@ fn eligible(series: &Series) -> bool {
     if series.meets.is_empty() {
         return false;
     }
-    if let (Some(until), Some(today)) = (series.until, series.last_seen) {
-        if until < today {
+    if let (Some(until), Some(read_date)) = (series.until, series.last_seen) {
+        if until < read_date {
             return false;
         }
     }
@@ -945,7 +1000,7 @@ fn eligible(series: &Series) -> bool {
 /// The slug a title starts with, per the vault's code table, and everything after it (rule 3's
 /// leading-code test; rule 2 reuses it just for the slug). `None` when the title does not start
 /// with a known code, or the character right after it is not one of rule 3's separators
-/// (space, `-`, `–`, `:`, `(`).
+/// (space, `-`, `–`, `:`, `(`, `.` — the last one added for I4's "CS 100.001").
 fn class_course(title: &str, codes: &BTreeMap<String, String>) -> Option<(String, String)> {
     let m = LEADING_CODE_RE.find(title)?;
     let slug = codes.get(&compact(m.as_str()))?.clone();
@@ -954,15 +1009,67 @@ fn class_course(title: &str, codes: &BTreeMap<String, String>) -> Option<(String
         return Some((slug, String::new()));
     }
     let sep = rest.chars().next().unwrap();
-    if !matches!(sep, ' ' | '-' | '–' | ':' | '(') {
+    if !matches!(sep, ' ' | '-' | '–' | ':' | '(' | '.') {
         return None;
     }
     Some((slug, rest[sep.len_utf8()..].to_string()))
 }
 
-/// Rule 3's remainder test: empty, a section word with at most one trailing token (a section
-/// number), or every word also in the course's own name/title. `None` means rule 3 does not
-/// match at all ("CS 100 TA hours" falls through to rules 4–6).
+/// M3's own leading-code match, restricted to the case a `codes` lookup already failed: the
+/// vault's own compact code with one trailing letter — the scaffold seeds one course note for a
+/// class and its lab together, so the table carries only the bare code and `"CS 100L"` needs its
+/// own reading. `L`/`l` reads as a lab; only an exact, whole-title match counts, matching M3's own
+/// example ("CS 100L" alone, not "CS 100L Discussion").
+fn bare_letter_suffix_lab(title: &str, codes: &BTreeMap<String, String>) -> Option<String> {
+    let m = LEADING_CODE_RE.find(title)?;
+    if !title[m.end()..].is_empty() {
+        return None;
+    }
+    let matched = m.as_str();
+    let last = matched.chars().next_back()?;
+    if !last.eq_ignore_ascii_case(&'l') {
+        return None;
+    }
+    let full = compact(matched);
+    let bare = &full[..full.len() - 1];
+    codes.get(bare).cloned()
+}
+
+/// A section word's own kind: `lab`/`laboratory` yield `lab`, every other one yields `class`.
+fn section_word_kind(word: &str) -> &'static str {
+    if word == "lab" || word == "laboratory" {
+        "lab"
+    } else {
+        "class"
+    }
+}
+
+/// A second token after a section word is a designator, not a second word (the review's spec-gap
+/// fix): it holds a digit, or it is a single character (`01`, `2`, `001L`, `A`) — "CS 100 Lab
+/// Hours" and "CS 100 Class Party" are not a section number and so are not `class`/`lab`.
+fn is_number_ish(tok: &str) -> bool {
+    tok.chars().any(|c| c.is_ascii_digit()) || tok.chars().count() == 1
+}
+
+/// I4's bare section number, with no leading section word ("-001", " 001", ".001"): at least one
+/// digit, at most four characters, otherwise plain alphanumeric.
+fn is_section_number(tok: &str) -> bool {
+    tok.len() <= 4
+        && tok.chars().any(|c| c.is_ascii_digit())
+        && tok.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// I4's bare lab designator ("L01"): `l` followed by one or more digits. `lab`/`laboratory`
+/// themselves are already `SECTION_WORDS`.
+fn is_lab_designator(tok: &str) -> bool {
+    tok.len() > 1 && tok.starts_with('l') && tok[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Rule 3's remainder test (§3.4, the review's spec-gap fix, and ruling I4): empty; a section word
+/// alone or with one number-ish token ("CS 100 Lab 01", "CS 100 Sec 1" — not "CS 100 Lab Hours");
+/// a bare section designator with no leading word ("-001", "001 LEC", "L01" — I4); or every
+/// remainder word also in the course's own name/title. `None` means rule 3 does not match at all
+/// ("CS 100 TA hours" falls through to rules 4–6).
 fn section_kind(
     remainder: &str,
     slug: &str,
@@ -975,13 +1082,26 @@ fn section_kind(
     if tokens.is_empty() {
         return Some("class");
     }
-    if SECTION_WORDS.contains(&tokens[0].as_str()) && tokens.len() <= 2 {
-        return Some(if tokens[0] == "lab" || tokens[0] == "laboratory" {
-            "lab"
-        } else {
-            "class"
-        });
+
+    if SECTION_WORDS.contains(&tokens[0].as_str())
+        && (tokens.len() == 1 || (tokens.len() == 2 && is_number_ish(&tokens[1])))
+    {
+        return Some(section_word_kind(&tokens[0]));
     }
+
+    if tokens.len() == 1 && is_lab_designator(&tokens[0]) {
+        return Some("lab");
+    }
+    if tokens.len() <= 2 && is_section_number(&tokens[0]) {
+        if tokens.len() == 1 {
+            return Some("class");
+        }
+        if SECTION_WORDS.contains(&tokens[1].as_str()) {
+            return Some(section_word_kind(&tokens[1]));
+        }
+        return None;
+    }
+
     if let Some(words) = course_words.get(slug) {
         if tokens.iter().all(|t| words.contains(t)) {
             return Some("class");
@@ -997,18 +1117,22 @@ pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<C
     if !eligible(series) {
         return None;
     }
-    let title = trimmed_title(&series.title);
+    // M1: normalised once — internal whitespace/`-`/`_` collapsed to one space — so every rule
+    // below sees "Wake-up" and "Wake  Up" the same way it sees "Wake up".
+    let title = normalize_words(&trimmed_title(&series.title));
 
-    // Rule 0: not proposed at all.
+    // Rule 0: not proposed at all. M2: the planning name is trimmed and normalised the same way
+    // the title is, so a planning entry "Gym." matches a series titled "Gym." too.
     if NOT_PROPOSED_RE.is_match(&title)
         || planning
             .iter()
-            .any(|name| name.trim().eq_ignore_ascii_case(&title))
+            .any(|name| normalize_words(&trimmed_title(name)).eq_ignore_ascii_case(&title))
     {
         return None;
     }
 
-    // Rule 1: routine.
+    // Rule 1: routine. I1: a zero-length event (`crosses_midnight` now `end < start`, not
+    // `<=`) is a point marker at its start, so only a genuine wraparound forces both sides.
     let lower = title.to_ascii_lowercase();
     if let Some((mut wake, mut bed)) = routine_side(&lower) {
         if crosses_midnight(series) {
@@ -1035,6 +1159,12 @@ pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<C
                 course: Some(slug),
             });
         }
+    } else if let Some(slug) = bare_letter_suffix_lab(&title, &codes.table) {
+        // M3: "CS 100L" is a lab of CS 100 when the table only knows the bare code.
+        return Some(Class::Kind {
+            kind: "lab".to_string(),
+            course: Some(slug),
+        });
     }
 
     // Rule 4: work.
@@ -2019,6 +2149,13 @@ mod tests {
         let codes = codes_with(&[("CS100", "cs-100")]);
         let base = || weekly("CS 100", 2, t(9, 0), t(9, 50));
 
+        // M6: a positive control. Without this, a regression in `base()` itself would make every
+        // sub-case below pass vacuously (`None` for the wrong reason).
+        assert!(
+            classify(&base(), &codes, &[]).is_some(),
+            "the base series is eligible and classifies on its own"
+        );
+
         let mut s = base();
         s.event_type = Some("fromGmail".to_string());
         assert_eq!(classify(&s, &codes, &[]), None, "fromGmail");
@@ -2104,6 +2241,265 @@ mod tests {
         assert!(
             classify(&s, &codes, &[]).is_some(),
             "a holiday gap does not break the weekly pattern"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Fix round 1 (review of commit 8c9dd9f): the spec-gap fix, I1-I4, and the minors.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_section_word_followed_by_an_ordinary_word_is_not_a_class_or_lab() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let want_meeting = Some(Class::Kind {
+            kind: "meeting".to_string(),
+            course: None,
+        });
+        for title in ["CS 100 Lab Hours", "CS 100 Class Party", "CS 100 Section Leaders"] {
+            let series = weekly(title, 2, t(9, 0), t(9, 50));
+            assert_eq!(classify(&series, &codes, &[]), want_meeting, "{title}");
+        }
+        let positive = weekly("CS 100 Lab 01", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&positive, &codes, &[]),
+            Some(Class::Kind {
+                kind: "lab".to_string(),
+                course: Some("cs-100".to_string())
+            }),
+            "a real section number after the word is still a lab"
+        );
+    }
+
+    #[test]
+    fn a_zero_length_event_never_crosses_midnight() {
+        let codes = codes_with(&[]);
+        let wake = weekly("Wake up", 2, t(7, 0), t(7, 0));
+        assert_eq!(
+            classify(&wake, &codes, &[]),
+            Some(Class::Routine {
+                wake: true,
+                bed: false
+            }),
+            "a 07:00-07:00 alarm is a point marker at its start, not a wraparound"
+        );
+        let sleep = weekly("Sleep", 2, t(23, 0), t(23, 0));
+        assert_eq!(
+            classify(&sleep, &codes, &[]),
+            Some(Class::Routine {
+                wake: false,
+                bed: true
+            }),
+            "a zero-length sleep marker is one side only, never both"
+        );
+    }
+
+    #[test]
+    fn a_class_ending_exactly_at_midnight_still_reads_as_crossing() {
+        let codes = codes_with(&[]);
+        let series = weekly("Night class", 2, t(23, 0), t(0, 0));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            None,
+            "pinned: an end of exactly 00:00 still reads as crossing midnight"
+        );
+    }
+
+    #[test]
+    fn term_prefixed_lms_names_read_the_course_code_not_the_term() {
+        assert_eq!(to_code("FA26-CS-100-001"), Some("CS100".to_string()));
+        assert_eq!(to_code("Fall 2026 - CS 100"), Some("CS100".to_string()));
+        assert_eq!(to_code("202640-BUI-100-101"), Some("BUI100".to_string()));
+    }
+
+    #[test]
+    fn several_courses_from_one_term_share_no_claimed_by_both_warning() {
+        let v = vault("codes-term");
+        course_note(&v, "cs-100.md", "name: \"FA26-CS-100-001\"\nslug: cs-100\n");
+        course_note(
+            &v,
+            "math-200.md",
+            "name: \"FA26-MATH-200-002\"\nslug: math-200\n",
+        );
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.get("CS100"), Some(&"cs-100".to_string()));
+        assert_eq!(codes.get("MATH200"), Some(&"math-200".to_string()));
+        assert!(!codes.contains_key("FA26"), "{codes:?}");
+    }
+
+    #[test]
+    fn work_session_block_and_time_are_never_proposed_and_working_on_matches_too() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        for title in [
+            "Work session",
+            "Work block",
+            "Work time",
+            "Work on CS 100",
+            "Working on CS 100",
+            "Work   on CS 100",
+        ] {
+            let series = weekly(title, 2, t(19, 0), t(20, 0));
+            assert_eq!(classify(&series, &codes, &[]), None, "{title}");
+        }
+    }
+
+    #[test]
+    fn a_job_shift_is_kind_work() {
+        let codes = codes_with(&[]);
+        let want = Some(Class::Kind {
+            kind: "work".to_string(),
+            course: None,
+        });
+        for title in ["Work", "Shift", "Work @ Cafe", "Trader Joe's Shift"] {
+            let series = weekly(title, 2, t(17, 0), t(21, 0));
+            assert_eq!(classify(&series, &codes, &[]), want, "{title}");
+        }
+    }
+
+    #[test]
+    fn bare_section_designators_are_a_class_and_lab_designators_are_a_lab() {
+        let codes = codes_with(&[("CS100", "cs-100"), ("CS1110", "cs-1110")]);
+        let want_class = Some(Class::Kind {
+            kind: "class".to_string(),
+            course: Some("cs-100".to_string()),
+        });
+        for title in [
+            "CS 100-001",
+            "CS 100 001",
+            "CS 100.001",
+            "CS 100 LEC",
+            "CS 100 SEC 1",
+        ] {
+            let series = weekly(title, 2, t(9, 0), t(9, 50));
+            assert_eq!(classify(&series, &codes, &[]), want_class, "{title}");
+        }
+        let lec_series = weekly("CS 1110 001 LEC", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&lec_series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "class".to_string(),
+                course: Some("cs-1110".to_string())
+            })
+        );
+        let want_lab = Some(Class::Kind {
+            kind: "lab".to_string(),
+            course: Some("cs-100".to_string()),
+        });
+        for title in ["CS 100-L01", "CS 100 L01"] {
+            let series = weekly(title, 2, t(9, 0), t(9, 50));
+            assert_eq!(classify(&series, &codes, &[]), want_lab, "{title}");
+        }
+    }
+
+    #[test]
+    fn routine_words_ignore_hyphens_double_spaces_and_glued_spelling() {
+        let codes = codes_with(&[]);
+        let want_wake = Some(Class::Routine {
+            wake: true,
+            bed: false,
+        });
+        for title in ["Wake-up", "Wake  Up", "Wakeup"] {
+            let series = weekly(title, 2, t(7, 0), t(7, 5));
+            assert_eq!(classify(&series, &codes, &[]), want_wake, "{title}");
+        }
+        let bed = weekly("Bed time", 2, t(22, 0), t(22, 5));
+        assert_eq!(
+            classify(&bed, &codes, &[]),
+            Some(Class::Routine {
+                wake: false,
+                bed: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_planning_name_with_trailing_punctuation_matches_the_same_title() {
+        let codes = codes_with(&[]);
+        let series = weekly("Gym.", 2, t(6, 0), t(7, 0));
+        let planning = vec!["Gym.".to_string()];
+        assert_eq!(classify(&series, &codes, &planning), None);
+    }
+
+    #[test]
+    fn cs_100l_is_a_lab_of_cs_100() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let series = weekly("CS 100L", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "lab".to_string(),
+                course: Some("cs-100".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn rule_0_catches_studying_and_hw_with_digits() {
+        let codes = codes_with(&[]);
+        for title in ["Studying for CS 100", "HW1", "HW 2"] {
+            let series = weekly(title, 2, t(19, 0), t(20, 0));
+            assert_eq!(classify(&series, &codes, &[]), None, "{title}");
+        }
+    }
+
+    #[test]
+    fn course_map_keys_are_a_source_and_a_third_claimant_never_re_warns() {
+        let v = vault("codes-course-map");
+        std::fs::create_dir_all(v.join("config")).unwrap();
+        std::fs::write(
+            v.join("config").join("ingest.yaml"),
+            "course_map:\n  CS-100: cs-100\n  PH-106: ph-106\n",
+        )
+        .unwrap();
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.get("CS100"), Some(&"cs-100".to_string()));
+        assert_eq!(codes.get("PH106"), Some(&"ph-106".to_string()));
+    }
+
+    #[test]
+    fn a_third_claimant_of_a_dropped_code_never_re_warns() {
+        let v = vault("codes-third-claimant");
+        course_note(&v, "a.md", "title: \"CS 100\"\nslug: cs-100-a\n");
+        course_note(&v, "b.md", "title: \"CS 100\"\nslug: cs-100-b\n");
+        std::fs::create_dir_all(v.join("config")).unwrap();
+        std::fs::write(
+            v.join("config").join("ingest.yaml"),
+            "course_map:\n  CS-100: cs-100-c\n",
+        )
+        .unwrap();
+        let (codes, warnings) = code_table(&v);
+        assert!(!codes.contains_key("CS100"), "{codes:?}");
+        assert_eq!(
+            warnings,
+            vec!["code CS100: claimed by both cs-100-a and cs-100-b; dropped"],
+            "the third claimant (course_map) must not add a second warning"
+        );
+    }
+
+    #[test]
+    fn codes_load_builds_the_table_and_the_name_words_together() {
+        let v = vault("codes-load");
+        course_note(
+            &v,
+            "cs-100.md",
+            "title: \"CS 100 – Intro to Computer Science\"\nslug: cs-100\n",
+        );
+        let (codes, warnings) = Codes::load(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.table.get("CS100"), Some(&"cs-100".to_string()));
+        let words = codes.names.get("cs-100").expect("cs-100 words");
+        assert!(
+            words.contains("intro") && words.contains("computer") && words.contains("science"),
+            "{words:?}"
+        );
+        let series = weekly("CS 100 – Intro to Computer Science", 2, t(12, 0), t(12, 50));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "class".to_string(),
+                course: Some("cs-100".to_string())
+            })
         );
     }
 }
