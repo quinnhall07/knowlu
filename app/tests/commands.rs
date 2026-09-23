@@ -94,6 +94,60 @@ fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
     assert!(knowlu::commands::first_run_value(&cs, &sch).is_none());
 }
 
+/// The C1c Task 5 live proof (2026-09-23) found no first-run line on screen, and the test above
+/// only reaches `first_run_value`. This drives the whole envelope the `state` command hands the
+/// page (`commands::state_envelope`, which the `#[tauri::command]` is one call to) over a vault made
+/// the way the wizard makes one (`scaffold::create_vault`: config, the seed task, nothing ranked),
+/// with a slot in flight as there was live. `attach_scheduler` runs after the block is attached;
+/// this proves it leaves the block alone and still fills the topline.
+#[test]
+fn the_state_command_carries_the_first_run_block_on_a_wizard_made_vault() {
+    let parent = std::env::temp_dir().join(format!("qo-console-firstrun-envelope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let v = parent.join("Fall 2026");
+    let plan = knowlu::scaffold::VaultPlan {
+        profile_id: knowlu::profiles::id_for(&v),
+        ics_url: None,
+        personal_calendar: None,
+        google_calendar: false,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        campus_choice: Default::default(),
+        zybooks: false,
+        vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        api_base: knowlu::account::api_base(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    knowlu::scaffold::create_vault(&v, &plan).unwrap();
+    assert!(!v.join("state").join("today.md").exists(), "a wizard-made vault has never been ranked");
+    let cs = ConsoleState::open(v.clone(), parent.join("appdata"));
+    let sch = Scheduler::default();
+    *lock(&sch.running) = true;
+
+    let env = knowlu::commands::state_envelope(&cs, &sch, "today");
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["first_run"]["running"], true, "{env}");
+    assert_eq!(env["first_run"]["steps"], json!([]), "a slot in flight has recorded nothing yet");
+    assert!(env["state"]["must_do"].is_object(), "the day is built and painted behind the block");
+    assert!(env["state"]["topline"]["scheduler"].is_object(), "attach_scheduler still ran: {env}");
+
+    // `rank` writes the day: the block stops coming, and nothing else about the envelope changes.
+    std::fs::write(v.join("state").join("today.md"), b"# Today\n").unwrap();
+    let env = knowlu::commands::state_envelope(&cs, &sch, "today");
+    assert!(env.get("first_run").is_none(), "{env}");
+    assert_eq!(env["ok"], true);
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
 #[test]
 fn note_finds_a_note_by_id_and_mark_seen_moves_the_delta_window() {
     let v = scratch("note");

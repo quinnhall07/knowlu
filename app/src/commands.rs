@@ -356,16 +356,20 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
 // so are the `*_inner` functions the tests call. The four read commands (`state`, `note`,
 // `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take only `cs.lock`,
 // they never wait on git, and keeping them there keeps a poll cheap.
-#[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value {
-    let mut env = state_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null }));
-    if let Some(fr) = first_run_value(&cs, &sch) {
+#[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { state_envelope(&cs, &sch, &view) }
+
+/// The whole of what `state` answers, `Scheduler` and all, without Tauri's `State` wrappers — so a
+/// test can read the exact envelope the page reads (the C1c Task 5 live-proof investigation).
+pub fn state_envelope(cs: &ConsoleState, sch: &Scheduler, view: &str) -> Value {
+    let mut env = state_inner(cs, view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null }));
+    if let Some(fr) = first_run_value(cs, sch) {
         // §6: a vault with no read model yet answers `ok: true` and no state, rather than an error
         // line a student can do nothing about — the page has a sentence for exactly this minute.
         // Any other failure, on a vault that has been ranked, keeps today's `ok: false`.
         if env["ok"] != true { env = json!({ "ok": true, "error": Value::Null, "state": Value::Null }); }
         env["first_run"] = fr;
     }
-    let _ = attach_scheduler(&mut env, &sch);
+    let _ = attach_scheduler(&mut env, sch);
     env
 }
 #[tauri::command] pub fn note(cs: State<'_, ConsoleState>, id: String) -> Value { note_inner(&cs, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "note": Value::Null })) }
