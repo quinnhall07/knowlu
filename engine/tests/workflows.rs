@@ -142,6 +142,24 @@ fn ci_enforces_zero_warnings_and_the_eol_contract() {
     assert!(c.contains("cargo test --workspace"), "ci.yml must test the whole workspace");
 }
 
+/// 2026-09-22 (Quinn: the Actions minutes ran out; this laptop becomes a runner). Every `ci.yml` job
+/// takes its runner from ONE switch — the repository variable `CI_SELF_HOSTED` — and falls back to
+/// the hosted image it used before, so going back is deleting a variable, never a code change. The
+/// release workflow never runs self-hosted: its signing and publish secrets stay on GitHub's machines.
+#[test]
+fn ci_jobs_run_self_hosted_only_behind_the_switch_and_release_never_does() {
+    let c = workflow("ci.yml");
+    let switch = "vars.CI_SELF_HOSTED == 'on' && fromJSON('[\"self-hosted\",\"windows\",\"x64\",\"knowlu-ci\"]')";
+    for (job, fallback) in [("test", "windows-latest"), ("cloud", "ubuntu-latest"), ("eval-gate", "ubuntu-latest")] {
+        let block = job_block(&c, job);
+        let expected = format!("runs-on: ${{{{ {switch} || '{fallback}' }}}}");
+        assert!(block.contains(&expected), "{job}: expected `{expected}` in:\n{block}");
+        assert_eq!(block.matches("runs-on:").count(), 1, "{job}: exactly one runs-on");
+    }
+    assert!(!workflow("release.yml").contains("self-hosted"), "release.yml must never run self-hosted");
+    assert!(!workflow("release.yml").contains("CI_SELF_HOSTED"), "release.yml must not read the CI switch");
+}
+
 /// A-6 (C2 final review): the eval gate exists, never runs on a plain push (a fork PR's `push` to
 /// its own branch must not spend the staging service-role key), and names both secrets it needs —
 /// so a secret renamed here but not in the repository's settings fails this test rather than only
