@@ -33,6 +33,11 @@ export interface JudgeRequest {
   /** What the caller's engine can take beyond the original vocabulary. Today one word matters:
    * `"unsure"` on an event request (final review item 2, see `gateUnsure`). */
   accepts?: readonly string[];
+  /** The student's timezone, an IANA name: the vault's own `config/ingest.yaml` `timezone`, sent
+   * by the device. Read only by the email `due` resolver, so a relative phrase resolves against
+   * the email's local date (`judge_due.ts`'s module doc); absent, the Date header's own offset is
+   * the only clock. Never part of the prompt. */
+  timezone?: string;
 }
 
 export interface JudgeReply {
@@ -241,12 +246,12 @@ async function judgeUngated(
   // T4: the model answers `due` with the deadline phrase as written (or an absolute date only
   // when the email itself stated one) — this is the one place between the model and `validate`
   // where a phrase like "Friday" becomes a calendar date, resolved against the email's own Date
-  // line (`req.item.date`) rather than guessed by the model. `resolveDue` itself is where a phrase
+  // line (`req.item.date`), on the student's clock (`req.timezone`), rather than guessed by the model. `resolveDue` itself is where a phrase
   // that names a span rather than one day (e.g. "next week") is refused to `null` — see
   // `judge_due.ts`. Task and event answers have no `due` field (`judge_prompts.ts`'s
   // `TASK_SCHEMA`/`EVENT_SCHEMA`), so this only ever touches email.
   const resolved = req.kind === "email"
-    ? { ...answer.json, due: resolveDue(typeof answer.json.due === "string" ? answer.json.due : null, String(req.item.date ?? "")) }
+    ? { ...answer.json, due: resolveDue(typeof answer.json.due === "string" ? answer.json.due : null, String(req.item.date ?? ""), req.timezone) }
     : answer.json;
 
   const checked = validate(req.kind, resolved, req.heuristics_seed);
