@@ -9,8 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use jiff::civil::{Date, Time};
+use regex::Regex;
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::models::split_frontmatter;
@@ -499,6 +501,563 @@ pub(crate) fn front_matter(fields: &[(&str, Field)]) -> String {
         }
     }
     out
+}
+
+// =============================================================================================
+// The vault's code table (§3.4, C3, R7) and the classifier (§3.4; C5), P7.
+// =============================================================================================
+
+/// A string's leading course code — `CS 100`, `cs-100`, `CS100` — at the very start of the
+/// string, then a word boundary. Used both to reduce a `courses/*.md` field to a code (§3.4's
+/// code table) and to find the code a series title starts with (rule 3).
+static LEADING_CODE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z]{2,8}[ ._-]?[0-9]{1,4}[A-Za-z]?\b").unwrap());
+
+/// Rule 0's own-work-time words and phrases, whole-word (`\b`), case-insensitive.
+static NOT_PROPOSED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(study|homework|hw|review|prep|tutoring|work on|focus)\b").unwrap()
+});
+
+/// Rule 2's `office hours?`, case-insensitive.
+static OFFICE_HOURS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\boffice hours?\b").unwrap());
+
+/// Rule 2's `OH` token, capitals only — case-sensitive on purpose, so `oh` never matches.
+static CAPITAL_OH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bOH\b").unwrap());
+
+/// Rule 4's leading `work`.
+static WORK_START_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^work\b").unwrap());
+
+/// Rule 4's `shift`, anywhere.
+static SHIFT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bshift\b").unwrap());
+
+/// Rule 5's club words, anywhere.
+static CLUB_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(club|society|team|practice|rehearsal|chapter)\b").unwrap()
+});
+
+/// One run of letters or digits — how a remainder or a course name is split into words.
+static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9]+").unwrap());
+
+/// Rule 3's section words. `lab`/`laboratory` yield kind `lab`; every other one yields `class`.
+const SECTION_WORDS: [&str; 13] = [
+    "lab",
+    "laboratory",
+    "lecture",
+    "lec",
+    "recitation",
+    "rec",
+    "discussion",
+    "disc",
+    "seminar",
+    "section",
+    "sec",
+    "studio",
+    "class",
+];
+
+/// Rule 1's whole-title words, lower-cased.
+const WAKE_WORDS: [&str; 4] = ["wake", "wake up", "get up", "alarm"];
+const BED_WORDS: [&str; 5] = ["bed", "bedtime", "go to bed", "sleep", "lights out"];
+
+/// A compact code: capitals, separators removed (`CS 100`, `cs-100`, `CS100` → `CS100`).
+fn compact(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// c1c D4's `course_code_in_name` (`app/src/scaffold.rs`, commit 7ef2fc2), reimplemented here
+/// since the engine never depends on the app crate (workspace rule; `dependency_boundary.rs`):
+/// 2–4 uppercase letters not themselves preceded by an uppercase letter, a required `-` or
+/// whitespace separator, exactly three digits, an optional one-letter suffix, and a
+/// non-alphanumeric boundary. The fallback reading for an LMS name like `202640-BUI-100-101`
+/// (§3.4), read **anywhere** in the string rather than only at its start.
+fn d4_fallback(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    for start in 0..chars.len() {
+        if start > 0 && chars[start - 1].is_ascii_uppercase() {
+            continue;
+        }
+        let letters: String = chars[start..]
+            .iter()
+            .take_while(|c| c.is_ascii_uppercase())
+            .collect();
+        if letters.len() < 2 || letters.len() > 4 {
+            continue;
+        }
+        let mut i = start + letters.len();
+        if chars.get(i).map(|c| *c == '-' || c.is_whitespace()) != Some(true) {
+            continue;
+        }
+        i += 1;
+        let digits: String = chars[i..].iter().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.len() != 3 {
+            continue;
+        }
+        i += digits.len();
+        let suffix = match chars.get(i) {
+            Some(c) if c.is_ascii_alphabetic() => {
+                i += 1;
+                c.to_ascii_uppercase().to_string()
+            }
+            _ => String::new(),
+        };
+        if chars.get(i).map(|c| c.is_ascii_alphanumeric()) == Some(true) {
+            continue;
+        }
+        return Some(format!("{letters} {digits}{suffix}"));
+    }
+    None
+}
+
+/// A string reduced to one compact code (§3.4): the leading-code reading first, then c1c D4's
+/// reading anywhere in the string as a fallback for an LMS name.
+fn to_code(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(m) = LEADING_CODE_RE.find(text) {
+        return Some(compact(m.as_str()));
+    }
+    d4_fallback(text).map(|s| compact(&s))
+}
+
+/// The code table under construction: a code's first claimant is remembered even after the code
+/// is dropped, so a third source repeating either side never re-warns (one warning per code).
+#[derive(Default)]
+struct Table {
+    codes: BTreeMap<String, String>,
+    owner: BTreeMap<String, String>,
+    dropped: BTreeSet<String>,
+    warnings: Vec<String>,
+}
+
+impl Table {
+    /// First mapping wins; a code a second, different slug claims is dropped (removed, not kept
+    /// for either side) with one warning — when in doubt, do not propose (§3.4).
+    fn claim(&mut self, code: String, slug: &str) {
+        match self.owner.get(&code).cloned() {
+            None => {
+                self.owner.insert(code.clone(), slug.to_string());
+                self.codes.insert(code, slug.to_string());
+            }
+            Some(existing) if existing == slug => {}
+            Some(existing) => {
+                if self.dropped.insert(code.clone()) {
+                    self.warnings.push(format!(
+                        "code {code}: claimed by both {existing} and {slug}; dropped"
+                    ));
+                }
+                self.codes.remove(&code);
+            }
+        }
+    }
+}
+
+/// The vault's compact-code → course-slug table (§3.4, C3, R7), read, never fetched, plus one
+/// warning per code two different courses claim. In order, first mapping wins: every
+/// `courses/*.md` note in file-name order (its `code`, `title` and `name` fields, then its own
+/// slug), then `config/ingest.yaml`'s `course_map` keys in file order.
+pub fn code_table(vault: &Path) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut table = Table::default();
+
+    let dir = vault.join("courses");
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".md"))
+            .collect();
+        names.sort();
+        for name in names {
+            let Ok(text) = pystr::read_text(&dir.join(&name)) else {
+                continue;
+            };
+            let Ok((meta, _)) = split_frontmatter(&text) else {
+                continue;
+            };
+            let stem = name.trim_end_matches(".md").to_string();
+            let slug = field_text(&meta, "slug")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(stem);
+            for field in ["code", "title", "name"] {
+                if let Some(raw) = field_text(&meta, field) {
+                    if let Some(code) = to_code(&raw) {
+                        table.claim(code, &slug);
+                    }
+                }
+            }
+            if let Some(code) = to_code(&slug) {
+                table.claim(code, &slug);
+            }
+        }
+    }
+
+    if let Ok(text) = pystr::read_text(&vault.join("config").join("ingest.yaml")) {
+        if let Ok(cfg) = serde_yaml_ng::from_str::<Value>(&text) {
+            if let Some(mapping) = cfg.get("course_map").and_then(|v| v.as_mapping()) {
+                for (k, v) in mapping.iter() {
+                    if let (Some(key), Some(slug)) = (k.as_str(), v.as_str()) {
+                        if let Some(code) = to_code(key) {
+                            table.claim(code, slug);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (table.codes, table.warnings)
+}
+
+/// Each known slug's own name words, lower-cased, from its `courses/*.md` note's `title` and
+/// `name` fields — rule 3's "words that all appear in that course note's own name/title"
+/// ("CS 100 – Intro to Computer Science"). Read the same way `code_table` reads `courses/*.md`.
+pub fn course_words(vault: &Path) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let dir = vault.join("courses");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".md"))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(text) = pystr::read_text(&dir.join(&name)) else {
+            continue;
+        };
+        let Ok((meta, _)) = split_frontmatter(&text) else {
+            continue;
+        };
+        let stem = name.trim_end_matches(".md").to_string();
+        let slug = field_text(&meta, "slug")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(stem);
+        let words = out.entry(slug).or_default();
+        for field in ["title", "name"] {
+            if let Some(raw) = field_text(&meta, field) {
+                for m in TOKEN_RE.find_iter(&raw) {
+                    words.insert(m.as_str().to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What `classify`'s rule 3 needs from the vault's courses (§3.4): the compact code table
+/// (`code_table`, unchanged, its own contract) plus each slug's own name words. *Decision beyond
+/// the brief:* rule 3's "words that all appear in that course note's own name/title" clause needs
+/// the note's own text, which `code_table`'s bare `(BTreeMap<String, String>, Vec<String>)`
+/// return does not carry — so `classify` takes this small bundle (still named `codes`) rather
+/// than `code_table`'s return directly.
+#[derive(Debug, Clone, Default)]
+pub struct Codes {
+    pub table: BTreeMap<String, String>,
+    pub names: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Codes {
+    /// `code_table` and `course_words` together, plus `code_table`'s warnings.
+    pub fn load(vault: &Path) -> (Codes, Vec<String>) {
+        let (table, warnings) = code_table(vault);
+        let names = course_words(vault);
+        (Codes { table, names }, warnings)
+    }
+}
+
+/// One instance of a series (§3.2.1): `start`/`end` are `None` together for an all-day event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Instance {
+    pub date: Date,
+    pub start: Option<Time>,
+    pub end: Option<Time>,
+}
+
+/// A series' recurrence rule (§3.2.2), from the master's `RRULE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub freq: String,
+    pub interval: u32,
+    pub until: Option<Date>,
+    pub count: Option<u32>,
+}
+
+/// One source reduced to §3.2's one record. Plain data; P8 fills it from Google/ICS, this module
+/// only reads it. `rdate` and `unsupported` are precomputed by whoever built the record (P8, from
+/// `calfeed`'s recurrence helpers) — `classify` only reads them, so it stays a pure function that
+/// touches no calendar-parsing code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    pub source_uid: String,
+    pub calendar: String,
+    pub title: String,
+    pub where_: Option<String>,
+    /// `None` (ICS, which carries no such field) or `Some("default")` are eligible; any other
+    /// value (`fromGmail`, `outOfOffice`, `focusTime`, `workingLocation`, …) is not.
+    pub event_type: Option<String>,
+    pub rule: Rule,
+    pub has_master: bool,
+    /// The master carries an `RDATE`: an irregular series, never eligible.
+    pub rdate: bool,
+    /// `calfeed`'s recurrence helpers refused the rule (`UnsupportedRule`): never eligible.
+    pub unsupported: bool,
+    pub instances: Vec<Instance>,
+    pub meets: Vec<Meet>,
+    pub first: Option<Date>,
+    pub until: Option<Date>,
+    pub last_seen: Option<Date>,
+}
+
+/// What a series classifies as (§3.4). A `Kind`'s `course` is only ever set for `class`, `lab`
+/// and `office-hours` (rule 2's course is optional even then). A midnight-crossing `sleep` series
+/// is `Routine { wake: true, bed: true }` — both sides at once (rule 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Class {
+    Kind { kind: String, course: Option<String> },
+    Routine { wake: bool, bed: bool },
+}
+
+/// The title with surrounding whitespace and punctuation trimmed (§3.4: "matching is on the
+/// title trimmed of surrounding punctuation").
+fn trimmed_title(title: &str) -> String {
+    title
+        .trim_matches(|c: char| {
+            c.is_whitespace() || c.is_ascii_punctuation() || matches!(c, '–' | '—' | '\u{2018}' | '\u{2019}' | '\u{201c}' | '\u{201d}')
+        })
+        .to_string()
+}
+
+/// Rule 1's side(s) for a trimmed, lower-cased whole title — `None` when it names no routine.
+fn routine_side(lower_trimmed: &str) -> Option<(bool, bool)> {
+    if WAKE_WORDS.contains(&lower_trimmed) {
+        return Some((true, false));
+    }
+    if BED_WORDS.contains(&lower_trimmed) {
+        return Some((false, true));
+    }
+    None
+}
+
+/// The trimmed title is exactly `sleep` (case-insensitive) — rule 1's one midnight-crossing
+/// exception.
+fn is_sleep(title: &str) -> bool {
+    trimmed_title(title).eq_ignore_ascii_case("sleep")
+}
+
+/// Any instance's end time is not after its start time — a nightly wraparound (§3.4's midnight
+/// bullet; `Instance` carries no explicit "next day" flag, so a start/end pair on the *same* date
+/// with `end <= start` is how the record says "crosses midnight").
+fn crosses_midnight(series: &Series) -> bool {
+    series
+        .instances
+        .iter()
+        .any(|i| matches!((i.start, i.end), (Some(s), Some(e)) if e <= s))
+}
+
+/// One "kept triple"'s instance dates (§3.2.3, §3.4): fewer than two is not "kept" at all and
+/// passes vacuously; otherwise every consecutive gap must be a positive multiple of 7 days, with
+/// at least one gap of exactly 7 (a holiday gap is allowed; an every-other-week series is not).
+fn spacing_ok(mut dates: Vec<Date>) -> bool {
+    if dates.len() < 2 {
+        return true;
+    }
+    dates.sort();
+    let mut saw_seven = false;
+    for pair in dates.windows(2) {
+        let gap = pair[1]
+            .since(pair[0])
+            .map(|s| i64::from(s.get_days()))
+            .unwrap_or(0);
+        if gap <= 0 || gap % 7 != 0 {
+            return false;
+        }
+        if gap == 7 {
+            saw_seven = true;
+        }
+    }
+    saw_seven
+}
+
+/// §3.4's eligibility bullets, in order. `series.until`'s "not before today" reads `last_seen` as
+/// today: normalisation sets `last_seen` to today for every series a fresh read returns (§3.2.6),
+/// and `classify` takes no `today` of its own (decision 2's signature is exactly `series, codes,
+/// planning`) — so the series' own record is where "today" comes from. A series with no
+/// `last_seen` (never freshly read) skips the check rather than guess.
+fn eligible(series: &Series) -> bool {
+    match series.event_type.as_deref() {
+        None | Some("default") => {}
+        Some(_) => return false,
+    }
+    if !series.has_master
+        || series.rule.freq != "WEEKLY"
+        || series.rule.interval != 1
+        || series.rdate
+        || series.unsupported
+    {
+        return false;
+    }
+    if series
+        .instances
+        .iter()
+        .any(|i| i.start.is_none() || i.end.is_none())
+    {
+        return false;
+    }
+    if crosses_midnight(series) && !is_sleep(&series.title) {
+        return false;
+    }
+    if series.instances.len() < 2 {
+        return false;
+    }
+    let mut groups: BTreeMap<(DayKey, Time, Time), Vec<Date>> = BTreeMap::new();
+    for i in &series.instances {
+        let (s, e) = (i.start.unwrap(), i.end.unwrap());
+        groups
+            .entry((crate::planning::day_key(i.date), s, e))
+            .or_default()
+            .push(i.date);
+    }
+    for dates in groups.into_values() {
+        if !spacing_ok(dates) {
+            return false;
+        }
+    }
+    if series.meets.is_empty() {
+        return false;
+    }
+    if let (Some(until), Some(today)) = (series.until, series.last_seen) {
+        if until < today {
+            return false;
+        }
+    }
+    true
+}
+
+/// The slug a title starts with, per the vault's code table, and everything after it (rule 3's
+/// leading-code test; rule 2 reuses it just for the slug). `None` when the title does not start
+/// with a known code, or the character right after it is not one of rule 3's separators
+/// (space, `-`, `–`, `:`, `(`).
+fn class_course(title: &str, codes: &BTreeMap<String, String>) -> Option<(String, String)> {
+    let m = LEADING_CODE_RE.find(title)?;
+    let slug = codes.get(&compact(m.as_str()))?.clone();
+    let rest = &title[m.end()..];
+    if rest.is_empty() {
+        return Some((slug, String::new()));
+    }
+    let sep = rest.chars().next().unwrap();
+    if !matches!(sep, ' ' | '-' | '–' | ':' | '(') {
+        return None;
+    }
+    Some((slug, rest[sep.len_utf8()..].to_string()))
+}
+
+/// Rule 3's remainder test: empty, a section word with at most one trailing token (a section
+/// number), or every word also in the course's own name/title. `None` means rule 3 does not
+/// match at all ("CS 100 TA hours" falls through to rules 4–6).
+fn section_kind(
+    remainder: &str,
+    slug: &str,
+    course_words: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<&'static str> {
+    let tokens: Vec<String> = TOKEN_RE
+        .find_iter(remainder)
+        .map(|m| m.as_str().to_ascii_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        return Some("class");
+    }
+    if SECTION_WORDS.contains(&tokens[0].as_str()) && tokens.len() <= 2 {
+        return Some(if tokens[0] == "lab" || tokens[0] == "laboratory" {
+            "lab"
+        } else {
+            "class"
+        });
+    }
+    if let Some(words) = course_words.get(slug) {
+        if tokens.iter().all(|t| words.contains(t)) {
+            return Some("class");
+        }
+    }
+    None
+}
+
+/// Pure: no clock, no network, no model (`rank` never calls a model — Knowlu spec decision 11;
+/// this is the same discipline one layer up). Eligibility first (§3.4's bullets), then rules 0–6
+/// in order, first match wins, on the title trimmed of surrounding punctuation (C5).
+pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<Class> {
+    if !eligible(series) {
+        return None;
+    }
+    let title = trimmed_title(&series.title);
+
+    // Rule 0: not proposed at all.
+    if NOT_PROPOSED_RE.is_match(&title)
+        || planning
+            .iter()
+            .any(|name| name.trim().eq_ignore_ascii_case(&title))
+    {
+        return None;
+    }
+
+    // Rule 1: routine.
+    let lower = title.to_ascii_lowercase();
+    if let Some((mut wake, mut bed)) = routine_side(&lower) {
+        if crosses_midnight(series) {
+            wake = true;
+            bed = true;
+        }
+        return Some(Class::Routine { wake, bed });
+    }
+
+    // Rule 2: office hours.
+    if OFFICE_HOURS_RE.is_match(&title) || CAPITAL_OH_RE.is_match(&title) {
+        let course = class_course(&title, &codes.table).map(|(slug, _)| slug);
+        return Some(Class::Kind {
+            kind: "office-hours".to_string(),
+            course,
+        });
+    }
+
+    // Rule 3: course.
+    if let Some((slug, remainder)) = class_course(&title, &codes.table) {
+        if let Some(kind) = section_kind(&remainder, &slug, &codes.names) {
+            return Some(Class::Kind {
+                kind: kind.to_string(),
+                course: Some(slug),
+            });
+        }
+    }
+
+    // Rule 4: work.
+    if WORK_START_RE.is_match(&title) || SHIFT_RE.is_match(&title) {
+        return Some(Class::Kind {
+            kind: "work".to_string(),
+            course: None,
+        });
+    }
+
+    // Rule 5: club.
+    if CLUB_RE.is_match(&title) {
+        return Some(Class::Kind {
+            kind: "club".to_string(),
+            course: None,
+        });
+    }
+
+    // Rule 6: otherwise.
+    Some(Class::Kind {
+        kind: "meeting".to_string(),
+        course: None,
+    })
 }
 
 #[cfg(test)]
@@ -1150,6 +1709,401 @@ mod tests {
         assert!(
             server_rules_name(&seven, None, &migrations[..1]).is_err(),
             "only the six-folder one"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The vault's code table and the classifier (§3.4, C3, R7; C5), P7.
+    // ---------------------------------------------------------------------------------------
+
+    fn course_dir(v: &Path) -> PathBuf {
+        let dir = v.join("courses");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn course_note(v: &Path, file: &str, front: &str) {
+        let text = format!("---\n{front}---\n\nInvented for a test.\n");
+        std::fs::write(course_dir(v).join(file), text).unwrap();
+    }
+
+    fn codes_with(pairs: &[(&str, &str)]) -> Codes {
+        let table = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Codes {
+            table,
+            names: BTreeMap::new(),
+        }
+    }
+
+    fn instances_weekly(start: Date, weeks: i64, s: Time, e: Time) -> Vec<Instance> {
+        let mut out = Vec::new();
+        let mut d = start;
+        for _ in 0..weeks {
+            out.push(Instance {
+                date: d,
+                start: Some(s),
+                end: Some(e),
+            });
+            d = d.checked_add(jiff::Span::new().days(7)).unwrap();
+        }
+        out
+    }
+
+    /// A weekly series over invented instances (default two weeks). `until`/`last_seen` are left
+    /// so eligibility's "not before today" check is a no-op unless a test sets both.
+    fn base_series(title: &str, instances: Vec<Instance>) -> Series {
+        let (day, s, e) = instances
+            .first()
+            .map(|i| (crate::planning::day_key(i.date), i.start, i.end))
+            .unwrap_or(("mon", None, None));
+        let meets = match (s, e) {
+            (Some(s), Some(e)) => vec![Meet {
+                days: vec![day],
+                start: s,
+                end: e,
+            }],
+            _ => Vec::new(),
+        };
+        Series {
+            source_uid: format!("gcal-series:{}", title.to_ascii_lowercase().replace(' ', "-")),
+            calendar: "google:test".to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule {
+                freq: "WEEKLY".to_string(),
+                interval: 1,
+                until: None,
+                count: None,
+            },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances,
+            meets,
+            first: None,
+            until: None,
+            last_seen: Some(jiff::civil::date(2026, 9, 1)),
+        }
+    }
+
+    fn weekly(title: &str, weeks: i64, s: Time, e: Time) -> Series {
+        base_series(
+            title,
+            instances_weekly(jiff::civil::date(2026, 9, 1), weeks, s, e),
+        )
+    }
+
+    #[test]
+    fn compact_codes_match_across_spellings() {
+        assert_eq!(to_code("CS 100"), Some("CS100".to_string()));
+        assert_eq!(to_code("cs-100"), Some("CS100".to_string()));
+        assert_eq!(to_code("CS100"), Some("CS100".to_string()));
+    }
+
+    #[test]
+    fn cs_1110_compsci_61a_and_math_20a_match_their_courses() {
+        let v = vault("codes-schools");
+        course_note(&v, "cs-1110.md", "title: \"CS 1110\"\nslug: cs-1110\n");
+        course_note(
+            &v,
+            "compsci-61a.md",
+            "title: \"COMPSCI 61A\"\nslug: compsci-61a\n",
+        );
+        course_note(&v, "math-20a.md", "title: \"MATH 20A\"\nslug: math-20a\n");
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.get("CS1110"), Some(&"cs-1110".to_string()));
+        assert_eq!(codes.get("COMPSCI61A"), Some(&"compsci-61a".to_string()));
+        assert_eq!(codes.get("MATH20A"), Some(&"math-20a".to_string()));
+    }
+
+    #[test]
+    fn lms_names_reduce_by_the_d4_fallback() {
+        let v = vault("codes-lms");
+        course_note(
+            &v,
+            "bui-100.md",
+            "name: \"202640-BUI-100-101\"\nslug: bui-100\n",
+        );
+        let (codes, warnings) = code_table(&v);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(codes.get("BUI100"), Some(&"bui-100".to_string()));
+    }
+
+    #[test]
+    fn a_code_claimed_by_two_courses_is_dropped_with_a_warning() {
+        let v = vault("codes-conflict");
+        course_note(&v, "a.md", "title: \"CS 100\"\nslug: cs-100-a\n");
+        course_note(&v, "b.md", "title: \"CS 100\"\nslug: cs-100-b\n");
+        let (codes, warnings) = code_table(&v);
+        assert!(!codes.contains_key("CS100"), "{codes:?}");
+        assert_eq!(
+            warnings,
+            vec!["code CS100: claimed by both cs-100-a and cs-100-b; dropped"]
+        );
+    }
+
+    #[test]
+    fn work_on_cs_100_cs_100_study_group_and_study_for_ph_106_are_never_proposed() {
+        let codes = codes_with(&[("CS100", "cs-100"), ("PH106", "ph-106")]);
+        for title in ["Work on CS 100", "CS 100 study group", "Study for PH 106"] {
+            let series = weekly(title, 2, t(19, 0), t(20, 0));
+            assert_eq!(classify(&series, &codes, &[]), None, "{title}");
+        }
+    }
+
+    #[test]
+    fn a_planning_yaml_recurring_name_is_never_proposed() {
+        let codes = codes_with(&[]);
+        let series = weekly("Piano lesson", 2, t(19, 0), t(20, 0));
+        let planning = vec!["Piano lesson".to_string()];
+        assert_eq!(classify(&series, &codes, &planning), None);
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "meeting".to_string(),
+                course: None
+            }),
+            "without the planning entry the same series is an ordinary meeting"
+        );
+    }
+
+    #[test]
+    fn cs_100_lab_is_a_lab_and_cs_100_lecture_is_a_class() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let lab = weekly("CS 100 Lab", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&lab, &codes, &[]),
+            Some(Class::Kind {
+                kind: "lab".to_string(),
+                course: Some("cs-100".to_string())
+            })
+        );
+        let lecture = weekly("CS 100 Lecture", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&lecture, &codes, &[]),
+            Some(Class::Kind {
+                kind: "class".to_string(),
+                course: Some("cs-100".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn words_from_the_course_name_after_the_code_are_a_class() {
+        let codes = Codes {
+            table: BTreeMap::from([("CS100".to_string(), "cs-100".to_string())]),
+            names: BTreeMap::from([(
+                "cs-100".to_string(),
+                BTreeSet::from([
+                    "cs".to_string(),
+                    "100".to_string(),
+                    "intro".to_string(),
+                    "to".to_string(),
+                    "computer".to_string(),
+                    "science".to_string(),
+                ]),
+            )]),
+        };
+        let series = weekly("CS 100 – Intro to Computer Science", 2, t(12, 0), t(12, 50));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "class".to_string(),
+                course: Some("cs-100".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn cs_100_ta_hours_is_not_a_class_and_falls_through_to_meeting() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let series = weekly("CS 100 TA hours", 2, t(9, 0), t(9, 50));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Kind {
+                kind: "meeting".to_string(),
+                course: None
+            })
+        );
+    }
+
+    #[test]
+    fn oh_matches_only_in_capitals() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let oh = weekly("CS 100 OH", 2, t(15, 0), t(16, 0));
+        assert_eq!(
+            classify(&oh, &codes, &[]),
+            Some(Class::Kind {
+                kind: "office-hours".to_string(),
+                course: Some("cs-100".to_string())
+            })
+        );
+        let no = weekly("oh no", 2, t(15, 0), t(16, 0));
+        assert_eq!(
+            classify(&no, &codes, &[]),
+            Some(Class::Kind {
+                kind: "meeting".to_string(),
+                course: None
+            }),
+            "lowercase oh never matches"
+        );
+    }
+
+    #[test]
+    fn routines_match_the_whole_title_only() {
+        let codes = codes_with(&[]);
+        let wake = weekly("Wake Up", 2, t(7, 0), t(7, 5));
+        assert_eq!(
+            classify(&wake, &codes, &[]),
+            Some(Class::Routine {
+                wake: true,
+                bed: false
+            })
+        );
+        let sleep_study = weekly("Sleep study", 2, t(22, 0), t(23, 0));
+        assert_eq!(
+            classify(&sleep_study, &codes, &[]),
+            None,
+            "study makes it rule 0, not a routine"
+        );
+    }
+
+    #[test]
+    fn a_midnight_sleep_series_is_both_sides() {
+        let codes = codes_with(&[]);
+        let series = weekly("Sleep", 2, t(23, 0), t(7, 0));
+        assert_eq!(
+            classify(&series, &codes, &[]),
+            Some(Class::Routine {
+                wake: true,
+                bed: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_midnight_crossing_series_other_than_sleep_is_ineligible() {
+        let codes = codes_with(&[]);
+        let series = weekly("Night shift", 2, t(23, 0), t(1, 0));
+        assert_eq!(classify(&series, &codes, &[]), None);
+    }
+
+    #[test]
+    fn work_shift_club_team_practice() {
+        let codes = codes_with(&[]);
+        let want_work = Some(Class::Kind {
+            kind: "work".to_string(),
+            course: None,
+        });
+        let want_club = Some(Class::Kind {
+            kind: "club".to_string(),
+            course: None,
+        });
+        let work = weekly("Work Shift", 2, t(17, 0), t(21, 0));
+        assert_eq!(classify(&work, &codes, &[]), want_work);
+        let shift = weekly("Evening Shift", 2, t(17, 0), t(21, 0));
+        assert_eq!(classify(&shift, &codes, &[]), want_work);
+        let club = weekly("Chess Club", 2, t(18, 0), t(19, 0));
+        assert_eq!(classify(&club, &codes, &[]), want_club);
+        let team = weekly("Soccer Practice", 2, t(16, 0), t(17, 30));
+        assert_eq!(classify(&team, &codes, &[]), want_club);
+    }
+
+    #[test]
+    fn ineligible_series_are_never_classified() {
+        let codes = codes_with(&[("CS100", "cs-100")]);
+        let base = || weekly("CS 100", 2, t(9, 0), t(9, 50));
+
+        let mut s = base();
+        s.event_type = Some("fromGmail".to_string());
+        assert_eq!(classify(&s, &codes, &[]), None, "fromGmail");
+
+        let mut s = base();
+        s.event_type = Some("focusTime".to_string());
+        assert_eq!(classify(&s, &codes, &[]), None, "focusTime");
+
+        let mut s = base();
+        s.has_master = false;
+        assert_eq!(classify(&s, &codes, &[]), None, "no master");
+
+        let mut s = base();
+        s.rule.interval = 2;
+        assert_eq!(classify(&s, &codes, &[]), None, "INTERVAL=2");
+
+        // Every-other-week: two instances 14 days apart, so no gap is exactly 7.
+        let mut s = base();
+        let day0 = jiff::civil::date(2026, 9, 1);
+        let day14 = day0.checked_add(jiff::Span::new().days(14)).unwrap();
+        s.instances = vec![
+            Instance {
+                date: day0,
+                start: Some(t(9, 0)),
+                end: Some(t(9, 50)),
+            },
+            Instance {
+                date: day14,
+                start: Some(t(9, 0)),
+                end: Some(t(9, 50)),
+            },
+        ];
+        s.meets = vec![Meet {
+            days: vec![crate::planning::day_key(day0)],
+            start: t(9, 0),
+            end: t(9, 50),
+        }];
+        assert_eq!(classify(&s, &codes, &[]), None, "every-other-week");
+
+        let mut s = base();
+        s.instances.truncate(1);
+        assert_eq!(classify(&s, &codes, &[]), None, "one instance");
+
+        let mut s = base();
+        for i in s.instances.iter_mut() {
+            i.start = None;
+            i.end = None;
+        }
+        assert_eq!(classify(&s, &codes, &[]), None, "all-day");
+
+        let mut s = base();
+        s.until = Some(jiff::civil::date(2026, 8, 1));
+        s.last_seen = Some(jiff::civil::date(2026, 9, 1));
+        assert_eq!(classify(&s, &codes, &[]), None, "until before today");
+
+        let mut s = base();
+        s.rdate = true;
+        assert_eq!(classify(&s, &codes, &[]), None, "RDATE");
+
+        let mut s = base();
+        s.unsupported = true;
+        assert_eq!(classify(&s, &codes, &[]), None, "BYMONTHDAY");
+    }
+
+    #[test]
+    fn a_holiday_gap_is_still_weekly() {
+        let codes = codes_with(&[]);
+        let mut s = weekly("Chess Club", 2, t(18, 0), t(19, 0));
+        let day0 = jiff::civil::date(2026, 9, 1);
+        s.instances = [0, 7, 21, 28]
+            .iter()
+            .map(|&d| Instance {
+                date: day0.checked_add(jiff::Span::new().days(d)).unwrap(),
+                start: Some(t(18, 0)),
+                end: Some(t(19, 0)),
+            })
+            .collect();
+        s.meets = vec![Meet {
+            days: vec![crate::planning::day_key(day0)],
+            start: t(18, 0),
+            end: t(19, 0),
+        }];
+        assert!(
+            classify(&s, &codes, &[]).is_some(),
+            "a holiday gap does not break the weekly pattern"
         );
     }
 }
