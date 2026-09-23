@@ -2002,3 +2002,163 @@ fn a_cursor_from_before_the_rule_never_carries_or_tombstones_a_sync_card() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Task 6b: a rejected sync card re-asserts this device's value (R-C3′-exec-20).
+// ---------------------------------------------------------------------------
+
+/// The student decides a card through the deck's own path: `status` set from the dashboard, then
+/// `process_approvals` under the executor's own context (`approvals::default_ctx`).
+fn decide(vault: &Path, journal: &mut Journal, card_rel: &str, status: &str) -> knowlu_engine::approvals::ApprovalsResult {
+    let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(vault, card_rel, &[("status".to_string(), status.to_string())], &student, journal, &Default::default())
+        .expect("the student's decision");
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    let now: jiff::civil::DateTime = "2026-09-22T12:00".parse().unwrap();
+    knowlu_engine::approvals::process_approvals(vault, today, now, &knowlu_engine::approvals::default_ctx(), journal)
+}
+
+/// The `set` records in a pulled page for the task note, as `(field, old, new, actor)`.
+fn task_sets(page: &sync::Pulled) -> Vec<(String, serde_json::Value, serde_json::Value, String)> {
+    page.records.iter()
+        .filter(|(_, r)| r.get("op").and_then(|v| v.as_str()) == Some("set")
+            && r.get("id").and_then(|v| v.as_str()) == Some("task_0000000001"))
+        .map(|(_, r)| (
+            r.get("field").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            r.get("old").cloned().unwrap_or(serde_json::Value::Null),
+            r.get("new").cloned().unwrap_or(serde_json::Value::Null),
+            r.get("actor").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        ))
+        .collect()
+}
+
+/// Two desktops where B's later `importance` 5 has come down to A and A has filed a sync card for
+/// it (`4 -> 5`, withheld), with both pushes settled so the next push starts clean.
+fn two_desktops_with_a_card(tag: &str, a_fields: &[(&str, &str)], b_fields: &[(&str, &str)]) -> (PathBuf, PathBuf, Journal, Journal, Cursor, Cursor, String) {
+    let a = fixture_with_id(&format!("t6b-{tag}-desk-a"));
+    let b = fixture_with_id(&format!("t6b-{tag}-desk-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let _ = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let _ = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    by_hand(&a, &mut ja, a_fields);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    by_hand(&b, &mut jb, b_fields);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let r = deliver(&a, &page, &mut ja);
+    assert_eq!(r.cards, 1, "{tag}: A files one card: {r:?}");
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let _ = deliver(&b, &page, &mut jb);
+    let card = card_rels_on_the_note(&a)[0].clone();
+    (a, b, ja, jb, ca, cb, card)
+}
+
+#[test]
+fn rejecting_a_sync_card_re_asserts_this_devices_value_and_the_other_desktop_converges() {
+    // N2x (reject). A's card offers B's later 5 over A's own 4. The student rejects it on A — "keep
+    // mine". Before R-C3′-exec-20 the reject wrote nothing to the task, so A's push carried nothing
+    // about `importance`: A kept 4, B kept 5, no card anywhere, and the student's explicit choice
+    // never reached B. Now the reject appends one journal-only `set` per field the card names —
+    // `old` the card's `to` (B's value), `new` the note's current value, a fresh `ts`, the deck's
+    // actor — which travels like any local edit and applies cleanly on B.
+    let (a, b, mut ja, mut jb, mut ca, _cb, card) = two_desktops_with_a_card("reject", &[("importance", "4")], &[("importance", "5")]);
+    let task = a.join("tasks").join("cs-100-hw-01.md");
+    let before = knowlu_engine::pystr::read_text(&task).expect("A's task");
+    let res = decide(&a, &mut ja, &card, "rejected");
+    assert_eq!(res.rejected.len(), 1, "{:?}", res.rejected);
+    assert_eq!(knowlu_engine::pystr::read_text(&task).expect("A's task"), before, "the reject never touches the note");
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    assert_eq!(
+        task_sets(&page),
+        vec![("importance".to_string(), serde_json::json!(5), serde_json::json!(4), knowlu_engine::approvals::default_ctx().actor.clone())],
+        "one re-assert: old = the card's `to`, new = A's current value, the deck's actor",
+    );
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!((r.applied, r.cards), (1, 0), "B takes A's value cleanly: {r:?}");
+    assert_eq!(importance_and_effort(&a).0, Some(4));
+    assert_eq!(importance_and_effort(&b).0, Some(4), "the student's choice reached B");
+    assert!(card_rels_on_the_note(&a).is_empty() && card_rels_on_the_note(&b).is_empty(), "no card anywhere");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn a_field_edited_here_after_the_card_was_filed_is_not_re_asserted_on_reject() {
+    // The skip case. A's card names `importance` and `effort_hours`; the student then edits
+    // `effort_hours` by hand on A (3 -> 3.5), so the note no longer holds the card's `from` (3) for
+    // it — that later local edit is already travelling as its own record — and only `importance` is
+    // re-asserted when the card is rejected.
+    let (a, b, mut ja, mut jb, mut ca, _cb, card) = two_desktops_with_a_card(
+        "skip", &[("importance", "4"), ("effort_hours", "3")], &[("importance", "5"), ("effort_hours", "4")],
+    );
+    by_hand(&a, &mut ja, &[("effort_hours", "3.5")]);
+    let res = decide(&a, &mut ja, &card, "rejected");
+    assert_eq!(res.rejected.len(), 1, "{:?}", res.rejected);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let actor = knowlu_engine::approvals::default_ctx().actor.clone();
+    let mut sets = task_sets(&page);
+    sets.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(
+        sets,
+        vec![
+            ("effort_hours".to_string(), serde_json::json!(3), serde_json::json!(3.5), "quinn".to_string()),
+            ("importance".to_string(), serde_json::json!(5), serde_json::json!(4), actor),
+        ],
+        "`effort_hours` travels as the student's own edit, never re-asserted over it",
+    );
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!(importance_and_effort(&b).0, Some(4), "{r:?}");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn rejecting_a_judge_once_card_writes_no_re_assert_record() {
+    // A judge-once proposal (`created_by: agent:knowlu.enrich`) asks whether the AGENT may change a
+    // field the student set; rejecting it means "leave my value", which no other device has to be
+    // told. Only a sync card — whose other side is another desktop — re-asserts.
+    let dir = fixture_with_id("t6b-judge-reject");
+    let mut journal = Journal::new(&dir);
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    by_hand(&dir, &mut journal, &[("importance", "4")]);
+    let file = dir.join("tasks").join("cs-100-hw-01.md");
+    let meta = knowlu_engine::ids::read_meta(&file).expect("the note");
+    let judge = knowlu_engine::write::WriteContext::new("agent:knowlu.enrich", "local-runner");
+    let card = knowlu_engine::write::propose_amendment(
+        &dir, &file, &meta,
+        &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
+        &judge, &mut journal, None, today,
+    ).expect("a judge-once proposal");
+    let card_rel = knowlu_engine::ids::rel(&dir, &card);
+    let count = |journal: &mut Journal| journal.read(None, None).iter()
+        .filter(|r| r.get("id").and_then(|v| v.as_str()) == Some("task_0000000001") && r.get("op").and_then(|v| v.as_str()) == Some("set"))
+        .count();
+    let before = count(&mut journal);
+    let res = decide(&dir, &mut journal, &card_rel, "rejected");
+    assert_eq!(res.rejected.len(), 1, "{:?}", res.rejected);
+    journal.invalidate();
+    assert_eq!(count(&mut journal), before, "no record about the task");
+    assert_eq!(importance_and_effort(&dir).0, Some(4));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn approving_a_sync_card_is_unchanged_and_the_other_desktop_converges() {
+    // Approving is untouched by R-C3′-exec-20: `apply_amendment` writes the card's `to` onto the task
+    // (one `set`, the executor's actor), that record travels, and B — which already holds it —
+    // converges through O4 with no card. No re-assert record rides along.
+    let (a, b, mut ja, mut jb, mut ca, _cb, card) = two_desktops_with_a_card("approve", &[("importance", "4")], &[("importance", "5")]);
+    let res = decide(&a, &mut ja, &card, "approved");
+    assert_eq!(res.executed.len(), 1, "{:?}", res.executed);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    assert_eq!(
+        task_sets(&page),
+        vec![("importance".to_string(), serde_json::json!(4), serde_json::json!(5), knowlu_engine::approvals::default_ctx().actor.clone())],
+    );
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!(r.cards, 0, "{r:?}");
+    assert_eq!((importance_and_effort(&a).0, importance_and_effort(&b).0), (Some(5), Some(5)));
+    assert!(card_rels_on_the_note(&a).is_empty() && card_rels_on_the_note(&b).is_empty());
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}

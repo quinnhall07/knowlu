@@ -440,6 +440,53 @@ fn free_slot(folder: &Path, name: &str) -> PathBuf {
     target
 }
 
+/// Re-state one field's CURRENT value in the journal, **without touching the note**
+/// (R-C3′-exec-20, Task 6b). Returns whether a record was appended.
+///
+/// **Why it exists.** When the student rejects a sync amend card ("keep mine"), nothing on this
+/// device changes — the value the student kept is already on the note — so nothing would travel,
+/// and the other desktop, which won that field at its own end and has no card, would keep its value
+/// for ever: an explicit choice silently lost. The rejection has to be said as a record. It cannot
+/// go through [`write_literals`]: a write that changes nothing produces no record and no write
+/// (F4), and that is exactly this write's shape.
+///
+/// **What it appends.** One `op: set` record for `field` on `target`: `old` is the value being
+/// turned down (the card's `to`, the other desktop's value), `new` is the note's current value, `ts`
+/// is fresh, and the actor/via/run_id are the caller's — the deck's, never `sync::ACTOR`, so it
+/// travels on the next push like any local edit. On the other desktop it then applies cleanly
+/// ("upstream never moved": that desktop still holds `old`), or, if that desktop has moved on
+/// since, it is a conflict this fresh `ts` wins, and that desktop files a card of its own — never
+/// silent either way. It goes through [`Journal::append`] like every other record, so its bytes are
+/// `ledger::dumps_value`'s. **The note's frontmatter is read, never written.**
+///
+/// Nothing is appended when `old` equals the current value — there is no disagreement to re-state.
+pub fn reassert(
+    vault: &Path,
+    target: &str,
+    field: &str,
+    old: &serde_json::Value,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<bool, WriteError> {
+    let path = resolve_target(vault, target)?;
+    let (_, meta) = load(&path, false)?;
+    let current = yaml_to_json(&crate::yaml::get(&meta, field).cloned().unwrap_or(Value::Null));
+    if &current == old {
+        return Ok(false);
+    }
+    let rel_path = rel(vault, &path);
+    let note_id = get_str(&meta, "id").filter(|s| is_id(s));
+    let mut spec = NewRecord::new("set", &rel_path, &ctx.actor, &ctx.via);
+    spec.id = note_id.as_deref();
+    spec.field = Some(field);
+    spec.old = old.clone();
+    spec.new = current;
+    spec.run_id = ctx.run_id.as_deref();
+    let mut record = make_record(spec).map_err(|e| WriteError::Io(e.to_string()))?;
+    journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
+    Ok(true)
+}
+
 /// "Delete" = settle into `archive/` keeping frontmatter. **Nothing is ever unlinked** (F14).
 pub fn delete(
     vault: &Path,
