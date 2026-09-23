@@ -989,13 +989,41 @@ mod tests {
         (0..35).map(|n| crate::scheduling::add_days(start, n)).collect()
     }
 
+    /// A scratch vault directory, removed on every exit path — a passing assertion, a failing
+    /// one, or a panic (fix round 1, M4) — the same idiom `app/tests/account.rs`'s `Cleanup` uses
+    /// for Credential Manager entries.
+    struct ScratchVault(std::path::PathBuf);
+
+    impl std::ops::Deref for ScratchVault {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchVault {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// `for_vault(vault, ..)` and `from_file(vault/config/week_template.yaml, ..)` must draw the
-    /// identical calendar over `days` — spec §8 test 1's five-way comparison, shared by the fixture
-    /// test and the decline-markers test.
+    /// identical calendar over `days` — spec §8 test 1's five-way comparison, plus `spans_on`
+    /// (fix round 1, M1: a drift that added a span wholly inside a template class would otherwise
+    /// pass all five), shared by the fixture test and the decline-markers test. `vault`'s
+    /// `state/calendar.md` snapshot (present only for `vault-full`) is read once and given to both
+    /// constructors, so a real events list — not just `Vec::new()` — exercises the same path
+    /// `surface::load` does.
     fn assert_for_vault_equals_from_file(vault: &Path, days: &[Date]) {
         let template = vault.join("config").join("week_template.yaml");
-        let from_file = WeekCalendar::from_file(&template, Vec::new());
-        let for_vault = WeekCalendar::for_vault(vault, Vec::new());
+        let events = || -> Vec<CalEvent> {
+            crate::calfeed::read_snapshot(&vault.join("state").join("calendar.md"))
+                .into_values()
+                .flatten()
+                .collect()
+        };
+        let from_file = WeekCalendar::from_file(&template, events());
+        let for_vault = WeekCalendar::for_vault(vault, events());
         for &day in days {
             assert_eq!(
                 for_vault.template_blocks(day),
@@ -1018,6 +1046,10 @@ mod tests {
                 "template_capacity disagrees on {day}"
             );
             assert_eq!(for_vault.window(day), from_file.window(day), "window disagrees on {day}");
+            assert!(
+                for_vault.spans_on(day).is_empty(),
+                "{day}: no commitments, so spans_on must be empty"
+            );
         }
     }
 
@@ -1057,17 +1089,30 @@ mod tests {
         }
     }
 
-    /// A private scratch copy of `tests/fixtures/vault-full`, safe for a test to add
-    /// `commitments/` notes into. Every call gets its own directory so parallel tests never
-    /// collide.
-    fn scratch_vault_full(tag: &str) -> std::path::PathBuf {
+    fn next_scratch_dir(tag: &str) -> std::path::PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("knowlu-p15-{}-{tag}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A private scratch copy of `tests/fixtures/vault-full`, safe for a test to add
+    /// `commitments/` notes into. Every call gets its own directory so parallel tests never
+    /// collide, and the directory is removed when the guard drops (M4).
+    fn scratch_vault_full(tag: &str) -> ScratchVault {
+        let dir = next_scratch_dir(tag);
         copy_dir_all(Path::new("tests/fixtures/vault-full"), &dir);
         std::fs::create_dir_all(dir.join("commitments")).unwrap();
-        dir
+        ScratchVault(dir)
+    }
+
+    /// An empty scratch vault (no template, no snapshot) with just a `commitments/` folder —
+    /// for tests that only care about one confirmed note's effect, not a fixture's classes.
+    fn scratch_vault_empty(tag: &str) -> ScratchVault {
+        let dir = next_scratch_dir(tag);
+        std::fs::create_dir_all(dir.join("commitments")).unwrap();
+        ScratchVault(dir)
     }
 
     #[test]
@@ -1081,18 +1126,11 @@ mod tests {
         .unwrap();
 
         assert_for_vault_equals_from_file(&vault, &days);
-
-        let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
     fn a_confirmed_class_note_reduces_capacity_on_its_days() {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let vault =
-            std::env::temp_dir().join(format!("knowlu-p15-class-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&vault);
-        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        let vault = scratch_vault_empty("class");
         std::fs::write(
             vault.join("commitments").join("class.md"),
             "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon, wed], start: \"12:00\", end: \"12:50\"}]\nstatus: confirmed\n---\n\nInvented.\n",
@@ -1101,7 +1139,6 @@ mod tests {
 
         let baseline = WeekCalendar::new(&Mapping::new(), Vec::new());
         let with_class = WeekCalendar::for_vault(&vault, Vec::new());
-        let _ = std::fs::remove_dir_all(&vault);
 
         // Both Mon and Wed carry the 12:00-12:50 class (50 minutes).
         for day in [Date::constant(2026, 8, 24), Date::constant(2026, 8, 26)] {
@@ -1128,7 +1165,6 @@ mod tests {
         let template = vault.join("config").join("week_template.yaml");
         let from_file = WeekCalendar::from_file(&template, Vec::new());
         let (calendar, warnings) = WeekCalendar::for_vault_with_warnings(&vault, Vec::new());
-        let _ = std::fs::remove_dir_all(&vault);
 
         assert!(
             warnings.iter().any(|w| w.contains("no valid meets entry")),
@@ -1144,5 +1180,42 @@ mod tests {
         let (_, warnings) =
             WeekCalendar::for_vault_with_warnings(Path::new("tests/fixtures/vault-full"), Vec::new());
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Fix round 1, M3: a malformed `state/calendar-series.json` names itself in the warnings
+    /// `for_vault_with_warnings` returns, and the calendar still falls back to the confirmed
+    /// note's weekly `meets` rather than losing the commitment entirely.
+    #[test]
+    fn for_vault_with_warnings_names_a_malformed_series_file_and_falls_back_to_the_weekly_rule() {
+        let vault = scratch_vault_empty("malformed-series");
+        std::fs::write(
+            vault.join("commitments").join("class.md"),
+            "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon], start: \"12:00\", end: \"12:50\"}]\nsource_uid: \"gcal-series:cs100\"\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(vault.join("state").join("calendar-series.json"), "{").unwrap();
+
+        let (calendar, warnings) = WeekCalendar::for_vault_with_warnings(&vault, Vec::new());
+
+        assert!(
+            warnings.iter().any(|w| w.contains("series file:") && w.contains("malformed")),
+            "expected a malformed-series-file warning, got {warnings:?}"
+        );
+        let monday = Date::constant(2026, 8, 24);
+        assert_eq!(
+            calendar.template_blocks(monday),
+            vec![
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 8, 0, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 12, 0, 0, 0),
+                },
+                Block {
+                    start: DateTime::constant(2026, 8, 24, 12, 50, 0, 0),
+                    end: DateTime::constant(2026, 8, 24, 18, 0, 0, 0),
+                },
+            ],
+            "a malformed series file must still leave the weekly rule in effect"
+        );
     }
 }

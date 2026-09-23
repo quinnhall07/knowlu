@@ -5541,23 +5541,46 @@ mod conflicts_tests {
     // --- P15 cross-check: `commitment_busy_on` (P10) must never drift from what
     // `weekcal::WeekCalendar::for_vault` (P15) subtracts, since both read the same vault. ---
 
-    fn scratch_p15(tag: &str) -> PathBuf {
+    /// A scratch vault directory, removed on every exit path — a passing assertion, a failing
+    /// one, or a panic (fix round 1, M4) — the same idiom `app/tests/account.rs`'s `Cleanup` uses
+    /// for Credential Manager entries.
+    struct ScratchVault(PathBuf);
+
+    impl std::ops::Deref for ScratchVault {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchVault {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch_p15(tag: &str) -> ScratchVault {
         let v = std::env::temp_dir().join(format!("knowlu-p15-crosscheck-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&v);
         std::fs::create_dir_all(v.join(FOLDER)).unwrap();
-        v
+        ScratchVault(v)
     }
 
     /// A vault with a confirmed hard class (a `source_uid` whose fresh horizon covers
-    /// 2026-08-24..2026-09-21, one moved instance inside it) and a confirmed soft club (no
-    /// `source_uid`, so it always falls back to its weekly `meets` — a span the horizon never
-    /// touches). Both are read by `load`/`read_series_file` exactly as `for_vault` reads them.
+    /// `[2026-08-24, 2026-09-21)`, one moved instance inside it, meeting both Monday and
+    /// Wednesday — fix round 1, M2: exercises `active_spans`' `handled_sources` de-duplication,
+    /// the most fragile path where the two readers could diverge, since it draws one shared
+    /// `source_uid` from two different spans), a confirmed soft club (no `source_uid`, so it
+    /// always falls back to its weekly `meets` — a span the horizon never touches), and a
+    /// confirmed **optional** office-hours note (M2: without one, the test's own
+    /// `level != Optional` filter never ran). All three are read by `load`/`read_series_file`
+    /// exactly as `for_vault` reads them.
     #[test]
     fn busy_spans_agree_with_week_calendar_for_vault() {
         let vault = scratch_p15("agree");
         std::fs::write(
             vault.join(FOLDER).join("hard.md"),
-            "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon], start: \"12:00\", end: \"12:50\"}]\nsource_uid: \"gcal-series:cs100\"\nstatus: confirmed\n---\n\nInvented.\n",
+            "---\ntype: commitment\nkind: class\ntitle: \"CS 100\"\nmeets: [{days: [mon, wed], start: \"12:00\", end: \"12:50\"}]\nsource_uid: \"gcal-series:cs100\"\nstatus: confirmed\n---\n\nInvented.\n",
         )
         .unwrap();
         std::fs::write(
@@ -5565,9 +5588,18 @@ mod conflicts_tests {
             "---\ntype: commitment\nkind: club\ntitle: \"Chess Club\"\nmeets: [{days: [mon], start: \"17:00\", end: \"18:00\"}]\nstatus: confirmed\n---\n\nInvented.\n",
         )
         .unwrap();
+        std::fs::write(
+            vault.join(FOLDER).join("optional.md"),
+            "---\ntype: commitment\nkind: office-hours\ntitle: \"Office Hours\"\nmeets: [{days: [mon], start: \"09:00\", end: \"09:50\"}]\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
 
-        let read_date = jiff::civil::date(2026, 8, 24);
+        let read_date = jiff::civil::date(2026, 8, 24); // Monday, the horizon's first day
         let moved_date = jiff::civil::date(2026, 8, 31); // second Monday, inside the horizon
+        let last_in_horizon = jiff::civil::date(2026, 9, 14); // last Monday before the horizon ends
+        let horizon_end = jiff::civil::date(2026, 9, 21); // read + 28, EXCLUSIVE (P3 review)
+        let past_horizon = jiff::civil::date(2026, 9, 28); // a Monday past the horizon end
+        let past_horizon_wed = jiff::civil::date(2026, 9, 30); // a Wednesday past the horizon end
         let series = Series {
             source_uid: "gcal-series:cs100".into(),
             calendar: "google:abc".into(),
@@ -5579,7 +5611,7 @@ mod conflicts_tests {
             rdate: false,
             unsupported: false,
             instances: vec![Instance { date: moved_date, start: Some(t(13, 0)), end: Some(t(13, 50)) }],
-            meets: vec![Meet { days: vec!["mon"], start: t(12, 0), end: t(12, 50) }],
+            meets: vec![Meet { days: vec!["mon", "wed"], start: t(12, 0), end: t(12, 50) }],
             first: Some(read_date),
             until: None,
             last_seen: Some(read_date),
@@ -5596,11 +5628,26 @@ mod conflicts_tests {
         let instances = series_file.instances_map();
         let calendar = crate::weekcal::WeekCalendar::for_vault(&vault, Vec::new());
 
-        // 2026-08-24: inside the horizon, no instance that day (cancelled) — the class is absent,
-        // the weekly club (untouched by any horizon) still meets.
-        // 2026-08-31: inside the horizon, the moved instance applies instead of the weekly time.
-        // 2026-09-28: past the horizon end (2026-09-21) — the class falls back to its weekly time.
-        for date in [read_date, moved_date, jiff::civil::date(2026, 9, 28)] {
+        // 2026-08-24 (Mon): inside the horizon, no instance that day (cancelled) — the class is
+        //   absent, the weekly club and office hours (untouched by any horizon) still meet.
+        // 2026-08-31 (Mon): inside the horizon, the moved instance applies instead of the weekly
+        //   time.
+        // 2026-09-14 (Mon): inside the horizon (its last Monday), no instance that day —
+        //   cancelled, same as 08-24 (fix round 1, I1).
+        // 2026-09-21 (Mon): the horizon's exclusive end — one day past it is already outside, so
+        //   the class falls back to its weekly time (fix round 1, I1: pins the `<` boundary).
+        // 2026-09-28 (Mon): well past the horizon — the class falls back to its weekly time.
+        // 2026-09-30 (Wed): well past the horizon, and the class's *other* weekday span — the
+        //   multi-day de-duplication's other branch (fix round 1, M2).
+        let dates = [
+            read_date,
+            moved_date,
+            last_in_horizon,
+            horizon_end,
+            past_horizon,
+            past_horizon_wed,
+        ];
+        for date in dates {
             let mut from_commitments: Vec<(Time, Time)> = set
                 .confirmed
                 .iter()
@@ -5622,6 +5669,42 @@ mod conflicts_tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&vault);
+        // Fix round 1, I1: pin the exclusive-horizon-end boundary with absolute values, not just
+        // agreement between the two readers.
+        assert_eq!(
+            calendar.spans_on(last_in_horizon).into_iter().map(|(s, e, _)| (s.time(), e.time())).collect::<Vec<_>>(),
+            vec![(t(17, 0), t(18, 0))],
+            "09-14 is inside the horizon with no instance: the class is cancelled, only the club meets"
+        );
+        let mut horizon_end_spans: Vec<(Time, Time)> = calendar
+            .spans_on(horizon_end)
+            .into_iter()
+            .map(|(s, e, _)| (s.time(), e.time()))
+            .collect();
+        horizon_end_spans.sort();
+        assert_eq!(
+            horizon_end_spans,
+            vec![(t(12, 0), t(12, 50)), (t(17, 0), t(18, 0))],
+            "09-21 is the horizon's exclusive end (day < end fails): the class is back to its weekly time"
+        );
+
+        // Fix round 1, M2: the optional office-hours note contributes no span, but does surface in
+        // `conflicts` (which `fit`, not `conflicts` itself, is what ignores optional commitments).
+        assert!(
+            calendar.spans_on(read_date).iter().all(|(_, _, span)| span.title != "Office Hours"),
+            "an optional note must contribute no span"
+        );
+        let day_conflicts = conflicts(
+            &set,
+            &instances,
+            DateTime::from_parts(read_date, Time::midnight()),
+            DateTime::from_parts(add_days(read_date, 1), Time::midnight()),
+        );
+        assert!(
+            day_conflicts
+                .iter()
+                .any(|(c, level)| c.title == "Office Hours" && *level == Level::Optional),
+            "an optional note must still be visible to conflicts: {day_conflicts:?}"
+        );
     }
 }
