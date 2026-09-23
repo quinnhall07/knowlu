@@ -2982,8 +2982,12 @@ fn text_value(text: Option<&str>) -> Value {
 ///   earlier is not proposed while another live series with the note's signature runs past it —
 ///   a "this and following" split with the same times (R22: the note is seen).
 /// - **ended** — the note's key is under no calendar, is in `file.ended`, and no live series has
-///   the note's signature → `until` = `last_instance`, else `until`; neither → one warning and no
-///   change; nothing when the note's `until` is on or before that date.
+///   the note's signature → `until` = `last_instance`, else `until` — but the entry's `until` when
+///   it falls on or up to a week after the last instance and before the note's, so a truncated
+///   series is asked with the date the live path named (fix round 1, I1); neither → one warning,
+///   on the run the entry was dropped, and no change; nothing when the note's `until` is on or
+///   before that date. An open-ended series (no `until`) never ends a soft or optional note
+///   (fix round 1, m1: a club dormant over the summer is not lost).
 /// - **succeeded** (R22) — while the note's series is ending (its record gone stale, its key in
 ///   `ended`, or its `until` newly earlier than the note's), a live, eligible series of the note's
 ///   kind (`class` or `lab`) and course, with different `meets`, first meeting on or after the old
@@ -3059,7 +3063,7 @@ pub fn detect_changes(
             was.insert("meets".into(), to_value(meets_json(&note.meets)));
             if let Some(place) = next.series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
                 if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
-                    change.insert("where".into(), Value::String(place.to_string()));
+                    change.insert("where".into(), Value::String(place.trim().to_string()));
                     was.insert("where".into(), text_value(note.where_.as_deref()));
                 }
             }
@@ -3097,7 +3101,7 @@ pub fn detect_changes(
                 }
                 if let Some(place) = series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
                     if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
-                        change.insert("where".into(), Value::String(place.to_string()));
+                        change.insert("where".into(), Value::String(place.trim().to_string()));
                         was.insert("where".into(), text_value(note.where_.as_deref()));
                     }
                 }
@@ -3119,15 +3123,36 @@ pub fn detect_changes(
                 if live.iter().any(|c| c.carries(&sig)) {
                     continue;
                 }
-                let end = ended.last_instance.or(ended.until);
+                // The end the live path named, when the series had been truncated before it went
+                // (fix round 1, I1): its `until` on or up to a week after its last instance, and
+                // before the note's. A series that vanished whole keeps its last instance.
+                let end = match (ended.last_instance, ended.until) {
+                    (Some(last), Some(until))
+                        if until >= last
+                            && days_since(last, until) < TRUNCATION_DAYS
+                            && note.until.is_none_or(|n| until < n) =>
+                    {
+                        Some(until)
+                    }
+                    (last, until) => last.or(until),
+                };
                 if let Some(change) = successor(end) {
                     out.push(change);
                     continue;
                 }
+                // An open-ended series (no UNTIL, no COUNT) that stops appearing never ends a soft
+                // or optional note by itself (fix round 1, m1): a club dormant over the summer is
+                // not lost. The student can delete the note.
+                if ended.until.is_none() && note.level != Level::Hard {
+                    continue;
+                }
                 let Some(end) = end else {
-                    warnings.push(format!(
-                        "commitments: {key} ended with no last instance and no until; no end card"
-                    ));
+                    // Once, on the run the entry was dropped (fix round 1, m3).
+                    if ended.dropped == today {
+                        warnings.push(format!(
+                            "commitments: {key} ended with no last instance and no until; no end card"
+                        ));
+                    }
                     continue;
                 };
                 if note.until.is_some_and(|u| u <= end) {
@@ -3144,6 +3169,11 @@ pub fn detect_changes(
     (out, warnings)
 }
 
+/// How far after its last instance an ended series' `until` may fall and still be the end the
+/// live path proposed (fix round 1, I1): a truncating UNTIL lands within the week of the last
+/// meeting; a series deleted whole keeps its old, far term end.
+const TRUNCATION_DAYS: i64 = 7;
+
 fn make_change(note: &Commitment, key: &str, change: Mapping, was: Mapping) -> Change {
     Change {
         target: note.path.to_string_lossy().replace('\\', "/"),
@@ -3155,9 +3185,12 @@ fn make_change(note: &Commitment, key: &str, change: Mapping, was: Mapping) -> C
 }
 
 /// The successor keys a change card holds (§5.4, §5.5, plan review I5): the `change.source_uid`
-/// of every `commitment-check` card in `approvals/` and `archive/` whose status is not
-/// `superseded` — pending, snoozed, approved or rejected. `rank` passes them to [`proposals`] as
-/// `held`, so a successor is never proposed as a class of its own beside its change card.
+/// of every `commitment-check` card in `approvals/` and `archive/` whose status is neither
+/// `superseded` nor `expired` — pending, snoozed, approved or rejected. `rank` passes them to
+/// [`proposals`] as `held`, so a successor is never proposed as a class of its own beside its
+/// change card. `expired` is open as in P11's asked-once index (fix round 1, m2). P13 stamps a
+/// change card whose `was` no longer matches the note `superseded` (§5.5), never `refused`, so a
+/// stale card releases its successor key here and the change can be asked again.
 pub fn successor_keys(vault: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for folder in ["approvals", "archive"] {
@@ -3169,7 +3202,7 @@ pub fn successor_keys(vault: &Path) -> BTreeSet<String> {
             let Ok(raw) = pystr::read_text(&path) else { continue };
             let Ok((meta, _)) = split_frontmatter(&raw) else { continue };
             let field = |key: &str| field_text(&meta, key).unwrap_or_default();
-            if field("type") != "approval" || field("kind") != COMMITMENT_CHECK || field("status") == "superseded" {
+            if field("type") != "approval" || field("kind") != COMMITMENT_CHECK || matches!(field("status").as_str(), "superseded" | "expired") {
                 continue;
             }
             let Some(Value::Mapping(change)) = get(&meta, "change") else { continue };
@@ -7434,6 +7467,15 @@ mod change_tests {
         }
         // The same room is no change.
         assert!(detect(&file_of(vec![cs100(OLD, GOOGLE)]), &set, &[GOOGLE]).0.is_empty());
+        // Fix round 1, m4: a proposed `where` is stored trimmed, on the changed and succeeded paths.
+        let mut padded = cs100(OLD, GOOGLE);
+        padded.where_ = Some("  Room 2 \t".into());
+        let (changes, _) = detect(&file_of(vec![padded]), &set, &[GOOGLE]);
+        assert_eq!(js(&changes[0].change), json!({"where": "Room 2"}));
+        let mut next = tue_thu(NEW, GOOGLE);
+        next.where_ = Some(" Room 3 ".into());
+        let (changes, _) = detect(&file_of(vec![ending(OLD, GOOGLE), next]), &set, &[GOOGLE]);
+        assert_eq!(get(&changes[0].change, "where"), Some(&Value::String("Room 3".into())));
     }
 
     #[test]
@@ -7511,6 +7553,78 @@ mod change_tests {
         assert!(changes.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("ics-series:a"), "{warnings:?}");
+        // Warned once (fix round 1, m3): only on the run the entry was dropped into `ended`.
+        let mut older = ended_file(None, None);
+        older.ended.get_mut("ics-series:a").unwrap().dropped = add_days(TODAY, -1);
+        let (changes, warnings) = detect(&older, &set, &["personal"]);
+        assert!(changes.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_truncated_until_that_is_not_a_meeting_day_is_asked_once_with_one_date() {
+        // Fix round 1, I1: "this and following" truncates a Mon/Wed/Fri class to a Tuesday UNTIL.
+        // The live card names the UNTIL; the student rejects it; when the series later ages out
+        // through `refresh_series`, the ended rule names the same date, so nothing is re-asked.
+        let v = vault("truncated");
+        let mut s = series(OLD, GOOGLE, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), TODAY, 2);
+        s.instances.retain(|i| i.date <= date(2026, 10, 13));
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 10, 13));
+        let set = set_of(vec![note(OLD)]);
+        let (file, _) = refresh_series(&v, &[(GOOGLE.into(), vec![s])], TODAY);
+        let (changes, _) = detect(&file, &set, &[GOOGLE]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-10-13"}));
+        let paths = emit(&v, &changes, &[]);
+        assert_eq!(paths.len(), 1);
+        // Rejected: archived as it stood, `status: rejected`.
+        let raw = std::fs::read_to_string(&paths[0]).unwrap();
+        std::fs::create_dir_all(v.join("archive")).unwrap();
+        std::fs::write(v.join("archive").join(paths[0].file_name().unwrap()), raw.replace("status: pending", "status: rejected")).unwrap();
+        std::fs::remove_file(&paths[0]).unwrap();
+
+        let drop_day = add_days(TODAY, 14);
+        let (file, _) = refresh_series(&v, &[(GOOGLE.into(), Vec::new())], drop_day);
+        assert_eq!(file.ended[OLD].last_instance, Some(date(2026, 10, 12)));
+        let (later, _) = detect_on(&file, &set, &[GOOGLE], drop_day);
+        assert_eq!(later, changes);
+        assert!(emit(&v, &later, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_open_ended_soft_commitment_that_stops_appearing_is_never_ended() {
+        // Fix round 1, m1 (controller ruling): a club dormant over the summer is not lost. With no
+        // UNTIL and no COUNT, a soft or optional note gets no end card; a hard one still does.
+        let file = ended_file(Some(date(2026, 10, 20)), None);
+        for (kind, level) in [("club", Level::Soft), ("meeting", Level::Soft), ("office-hours", Level::Optional)] {
+            let mut n = note("ics-series:a");
+            n.kind = kind.into();
+            n.level = level;
+            n.course = None;
+            n.title = "Robotics Club".into();
+            let (changes, warnings) = detect(&file, &set_of(vec![n.clone()]), &["personal"]);
+            assert!(changes.is_empty(), "{kind}: {changes:?}");
+            assert!(warnings.is_empty());
+            // Nor with no instance either: no warning for a question that is never asked.
+            let (changes, warnings) = detect(&ended_file(None, None), &set_of(vec![n]), &["personal"]);
+            assert!(changes.is_empty() && warnings.is_empty(), "{kind}: {warnings:?}");
+        }
+        // With a known end, a soft note still gets one.
+        let mut club = note("ics-series:a");
+        club.kind = "club".into();
+        club.level = Level::Soft;
+        let (changes, _) = detect(&ended_file(Some(date(2026, 10, 20)), Some(date(2026, 11, 20))), &set_of(vec![club]), &["personal"]);
+        assert_eq!(changes.len(), 1);
+        // Hard kinds keep the rule.
+        for kind in ["class", "lab", "work"] {
+            let mut n = note("ics-series:a");
+            n.kind = kind.into();
+            n.level = Level::Hard;
+            let (changes, _) = detect(&file, &set_of(vec![n]), &["personal"]);
+            assert_eq!(changes.len(), 1, "{kind}");
+            assert_eq!(js(&changes[0].change), json!({"until": "2026-10-20"}));
+        }
     }
 
     #[test]
@@ -7660,6 +7774,8 @@ mod change_tests {
         card(&v, "archive", "c.md", &format!("kind: commitment-check\nstatus: rejected\ntarget: commitments/c.md\n{}", change("gcal-series:rejected")));
         card(&v, "archive", "d.md", &format!("kind: commitment-check\nstatus: executed\ntarget: commitments/d.md\n{}", change("gcal-series:approved")));
         card(&v, "archive", "e.md", &format!("kind: commitment-check\nstatus: superseded\ntarget: commitments/e.md\n{}", change("gcal-series:superseded")));
+        // Fix round 1, m2: `expired` does not hold its key either (parity with P11's asked-once).
+        card(&v, "archive", "e2.md", &format!("kind: commitment-check\nstatus: expired\ntarget: commitments/e2.md\n{}", change("gcal-series:expired")));
         // Not a successor: another kind, a change without a new key, a proposal card.
         card(&v, "approvals", "f.md", &format!("kind: amend\nstatus: pending\n{}", change("gcal-series:amend")));
         card(&v, "approvals", "g.md", "kind: commitment-check\nstatus: pending\ntarget: commitments/g.md\nchange: {until: '2026-12-04'}\n");
