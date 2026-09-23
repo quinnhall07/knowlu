@@ -257,6 +257,16 @@ pub fn enrich_with(
         let mut inputs = serde_yaml_ng::Mapping::new();
         inputs.insert("source_uid".into(), Value::String(item.source_uid.clone()));
         inputs.insert("title_seen".into(), Value::String(item.title.clone()));
+        // F5(b): the service's own judgment id, whenever this verdict carried one (tier 2 or
+        // tier 3, `judge::Verdict::judgment_id`). Both keys or neither — `judgment_kind` names
+        // the note kind this pass always writes (`task`), so a later cross-account join
+        // (`calibration_query.sql`'s `c.judgment_id = j.id`) can tell a task judgment from an
+        // event or email one without re-deriving it from the note path. Absent on every tier-1
+        // verdict and on every reply from an older server, which is byte-identical to today.
+        if let Some(jid) = &outcome.verdict().judgment_id {
+            inputs.insert("judgment_id".into(), Value::String(jid.clone()));
+            inputs.insert("judgment_kind".into(), Value::String("task".into()));
+        }
         let write_opts = WriteOpts { judged: true, evidence: None, propose: true, inputs: Some(&inputs) };
         match write::write_literals(vault, &item.rel_path, &literals, &ctx, &mut journal, &write_opts) {
             Ok(res) => {
@@ -1304,6 +1314,77 @@ mod tests {
         assert_eq!(logged.len(), 1);
         assert_eq!(logged[0]["outcome"], "answered");
         assert_eq!(logged[0]["tier"], 3);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F5(b): a verdict carrying the service's `judgment_id` (tier 2 or tier 3, over the cloud)
+    /// stamps `judgment_id` and `judgment_kind: task` into the `judgment:` block's `inputs`,
+    /// alongside the two `enrich` already wrote — sorted, since `judgment_literal` sorts keys.
+    #[test]
+    fn a_cloud_judgment_with_an_id_stamps_it_into_the_judgment_block() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("with-jid");
+        let log = v.join("_log");
+        let m = Fixed(crate::judge::Verdict {
+            course: Some("cs-100".to_string()),
+            effort_hours: Some(2.5),
+            importance: Some(4),
+            importance_reason: Some("Homework is 20% of CS 100.".to_string()),
+            confidence: 0.9,
+            tier: 3,
+            judgment_id: Some("3fa85f64-5717-4562-b3fc-2c963f66afa6".to_string()),
+        });
+        let (code, _) = enrich_with(&v, &opts(&log), Ok(&m));
+        assert_eq!(code, 0);
+
+        let meta = meta_of(&v, "hw3.md");
+        let Some(serde_yaml_ng::Value::Mapping(j)) = crate::yaml::get(&meta, "judgment") else { panic!("no judgment") };
+        let Some(serde_yaml_ng::Value::Mapping(inputs)) = crate::yaml::get(j, "inputs") else { panic!("no inputs") };
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "judgment_id")).as_deref(), Some("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "judgment_kind")).as_deref(), Some("task"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "source_uid")).as_deref(), Some("blackboard:_884411_1"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "title_seen")).as_deref(), Some("CS-100 Homework 3"));
+
+        // Sorted keys, one line (`inputs`'s `judgment_id` sorts before `judgment_kind`, which
+        // sorts before `source_uid`) — the exact literal `write` renders onto the note.
+        let text = crate::pystr::read_text(&v.join("tasks").join("hw3.md")).unwrap();
+        assert!(crate::provenance::guard_block_style(&text).is_ok(), "must stay a single-line flow mapping");
+        let line = text.lines().find(|l| l.starts_with("judgment:")).unwrap();
+        assert!(
+            line.contains("inputs: {judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6, judgment_kind: task, source_uid: 'blackboard:_884411_1', title_seen: CS-100 Homework 3}"),
+            "{line}"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F5(b): the byte-contract half — a verdict with **no** id (every tier-1-only verdict, and
+    /// every reply from a server that never sends the field, `judgment_id: None` from
+    /// `..Default::default()`) must write the exact `judgment:` line this pass wrote before F5
+    /// existed: same four keys in `inputs`... no, same TWO keys (`source_uid`, `title_seen`), no
+    /// `judgment_id`, no `judgment_kind`. `at` is the run's own wall clock, spliced from the same
+    /// write rather than pinned, so every other byte is still compared literally.
+    #[test]
+    fn a_judgment_without_an_id_writes_the_block_exactly_as_before() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("no-jid");
+        let log = v.join("_log");
+        let m = answered(); // judgment_id: None, via `..Default::default()`
+        let (code, _) = enrich_with(&v, &opts(&log), Ok(&m));
+        assert_eq!(code, 0);
+
+        let meta = meta_of(&v, "hw3.md");
+        let Some(serde_yaml_ng::Value::Mapping(j)) = crate::yaml::get(&meta, "judgment") else { panic!("no judgment") };
+        let at = crate::yaml::opt_text(crate::yaml::get(j, "at")).unwrap();
+
+        let text = crate::pystr::read_text(&v.join("tasks").join("hw3.md")).unwrap();
+        let line = text.lines().find(|l| l.starts_with("judgment:")).unwrap();
+        let expected = format!(
+            "judgment: {{actor: 'agent:knowlu.enrich', at: '{at}', \
+             fields: [course, effort_confidence, effort_hours, importance, importance_reason], \
+             inputs: {{source_uid: 'blackboard:_884411_1', title_seen: CS-100 Homework 3}}, \
+             run_id: 'local-2026-09-07T18:00:00Z'}}"
+        );
+        assert_eq!(line, expected);
         let _ = std::fs::remove_dir_all(&v);
     }
 
