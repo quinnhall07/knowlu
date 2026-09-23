@@ -7,7 +7,7 @@ use knowlu::commands::{
     resolve_issue_inner, set_fields_inner, set_settings_inner, state_inner, sync_inner,
     ui_event_inner,
 };
-use knowlu::scheduler::{lock, RunSummary, Scheduler};
+use knowlu::scheduler::{lock, LiveSlot, RunSummary, Scheduler};
 
 /// Every journal record across `state/journal/*.jsonl`, parsed. Files are CRLF (translate on
 /// read per the repo's line-ending rule) and one JSON object per line.
@@ -71,7 +71,7 @@ fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
     let sch = Scheduler::default();
     let fr = knowlu::commands::first_run_value(&cs, &sch).expect("a vault with no today.md carries it");
     assert_eq!(fr["running"], false);
-    // The slot in flight records nothing until it ends: an empty list, never an invented step.
+    // No slot has run yet: an empty list, never an invented step.
     assert_eq!(fr["steps"], json!([]));
 
     *lock(&sch.last) = Some(RunSummary {
@@ -92,6 +92,40 @@ fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
     std::fs::create_dir_all(v.join("state")).unwrap();
     std::fs::write(v.join("state").join("today.md"), b"# Today\n").unwrap();
     assert!(knowlu::commands::first_run_value(&cs, &sch).is_none());
+}
+
+/// R-C1c-8: while a slot runs, the block carries what `Scheduler.live` has published (the steps
+/// that have landed and the one in progress), never `Scheduler.last`, which belongs to an earlier
+/// slot and is written only when a slot ends. With no slot running it is `last`'s steps, as before,
+/// and nothing is in progress.
+#[test]
+fn the_first_run_block_reads_the_live_slot_while_one_runs_and_the_last_one_after() {
+    let v = scratch("firstrun-live");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-console-appdata-firstrun-live-{}", std::process::id())));
+    let sch = Scheduler::default();
+    *lock(&sch.last) = Some(RunSummary {
+        started: "2026-09-22T19:14:37Z".into(),
+        ended: "2026-09-22T19:15:38Z".into(),
+        steps: vec![("coursework".into(), 0), ("rank".into(), 1)],
+        ok: false,
+        engine_ok: false,
+        late: false,
+        reason: None,
+        attempts: 1,
+    });
+    *lock(&sch.live) = LiveSlot { steps: vec![("coursework".into(), 0)], current: Some("judge".into()) };
+    *lock(&sch.running) = true;
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("no read model yet");
+    assert_eq!(fr["running"], true);
+    assert_eq!(fr["current"], "judge", "the step in progress: {fr}");
+    assert_eq!(fr["steps"], json!([["coursework", 0]]), "the live steps, not the last slot's: {fr}");
+
+    *lock(&sch.running) = false;
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("still no read model");
+    assert_eq!(fr["running"], false);
+    assert_eq!(fr.get("current"), Some(&serde_json::Value::Null), "nothing is in progress: {fr}");
+    assert_eq!(fr["steps"], json!([["coursework", 0], ["rank", 1]]), "the ended slot's steps: {fr}");
+    let _ = std::fs::remove_dir_all(&v);
 }
 
 /// The C1c Task 5 live proof (2026-09-23) found no first-run line on screen, and the test above
@@ -137,6 +171,8 @@ fn the_state_command_carries_the_first_run_block_on_a_wizard_made_vault() {
     assert_eq!(env["ok"], true, "{env}");
     assert_eq!(env["first_run"]["running"], true, "{env}");
     assert_eq!(env["first_run"]["steps"], json!([]), "a slot in flight has recorded nothing yet");
+    // R-C1c-8's shape: the step in progress rides on the block too, null until a step starts.
+    assert_eq!(env["first_run"].get("current"), Some(&serde_json::Value::Null), "{env}");
     assert!(env["state"]["must_do"].is_object(), "the day is built and painted behind the block");
     assert!(env["state"]["topline"]["scheduler"].is_object(), "attach_scheduler still ran: {env}");
 

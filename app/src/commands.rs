@@ -83,15 +83,26 @@ pub fn attach_scheduler(env: &mut Value, sch: &Scheduler) -> Result<(), String> 
 /// the first look. The page paints the block while the key is there and drops it when it stops
 /// coming.
 ///
-/// `running` and `steps` come from the live `Scheduler`; a slot in flight records nothing until it
-/// ends, so `steps` is empty on the first poll and the page shows its sentence alone.
+/// The block is `{ running, current, steps: [[name, code], …] }`, all from the live `Scheduler`
+/// (R-C1c-8). While a slot runs, `steps` and `current` are `Scheduler.live`: each step as it lands
+/// and the one doing its work now, so the list fills during the slot. `Scheduler.last` is written
+/// only when a slot ends, and on a first run that succeeds `rank` has written the day by then, so
+/// reading it mid-slot listed nothing. With no slot running, `steps` is `last`'s (a first slot that
+/// ended without a day) and `current` is null.
 pub fn first_run_value(cs: &ConsoleState, sch: &Scheduler) -> Option<Value> {
     if !knowlu_engine::ingest::is_first_run(&cs.vault) {
         return None;
     }
-    let running = *crate::scheduler::lock(&sch.running);
+    // `live` is read under the `running` guard (the lock order `Scheduler.live` names), so the flag
+    // and the list are one reading: no slot can start or end between them.
+    let running = crate::scheduler::lock(&sch.running);
+    if *running {
+        let live = crate::scheduler::lock(&sch.live).clone();
+        return Some(json!({ "running": true, "current": live.current, "steps": live.steps }));
+    }
+    drop(running);
     let steps = crate::scheduler::lock(&sch.last).as_ref().map(|s| s.steps.clone()).unwrap_or_default();
-    Some(json!({ "running": running, "steps": steps }))
+    Some(json!({ "running": false, "current": Value::Null, "steps": steps }))
 }
 
 pub fn state_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {

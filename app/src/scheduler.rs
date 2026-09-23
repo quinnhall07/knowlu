@@ -77,6 +77,60 @@ pub struct Scheduler {
     /// 18:00 America/Chicago slot is 00:00 the NEXT day in UTC — it would be swept the instant it
     /// was written, which is exactly the retry storm the ladder exists to stop.
     pub attempts: Mutex<HashMap<String, (u32, std::time::Instant)>>,
+    /// The slot in flight, published step by step (R-C1c-8) for the console's first-run view.
+    /// `last` is written only when a slot ends, and on a first run that succeeds `rank` has written
+    /// the day by then, so the view that polled `last` never listed a step. `run_slot_inner` clears
+    /// this in the same locked block that sets `running`, then mirrors every step into it as the step
+    /// lands (`SlotSteps`); when the slot ends, `live.steps` equals `RunSummary.steps`. A refusal and
+    /// the "already running" return never touch it.
+    ///
+    /// **Lock order: `running` before `live`**, wherever both are taken (`run_slot_inner`'s start and
+    /// `commands::first_run_value`), and nothing else nests them. The lock is held for one push or one
+    /// assignment, never across a child process, a network call or `vault_io`.
+    pub live: Mutex<LiveSlot>,
+}
+
+/// What `Scheduler.live` holds: the steps the running slot has recorded so far, in `RunSummary.steps`'
+/// own shape, and the step doing its work right now (named as it will be recorded, or by that name's
+/// first word when the recorded name adds a note: `pull`, `entitlement`). `None` between steps and
+/// once the slot has ended.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LiveSlot {
+    pub steps: Vec<(String, i32)>,
+    pub current: Option<String>,
+}
+
+/// The step list `run_slot_inner` builds, published as it grows (R-C1c-8). Every step goes through
+/// `push`, which records it in the slot's own list (what `RunSummary.steps` becomes) and in
+/// `Scheduler.live` in the same call, so the two can never disagree; `start` names the step about to
+/// do work. One recorder rather than a lock at each of the dozen sites that record a step.
+///
+/// Each method takes the `live` lock for one push or one assignment and drops it before returning:
+/// the child processes, network calls and `vault_io` sections between them run with it free.
+struct SlotSteps<'a> {
+    sch: &'a Scheduler,
+    steps: Vec<(String, i32)>,
+}
+
+impl<'a> SlotSteps<'a> {
+    fn new(sch: &'a Scheduler) -> Self { SlotSteps { sch, steps: Vec::new() } }
+
+    /// The step about to do work. A named skip lands at once and never needs one.
+    fn start(&self, name: &str) { lock(&self.sch.live).current = Some(name.to_string()); }
+
+    /// A step that started and recorded nothing after all (a backup with no folder set).
+    fn idle(&self) { lock(&self.sch.live).current = None; }
+
+    /// A step has landed: recorded here and published, and nothing is in progress until the next
+    /// `start`.
+    fn push(&mut self, step: (String, i32)) {
+        {
+            let mut live = lock(&self.sch.live);
+            live.steps.push(step.clone());
+            live.current = None;
+        }
+        self.steps.push(step);
+    }
 }
 
 impl Default for Scheduler {
@@ -88,6 +142,7 @@ impl Default for Scheduler {
             pause_item: Mutex::new(None),
             mode_device: Mutex::new((SchedulerMode::Script, true)),
             attempts: Mutex::new(HashMap::new()),
+            live: Mutex::new(LiveSlot::default()),
         }
     }
 }
@@ -570,6 +625,9 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             return lock(&sch.last).clone().unwrap_or_else(|| RunSummary { started: String::new(), ended: String::new(), steps: vec![], ok: false, engine_ok: false, late, reason: None, attempts: 0 });
         }
         *r = true;
+        // R-C1c-8: cleared under the `running` guard (lock order: `running`, then `live`), so no
+        // poll can ever read `running: true` beside the previous slot's steps.
+        *lock(&sch.live) = LiveSlot::default();
     }
     let _guard = RunGuard(sch);
     // The pull decision below reads `cs.history.has_remote` — refresh it first, since
@@ -577,9 +635,10 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // tick thread's very first iteration is guaranteed to have refreshed it yet (review item 1).
     state::refresh_history(cs);
     let started = knowlu_engine::journal::now_ts(None);
-    let mut steps = Vec::new();
+    let mut steps = SlotSteps::new(sch);
     let mut engine_ok = true;
     if lock(&cs.history).has_remote {
+        steps.start("pull");
         steps.push(sync_step(cs, "pull"));
     }
     // A skipped step is still a step: without this line the Runs view and the sync line would show
@@ -617,6 +676,7 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         // Exit code **0** on both arms, like every other named step here: an account service that
         // could not be reached is not a slot that failed, and an amber tray twice a day for a
         // network is the wrong answer.
+        steps.start("entitlement");
         let step = match crate::account::refresh_entitlement(&cs.vault, &cs.data_dir) {
             Ok(_) => "entitlement (refreshed)".to_string(),
             Err(e) => format!("entitlement (refresh failed: {e})"),
@@ -659,6 +719,7 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // `entitlement (refresh failed: <reason>)` from the push above; the vault gets the bare
     // sentence only, so no service error text ever reaches a file a student can open.
     let skips: Vec<String> = steps
+        .steps
         .iter()
         .filter_map(|(n, _)| {
             if n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:") {
@@ -682,6 +743,7 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         Ok(exe) => {
             for (i, (e, args)) in slot_argv(&cs.vault, &exe, &judge).into_iter().enumerate() {
                 let log = log_dir(cs).join(format!("slot-{}-{}-{}.txt", started.replace(':', ""), i, args[0]));
+                steps.start(&args[0]);
                 let code = run_child(&e, &args, &log, CHILD_TIMEOUT);
                 if code != 0 {
                     engine_ok = false;
@@ -694,14 +756,18 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             steps.push((format!("engine: {e}"), -1));
         }
     }
+    steps.start("push");
     steps.push(sync_step(cs, "push"));
     // F11: the backup walks and copies the whole working tree — the same tree `history::sync`
     // rewrites — so it takes `vault_io` like every other vault-touching step. Taken HERE, after the
     // child wait and scoped to the engine call alone: `vault_io` is never held across a child
     // process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    steps.start("backup");
     let backed = { let _io = lock(&cs.vault_io); state::run_backup(cs, jiff::Timestamp::now()) };
-    if let Ok(st) = backed {
-        steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 }));
+    match backed {
+        Ok(st) => steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 })),
+        // No backup folder set: no step is recorded, so nothing is in progress either.
+        Err(_) => steps.idle(),
     }
     // Spec §6: batched to `/telemetry` at each slot. **Never a failure** — a student on a train has
     // nothing to apologise for, and an analytics upload has no business turning a slot amber. Every
@@ -715,16 +781,20 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     let telemetry = match est {
         crate::account::EntitlementState::NoAccount => ("telemetry (skipped: no account)".to_string(), 0),
         crate::account::EntitlementState::Unreadable => ("telemetry (skipped: cloud.yaml unreadable)".to_string(), 0),
-        _ => match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
-            Ok(crate::telemetry::SendOutcome::Sent(0, 0)) => ("telemetry (nothing new)".to_string(), 0),
-            Ok(crate::telemetry::SendOutcome::Sent(e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
-            Ok(crate::telemetry::SendOutcome::Refused(status)) => (format!("telemetry (refused: {status})"), 0),
-            Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
-        },
+        _ => {
+            steps.start("telemetry");
+            match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
+                Ok(crate::telemetry::SendOutcome::Sent(0, 0)) => ("telemetry (nothing new)".to_string(), 0),
+                Ok(crate::telemetry::SendOutcome::Sent(e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
+                Ok(crate::telemetry::SendOutcome::Refused(status)) => (format!("telemetry (refused: {status})"), 0),
+                Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
+            }
+        }
     };
     steps.push(telemetry);
     state::refresh_head(cs);
     state::refresh_history(cs);
+    let steps = steps.steps;
     let ok = steps.iter().all(|(_, c)| *c == 0);
     let summary = RunSummary { started, ended: knowlu_engine::journal::now_ts(None), steps, ok, engine_ok, late, reason: None, attempts: 1 };
     *lock(&sch.last) = Some(summary.clone());

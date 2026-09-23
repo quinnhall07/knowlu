@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, judge_plan, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, judge_plan, judge_state_in, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, LiveSlot, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -953,5 +953,156 @@ fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
     assert!(needs_first_run(&v), "a root today.md is not the ranked page");
     std::fs::write(&today, b"# Today\n").unwrap();
     assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// An app-scheduled `local` runner on this device, so `run_slot_inner` runs rather than refuses.
+fn app_scheduled(v: &Path) {
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+}
+
+/// R-C1c-8: the first-run view reads `Scheduler.live` while a slot runs, because `Scheduler.last`
+/// is written only when the slot ends — by which time `rank` has written the day and the view is
+/// gone. So every step the slot records has to reach `live` as it lands, from every kind of site
+/// (a named skip, a child, the push, the backup, telemetry), and when the slot is over the two
+/// lists are the same list. `current` names a step in progress; a finished slot has none.
+///
+/// The `cmd` stand-in engine and a temp `LOCALAPPDATA`, under `ENGINE_ENV_LOCK`, exactly as the
+/// skip tests above.
+#[test]
+fn a_slot_publishes_every_step_it_records_while_it_runs() {
+    let v = scratch("livesteps");
+    app_scheduled(&v);
+    let cs = open(&v, "livesteps");
+    // A backup folder, so the backup step lands too and the mirror is proved over it.
+    let bdir = std::env::temp_dir().join(format!("qo-console-sched-livesteps-backup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bdir);
+    { cs.settings.lock().unwrap().backup_dir = Some(bdir.clone()); }
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-livesteps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    assert!(s.reason.is_none(), "not refused: {:?}", s.reason);
+    let live = lock(&sch.live).clone();
+    assert_eq!(live.steps, s.steps, "the published list is the slot's own list, step for step");
+    assert!(live.current.is_none(), "a slot that has ended has nothing in progress: {live:?}");
+    let named: Vec<&str> = live.steps.iter().map(|(n, _)| n.as_str()).collect();
+    for want in ["ingest (skipped: no ics_url)", "coursework", "rank", "push", "backup", "telemetry (skipped: no account)"] {
+        assert!(named.contains(&want), "{want} did not reach the published list: {named:?}");
+    }
+    assert!(named.iter().any(|n| n.starts_with("judge (skipped:")), "{named:?}");
+    let _ = std::fs::remove_dir_all(&bdir);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// R-C1c-8: a slot that really starts clears the published list in the same step that sets
+/// `running`, so no poll can pair `running: true` with the previous slot's steps. A slot that does
+/// not start — refused, or turned away because one is already running — leaves it alone.
+#[test]
+fn a_new_slot_starts_with_an_empty_live_list() {
+    let v = scratch("livereset");
+    app_scheduled(&v);
+    let cs = open(&v, "livereset");
+    let sch = Scheduler::default();
+    let junk = || LiveSlot { steps: vec![("an older slot's step".to_string(), 7)], current: Some("an older slot's step in progress".to_string()) };
+    *lock(&sch.live) = junk();
+
+    // Turned away: a slot is already running, and that slot's list is the one on the page.
+    *lock(&sch.running) = true;
+    let _ = run_slot_inner(&cs, &sch, None, false);
+    *lock(&sch.running) = false;
+    assert_eq!(lock(&sch.live).steps, junk().steps, "an overlapping trigger must not clear the running slot's list");
+    // Refused: vault-full's own runners.yaml says `scheduler: script`.
+    let refused_vault = scratch("livereset-refused");
+    let refused = run_slot_inner(&open(&refused_vault, "livereset-refused"), &sch, None, false);
+    assert!(refused.reason.is_some(), "this slot was refused: {refused:?}");
+    assert_eq!(lock(&sch.live).current, junk().current, "a refusal never started, so it publishes nothing");
+
+    let fake = std::env::temp_dir().join(format!("qo-sched-livereset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let live = lock(&sch.live).clone();
+    assert!(!live.steps.iter().any(|(n, _)| n == "an older slot's step"), "the older slot's step survived: {live:?}");
+    assert!(live.current.is_none(), "the older slot's step in progress survived: {live:?}");
+    assert_eq!(live.steps, s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&refused_vault);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Creates the handshake's go-ahead file when dropped — on a failing assertion too — so the
+/// stand-in engine below never waits out the twenty-minute child cap.
+struct GoAhead(PathBuf);
+impl Drop for GoAhead {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"go");
+    }
+}
+
+/// R-C1c-8: while a step does its work, `live.current` names it and `live.steps` holds exactly what
+/// has landed before it. Observed by handshake, not by timing: the stand-in engine is a batch file
+/// that, when called as `coursework`, drops a `started` marker and then waits until this test
+/// writes `go`, so the slot is provably inside that step while `live` is read. Every other step
+/// exits 0 at once.
+#[test]
+fn a_slot_names_the_step_in_progress_while_it_runs() {
+    let v = scratch("livecurrent");
+    app_scheduled(&v);
+    let cs = open(&v, "livecurrent");
+    let sch = Scheduler::default();
+    let hs = std::env::temp_dir().join(format!("qo-sched-handshake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&hs);
+    std::fs::create_dir_all(&hs).unwrap();
+    // CRLF inside the file: `goto` in a batch file with bare LF line ends is unreliable.
+    let bat = hs.join("engine.bat");
+    std::fs::write(&bat, concat!(
+        "@echo off\r\n",
+        "if not \"%1\"==\"coursework\" exit /b 0\r\n",
+        "echo started>\"%KNOWLU_TEST_HANDSHAKE%\\started\"\r\n",
+        ":wait\r\n",
+        "if exist \"%KNOWLU_TEST_HANDSHAKE%\\go\" exit /b 0\r\n",
+        "ping -n 2 127.0.0.1 >nul\r\n",
+        "goto wait\r\n",
+    )).unwrap();
+    let fake = std::env::temp_dir().join(format!("qo-sched-livecurrent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", bat.as_os_str()),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_TEST_HANDSHAKE", hs.as_os_str()),
+    ]);
+    let (mid, s) = std::thread::scope(|scope| {
+        let slot = scope.spawn(|| run_slot_inner(&cs, &sch, None, false));
+        let go = GoAhead(hs.join("go"));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !hs.join("started").exists() {
+            assert!(!slot.is_finished(), "the slot ended without the stand-in engine reaching coursework");
+            assert!(Instant::now() < deadline, "the stand-in engine never reached coursework");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mid = lock(&sch.live).clone();
+        drop(go);
+        (mid, slot.join().unwrap())
+    });
+    assert_eq!(mid.current.as_deref(), Some("coursework"), "the step in progress is named: {mid:?}");
+    let landed: Vec<(String, i32)> = s.steps.iter().take_while(|(n, _)| n != "coursework").cloned().collect();
+    assert!(!landed.is_empty(), "the named skips land before the first child: {:?}", s.steps);
+    assert_eq!(mid.steps, landed, "mid-slot, the list is exactly what has landed so far");
+    assert_eq!(s.steps.iter().find(|(n, _)| n == "coursework").map(|(_, c)| *c), Some(0), "{:?}", s.steps);
+    assert!(lock(&sch.live).current.is_none(), "nothing is in progress once the slot has ended");
+    let _ = std::fs::remove_dir_all(&hs);
+    let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
