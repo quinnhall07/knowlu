@@ -1,17 +1,20 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import type { CorpusFinding } from "./types.ts";
 import {
-  buildJevNativeBody,
-  buildOpenRouterChatBody,
+  buildDecisionsBody,
   buildState,
   contextFor,
+  DECISION_QUESTIONS,
+  DISPOSITION_OPTION_TO_LABEL,
   estimateCorpusCost,
   estimateTokens,
+  INPUT_COST_PER_MILLION_USD,
   JEV_MODEL_ID,
+  OPENROUTER_DECISIONS_URL,
   primaryFileFor,
-  QUESTIONS,
   ZDR_ROUTE,
 } from "./jev_request.ts";
+import { findLeaks } from "./severity.ts";
 
 function fixture(overrides: Partial<CorpusFinding> = {}): CorpusFinding {
   return {
@@ -58,26 +61,54 @@ Deno.test("buildState assembles finding/file/context exactly as procedure §Step
   assertEquals(state.context, contextFor(f.source));
 });
 
-Deno.test("buildJevNativeBody carries the model id and all three questions", () => {
-  const body = buildJevNativeBody(fixture());
-  assertEquals(body.model, JEV_MODEL_ID);
-  assertEquals(body.questions, QUESTIONS);
-  assert("state" in body);
+Deno.test("the transport is OpenRouter's decisions endpoint, not chat/completions", () => {
+  assertEquals(OPENROUTER_DECISIONS_URL, "https://openrouter.ai/api/alpha/decisions");
 });
 
-Deno.test("buildOpenRouterChatBody is pinned zero-retention and carries the state as JSON in the user turn", () => {
-  const body = buildOpenRouterChatBody(fixture()) as {
-    model: string;
-    messages: { role: string; content: string }[];
-    provider: typeof ZDR_ROUTE;
-  };
+Deno.test("the ZDR route is the provider block the controller's smoke call verified", () => {
+  assertEquals(ZDR_ROUTE, { order: ["typesafe"], allow_fallbacks: false, zdr: true });
+});
+
+Deno.test("buildDecisionsBody is {model, state, questions, provider} with the state as structured JSON", () => {
+  const f = fixture();
+  const body = buildDecisionsBody(f);
+  assertEquals(Object.keys(body).sort(), ["model", "provider", "questions", "state"]);
   assertEquals(body.model, JEV_MODEL_ID);
   assertEquals(body.provider, ZDR_ROUTE);
-  assertEquals(body.messages.length, 1);
-  assertEquals(body.messages[0].role, "user");
-  assert(body.messages[0].content.includes("account/index.ts"));
-  assert(body.messages[0].content.includes("grade"));
-  assert(body.messages[0].content.includes("disposition"));
+  assertEquals(body.state, buildState(f));
+  assertEquals(body.questions, DECISION_QUESTIONS);
+});
+
+Deno.test("grade and disposition are choice questions whose every option carries a criterion", () => {
+  const { grade, disposition, blocks } = DECISION_QUESTIONS;
+  assertEquals(grade.type, "choice");
+  assertEquals(Object.keys(grade.criteria).sort(), ["critical", "important", "minor"]);
+  assertEquals(disposition.type, "choice");
+  assertEquals(Object.keys(disposition.criteria).sort(), ["defer", "fix", "hand_off", "rule_against"]);
+  for (const q of [grade, disposition]) {
+    assert(q.instructions.length > 0);
+    for (const d of Object.values(q.criteria)) assert(d.length > 20, `criterion too thin: ${d}`);
+  }
+  assertEquals(blocks.type, "noul");
+  assertEquals(blocks.instructions, "This finding must be fixed before the branch merges.");
+});
+
+Deno.test("every disposition option maps to exactly one corpus disposition label", () => {
+  assertEquals(DISPOSITION_OPTION_TO_LABEL, {
+    fix: "fixed",
+    rule_against: "ruled_against",
+    hand_off: "handed_off",
+    defer: "deferred",
+  });
+});
+
+Deno.test("buildDecisionsBody refuses a state that still carries a severity word", () => {
+  const leaky = fixture({ text: "should-fix — the header still says four routes" });
+  assertThrows(() => buildDecisionsBody(leaky), Error, "leak");
+});
+
+Deno.test("the state of a clean finding has no leak terms", () => {
+  assertEquals(findLeaks(JSON.stringify(buildDecisionsBody(fixture()).state)), []);
 });
 
 Deno.test("estimateTokens is roughly chars/4 and monotone in length", () => {
@@ -91,7 +122,14 @@ Deno.test("estimateCorpusCost scales linearly with item count and matches the pe
   const three = estimateCorpusCost([fixture(), fixture({ id: "x2" }), fixture({ id: "x3" })]);
   assertEquals(three.items, 3);
   assertEquals(three.totalInputChars, one.totalInputChars * 3);
-  assertEquals(three.estimatedCostUsd, one.estimatedCostUsd * 3);
+  // chars/4 is rounded up once over the whole pass, not per item, so 3 x ceil(c/4) and ceil(3c/4)
+  // differ by at most two tokens.
+  assert(Math.abs(three.estimatedInputTokens - one.estimatedInputTokens * 3) <= 2);
+  assertAlmostEquals(
+    three.estimatedCostUsd,
+    one.estimatedCostUsd * 3,
+    (2 * INPUT_COST_PER_MILLION_USD) / 1e6,
+  );
   assert(one.estimatedCostUsd > 0);
   // Sanity bound: the whole 60-item corpus, minimal state, should stay under a dollar by a wide
   // margin (the note's own table puts the generous-state, both-arms figure at $0.018).

@@ -1,8 +1,13 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run=powershell.exe --allow-env=OPENROUTER_API_KEY,E2_CORPUS_ROOT,E2_WORKSPACE --allow-net=openrouter.ai
 // Stream J experiment E2 — the offline review-triage replay. Orchestrates the whole procedure:
 // extract, leak-check both arms, both baselines, the cost estimate, then either the paid run (one
-// sequential pass over OpenRouter, only if a key resolves) or --dry-run (always the default; prints
+// sequential pass over OpenRouter's decisions endpoint, only if a key resolves) or --dry-run (prints
 // the exact request bodies and the cost estimate, sends nothing).
+//
+// The paid run writes two files to the workspace: `paid-run-results.jsonl` (one line per item: the
+// request, the full answer with its distribution, latency, usage, or the error) and
+// `paid-run-summary.json` (score.ts's scored summary beside the baselines). An HTTP or parse failure
+// is recorded against its item and the pass goes on; five in a row stop it (replay.ts).
 //
 // Every run needs the corpus folder and a workspace to write into, as `--corpus-root <dir>
 // --workspace <dir>` or the environment variables `E2_CORPUS_ROOT` / `E2_WORKSPACE` (see
@@ -22,7 +27,9 @@
 import { extractCorpus, forDisk, resolvePaths } from "./extract.ts";
 import { findLeaks } from "./severity.ts";
 import { type LabeledItem, leaveOneOutLexicalKNN, leaveOneOutMajorityClass } from "./baselines.ts";
-import { buildOpenRouterChatBody, estimateCorpusCost, OPENROUTER_CHAT_URL } from "./jev_request.ts";
+import { buildDecisionsBody, estimateCorpusCost, OPENROUTER_DECISIONS_URL } from "./jev_request.ts";
+import { runPass } from "./replay.ts";
+import { scoreResults } from "./score.ts";
 import { noKeyMessage, resolveOpenRouterKey } from "./credentials.ts";
 import type { CorpusFinding } from "./types.ts";
 
@@ -130,10 +137,12 @@ async function main() {
   if (!key || forceDryRun) {
     if (!key) console.log(noKeyMessage(diagnostics));
     else console.log("--dry-run passed: not sending, even though a key resolved.");
-    console.log(`transport: POST ${OPENROUTER_CHAT_URL}, model typesafe/jev-1.13, pinned zero-retention.`);
+    console.log(
+      `transport: POST ${OPENROUTER_DECISIONS_URL}, model typesafe/jev-1.13, pinned zero-retention.`,
+    );
     console.log("first three request bodies (dry run — nothing sent):");
     for (const f of kept.slice(0, 3)) {
-      console.log(JSON.stringify(buildOpenRouterChatBody(f), null, 2));
+      console.log(JSON.stringify(buildDecisionsBody(f), null, 2));
     }
     console.log(
       `\n(dry run) would send ${kept.length} sequential requests, estimated ` +
@@ -143,11 +152,8 @@ async function main() {
   }
 
   console.log(`OPENROUTER_API_KEY resolved from: ${source}. Sending ${kept.length} sequential requests.`);
-  const results: unknown[] = [];
-  for (const f of kept) {
-    const body = buildOpenRouterChatBody(f);
-    const started = performance.now();
-    const resp = await fetch(OPENROUTER_CHAT_URL, {
+  const pass = await runPass(kept, async (body) => {
+    const resp = await fetch(OPENROUTER_DECISIONS_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${key}`,
@@ -157,13 +163,50 @@ async function main() {
       },
       body: JSON.stringify(body),
     });
-    const elapsedMs = performance.now() - started;
-    const text = await resp.text();
-    results.push({ id: f.id, status: resp.status, elapsedMs, body: text });
-    console.log(`${f.id}: HTTP ${resp.status} in ${elapsedMs.toFixed(0)}ms`);
-  }
-  await Deno.writeTextFile(`${workspace}/paid-run-results.json`, JSON.stringify(results, null, 2));
-  console.log(`wrote ${workspace}/paid-run-results.json`);
+    return { status: resp.status, text: await resp.text() };
+  });
+  await Deno.writeTextFile(
+    `${workspace}/paid-run-results.jsonl`,
+    pass.results.map((r) => JSON.stringify(r)).join("\n") + "\n",
+  );
+  const scored = scoreResults(pass.results);
+  const paidSummary = {
+    ranAt: new Date().toISOString(),
+    stoppedEarly: pass.stoppedEarly,
+    jev: scored,
+    baselines: {
+      severity: { majorityClass: majoritySeverity, lexicalKnn: lexicalSeverity },
+      disposition: { majorityClass: majorityDisposition, lexicalKnn: lexicalDisposition },
+    },
+  };
+  await Deno.writeTextFile(`${workspace}/paid-run-summary.json`, JSON.stringify(paidSummary, null, 2));
+
+  console.log("\n== Step 6: scored ==");
+  console.log(
+    `answered ${scored.answered}/${scored.items}; failed: ${JSON.stringify(scored.failed)}` +
+      (pass.stoppedEarly ? " — STOPPED EARLY after consecutive failures" : ""),
+  );
+  console.log(
+    `severity — Jev: ${fmt(scored.severity.accuracy)}; demotions (critical graded minor): ` +
+      JSON.stringify(scored.severity.demotions),
+  );
+  console.log(`severity confusion (truth → predicted): ${JSON.stringify(scored.severity.confusion)}`);
+  console.log(`disposition — Jev: ${fmt(scored.disposition.accuracy)}`);
+  console.log(`disposition confusion (truth → predicted): ${JSON.stringify(scored.disposition.confusion)}`);
+  console.log(
+    `blocks vs critical|important: AUROC ${scored.blocks.auroc}, Brier ${scored.blocks.brier} ` +
+      `(${scored.blocks.positives}/${scored.blocks.n} positive)`,
+  );
+  console.log(
+    `confidence separation — grade: ${JSON.stringify(scored.severity.confidence)}; ` +
+      `disposition: ${JSON.stringify(scored.disposition.confidence)}`,
+  );
+  console.log(
+    `spend $${scored.costUsd.toFixed(6)} (${scored.inputTokens} in / ${scored.outputTokens} out); ` +
+      `latency p50 ${scored.latencyMs.p50?.toFixed(0)}ms p99 ${scored.latencyMs.p99?.toFixed(0)}ms; ` +
+      `models ${JSON.stringify(scored.models)}`,
+  );
+  console.log(`wrote ${workspace}/paid-run-results.jsonl and paid-run-summary.json`);
 }
 
 if (import.meta.main) {
