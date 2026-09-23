@@ -381,7 +381,7 @@ fn day_label(day: Date) -> String {
 }
 
 /// `10am`, `10:30`, `7pm` — a 12-hour clock, minutes only when non-zero.
-fn clock(time: Time, with_meridiem: bool) -> String {
+pub(crate) fn clock(time: Time, with_meridiem: bool) -> String {
     let hour = match time.hour() % 12 {
         0 => 12,
         h => h,

@@ -456,14 +456,7 @@ fn planning_day(
 }
 
 /// One field of a new note's frontmatter (plan review I3, Global Constraint 23).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "P11's cards and P13's notes are its first callers"
-    )
-)]
-pub(crate) enum Field {
+pub enum Field {
     /// A scalar (never a `Node::Seq`/`Node::Map`): written by `yamlemit::safe_dump_block`.
     Scalar(Node),
     /// A collection: written on one line by `write::to_literal`, the flow path `judgment:` uses.
@@ -473,34 +466,40 @@ pub(crate) enum Field {
 /// The one builder for the frontmatter of every note and card this model writes: one line per
 /// field, in the order given. `safe_dump_block` of a whole map would put a nested map or sequence
 /// on several lines, and nothing downstream would stop it reaching disk.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "P11's cards and P13's notes are its first callers"
-    )
-)]
-pub(crate) fn front_matter(fields: &[(&str, Field)]) -> String {
+///
+/// **Refuses** (P11, P6 review m4) a `Scalar` holding a collection, and any field whose emitted
+/// text is not exactly one line: a string with a line break in it (a calendar title is verbatim)
+/// is written by PyYAML's emitter as a quoted scalar spread over several lines, in block and in
+/// flow style alike. Callers make their values one line first ([`single_line`]); this is the
+/// guard that nothing multi-line reaches a note.
+pub(crate) fn front_matter(fields: &[(&str, Field)]) -> Result<String, String> {
     let mut out = String::new();
     for (key, field) in fields {
-        match field {
+        let emitted = match field {
+            Field::Scalar(Node::Seq(_) | Node::Map(_)) => {
+                return Err(format!("{key}: a collection written as a scalar"));
+            }
             Field::Scalar(node) => {
-                debug_assert!(
-                    !matches!(node, Node::Seq(_) | Node::Map(_)),
-                    "{key}: a collection"
-                );
-                out.push_str(&yamlemit::safe_dump_block(&Node::map(vec![(
-                    key,
-                    node.clone(),
-                )])));
+                yamlemit::safe_dump_block(&Node::map(vec![(key, node.clone())]))
             }
             Field::Flow(value) => {
                 let literal = crate::write::to_literal(&crate::yaml::from_json(value));
-                out.push_str(&format!("{key}: {literal}\n"));
+                format!("{key}: {literal}\n")
             }
+        };
+        if pystr::splitlines(&emitted).len() != 1 {
+            return Err(format!("{key}: would span more than one frontmatter line"));
         }
+        out.push_str(&emitted);
     }
-    out
+    Ok(out)
+}
+
+/// `text` with every line break (`str.splitlines`' set: LF, CR, U+2028, U+0085, ...) replaced
+/// by one space and nothing else changed — the one change a verbatim title needs to be written
+/// on one frontmatter line.
+pub(crate) fn single_line(text: &str) -> String {
+    pystr::splitlines(text).join(" ")
 }
 
 // =============================================================================================
@@ -2378,6 +2377,511 @@ fn window_proposal(
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// P11 — the `commitment-check` card (§5.2, §5.4, §5.5).
+// ---------------------------------------------------------------------------------------------
+
+/// The card kind this piece files (one of [`LOCAL_CARD_KINDS`]).
+pub const COMMITMENT_CHECK: &str = "commitment-check";
+
+/// The actor of every card and every journal record about one (§5.2); `provenance::is_agent` is
+/// a `starts_with` test, so no new `journal::VIAS` entry is needed.
+pub const CARD_ACTOR: &str = "agent:commitments";
+
+/// The most `commitment-check` cards first proposed on any one day (R9).
+pub const CHECKS_PER_DAY: i64 = 5;
+
+/// The longest title a card's own title quotes (§5.2 `{title≤40}`).
+const CARD_TITLE_MAX: usize = 40;
+
+/// The card's first paragraph — what `surface::first_paragraph` shows as its `why`.
+const CHECK_WHY: &str =
+    "**Is this part of your week?** Knowlu found it repeating on your calendar.";
+const CHECK_CLOSING: &str = "Reject and it's ignored. Either way you won't be asked again.";
+const HARD_SENTENCE: &str = "Approve and Knowlu never plans anything over it.";
+const SOFT_SENTENCE: &str =
+    "Approve and Knowlu counts it as busy; an event suggestion may overlap it, and will say so.";
+const OPTIONAL_SENTENCE: &str =
+    "Approve and Knowlu shows it on your week; it plans around it only if nothing else fits.";
+const WINDOW_SENTENCE: &str =
+    "Approve and Knowlu plans your days in these hours. You can change them any time.";
+const CHANGE_WHY: &str =
+    "**Has this changed?** Your calendar now shows it differently from your note.";
+const CHANGE_CLOSING: &str = "Approve and Knowlu updates the note. Reject and it stays as it \
+is. Either way you won't be asked again.";
+
+/// A change to a confirmed commitment (§5.4), detected by P12 and filed here. `target` is
+/// `commitments/<file>.md`; `source_uid` and `title` are the note's; `change` holds the new values
+/// of the changed fields only; `was` the note's current values of the same fields, an absent one
+/// as `null`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub target: String,
+    pub source_uid: String,
+    pub title: String,
+    pub change: Mapping,
+    pub was: Mapping,
+}
+
+/// File one local-only card: the **only** function in this piece that writes into `approvals/`
+/// (§5.2 "One constructor", R20). Refuses a `kind` outside [`LOCAL_CARD_KINDS`] before touching
+/// anything, so every card it writes is one C3′'s sync keeps off the wire.
+///
+/// The frontmatter is `type: approval`, `kind`, `title`, `status: pending`, then `fields` in the
+/// order given, then `proposed_at` and `first_proposed_at` (both today, two distinct dates — never
+/// an anchor), `expires: null`, `snooze_until: null`, `created_by: agent:commitments`, every line
+/// through [`front_matter`] (Global Constraint 23), which refuses anything that would span two
+/// lines. The file is `approvals/<kind>-<slugify(title)>.md`, `-2`, `-3` on a collision **in
+/// `approvals/` only** (an archived card of the same name is no collision). The journal's actor is
+/// `agent:commitments` whatever `ctx` carries; its `via` and `run_id` are kept.
+#[allow(clippy::too_many_arguments)]
+pub fn file_card(
+    vault: &Path,
+    kind: &str,
+    fields: Vec<(&str, Field)>,
+    title: &str,
+    body: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<PathBuf, String> {
+    if !LOCAL_CARD_KINDS.contains(&kind) {
+        return Err(format!("{kind}: not a local card kind, not filed"));
+    }
+    let mut all: Vec<(&str, Field)> = vec![
+        ("type", Field::Scalar(Node::text("approval"))),
+        ("kind", Field::Scalar(Node::text(kind))),
+        ("title", Field::Scalar(Node::text(title))),
+        ("status", Field::Scalar(Node::text("pending"))),
+    ];
+    all.extend(fields);
+    all.extend([
+        ("proposed_at", Field::Scalar(Node::Date(today))),
+        ("first_proposed_at", Field::Scalar(Node::Date(today))),
+        ("expires", Field::Scalar(Node::Null)),
+        ("snooze_until", Field::Scalar(Node::Null)),
+        ("created_by", Field::Scalar(Node::text(CARD_ACTOR))),
+    ]);
+    let front = front_matter(&all).map_err(|e| format!("card not filed ({title}): {e}"))?;
+    let text = format!("---\n{front}---\n\n{body}");
+
+    let folder = vault.join("approvals");
+    std::fs::create_dir_all(&folder).map_err(|e| format!("card not filed ({title}): {e}"))?;
+    let stem = format!("{kind}-{}", crate::ingest::slugify(title));
+    let mut name = format!("{stem}.md");
+    let mut suffix = 2;
+    while folder.join(&name).exists() {
+        name = format!("{stem}-{suffix}.md");
+        suffix += 1;
+    }
+    crate::write::create(
+        vault,
+        &format!("approvals/{name}"),
+        &text,
+        &ctx.with_actor(CARD_ACTOR),
+        journal,
+        None,
+    )
+    .map_err(|e| format!("card not filed ({title}): {e}"))
+}
+
+/// `Mon`, `Tue`, … for a `DAY_KEYS` index.
+fn day_name(i: usize) -> String {
+    let key = DAY_KEYS[i];
+    key[..1].to_uppercase() + &key[1..]
+}
+
+/// `Mon/Wed/Fri`; a run of three or more consecutive days collapses to `Mon–Fri` (`Mon–Wed/Fri`).
+fn days_label(days: &[DayKey]) -> String {
+    let mut idx: Vec<usize> = days
+        .iter()
+        .filter_map(|d| DAY_KEYS.iter().position(|k| k == d))
+        .collect();
+    idx.sort_unstable();
+    idx.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i;
+        while j + 1 < idx.len() && idx[j + 1] == idx[j] + 1 {
+            j += 1;
+        }
+        if j - i >= 2 {
+            parts.push(format!("{}\u{2013}{}", day_name(idx[i]), day_name(idx[j])));
+        } else {
+            parts.extend((i..=j).map(|k| day_name(idx[k])));
+        }
+        i = j + 1;
+    }
+    parts.join("/")
+}
+
+/// F2's range: `12–12:50pm`, `8am–10pm`, `9:30–10:45am` (the start carries am/pm only when it
+/// is on the other side of noon).
+fn range_label(start: Time, end: Time) -> String {
+    let split = (start.hour() < 12) != (end.hour() < 12);
+    format!(
+        "{}\u{2013}{}",
+        crate::eventemit::clock(start, split),
+        crate::eventemit::clock(end, true)
+    )
+}
+
+/// `Mon/Wed/Fri 12–12:50pm` from the first entry; ` +1 more time` (` +N more times`) for the rest.
+fn meets_label(meets: &[Meet]) -> Option<String> {
+    let first = meets.first()?;
+    let mut out = format!("{} {}", days_label(&first.days), range_label(first.start, first.end));
+    match meets.len() - 1 {
+        0 => {}
+        1 => out.push_str(" +1 more time"),
+        n => out.push_str(&format!(" +{n} more times")),
+    }
+    Some(out)
+}
+
+/// A title as a card's title quotes it: one line, at most 40 characters.
+fn short_title(title: &str) -> String {
+    let short = crate::judge::one_line(title, CARD_TITLE_MAX);
+    let short = short.trim_end();
+    if short.is_empty() {
+        "(untitled)".to_string()
+    } else {
+        short.to_string()
+    }
+}
+
+fn question(kind: &str) -> &'static str {
+    match kind {
+        "class" => "a class?",
+        "lab" => "a lab?",
+        "work" => "work?",
+        "club" => "a club?",
+        "meeting" => "a meeting?",
+        _ => "part of your week?",
+    }
+}
+
+/// §5.2's title: `CS 100 · Mon/Wed/Fri 12–12:50pm · a class?`, or the window's
+/// `Your day · Mon–Fri 8am–10pm · plan in this window?`.
+fn proposal_title(p: &Proposal) -> String {
+    let (name, ask) = if p.is_window() {
+        (WINDOW_TITLE.to_string(), "plan in this window?")
+    } else {
+        (short_title(&p.title), question(&p.kind))
+    };
+    match meets_label(&p.meets) {
+        Some(when) => format!("{name} · {when} · {ask}"),
+        None => format!("{name} · {ask}"),
+    }
+}
+
+fn meets_json(meets: &[Meet]) -> serde_json::Value {
+    serde_json::Value::Array(
+        meets
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "days": m.days.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                    "start": hm(m.start),
+                    "end": hm(m.end),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn opt_json(text: Option<&str>) -> serde_json::Value {
+    text.map(single_line)
+        .filter(|t| !t.trim().is_empty())
+        .map_or(serde_json::Value::Null, serde_json::Value::String)
+}
+
+/// The card's `commitment:` mapping (§5.2): `kind`, `level`, `title`, `course`, `meets`, `where`,
+/// `from`, `until` — absent ones `null` — or, for the window, `kind: planning-day`, `title` and
+/// `window` (§2.4's shape). The title is verbatim but for line breaks, which become spaces.
+fn proposal_commitment(p: &Proposal) -> serde_json::Value {
+    if p.is_window() {
+        return serde_json::json!({
+            "kind": PLANNING_DAY,
+            "title": single_line(&p.title),
+            "window": meets_json(&p.meets),
+        });
+    }
+    serde_json::json!({
+        "kind": p.kind,
+        "level": p.level.as_str(),
+        "title": single_line(&p.title),
+        "course": opt_json(p.course.as_deref()),
+        "meets": meets_json(&p.meets),
+        "where": opt_json(p.where_.as_deref()),
+        "from": date_json(p.from),
+        "until": date_json(p.until),
+    })
+}
+
+fn proposal_body(p: &Proposal) -> String {
+    let sentence = if p.is_window() {
+        WINDOW_SENTENCE
+    } else {
+        match p.level {
+            Level::Hard => HARD_SENTENCE,
+            Level::Soft => SOFT_SENTENCE,
+            Level::Optional => OPTIONAL_SENTENCE,
+        }
+    };
+    let mut parts = vec![CHECK_WHY.to_string(), sentence.to_string()];
+    if let Some(place) = p.where_.as_deref().map(single_line).filter(|w| !w.trim().is_empty()) {
+        parts.push(format!("Where: {}", place.trim()));
+    }
+    parts.push(CHECK_CLOSING.to_string());
+    parts.join("\n\n") + "\n"
+}
+
+/// A mapping as the card writes it and a reader parses it back, then as canonical flow text
+/// (`safe_dump_flow(parse(value))`, §5.4) — so a `Change` and a card on disk compare equal.
+fn canonical(value: &Value) -> String {
+    let literal = crate::write::to_literal(&crate::yaml::from_json(&crate::yaml::to_json(value)));
+    yamlemit::safe_dump_flow(&crate::write::parse_literal(&literal))
+}
+
+/// `Dec 4`.
+fn short_date(day: Date) -> String {
+    format!("{} {}", day.strftime("%b"), day.day())
+}
+
+fn value_meets(value: Option<&Value>) -> Option<Vec<Meet>> {
+    match value {
+        Some(Value::Sequence(items)) => {
+            let meets: Vec<Meet> = items.iter().filter_map(|v| parse_entry(v).ok()).collect();
+            (!meets.is_empty()).then_some(meets)
+        }
+        _ => None,
+    }
+}
+
+fn value_date(value: Option<&Value>) -> Option<Date> {
+    value.and_then(text).and_then(|t| t.trim().parse::<Date>().ok())
+}
+
+/// §5.4's title: `CS 100 now meets Tue/Thu 9:30–10:45am · update?` when `meets` changed, else
+/// `CS 100 ends Dec 4 · update?` for `until`, else `CS 100 is now in Room 2 · update?` for
+/// `where`, else `CS 100 changed · update?`.
+fn change_title(c: &Change) -> String {
+    let name = short_title(&c.title);
+    if let Some(when) = value_meets(get(&c.change, "meets")).as_deref().and_then(meets_label) {
+        return format!("{name} now meets {when} · update?");
+    }
+    if let Some(until) = value_date(get(&c.change, "until")) {
+        return format!("{name} ends {} · update?", short_date(until));
+    }
+    if let Some(place) = get(&c.change, "where").and_then(text) {
+        return format!("{name} is now in {} · update?", crate::judge::one_line(&place, 40));
+    }
+    format!("{name} changed · update?")
+}
+
+/// One `Field: now …, was …` line per changed field the student can read (`source_uid` is not
+/// one).
+fn change_body(c: &Change) -> String {
+    let show = |field: &str, value: Option<&Value>| -> String {
+        match field {
+            "meets" => value_meets(value).as_deref().and_then(meets_label),
+            "until" => value_date(value).map(short_date),
+            _ => value.and_then(text).map(|t| crate::judge::one_line(&t, 80)),
+        }
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "none".to_string())
+    };
+    let mut parts = vec![CHANGE_WHY.to_string()];
+    for (key, value) in &c.change {
+        let Some(field) = text(key) else { continue };
+        if field == "source_uid" {
+            continue;
+        }
+        let label = capitalised(&field);
+        parts.push(format!(
+            "{label}: now {}, was {}.",
+            show(&field, Some(value)),
+            show(&field, get(&c.was, &field))
+        ));
+    }
+    parts.push(CHANGE_CLOSING.to_string());
+    parts.join("\n\n") + "\n"
+}
+
+/// `meets` → `Meets`.
+fn capitalised(field: &str) -> String {
+    let mut chars = field.chars();
+    chars.next().map_or_else(String::new, |c| c.to_uppercase().collect::<String>() + chars.as_str())
+}
+
+/// What `approvals/` and `archive/` already ask, read once at the start of [`emit_checks`].
+#[derive(Default)]
+struct Asked {
+    /// Every approval's `source_uid`, but a `superseded` card's (§5.2, M-f).
+    keys: BTreeSet<String>,
+    /// A card whose `source_uid` starts `window:` and is not `superseded` exists (plan review C1).
+    window: bool,
+    /// `(target, canonical change)` of every change card not `superseded` (§5.4, §5.5).
+    changes: BTreeSet<(String, String)>,
+    /// `commitment-check` cards whose `first_proposed_at` is today, whatever their status.
+    today: i64,
+}
+
+fn asked(vault: &Path, today: Date) -> Asked {
+    let mut out = Asked::default();
+    for folder in ["approvals", "archive"] {
+        let dir = vault.join(folder);
+        if !dir.is_dir() {
+            continue;
+        }
+        for path in crate::approvals::sorted_md(&dir) {
+            let Ok(raw) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&raw) else { continue };
+            let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+            if field("type") != "approval" {
+                continue;
+            }
+            let is_check = field("kind") == COMMITMENT_CHECK;
+            if is_check
+                && crate::approvals::as_date(get(&meta, "first_proposed_at")) == Some(today)
+            {
+                out.today += 1;
+            }
+            if field("status") == "superseded" {
+                continue;
+            }
+            let key = field("source_uid");
+            if key.starts_with(WINDOW_PREFIX) {
+                out.window = true;
+            }
+            if !key.is_empty() {
+                out.keys.insert(key);
+            }
+            let target = field("target");
+            if is_check && !target.is_empty() {
+                let change = get(&meta, "change").cloned().unwrap_or(Value::Null);
+                out.changes.insert((target, canonical(&change)));
+            }
+        }
+    }
+    out
+}
+
+/// §5.2's order within the proposals: `class`, `lab`, `work`, the window, `club`, `meeting`, any
+/// other kind; then the first meeting's `(day, start)`; then `source_uid`.
+fn proposal_order(p: &Proposal) -> (usize, usize, Time, &str) {
+    let rank = if p.is_window() {
+        3
+    } else {
+        match p.kind.as_str() {
+            "class" => 0,
+            "lab" => 1,
+            "work" => 2,
+            "club" => 4,
+            "meeting" => 5,
+            _ => 6,
+        }
+    };
+    let (day, start) = p.meets.first().map_or((DAY_KEYS.len(), Time::midnight()), |m| {
+        let day = m.days.iter().filter_map(|d| DAY_KEYS.iter().position(|k| k == d)).min();
+        (day.unwrap_or(DAY_KEYS.len()), m.start)
+    });
+    (rank, day, start, p.source_uid.as_str())
+}
+
+/// File today's `commitment-check` cards (§5.2, §5.4): change cards first, then proposals in
+/// [`proposal_order`]. Returns `(paths, count, warnings)`.
+///
+/// At most `min(budget, 5 − commitment-check cards in approvals/ and archive/ first proposed
+/// today)` are filed, so `defer_over_budget` never has overflow to snooze (R9, constraint 7).
+/// **Asked once** (§5.5): one snapshot of `approvals/` and `archive/` is read on entry and every
+/// key and change filed in this call joins it, so one key never files twice in a run —
+/// - a proposal is skipped when any card not `superseded` has its `source_uid` (M-f);
+/// - the window proposal is skipped while any card not `superseded` has a `window:` key,
+///   **whatever its routine keys** — the window's `source_uid` changes as routines come and go,
+///   so it is never compared by its exact value (P9 M6, plan review C1);
+/// - a change is skipped when a card not `superseded` has the same `target` and the same
+///   canonical `change` text.
+///
+/// An `office-hours` proposal is never filed (R8; P9's `for_cards` already leaves them out). A
+/// card that cannot be filed is a warning and the next one is tried.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_checks(
+    vault: &Path,
+    proposals: &[Proposal],
+    changes: &[Change],
+    today: Date,
+    budget: i64,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (Vec<PathBuf>, usize, Vec<String>) {
+    let mut filed: Vec<PathBuf> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut seen = asked(vault, today);
+    let allowance = budget.min(CHECKS_PER_DAY - seen.today).max(0) as usize;
+    if allowance == 0 {
+        return (filed, 0, warnings);
+    }
+
+    let mut ordered_changes: Vec<(String, &Change)> = changes
+        .iter()
+        .map(|c| (canonical(&Value::Mapping(c.change.clone())), c))
+        .collect();
+    ordered_changes.sort_by(|a, b| (&a.1.target, &a.0).cmp(&(&b.1.target, &b.0)));
+    for (text_of_change, change) in ordered_changes {
+        if filed.len() >= allowance {
+            break;
+        }
+        let asked_key = (change.target.clone(), text_of_change);
+        if seen.changes.contains(&asked_key) {
+            continue;
+        }
+        let fields = vec![
+            ("source_uid", Field::Scalar(Node::text(&change.source_uid))),
+            ("target", Field::Scalar(Node::text(&change.target))),
+            ("change", Field::Flow(crate::yaml::to_json(&Value::Mapping(change.change.clone())))),
+            ("was", Field::Flow(crate::yaml::to_json(&Value::Mapping(change.was.clone())))),
+        ];
+        let title = change_title(change);
+        match file_card(vault, COMMITMENT_CHECK, fields, &title, &change_body(change), today, ctx, journal) {
+            Ok(path) => {
+                seen.changes.insert(asked_key);
+                filed.push(path);
+            }
+            Err(err) => warnings.push(err),
+        }
+    }
+
+    let mut ordered: Vec<&Proposal> =
+        proposals.iter().filter(|p| p.kind != "office-hours").collect();
+    ordered.sort_by(|a, b| proposal_order(a).cmp(&proposal_order(b)));
+    for proposal in ordered {
+        if filed.len() >= allowance {
+            break;
+        }
+        let window = proposal.is_window();
+        if (window && seen.window) || seen.keys.contains(&proposal.source_uid) {
+            continue;
+        }
+        let fields = vec![
+            ("source_uid", Field::Scalar(Node::text(&proposal.source_uid))),
+            ("commitment", Field::Flow(proposal_commitment(proposal))),
+        ];
+        let title = proposal_title(proposal);
+        match file_card(vault, COMMITMENT_CHECK, fields, &title, &proposal_body(proposal), today, ctx, journal) {
+            Ok(path) => {
+                seen.keys.insert(proposal.source_uid.clone());
+                seen.window |= window;
+                filed.push(path);
+            }
+            Err(err) => warnings.push(err),
+        }
+    }
+    let count = filed.len();
+    (filed, count, warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2806,7 +3310,7 @@ mod tests {
             .map(|(k, n)| (*k, Field::Scalar(n.clone())))
             .collect();
         assert_eq!(
-            front_matter(&fields),
+            front_matter(&fields).unwrap(),
             yamlemit::safe_dump_block(&Node::map(scalars.clone()))
         );
 
@@ -2822,7 +3326,7 @@ mod tests {
             ("meets", Field::Flow(meets.clone())),
             ("commitment", Field::Flow(commitment.clone())),
         ];
-        let front = front_matter(&fields);
+        let front = front_matter(&fields).unwrap();
         let lines: Vec<&str> = front.lines().collect();
         assert_eq!(lines.len(), 3, "{front:?}");
         assert!(
@@ -5706,5 +6210,563 @@ mod conflicts_tests {
                 .any(|(c, level)| c.title == "Office Hours" && *level == Level::Optional),
             "an optional note must still be visible to conflicts: {day_conflicts:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod card_tests {
+    //! P11: `file_card` and `emit_checks` (§5.2, §5.4, §5.5). Every title, room and key is
+    //! invented.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 24);
+
+    fn vault(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-card-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ctx() -> WriteContext {
+        WriteContext::new("agent:rank", "cli")
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn meet(days: &[DayKey], start: Time, end: Time) -> Meet {
+        Meet { days: days.to_vec(), start, end }
+    }
+
+    fn proposal(kind: &str, title: &str, uid: &str, meets: Vec<Meet>) -> Proposal {
+        Proposal {
+            kind: kind.to_string(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.to_string(),
+            course: None,
+            meets,
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: uid.to_string(),
+        }
+    }
+
+    fn cs100() -> Proposal {
+        Proposal {
+            course: Some("cs-100".into()),
+            where_: Some("Room 101".into()),
+            from: Some(date(2026, 8, 19)),
+            until: Some(date(2026, 12, 4)),
+            ..proposal(
+                "class",
+                "CS 100",
+                "gcal-series:cs100",
+                vec![meet(&["mon", "wed", "fri"], t(12, 0), t(12, 50))],
+            )
+        }
+    }
+
+    fn window(uid: &str) -> Proposal {
+        Proposal {
+            level: Level::Optional,
+            ..proposal(
+                PLANNING_DAY,
+                WINDOW_TITLE,
+                uid,
+                vec![meet(&["mon", "tue", "wed", "thu", "fri"], t(8, 0), t(22, 0))],
+            )
+        }
+    }
+
+    fn emit(v: &Path, proposals: &[Proposal], changes: &[Change], budget: i64) -> (Vec<PathBuf>, usize, Vec<String>) {
+        let mut journal = Journal::new(v);
+        emit_checks(v, proposals, changes, TODAY, budget, &ctx(), &mut journal)
+    }
+
+    fn read(path: &Path) -> (Mapping, String, String) {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        let (meta, body) = split_frontmatter(&raw).unwrap();
+        (meta, body, raw)
+    }
+
+    fn field(meta: &Mapping, key: &str) -> String {
+        field_text(meta, key).unwrap_or_default()
+    }
+
+    fn titles(paths: &[PathBuf]) -> Vec<String> {
+        paths.iter().map(|p| field(&read(p).0, "title")).collect()
+    }
+
+    /// The frontmatter's lines, `id:` left out (it is minted).
+    fn front_lines(raw: &str) -> Vec<String> {
+        raw.split("---\n").nth(1).unwrap().lines().filter(|l| !l.starts_with("id: ")).map(str::to_string).collect()
+    }
+
+    fn journal_text(v: &Path) -> String {
+        let dir = v.join("state").join("journal");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return String::new() };
+        entries.map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap()).collect()
+    }
+
+    fn mapping(yaml: &str) -> Mapping {
+        match serde_yaml_ng::from_str::<Value>(yaml).unwrap() {
+            Value::Mapping(m) => m,
+            other => panic!("not a mapping: {other:?}"),
+        }
+    }
+
+    fn meets_change() -> Change {
+        Change {
+            target: "commitments/cs-100.md".into(),
+            source_uid: "gcal-series:cs100".into(),
+            title: "CS 100".into(),
+            change: mapping("meets: [{days: [tue, thu], start: \"09:30\", end: \"10:45\"}]"),
+            was: mapping("meets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]"),
+        }
+    }
+
+    fn until_change() -> Change {
+        Change {
+            change: mapping("until: \"2026-12-04\""),
+            was: mapping("until: null"),
+            ..meets_change()
+        }
+    }
+
+    /// A card written by hand into `folder`, as an earlier run would have filed it.
+    fn card(v: &Path, folder: &str, name: &str, front: &str) {
+        let dir = v.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), format!("---\ntype: approval\nkind: commitment-check\n{front}---\n\nInvented.\n")).unwrap();
+    }
+
+    // --- file_card ------------------------------------------------------------------------
+
+    #[test]
+    fn file_card_refuses_a_kind_outside_local_card_kinds() {
+        let v = vault("refuse");
+        for kind in ["event-check", "amend"] {
+            let mut journal = Journal::new(&v);
+            let filed = file_card(
+                &v,
+                kind,
+                vec![("source_uid", Field::Scalar(Node::text("gcal-series:x")))],
+                "Invented · a class?",
+                "Body.\n",
+                TODAY,
+                &ctx(),
+                &mut journal,
+            );
+            assert!(filed.is_err(), "{kind}: {filed:?}");
+        }
+        let approvals = v.join("approvals");
+        assert!(!approvals.exists() || std::fs::read_dir(&approvals).unwrap().next().is_none());
+        assert_eq!(journal_text(&v), "");
+    }
+
+    #[test]
+    fn front_matter_refuses_a_value_that_would_span_two_lines() {
+        // A bare LF is written as a quoted scalar over two lines, in block and in flow: refused.
+        let title = "CS 100\nLecture";
+        let scalar = front_matter(&[("title", Field::Scalar(Node::text(title)))]);
+        assert!(scalar.is_err(), "{scalar:?}");
+        let flow = front_matter(&[("commitment", Field::Flow(serde_json::json!({"title": title})))]);
+        assert!(flow.is_err(), "{flow:?}");
+        // Whatever the emitter does with the rest, nothing multi-line gets through.
+        for title in ["CS 100\r\nLecture", "CS 100\rLecture", "CS 100\u{2028}Lecture", "CS 100\u{85}Lecture"] {
+            for fields in [
+                vec![("title", Field::Scalar(Node::text(title)))],
+                vec![("commitment", Field::Flow(serde_json::json!({"title": title})))],
+            ] {
+                if let Ok(text) = front_matter(&fields) {
+                    assert_eq!(pystr::splitlines(&text).len(), 1, "{title:?}: {text:?}");
+                    let (meta, _) = split_frontmatter(&format!("---\n{text}---\n")).unwrap();
+                    assert_eq!(meta.len(), 1, "{text:?}");
+                }
+            }
+        }
+        let collection = front_matter(&[("meets", Field::Scalar(Node::Seq(vec![Node::text("mon")])))]);
+        assert!(collection.is_err());
+        assert_eq!(single_line("CS 100\r\nLecture\u{2028}A"), "CS 100 Lecture A");
+        assert_eq!(single_line("CS  100"), "CS  100", "nothing but line breaks changes");
+    }
+
+    #[test]
+    fn a_calendar_title_with_a_line_break_is_filed_on_one_line() {
+        let v = vault("newline");
+        let p = proposal("club", "Chess\nClub", "gcal-series:chess", vec![meet(&["wed"], t(18, 0), t(19, 0))]);
+        let (paths, n, warnings) = emit(&v, &[p], &[], 15);
+        assert_eq!((n, warnings.len()), (1, 0), "{warnings:?}");
+        let (meta, _, raw) = read(&paths[0]);
+        assert_eq!(field(&meta, "title"), "Chess Club · Wed 6–7pm · a club?");
+        let lines = front_lines(&raw);
+        assert_eq!(lines.iter().filter(|l| l.starts_with("commitment: ")).count(), 1);
+        let Some(Value::Mapping(c)) = get(&meta, "commitment") else { panic!("{raw}") };
+        assert_eq!(field(c, "title"), "Chess Club");
+    }
+
+    // --- the proposal card ----------------------------------------------------------------
+
+    #[test]
+    fn a_class_proposal_files_one_card_with_the_exact_title_frontmatter_and_body() {
+        let v = vault("class");
+        let (paths, n, warnings) = emit(&v, &[cs100()], &[], 15);
+        assert_eq!((n, paths.len()), (1, 1));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            paths[0],
+            v.join("approvals").join("commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md")
+        );
+        let (meta, body, raw) = read(&paths[0]);
+        assert!(!field(&meta, "id").is_empty());
+        let commitment_line = "commitment: {course: cs-100, from: '2026-08-19', kind: class, level: hard, \
+             meets: [{days: [mon, wed, fri], end: '12:50', start: '12:00'}], title: CS 100, \
+             until: '2026-12-04', where: Room 101}";
+        assert_eq!(
+            front_lines(&raw),
+            vec![
+                "type: approval",
+                "kind: commitment-check",
+                "title: CS 100 · Mon/Wed/Fri 12–12:50pm · a class?",
+                "status: pending",
+                "source_uid: gcal-series:cs100",
+                commitment_line,
+                "proposed_at: 2026-09-24",
+                "first_proposed_at: 2026-09-24",
+                "expires: null",
+                "snooze_until: null",
+                "created_by: agent:commitments",
+            ]
+        );
+        let expected: Value = serde_yaml_ng::from_str(
+            "{kind: class, level: hard, title: \"CS 100\", course: cs-100, \
+             meets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}], \
+             where: \"Room 101\", from: \"2026-08-19\", until: \"2026-12-04\"}",
+        )
+        .unwrap();
+        assert_eq!(get(&meta, "commitment"), Some(&expected));
+        assert_eq!(
+            body.trim_start_matches('\n'),
+            "**Is this part of your week?** Knowlu found it repeating on your calendar.\n\n\
+             Approve and Knowlu never plans anything over it.\n\n\
+             Where: Room 101\n\n\
+             Reject and it's ignored. Either way you won't be asked again.\n"
+        );
+        let journal = journal_text(&v);
+        assert!(journal.contains("\"agent:commitments\""), "{journal}");
+        assert!(journal.contains("\"create\""), "{journal}");
+    }
+
+    #[test]
+    fn a_soft_proposal_says_it_may_overlap() {
+        let v = vault("soft");
+        let p = proposal("club", "Chess Club", "gcal-series:chess", vec![meet(&["wed"], t(18, 0), t(19, 0))]);
+        let (paths, ..) = emit(&v, &[p], &[], 15);
+        let (_, body, _) = read(&paths[0]);
+        assert!(body.contains("Approve and Knowlu counts it as busy; an event suggestion may overlap it, and will say so."));
+        assert!(!body.contains("Where:"));
+    }
+
+    #[test]
+    fn day_lists_collapse_and_a_second_meeting_says_plus_one_more_time() {
+        assert_eq!(days_label(&["mon", "wed", "fri"]), "Mon/Wed/Fri");
+        assert_eq!(days_label(&["mon", "tue", "wed", "thu", "fri"]), "Mon–Fri");
+        assert_eq!(days_label(&["tue", "thu"]), "Tue/Thu");
+        assert_eq!(days_label(&["tue", "wed"]), "Tue/Wed");
+        assert_eq!(days_label(&["fri", "mon", "tue", "wed"]), "Mon–Wed/Fri");
+        assert_eq!(range_label(t(12, 0), t(12, 50)), "12–12:50pm");
+        assert_eq!(range_label(t(13, 0), t(14, 45)), "1–2:45pm");
+        assert_eq!(range_label(t(8, 0), t(22, 0)), "8am–10pm");
+        let v = vault("plus-one");
+        let lab = proposal(
+            "lab",
+            "CHEM 110 Lab",
+            "gcal-series:chem",
+            vec![meet(&["tue"], t(14, 0), t(16, 50)), meet(&["thu"], t(9, 30), t(10, 45))],
+        );
+        let (paths, ..) = emit(&v, &[lab], &[], 15);
+        assert_eq!(titles(&paths), vec!["CHEM 110 Lab · Tue 2–4:50pm +1 more time · a lab?"]);
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_forty_characters() {
+        let v = vault("long");
+        let long = "An Invented Very Long Meeting Title That Runs On And On";
+        let p = proposal("meeting", long, "gcal-series:long", vec![meet(&["mon"], t(15, 0), t(16, 0))]);
+        let (paths, ..) = emit(&v, &[p], &[], 15);
+        let title = titles(&paths).remove(0);
+        let quoted = title.split(" · ").next().unwrap();
+        assert!(quoted.chars().count() <= 40, "{title}");
+        assert!(title.ends_with(" · Mon 3–4pm · a meeting?"), "{title}");
+    }
+
+    #[test]
+    fn the_window_card_title_reads_your_day() {
+        let v = vault("window");
+        let (paths, ..) = emit(&v, &[window("window:gcal-series:wake,gcal-series:bed")], &[], 15);
+        let (meta, body, raw) = read(&paths[0]);
+        assert_eq!(field(&meta, "title"), "Your day · Mon–Fri 8am–10pm · plan in this window?");
+        assert_eq!(field(&meta, "source_uid"), "window:gcal-series:wake,gcal-series:bed");
+        let lines = front_lines(&raw);
+        let commitment: Vec<&String> = lines.iter().filter(|l| l.starts_with("commitment")).collect();
+        assert_eq!(
+            commitment,
+            vec!["commitment: {kind: planning-day, title: Your day, window: [{days: [mon, tue, wed, thu, fri], end: '22:00', start: '08:00'}]}"]
+        );
+        let expected: Value = serde_yaml_ng::from_str(
+            "{kind: planning-day, title: Your day, window: [{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]}",
+        )
+        .unwrap();
+        assert_eq!(get(&meta, "commitment"), Some(&expected));
+        assert!(body.contains("Approve and Knowlu plans your days in these hours. You can change them any time."));
+    }
+
+    // --- the change card ------------------------------------------------------------------
+
+    #[test]
+    fn a_change_card_carries_target_change_and_was_each_on_one_line() {
+        let v = vault("change");
+        let (paths, n, _) = emit(&v, &[], &[meets_change()], 15);
+        assert_eq!(n, 1);
+        let (meta, body, raw) = read(&paths[0]);
+        assert_eq!(field(&meta, "title"), "CS 100 now meets Tue/Thu 9:30–10:45am · update?");
+        assert_eq!(field(&meta, "source_uid"), "gcal-series:cs100");
+        assert_eq!(field(&meta, "target"), "commitments/cs-100.md");
+        let lines = front_lines(&raw);
+        assert!(lines.contains(&"change: {meets: [{days: [tue, thu], end: '10:45', start: '09:30'}]}".to_string()), "{raw}");
+        assert!(lines.contains(&"was: {meets: [{days: [mon, wed, fri], end: '12:50', start: '12:00'}]}".to_string()), "{raw}");
+        assert_eq!(get(&meta, "change"), Some(&Value::Mapping(meets_change().change)));
+        assert_eq!(get(&meta, "was"), Some(&Value::Mapping(meets_change().was)));
+        assert!(!lines.iter().any(|l| l.starts_with("commitment")));
+        assert!(body.contains("Meets: now Tue/Thu 9:30–10:45am, was Mon/Wed/Fri 12–12:50pm."), "{body}");
+
+        let v = vault("change-until");
+        let (paths, ..) = emit(&v, &[], &[until_change()], 15);
+        let (meta, body, raw) = read(&paths[0]);
+        assert_eq!(field(&meta, "title"), "CS 100 ends Dec 4 · update?");
+        let lines = front_lines(&raw);
+        assert!(lines.contains(&"change: {until: '2026-12-04'}".to_string()), "{raw}");
+        assert!(lines.contains(&"was: {until: null}".to_string()), "{raw}");
+        assert_eq!(get(&meta, "was"), Some(&Value::Mapping(until_change().was)));
+        assert!(body.contains("Until: now Dec 4, was none."), "{body}");
+    }
+
+    // --- the cap and the order ------------------------------------------------------------
+
+    fn clubs(n: usize) -> Vec<Proposal> {
+        (0..n)
+            .map(|i| proposal("club", &format!("Club {i}"), &format!("gcal-series:club{i}"), vec![meet(&["wed"], t(18, 0), t(19, 0))]))
+            .collect()
+    }
+
+    #[test]
+    fn at_most_five_a_day_counted_by_first_proposed_at() {
+        let v = vault("five");
+        let (paths, n, _) = emit(&v, &clubs(7), &[], 15);
+        assert_eq!((paths.len(), n), (5, 5));
+        let (again, ..) = emit(&v, &clubs(7), &[], 15);
+        assert!(again.is_empty(), "the day's five are spent");
+
+        // A card `defer_over_budget` moved to tomorrow still counts today.
+        let v = vault("five-deferred");
+        card(
+            &v,
+            "approvals",
+            "commitment-check-old.md",
+            "title: Old\nstatus: snoozed\nsource_uid: gcal-series:old\nproposed_at: 2026-09-25\n\
+             first_proposed_at: 2026-09-24\nsnooze_until: 2026-09-25\n",
+        );
+        let (paths, ..) = emit(&v, &clubs(7), &[], 15);
+        assert_eq!(paths.len(), 4);
+
+        // One first proposed yesterday does not.
+        let v = vault("five-yesterday");
+        card(
+            &v,
+            "archive",
+            "commitment-check-old.md",
+            "title: Old\nstatus: executed\nsource_uid: gcal-series:old\nproposed_at: 2026-09-23\n\
+             first_proposed_at: 2026-09-23\n",
+        );
+        let (paths, ..) = emit(&v, &clubs(7), &[], 15);
+        assert_eq!(paths.len(), 5);
+    }
+
+    #[test]
+    fn the_budget_caps_below_five() {
+        let v = vault("budget");
+        let (paths, n, _) = emit(&v, &clubs(7), &[], 2);
+        assert_eq!((paths.len(), n), (2, 2));
+        let v = vault("budget-zero");
+        let (paths, ..) = emit(&v, &clubs(7), &[], 0);
+        assert!(paths.is_empty());
+        assert!(!v.join("approvals").exists());
+        let v = vault("budget-negative");
+        assert!(emit(&v, &clubs(7), &[], -3).0.is_empty());
+    }
+
+    #[test]
+    fn order_is_changes_then_class_lab_work_window_club_meeting() {
+        let v = vault("order");
+        let mut ps = vec![
+            proposal("meeting", "Team Sync", "gcal-series:m", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+            proposal("club", "Chess Club", "gcal-series:c", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+            window("window:gcal-series:wake"),
+            proposal("work", "Library Shift", "gcal-series:w", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+            proposal("lab", "CHEM 110 Lab", "gcal-series:l", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+            proposal("class", "BIO 120", "gcal-series:b", vec![meet(&["tue"], t(9, 0), t(10, 0))]),
+            proposal("class", "ART 130", "gcal-series:a", vec![meet(&["mon"], t(11, 0), t(12, 0))]),
+            proposal("class", "MAT 140", "gcal-series:z", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+            proposal("class", "HIS 150", "gcal-series:y", vec![meet(&["mon"], t(9, 0), t(10, 0))]),
+        ];
+        ps.reverse();
+        let mut journal = Journal::new(&v);
+        let (paths, ..) = emit_checks(&v, &ps, &[meets_change()], TODAY, 100, &ctx(), &mut journal);
+        // Five a day: the change, then four classes by (day, start), then source_uid.
+        assert_eq!(
+            titles(&paths),
+            vec![
+                "CS 100 now meets Tue/Thu 9:30–10:45am · update?",
+                "HIS 150 · Mon 9–10am · a class?",
+                "MAT 140 · Mon 9–10am · a class?",
+                "ART 130 · Mon 11am–12pm · a class?",
+                "BIO 120 · Tue 9–10am · a class?",
+            ]
+        );
+        // The next day, the rest in kind order.
+        let mut journal = Journal::new(&v);
+        let tomorrow = TODAY.tomorrow().unwrap();
+        let (paths, ..) = emit_checks(&v, &ps, &[meets_change()], tomorrow, 100, &ctx(), &mut journal);
+        assert_eq!(
+            titles(&paths),
+            vec![
+                "CHEM 110 Lab · Mon 9–10am · a lab?",
+                "Library Shift · Mon 9–10am · work?",
+                "Your day · Mon–Fri 8am–10pm · plan in this window?",
+                "Chess Club · Mon 9–10am · a club?",
+                "Team Sync · Mon 9–10am · a meeting?",
+            ]
+        );
+    }
+
+    #[test]
+    fn office_hours_are_never_filed() {
+        let v = vault("oh");
+        let p = proposal("office-hours", "CS 100 Office Hours", "gcal-series:oh", vec![meet(&["mon"], t(9, 0), t(10, 0))]);
+        assert!(emit(&v, &[p], &[], 15).0.is_empty());
+    }
+
+    // --- asked once -----------------------------------------------------------------------
+
+    #[test]
+    fn a_second_run_files_nothing() {
+        let v = vault("second");
+        let ps = vec![cs100(), window("window:gcal-series:wake")];
+        let (first, ..) = emit(&v, &ps, &[meets_change()], 15);
+        assert_eq!(first.len(), 3);
+        let mut journal = Journal::new(&v);
+        let tomorrow = TODAY.tomorrow().unwrap();
+        let (second, n, warnings) = emit_checks(&v, &ps, &[meets_change()], tomorrow, 15, &ctx(), &mut journal);
+        assert_eq!((second.len(), n, warnings.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn an_answered_or_archived_card_closes_the_question() {
+        let v = vault("answered");
+        card(&v, "archive", "commitment-check-cs-100.md", "status: rejected\nsource_uid: gcal-series:cs100\nfirst_proposed_at: 2026-09-01\n");
+        assert!(emit(&v, &[cs100()], &[], 15).0.is_empty());
+    }
+
+    #[test]
+    fn a_superseded_card_does_not_close_the_question() {
+        let v = vault("superseded");
+        let name = "commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md";
+        card(&v, "archive", name, "status: superseded\nsource_uid: gcal-series:cs100\nfirst_proposed_at: 2026-09-01\n");
+        let (paths, ..) = emit(&v, &[cs100()], &[], 15);
+        assert_eq!(paths, vec![v.join("approvals").join(name)], "the base name: collisions are checked in approvals/ only");
+    }
+
+    #[test]
+    fn a_name_taken_in_approvals_takes_dash_two() {
+        let v = vault("dash-two");
+        card(&v, "approvals", "commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md", "status: pending\nsource_uid: gcal-series:other\nfirst_proposed_at: 2026-09-01\n");
+        let (paths, ..) = emit(&v, &[cs100()], &[], 15);
+        assert_eq!(paths, vec![v.join("approvals").join("commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class-2.md")]);
+    }
+
+    #[test]
+    fn one_key_from_google_and_ics_is_one_proposal_and_one_card() {
+        let v = vault("twins");
+        let (paths, n, warnings) = emit(&v, &[cs100(), cs100()], &[], 15);
+        assert_eq!((paths.len(), n), (1, 1));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (paths, ..) = emit(&v, &[window("window:a"), window("window:a,b")], &[], 15);
+        assert_eq!(paths.len(), 1, "one window card per run, whatever its keys");
+    }
+
+    #[test]
+    fn a_pending_window_card_blocks_a_window_proposal_with_new_routine_keys() {
+        let v = vault("window-pending");
+        card(&v, "approvals", "commitment-check-your-day.md", "status: pending\nsource_uid: \"window:gcal-series:wake\"\nfirst_proposed_at: 2026-09-01\n");
+        let fresh = window("window:gcal-series:wake,gcal-series:bed");
+        assert!(emit(&v, &[fresh.clone()], &[], 15).0.is_empty());
+        // Answered and archived, it still blocks; withdrawn (superseded), it does not.
+        let v = vault("window-archived");
+        card(&v, "archive", "commitment-check-your-day.md", "status: rejected\nsource_uid: \"window:gcal-series:wake\"\nfirst_proposed_at: 2026-09-01\n");
+        assert!(emit(&v, &[fresh.clone()], &[], 15).0.is_empty());
+        let v = vault("window-superseded");
+        card(&v, "archive", "commitment-check-your-day.md", "status: superseded\nsource_uid: \"window:gcal-series:wake\"\nfirst_proposed_at: 2026-09-01\n");
+        assert_eq!(emit(&v, &[fresh], &[], 15).0.len(), 1);
+    }
+
+    #[test]
+    fn the_same_change_is_never_asked_twice_and_a_different_one_is() {
+        let v = vault("change-once");
+        assert_eq!(emit(&v, &[], &[until_change()], 15).0.len(), 1);
+        let tomorrow = TODAY.tomorrow().unwrap();
+        let mut journal = Journal::new(&v);
+        let (again, ..) = emit_checks(&v, &[], &[until_change(), until_change()], tomorrow, 15, &ctx(), &mut journal);
+        assert!(again.is_empty());
+        let mut journal = Journal::new(&v);
+        let later = Change { change: mapping("until: \"2026-12-11\""), ..until_change() };
+        let (different, ..) = emit_checks(&v, &[], &[later], tomorrow, 15, &ctx(), &mut journal);
+        assert_eq!(titles(&different), vec!["CS 100 ends Dec 11 · update?"]);
+        // The same change in one call is filed once.
+        let v = vault("change-twice-in-a-call");
+        assert_eq!(emit(&v, &[], &[meets_change(), meets_change()], 15).0.len(), 1);
+    }
+
+    #[test]
+    fn a_superseded_change_card_does_not_close_its_change() {
+        let v = vault("change-superseded");
+        card(
+            &v,
+            "archive",
+            "commitment-check-cs-100-ends-dec-4-update.md",
+            "status: superseded\nsource_uid: gcal-series:cs100\ntarget: commitments/cs-100.md\n\
+             change: {until: '2026-12-04'}\nwas: {until: null}\nfirst_proposed_at: 2026-09-01\n",
+        );
+        let reasked = Change { was: mapping("until: \"2026-12-18\""), ..until_change() };
+        let (paths, ..) = emit(&v, &[], &[reasked], 15);
+        assert_eq!(paths.len(), 1);
+        let (meta, ..) = read(&paths[0]);
+        assert_eq!(get(&meta, "was"), Some(&Value::Mapping(mapping("until: \"2026-12-18\""))));
+        // Pending with the same change, it closes it.
+        let v = vault("change-pending");
+        card(
+            &v,
+            "approvals",
+            "commitment-check-cs-100-ends-dec-4-update.md",
+            "status: pending\nsource_uid: gcal-series:cs100\ntarget: commitments/cs-100.md\n\
+             change: {until: '2026-12-04'}\nwas: {until: null}\nfirst_proposed_at: 2026-09-01\n",
+        );
+        assert!(emit(&v, &[], &[until_change()], 15).0.is_empty());
     }
 }
