@@ -1,8 +1,11 @@
 # The cost matrices — a proposal for ratification (T0)
 
-**Date:** 2026-09-22. **Status: PROPOSED, not ruled.** Quinn asked to address these properly rather
-than guess, so this works every cell out from stated principles and brings the result back for a
-yes, a no, or an edit. Nothing here is in `score.ts` yet.
+**Date:** 2026-09-22. **Status: RULED by Quinn 2026-09-22** ("looks good"). Quinn asked to address
+these properly rather than guess, so this works every cell out from stated principles and brought
+the result back for a yes, a no, or an edit. §9 below records the `unsure` and `completion` cells
+the controller ruled the same day for the two things this note left open (event's fourth verdict,
+and the `completion` tier this note's §5 flags but does not price as a *classification* cost). All
+42 off-diagonal cells (event's 12, email's 30) are now in `cloud/eval/score.ts`'s `COST` map.
 
 **What a cost matrix is here.** Not a measurement. A statement of how bad each mistake is *in units
 of the other mistakes*. The numbers only have to be right relative to each other, because what they
@@ -162,3 +165,57 @@ threshold result and its derivation are carried from
 `docs/notes/2026-09-22-confidence-calibration-and-the-floor.md` §4, which holds the citation and
 date. No external number is introduced here; every value in this note is a preference, not a
 measurement, and that is what makes it Quinn's to rule.
+
+## 9. Rulings after T0: the cells this note left open
+
+This note's §3 (event) covers only `obligation`/`opportunity`/`drop`, and its §4 (email) covers
+only `task`/`borderline`/`event`/`opportunity`/`information`. Two things were still open when T0
+went to implement the `COST` map: event's fourth verdict, `unsure` (added after this note's first
+draft — see `EVENT_VERDICTS` in `judge_validate.ts`), and `completion`, the sixth email tier this
+note's own §5 discusses only as a *field* (`status`) with its own two-matrix analysis, never as a
+*classification* cost against the other five tiers. The stream controller ruled both sets of cells
+on 2026-09-22, the same day as this note's ratification, so `score.ts`'s `COST` map could be
+completed without a second round-trip. Verbatim, with the one-line reason each cell carries:
+
+**Event `unsure` (six cells):**
+
+- `obligation → unsure` = **3**, not 2. `unsure` never surfaces to the student today (T1's design),
+  so calling an obligation `unsure` hides it exactly as completely as `drop` does — pricing it at
+  the "invented obligation" 2 would score it as *milder* than a plain miss, when it is the same
+  miss with a different name. Revisit to 2 once `unsure` surfaces somewhere the student can see and
+  correct it — at that point it becomes P2's abstain lane, not P1's catastrophe.
+- `opportunity → unsure` = **1**. P4: the item still surfaces (as `unsure` gets handled today),
+  a mild confusion.
+- `drop → unsure` = **1**. Same: neither direction removes anything that wasn't already headed for
+  drop.
+- `unsure → obligation` = **2**. P3: an invented obligation from an honest "I couldn't tell" is the
+  same false-urgency cost as `drop → obligation` and `opportunity → obligation`.
+- `unsure → opportunity` = **1**. P4, mild.
+- `unsure → drop` = **2**. Symmetric with `obligation → unsure`'s reasoning read the other way: an
+  event the truth calls uncertain, we call closeable, is close enough to inventing a false "safe to
+  ignore" that it prices like the false-obligation cells, not like the mild ones.
+
+**Email `completion` (ten cells):**
+
+- `task → completion` = **3**, the same as `task → information`. A live task marked "already done"
+  is hidden from the ranking exactly as completely as one filed as information — P1's catastrophe,
+  same price, different disguise.
+- `completion → task` = **2**, the same as `information → task`. A real completion signal invented
+  as a task is P3's false urgency: visible, dismissible, but a trust cost.
+- `completion → information` = **1**. A completion email that matches no active task by title
+  writes nothing (`completion::propose_done`'s match requirement, T9) — the same silent no-op as
+  filing it as `information` in the first place, so the two cost the same, P4's mild confusion, not
+  P1's catastrophe: nothing that was being tracked was lost by this particular misroute.
+- `information → completion` = **2**. The reverse: treating an ordinary item as a completion signal
+  risks a spurious `status: done` amend proposal on some task, an invented change a student has to
+  notice and reject — P3's false-urgency price, not P4's mild one.
+- `completion → borderline` = **1**, `completion → event` = **1**, `completion → opportunity` = **1**.
+  All three still surface the item somewhere a human can act on it — P4, mild, the same price as the
+  other non-catastrophic confusions among the five original tiers.
+- `borderline → completion` = **2**, `event → completion` = **2**. Same reasoning as
+  `information → completion`: a real borderline or event item recast as a completion signal risks
+  an invented amend proposal against some unrelated task, P3's price.
+- `opportunity → completion` = **3**, the same as `opportunity → information` (P5): opportunity's
+  email-tier meaning is a dated, consequential item (an application, a scholarship, a job), and
+  recasting it as a completion signal both loses it from the ranking and risks a spurious proposal
+  elsewhere — the worst of both, so it takes the ceiling price rather than a lesser one.
