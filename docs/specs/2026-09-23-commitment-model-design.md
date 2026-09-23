@@ -80,7 +80,7 @@ Rows marked **(rev.)** changed in the 2026-09-23 revision; **(new)** were added 
 | R6 | **(rev.)** A plain ICS feed yields series too, through **new** code in `calfeed::weekly_series` that honours `RECURRENCE-ID` overrides, `STATUS:CANCELLED`, the student's `PARTSTAT=DECLINED` and `TRANSP:TRANSPARENT` (§3.2). A Google UID's `@google.com` suffix is stripped so both routes key the same series. `parse_calendar_ics`'s busy time is not changed. | Students who only paste the secret address would otherwise get no pre-filled list. |
 | R7 | **(rev.)** A series is a class only when its title **starts with one of this vault's own course codes**, however the vault's course notes and `course_map` spell them, followed by nothing or a known section word (§3.3). A fixed code pattern is only a fallback source of codes, with named blind spots. *Reason:* numbering differs by school (CS 1110, COMPSCI 61A, MATH 20A), and "Work on CS 100" or "CS 100 study group" is the student's own time, not a class (review C3, I2). | A class titled in a way no course note spells is not pre-filled; the fallback card asks. |
 | R8 | Office-hours proposals get **no card**: an optional commitment changes nothing the morning answer shows. The phase-2 screen and the phase-2 "Your week" panel list them. | An office-hours series is never confirmed without the app. |
-| R9 | **(rev.)** `commitment-check` cards: at most **5 a day**, classes first; **no expiry**; a pending card whose series vanished from the series file is withdrawn (archived `superseded`). A withdrawn card does not close the question: if the series returns, it is asked again (re-review M-f). | A slow onboarding without the phase-2 screen takes two or three days of cards. |
+| R9 | **(rev.)** `commitment-check` cards: at most **5 a day**, classes first; **no expiry**; a pending card whose question went away is withdrawn (archived `superseded`) — for a proposal card, its series vanished from the series file; the rule is by card shape (§5.2). A withdrawn card does not close the question: if the series returns, it is asked again (re-review M-f). | A slow onboarding without the phase-2 screen takes two or three days of cards. |
 | R10 | The fallback card becomes eligible on **day 3** of the vault, paced 2 a day. A pending fallback card is withdrawn if a class proposal for the course appears. | One redundant card when a class shows up on Google late in week 1. |
 | R11 | **(rev., Q6)** The planning day is **one note**, `commitments/planning-day.md` (`kind: planning-day`), holding a per-weekday `window`. Routines only *propose* it. A weekday the note leaves out keeps the template's `day_start`/`day_end`. *Reason:* the ranking reads the vault, not app data, so the window must be in the vault to take effect on the next rank; a note (not `week_template.yaml`) because config files are never rewritten and a note edit is journaled and syncs. With no routine found, the phase-2 screen suggests 08:00–22:00 (the observed case) for the student to adjust. | A student with no confirmed window keeps 08:00–18:00 until they set one; a suggested 22:00 end over-plans the evenings of a student who stops earlier and does not adjust it. |
 | R12 | **(rev., C1)** A change to a **confirmed** commitment (times, room, end date) is a `commitment-check` card with a `change:` field, settled by its own arm in `approvals.rs` — **not** the `amend` machinery, whose validator refuses null and sequence values (§5.4). `commitments` does **not** join `AMENDABLE_FOLDERS`. | One more settlement arm; the alternative (amend) can never apply these changes. |
@@ -275,7 +275,7 @@ series a fresh read returned, eligible or not: eligibility and classification ar
 each run, by §3.4 (re-review M-g).
 
 ```json
-{"calendars": {"google:3b9e0c1d2a4f5e60": "2026-09-24", "personal": "2026-09-24"},
+{"calendars": {"google:3b9e0c1d2a4f5e60": "2026-09-24", "personal": "2026-09-24"}, "ended": {},
  "series": [{"calendar": "google:3b9e0c1d2a4f5e60", "event_type": "default", "first": "2026-08-19",
   "instances": [["2026-09-24", "12:00", "12:50"]], "last_seen": "2026-09-24",
   "meets": [{"days": ["mon", "wed", "fri"], "end": "12:50", "start": "12:00"}],
@@ -301,6 +301,18 @@ each run, by §3.4 (re-review M-g).
 - **A removed feed** (a `calendars:` entry deleted from `config/ingest.yaml`) keeps its series for
   14 days after its last read date, then they are dropped; no end card is filed for them, since the
   student removed the source, not the class.
+- **Ended series are retained** (plan review I1). A series dropped because its calendar was read
+  fresh and it went unseen for 14 days — not one dropped with a removed feed, and not a key still
+  held under another calendar — moves to `ended[source_uid] = {calendar, dropped, last_instance,
+  until}` (its last instance date the file held, and its last-known `until`). The entry goes 28
+  days after `dropped`, or at once if the key comes back. §5.4's **ended** rule reads it, so the end
+  card can be computed after the series itself left, and filed on a later run if the cap was full.
+- **One key, two calendars** (plan review I2). R6 keys a Google series and its ICS twin alike, so
+  one `source_uid` may be held under a `google:` calendar and an ICS feed. Both records are kept
+  (series sorted by `source_uid`, then calendar), each aging with its own calendar; every reader
+  takes **one per key** — a `google:` calendar first, then the lower calendar key — so one key is
+  one set of instances, one proposal and one card. A key "left the file" only when no calendar
+  holds it.
 - **Written only when some calendar produced a fresh result and the bytes differ.** A vault whose
   feeds are all unconfigured or unreachable — every oracle fixture — never gets the file. A
   **missing** file is silent and empty; an unreadable or malformed one is empty with one warning
@@ -426,8 +438,10 @@ source}`). With it, and only for `name=google`, the reply gains one field:
   and not `hidden`, ordered primary first and then by calendar id; the first 10. Each is named in
   the reply only by `google:` + the first 16 hex of `sha256(account_id + "\n" + calendar id)` — an
   identity for "the same calendar as last time", and nothing else.
-- **Which events.** Per calendar, `events.list` with `singleEvents=true` over the same 28-day
-  window, **following `nextPageToken`** up to 5 pages; keep items that carry a `recurringEventId`,
+- **Which events.** Per calendar, `events.list` with `singleEvents=true` over a window from 24
+  hours before now to 28 days after (plan review M7: an instance held earlier today is still seen,
+  in any timezone; the device keeps `[today, today + 28)`, §3.2), **following `nextPageToken`** up
+  to 5 pages; keep items that carry a `recurringEventId`,
   have a `dateTime` start, are not `status: cancelled`, and whose `self: true` attendee, if any, has
   not declined. `eventType` passes through (`default` when Google omits it); the device, not the
   function, decides eligibility (§3.4), so the rule lives in one place.
@@ -566,8 +580,13 @@ One card per proposal not yet answered (§3.5), built on F2's `event-check` patt
   - `rejected` → `write::create` the decline marker (for the window, the one `window` marker of
     §2.3), unless one exists; then the generic archive.
   - `pending` / `snoozed` → unchanged machinery. There is no expiry (R9).
-  - **Withdrawn** (M14): a pending card whose series left the series file, or which a confirmed
-    note now covers, is archived `superseded` with no write.
+  - **Withdrawn** (M14), by card shape (plan review C1): a pending card is archived `superseded`
+    with no write only when its question went away — a **proposal** card when its key is under no
+    calendar of the series file, a note has its key, or a confirmed note has its signature; a
+    **window** card when a `planning-day` note or the `window` marker exists; a **change** card
+    (§5.4) when its target note is gone or the note no longer holds `was`. Each condition also stops
+    the card being proposed again, so no card is withdrawn and re-filed run after run. While a
+    window card is not `superseded`, no other window card is filed, whatever its routine keys.
 - **The day's count.** Cards filed after `process_approvals` are counted into this run's
   `Approvals: N pending` line, as F2 does for its event-checks: in `cli.rs`, by adding the number
   filed to `approvals.pending` (`j-followups:cli.rs:417` does `approvals.pending += checks`).
@@ -612,8 +631,9 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
   - **changed** — its series differs from the note in `meets`, in a non-empty `where`, or in
     `until` (the series now ends, or ends earlier);
   - **ended** — its series was dropped from the file (14 days unseen while its calendar was read)
-    and no fresh series has the note's signature (R22) → propose `until` = the last instance date
-    the file held;
+    and so is in the file's `ended` map (§3.3), and no fresh series has the note's signature (R22)
+    → propose `until` = the last instance date the file held, else its last-known `until` (neither:
+    no card); nothing when the note's `until` already ends it by then;
   - **succeeded** (R22) — an eligible class or lab series for the same course, with different
     meets, whose first instance falls on or after the note's series' last instance, while that
     series is ending → propose `meets` (and `where`) of the new series **and** `source_uid` = the
@@ -652,7 +672,7 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
 | a successor change was rejected | the decline marker for the successor's key (§5.4) |
 | a window proposal was rejected | the `window` marker (§2.3, §3.5) |
 | a course was asked when it meets | its `card:<slug>` note, confirmed or a decline marker |
-| a confirmed commitment changed | a card with the same `target` and `change` (§5.4) |
+| a confirmed commitment changed | a card with the same `target` and `change` (§5.4), except one withdrawn as `superseded` (the note was edited since; asked once more with the new `was`) |
 | the student has a planning day | the `planning-day` note: no window is proposed again |
 
 Cards are local-only (R20), so on a second desktop the rows closed by a card hold only once the
@@ -927,7 +947,7 @@ the read model's blocks and preview; `conflicts`/`fit`; the `commitments` comman
 | `engine/src/ids.rs` | `NOTE_FOLDERS` + `commitments`; `KINDS`, `ID_RE` + `cmt`; `kind_for` maps `type: commitment` |
 | `engine/src/backup.rs` | `BACKUP_FOLDERS` derivation grows by one |
 | `engine/src/weekcal.rs` | `for_vault`, `with_commitments`, `with_instances`, `window(day)`, `commitment_spans`, `template_only_blocks` |
-| `engine/src/calfeed.rs` | **new** pure `weekly_series` (overrides, cancellations, declines, transparency, rule fields); nothing existing edited |
+| `engine/src/calfeed.rs` | **new** pure `weekly_series` (overrides, cancellations, declines, transparency, rule fields); nothing existing edited but `occurrence_starts` made `pub(crate)` |
 | `engine/src/cloudmodel.rs` | `fetch_calendar` sends `accepts=series`, returns the optional value |
 | `engine/src/cli.rs` | `Fetchers.series` + `#[derive(Default)]`, `SeriesStash`, the stashing closure; `refresh_series`, change detection and `emit_checks` after `load_calendar_events`; `for_vault`; the `state/plan.json` baseline (no diff); cards filed added to `approvals.pending` (M8, re-review M-a); warnings into the `calendar` step |
 | `engine/src/main.rs` | `commitments --vault <v> [--today] [--json]` (always exits 0, writes no note); `surface --window` |
@@ -972,7 +992,9 @@ in it:
 
 1. `is_note_path_and_the_servers_regex_agree` (`engine/tests/sync_contract.rs`, C3′'s): the folder
    regex must match `NOTE_FOLDERS` (a refused `commitments/` path would wedge every push,
-   R-C3′-exec-12). On its own it can be satisfied by the regex alone, which is why 2 and 3 exist.
+   R-C3′-exec-12). **As C3′ wrote it, it asserts a hard-coded six-folder literal and cannot fail**
+   (plan review C2); phase 1s rewrites it to derive from `NOTE_FOLDERS`. Until then, gate 3's
+   second test is what forces the regex and the migration.
 2. **`build_push_sends_no_local_card_nor_any_record_about_one`** (`engine/src/sync.rs` `mod tests`,
    phase 1s, beside the regex gate in the hand-off's list). A scratch vault holds, for each kind in
    `LOCAL_CARD_KINDS`, a **pending** card in `approvals/`, an **approved-and-settled** card and a
@@ -987,7 +1009,10 @@ in it:
    the tripwire): if `engine/src/sync.rs` exists in the crate (`CARGO_MANIFEST_DIR`), its text must
    name `commitments::LOCAL_CARD_KINDS` and contain the test named in 2. It passes while phase 1
    lands before C3′ (no `sync.rs`), and fails the first build in which both exist until the
-   predicate and gate 2 are in — so the second merge cannot pass on the regex alone.
+   predicate and gate 2 are in — so the second merge cannot pass on the regex alone. Beside it,
+   `the_servers_note_path_rules_name_every_note_folder` requires `sync_rows.ts` and the latest
+   `*sync_note_path_check*.sql` migration, whenever they exist, to carry `NOTE_FOLDERS`' folder
+   group — so the second merge cannot pass without the regex and the migration either.
 
 And the migration is live on prod before any release carrying `cmt` ships (R3).
 

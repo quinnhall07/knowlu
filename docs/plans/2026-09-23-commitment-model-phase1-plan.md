@@ -1,6 +1,7 @@
 # The commitment model — phase 1 plan (engine and cloud, the Google Calendar series path)
 
-**Status: PLAN, written 2026-09-23. Not executed.** **Base:** `main` **after `j-followups`
+**Status: PLAN, written 2026-09-23, revised the same day against its review (see "Plan review
+(2026-09-23)" at the end). Not executed.** **Base:** `main` **after `j-followups`
 merges** (spec R16). Phase 1 edits `cli.rs`, `approvals.rs`, `cloudmodel.rs`, `eventemit.rs` and
 `engine/tests/cloud_contract.rs`, which `j-followups` also edits, and it calls F2's
 `eventemit::clock` and copies F3's `event-check` settlement arm, neither of which exists on `main`
@@ -16,13 +17,15 @@ proposals; local-only `commitment-check` cards (proposals, the window, changes) 
 settlement; capacity and the planning day; `state/plan.json` and a live `moved`; the read model's
 blocks and the `--window` preview; `conflicts`/`fit`; the `commitments` command.
 **It is not:** the onboarding confirm screen, the *Your week* panel and editor, the fallback card
-(`commitment-ask`) and its form (all phase 2), the UA registrar (phase 3), or the sync work (phase 1s,
-listed under "Dependencies" because it gates the release).
+(`commitment-ask`) and its form (all phase 2), or the UA registrar (phase 3). The sync work (phase
+1s) is **P21, a conditional task**: this branch runs it only when C3′ merged first; otherwise its
+text goes to `c3-sync` (see "P21's trigger").
 
 ## Authority
 
 - **The spec:** `docs/specs/2026-09-23-commitment-model-design.md` on `main` at `80350a9`
-  ("re-review fixes"). Section numbers below (§2.1, R12, …) are its. Where this plan and the spec
+  ("re-review fixes"), as amended by this plan's review commit (§3.3, §4.1, §5.2, §5.4, §5.5, §10
+  and R9; listed under "Plan review (2026-09-23)"). Section numbers below (§2.1, R12, …) are its. Where this plan and the spec
   disagree, the spec wins and this plan is wrong.
 - **Quinn's rulings of 2026-09-23**, in the spec's §1.1: Q1 (the tagline: every feature improves the
   morning answer), Q2 (login-only: infer, ask to confirm, typing last), Q3 (commitments in the
@@ -112,7 +115,16 @@ listed under "Dependencies" because it gates the release).
 19. **No personal data.** Every title, room and calendar in a test is invented. Quinn's observed
     calendar (Q5) is a pattern, never a fixture.
 20. **Proposals never become notes, and nothing about a card leaves the device** (R18, R20). No task
-    writes a `proposed` note, and every card goes through `commitments::file_card`.
+    writes a `proposed` note, and every card goes through `commitments::file_card`. **R18's
+    "the journal" reads as "the synced journal"** (plan review M9): a card's `create` record, with
+    its whole `commitment:` mapping, is journaled locally as §5.2 requires, and phase 1s's gate 2
+    keeps every record about a card off the wire. Do not "fix" this by skipping the journal.
+23. **One-line collection fields go through one builder** (plan review I3). Every `commitment:`,
+    `change:`, `was:`, `meets:` and `window:` a task writes into new frontmatter goes through
+    `commitments::front_matter` (P6): scalars through `yamlemit::safe_dump_block`, collections
+    as `key: {write::to_literal(value)}` — the `safe_dump_flow` path `judgment:` already uses.
+    `safe_dump_block` on a whole map writes nested maps and sequences in block style, and
+    `provenance::guard_block_style` checks only `judgment:`, so nothing else would catch it.
 21. **No bare `git stash`.** A WIP commit, or `git stash push -u -m <tag>` and apply by SHA.
 22. **Stay out of** `.claude/worktrees/*`, `.github/**`, `app/src/**`, `app/static/**` and
     `site/**`. The one `app/**` edit is `app/tests/scaffold.rs`'s `Fetchers` literal (P14).
@@ -122,22 +134,23 @@ listed under "Dependencies" because it gates the release).
 | task | unit | files | depends on | before the merge? |
 |---|---|---|---|---|
 | P1 | the `cmt` id kind and the `commitments/` folder | `engine/src/ids.rs`, `engine/src/backup.rs` | — | **yes** |
-| P2 | the flow emitter carries `meets`, `window`, `commitment`, `change` | `engine/src/yamlemit.rs` (tests; code only if a test fails) | — | **yes** |
-| P3 | `WeekCalendar` learns spans, instances and the window | `engine/src/weekcal.rs` | — | **yes** |
-| P4 | `calfeed::weekly_series`, the ICS series reader | `engine/src/calfeed.rs` | — | **yes** |
+| P2 | the flow emitter carries `meets`, `window`, `commitment`, `change`; one line in block frontmatter | `engine/src/yamlemit.rs` (tests; code only if a test fails) | — | **yes** |
+| P3 | `WeekCalendar` learns spans, instances and the window; `#[derive(Clone)]` | `engine/src/weekcal.rs` | — | **yes** |
+| P4 | `calfeed::weekly_series`, the ICS series reader; `occurrence_starts` `pub(crate)` | `engine/src/calfeed.rs` | — | **yes** |
 | P5 | `/ingest-calendar` learns `series` | `cloud/supabase/functions/ingest-calendar/{handler.ts,handler_test.ts,index.ts}` | — | **yes** |
-| P6 | `commitments.rs`: the notes, `load`, `LOCAL_CARD_KINDS`, the sync tripwire | `engine/src/commitments.rs` (new), `engine/src/lib.rs` | P1, P3 | with a one-line `lib.rs` rebase |
+| P6 | `commitments.rs`: the notes, `load`, `front_matter`, `LOCAL_CARD_KINDS`, the two sync tripwires | `engine/src/commitments.rs` (new), `engine/src/lib.rs` | P1, P3 | with a one-line `lib.rs` rebase |
 | P7 | the classifier and the vault's code table | `engine/src/commitments.rs` | P6 | with P6 |
-| P8 | `Series`, normalisation and `state/calendar-series.json` | `engine/src/commitments.rs` | P4, P7 | with P6 |
+| P8 | `Series`, normalisation, one key from two calendars, `state/calendar-series.json` with `ended` | `engine/src/commitments.rs` | P4, P7 | with P6 |
 | P9 | proposals and the window proposal | `engine/src/commitments.rs` | P8 | with P6 |
 | P10 | `conflicts` and `fit`, the piece-2 API | `engine/src/commitments.rs` | P6, P8 | with P6 |
-| P15 | `WeekCalendar::for_vault` and the no-commitments equivalence | `engine/src/weekcal.rs`, `engine/src/commitments.rs` | P3, P6, P8 | with P6 |
+| P15 | `WeekCalendar::for_vault` and the no-commitments equivalence | `engine/src/weekcal.rs`, `engine/src/commitments.rs` | P3, P6, P8, P10 | with P6 |
 | P17 | the read model's commitment blocks and window | `engine/src/surface.rs` | P15 | with P6 |
-| P11 | the `commitment-check` card: `file_card`, `emit_checks`, withdrawal | `engine/src/commitments.rs`, `engine/src/eventemit.rs` | P9, **j-followups** | no |
-| P12 | change detection: changed, ended, succeeded | `engine/src/commitments.rs` | P11 | no |
-| P13 | the settlement arm | `engine/src/approvals.rs`, `engine/src/commitments.rs`, `engine/Cargo.toml`, `Cargo.lock` | P11, P12, **j-followups** | no |
+| P11 | the `commitment-check` card: `Change`, `file_card`, `emit_checks`, the change card | `engine/src/commitments.rs`, `engine/src/eventemit.rs` | P9, P15, **j-followups** | no |
+| P12 | change detection: changed, ended, succeeded; successor keys | `engine/src/commitments.rs` | P11 | no |
+| P13 | the settlement arm and withdrawal by card shape | `engine/src/approvals.rs`, `engine/src/commitments.rs`, `engine/Cargo.toml`, `Cargo.lock` | P11, P12, **j-followups** | no |
+| P21 | **phase 1s (conditional)**: the local-card predicate, gate 2, gate 1 derived, `NOTE_PATH_RE`, the migration | `engine/src/sync.rs`, `engine/tests/sync_contract.rs`, `cloud/supabase/functions/_shared/{sync_rows.ts,sync_rows_test.ts}`, a new `cloud/supabase/migrations/*_sync_note_path_check_commitments.sql`, `cloud/supabase/migrations_sync_test.ts` | P6, P13, **`sync.rs` on the base** | no |
 | P14 | the engine transport: `accepts=series`, `Fetchers.series`, the stash | `engine/src/cloudmodel.rs`, `engine/src/cli.rs`, `engine/tests/cloud_contract.rs`, `app/tests/scaffold.rs` | P5, **j-followups** | no |
-| P16 | `rank` wiring: refresh, withdraw, change, emit, count, capacity, baseline | `engine/src/cli.rs`, `engine/src/commitments.rs` | P11–P15 | no |
+| P16 | `rank` wiring: refresh, load, withdraw, change, emit, count, capacity, baseline | `engine/src/cli.rs`, `engine/src/commitments.rs` | P11–P15 | no |
 | P18 | `moved`, live in `surface`, and the `--window` preview | `engine/src/surface.rs`, `engine/src/main.rs`, `engine/src/commitments.rs` | P16, P17 | no (after P16) |
 | P19 | the `commitments` command and the model-reach test | `engine/src/main.rs`, `engine/src/cli.rs`, `engine/tests/cloud_contract.rs` | P14, P16, P18 | no |
 | P20 | docs: the read model and `CLAUDE.md` | `docs/surface/anatomy.md`, `CLAUDE.md` | P19 | no |
@@ -146,11 +159,22 @@ listed under "Dependencies" because it gates the release).
 
 - `commitments.rs`: P6 → P7 → P8 → P9 → P10 → P15 → P11 → P12 → P13 → P16 → P18.
 - `weekcal.rs`: P3 → P15. `surface.rs`: P17 → P18. `main.rs`: P18 → P19.
-- `cli.rs`: P14 → P16 → P19. `cloud_contract.rs`: P14 → P19.
+- `cli.rs`: P14 → P16 → P19. `cloud_contract.rs`: P14 → P19. `approvals.rs`: P13 only.
+- P21's files are its own; it reads `commitments.rs` and `approvals.rs` and edits neither.
 
-**Parallel lanes.** Wave 1: P1, P2, P3, P4, P5 (disjoint files). Wave 2: P6. Then P7 → P8 → P9 → P10
-in sequence (one file), with P15 → P17 after P8. After the merge: P11 and P14 in parallel (disjoint),
-then P12, P13, P16, P18, P19, P20 in sequence.
+**Parallel lanes** (plan review I5). Wave 1: P1, P2, P3, P4, P5 (disjoint files). Wave 2: P6. Then
+P7 → P8 → P9 → P10 → P15 strictly in sequence (all edit `commitments.rs`), then P17 (`surface.rs`
+only). After the merge: P11 and P14 in parallel (disjoint files), then P12 → P13; then P21 (only if
+it runs, see below) in parallel with P16 (disjoint files); then P18, P19, P20 in sequence.
+
+**Final task order:** P1, P2, P3, P4, P5 → P6 → P7 → P8 → P9 → P10 → P15 → P17 → *(merge, rebase)*
+→ P11 ∥ P14 → P12 → P13 → P16 (∥ P21 when it runs) → P18 → P19 → P20.
+
+**P21's trigger.** Whichever of phase 1 and C3′ merges second carries phase 1s. If `engine/src/sync.rs`
+is on the base when `commitments-p1` rebases, P21 runs in this branch. From that rebase until P21
+lands, P6's two tripwires are the **expected** red tests of `cargo test -p knowlu-engine --lib --
+commitments::` — the tripwire exists to be red there. If phase 1 merges first, P21's text is handed
+verbatim to the `c3-sync` branch, where the same tripwires turn red at its rebase and point at it.
 
 ### Before the merge
 
@@ -168,9 +192,16 @@ anywhere. So:
   touches it" rule, they wait.
 - **P11–P14, P16, P18–P20 wait for the merge.** They edit `approvals.rs`, `cli.rs`, `cloudmodel.rs`,
   `eventemit.rs`, `cloud_contract.rs`, `anatomy.md` or `CLAUDE.md` (all in `j-followups`' diff), or
-  they call `eventemit::clock`, which only `j-followups` has. P13 also adds `ring` to
-  `engine/Cargo.toml`, the line `c3-sync` adds too. P18 needs P16's baseline, so it follows the merge
-  though `surface.rs` and `main.rs` are otherwise free.
+  they call `eventemit::clock`, which only `j-followups` has. P18 needs P16's baseline, so it
+  follows the merge though `surface.rs` and `main.rs` are otherwise free.
+- **Collisions with other branches beyond `j-followups`** (plan review M1), each resolved at
+  whichever rebase meets it:
+  - `c3-sync`: `engine/Cargo.toml` (P13 adds the same `ring = "0.17"` line, with its comment);
+    `Cargo.lock` (the same `ring` entry); and `engine/src/approvals.rs`, where `c3-sync` adds
+    `reassert_rejected_sync_card` inside `transition_note`'s **rejected** branch — the branch
+    P13's arm joins. Keep both: the sync card's re-assert and the `commitment-check` arm are
+    disjoint by `kind`.
+  - `c1c-first-day`: `app/tests/scaffold.rs` (P14's one `Fetchers` literal).
 - **Nothing is merged to `main` early.** A `main` that carries P1's `cmt` without phase 1s's
   migration live on prod breaks the R3 release gate. The pre-merge tasks live on the branch.
 
@@ -179,18 +210,24 @@ anywhere. So:
 1. **`j-followups` merges first** (R16). It owns `approvals::transition_note`'s `event-check` arms
    (the pattern P13 copies), `eventemit::clock` (P11's titles) and the `approvals.pending += checks`
    count in `cli.rs` (P16 copies it).
-2. **Phase 1s, the C3 sync dependency (spec §10), is not in this plan, but gates the release.** It
-   lands with C3′ (inside `c3-sync` if phase 1 merges first, or after it):
+2. **Phase 1s, the C3 sync dependency (spec §10), is task P21 — conditional — and gates the
+   release.** Whichever of phase 1 and C3′ merges second carries it (P21's trigger, above):
    - a migration adding `commitments` to `sync_notes_path_check`, and `NOTE_PATH_RE` in
      `cloud/supabase/functions/_shared/sync_rows.ts` with its test;
    - `sync.rs`'s local-card predicate by **kind**, reading `commitments::LOCAL_CARD_KINDS`, and its
      gate `build_push_sends_no_local_card_nor_any_record_about_one`;
-   - privacy line 2 (§9).
+   - gate 1 rewritten to derive from `NOTE_FOLDERS`;
+   - privacy line 2 (§9), a release gate outside P21's files (`site/privacy.html`).
 
-   **The gates that make it unmissable.** C3′'s `is_note_path_and_the_servers_regex_agree` fails
-   once `NOTE_FOLDERS` holds `commitments` (P1) and the regex does not; P6's tripwire
-   `sync_keeps_every_local_card_kind_local` fails once `sync.rs` exists in the crate without the
-   predicate and its gate. Either merge order fails the second build until 1s is in.
+   **The gates that make it unmissable** (plan review C2). C3′'s `is_note_path_and_the_servers_regex_agree`
+   (`c3-sync:engine/tests/sync_contract.rs:396`) asserts a **hard-coded** six-folder literal, not
+   `NOTE_FOLDERS`, and probes only `tasks/`, `courses/`, `info/`: after P1 it stays green while
+   the server refuses `commitments/…`. So it gates nothing until P21 rewrites it. What gates phase
+   1s, whatever the merge order, is P6's two tripwires, both in phase 1's own file:
+   `sync_keeps_every_local_card_kind_local` (fails once `sync.rs` exists without the predicate and
+   gate 2) and **`the_servers_note_path_rules_name_every_note_folder`** (fails once `sync_rows.ts`
+   or a `*sync_note_path_check*.sql` migration exists and does not carry `NOTE_FOLDERS`' group).
+   The second build of either merge order is red until P21 is in.
    **Release gate (R3):** the phase-1s migration is live on prod before any release carrying `cmt`
    ships. `C3 migrations need db push --include-all` (the SDD lessons note) — the controller's.
 3. **Privacy line 1 (§9) ships with phase 1's first release** — a release gate, worded by Quinn with
@@ -248,6 +285,12 @@ anywhere. So:
 - `flow_emits_a_change_and_was_pair` — `{until: "2026-12-04"}` and `{until: null}`.
 - `a_title_with_a_colon_or_quote_round_trips` — `CS 100: Lecture` and `Bob's club` emit on one line
   and parse back (via `serde_yaml_ng`) to the same value.
+- **`a_collection_after_block_scalars_is_one_frontmatter_line`** (plan review I3; the path the
+  cards and notes use, Global Constraint 23) — `safe_dump_block` of `{type: approval, title: "CS
+  100"}` followed by `format!("commitment: {}\n", write::to_literal(&v))` for the §2.1 mapping
+  gives frontmatter in which `commitment:` is **exactly one line**, and `split_frontmatter` parses
+  it back to `v`; and, as the counter-case the builder exists for, `safe_dump_block` of the same
+  mapping nested in the map spans more than one line.
 
 **Verify:** `cargo test -p knowlu-engine --lib -- yamlemit::`, then `cargo test -p knowlu-engine
 --test oracle` (which reads `pyyaml-safe-dump-reference.json`).
@@ -279,6 +322,8 @@ anywhere. So:
 6. `pub fn with_day_window(self, day: Date, start: Time, end: Time) -> Self` — a copy whose window
    for `day`'s weekday is replaced. *Reason:* P18 plans today under the baseline window and the
    `--window` preview under a proposed one, from the same calendar otherwise.
+7. `WeekCalendar` gains `#[derive(Clone)]` (every field is already `Clone`). *Reason:* P18's
+   `cal.clone().with_day_window(..)` (plan review M3).
 
 **Tests first** (`weekcal.rs` `mod tests`, invented spans):
 - `window_falls_back_to_template_day_start_and_end` — no window: `window(d) == (day_start, day_end)`.
@@ -302,7 +347,9 @@ oracle --test surface_oracle`, `git diff --exit-code engine/tests/fixtures`.
 **Decisions.**
 
 1. `pub fn weekly_series(ics: &str, tz: &TimeZone, from: Date, to: Date) -> (Vec<IcsSeries>, Vec<String>)`
-   — **new, pure; nothing existing is edited**. `IcsSeries { key, title, location, description,
+   — **new, pure; nothing existing is edited but one visibility**: `occurrence_starts` becomes
+   `pub(crate)` (plan review M4), because P8 expands Google `COUNT` and tests Google `RRULE`s with
+   it; its body and every existing caller are unchanged. `IcsSeries { key, title, location, description,
    rule_lines, first, instances: Vec<(Date, Time, Time)>, all_day, ineligible: Option<String> }`,
    defined in `calfeed.rs`. *Reason:* §3.2 step 1 and constraint 13 (`parse_calendar_ics` feeds the
    frozen snapshot).
@@ -355,8 +402,17 @@ oracle`, `git diff --exit-code engine/tests/fixtures`.
    a series with more than 40 instances is dropped. *Reason:* review I6 — no flicker.
 7. `title`, `location` cut to 200; `description` only when `location` is empty, cut to 200. Nothing is
    logged but exception class names. *Reason:* R4, §9.
-8. **A 5-second budget** for series gathering after `ics` is built; on overrun or any error `series`
-   is omitted and `ics` returned as today. *Reason:* a series problem never costs the day's busy time.
+8. **A 5-second budget** for series gathering after `ics` is built, enforced by an `AbortSignal`
+   (`AbortSignal.timeout`, passed into every `CalendarDeps` series call) **or** `Promise.race`
+   against a timer — a clock check between calls cannot interrupt one hung Google call (plan review
+   M6). On overrun or any error `series` is omitted and `ics` returned as today. *Reason:* a series
+   problem never costs the day's busy time.
+9. **The series window starts 24 hours before `deps.now()`** and ends 28 days after it (plan review
+   M7; spec §4.1 amended). The `ics` window is unchanged. The device keeps only instances whose local
+   date is in `[today, today + 28)` (P8), so a class held earlier today is still an instance there,
+   in any timezone, and R21 does not read it as cancelled.
+10. `CalendarDeps` gains **read methods only** — no write, insert, upsert or persist method (Limited
+   Use, §9). *Reason:* `calendar.readonly` data is fetched, reduced and returned, never kept.
 
 **Tests first** (`handler_test.ts`, Deno, injected deps, invented events):
 - `without accepts=series the google reply is byte-for-byte today's` — the body equals the
@@ -375,10 +431,25 @@ oracle`, `git diff --exit-code engine/tests/fixtures`.
 - `recurrence keeps RRULE, EXDATE and RDATE lines only`.
 - `description is sent only when location is empty, cut to 200`.
 - `past the 5-second budget series is omitted and ics is unchanged` (fake clock in deps).
+- `a hung seriesInstances call is abandoned at the budget` — a dep whose promise never settles; the
+  handler still answers with `ics` and no `series` (the abort, not a between-call check, ends it).
 - `a throwing seriesMasters omits series and keeps ics`.
+- `title and location are cut to 200` (a 250-character title and location).
+- `console.error receives only exception class names` — a throwing dep whose message holds an
+  invented title and token; the captured `console.error` arguments contain the class name and
+  neither string.
+- `CalendarDeps has no write or persist method` — the deps type's keys (read from a test double
+  that satisfies the interface exactly) are the read methods only.
+- `the series window starts 24 hours before now` — the `from` passed to `seriesInstances` and
+  `seriesMasters` is `now − 24h`, the `to` is `now + 28d`; the `ics` call's window is unchanged.
+- The existing `handler_test.ts` dep literals gain the three new members (stubs), so every existing
+  test compiles unchanged otherwise.
 
-**Verify:** `deno test cloud/supabase/functions/ingest-calendar/` and `deno check
-cloud/supabase/functions/ingest-calendar/index.ts`. **Deploy is the controller's**, to staging first.
+**Verify:** CI's own forms — `deno test --allow-read --allow-net=127.0.0.1 --config
+cloud/supabase/deno.json cloud/supabase/functions/ingest-calendar/`, `deno check --config
+cloud/supabase/deno.json cloud/supabase/functions/ingest-calendar/*.ts` and `deno lint --config
+cloud/supabase/deno.json cloud/supabase/functions/ingest-calendar/`. **Deploy is the
+controller's**, to staging first.
 
 ## P6 — `commitments.rs`: the notes, `load`, `LOCAL_CARD_KINDS`, the sync tripwire
 
@@ -404,6 +475,24 @@ Files: `engine/src/commitments.rs` (new), `engine/src/lib.rs` (`pub mod commitme
    the one constant C3′'s sync reads (phase 1s).
 6. `pub fn spans(&self) -> Vec<weekcal::CommitmentSpan>` — hard and soft confirmed notes only, one
    span per `(meet, day)`. *Reason:* §6.1 (optional, markers and the planning day add no busy time).
+7. **The single-line builder** (plan review I3, Global Constraint 23): `pub(crate) enum Field {
+   Scalar(yamlemit::Node), Flow(serde_json::Value) }` and `pub(crate) fn front_matter(fields: &[(&str,
+   Field)]) -> String` — one line per field, in the order given: a `Scalar` as
+   `yamlemit::safe_dump_block` of a one-entry map, a `Flow` as `format!("{key}: {}\n",
+   write::to_literal(value))`. P11's cards and P13's notes and markers build their frontmatter with it
+   and nothing else. *Reason:* `safe_dump_block` of a whole map puts a nested map or sequence on
+   several lines, and no guard would stop it reaching disk.
+8. **The second tripwire** (plan review C2), `the_servers_note_path_rules_name_every_note_folder`:
+   let `group = format!("({})/", ids::NOTE_FOLDERS.join("|"))`. If
+   `<CARGO_MANIFEST_DIR>/../cloud/supabase/functions/_shared/sync_rows.ts` exists, its text must
+   contain `group`. If any `cloud/supabase/migrations/*sync_note_path_check*.sql` exists, the
+   **latest by file name** must contain `group`. Both files absent → the test passes (phase 1
+   before C3′). The failure message names P21 of this plan. *Reason:* C3′'s gate 1 is a hard-coded
+   literal and cannot fail, so without this nothing forces the server regex or the migration.
+9. **The first tripwire, hardened** (plan review M8): `sync_keeps_every_local_card_kind_local`
+   finds `commitments::LOCAL_CARD_KINDS` on a **non-comment** line (trimmed, not starting `//`),
+   and `fn build_push_sends_no_local_card_nor_any_record_about_one` with `#[test]` as the nearest
+   preceding non-blank, non-comment line. A comment naming either no longer satisfies it.
 
 **Tests first** (`commitments.rs` `mod tests`, scratch vaults under a temp dir):
 - `load_reads_a_confirmed_commitment` — §2.1's example note gives every field.
@@ -420,10 +509,19 @@ Files: `engine/src/commitments.rs` (new), `engine/src/lib.rs` (`pub mod commitme
 - `an_invalid_window_entry_warns_with_the_spec_text` — `start >= end` gives exactly `planning day
   <days>: <start>–<end> ignored; using week_template` (§6.3) and that weekday keeps the template.
 - `spans_come_from_hard_and_soft_notes_only`.
+- `a_window_end_past_23_59_is_invalid` — `end: "24:00"` warns with §6.3's text; that weekday keeps
+  the template (plan review M15).
+- `front_matter_puts_every_collection_field_on_one_line` — scalars-only input is byte-equal to
+  `safe_dump_block` of the same map; each `Flow` field (a `meets` sequence, a `commitment`
+  mapping with a nested sequence and a `null`) is exactly one line and parses back to its value.
 - **`sync_keeps_every_local_card_kind_local`** (the tripwire, spec §10 Phase 1s gate 3): reads
   `concat!(env!("CARGO_MANIFEST_DIR"), "/src/sync.rs")`; if the file is absent the test passes; if
-  present, it asserts the text contains `commitments::LOCAL_CARD_KINDS` and
-  `fn build_push_sends_no_local_card_nor_any_record_about_one`, with a message naming phase 1s.
+  present, it asserts decision 9's two conditions, with a message naming P21 (phase 1s).
+- **`the_servers_note_path_rules_name_every_note_folder`** (decision 8).
+- `the_tripwires_refuse_a_comment` — the two checks, run as functions over invented texts: a
+  `sync.rs` text naming both only in comments fails; a `sync_rows.ts` text with the six-folder
+  group fails; the seven-folder group passes; the latest-migration pick takes the highest file
+  name (non-vacuity).
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments::`, `cargo build --workspace` (0
 warnings: `dead_code` on items used only by later tasks is avoided by landing their tests here).
@@ -461,7 +559,9 @@ warnings: `dead_code` on items used only by later tasks is avoided by landing th
 `a_midnight_sleep_series_is_both_sides`; `work_shift_club_team_practice` (rules 4–5);
 `ineligible_series_are_never_classified` — `fromGmail`, `focusTime`, no master, `INTERVAL=2`, an
 every-other-week pattern, one instance, all-day, `until` before today, an `RDATE`, `BYMONTHDAY`;
-`a_holiday_gap_is_still_weekly` (a 14-day gap between two 7-day pairs).
+`a_holiday_gap_is_still_weekly` (a 14-day gap between two 7-day pairs);
+`a_midnight_crossing_series_other_than_sleep_is_ineligible` (a 23:00–01:00 `Night shift` is never
+classified — plan review M15).
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments::`.
 
@@ -481,19 +581,40 @@ every-other-week pattern, one instance, all-day, `until` before today, an `RDATE
 4. `where_`: the location trimmed; else the first description line that looks like a place (≤ 80
    characters; no `://`, `www.`; none of `zoom`, `teams`, `meet.google`, `webex`, `pwd`, `passcode`,
    `password`, `pin`, `meeting id`; no run of six digits). The description is then dropped and never
-   stored. *Reason:* R4, I5.
+   stored. `title` is cut to 200 characters and `where` to 80 on both routes (§2.2; the function
+   already cuts Google's, P8 cuts the ICS route's). *Reason:* R4, I5.
 5. `pub fn refresh_series(vault, fresh: &[(String /*calendar*/, Vec<Series>)], today) -> (SeriesFile,
    Vec<String>)`: a calendar in `fresh` replaces its series and its date; a series it no longer
    returns keeps its old `last_seen` until 14 days old, then is dropped; a calendar not in `fresh`
    is untouched; a feed removed from `config/ingest.yaml` keeps its series 14 days past its last read,
    then drops them. **A fetched-and-parsed ICS with zero masters is fresh** (M-e); a Google reply
    without `series`, a failed fetch, or text without `BEGIN:VCALENDAR` is not read. *Reason:* §3.3.
-6. Bytes: `ledger::dumps_value` of `{calendars, series}` (keys sorted, series by `source_uid`) plus a
-   trailing newline; **written only when some calendar was fresh and the bytes differ**; a missing
-   file is silent and empty, an unreadable one empty with one warning. *Reason:* §3.3, constraint 8.
-7. `pub fn read_series_file(vault) -> (SeriesFile, Vec<String>)` and `SeriesFile::instances_map()`
-   giving P3's `instances` shape (per `source_uid`, its calendar's read date, that + 28, the
-   instances). *Reason:* R21 uses the same file.
+   **Removed-feed mapping** (plan review M13): a calendar key is its feed's name for an ICS feed;
+   every `google:<hash>` key belongs to the feed whose URL is `cloud:google` (the stash entry that
+   produced it). If that feed is gone from `config/ingest.yaml`, every `google:` calendar ages as
+   removed.
+6. **`ended`, retained** (plan review I1; spec §3.3 and §5.4 amended). A series dropped in step 5
+   because its calendar was read fresh and it went unseen for 14 days — **not** one dropped because
+   its feed was removed, and not a key still held under another calendar (decision 8) — moves to
+   `ended[source_uid] = {calendar, dropped: today, last_instance, until}`: its last instance date
+   the file held (`null` if it held none) and its last-known `until`. An `ended` entry is removed 28
+   days after `dropped`, or at once if the key comes back in a fresh read. *Reason:* P12's **ended**
+   rule reads the post-refresh file, where the series itself is gone; and a budget-starved run must
+   be able to file the end card on the next one.
+7. Bytes: `ledger::dumps_value` of `{calendars, ended, series}` (keys sorted; series by
+   `(source_uid, calendar)`) plus a trailing newline; **written only when some calendar was fresh and
+   the bytes differ**; a missing file is silent and empty, an unreadable one empty with one warning.
+   *Reason:* §3.3, constraint 8.
+8. **One key from two calendars** (plan review I2; spec §3.3 amended). R6 keys a Google series and
+   its ICS twin identically, so the file may hold one `source_uid` under `google:<hash>` and under
+   `personal`. Both records are kept (each calendar ages its own). **Every reader takes one per
+   key** through `SeriesFile::by_key() -> BTreeMap<&str, &Series>`, by a stated precedence: a
+   `google:` calendar over any other, then the lower calendar key. `instances_map`, `proposals`
+   (P9), `detect_changes` (P12) and withdrawal's "left the file" (P13: absent under **every**
+   calendar) all read `by_key`, never the raw list.
+9. `pub fn read_series_file(vault) -> (SeriesFile, Vec<String>)` and `SeriesFile::instances_map()`
+   giving P3's `instances` shape (per `source_uid`, from `by_key`: its calendar's read date, that +
+   28, the instances). *Reason:* R21 uses the same file.
 
 **Tests first:**
 `google_value_normalises_to_one_series_with_meets_and_until` (§4.1's example → §3.3's example);
@@ -507,7 +628,12 @@ every-other-week pattern, one instance, all-day, `until` before today, an `RDATE
 `a_removed_feed_keeps_its_series_14_days_then_drops_them`;
 `the_file_is_written_only_when_fresh_and_changed` (second identical refresh: mtime and bytes
 unchanged); `the_file_bytes_are_sorted_dumps_value_with_a_trailing_newline`;
-`a_malformed_file_reads_empty_with_one_warning`; `no_fresh_calendar_writes_no_file`.
+`a_malformed_file_reads_empty_with_one_warning`; `no_fresh_calendar_writes_no_file`;
+`an_aged_out_series_moves_to_ended_with_its_last_instance_and_until` (I1);
+`a_removed_feeds_series_never_enter_ended`; `an_ended_entry_goes_after_28_days_or_when_the_key_returns`;
+`a_google_calendar_key_ages_as_removed_when_cloud_google_leaves_the_config` (M13);
+`instances_map_prefers_the_google_calendar` and `by_key_takes_one_record_per_key_google_first_then_calendar_key`
+(I2); `an_ics_title_is_cut_to_200_and_where_to_80` (M15).
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments::`.
 
@@ -515,11 +641,16 @@ unchanged); `the_file_bytes_are_sorted_dumps_value_with_a_trailing_newline`;
 
 **Decisions.**
 
-1. `pub fn proposals(file: &SeriesFile, set: &Commitments, codes, planning, template_window, today,
-   for_cards: bool) -> Vec<Proposal>` — pure, in `source_uid` order. A series is proposed only if
-   eligible and classified, **no note** has its `source_uid` (confirmed or marker), **no confirmed
-   note has its signature** `(kind, course or lower-cased title, meets)`, and — when `for_cards` —
-   it is not `office-hours`. *Reason:* §3.5, R8, R22.
+1. `pub fn proposals(file: &SeriesFile, set: &Commitments, codes, planning, template: &WeekCalendar,
+   held: &BTreeSet<String>, today, for_cards: bool) -> Vec<Proposal>` — pure, over `file.by_key()`
+   (P8 decision 8), so one key is one proposal whichever calendars hold it; in `source_uid` order.
+   `template` supplies `day_start`, `day_end` **and `min_block_minutes`** (plan review M5); `held`
+   is the set of keys that a change card's `change.source_uid` carries (P12's `successor_keys`, any
+   status but `superseded`), passed in so the function stays pure (plan review I5). A series is
+   proposed only if eligible and classified, its key is not in `held`, **no note** has its
+   `source_uid` (confirmed or marker), **no confirmed note has its signature** `(kind, course or
+   lower-cased title, meets)`, and — when `for_cards` — it is not `office-hours`. *Reason:* §3.5,
+   R8, R22, §5.4.
 2. `Proposal { kind, level, title, course, meets, where_, from, until, source_uid }`, level the
    kind's default. *Reason:* what §2.1's note needs.
 3. **The window proposal**, only when no `planning-day` note and no `window` marker exist: per
@@ -536,7 +667,9 @@ unchanged); `the_file_bytes_are_sorted_dumps_value_with_a_trailing_newline`;
 bed → two entries); `a_weekday_with_one_side_takes_the_other_from_the_template`;
 `an_inverted_or_too_short_day_is_left_out`; `a_planning_day_note_suppresses_the_window`;
 `a_window_marker_suppresses_every_later_window_even_with_a_new_routine`;
-`proposals_are_in_source_uid_order_and_deterministic` (same input twice, equal output).
+`proposals_are_in_source_uid_order_and_deterministic` (same input twice, equal output);
+`one_key_from_google_and_ics_is_one_proposal` (I2; the card half is P11's);
+`a_key_held_by_a_change_card_is_not_proposed` (I5).
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments::`.
 
@@ -592,29 +725,48 @@ knowlu-engine --test oracle --test surface_oracle`, `git diff --exit-code engine
 
 1. `eventemit::clock` becomes `pub(crate)`; nothing else in `eventemit.rs` changes. *Reason:* M4 —
    one 12-hour format across every card.
-2. `pub fn file_card(vault, kind: &str, fields: Vec<(&str, Node)>, title, body, today, ctx, journal)
+2. `pub fn file_card(vault, kind: &str, fields: Vec<(&str, Field)>, title, body, today, ctx, journal)
    -> Result<PathBuf, String>` — **refuses a `kind` outside `LOCAL_CARD_KINDS`**, and is the only
-   function in this piece that writes into `approvals/`. `write::create` with `yamlemit::Node::map`;
-   `proposed_at` and `first_proposed_at` both `Node::Date(today)` (never an anchor); `expires: null`,
+   function in this piece that writes into `approvals/`. `write::create` with frontmatter from P6's
+   `front_matter` (Global Constraint 23: `commitment:`, `target`-side `change:`/`was:` as `Field::Flow`,
+   one line each); `proposed_at` and `first_proposed_at` both `Node::Date(today)` (never an anchor); `expires: null`,
    `snooze_until: null`, `created_by: agent:commitments`; journal actor `agent:commitments`; path
-   `approvals/commitment-check-<ingest::slugify(title)>.md`, `-2`, `-3` on collision. *Reason:* R20
-   by construction (spec §5.2 "One constructor"), constraint 5.
-3. `pub fn emit_checks(vault, proposals, changes, today, budget: i64, ctx, journal) -> (Vec<PathBuf>,
-   usize, Vec<String>)`. `allowance = min(budget, 5 − commitment-check cards in approvals/ and
-   archive/ whose first_proposed_at is today)`. Order: change cards (P12), then `class`, `lab`,
-   `work`, the window, `club`, `meeting`, any other kind; within a kind by the first meeting's
-   `(day, start)`, then `source_uid`. *Reason:* R9, §5.2; the F2 sizing means `defer_over_budget`
-   never has overflow to snooze (constraint 7).
-4. **Asked once:** a proposal is skipped when any card in `approvals/` or `archive/` has its
-   `source_uid` **unless that card's status is `superseded`** (M-f). Office-hours proposals never
-   reach here (P9 `for_cards`). *Reason:* §5.2, §5.5.
-5. **Title** from structured fields only: `{title≤40} · {days} {range} · {question}`; days
+   `approvals/commitment-check-<ingest::slugify(title)>.md`, `-2`, `-3` on collision **in
+   `approvals/` only**, as F2's emitter checks. *Reason:* R20 by construction (spec §5.2 "One
+   constructor"), constraint 5.
+3. **`Change` and the change card live here** (plan review I5: P11's order test needs them; P12 only
+   detects). `pub struct Change { target: String, source_uid: String, title: String, change:
+   Mapping, was: Mapping }` — `target` is `commitments/<file>.md`, `source_uid` the note's, `title`
+   the note's; changed fields only; `was` the note's current values, absent as `null`. The change
+   card's title: `CS 100 now meets Tue/Thu 9:30–10:45am · update?` / `CS 100 ends Dec 4 · update?`;
+   its frontmatter adds `target`, `change:` and `was:` (one line each) to decision 7's; its
+   `source_uid` is the note's. *Reason:* §5.4.
+4. `pub fn emit_checks(vault, proposals, changes: &[Change], today, budget: i64, ctx, journal) ->
+   (Vec<PathBuf>, usize, Vec<String>)`. `allowance = min(budget, 5 − commitment-check cards in
+   approvals/ and archive/ whose first_proposed_at is today)`. Order: change cards, then `class`,
+   `lab`, `work`, the window, `club`, `meeting`, any other kind; within a kind by the first
+   meeting's `(day, start)`, then `source_uid`. *Reason:* R9, §5.2; the F2 sizing means
+   `defer_over_budget` never has overflow to snooze (constraint 7).
+5. **Asked once** — one snapshot of `approvals/` and `archive/` taken at entry, **plus every key and
+   `(target, change)` filed earlier in this same call** (plan review I2), so one key never files
+   twice in a run whatever the input holds:
+   - a **proposal** is skipped when any card has its `source_uid`, unless that card's status is
+     `superseded` (M-f);
+   - the **window** proposal is skipped while any card whose `source_uid` starts `window:` exists and
+     is not `superseded` — whatever its routine keys (plan review C1: a new routine series changes the
+     key, and must not file a second window card beside a pending one);
+   - a **change** is skipped when a card with the same `target` and the same canonical `change` text
+     (`safe_dump_flow`) exists and is not `superseded` (spec §5.5 amended: a change card withdrawn
+     because the note was edited is re-asked once, with the new `was`).
+   Office-hours proposals never reach here (P9 `for_cards`). *Reason:* §5.2, §5.4, §5.5.
+6. **Title** from structured fields only: `{title≤40} · {days} {range} · {question}`; days
    `Mon/Wed/Fri`, three or more consecutive collapse to `Mon–Fri`; `range` by `clock`
    (`12–12:50pm`); a second `meets` entry adds ` +1 more time`; questions `a class?`, `a lab?`,
    `work?`, `a club?`, `a meeting?`; the window `Your day · Mon–Fri 8am–10pm · plan in this
    window?`. *Reason:* §5.2; direction note §4.
-6. **Frontmatter** as §5.2: `type: approval`, `kind: commitment-check`, `title`, `status: pending`,
-   `source_uid`, `commitment:` (one flow mapping, P2's bytes), dates, `created_by`. **Body** as §5.2,
+7. **Frontmatter** as §5.2: `type: approval`, `kind: commitment-check`, `title`, `status: pending`,
+   `source_uid`, `commitment:` (one flow line through `front_matter`, P2's bytes), dates,
+   `created_by`. **Body** as §5.2,
    first paragraph `**Is this part of your week?** Knowlu found it repeating on your calendar.`, then
    the level's sentence, `where` if present, and `Reject and it's ignored. Either way you won't be
    asked again.` *Reason:* the first paragraph is what `surface::first_paragraph` shows as `why`.
@@ -623,17 +775,27 @@ knowlu-engine --test oracle --test surface_oracle`, `git diff --exit-code engine
 - `file_card_refuses_a_kind_outside_local_card_kinds` — `event-check` and `amend` give `Err`, write
   nothing, journal nothing.
 - `a_class_proposal_files_one_card_with_the_exact_title_frontmatter_and_body` — `CS 100 · Mon/Wed/Fri
-  12–12:50pm · a class?`; the `commitment:` line's bytes; `created_by: agent:commitments`; both dates
-  today; `expires: null`.
+  12–12:50pm · a class?`; the `commitment:` line's bytes, and **`commitment:` is exactly one
+  frontmatter line that parses back to the proposal's mapping** (I3); `created_by:
+  agent:commitments`; both dates today; `expires: null`.
+- `a_change_card_carries_target_change_and_was_each_on_one_line` — a hand-built `Change` gives
+  `target`, the note's `source_uid`, and `change:`/`was:` each one line parsing back to its mapping
+  (I3); titles `… now meets Tue/Thu 9:30–10:45am · update?` and `… ends Dec 4 · update?`.
 - `day_lists_collapse_and_a_second_meeting_says_plus_one_more_time`.
-- `the_window_card_title_reads_your_day`.
+- `the_window_card_title_reads_your_day`; the window card's `commitment:` (holding `window`) is one line.
 - `at_most_five_a_day_counted_by_first_proposed_at` — 7 proposals, budget 15 → 5 cards; a card
   deferred to tomorrow by `defer_over_budget` still counts today.
 - `the_budget_caps_below_five` — budget 2 → 2 cards.
-- `order_is_changes_then_class_lab_work_window_club_meeting`.
+- `order_is_changes_then_class_lab_work_window_club_meeting` — with a hand-built `Change`.
 - `a_second_run_files_nothing` — every proposal already has a card.
 - `a_superseded_card_does_not_close_the_question` — archived `superseded` card, series back → one
-  new card at `-2`.
+  new card at the **base** name (collision is checked in `approvals/` only; the old card is in
+  `archive/` — plan review M10).
+- `one_key_from_google_and_ics_is_one_proposal_and_one_card` (I2) — two identical proposals with one
+  key in the input → one card; the second is refused by the in-call set.
+- `a_pending_window_card_blocks_a_window_proposal_with_new_routine_keys` (C1).
+- `the_same_change_is_never_asked_twice_and_a_different_one_is`;
+  `a_superseded_change_card_does_not_close_its_change` (spec §5.5 amended).
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments:: eventemit::`.
 
@@ -642,30 +804,34 @@ knowlu-engine --test oracle --test surface_oracle`, `git diff --exit-code engine
 **Decisions.**
 
 1. `pub fn detect_changes(file: &SeriesFile, set: &Commitments, fresh: &BTreeSet<String>, today)
-   -> Vec<Change>` — pure; only for confirmed notes keyed `gcal-series:`/`ics-series:` whose
-   calendar is in `fresh`. **Changed:** series differs in `meets`, a non-empty `where`, or `until`.
-   **Ended:** the series was dropped from the file and no fresh series has the note's signature →
-   `until` = the last instance date the file held. **Succeeded:** an eligible class or lab series
-   for the same course, different `meets`, first instance on or after the old series' last one,
-   while the old one is ending → `meets`, `where` **and** `source_uid` = the new key, in one change.
-   *Reason:* §5.4, R22.
-2. `Change { target, change: Mapping, was: Mapping }` — changed fields only; `was` the note's current
-   values, absent as `null`; no field proposed as `null`. *Reason:* §5.4; C1.
-3. Titles: `CS 100 now meets Tue/Thu 9:30–10:45am · update?`, `CS 100 ends Dec 4 · update?`. Cards
-   carry `target: commitments/<file>.md`, `change:`, `was:`, and the note's `source_uid`; filed
-   through P11's `file_card`, charged to the cap, first in order.
-4. **Asked once:** a card with the same `target` and the same canonical `change` text
-   (`safe_dump_flow`) in `approvals/` or `archive/` suppresses another; a successor's key is not
-   proposed on its own while its change card is pending, approved or rejected (P9 reads the cards'
-   `change.source_uid`). *Reason:* §5.4, §5.5.
+   -> Vec<Change>` — pure, over `file.by_key()` and `file.ended`; only for confirmed notes keyed
+   `gcal-series:`/`ics-series:`. **Changed** (the chosen record's calendar in `fresh`): series
+   differs in `meets`, a non-empty `where`, or `until`. **Ended** (plan review I1): the note's key is
+   in `file.ended` (P8 decision 6 — it was dropped from a fresh read, so the freshness test is
+   already met), under no calendar in `by_key`, and no fresh series has the note's signature →
+   `until` = `ended.last_instance`, else `ended.until`; neither → no change and one warning; and no
+   change when the note's `until` is already on or before that date. **Succeeded:** an eligible class
+   or lab series for the same course, different `meets`, first instance on or after the old series'
+   last one, while the old one is ending → `meets`, `where` **and** `source_uid` = the new key, in
+   one change. *Reason:* §5.4, R22.
+2. Returns P11's `Change` — changed fields only; `was` the note's current values, absent as `null`;
+   no field proposed as `null`. Filed through `emit_checks` (P11), charged to the cap, first in
+   order; asked once by P11 decision 5. *Reason:* §5.4; C1.
+3. `pub fn successor_keys(vault) -> BTreeSet<String>` — the `change.source_uid` of every
+   `commitment-check` card in `approvals/` and `archive/` whose status is not `superseded`. P16
+   passes it to `proposals` as `held` (P9), so a successor's key is not proposed on its own while
+   its change card is pending, approved or rejected. *Reason:* §5.4, §5.5; plan review I5.
 
 **Tests first:** `a_meets_change_on_a_fresh_calendar_files_one_change_card`;
 `a_calendar_not_read_fresh_files_nothing`; `a_non_empty_where_change_is_a_change_and_an_empty_one_is_not`;
-`an_ended_series_proposes_until_the_last_instance`;
+`an_ended_series_proposes_until_the_last_instance` — built by P8's `refresh_series` aging a series
+out, not by hand (I1); `an_ended_entry_with_no_instance_uses_its_last_known_until`;
+`an_ended_note_whose_until_already_ends_it_files_nothing`;
+`a_key_still_held_by_another_calendar_is_not_ended` (I2);
 `a_split_series_with_the_same_meets_files_nothing` (signature seen);
 `a_split_with_new_meets_files_exactly_one_card_moving_source_uid`;
-`the_successor_is_not_proposed_while_its_change_card_exists`;
-`the_same_change_is_never_asked_twice_and_a_different_one_is`; `no_field_is_proposed_as_null`.
+`successor_keys_skips_superseded_cards` and `the_successor_is_not_proposed_while_its_change_card_exists`
+(through `successor_keys` → `proposals`); `no_field_is_proposed_as_null`.
 
 **Verify:** `cargo test -p knowlu-engine --lib -- commitments::`.
 
@@ -685,7 +851,8 @@ knowlu-engine --test oracle --test surface_oracle`, `git diff --exit-code engine
    journal)` (the §2.1 note; the window as §2.4; file name `slugify(title)`, `-2` on collision) and
    `create_marker(vault, key, ctx, journal)` (`commitments/declined-<10 hex>.md`, fields `type`,
    `status: declined`, `source_uid` only; no-op when a marker for the key exists). Actor
-   `agent:commitments`. *Reason:* §2.3, §2.5.
+   `agent:commitments`. Both build their frontmatter with P6's `front_matter`, so `meets:` and
+   `window:` are each one line (Global Constraint 23). *Reason:* §2.3, §2.5.
 3. **approved** → if a confirmed note has the card's `source_uid` or signature (or, for the window, a
    `planning-day` note exists): stamp `refused`, archive, one warning, no write. Else create the
    note, stamp `executed`, archive. **A change card** (it has `target`): for each field of `change`,
@@ -697,19 +864,36 @@ knowlu-engine --test oracle --test surface_oracle`, `git diff --exit-code engine
    marker; a change card writes nothing to the note, **but** when its `change` carries a new
    `source_uid`, the marker for that key (M-d). Then the generic delete-to-archive. *Reason:* §5.2,
    §5.4, §5.5.
-5. **Withdrawal:** `pub fn withdraw_stale(vault, file, set, today, ctx, journal)` in `approvals.rs`
-   (it owns the archive path) — a pending `commitment-check` whose `source_uid` left the series file,
-   or which a confirmed note now covers, is stamped `superseded` and archived, no other write. Called
-   by `rank` (P16) after `refresh_series`. *Reason:* §5.2 "Withdrawn", R9.
+5. **Withdrawal, by card shape** (plan review C1; spec §5.2 amended): `pub fn withdraw_stale(vault,
+   file, set, today, ctx, journal)` in `approvals.rs` (it owns the archive path). A pending or
+   snoozed `commitment-check` is stamped `superseded` and archived, no other write, only when:
+   - **a change card** (it has `target`): the target note is gone, or for some field of `change`
+     the note's current value no longer equals `was` (the same canonical-text test as settlement,
+     decision 3). A pending change or ended card otherwise survives every rank — its `source_uid`
+     is the note's, which a confirmed note always "covers", and an ended series has by definition
+     left `series`, so neither of those tests applies to it.
+   - **a window card** (`source_uid` starts `window:`): a `planning-day` note or the `window` marker
+     exists. Its key is never in the series file, so "left the file" never applies to it.
+   - **a proposal card** (neither): its key is under no calendar of `file.by_key()`, or a note
+     (confirmed or marker) has that key, or a confirmed note has its signature.
+
+   **No cap-charge loop, by construction:** every withdrawal condition is also a condition under
+   which `proposals` (P9) or `detect_changes` (P12) no longer produces that card — except the edited
+   `was`, where the change is re-asked **once** with the new `was` and that card then survives. So a
+   card is never withdrawn and re-filed run after run. Called by `rank` (P16) after `load`.
+   *Reason:* §5.2 "Withdrawn", R9.
 6. `pending`/`snoozed`: the existing machinery; no expiry. An old engine's `unknown kind` warning is
    accepted (§5.2). *Reason:* R9.
 
 **Tests first** (`approvals.rs` `mod tests`, driving `write_literals` then `process_approvals` exactly
 as `decide_inner` does):
 - `approving_a_class_card_creates_the_confirmed_note_and_archives_executed` — the note's fields,
-  `confirmed_at` today, `id` `cmt_…`, the card in `archive/` `executed`.
+  `confirmed_at` today, `id` `cmt_…`, the card in `archive/` `executed`; the note is
+  `commitments/cs-100.md` and **`meets:` is exactly one frontmatter line** parsing back to the
+  sequence (I3).
+- `a_second_confirmed_note_with_the_same_title_takes_dash_2` — `commitments/cs-100-2.md` (M15).
 - `approving_when_a_confirmed_note_has_the_key_or_signature_is_refused_and_writes_nothing`.
-- `approving_the_window_card_writes_the_planning_day_note`.
+- `approving_the_window_card_writes_the_planning_day_note` — its `window:` is one line (I3).
 - `rejecting_a_class_card_writes_one_anonymous_marker` — the marker's bytes hold only `id`, `type`,
   `status`, `source_uid`; its file name is `declined-` + 10 hex of SHA-256 of the key.
 - `rejecting_the_window_card_writes_the_window_marker`.
@@ -717,7 +901,15 @@ as `decide_inner` does):
 - `a_meets_change_applies_and_reads_back_as_a_sequence_load_accepts`.
 - `a_stale_was_is_refused_and_archived`.
 - `rejecting_a_successor_change_writes_the_successors_marker`.
-- `a_pending_card_whose_series_left_the_file_is_withdrawn_superseded`.
+- Withdrawal, one test per shape and per condition (C1):
+  `a_pending_card_whose_series_left_the_file_is_withdrawn_superseded`;
+  `a_proposal_card_is_withdrawn_once_a_confirmed_note_has_its_key_or_signature` (M15);
+  `a_proposal_card_whose_key_another_calendar_still_holds_survives` (I2);
+  `a_pending_change_card_survives_the_next_rank`; `a_pending_ended_card_survives_the_next_rank`;
+  `a_pending_window_card_survives_the_next_rank`;
+  `a_window_card_is_withdrawn_once_a_planning_day_note_exists` (and once the `window` marker does);
+  `a_change_card_is_withdrawn_when_the_note_was_edited_since`;
+  `a_change_card_is_withdrawn_when_its_target_is_gone`.
 - `amendable_folders_is_unchanged` — `AMENDABLE_FOLDERS == ["tasks", "courses"]`.
 
 **Verify:** `cargo test -p knowlu-engine --lib -- approvals:: commitments::`, `cargo test -p
@@ -732,10 +924,13 @@ knowlu-engine --test dependency_boundary`, `cargo build --workspace` at 0 warnin
 1. `cloudmodel::fetch_calendar(client, name) -> Result<(String, Option<Value>), String>` sends
    `?name=<name>&accepts=series` and returns the reply's `series` as `Some` only when present.
    *Reason:* §4.2; a reply without it is today's reply (§4.3 "new engine, old function").
-2. `cli::Fetchers` gains `pub series: Option<&'a SeriesStash>` and `#[derive(Default)]`;
-   `pub type SeriesStash = RefCell<BTreeMap<String, StashEntry>>`, `pub enum StashEntry {
+2. `cli::Fetchers` gains `pub series: Option<&'a SeriesStash>`. **Partly landed already** (plan
+   review M2): on `j-followups` it derives `Default, Clone, Copy`, which an `Option<&RefCell<..>>`
+   keeps. `pub type SeriesStash = RefCell<BTreeMap<String, StashEntry>>`, `pub enum StashEntry {
    Google(Value), Ics(String) }`, keyed by the feed's **URL** as the calendar closure receives it.
-   *Reason:* review I8 — explicit plumbing, so `run_with` tests inject series without a network.
+   The ~eight `Fetchers { calendar, events }` literals in `cli.rs`'s tests (1345–1738 on
+   `j-followups`) and `run`'s own (line 261) gain `series: None` or the stash. *Reason:* review I8 —
+   explicit plumbing, so `run_with` tests inject series without a network.
 3. `cli::run` owns one stash; its calendar closure stashes the Google `series` for `cloud:google`, and
    the ICS text for any other feed it fetched; a failed fetch stashes nothing. The closure keeps its
    `Fn(&str) -> Result<String, String>` shape, so `load_calendar_events` and every oracle test are
@@ -758,12 +953,15 @@ cli::`, `cargo test -p knowlu --test scaffold`, `cargo build --workspace` at 0 w
 
 **Decisions.**
 
-1. In `run_with`, directly after `load_calendar_events` and before the `WeekCalendar` is built:
-   normalise every stash entry (P8), `refresh_series`, then `approvals::withdraw_stale` (P13), then
-   `load`, `detect_changes` (P12), `proposals(.., for_cards: true)` (P9) and `emit_checks` (P11)
-   with `budget = max(0, planning.daily_approval_budget − count_proposals_created(vault,
+1. In `run_with`, directly after `load_calendar_events` and before the `WeekCalendar` is built, in
+   this order (plan review I5 — withdrawal needs the loaded set): normalise every stash entry (P8);
+   `refresh_series` → `file`; `commitments::load` → `set`; `approvals::withdraw_stale(vault, &file,
+   &set, …)` (P13); `detect_changes(&file, &set, fresh, today)` (P12); `successor_keys(vault)`
+   (P12) → `held`; `proposals(&file, &set, …, &held, today, for_cards: true)` (P9); `emit_checks`
+   (P11) with `budget = max(0, planning.daily_approval_budget − count_proposals_created(vault,
    today))` — recounted here, after the events pass took its share. The number filed is added
-   to `approvals.pending`, as `j-followups` does for its checks (M8, re-review M-a). *Reason:* §4.2, §5.2.
+   to `approvals.pending`, as `j-followups` does for its checks (M8, re-review M-a). *Reason:* §4.2,
+   §5.2. (`withdraw_stale` archives only, so `set` read before it is still current.)
 2. `WeekCalendar::from_file(...)` in `run_with` becomes `WeekCalendar::for_vault(vault, cal_events)`.
    *Reason:* §6.1, C3.
 3. `commitments::record_baseline(vault, &set, &cal, today)`: only when a confirmed `planning-day`
@@ -788,6 +986,20 @@ cli::`, `cargo test -p knowlu --test scaffold`, `cargo build --workspace` at 0 w
   deferred.
 - `rank_subtracts_a_confirmed_class_from_capacity` — `today.md`'s capacity line drops by the class.
 - `rank_withdraws_a_card_whose_series_left_the_file`.
+- **`a_change_card_survives_two_more_ranks`** (C1) — a confirmed note, its series' `meets` changed
+  in the stash → one change card; rank twice more with the same stash → still exactly one, still
+  pending, nothing in `archive/`.
+- **`no_card_is_withdrawn_and_refiled_across_three_ranks`** (C1) — a vault that yields one
+  proposal card, one window card and one change card; three ranks on consecutive days with the
+  same stash file each card once, archive nothing, and charge the 5-a-day count only on day one.
+- **`an_aged_out_series_files_exactly_one_end_card_with_its_last_instance`** (I1) — a confirmed note
+  whose series is in the stash, then absent from a fresh read for 14 days (ranks with `--today`
+  advanced): exactly one `… ends <date> · update?` card, `change: {until: <last instance>}`; a
+  further rank files nothing.
+- `an_end_card_starved_by_the_budget_is_filed_on_the_next_run` (I1) — the drop run's budget is 0;
+  the next day's rank files it from `ended`.
+- `one_series_from_google_and_ics_files_one_card` (I2) — the same `gcal-series:` key in the Google
+  stash entry and a direct ICS feed.
 - `rank_records_the_template_window_when_plan_json_is_missing`;
   `rank_keeps_the_days_first_window_across_runs`; `rank_records_todays_window_on_a_new_day`;
   `rank_writes_no_plan_json_without_a_planning_day_note`.
@@ -827,7 +1039,8 @@ surface_oracle` (the three references unchanged), `git diff --exit-code engine/t
    `(day_start, day_end)` for today; dated another day (today's first `rank` has not run) → the
    current `window(today)`, so nothing is reported. *Reason:* §6.4 — the first window is diffed
    against the template (re-review N2).
-2. `commitments::moved(ranked, today, now_cal, base_cal) -> Option<Moved>` — pure: both
+2. `commitments::moved(ranked, today, now_cal, base_cal, planning: Option<&PlanningConfig>) ->
+   Option<Moved>` (`planning` is what `designate_today_explained` takes — plan review M5) — pure: both
    `designate_today_explained` runs from the **same** ranked list; part of day from the take's free
    block start (before 12:00 morning, before 17:00 afternoon, else evening); moved-to when the part
    changed or the task is new; `dropped` when only in the baseline plan. `Moved { to: {morning,
@@ -878,7 +1091,10 @@ knowlu-engine --test surface_oracle`, `git diff --exit-code engine/tests/fixture
 **Tests first:**
 - `cli.rs`: `commitments_command_prints_proposals_and_writes_no_note_card_or_journal` — injected
   stash; afterwards the only changed path under the vault is `state/calendar-series.json`;
-  `commitments_command_with_no_feed_prints_an_empty_list`.
+  `commitments_command_with_no_feed_prints_an_empty_list`;
+  `commitments_command_exits_0_on_an_unreadable_config_and_a_failed_fetch` (plan review M14) — a
+  malformed `config/ingest.yaml`, and separately a fetcher that errors: exit code 0, the failure
+  named in `warnings`, nothing written.
 - `cloud_contract.rs`: the extended `rank_cannot_reach_a_judgment_endpoint`, plus
   `the_commitments_arm_markers_exist` so the scan cannot pass vacuously.
 
@@ -902,6 +1118,55 @@ cloud_contract`, then a hand smoke on a scratch vault (`scripts\scratch-vault.ps
 last), `git diff --exit-code engine/tests/fixtures`, and `git diff --stat` shows only this plan's
 files.
 
+## P21 — phase 1s, conditional (`sync.rs`, `sync_contract.rs`, `sync_rows.ts`, a migration)
+
+**Runs** only when `engine/src/sync.rs` is on the base at `commitments-p1`'s rebase (C3′ merged
+first); otherwise this section is handed, verbatim, to the `c3-sync` branch, which runs it at its
+own rebase onto a `main` carrying phase 1 (plan review I4). Either way it lands in the second merge,
+and P6's two tripwires are red until it does. After P6 (the constant), P11 (`file_card`) and P13
+(settlement, withdrawal); in parallel with P16 (disjoint files). Spec §10 Phase 1s is the authority.
+
+**Decisions.**
+
+1. `sync.rs`: `sync_card_note` becomes `local_card_note(text) -> Option<Option<String>>` — `Some`
+   when `created_by` is `ACTOR` **or** `kind` is in `crate::commitments::LOCAL_CARD_KINDS` (the
+   substring pre-test widens to `ACTOR` or `kind: commitment-`), used in all three places the old
+   function was. The journal pass collects the `id` of every `create` record whose `new.kind` is in
+   `LOCAL_CARD_KINDS`, beside the two actor tests, **before** ids and paths are gathered. The
+   constant is named, never copied. *Reason:* §10 "The local-card predicate, by construction".
+2. `engine/tests/sync_contract.rs`: gate 1 derives from `NOTE_FOLDERS` — `ts.contains(&format!("({})/",
+   ids::NOTE_FOLDERS.join("|")))` — and probes a path under **every** folder of `NOTE_FOLDERS`,
+   `commitments/cs-100.md` among them. *Reason:* plan review C2; the literal could not fail.
+3. `cloud/supabase/functions/_shared/sync_rows.ts`: `NOTE_PATH_RE` gains `commitments` (the group
+   in `NOTE_FOLDERS` order); `sync_rows_test.ts` accepts `commitments/x.md` and still refuses
+   `state/…`.
+4. A new, forward-only migration `cloud/supabase/migrations/<timestamp>_sync_note_path_check_commitments.sql`
+   re-declares `sync_notes_path_check` exactly as `20260912000400` does (the unbounded class plus
+   the `char_length` check — Postgres's 255 repetition cap) with `commitments` in the group; no
+   earlier migration is edited. Its name matches P6's `*sync_note_path_check*.sql` pick and sorts
+   last. *Reason:* R3; R-C3′-exec-10's lesson.
+5. `cloud/supabase/migrations_sync_test.ts`: a new assertion reads the new migration **by name** and
+   requires the seven-folder group; line 134's six-folder assertion on `20260912000300` stays, since
+   it pins that file's own (superseded) check.
+6. **Deploy is the controller's:** `supabase db push --include-all` (the SDD lessons note), staging
+   first, then prod — the prod push is release gate R3. Privacy line 2 (§9) is a release gate in
+   `site/privacy.html`, outside these files.
+
+**Tests first:**
+- `sync.rs` `mod tests`: **`build_push_sends_no_local_card_nor_any_record_about_one`** exactly as
+  spec §10 gate 2 states it — for each kind in `LOCAL_CARD_KINDS`, a pending card, an approved and
+  settled card and a withdrawn card, each written through `file_card` and settled through
+  `process_approvals` / `withdraw_stale` (a kind with no arm yet, `commitment-ask`, is stamped and
+  archived through the same `write` calls the arm makes); no card row, no record by card id or card
+  path; the confirmed note, the marker and their `create` records **are** sent.
+- `local_card_note_matches_by_actor_or_kind_not_by_a_body_line`.
+- `sync_contract.rs`: the rewritten `is_note_path_and_the_servers_regex_agree`.
+- Deno: `sync_rows_test.ts`'s `commitments/` case; `migrations_sync_test.ts`'s new assertion.
+
+**Verify:** `cargo test -p knowlu-engine --lib -- sync:: commitments::` (P6's tripwires now green),
+`cargo test -p knowlu-engine --test sync_contract`, CI's `deno test`/`deno check`/`deno lint` forms
+over `cloud/supabase/`, `cargo build --workspace` at 0 warnings.
+
 ---
 
 ## Decisions taken, with their cost if wrong
@@ -915,6 +1180,14 @@ files.
 | the `commitments` command bypasses `load_calendar_events` | P19 | the snapshot is one run staler than it could be |
 | the baseline is today's single span, not the whole note | P16, P18 | only today is ever diffed, which is all `moved` reports |
 | main.rs markers bound the model-reach scan | P19 | a marker moved by hand makes `the_commitments_arm_markers_exist` fail loudly |
+| the series file carries `ineligible`/`rdate`/`unsupported` fields beyond §3.3's example (plan review M12) | P4, P8 | a larger generated file; it is state, never synced, and no reader outside `commitments.rs` |
+| the series file carries `ended` (28-day retention of aged-out series) | P8, P12 | a larger generated file; without it the end card cannot be computed or retried (I1) |
+| one key from two calendars: Google over ICS, then calendar key; both records kept | P8, P9, P11, P12, P13 | the ICS twin's instances are ignored while Google holds the key; both routes read the same event, so they agree |
+| withdrawal by card shape; a window card blocks any later window proposal while not `superseded` | P11, P13 | a stale change card lingers until the student answers it; settlement's `was` check still refuses a stale one |
+| a `superseded` change card does not close its `(target, change)` | P11 | one re-ask per hand edit of the note, never a loop |
+| the Google series window starts 24 hours before `now` | P5 | one more day of instances per call, well under the 40-instance and page caps |
+| `front_matter` in `commitments.rs`, not a `yamlemit` API | P6 | a move; `yamlemit` stays the PyYAML port and is not extended |
+| phase 1s is P21 in this plan, run by whichever branch merges second | P21 | the same text in two branches' hands; the tripwires fail whichever forgets it |
 
 ## Fidelity ledger (spec section → task → proof)
 
@@ -925,21 +1198,24 @@ files.
 | §2.3, R19 | the anonymous decline marker | P6, P13 | `a_decline_marker_contributes_its_key_only`, `rejecting_a_class_card_writes_one_anonymous_marker` |
 | §2.4, §6.3, R11 | the planning-day note; per-weekday window; lowest id; invalid entry warning | P3, P6, P13 | `a_window_entry_replaces_that_weekday_only`, `the_planning_day_lowest_id_wins_and_a_duplicate_weekday_is_skipped`, `an_invalid_window_entry_warns_with_the_spec_text`, `approving_the_window_card_writes_the_planning_day_note` |
 | §2.5 | duplicates: lowest id; settlement never adds a third | P6, P13 | `duplicate_source_uid_keeps_the_lowest_id_and_warns_once`, `approving_when_a_confirmed_note_has_the_key_or_signature_is_refused_and_writes_nothing` |
-| R2 | single-line flow values with PyYAML's bytes | P2 | `flow_emits_a_meets_sequence_on_one_line`, `flow_emits_a_commitment_mapping_with_nulls_and_a_nested_sequence`; oracle green |
+| R2 | single-line flow values with PyYAML's bytes, one frontmatter line each on disk (plan review I3) | P2, P6, P11, P13 | `flow_emits_a_meets_sequence_on_one_line`, `flow_emits_a_commitment_mapping_with_nulls_and_a_nested_sequence`, `a_collection_after_block_scalars_is_one_frontmatter_line`, `front_matter_puts_every_collection_field_on_one_line`, the one-line assertions in P11's and P13's tests; oracle green |
 | §3.1, R6 | ICS series; `@google.com` keyed as `gcal-series:` | P4 | `a_google_uid_is_keyed_gcal_series_without_the_suffix` |
 | §3.2 step 1, C4 | overrides, cancellations, declines, transparency, EXDATE | P4 | the seven per-rule tests in P4 |
 | §3.2 steps 2–6, R4, I5 | UNTIL/COUNT on the device; meets; place-like `where`; description dropped | P8 | `until_z_is_a_local_date_in_the_vault_timezone`, `count_gives_until`, `meets_keeps_triples_seen_twice_and_groups_by_time`, `a_zoom_link_or_passcode_line_is_never_where`, `the_description_is_never_in_the_file` |
-| §3.3, M-e, M-g | the series file: freshness, 14 days, removed feeds, zero-series fresh, bytes, write-on-change | P8 | P8's eleven file tests |
+| §3.3, M-e, M-g | the series file: freshness, 14 days, removed feeds (and `google:` keys' feed), zero-series fresh, bytes, write-on-change, `ended` | P8 | P8's nine file tests, `a_google_calendar_key_ages_as_removed_when_cloud_google_leaves_the_config`, `an_aged_out_series_moves_to_ended_with_its_last_instance_and_until`, `a_removed_feeds_series_never_enter_ended`, `an_ended_entry_goes_after_28_days_or_when_the_key_returns` |
+| §3.1, §3.3, R6 (plan review I2) | one key from two calendars: one record per key by precedence, one proposal, one card | P8, P9, P11, P12, P13, P16 | `by_key_takes_one_record_per_key_google_first_then_calendar_key`, `instances_map_prefers_the_google_calendar`, `one_key_from_google_and_ics_is_one_proposal`, `one_key_from_google_and_ics_is_one_proposal_and_one_card`, `a_key_still_held_by_another_calendar_is_not_ended`, `a_proposal_card_whose_key_another_calendar_still_holds_survives`, `one_series_from_google_and_ics_files_one_card` |
 | §3.4, R7, C3, I2 | eligibility; rules 0–6; the code table; blind spots; unsupported rules | P7 | P7's tests, including `cs_1110_compsci_61a_and_math_20a_match_their_courses`, `work_on_cs_100_cs_100_study_group_and_study_for_ph_106_are_never_proposed`, `ineligible_series_are_never_classified` |
-| §3.5, R8, R22, M-i | proposals; signature; office hours not carded; window proposal and its marker | P9 | P9's nine tests |
-| §4.1, R5, I6, M17 | `/ingest-calendar` `series`: owned calendars, paging, completeness, caps, budget, bounds, `toIcs` pin | P5 | P5's fourteen Deno tests |
+| §3.5, R8, R22, M-i | proposals; signature; office hours not carded; window proposal and its marker; successor keys held | P9, P12 | P9's eleven tests; `successor_keys_skips_superseded_cards` |
+| §4.1, R5, I6, M17, §9 | `/ingest-calendar` `series`: owned calendars, paging, completeness, caps, budget (abortable), bounds, the 24-hour-earlier window, read-only deps, logs, `toIcs` pin | P5 | P5's nineteen Deno tests |
 | §4.2, I8 | `accepts=series`; `Fetchers.series`, `Default`; URL-keyed stash; scaffold literal | P14 | the updated request-line assertion, `a_calendar_reply_without_series_parses_to_none`, the stash tests, `cargo test -p knowlu --test scaffold` |
 | §4.3 | old engine / new function and the reverse | P5, P14 | `without accepts=series the google reply is byte-for-byte today's`; `a_calendar_reply_without_series_parses_to_none` |
-| §5.2, R9, R20, M-f | the card: one constructor, cap 5, budget, order, title, frontmatter, body, superseded exemption | P11 | `file_card_refuses_a_kind_outside_local_card_kinds`, `a_class_proposal_files_one_card_with_the_exact_title_frontmatter_and_body`, `at_most_five_a_day_counted_by_first_proposed_at`, `a_superseded_card_does_not_close_the_question` |
-| §5.2 settlement, R12 | approve → note; reject → marker; window; refused; withdrawn | P13 | the eleven P13 tests |
+| §5.2, R9, R20, M-f | the card: one constructor, cap 5, budget, order, title, frontmatter, body, superseded exemption, one window card at a time | P11 | `file_card_refuses_a_kind_outside_local_card_kinds`, `a_class_proposal_files_one_card_with_the_exact_title_frontmatter_and_body`, `at_most_five_a_day_counted_by_first_proposed_at`, `a_superseded_card_does_not_close_the_question`, `a_pending_window_card_blocks_a_window_proposal_with_new_routine_keys` |
+| §5.2 settlement, R12 | approve → note (file name, `-2`); reject → marker; window; refused | P13 | P13's settlement tests |
+| §5.2 withdrawn, R9 (plan review C1) | withdrawal by card shape; no withdraw-and-refile loop; no daily cap charge | P13, P16 | the nine withdrawal tests in P13 (`a_pending_change_card_survives_the_next_rank`, `a_pending_ended_card_survives_the_next_rank`, `a_pending_window_card_survives_the_next_rank`, `a_window_card_is_withdrawn_once_a_planning_day_note_exists`, `a_change_card_is_withdrawn_when_the_note_was_edited_since`, and four more); `a_change_card_survives_two_more_ranks`, `no_card_is_withdrawn_and_refiled_across_three_ranks` |
 | §5.2 count, M8, M-a | cards filed count in `Approvals: N pending`, in `cli.rs` | P16 | `rank_files_a_commitment_check_for_an_injected_class_series_and_counts_it_pending` |
-| §5.4, R22, M-d | changed / ended / succeeded; `was` check; `write_literals`; successor marker | P12, P13 | P12's nine tests; `a_meets_change_applies_and_reads_back_as_a_sequence_load_accepts`, `a_stale_was_is_refused_and_archived`, `rejecting_a_successor_change_writes_the_successors_marker` |
-| §5.5 | never re-asked, every row | P9, P11, P12, P13 | `a_confirmed_or_declined_key_is_never_proposed`, `a_second_run_files_nothing`, `the_same_change_is_never_asked_twice_and_a_different_one_is`, `a_window_marker_suppresses_every_later_window_even_with_a_new_routine` |
+| §5.4, R22, M-d | changed / ended / succeeded; `was` check; `write_literals`; successor marker | P11, P12, P13 | P12's tests; `a_change_card_carries_target_change_and_was_each_on_one_line`; `a_meets_change_applies_and_reads_back_as_a_sequence_load_accepts`, `a_stale_was_is_refused_and_archived`, `rejecting_a_successor_change_writes_the_successors_marker` |
+| §5.4 ended, §3.3 (plan review I1) | the end card from the retained `ended` entry, once, retried when starved | P8, P12, P16 | `an_ended_series_proposes_until_the_last_instance`, `an_ended_entry_with_no_instance_uses_its_last_known_until`, `an_aged_out_series_files_exactly_one_end_card_with_its_last_instance`, `an_end_card_starved_by_the_budget_is_filed_on_the_next_run` |
+| §5.5 | never re-asked, every row | P9, P11, P12, P13 | `a_confirmed_or_declined_key_is_never_proposed`, `a_second_run_files_nothing`, `the_same_change_is_never_asked_twice_and_a_different_one_is`, `a_superseded_change_card_does_not_close_its_change`, `a_window_marker_suppresses_every_later_window_even_with_a_new_routine` |
 | §6.1, R21, C3 | `for_vault`; spans in `template_blocks`; actual instances in the horizon | P3, P15, P16 | `inside_the_horizon_actual_instances_replace_the_weekly_span`, `a_confirmed_class_note_reduces_capacity_on_its_days`, `rank_subtracts_a_confirmed_class_from_capacity` |
 | §6.2, R15 | blocks by kind, clamp, de-duplication, `template_only_blocks` | P3, P17 | P17's five tests; `template_only_blocks_ignores_commitment_spans` |
 | §6.4, R23, N2 | baseline in `rank`; `moved` live in `surface`; first window vs template; preview | P16, P18 | `rank_records_the_template_window_when_plan_json_is_missing`, `surface_reports_moved_at_once_after_a_window_edit_without_a_rank`, `the_first_window_is_diffed_against_the_template`, `window_preview_diffs_against_the_current_window_and_writes_nothing` |
@@ -948,14 +1224,15 @@ files.
 | §8 | frozen and read-model references; no-commitments equivalence; no new state on `vault-full` | P1, P3, P15, P16, P17, P18 | `for_vault_equals_from_file_without_commitments`, `template_only_blocks_equals_template_blocks_without_commitments`, `decline_markers_change_nothing`, `rank_on_vault_full_writes_no_new_state`; `--test oracle --test surface_oracle` with `git diff --exit-code engine/tests/fixtures` in every relevant task |
 | §9, R18 | proposals never notes; description never stored; function logs nothing | P8, P16, P5 | `the_description_is_never_in_the_file`; the `commitments/`-absent assertion in P16; P5's error-line rule |
 | §9 privacy lines | line 1 with phase 1's first release | **release gate** (Dependencies 3) | `site/privacy.html` is outside this plan's files |
-| §10 Phase 1s, R20, N1 | local cards never sync, by kind | P6 (tripwire), **phase 1s** | `sync_keeps_every_local_card_kind_local`; phase 1s's `build_push_sends_no_local_card_nor_any_record_about_one` |
-| R3 | the migration live on prod before a release with `cmt` | **release gate** (Dependencies 2) | the controller's release checklist |
-| R14 | the `commitments` command, exits 0, writes no note or card | P19 | `commitments_command_prints_proposals_and_writes_no_note_card_or_journal` |
+| §10 Phase 1s, R20, N1 | local cards never sync, by kind | P6 (tripwire), **P21** | `sync_keeps_every_local_card_kind_local`, `the_tripwires_refuse_a_comment`; P21's `build_push_sends_no_local_card_nor_any_record_about_one`, `local_card_note_matches_by_actor_or_kind_not_by_a_body_line` |
+| §10 Phase 1s gate 1, R-C3′-exec-12 (plan review C2) | the server's path regex and the migration carry `commitments`; phase 1 cannot go green without them | P6 (tripwire), **P21** | `the_servers_note_path_rules_name_every_note_folder`; P21's rewritten `is_note_path_and_the_servers_regex_agree`, `sync_rows_test.ts` and `migrations_sync_test.ts` cases |
+| R3 | the migration live on prod before a release with `cmt` | P21 (the file), **release gate** (Dependencies 2) | the controller's `db push --include-all` and release checklist |
+| R14 | the `commitments` command, exits 0, writes no note or card | P19 | `commitments_command_prints_proposals_and_writes_no_note_card_or_journal`, `commitments_command_exits_0_on_an_unreadable_config_and_a_failed_fetch` |
 | §10 files | `eventemit::clock` `pub(crate)`; `render.rs` not edited; docs | P11, P20 | the P11 title tests; `git diff --stat` in P20 |
 
 **Not in phase 1, by the spec:** §5.1 (the screen), §5.3 and R10 (the fallback card), the *Your week*
 panel and editor, M-c's `EDITABLE` work (phase 2); R24 and the registrar (phase 3); §10 Phase 1s
-(sync, with C3′).
+(sync) is P21 here, conditional, or runs in `c3-sync`.
 
 ## Open questions for Quinn
 
@@ -974,7 +1251,8 @@ Checked this plan against the spec at `80350a9`, section by section, for phase 1
   (`render.rs` is intentionally absent, per M-a). Every R-row that applies to phase 1 (R1–R9, R11–R23)
   appears in the ledger; R10 and R24 are phases 2 and 3.
 - **Task size.** P13 is the largest at four files (two of them `Cargo.toml` and `Cargo.lock` for one
-  dependency line); P14 is four; every other task is one to three.
+  dependency line); P14 is four; every other task is one to three. (After the plan review, P21 —
+  conditional phase 1s — is six, most of them one line or one assertion each.)
 - **Two gaps found and closed while writing:** §6.3's exact warning text had no test (added to P6),
   and R18's "a proposal is never a note" had no end-to-end assertion (added to P16's rank test).
 - **One spec gap found and fixed in the spec:** with a `state/plan.json` from yesterday and no rank
@@ -982,3 +1260,38 @@ Checked this plan against the spec at `80350a9`, section by section, for phase 1
   nothing is reported (§6.4), and P18 tests it.
 - **Frozen references:** no task edits a fixture; P1, P3, P4, P15, P16, P17 and P18 each verify with
   `--test oracle`/`--test surface_oracle` and `git diff --exit-code engine/tests/fixtures`.
+
+## Plan review (2026-09-23)
+
+Review: `.superpowers/sdd/2026-09-23-commitment-model/plan-review.md` (on 5d3c8cb). Each finding was
+checked against `main`, `j-followups:` and `c3-sync:` before it was folded in. Spec changes are
+marked **spec**; each is the minimum the fix needs.
+
+| finding | disposition |
+|---|---|
+| **C1** withdrawal supersedes every change and window card | **Fixed.** P13 decision 5 withdraws by card shape (change: target gone or `was` stale; window: planning-day note or `window` marker; proposal: key under no calendar, a note has the key, or a confirmed note the signature), with the invariant that every withdrawal condition also stops the card being produced again. P11 decision 5: a window card not `superseded` blocks any later window proposal whatever its routine keys. Nine withdrawal tests in P13; `a_change_card_survives_two_more_ranks` and `no_card_is_withdrawn_and_refiled_across_three_ranks` in P16. **spec** §5.2 "Withdrawn" and R9 reworded by shape. |
+| **C2** gate 1 cannot fail, so nothing forces the regex or the migration | **Fixed.** Confirmed: `c3-sync:engine/tests/sync_contract.rs:396` asserts a literal. P6 adds `the_servers_note_path_rules_name_every_note_folder` (`sync_rows.ts` and the latest `*sync_note_path_check*.sql` must carry `NOTE_FOLDERS`' group) and `the_tripwires_refuse_a_comment`; P21 rewrites gate 1 from `NOTE_FOLDERS`. Dependencies §2 corrected. **spec** §10 gates 1 and 3 reworded. |
+| **I1** the ended rule reads a file the series already left | **Fixed** by retention, not a return value: P8 decision 6 moves an aged-out series to the file's `ended` map (last instance, last-known `until`, 28 days), so the rule reads the post-refresh file and a budget-starved end card is filed on the next run. P12 decision 1 reads it; P16 ages a series out across ranks. **spec** §3.3 (`ended` in the file) and §5.4 "ended". |
+| **I2** one key from Google and ICS has no dedup rule | **Fixed.** P8 decision 8: both records kept, every reader takes one per key through `SeriesFile::by_key()` — a `google:` calendar first, then the lower calendar key; P11's asked-once set includes keys filed earlier in the same call. Tests in P8, P9, P11, P12, P13, P16. **spec** §3.3 bullet added. |
+| **I3** no single-line builder for flow-valued fields | **Fixed.** P6 decision 7 names `commitments::front_matter` (scalars through `safe_dump_block`, collections as `key: {write::to_literal(v)}`); Global Constraint 23; P2's `a_collection_after_block_scalars_is_one_frontmatter_line`; one-line assertions in P11 and P13. No spec change (R2 already requires one line). |
+| **I4** phase 1s has no task if C3′ merges first | **Fixed.** P21, conditional: run by whichever of phase 1 and C3′ merges second, with its files, tests (gate 2 as spec §10), migration and deploy; the tripwire messages name it. |
+| **I5** four ordering breaks | **Fixed.** `Change` and the change card move to P11 (P12 only detects); `proposals` takes `held` from P12's `successor_keys`; P16 loads before `withdraw_stale`; P15 is sequential after P10. New lanes and the final task order under "Ordering". |
+| M1 collisions beyond `j-followups` | Accepted: `approvals.rs` and `Cargo.lock` (`c3-sync`), `app/tests/scaffold.rs` (`c1c-first-day`) named under "Before the merge". |
+| M2 `Fetchers` partly landed | Accepted: P14 decision 2. |
+| M3 `WeekCalendar` has no `Clone` | Accepted: P3 decision 7. |
+| M4 `occurrence_starts` private | Accepted: `pub(crate)` in P4. **spec** §10's `calfeed.rs` row says so. |
+| M5 signature gaps | Accepted: `proposals` takes the template calendar (`min_block_minutes`); `moved` takes `planning`. |
+| M6 missing P5 tests, Verify form | Accepted: five tests, an abortable budget, CI's `deno` forms. |
+| M7 horizon starts at `now` | Accepted: P5 decision 9, the series window starts 24 hours earlier; the device keeps `[today, today + 28)`. **spec** §4.1. |
+| M8 the tripwire is textual | Accepted: P6 decision 9 (non-comment line, `#[test]` before the gate). |
+| M9 R18 vs the journaled `create` | Accepted: Global Constraint 20 states the reading ("the synced journal"). No spec change: §5.2 and §10 gate 2 already say it. |
+| M10 collision expectation | Accepted: the base name. |
+| M11 ledger counts | Accepted: counts recounted. |
+| M12 extra series fields | Accepted: a "Decisions taken" row. |
+| M13 removed-feed mapping for `google:` keys | Accepted: P8 decision 5. |
+| M14 exit 0 untested | Accepted: P19 test. |
+| M15 unstated §2.2 rules | Accepted: tests for title/where cuts (P8), `end` past 23:59 (P6), the note's file name and `-2` (P13), withdrawal when a confirmed note covers (P13), midnight-crossing ineligibility (P7). |
+
+**Also changed while folding:** a `superseded` change card no longer closes its `(target, change)`
+(P11 decision 5; **spec** §5.5 row), so a change card withdrawn because the student edited the note
+is asked once more with the new `was` — never a loop, since that card then survives.
