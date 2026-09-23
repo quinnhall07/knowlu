@@ -126,9 +126,9 @@ async function main() {
   );
 
   console.log("\n== Step 5: the paid run ==");
-  const { key, source } = await resolveOpenRouterKey();
+  const { key, source, diagnostics } = await resolveOpenRouterKey();
   if (!key || forceDryRun) {
-    if (!key) console.log(noKeyMessage());
+    if (!key) console.log(noKeyMessage(diagnostics));
     else console.log("--dry-run passed: not sending, even though a key resolved.");
     console.log(`transport: POST ${OPENROUTER_CHAT_URL}, model typesafe/jev-1.13, pinned zero-retention.`);
     console.log("first three request bodies (dry run — nothing sent):");
