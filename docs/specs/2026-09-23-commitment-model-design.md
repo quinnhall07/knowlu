@@ -584,9 +584,11 @@ One card per proposal not yet answered (§3.5), built on F2's `event-check` patt
 - **Body.** First paragraph (the card's `why`): `**Is this part of your week?** Knowlu found it
   repeating on your calendar.` Then what approving does, by level — hard: "Approve and Knowlu never
   plans anything over it."; soft: "Approve and Knowlu counts it as busy; an event suggestion may
-  overlap it, and will say so."; the window: "Approve and Knowlu plans your days in these hours.
-  You can change them any time." Then `where` when present, and `Reject and it's ignored. Either
-  way you won't be asked again.`
+  overlap it, and will say so."; optional: "Optional: Knowlu won't plan around it." Then `where`
+  when present, and `Reject and it's ignored. Either way you won't be asked again.` The window
+  card instead says "Approve to plan inside these hours. Reject to keep your usual hours." and
+  then "Either way you won't be asked again.": rejecting it keeps the usual hours, so "ignored"
+  would be wrong (controller ruling, P11 fix round 1; for Quinn to revisit).
 - **Settlement**, a new arm in `approvals::transition_note` beside F3's `event-check` arm:
   - `approved` → if a confirmed note already has the card's `source_uid` or signature (or, for the
     window, a `planning-day` note exists), the card is archived `refused` with one warning and
