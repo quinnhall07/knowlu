@@ -1563,10 +1563,18 @@ pub fn collect(
                 continue;
             }
         };
+        // R-C1c-10: an unmapped book or section is a question, not a failed parse — the fetcher
+        // already said so with its own "not in config; skipped" line, which is not one of
+        // `FAILURE_MARKERS`. This vault has no card mechanism (that is `collect_cloud`'s), so this
+        // line is the only notice there is, and it must not be buried under a second, scarier one
+        // for the same cause.
+        let unmapped = source_warnings.iter().any(|w| w.ends_with("not in config; skipped"));
         warnings.extend(source_warnings.into_iter().map(|w| format!("{name}: {w}")));
         if items.is_empty() {
-            // Deliberately not "no assignments this semester". See coursework spec §9.
-            warnings.push(format!("{name}: 0 assignments parsed; treating as failure"));
+            if !unmapped {
+                // Deliberately not "no assignments this semester". See coursework spec §9.
+                warnings.push(format!("{name}: 0 assignments parsed; treating as failure"));
+            }
             continue;
         }
         out.extend(items);
@@ -2901,6 +2909,65 @@ mod tests {
                 .filter(|w| w.contains("0 assignments"))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn an_unmapped_only_source_gets_no_failure_warning() {
+        // R-C1c-10: a fetcher that reports an unmapped book or section already found real work —
+        // "not in config; skipped" is the question, and stacking "0 assignments parsed; treating
+        // as failure" on top of it would call the same thing a failure twice.
+        let unmapped_zy =
+            |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+                warnings.push("zybook UACS100Fall2026 not in config; skipped".to_string());
+                Ok(Vec::new())
+            };
+        let unmapped_vhl =
+            |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+                warnings.push("section 2102121 not in config; skipped".to_string());
+                Ok(Vec::new())
+            };
+        let fetchers: [(&str, Fetcher); 2] = [("zybooks", &unmapped_zy), ("vhl", &unmapped_vhl)];
+        let mut warnings = Vec::new();
+        let items = collect(Path::new("."), &base_config(), &mut warnings, Some(&fetchers));
+        assert!(items.is_empty());
+        assert!(
+            !warnings.iter().any(|w| w.contains("0 assignments")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "zybooks: zybook UACS100Fall2026 not in config; skipped",
+                "vhl: section 2102121 not in config; skipped",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unmapped_source_does_not_excuse_a_truly_empty_sibling() {
+        // R-C1c-10: the signal is counted per source — an unmapped zyBooks book must not quiet a
+        // VHL source that came back with nothing to report at all, or the reverse.
+        let unmapped_zy =
+            |_: &Mapping, _: &TimeZone, warnings: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+                warnings.push("zybook UACS100Fall2026 not in config; skipped".to_string());
+                Ok(Vec::new())
+            };
+        let truly_empty =
+            |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+                Ok(Vec::new())
+            };
+        let fetchers: [(&str, Fetcher); 2] = [("zybooks", &unmapped_zy), ("vhl", &truly_empty)];
+        let mut warnings = Vec::new();
+        let items = collect(Path::new("."), &base_config(), &mut warnings, Some(&fetchers));
+        assert!(items.is_empty());
+        assert!(
+            !warnings.iter().any(|w| w == "zybooks: 0 assignments parsed; treating as failure"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w == "vhl: 0 assignments parsed; treating as failure"),
+            "{warnings:?}"
         );
     }
 

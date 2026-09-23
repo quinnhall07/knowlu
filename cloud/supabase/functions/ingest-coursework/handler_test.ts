@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { ingestHandler, suggestCourse } from "./handler.ts";
 
 const FIXTURES = new URL("../../../../engine/tests/fixtures/", import.meta.url);
@@ -111,9 +111,11 @@ Deno.test("an unknown zybook is one proposal and zero warnings", async () => {
     new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }),
   )).json();
   assertEquals(reply.assignments, []);
-  // R-C2 pre-flight correction F3: every book in this source is unmapped, so the source really
-  // did parse to zero assignments — the empty-parse rule still fires, alongside the proposal.
-  assertEquals(reply.warnings, ["zybooks: 0 assignments parsed; treating as failure"]);
+  // R-C1c-10 (supersedes R-C2 pre-flight correction F3): the one book in this source is
+  // unmapped, so it produced a proposal instead of an item. That proposal is the honest channel
+  // for "the portal returned work" — a second, `0 assignments parsed` complaint layered under it
+  // would be the very bug this rule exists to stop.
+  assertEquals(reply.warnings, []);
   assertEquals(reply.proposals, [{
     source: "zybooks",
     key: "UACS100Fall2026",
@@ -168,7 +170,58 @@ Deno.test("an unmapped VHL section becomes a proposal with no course to suggest"
     label: "VHL section 2102121",
     suggested_course: null,
   }]);
-  assert(!reply.warnings.some((w: string) => w.includes("not in config")));
+  // R-C1c-10: every row in this dashboard is in that one unmapped section, so the source's items
+  // are empty — but it produced a proposal, and that proposal is the honest channel for "the
+  // portal returned work", not the empty-parse failure line on top of it.
+  assertEquals(reply.warnings, []);
+});
+
+Deno.test("a VHL source with no rows at all still gets the failure warning", async () => {
+  // R-C1c-10's other half: a genuinely empty dashboard is not a question — it never produced a
+  // proposal, so the empty-parse rule must still fire, exactly as strongly as before.
+  const html = '<div class="js-student-dashboard-app" data-assignment-summaries="[]"></div>';
+  const body = JSON.stringify({
+    timezone: "America/Chicago",
+    sources: [{ name: "vhl", config: { sections: {}, importance: 3, importance_reason: "" }, html }],
+  });
+  const reply = await (await ingestHandler(OK)(
+    new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }),
+  )).json();
+  assertEquals(reply.assignments, []);
+  assertEquals(reply.proposals, []);
+  assertEquals(reply.warnings, ["vhl: 0 assignments parsed; treating as failure"]);
+});
+
+Deno.test("an unmapped source's proposal never excuses a truly empty sibling in the same request", async () => {
+  // R-C1c-10: `proposals` is shared across sources in one request — a VHL proposal must not
+  // quiet an empty zyBooks parse in the same request, or the reverse. Counted per source.
+  const html = await Deno.readTextFile(new URL("vhl-dashboard.html", FIXTURES));
+  const body = JSON.stringify({
+    timezone: "America/Chicago",
+    sources: [
+      {
+        name: "zybooks",
+        config: { courses: {}, ignore: [], categories: {}, effort: {}, importance: {} },
+        books: [],
+      },
+      {
+        name: "vhl",
+        config: { sections: {}, importance: 3, importance_reason: "" },
+        html,
+      },
+    ],
+  });
+  const reply = await (await ingestHandler(OK)(
+    new Request("http://127.0.0.1/ingest-coursework", { method: "POST", body }),
+  )).json();
+  assertEquals(reply.assignments, []);
+  assertEquals(reply.warnings, ["zybooks: 0 assignments parsed; treating as failure"]);
+  assertEquals(reply.proposals, [{
+    source: "vhl",
+    key: "2102121",
+    label: "VHL section 2102121",
+    suggested_course: null,
+  }]);
 });
 
 Deno.test("a course is suggested from a zybook code, or not at all", () => {
