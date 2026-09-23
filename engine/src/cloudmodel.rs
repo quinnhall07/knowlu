@@ -30,11 +30,33 @@
 
 use std::cell::Cell;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::judge::{self, ModelError};
+
+/// The same shape `eventledger::JID_SAFE` requires: lowercase hex, five groups, no separator a
+/// ledger line or a flow mapping could ever misread. Nothing but this shape is ever accepted —
+/// `dumps_value`, `write_literals` and `eventledger::write_verdict_line` all write the id
+/// unquoted, so a stray `"` or ` · ` in it would corrupt the line it lands on.
+static JUDGMENT_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+});
+
+/// F4: the reply's own `judgment_id`, whenever the service wrote a `judgments` row for this call
+/// (`judge_pipeline.ts`'s `id === null ? {} : { judgment_id: id }`). `None` for an absent field,
+/// a non-string value, or anything that is not a lowercase UUID — an old server that never sends
+/// the field, and a malformed one, read exactly alike: nothing to carry forward.
+pub fn judgment_id_of(reply: &Value) -> Option<String> {
+    reply
+        .get("judgment_id")
+        .and_then(Value::as_str)
+        .filter(|s| JUDGMENT_ID.is_match(s))
+        .map(str::to_string)
+}
 
 /// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
 /// completion. Spelled again here rather than borrowed, because C4 removes `runtime.rs` and this
@@ -420,6 +442,7 @@ impl judge::Model for CloudModel<'_> {
         if let Some(tier) = reply.get("tier").and_then(Value::as_u64) {
             v.tier = tier.min(3) as u8;
         }
+        v.judgment_id = judgment_id_of(&reply);
         Ok(v)
     }
 }
@@ -472,12 +495,18 @@ impl judge::EventModel for CloudModel<'_> {
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
         let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
+        // Read once and carried into every `Ok` arm below: `judge_pipeline.ts` writes a
+        // `judgments` row — and so a `judgment_id` — for the rescued-`unsure` replies exactly as
+        // it does for an honest verdict (lines 233 and 271), so the id is not conditional on
+        // which arm below is taken.
+        let judgment_id = judgment_id_of(&reply);
         match self.verdict_of(&reply) {
             Ok(verdict) => Ok(judge::EventVerdict {
                 verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
                 why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
                 confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
                 tier,
+                judgment_id,
             }),
             // A spent cap answers every remaining item identically and must stay retryable
             // tomorrow — never recorded as if the event itself had been considered.
@@ -498,6 +527,7 @@ impl judge::EventModel for CloudModel<'_> {
                 why: judge::one_line(&reason, 140),
                 confidence: 0.0,
                 tier,
+                judgment_id,
             }),
         }
     }

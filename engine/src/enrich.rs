@@ -1191,6 +1191,7 @@ mod tests {
             importance_reason: Some("Homework is 20% of CS 100.".to_string()),
             confidence: 0.9,
             tier: 3,
+            ..Default::default()
         })
     }
     fn opts<'a>(log: &'a Path) -> Options<'a> {
@@ -1411,7 +1412,8 @@ mod tests {
                 *n += 1;
                 if *n == 1 { return Err(crate::judge::ModelError::Failed("llama-cli: broken pipe".into())); }
                 Ok(crate::judge::Verdict { course: None, effort_hours: Some(1.5), importance: Some(3),
-                    importance_reason: Some("No weights given, so 3.".into()), confidence: 0.8, tier: 3 })
+                    importance_reason: Some("No weights given, so 3.".into()), confidence: 0.8, tier: 3,
+                    ..Default::default() })
             }
         }
         let m = Flaky(std::sync::Mutex::new(0));

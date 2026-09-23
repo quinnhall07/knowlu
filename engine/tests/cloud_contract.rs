@@ -240,6 +240,53 @@ fn a_verdict_the_service_refused_is_an_error_that_names_the_cause() {
     let _ = server.requests();
 }
 
+/// F4: `judge_pipeline.ts` hands back the `judgments` row it just wrote (`id === null ? {} :
+/// { judgment_id: id }`), sitting beside `verdict`, not inside it. `CloudModel::judge` must carry
+/// that onto the `Verdict` it returns.
+#[test]
+fn a_task_reply_hands_its_judgment_id_to_the_verdict() {
+    let with_id = r#"{"verdict":{"course":"cs-100","effort_hours":2.5,"importance":4,"importance_reason":"twenty percent of the grade","confidence":0.82},"tier":3,"outcome":"answered","judgment_id":"11111111-1111-1111-1111-111111111111"}"#;
+    let mut server = loopback(vec![(200, with_id.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let got = model.judge(&item(), &heuristics(), &seed).expect("the service answered");
+    assert_eq!(got.judgment_id.as_deref(), Some("11111111-1111-1111-1111-111111111111"));
+    let _ = server.requests();
+}
+
+/// Old and new pairings (F4 brief): a new engine talking to an old server gets no `judgment_id`
+/// field at all, and that must read as `None`, not as a malformed id or an error.
+#[test]
+fn a_reply_without_a_judgment_id_is_none() {
+    let mut server = loopback(vec![(200, ANSWERED.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let got = model.judge(&item(), &heuristics(), &seed).expect("the service answered");
+    assert_eq!(got.judgment_id, None, "an old server sends no judgment_id field at all");
+    let _ = server.requests();
+}
+
+/// `judgment_id_of` accepts only a lowercase UUID (the same shape `eventledger::JID_SAFE`
+/// requires) because the id is written unquoted into a ledger line and a flow mapping, so it must
+/// never be able to carry a separator.
+#[test]
+fn a_malformed_judgment_id_is_dropped() {
+    use knowlu_engine::cloudmodel::judgment_id_of;
+    for bad in ["judgment-1", "../x"] {
+        let reply = serde_json::json!({ "judgment_id": bad });
+        assert_eq!(judgment_id_of(&reply), None, "{bad}");
+    }
+    let reply = serde_json::json!({ "judgment_id": "11111111-1111-1111-1111-111111111111" });
+    assert_eq!(
+        judgment_id_of(&reply),
+        Some("11111111-1111-1111-1111-111111111111".to_string()),
+        "a real lowercase UUID must still pass"
+    );
+    assert_eq!(judgment_id_of(&serde_json::json!({})), None, "an absent field is None too");
+}
+
 fn event_item(uid: &str) -> judge::EventItem {
     judge::EventItem {
         uid: uid.to_string(),
@@ -249,6 +296,19 @@ fn event_item(uid: &str) -> judge::EventItem {
         source: "engage".to_string(),
         ..Default::default()
     }
+}
+
+/// F4: the same `judgment_id` a task reply carries reaches an event reply's `EventVerdict` too.
+#[test]
+fn an_event_reply_hands_its_judgment_id_to_the_verdict() {
+    let with_id = r#"{"verdict":{"verdict":"opportunity","why":"matches your interests","confidence":0.8},"tier":3,"outcome":"answered","judgment_id":"22222222-2222-2222-2222-222222222222"}"#;
+    let mut server = loopback(vec![(200, with_id.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model.judge_event(&event_item("engage:1")).expect("the service answered");
+    assert_eq!(got.verdict, "opportunity");
+    assert_eq!(got.judgment_id.as_deref(), Some("22222222-2222-2222-2222-222222222222"));
+    let _ = server.requests();
 }
 
 /// Stream J Task T1, CHECKPOINT J-1: defect B for the below-floor / no-verdict path.
@@ -270,6 +330,23 @@ fn a_below_floor_event_reply_becomes_unsure_instead_of_an_error_the_device_would
     assert_eq!(got.verdict, "unsure");
     assert!(got.why.contains("below floor"), "{}", got.why);
     assert_eq!(got.confidence, 0.0, "the service never returns a number for this case (server log only)");
+    let _ = server.requests();
+}
+
+/// F4 decision 3: the rescued-`unsure` arm carries `judgment_id` too — `judge_pipeline.ts` writes
+/// a `judgments` row (and so a `judgment_id`) for the low-confidence reply exactly as it does for
+/// an honest one (`judge_pipeline.ts:233`), so the device-side rescue must not drop it.
+#[test]
+fn a_rescued_unsure_keeps_the_judgment_id() {
+    let refused = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"below floor","judgment_id":"33333333-3333-3333-3333-333333333333"}"#;
+    let mut server = loopback(vec![(200, refused.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model
+        .judge_event(&event_item("engage:1"))
+        .expect("a below-floor reply must become a usable verdict, not an error");
+    assert_eq!(got.verdict, "unsure");
+    assert_eq!(got.judgment_id.as_deref(), Some("33333333-3333-3333-3333-333333333333"));
     let _ = server.requests();
 }
 
