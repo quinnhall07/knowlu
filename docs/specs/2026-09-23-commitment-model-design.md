@@ -245,9 +245,14 @@ Series { source_uid, calendar, title, where, event_type, rule: {freq, interval, 
      `EXDATE`s removed; an override `VEVENT` (one carrying `RECURRENCE-ID`) replaces the instance
      it names, or removes it if it has `STATUS:CANCELLED`. A master with `STATUS:CANCELLED`, with
      `TRANSP:TRANSPARENT`, or with an `ATTENDEE` line for the feed owner carrying
-     `PARTSTAT=DECLINED` yields no series. (The feed owner is the `ORGANIZER`'s address when the
-     feed has one line naming it; if the owner cannot be told, any `DECLINED` attendee line makes
-     the series ineligible — when in doubt, do not propose.) Each rule has its own test.
+     `PARTSTAT=DECLINED` yields no series. (The feed owner is the address a calendar-level
+     `X-WR-CALNAME` names, when it is email-shaped — Google names a primary calendar so — and is
+     **never** inferred from `ORGANIZER` lines, since a feed whose invites all come from one
+     person would make that person the owner (P4 review I1, controller ruling). Without it the
+     owner is unknown, and any `DECLINED` attendee line, on the master or an override, makes the
+     series ineligible — when in doubt, do not propose; the cost is that some invite-based
+     series reach the student as a card later instead of a proposal now.) Each rule has its own
+     test.
    - `parse_calendar_ics`'s busy time keeps today's override-blind behaviour: it feeds the frozen
      `calendar-snapshot-gcal.md` reference, and a doubled busy span subtracts nothing extra.
 2. **Rule.** From the master's `RRULE`: `FREQ`, `INTERVAL` (absent = 1), `UNTIL` (the raw value,
