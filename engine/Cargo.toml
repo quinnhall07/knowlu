@@ -31,6 +31,15 @@ getrandom = "0.2"
 html-escape = "0.2.15"
 jiff = "0.2.35"
 regex = "1.13.1"
+# Knowlu C3′ (cloud design §5.5 as amended 2026-09-17): SHA-256 for the sync content hash — the
+# idempotence key of a pushed journal record, which the server re-derives from the body. The
+# envelope this crate was named for is gone with ruling 2 (no AES, no HKDF, no key); what remains is
+# one digest, and `ring` is what this binary already links for TLS through `ureq` → `rustls`, so the
+# direct edge costs no crate, no version and nothing new to audit. A second SHA-256 crate was
+# considered and refused (`dependency_boundary.rs` names it and argues it at length): it is absent
+# from this crate's graph and would bring a second `digest` major beside `sha1`'s.
+# `base64` left with the envelope; nothing here encodes bytes any more.
+ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml_ng = "0.10.0"
