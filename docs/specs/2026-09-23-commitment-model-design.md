@@ -651,6 +651,10 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
     and so is in the file's `ended` map (§3.3), and no fresh series has the note's signature (R22)
     → propose `until` = the last instance date the file held, else its last-known `until` (neither:
     no card); nothing when the note's `until` already ends it by then;
+    an open-ended series (no UNTIL, no COUNT) that merely stops appearing never ends a **soft or
+    optional** note (club, meeting, office hours) — a club dormant over the summer is not lost; the
+    student can delete the note — while hard ones (class, lab, work) keep this rule (controller
+    ruling, P12 fix round 1, m1);
   - **succeeded** (R22) — an eligible class or lab series for the same course, with different
     meets, whose first instance falls on or after the note's series' last instance, while that
     series is ending → propose `meets` (and `where`) of the new series **and** `source_uid` = the
