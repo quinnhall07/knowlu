@@ -23,6 +23,7 @@
 //! asks for them, and are journalled on the device that asked; they then go up through this module
 //! like any other record. The fidelity ledger's `§5.5 Down` row argues it.
 
+use std::io::Write;
 use std::path::Path;
 
 use ring::digest;
@@ -315,6 +316,15 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // its `received_at` (a default, not an on-update), and therefore never resurfaces on another
         // desktop's cursor.
         if record.get("actor").and_then(Value::as_str) == Some(ACTOR) { continue; }
+        // M2 (fix round 1): a `supersede` record stays on this device. `reconcile::resolve` stamps
+        // its own actor (`system:reconcile`, not `ACTOR`) and its `ts` is whichever contender WON —
+        // often the past, and never this run's own clock — so neither filter above would catch it.
+        // It also does nothing useful on the other desktop: that machine has no local `set` chain to
+        // reconcile it against, since the chain reconstruction lives entirely in the two records
+        // that produced it, which already travel (the foreign one verbatim, this device's own echo
+        // under `ACTOR`, excluded above like any other echo). `ACTOR`'s own doc comment lists "the
+        // supersede record" among what stays local, and this is the line that keeps it there.
+        if record.get("op").and_then(Value::as_str) == Some("supersede") { continue; }
         // R-C3′-exec-12 (the wedge principle): predict every refusal `sync_rows.ts::checkRecord`
         // makes and never send the row that would trigger it. `sync_rows.ts:89-93` refuses a record
         // whose body has no non-empty string `op` or `actor` — `ledger::read` itself validates only
@@ -460,17 +470,48 @@ pub struct Pulled {
     pub warnings: Vec<String>,
 }
 
-/// Is this a journal record at all? **Six checks, and every one of them is a shape a malformed or
-/// hostile row could otherwise slip through into `state/journal/`** (review I7).
+/// A bare identifier: `^[A-Za-z_][A-Za-z0-9_]*$`, checked character by character rather than
+/// pulling in a second `regex` dependency for one small rule.
+fn is_field_ident(field: &str) -> bool {
+    let mut chars = field.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Is this a journal record at all? **Eight checks, and every one of them is a shape a malformed or
+/// hostile row could otherwise slip through into `state/journal/`** (review I7, and fix round 1's
+/// I2/M7).
 pub fn record_is_well_formed(record: &Record) -> Result<(), &'static str> {
     let s = |k: &str| record.get(k).and_then(Value::as_str).unwrap_or_default();
     if !crate::journal::OPS.contains(&s("op")) { return Err("unknown op"); }
     if !crate::journal::VIAS.contains(&s("via")) { return Err("unknown via"); }
-    if s("ts").parse::<jiff::Timestamp>().is_err() { return Err("unparseable ts"); }
+    let ts = s("ts");
+    // I7's original check only asked whether `ts` parses at all. Every ordering this crate does —
+    // `wins`, the journal's own `ts`-sort, the ledger's day-file name — compares the CANONICAL
+    // string, not the parsed instant, so a row carrying a jiff-parseable but non-canonical `ts`
+    // (missing milliseconds, a numeric offset instead of `Z`, six-digit microseconds) would sort in
+    // a place its own value disagrees with (review M7). Requiring round-trip equality through
+    // `journal::now_ts` catches exactly that, with no new dependency.
+    match ts.parse::<jiff::Timestamp>() {
+        Ok(parsed) if crate::journal::now_ts(Some(parsed)) == ts => {}
+        _ => return Err("ts not canonical"),
+    }
     if s("actor").is_empty() { return Err("no actor"); }
     if s("device").is_empty() { return Err("no device"); }
     let id = s("id");
     if !id.is_empty() && !crate::ids::is_id(id) { return Err("not an id"); }
+    // review I2: nothing upstream of this guard ever looks at `field`. `reconcile` will build a
+    // chain for any non-empty string, `write_literals` writes any key through to
+    // `apply_frontmatter_fields_to_text`, and that function writes `"{key}: {value}"` onto the note
+    // unescaped — so a `field` carrying a newline and a `---` can inject arbitrary frontmatter lines,
+    // and `field: "id"` would let a pulled `set` retarget the note's own opaque identity. Refused
+    // before the record ever reaches the journal, same as every other guard here.
+    if let Some(field) = record.get("field").and_then(Value::as_str) {
+        if field == "id" || !is_field_ident(field) { return Err("bad field"); }
+    }
     Ok(())
 }
 
@@ -497,12 +538,19 @@ pub fn pulled_from_reply(reply: &Value) -> Result<Pulled, SyncError> {
     }
     for row in reply.get("notes").and_then(Value::as_array).cloned().unwrap_or_default() {
         let path = row.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
-        let text = if row.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
-            None
-        } else {
-            Some(row.get("body").and_then(Value::as_str).unwrap_or_default().to_string())
-        };
-        out.notes.push(PulledNote { device: row.get("device").and_then(Value::as_str).unwrap_or_default().to_string(), path, text });
+        let device = row.get("device").and_then(Value::as_str).unwrap_or_default().to_string();
+        if row.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
+            out.notes.push(PulledNote { device, path, text: None });
+            continue;
+        }
+        // M4 (fix round 1): a missing or non-string `body` on a LIVE row (one that is not a
+        // tombstone) used to fall through `unwrap_or_default` into `Some("")` — a zero-byte file at
+        // `apply`'s note-write step, which `build_push` would then warn about on every subsequent
+        // run. An empty string is treated the same way: neither is a note worth writing.
+        match row.get("body").and_then(Value::as_str) {
+            Some(body) if !body.is_empty() => out.notes.push(PulledNote { device, path, text: Some(body.to_string()) }),
+            _ => out.warnings.push("sync: one pulled note arrived with no body and was skipped".to_string()),
+        }
     }
     Ok(out)
 }
@@ -530,6 +578,23 @@ pub struct ApplyReport {
     pub warnings: Vec<String>,
 }
 
+/// Whether `path`'s exact file name — case included — is a real entry in its own parent directory.
+///
+/// `Path::exists` answers case-INsensitively on Windows/NTFS, which is wrong for two of `apply`'s
+/// own questions: "is a note already at this exact pulled path" and "does the note this tombstone
+/// names still exist under that exact spelling" (review I3). A student who renames `foo.md` to
+/// `Foo.md` pushes a tombstone for `foo.md`; `sync-pull` returns every row for the account,
+/// including the caller's own, with no device filter; and `file.exists()` on the still-live
+/// `Foo.md` would answer true for a query about `foo.md`, so `write::delete` would archive the live
+/// note. Comparing raw `OsStr` bytes from a directory listing is exact where `exists()` is not.
+fn exact_case_exists(path: &Path) -> bool {
+    let Some(name) = path.file_name() else { return false };
+    let Some(parent) = path.parent() else { return false };
+    std::fs::read_dir(parent)
+        .map(|entries| entries.flatten().any(|e| e.file_name() == name))
+        .unwrap_or(false)
+}
+
 /// Apply one pulled page to this vault.
 ///
 /// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
@@ -543,6 +608,12 @@ pub fn apply(
     journal: &mut Journal,
     today: jiff::civil::Date,
 ) -> ApplyReport {
+    // M2 (fix round 1): every local effect below runs under `ctx`, and `build_push`'s echo filter
+    // only ever excludes records under `sync::ACTOR` — so a caller that passed a human's context here
+    // would push every mirrored effect back up as if the OTHER desktop had made it. Debug-only: the
+    // cost of checking it on every production run is not worth paying for a mistake `cli.rs` and
+    // `enrich.rs`'s own tests would already catch.
+    debug_assert_eq!(ctx.actor, ACTOR, "apply's local effects must be attributed to sync::ACTOR");
     let mut report = ApplyReport { warnings: page.warnings.clone(), ..Default::default() };
 
     // 1. What this device already has. A record is identified by the hash of its canonical bytes,
@@ -602,6 +673,15 @@ pub fn apply(
         let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         if !id.is_empty() {
             touched.entry(id).or_default().push(record.clone());
+        } else if record.get("op").and_then(Value::as_str) == Some("set") {
+            // M5 (fix round 1): a `set` with no `id` is journalled — it is well-formed, `is_id`
+            // only checks a non-empty one — but it can never be reconciled, because the per-note
+            // pass below groups by `id`. It sits in the ledger for ever, doing nothing, and nothing
+            // said so. This is also the one real way a note lacking its own `id:` frontmatter line
+            // reaches the mtime-fallback path in `reconcile::resolve` at all: `write::write_literals`
+            // journals `id: null` on both desktops for such a note, so this warning is the visible
+            // half of that gap.
+            report.warnings.push(format!("sync: {path} — a pulled `set` with no id can never be applied"));
         }
     }
     journal.invalidate();
@@ -636,7 +716,7 @@ pub fn apply(
 
     // 4. Per note, with the roles reversed exactly as the table above says.
     for (id, foreign) in &touched {
-        let Some(first_ts) = foreign.iter().filter_map(|r| r.get("ts").and_then(Value::as_str)).min() else { continue };
+        if foreign.is_empty() { continue; }
         let path = foreign
             .iter()
             .rev()
@@ -648,14 +728,29 @@ pub fn apply(
             // No local file: nothing to reconcile. The note's own text arrives below, if it came.
             continue;
         };
-        // THIS device's records for the note since the foreign side's earliest `ts` — the
-        // `upstream_records` argument, because on this machine the file on disk is upstream.
+        // THIS device's records for the note — the `upstream_records` argument, because on this
+        // machine the file on disk is upstream.
+        //
+        // **No `ts` floor here** (review I1, fix round 1). The brief kept only records at or after
+        // the foreign chain's earliest `ts`, which drops this device's own, genuinely earlier record
+        // for the field out of `up_latest` whenever the foreign write is later — exactly the case
+        // `reconcile::resolve`'s "upstream never moved" branch exists to recognise correctly. Without
+        // the real record, `resolve` falls back to a synthetic contender stamped with the file's raw
+        // mtime, and an UNRELATED local edit to a different field of the same note bumps that mtime
+        // past the foreign `ts`, so the older local value wins with no card and no warning — the two
+        // desktops then stay different for good. `resolve` itself already limits a chain to `op ==
+        // "set"` records and groups by field, so passing every record for the note, of any age, costs
+        // nothing: a field the foreign side never touched simply has no chain to compare against.
         let mine: Vec<Record> = journal
             .records_for(id, None)
             .into_iter()
             .filter(|r| {
                 r.get("device").and_then(Value::as_str) != foreign[0].get("device").and_then(Value::as_str)
-                    && r.get("ts").and_then(Value::as_str).unwrap_or_default() >= first_ts
+                    // Also drop this device's own SYNC echoes (review I1/M2): an echo carries a
+                    // fresh `ts` for a value that is really the foreign write restated, so once a
+                    // third desktop is in the mix an echo could out-rank a genuinely later write it
+                    // is itself only a mirror of.
+                    && r.get("actor").and_then(Value::as_str) != Some(ACTOR)
             })
             .collect();
         let mtime_ts = std::fs::metadata(&file)
@@ -721,7 +816,7 @@ pub fn apply(
         // against before it applies anything.
         let carded: std::collections::BTreeSet<String> =
             superseded_fields.iter().filter(|f| cardable(f)).cloned().collect();
-        if !carded.is_empty() && crate::write::find_pending_amendment(vault, &path, &carded).is_none() {
+        if !carded.is_empty() {
             // **YAML values on both sides** (review R3): `propose_amendment`'s `changes` is
             // `&[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]`. `from` comes straight out of
             // the note's own frontmatter mapping — no round trip through JSON — and `to` is the
@@ -735,11 +830,35 @@ pub fn apply(
                 })
                 .collect();
             if !changes.is_empty() {
-                match crate::write::propose_amendment(vault, &file, &meta, &changes, ctx, journal, None, today) {
-                    // One card, however many fields it carries — the fifteen-a-day cap the deck
-                    // already applies counts cards, and so does this.
-                    Ok(_) => report.cards += 1,
-                    Err(e) => report.warnings.push(format!("sync: {path} — the amend card could not be filed ({e})")),
+                let pending = crate::write::find_pending_amendment(vault, &path, &carded);
+                // M3 (fix round 1): `find_pending_amendment` matches on the FIELD-NAME set, not the
+                // values, so a card left over from an earlier, since-superseded foreign write reads
+                // as "already proposed" even after a NEWER foreign value has moved past what the card
+                // still offers — approving it would then write a value the other desktop itself no
+                // longer holds. A pending card is only "the re-proposal" when its `to` still matches
+                // what this pull resolved to; otherwise it is settled (through `write::delete`, like
+                // any other note this vault never unlinks) and a fresh one filed with today's value,
+                // both under `ctx.actor` like every other write this function makes.
+                let stale = pending.as_ref().and_then(|p| crate::ids::read_meta(p)).is_some_and(|existing_meta| {
+                    let existing_json = crate::yaml::to_json(&serde_yaml_ng::Value::Mapping(existing_meta));
+                    changes.iter().any(|(field, _from, to)| {
+                        existing_json.get("changes").and_then(|c| c.get(field.as_str())).and_then(|f| f.get("to"))
+                            != Some(&crate::yaml::to_json(to))
+                    })
+                });
+                if pending.is_none() || stale {
+                    if let Some(existing) = &pending {
+                        let existing_rel = crate::ids::rel(vault, existing);
+                        if let Err(e) = crate::write::delete(vault, &existing_rel, ctx, journal) {
+                            report.warnings.push(format!("sync: {path} — the stale amend card could not be settled ({e})"));
+                        }
+                    }
+                    match crate::write::propose_amendment(vault, &file, &meta, &changes, ctx, journal, None, today) {
+                        // One card, however many fields it carries — the fifteen-a-day cap the deck
+                        // already applies counts cards, and so does this.
+                        Ok(_) => report.cards += 1,
+                        Err(e) => report.warnings.push(format!("sync: {path} — the amend card could not be filed ({e})")),
+                    }
                 }
             }
         }
@@ -755,9 +874,13 @@ pub fn apply(
         let file = vault.join(&note.path);
         match &note.text {
             // A tombstone settles the note through `write::delete`, which moves it to `archive/` and
-            // journals the move. Nothing in this vault is ever unlinked.
+            // journals the move. Nothing in this vault is ever unlinked. **Exact case** (review I3):
+            // `sync-pull` returns every row for the account with no device filter, so a case-only
+            // local rename can pull back its OWN tombstone for the old spelling; `file.exists()`
+            // answers case-insensitively on NTFS and would archive the still-live, differently-cased
+            // note. `exact_case_exists` answers at the byte level a directory listing would.
             None => {
-                if file.exists() {
+                if exact_case_exists(&file) {
                     match crate::write::delete(vault, &note.path, ctx, journal) {
                         Ok(_) => report.moved += 1,
                         Err(e) => report.warnings.push(format!("sync: {} could not be settled ({e})", note.path)),
@@ -765,18 +888,34 @@ pub fn apply(
                 }
             }
             Some(text) => {
-                // **Never overwrites a note this device already has.** Its frontmatter was settled
-                // above by `reconcile` and its body is never merged, so the local file wins. What
-                // this writes is a note another desktop CREATED, whose own `create` record was
-                // appended verbatim a few lines ago — which is why it cannot go through
-                // `write::create`, and is the exception the fidelity ledger argues.
-                if file.exists() {
+                // **Never overwrites a note this device already has — the one recorded exception to
+                // "every write goes through `write::`".** Exactly two bounds, not the plan's original
+                // three (review M1: its third, "the note's own `create` record must already have
+                // been appended", does not hold in general — a hand-made note on disk has no record
+                // at all, and an amend card `apply` files is journalled under `sync::ACTOR`, which
+                // `build_push`'s echo filter never sends, so the OTHER desktop would never see that
+                // record either). The path must already be `is_note_path` (checked above, for every
+                // note in this loop), and no file of that EXACT name — case included (review I3) —
+                // may already sit at it. `create_new` (review M6) closes the remaining
+                // check-then-write race: this can never overwrite a file that appears between the
+                // check above and this write, even one from a concurrent console `write` command.
+                if exact_case_exists(&file) {
                     continue;
                 }
                 if let Some(parent) = file.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match crate::pystr::write_text(&file, text) {
+                let translated = if crate::pystr::NEWLINE == "\n" {
+                    text.clone()
+                } else {
+                    crate::pystr::universal_newlines(text).replace('\n', crate::pystr::NEWLINE)
+                };
+                let result = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&file)
+                    .and_then(|mut f| f.write_all(translated.as_bytes()));
+                match result {
                     Ok(()) => report.notes_written += 1,
                     Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
                 }

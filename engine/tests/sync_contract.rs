@@ -593,6 +593,22 @@ fn pulled(records: Vec<knowlu_engine::ledger::Record>, notes: Vec<sync::PulledNo
     }
 }
 
+/// `fixture(name)`, plus an `id:` line stamped on `tasks/cs-100-hw-01.md` — as every wizard-made
+/// note carries, but this frozen fixture predates id-stamping. Stamped onto the TEMP COPY only,
+/// never onto `vault-s1` itself (review I1, fix round 1): without an `id:` line, `write_literals`
+/// journals this device's own edits with `id: null`, so `journal::records_for` (keyed on `id`) can
+/// never find them and every conflict test falls back to `reconcile::resolve`'s synthetic "external
+/// write" branch — the mtime fallback — rather than exercising the real, reversed-role comparison
+/// against this device's own journalled records this task exists to get right.
+fn fixture_with_id(name: &str) -> PathBuf {
+    let dir = fixture(name);
+    let path = dir.join("tasks").join("cs-100-hw-01.md");
+    let text = knowlu_engine::pystr::read_text(&path).expect("the fixture note");
+    let stamped = text.replacen("title:", "id: task_0000000001\ntitle:", 1);
+    knowlu_engine::pystr::write_text(&path, &stamped).expect("stamp an id on the temp copy");
+    dir
+}
+
 #[test]
 fn a_field_only_the_other_desktop_touched_applies_cleanly_and_files_no_card() {
     let dir = fixture("clean");
@@ -646,7 +662,11 @@ fn a_record_this_device_already_has_is_not_applied_twice() {
 fn a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge() {
     // VISION, and §5.5's own sentence. The card is the ordinary `kind: amend` card the deck already
     // answers, through the ordinary `propose_amendment` path, so the fifteen-a-day cap applies.
-    let dir = fixture("conflict");
+    // `fixture_with_id`, not the plain `fixture` (review I1, fix round 1): with a real `id:` on the
+    // note, this device's own edit below is found by `journal::records_for` and the conflict below
+    // is resolved against it directly, rather than falling back to the mtime-based synthetic
+    // contender every other test that used the id-less fixture was quietly exercising instead.
+    let dir = fixture_with_id("conflict");
     let mut journal = Journal::new(&dir);
     let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
     knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
@@ -663,14 +683,26 @@ fn a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge() {
     // The note keeps what this device had until the card is answered: never a silent merge.
     let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
     assert_eq!(knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(4));
+    // `amend-cs-100-hw-01-`, not just `amend-`: the fixture vault already ships an unrelated
+    // `amend-ph-106-due.md` card, and matching on the target note's own stem is what keeps this
+    // assertion (and the recount below, after the M3 fix files a second card) pointed at the right
+    // one regardless of directory read order.
     let card = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
-        .find(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-")).unwrap_or(false)).expect("one amend card");
+        .find(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).expect("one amend card");
     let text = knowlu_engine::pystr::read_text(&card).expect("the card");
     assert!(text.contains("kind: amend") && text.contains("from: 4") && text.contains("to: 5"), "{text}");
-    // A second pull of the same field set must not mint a second card.
+    // A second pull with a NEWER conflicting value for the same field set is not an identical
+    // re-proposal (review M3, fix round 1): the stale card, which still offers `to: 5`, is settled
+    // (archived, never deleted outright) and a fresh one filed with `to: 6` — approving the old card
+    // would otherwise write a value the other desktop has already moved past.
     let again = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(6), "2036-09-17T11:00:00.000Z");
     let second = sync::apply(&dir, &pulled(vec![again], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
-    assert_eq!(second.cards, 0, "an identical pending proposal already IS the re-proposal");
+    assert_eq!(second.cards, 1, "a newer conflicting value replaces the stale card, it does not sit beside it: {second:?}");
+    let cards: Vec<PathBuf> = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).collect();
+    assert_eq!(cards.len(), 1, "the stale card is settled, not left beside the fresh one: {cards:?}");
+    let fresh_text = knowlu_engine::pystr::read_text(&cards[0]).expect("the fresh card");
+    assert!(fresh_text.contains("to: 6") && !fresh_text.contains("to: 5"), "{fresh_text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -869,4 +901,175 @@ fn a_pull_reads_the_two_cursors_and_the_more_flag_from_the_reply() {
     // `base` (C2's own harness) already carries `/functions/v1`, which `CloudClient::get` prepends
     // to every path exactly as `CloudClient::post` does.
     assert!(sent[0].starts_with("GET /functions/v1/sync-pull?records_after=40&notes_after=16&limit=500 "), "{}", sent[0]);
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (review): I1, I2, I3, M2, M4, M5, M7.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_later_foreign_write_never_loses_to_an_unrelated_local_mtime_bump() {
+    // I1. The brief's own `ts >= first_ts` filter dropped this device's real, earlier `importance`
+    // record out of `upstream_records` whenever the foreign write's `ts` was later, so
+    // `reconcile::resolve` fell back to a synthetic "external write" contender stamped with the
+    // file's raw mtime. An UNRELATED local edit to a DIFFERENT field, made after the foreign write,
+    // bumps that mtime past the foreign `ts` — so the older local value silently won, with no card
+    // and no warning, and the two desktops stayed different for good.
+    let dir = fixture_with_id("later-write-wins");
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    // T1: this device's own, real, journalled edit.
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("T1");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // T2: the foreign human's write, genuinely later than T1.
+    let t2 = knowlu_engine::journal::now_ts(None);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // T3: an UNRELATED local edit, after T2 — bumps the file's mtime without touching `importance`.
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("progress".to_string(), "10".to_string())], &mine, &mut journal, &Default::default()).expect("T3");
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), &t2);
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-22".parse().unwrap());
+    // A genuinely later foreign write must never lose silently: never `cards == 0 && applied == 0`
+    // with the note quietly keeping this device's older value.
+    assert_ne!((report.applied, report.cards), (0, 0), "a later foreign write lost silently: {report:?}");
+    assert_eq!((report.applied, report.cards, report.superseded), (0, 1, 1), "{report:?}");
+    let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
+    assert_eq!(
+        knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(4),
+        "withheld pending the card, not silently kept for ever"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_records_field_name_is_checked_before_it_can_touch_a_note() {
+    // I2. Nothing on the path checked `field`: `apply_frontmatter_fields_to_text` writes
+    // `"{key}: {value}"` onto the note unescaped, so a `field` carrying a newline and a `---` can
+    // inject arbitrary frontmatter lines, and `field: "id"` would let a pulled `set` retarget the
+    // note's own opaque identity.
+    let dir = fixture("field-injection");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let hijack = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "zz\n---\nhijack", serde_json::Value::Null, serde_json::json!(1), "2026-09-17T10:00:00.000Z");
+    let retarget = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "id", serde_json::json!("task_0123456789"), serde_json::json!("task_9999999999"), "2026-09-17T10:01:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![hijack, retarget], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.refused, report.records, report.applied), (2, 0, 0), "{report:?}");
+    let text = knowlu_engine::pystr::read_text(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note");
+    assert!(!text.contains("hijack"), "{text}");
+    let meta = knowlu_engine::ids::read_meta(&dir.join("tasks").join("cs-100-hw-01.md")).expect("the note still parses");
+    assert_eq!(
+        knowlu_engine::yaml::get(&meta, "importance").and_then(knowlu_engine::yaml::i64_of), Some(2),
+        "the frontmatter is intact"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_case_only_local_rename_survives_a_tombstone_for_the_old_spelling() {
+    // I3. `sync-pull` returns every row for the account with no device filter, so a case-only rename
+    // this device itself made can pull back its OWN tombstone for the old spelling. `file.exists()`
+    // answers case-insensitively on NTFS, so `write::delete` would archive the still-live,
+    // differently-cased note — the note silently leaves Today.
+    let dir = fixture("case-rename");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    std::fs::rename(dir.join("tasks").join("cs-100-hw-01.md"), dir.join("tasks").join("CS-100-HW-01.md")).expect("the case-only rename");
+    let report = sync::apply(&dir, &pulled(vec![], vec![
+        sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/cs-100-hw-01.md".into(), text: None },
+    ]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.moved, 0, "the live note under its new spelling must not be archived: {report:?}");
+    assert!(dir.join("tasks").join("CS-100-HW-01.md").exists(), "the live, renamed note is untouched");
+    assert!(
+        std::fs::read_dir(dir.join("archive"))
+            .map(|d| d.flatten().all(|e| !e.file_name().to_string_lossy().to_lowercase().contains("100-hw-01")))
+            .unwrap_or(true),
+        "nothing was archived"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_supersede_record_never_leaves_this_device() {
+    // M2. `reconcile::resolve` stamps a supersede record's `ts` as whichever contender WON — often
+    // in the past relative to the push cursor — and its actor is always `system:reconcile`, never
+    // `sync::ACTOR`, so neither of `build_push`'s existing filters would catch it. `sync::ACTOR`'s
+    // own doc comment lists "the supersede record" among what stays on this device.
+    let dir = fixture("supersede-stays");
+    let mut journal = Journal::new(&dir);
+    let mut spec = knowlu_engine::journal::NewRecord::new("supersede", "tasks/cs-100-hw-01.md", "system:reconcile", "local-runner");
+    spec.id = Some("task_0000000001");
+    spec.field = Some("importance");
+    spec.old = serde_json::json!({"ts": "2026-09-17T10:00:00.000Z", "device": "OtherDesktop", "seq": 1, "field": "importance"});
+    spec.new = serde_json::json!({"ts": "2026-09-17T11:00:00.000Z", "device": "ThisPC", "seq": 2, "field": "importance"});
+    spec.ts = Some("2026-09-17T11:00:00.000Z".to_string());
+    let mut rec = knowlu_engine::journal::make_record(spec).expect("a record");
+    journal.append(&mut rec).expect("append the supersede record");
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(!batch.records.is_empty(), "the fixture's own seed record must still go up");
+    assert!(
+        !batch.records.iter().any(|r| r["body"].as_str().unwrap_or_default().contains("supersede")),
+        "a supersede record reached the wire: {:?}", batch.records
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_live_note_with_no_body_is_skipped_never_written_as_a_blank_file() {
+    // M4. `pulled_from_reply` used to turn a missing or non-string `body` on a LIVE row into
+    // `Some("")` — a zero-byte file at `apply`'s note-write step, which `build_push` would then warn
+    // about, for ever, on every subsequent run.
+    let dir = fixture("bodyless");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let reply = serde_json::json!({
+        "records": [], "notes": [{"device": "fedcba9876543210", "path": "tasks/blank.md", "rev": 1}],
+        "record_cursor": 0, "note_cursor": 1, "more": false
+    });
+    let page = sync::pulled_from_reply(&reply).expect("a parse");
+    assert!(page.notes.is_empty(), "a bodyless live row must never become a note: {:?}", page.notes);
+    assert!(page.warnings.iter().any(|w| w.contains("body")), "{:?}", page.warnings);
+    let report = sync::apply(&dir, &page, &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.notes_written, 0, "{report:?}");
+    assert!(!dir.join("tasks").join("blank.md").exists(), "no zero-byte file must appear");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_set_with_no_id_names_the_note_it_can_never_reach() {
+    // M5. A `set` with no `id` is well-formed — `record_is_well_formed`'s `is_id` check only fires
+    // on a NON-empty id — but the per-note pass groups by `id`, so it is journalled and then does
+    // nothing, silently, for ever.
+    let dir = fixture("no-id-set");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+    spec.field = Some("importance");
+    spec.old = serde_json::json!(2);
+    spec.new = serde_json::json!(5);
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    let rec = knowlu_engine::journal::make_record(spec).expect("a record");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!(report.records, 1, "the record still lands — it is well-formed, just unreachable: {report:?}");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("cs-100-hw-01") && w.contains("id")),
+        "{:?}", report.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pulled_records_non_canonical_ts_is_refused() {
+    // M7. Every ordering here — `wins`, the journal's own sort, the ledger's day-file name —
+    // compares the CANONICAL `ts` string, not the parsed instant, so `…T10:00:00Z` (valid to
+    // `jiff`, missing milliseconds) sorts in a place its own value disagrees with.
+    let dir = fixture("noncanonical-ts");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let mut rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), "2026-09-17T10:00:00.000Z");
+    rec.insert("ts".to_string(), serde_json::json!("2026-09-17T10:00:00Z"));
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.refused, report.records), (1, 0), "{report:?}");
+    assert!(report.warnings.iter().any(|w| w.contains("ts")), "{:?}", report.warnings);
+    let _ = std::fs::remove_dir_all(&dir);
 }
