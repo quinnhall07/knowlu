@@ -96,6 +96,14 @@ pub struct ConsoleState {
     pub pending_edits: AtomicUsize,
     pub auto_sync: AtomicBool,
     pub startup_missed: AtomicUsize,
+    /// **Test-only seam.** `None` (the only value any real caller ever sets) means "today" is
+    /// wherever `commands::now_in` finds the real clock, exactly as before this field existed — no
+    /// production path, command or wizard step ever writes here. A test that needs the read model
+    /// and a `decide`d approval's expiry to agree on the same day sets this once via
+    /// `ConsoleState::set_test_today` instead of racing the frozen `vault-full` fixture's fixed
+    /// `expires:` dates against whatever day the suite happens to run on (`app/tests/commands.rs`,
+    /// `rejecting_and_snoozing_write_the_decision_fields`).
+    pub test_today: Mutex<Option<jiff::civil::Date>>,
 }
 
 impl ConsoleState {
@@ -129,10 +137,19 @@ impl ConsoleState {
             pending_edits: AtomicUsize::new(0),
             auto_sync: AtomicBool::new(true),
             startup_missed: AtomicUsize::new(0),
+            test_today: Mutex::new(None),
             vault,
         }
     }
     pub fn seen_at(&self) -> Option<String> { std::fs::read_to_string(&self.seen_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) }
+
+    /// Pins "today" for every `commands::now_in` call this state makes from here on — the test-only
+    /// seam described on `test_today`. Not `#[cfg(test)]`: `app/tests/**` links this crate as an
+    /// ordinary dependency, so the field and this setter always compile, but nothing outside a test
+    /// ever calls it.
+    pub fn set_test_today(&self, d: Option<jiff::civil::Date>) {
+        *self.test_today.lock().unwrap() = d;
+    }
 
     /// Records that a note write just happened: bumps the pending-edit count and stamps
     /// `last_write` for the housekeeping thread's debounced backup (fix round 1, review M2: it no
