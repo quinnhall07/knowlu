@@ -175,7 +175,7 @@ draft — see `EVENT_VERDICTS` in `judge_validate.ts`), and `completion`, the si
 note's own §5 discusses only as a *field* (`status`) with its own two-matrix analysis, never as a
 *classification* cost against the other five tiers. The stream controller ruled both sets of cells
 on 2026-09-22, the same day as this note's ratification, so `score.ts`'s `COST` map could be
-completed without a second round-trip. Verbatim, with the one-line reason each cell carries:
+completed without a second round-trip. The values are the controller's rulings; the one-line reasons for `completion->borderline/event/opportunity` and `borderline/event->completion` were derived from the principles in §2 when the map was written, the rest are the rulings' own:
 
 **Event `unsure` (six cells):**
 
