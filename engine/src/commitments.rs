@@ -2063,6 +2063,276 @@ pub fn refresh_series(
     (file, warnings)
 }
 
+// ---------------------------------------------------------------------------------------------
+// P9 — proposals and the window proposal (§3.5).
+// ---------------------------------------------------------------------------------------------
+
+/// The one decline-marker key that is not a source's (§2.3): the student rejected a window
+/// proposal, and no window is proposed again (§3.5, re-review M-i).
+pub const WINDOW_MARKER: &str = "window";
+
+/// A window proposal's `source_uid` is this prefix + its routine keys joined by `,` (§5.2).
+pub const WINDOW_PREFIX: &str = "window:";
+
+/// The window proposal's title (§5.2: `Your day · Mon–Fri 8am–10pm · plan in this window?`).
+pub const WINDOW_TITLE: &str = "Your day";
+
+/// §3.5's signature `(kind, course or lower-cased title, meets)`: the same meeting from a second
+/// route (a Google key and an ICS key, a registrar row, a hand-written note, a successor) has the
+/// same one. `course` stands in for the title when it is set, so `title` is then empty; `meets` is
+/// the set of `(DAY_KEYS index, start, end)` triples, so neither the order of the entries nor the
+/// order of the days inside one matters.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Signature {
+    pub kind: String,
+    pub course: Option<String>,
+    pub title: String,
+    pub meets: BTreeSet<(usize, Time, Time)>,
+}
+
+/// The signature of whatever carries these fields (a series' classification, a note, a card's
+/// `commitment:`).
+pub fn signature(kind: &str, course: Option<&str>, title: &str, meets: &[Meet]) -> Signature {
+    let course = course
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    let title = match course {
+        Some(_) => String::new(),
+        None => title.trim().to_lowercase(),
+    };
+    let meets = meets
+        .iter()
+        .flat_map(|m| {
+            m.days
+                .iter()
+                .filter_map(|d| DAY_KEYS.iter().position(|k| k == d))
+                .map(move |i| (i, m.start, m.end))
+        })
+        .collect();
+    Signature {
+        kind: kind.to_string(),
+        course,
+        title,
+        meets,
+    }
+}
+
+impl Commitment {
+    pub fn signature(&self) -> Signature {
+        signature(&self.kind, self.course.as_deref(), &self.title, &self.meets)
+    }
+}
+
+/// What a confirmed note needs (§3.5, §2.1): a series the student has not answered yet, or the
+/// one window proposal (`kind: planning-day`, its window per weekday in `meets`, the §2.4 shape).
+/// Plain data, recomputed each run and held only in memory: nothing here writes a note, a card,
+/// a journal record or a file, so a proposal stays on the device until a card or the screen
+/// confirms it (R18, R20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proposal {
+    pub kind: String,
+    pub level: Level,
+    pub title: String,
+    pub course: Option<String>,
+    pub meets: Vec<Meet>,
+    pub where_: Option<String>,
+    pub from: Option<Date>,
+    pub until: Option<Date>,
+    pub source_uid: String,
+}
+
+impl Proposal {
+    pub fn signature(&self) -> Signature {
+        signature(&self.kind, self.course.as_deref(), &self.title, &self.meets)
+    }
+
+    /// The window proposal (its `source_uid` starts [`WINDOW_PREFIX`]).
+    pub fn is_window(&self) -> bool {
+        self.source_uid.starts_with(WINDOW_PREFIX)
+    }
+}
+
+/// Minutes since midnight.
+fn minutes(time: Time) -> i64 {
+    i64::from(time.hour()) * 60 + i64::from(time.minute())
+}
+
+/// §3.5's proposals, pure (no clock, no I/O, no model), in `source_uid` order, over
+/// [`SeriesFile::by_key`] so one key is one proposal whichever calendars hold it.
+///
+/// A series is proposed only if it is eligible and classified (P7's `classify`), its `until` is
+/// not before `today` (P7 left that check to the caller: `classify` has no `today`), its key is
+/// not in `held` (keys a change card's `change.source_uid` carries, P12's `successor_keys`), no
+/// note has its key (a confirmed note, a decline marker, the planning day), no confirmed note has
+/// its [`Signature`], and — when `for_cards` — it is not `office-hours` (R8; the screen lists
+/// them).
+///
+/// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
+/// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
+/// signature. Candidates are grouped by signature and one proposal is made per group, from the
+/// record [`SeriesFile::by_key`]'s precedence prefers (a `google:` calendar, then the lower
+/// calendar key; then the lower key). A key answered or held closes its signature, so a declined,
+/// confirmed or held twin suppresses the other.
+///
+/// Routines feed the one window proposal (decision 3, [`window_proposal`]), never a commitment.
+#[allow(clippy::too_many_arguments)]
+pub fn proposals(
+    file: &SeriesFile,
+    set: &Commitments,
+    codes: &Codes,
+    planning: &[String],
+    template: &crate::weekcal::WeekCalendar,
+    held: &BTreeSet<String>,
+    today: Date,
+    for_cards: bool,
+) -> Vec<Proposal> {
+    let answered: BTreeSet<&str> = set
+        .confirmed
+        .iter()
+        .chain(set.planning_day.iter())
+        .filter_map(|n| n.source_uid.as_deref())
+        .chain(set.declined.iter().map(String::as_str))
+        .collect();
+    let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(Commitment::signature).collect();
+
+    let mut candidates: Vec<(Signature, &Series, String, Option<String>)> = Vec::new();
+    let mut routines: Vec<(&str, &Series, bool, bool)> = Vec::new();
+    for (key, series) in file.by_key() {
+        if series.until.is_some_and(|until| until < today) {
+            continue;
+        }
+        match classify(series, codes, planning) {
+            None => {}
+            Some(Class::Routine { wake, bed }) => routines.push((key, series, wake, bed)),
+            Some(Class::Kind { kind, course }) => {
+                let sig = signature(&kind, course.as_deref(), &series.title, &series.meets);
+                if answered.contains(key) || held.contains(key) {
+                    closed.insert(sig);
+                } else {
+                    candidates.push((sig, series, kind, course));
+                }
+            }
+        }
+    }
+
+    fn rank(s: &Series) -> ((bool, &str), &str) {
+        (precedence(s), s.source_uid.as_str())
+    }
+    let mut chosen: BTreeMap<Signature, (&Series, String, Option<String>)> = BTreeMap::new();
+    for (sig, series, kind, course) in candidates {
+        if closed.contains(&sig) {
+            continue;
+        }
+        match chosen.get(&sig) {
+            Some((kept, _, _)) if rank(kept) <= rank(series) => {}
+            _ => {
+                chosen.insert(sig, (series, kind, course));
+            }
+        }
+    }
+
+    let mut out: Vec<Proposal> = chosen
+        .into_values()
+        .filter(|(_, kind, _)| !(for_cards && kind == "office-hours"))
+        .map(|(series, kind, course)| Proposal {
+            level: default_level(&kind).unwrap_or(Level::Soft),
+            kind,
+            title: series.title.clone(),
+            course,
+            meets: series.meets.clone(),
+            where_: series.where_.clone(),
+            from: series.first,
+            until: series.until,
+            source_uid: series.source_uid.clone(),
+        })
+        .collect();
+    if set.planning_day.is_none() && !set.declined.contains(WINDOW_MARKER) {
+        out.extend(window_proposal(&routines, template));
+    }
+    out.sort_by(|a, b| a.source_uid.cmp(&b.source_uid));
+    out
+}
+
+/// Decision 3, §3.5: per weekday, `start` = the latest wake-side time (a wake event's end) and
+/// `end` = the earliest bed-side time (a bed event's start); one side missing takes the
+/// template's `day_start`/`day_end`; a weekday with neither side, or whose result is inverted or
+/// shorter than `min_block_minutes`, is left out. A midnight-crossing `sleep` entry is both
+/// sides: its start is the bed side on its own day, its end the wake side on the next. (A
+/// non-crossing entry of such a series gives only its wake side: a bedtime after midnight is not
+/// representable, §2.4.) Weekdays with equal `(start, end)` share one entry, days in `DAY_KEYS`
+/// order, entries by their first day. `None` when no weekday is left.
+fn window_proposal(
+    routines: &[(&str, &Series, bool, bool)],
+    template: &crate::weekcal::WeekCalendar,
+) -> Option<Proposal> {
+    let mut wake: [Option<Time>; 7] = [None; 7];
+    let mut bed: [Option<Time>; 7] = [None; 7];
+    let later = |slot: &mut Option<Time>, t: Time| *slot = Some(slot.map_or(t, |s| s.max(t)));
+    let earlier = |slot: &mut Option<Time>, t: Time| *slot = Some(slot.map_or(t, |s| s.min(t)));
+    for (_, series, wake_side, bed_side) in routines {
+        for meet in &series.meets {
+            for day in &meet.days {
+                let Some(i) = DAY_KEYS.iter().position(|k| k == day) else {
+                    continue;
+                };
+                if meet.end < meet.start {
+                    if *bed_side {
+                        earlier(&mut bed[i], meet.start);
+                    }
+                    if *wake_side {
+                        later(&mut wake[(i + 1) % 7], meet.end);
+                    }
+                } else if *wake_side {
+                    later(&mut wake[i], meet.end);
+                } else if *bed_side {
+                    earlier(&mut bed[i], meet.start);
+                }
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<(Time, Time), Vec<usize>> = BTreeMap::new();
+    for i in 0..7 {
+        if wake[i].is_none() && bed[i].is_none() {
+            continue;
+        }
+        let start = wake[i].unwrap_or(template.day_start);
+        let end = bed[i].unwrap_or(template.day_end);
+        if start >= end || minutes(end) - minutes(start) < template.min_block_minutes {
+            continue;
+        }
+        groups.entry((start, end)).or_default().push(i);
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let mut meets: Vec<(usize, Meet)> = groups
+        .into_iter()
+        .map(|((start, end), days)| {
+            let meet = Meet {
+                days: days.iter().map(|&i| DAY_KEYS[i]).collect(),
+                start,
+                end,
+            };
+            (days[0], meet)
+        })
+        .collect();
+    meets.sort_by_key(|(first, meet)| (*first, meet.start));
+    let keys: Vec<&str> = routines.iter().map(|(key, ..)| *key).collect();
+    Some(Proposal {
+        kind: PLANNING_DAY.to_string(),
+        level: default_level(PLANNING_DAY).unwrap_or(Level::Optional),
+        title: WINDOW_TITLE.to_string(),
+        course: None,
+        meets: meets.into_iter().map(|(_, meet)| meet).collect(),
+        where_: None,
+        from: None,
+        until: None,
+        source_uid: format!("{WINDOW_PREFIX}{}", keys.join(",")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4289,5 +4559,554 @@ mod series_tests {
             .collect();
         assert_eq!(names, vec!["calendar-series.json".to_string()]);
         assert_eq!(read_series_file(&v), (file, Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+    use crate::weekcal::WeekCalendar;
+    use jiff::civil::date;
+
+    const TODAY: Date = date(2026, 9, 1);
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    /// Three weeks of a weekly series from Monday 2026-08-31, on `days`, `s`–`e`; `meets` as P8
+    /// derives it. Every title, key and calendar is invented.
+    fn mk(uid: &str, cal: &str, title: &str, days: &[DayKey], s: Time, e: Time) -> Series {
+        let monday = date(2026, 8, 31);
+        let mut instances = Vec::new();
+        for week in 0..3 {
+            for day in days {
+                let offset = DAY_KEYS.iter().position(|k| k == day).unwrap() as i64;
+                instances.push(Instance {
+                    date: add_days(monday, week * 7 + offset),
+                    start: Some(s),
+                    end: Some(e),
+                });
+            }
+        }
+        instances.sort_by_key(|i| i.date);
+        let meets = meets_of(&instances);
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule {
+                freq: "WEEKLY".into(),
+                interval: 1,
+                until: None,
+                count: None,
+            },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances,
+            meets,
+            first: Some(monday),
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn g(uid: &str, title: &str, days: &[DayKey], s: Time, e: Time) -> Series {
+        mk(uid, "google:abc", title, days, s, e)
+    }
+
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series
+            .sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        file
+    }
+
+    fn codes() -> Codes {
+        Codes {
+            table: [("CS100".to_string(), "cs-100".to_string())]
+                .into_iter()
+                .collect(),
+            names: BTreeMap::new(),
+        }
+    }
+
+    /// `week_template.yaml` absent: 08:00–18:00, `min_block_minutes` 45.
+    fn template() -> WeekCalendar {
+        WeekCalendar::new(&Mapping::new(), Vec::new())
+    }
+
+    fn run_with(
+        file: &SeriesFile,
+        set: &Commitments,
+        held: &BTreeSet<String>,
+        for_cards: bool,
+    ) -> Vec<Proposal> {
+        proposals(file, set, &codes(), &[], &template(), held, TODAY, for_cards)
+    }
+
+    fn run(file: &SeriesFile, set: &Commitments) -> Vec<Proposal> {
+        run_with(file, set, &BTreeSet::new(), true)
+    }
+
+    fn keys(got: &[Proposal]) -> Vec<&str> {
+        got.iter().map(|p| p.source_uid.as_str()).collect()
+    }
+
+    fn meet(days: &[DayKey], s: Time, e: Time) -> Meet {
+        Meet {
+            days: days.to_vec(),
+            start: s,
+            end: e,
+        }
+    }
+
+    fn confirmed(
+        kind: &str,
+        title: &str,
+        course: Option<&str>,
+        meets: Vec<Meet>,
+        uid: Option<&str>,
+    ) -> Commitment {
+        Commitment {
+            id: format!("cmt_{}", title.len()),
+            path: PathBuf::from("commitments/x.md"),
+            kind: kind.into(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.into(),
+            course: course.map(String::from),
+            meets,
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: uid.map(String::from),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let v = std::env::temp_dir().join(format!("knowlu-p9-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&v);
+        std::fs::create_dir_all(v.join(FOLDER)).unwrap();
+        v
+    }
+
+    fn cs100() -> Series {
+        g(
+            "gcal-series:cs100",
+            "CS 100",
+            &["mon", "wed", "fri"],
+            t(12, 0),
+            t(12, 50),
+        )
+    }
+
+    fn club() -> Series {
+        g("gcal-series:club", "Robotics Club", &["tue"], t(18, 0), t(19, 0))
+    }
+
+    fn shift() -> Series {
+        g("gcal-series:shift", "Work", &["sat"], t(9, 0), t(13, 0))
+    }
+
+    #[test]
+    fn a_proposal_carries_what_a_note_needs() {
+        let mut s = cs100();
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 12, 4));
+        let got = run(&file_of(vec![s]), &Commitments::default());
+        assert_eq!(
+            got,
+            vec![Proposal {
+                kind: "class".into(),
+                level: Level::Hard,
+                title: "CS 100".into(),
+                course: Some("cs-100".into()),
+                meets: vec![meet(&["mon", "wed", "fri"], t(12, 0), t(12, 50))],
+                where_: Some("Room 101".into()),
+                from: Some(date(2026, 8, 31)),
+                until: Some(date(2026, 12, 4)),
+                source_uid: "gcal-series:cs100".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_confirmed_or_declined_key_is_never_proposed() {
+        let file = file_of(vec![cs100(), club(), shift()]);
+        let mut set = Commitments::default();
+        // Keyed to the class, but a different signature: the key alone must close it.
+        set.confirmed.push(confirmed(
+            "class",
+            "Old title",
+            Some("cs-999"),
+            vec![meet(&["thu"], t(8, 0), t(9, 0))],
+            Some("gcal-series:cs100"),
+        ));
+        set.declined.insert("gcal-series:club".into());
+        assert_eq!(keys(&run(&file, &set)), vec!["gcal-series:shift"]);
+    }
+
+    #[test]
+    fn a_signature_match_is_never_proposed() {
+        // The same class from a second route: an ICS key, with a note confirmed under a Google key.
+        let ics = mk(
+            "ics-series:cs100@school.example",
+            "personal",
+            "CS 100",
+            &["mon", "wed", "fri"],
+            t(12, 0),
+            t(12, 50),
+        );
+        let mut set = Commitments::default();
+        set.confirmed.push(confirmed(
+            "class",
+            "CS 100 Lecture",
+            Some("cs-100"),
+            // Days written in another order are the same meets.
+            vec![meet(&["fri", "mon", "wed"], t(12, 0), t(12, 50))],
+            Some("gcal-series:elsewhere"),
+        ));
+        let chess = g("gcal-series:chess", "Chess Club", &["wed"], t(18, 0), t(19, 0));
+        let file = file_of(vec![ics, club(), chess]);
+
+        // A hand-written club note (no source_uid, another case), read through `load`.
+        let v = scratch("sig");
+        std::fs::write(
+            v.join(FOLDER).join("robotics.md"),
+            "---\ntype: commitment\nkind: club\ntitle: \"robotics club\"\n\
+             meets: [{days: [tue], start: \"18:00\", end: \"19:00\"}]\nstatus: confirmed\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        let loaded = load(&v);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        set.confirmed.extend(loaded.confirmed);
+
+        assert_eq!(keys(&run(&file, &set)), vec!["gcal-series:chess"]);
+    }
+
+    #[test]
+    fn office_hours_is_proposed_for_the_screen_not_for_cards() {
+        let file = file_of(vec![g(
+            "gcal-series:oh",
+            "CS 100 Office Hours",
+            &["thu"],
+            t(15, 0),
+            t(16, 0),
+        )]);
+        let none = BTreeSet::new();
+        let screen = run_with(&file, &Commitments::default(), &none, false);
+        assert_eq!(screen.len(), 1);
+        assert_eq!(screen[0].kind, "office-hours");
+        assert_eq!(screen[0].course.as_deref(), Some("cs-100"));
+        assert_eq!(screen[0].level, Level::Optional);
+        assert!(run_with(&file, &Commitments::default(), &none, true).is_empty());
+    }
+
+    const WEEKDAYS: [DayKey; 5] = ["mon", "tue", "wed", "thu", "fri"];
+    const ALL: [DayKey; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    fn window_of(got: &[Proposal]) -> Option<&Proposal> {
+        got.iter().find(|p| p.kind == PLANNING_DAY)
+    }
+
+    #[test]
+    fn a_window_is_proposed_per_weekday_from_wake_and_bed() {
+        let file = file_of(vec![
+            g("gcal-series:wake-wk", "Wake up", &WEEKDAYS, t(7, 0), t(7, 30)),
+            g("gcal-series:wake-we", "Wake up", &["sat", "sun"], t(9, 30), t(10, 0)),
+            g("gcal-series:bed", "Bedtime", &ALL, t(22, 0), t(22, 15)),
+        ]);
+        let got = run(&file, &Commitments::default());
+        assert_eq!(
+            got,
+            vec![Proposal {
+                kind: PLANNING_DAY.into(),
+                level: Level::Optional,
+                title: "Your day".into(),
+                course: None,
+                meets: vec![
+                    meet(&WEEKDAYS, t(7, 30), t(22, 0)),
+                    meet(&["sat", "sun"], t(10, 0), t(22, 0)),
+                ],
+                where_: None,
+                from: None,
+                until: None,
+                source_uid: "window:gcal-series:bed,gcal-series:wake-we,gcal-series:wake-wk"
+                    .into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_latest_wake_and_the_earliest_bed_win() {
+        let file = file_of(vec![
+            g("gcal-series:alarm", "Alarm", &["mon"], t(6, 0), t(6, 0)),
+            g("gcal-series:get-up", "Get up", &["mon"], t(7, 0), t(7, 15)),
+            g("gcal-series:bed", "Bedtime", &["mon"], t(23, 0), t(23, 5)),
+            g("gcal-series:lights", "Lights out", &["mon"], t(22, 30), t(22, 35)),
+        ]);
+        let got = run(&file, &Commitments::default());
+        assert_eq!(
+            window_of(&got).unwrap().meets,
+            vec![meet(&["mon"], t(7, 15), t(22, 30))]
+        );
+    }
+
+    #[test]
+    fn a_midnight_sleep_series_gives_bed_on_its_day_and_wake_on_the_next() {
+        let file = file_of(vec![g(
+            "gcal-series:sleep",
+            "Sleep",
+            &["mon", "tue"],
+            t(23, 0),
+            t(7, 0),
+        )]);
+        let got = run(&file, &Commitments::default());
+        // Mon: bed 23:00, wake from the template (08:00). Tue: wake 07:00 (Monday night), bed
+        // 23:00. Wed: wake 07:00 (Tuesday night), bed from the template (18:00).
+        assert_eq!(
+            window_of(&got).unwrap().meets,
+            vec![
+                meet(&["mon"], t(8, 0), t(23, 0)),
+                meet(&["tue"], t(7, 0), t(23, 0)),
+                meet(&["wed"], t(7, 0), t(18, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_weekday_with_one_side_takes_the_other_from_the_template() {
+        let file = file_of(vec![
+            g("gcal-series:wake", "Wake up", &["mon"], t(7, 0), t(7, 30)),
+            g("gcal-series:bed", "Bedtime", &["sat"], t(23, 0), t(23, 15)),
+        ]);
+        let got = run(&file, &Commitments::default());
+        assert_eq!(
+            window_of(&got).unwrap().meets,
+            vec![
+                meet(&["mon"], t(7, 30), t(18, 0)),
+                meet(&["sat"], t(8, 0), t(23, 0))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inverted_or_too_short_day_is_left_out() {
+        let file = file_of(vec![
+            // Mon: 08:00 (template) to 07:00 — inverted.
+            g("gcal-series:bed-mon", "Bedtime", &["mon"], t(7, 0), t(7, 15)),
+            // Tue: 17:30 to 18:00 — 30 minutes, under 45.
+            g("gcal-series:wake-tue", "Alarm", &["tue"], t(17, 30), t(17, 30)),
+            // Wed: 09:00 to 18:00 — kept.
+            g("gcal-series:wake-wed", "Alarm", &["wed"], t(9, 0), t(9, 0)),
+            // Thu: 17:15 to 18:00 — exactly 45, not shorter, kept.
+            g("gcal-series:wake-thu", "Alarm", &["thu"], t(17, 15), t(17, 15)),
+        ]);
+        let got = run(&file, &Commitments::default());
+        assert_eq!(
+            window_of(&got).unwrap().meets,
+            vec![
+                meet(&["wed"], t(9, 0), t(18, 0)),
+                meet(&["thu"], t(17, 15), t(18, 0))
+            ]
+        );
+        // Every day left out: no window at all.
+        let only_bad = file_of(vec![g(
+            "gcal-series:bed-mon",
+            "Bedtime",
+            &["mon"],
+            t(7, 0),
+            t(7, 15),
+        )]);
+        assert!(run(&only_bad, &Commitments::default()).is_empty());
+    }
+
+    fn routines() -> Vec<Series> {
+        vec![
+            g("gcal-series:wake", "Wake up", &WEEKDAYS, t(7, 0), t(7, 30)),
+            g("gcal-series:bed", "Bedtime", &ALL, t(22, 0), t(22, 15)),
+        ]
+    }
+
+    #[test]
+    fn a_planning_day_note_suppresses_the_window() {
+        let v = scratch("pd");
+        std::fs::write(
+            v.join(FOLDER).join("planning-day.md"),
+            "---\nid: cmt_0000000001\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+             window: [{days: [mon], start: \"09:00\", end: \"21:00\"}]\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        let set = load(&v);
+        assert!(set.planning_day.is_some());
+        let got = run(&file_of(routines()), &set);
+        assert!(got.is_empty(), "no window, and routines are never commitments: {got:?}");
+    }
+
+    #[test]
+    fn a_window_marker_suppresses_every_later_window_even_with_a_new_routine() {
+        let mut set = Commitments::default();
+        set.declined.insert("window".into());
+        let mut series = routines();
+        series.push(g("gcal-series:new-alarm", "Alarm", &["sat"], t(9, 0), t(9, 0)));
+        series.push(cs100());
+        let got = run(&file_of(series), &set);
+        assert_eq!(keys(&got), vec!["gcal-series:cs100"]);
+    }
+
+    #[test]
+    fn proposals_are_in_source_uid_order_and_deterministic() {
+        let mut series = routines();
+        series.push(mk(
+            "ics-series:zeta",
+            "personal",
+            "Robotics Club",
+            &["tue"],
+            t(18, 0),
+            t(19, 0),
+        ));
+        series.push(g("gcal-series:m", "Work", &["sat"], t(9, 0), t(13, 0)));
+        series.push(g(
+            "gcal-series:a",
+            "CS 100",
+            &["mon", "wed", "fri"],
+            t(12, 0),
+            t(12, 50),
+        ));
+        series.reverse();
+        let file = SeriesFile {
+            calendars: [
+                ("google:abc".to_string(), TODAY),
+                ("personal".to_string(), TODAY),
+            ]
+            .into_iter()
+            .collect(),
+            ended: BTreeMap::new(),
+            series,
+        };
+        let first = run(&file, &Commitments::default());
+        assert_eq!(
+            keys(&first),
+            vec![
+                "gcal-series:a",
+                "gcal-series:m",
+                "ics-series:zeta",
+                "window:gcal-series:bed,gcal-series:wake"
+            ]
+        );
+        assert_eq!(first, run(&file, &Commitments::default()));
+    }
+
+    #[test]
+    fn one_key_from_google_and_ics_is_one_proposal() {
+        let mut google = cs100();
+        google.where_ = Some("Room 101".into());
+        let mut ics = cs100();
+        ics.calendar = "personal".into();
+        ics.where_ = Some("Room 9".into());
+        let got = run(&file_of(vec![ics, google]), &Commitments::default());
+        assert_eq!(keys(&got), vec!["gcal-series:cs100"]);
+        assert_eq!(got[0].where_.as_deref(), Some("Room 101"), "the google: record wins");
+    }
+
+    /// One real series under two keys: an Exchange invite keeps its own UID (P8 review).
+    fn twins() -> Vec<Series> {
+        vec![
+            mk(
+                "ics-series:040000008200E0@exchange.example",
+                "work",
+                "Team Standup",
+                &WEEKDAYS,
+                t(9, 0),
+                t(9, 15),
+            ),
+            g("gcal-series:standup", "Team Standup", &WEEKDAYS, t(9, 0), t(9, 15)),
+        ]
+    }
+
+    #[test]
+    fn twins_under_two_keys_are_one_proposal_by_google_first_precedence() {
+        let got = run(&file_of(twins()), &Commitments::default());
+        assert_eq!(keys(&got), vec!["gcal-series:standup"]);
+        // Precedence is the calendar's, not the key's spelling: of two ICS feeds, the lower
+        // calendar key wins.
+        let a = mk("ics-series:b-uid", "alpha", "Team Standup", &WEEKDAYS, t(9, 0), t(9, 15));
+        let b = mk("ics-series:a-uid", "beta", "Team Standup", &WEEKDAYS, t(9, 0), t(9, 15));
+        assert_eq!(
+            keys(&run(&file_of(vec![a, b]), &Commitments::default())),
+            vec!["ics-series:b-uid"]
+        );
+    }
+
+    #[test]
+    fn a_declined_or_confirmed_twin_suppresses_the_other() {
+        for key in [
+            "gcal-series:standup",
+            "ics-series:040000008200E0@exchange.example",
+        ] {
+            let mut declined = Commitments::default();
+            declined.declined.insert(key.into());
+            assert!(run(&file_of(twins()), &declined).is_empty(), "declined {key}");
+
+            // Keyed only: this note's own meets are elsewhere, so only the key ties it.
+            let mut kept = Commitments::default();
+            kept.confirmed.push(confirmed(
+                "meeting",
+                "Standup (old)",
+                None,
+                vec![meet(&["sat"], t(8, 0), t(9, 0))],
+                Some(key),
+            ));
+            assert!(run(&file_of(twins()), &kept).is_empty(), "confirmed {key}");
+
+            let held: BTreeSet<String> = [key.to_string()].into_iter().collect();
+            assert!(
+                run_with(&file_of(twins()), &Commitments::default(), &held, true).is_empty(),
+                "held {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_held_by_a_change_card_is_not_proposed() {
+        let file = file_of(vec![cs100(), club()]);
+        let held: BTreeSet<String> = ["gcal-series:cs100".to_string()].into_iter().collect();
+        assert_eq!(
+            keys(&run_with(&file, &Commitments::default(), &held, true)),
+            vec!["gcal-series:club"]
+        );
+    }
+
+    #[test]
+    fn a_series_that_ended_before_today_or_is_unclassified_is_not_proposed() {
+        let mut ended = cs100();
+        ended.until = Some(date(2026, 8, 31));
+        ended.last_seen = Some(date(2026, 8, 1));
+        let study = g("gcal-series:study", "Study for CS 100", &["sun"], t(14, 0), t(16, 0));
+        let mut biweekly = club();
+        biweekly.rule.interval = 2;
+        assert!(run(&file_of(vec![ended, study, biweekly]), &Commitments::default()).is_empty());
+    }
+
+    #[test]
+    fn a_signature_is_order_free_and_case_free_on_the_title() {
+        let a = signature("club", None, "Robotics Club", &[meet(&["tue", "mon"], t(18, 0), t(19, 0))]);
+        let b = signature(
+            "club",
+            None,
+            " robotics club ",
+            &[meet(&["mon"], t(18, 0), t(19, 0)), meet(&["tue"], t(18, 0), t(19, 0))],
+        );
+        assert_eq!(a, b);
+        let c = signature("class", Some("cs-100"), "Anything", &[meet(&["mon"], t(9, 0), t(10, 0))]);
+        let d = signature("class", Some("cs-100"), "Else", &[meet(&["mon"], t(9, 0), t(10, 0))]);
+        assert_eq!(c, d, "a course, when set, stands in for the title");
     }
 }
