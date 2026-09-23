@@ -942,6 +942,54 @@ fn a_refused_batch_stamps_nothing_and_says_so() {
 }
 
 #[test]
+fn a_malformed_journal_ts_is_skipped_and_the_rest_of_the_batch_still_sends() {
+    let v = label_vault("badts");
+    let good = file_card(&v, "amend-good", "amend", &judged("task", LABEL_J));
+    set_status(&v, "approvals/amend-good.md", "rejected", &console_ctx());
+    let good_ts = human_ts(&v, &good);
+
+    let bad = file_card(&v, "amend-badts", "amend", &judged("task", LABEL_J2));
+    set_status(&v, "approvals/amend-badts.md", "rejected", &console_ctx());
+    // A hand-edited journal line: `LABEL_TS_RE`-shaped (four digits, two digits, ...), but month
+    // 13 and hour 25 make it unparseable as a real instant.
+    let mut journal = knowlu_engine::journal::Journal::new(&v);
+    let spec = knowlu_engine::journal::NewRecord {
+        id: Some(bad.as_str()),
+        field: Some("status"),
+        old: serde_json::json!("pending"),
+        new: serde_json::json!("rejected"),
+        ts: Some("2026-13-40T25:61:00Z".to_string()),
+        ..knowlu_engine::journal::NewRecord::new("set", "approvals/amend-badts.md", "quinn", "dashboard")
+    };
+    let mut rec = knowlu_engine::journal::make_record(spec).expect("the record builds");
+    journal.append(&mut rec).expect("the malformed-ts record appends");
+
+    let mut server = loopback(vec![(200, SAVED_ONE.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let lines = report(&v, &client);
+    assert_eq!(lines, vec!["labels: sent 1".to_string()], "{lines:?}");
+    assert!(card_field(&v, "approvals/amend-good.md", "reported_at").is_some());
+    assert!(
+        card_field(&v, "approvals/amend-badts.md", "reported_at").is_none(),
+        "an unparseable ts must not be stamped, so a corrected journal line can still be retried"
+    );
+    let sent = server.requests();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let expected = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "events": [],
+        "corrections": [{
+            "ts": good_ts, "item_id": good, "field": "decision", "ours": "proposed", "theirs": "rejected",
+            "kind": "approval", "judgment_id": LABEL_J, "judgment_kind": "task",
+        }],
+    }));
+    assert_eq!(body_of(&sent[0]), expected);
+    // The malformed card is quietly excluded (its ts can never resolve without a hand-fixed
+    // journal), not blocked-and-retried: with the good card now stamped, nothing is waiting.
+    assert!(!knowlu_engine::enrich::labels_waiting(&v));
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
 fn nothing_waiting_means_no_request() {
     let v = label_vault("nothing");
     let mut server = loopback(vec![]);

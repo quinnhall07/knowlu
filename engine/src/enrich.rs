@@ -1141,7 +1141,10 @@ pub const LABELS_ACTOR: &str = "agent:knowlu.labels";
 pub const LABEL_BATCH: usize = 100;
 
 /// The handler's own `ISO_TIMESTAMP`. `journal::now_ts` always matches it; a hand-edited journal
-/// might not, and one row the service refuses would 400 the whole batch every slot forever.
+/// might not, and one row the service refuses would 400 the whole batch every slot forever. Shape
+/// alone is not enough — `2026-13-40T25:61:00Z` matches this regex — so the filter that uses it
+/// also requires `jiff::Timestamp::from_str` to succeed, or the same row would 400 the batch on
+/// every later slot forever (rows sort by `ts`, so a bad one always rides in the first batch).
 static LABEL_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$").unwrap()
 });
@@ -1206,7 +1209,7 @@ fn labels_to_report(vault: &Path) -> Vec<LabelCard> {
             let Some(ts) = journal
                 .human_set(&item_id, "status")
                 .and_then(|r| r.get("ts").and_then(|t| t.as_str()).map(str::to_string))
-                .filter(|ts| LABEL_TS_RE.is_match(ts))
+                .filter(|ts| LABEL_TS_RE.is_match(ts) && ts.parse::<jiff::Timestamp>().is_ok())
             else {
                 continue;
             };
