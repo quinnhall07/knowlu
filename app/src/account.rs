@@ -691,11 +691,26 @@ pub fn load_cache(data_dir: &std::path::Path) -> Option<EntitlementCache> {
     serde_json::from_str(&text).ok()
 }
 
+/// A counter, not a clock: two calls on the same thread in the same nanosecond are not a
+/// hypothetical on a fast machine, and `fetch_add` can never collide the way two `Timestamp::now()`
+/// reads could (R-C1c-final-5).
+static CACHE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Written atomically: the fresh bytes land in a sibling `.tmp` file first, and `fs::rename` — which
 /// on Windows calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` — swaps it into place in one step,
 /// so a reader (this process's own next `load_cache`, or a crash mid-write) never observes a
 /// half-written file. The remove-then-rename fallback below is a second attempt for the rare case
 /// where the direct rename itself fails (fix round 1, item 6).
+///
+/// **R-C1c-final-5:** the `.tmp` name is unique to this CALL — pid plus a counter — not shared by
+/// every writer the way a bare `entitlement.json.tmp` was. `scheduler::spawn`'s launch refresh (at
+/// +10 s) and a slot's own in-slot refresh (§2) can overlap when the round trip takes about that
+/// long, and with one shared name the loser's `rename` finds its own source already moved away by
+/// the winner, falls into the fallback, and `remove_file(&path)` deletes the WINNER's just-written
+/// fresh cache — leaving no cache at all and the F13 skip again, from two calls that each believed
+/// they had succeeded. A name unique per call means neither writer's source can ever be the other's
+/// to consume: the fallback here only ever retries this call's own rename against a target that may
+/// be transiently locked, never against another call's in-flight write.
 pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<(), String> {
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let v = serde_json::to_value(c).map_err(|e| e.to_string())?;
@@ -703,11 +718,14 @@ pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<()
     // the engine wrote never differ by whitespace.
     let bytes = knowlu_engine::ledger::dumps_value(&v);
     let path = cache_path(data_dir);
-    let tmp = data_dir.join("entitlement.json.tmp");
+    let n = CACHE_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = data_dir.join(format!("entitlement.json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
         // Fallback, and say so: remove the stale target and retry the rename rather than leaving
-        // both the old cache and the fresh `.tmp` sitting on disk.
+        // both the old cache and the fresh `.tmp` sitting on disk. Safe now that `tmp` is this
+        // call's alone — the target this removes and replaces is never another call's still-in-flight
+        // write, only ever a target `rename` itself could not replace in place.
         let _ = std::fs::remove_file(&path);
         std::fs::rename(&tmp, &path).map_err(|e2| format!("entitlement cache rename failed ({e}); fallback also failed: {e2}"))?;
     }

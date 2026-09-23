@@ -403,6 +403,50 @@ fn a_cache_round_trips_through_the_profile_folder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R-C1c-final-5: `scheduler::spawn`'s launch refresh (at +10 s) and a slot's own in-slot refresh
+/// (§2) can overlap when the round trip takes about that long. With one shared `.tmp` name, the
+/// loser's `rename` finds its own source already moved away by the winner, falls into the fallback,
+/// and `remove_file(&path)` deletes the WINNER's just-written fresh cache — both calls report
+/// success and the profile is left with none at all (the F13 skip again). Many rounds of two
+/// barrier-synchronised threads, to give that interleaving room to land within one test run. This
+/// never touches Credential Manager, so — per CLAUDE.md — it does not take `CREDMAN_LOCK`.
+#[test]
+fn overlapping_saves_never_clobber_each_other_into_no_cache_at_all() {
+    use knowlu::account::{cache_path, load_cache, save_cache, EntitlementCache};
+    let dir = std::env::temp_dir().join(format!("knowlu-ent-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for round in 0..200u32 {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for i in 0..2u32 {
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let c = EntitlementCache {
+                    status: if i == 0 { "active" } else { "trialing" }.into(),
+                    current_period_end: None,
+                    plan: Some("monthly".into()),
+                    checked_at: format!("2026-09-22T00:00:{round:02}.00{i}Z"),
+                };
+                // Lines both threads up at the same starting gate so the write-then-rename windows
+                // of the two calls actually overlap, rather than one finishing before the other starts.
+                barrier.wait();
+                save_cache(&dir, &c)
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().expect("an overlapping save must still succeed");
+        }
+        assert!(
+            load_cache(&dir).is_some(),
+            "round {round}: the cache must end up present and parseable, never deleted by the other writer's fallback"
+        );
+    }
+    assert!(cache_path(&dir).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fix round 1, item 5a: a profile with no session credential at all — the ordinary state for a
 /// signed-out or never-signed-in install — must fail the refresh outright and leave no
 /// `entitlement.json` behind. No loopback server needed — nothing here ever answers a request — but
