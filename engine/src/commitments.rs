@@ -1288,23 +1288,20 @@ const ENDED_DAYS: i64 = 28;
 /// title to 200; `where` is cut to 80 on both).
 const TITLE_MAX: usize = 200;
 const WHERE_MAX: usize = 80;
+/// Google's `eventType` is a short word (`default`, `focusTime`, …); anything longer is cut.
+const EVENT_TYPE_MAX: usize = 40;
 
-/// §3.2.5: a line carrying any of these (case-insensitive) is a link or a way into a meeting,
-/// never a place. Matched as substrings — the safe side: a lost `where` costs nothing, a stored
-/// passcode would sync with a confirmed note.
-const NOT_A_PLACE: [&str; 11] = [
-    "://",
-    "www.",
-    "zoom",
-    "teams",
-    "meet.google",
-    "webex",
-    "pwd",
-    "passcode",
-    "password",
-    "pin",
-    "meeting id",
-];
+/// §3.2.5: a line carrying any of these (case-insensitive, anywhere) is a link or a way into a
+/// meeting, never a place.
+const NOT_A_PLACE: [&str; 4] = ["://", "www.", "meet.google", "meeting id"];
+
+/// §3.2.5's single words, matched on **letter** boundaries (fix round 1, I1): "Pine Hall",
+/// "Chapin Hall", "Spinning Studio" and "Steamship Rm" keep their `where`, while `PIN1234`,
+/// `pin: 1234`, `pwd=` and `us02web.zoom.us` are still caught (a digit or punctuation is not a
+/// letter, so `` — which would miss `PIN1234` — is not used).
+static MEETING_WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^a-z])(?:zoom|teams|webex|pwd|passcode|password|pin)(?:[^a-z]|$)").unwrap()
+});
 
 /// §3.2.5's "run of six or more digits", read so a meeting id or phone number written with
 /// spaces or dashes between its groups ("555 123 456", "205-555-0100") is a run too.
@@ -1360,16 +1357,26 @@ impl SeriesFile {
     /// P3's `instances` shape (`WeekCalendar::with_instances`), from [`SeriesFile::by_key`]: per
     /// key, its calendar's read date, that + 28 (exclusive), and its timed instances. An all-day
     /// instance has no span, so it is left out.
+    ///
+    /// A series its calendar's last fresh read did not return (`last_seen` before that read
+    /// date) gets the horizon with **no** instances (fix round 1, M1; R21: inside the fresh
+    /// horizon only the actual instances subtract, and that read found none). It stops blocking
+    /// time at once; the record itself, with its old instances, stays in the file until it ages
+    /// into `ended` (§3.3), so P12 can still name its last instance.
     pub fn instances_map(&self) -> BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)> {
         self.by_key()
             .into_iter()
             .filter_map(|(key, series)| {
                 let read = self.calendars.get(&series.calendar).copied().or(series.last_seen)?;
-                let timed = series
-                    .instances
-                    .iter()
-                    .filter_map(|i| Some((i.date, i.start?, i.end?)))
-                    .collect();
+                let stale = series.last_seen.is_none_or(|seen| seen < read);
+                let timed = match stale {
+                    true => Vec::new(),
+                    false => series
+                        .instances
+                        .iter()
+                        .filter_map(|i| Some((i.date, i.start?, i.end?)))
+                        .collect(),
+                };
                 Some((key.to_string(), (read, add_days(read, HORIZON_DAYS), timed)))
             })
             .collect()
@@ -1404,15 +1411,18 @@ fn title_text(raw: &str) -> String {
 /// No link, no way into a meeting, no long digit run (§3.2.5).
 fn safe_line(line: &str) -> bool {
     let lower = line.to_lowercase();
-    !NOT_A_PLACE.iter().any(|word| lower.contains(word)) && !DIGIT_RUN_RE.is_match(line)
+    !NOT_A_PLACE.iter().any(|word| lower.contains(word))
+        && !MEETING_WORD_RE.is_match(line)
+        && !DIGIT_RUN_RE.is_match(line)
 }
 
-/// §3.2.5: the location, trimmed and cut to 80 — unless it is itself a link or passcode (a
-/// meeting URL is a common Google location), which is never stored (§9); else the first
+/// §3.2.5: the location's first non-empty line (fix round 1, M3: `where` is one line), trimmed
+/// and cut to 80 — unless it is itself a link or passcode (a meeting URL is a common Google
+/// location), which is never stored (§9); else the first
 /// description line that looks like a place (≤ 80 characters, [`safe_line`]); else none. The
 /// description goes no further than this function (R4).
 fn where_of(location: &str, description: &str) -> Option<String> {
-    let location = location.trim();
+    let location = location.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
     if !location.is_empty() && safe_line(location) {
         return Some(cut(location, WHERE_MAX));
     }
@@ -1460,7 +1470,9 @@ struct RuleRead {
 
 /// Reads `RRULE`/`EXDATE`/`RDATE` lines (Google's `recurrence`, or `IcsSeries::rule_lines` —
 /// one shape). `UNTIL` becomes a date in `tz` (`20261205T055959Z` is 4 December in Chicago);
-/// `COUNT` is expanded from `first` with `calfeed`'s own helper to its last date. A rule that
+/// `COUNT` is expanded from `first` with `calfeed`'s own helper to its last date — from
+/// `first` at 00:00, not the master's start time, which is exact for a date-level `until` (a
+/// `COUNT` over the helper's 1000-occurrence cap gives no `until`). A rule that
 /// helper refuses, a second `RRULE`, an `EXRULE`, or no `RRULE` at all is `unsupported`.
 fn read_rule(lines: &[String], first: Option<Date>, tz: &jiff::tz::TimeZone) -> RuleRead {
     let mut rrules: Vec<String> = Vec::new();
@@ -1598,7 +1610,8 @@ fn google_item(
         calendar: calendar.to_string(),
         title: title_text(text("title")?.unwrap_or("")),
         where_: where_of(text("location")?.unwrap_or(""), text("description")?.unwrap_or("")),
-        event_type: text("event_type")?.map(str::to_string),
+        // Bounded (fix round 1, M4), never emptied: `None` would read as eligible.
+        event_type: text("event_type")?.map(|kind| cut(kind, EVENT_TYPE_MAX)),
         rule: read.rule,
         has_master,
         rdate: read.rdate,
@@ -1629,8 +1642,17 @@ pub fn series_from_google(
         warnings.push("series: a Google reply without calendars_read and items; not read".to_string());
         return (Vec::new(), Vec::new(), warnings);
     };
-    let mut calendars: BTreeSet<String> =
-        read.iter().filter_map(|c| c.as_str()).map(str::to_string).collect();
+    // Fix round 1, M2: a Google read names only `google:` calendars; any other key could
+    // replace an ICS feed's series, so it is skipped with a warning.
+    let mut calendars: BTreeSet<String> = BTreeSet::new();
+    for key in read {
+        match key.as_str() {
+            Some(key) if key.starts_with("google:") => {
+                calendars.insert(key.to_string());
+            }
+            _ => warnings.push(format!("series: a Google calendar key without google: ({key}); skipped")),
+        }
+    }
     let mut broken: BTreeSet<String> = BTreeSet::new();
     let mut series = Vec::new();
     for item in items {
@@ -1879,26 +1901,57 @@ fn series_path(vault: &Path) -> PathBuf {
     vault.join("state").join("calendar-series.json")
 }
 
-/// `state/calendar-series.json` (§3.3). Missing: silent and empty. Unreadable or malformed in
-/// any part: empty, with one warning — the next fresh read rewrites it.
+/// What reading the file found (fix round 1, M6).
+enum Loaded {
+    /// Read and parsed, or missing (empty).
+    Read(SeriesFile),
+    /// Not UTF-8 or not the file's shape: empty, and the next fresh read regenerates it.
+    Malformed(String),
+    /// An I/O error other than not-found (a sharing violation, a folder in its place): the file
+    /// may be fine, so it is left alone and not rewritten this run.
+    Unreadable(std::io::ErrorKind),
+}
+
+fn load_series_file(vault: &Path) -> Loaded {
+    match std::fs::read_to_string(series_path(vault)) {
+        Ok(text) => match parse_file(&text) {
+            Ok(file) => Loaded::Read(file),
+            Err(why) => Loaded::Malformed(why),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Loaded::Read(SeriesFile::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => Loaded::Malformed("not UTF-8".into()),
+        Err(err) => Loaded::Unreadable(err.kind()),
+    }
+}
+
+/// `state/calendar-series.json` (§3.3). Missing: silent and empty. Malformed in any part, or
+/// unreadable: empty, with one warning. A malformed file is rewritten by the next fresh read; an
+/// unreadable one is left alone ([`refresh_series`]).
 pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
-    let text = match std::fs::read_to_string(series_path(vault)) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return (SeriesFile::default(), Vec::new());
-        }
-        Err(err) => {
-            let warning = format!("series file: {SERIES_FILE} unreadable ({}); starting empty", err.kind());
-            return (SeriesFile::default(), vec![warning]);
-        }
-    };
-    match parse_file(&text) {
-        Ok(file) => (file, Vec::new()),
-        Err(why) => (
+    match load_series_file(vault) {
+        Loaded::Read(file) => (file, Vec::new()),
+        Loaded::Malformed(why) => (
             SeriesFile::default(),
             vec![format!("series file: {SERIES_FILE} malformed ({why}); starting empty")],
         ),
+        Loaded::Unreadable(kind) => (
+            SeriesFile::default(),
+            vec![format!("series file: {SERIES_FILE} unreadable ({kind}); read as empty")],
+        ),
     }
+}
+
+/// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
+/// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
+/// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
+fn write_series_file(vault: &Path, bytes: &str) -> std::io::Result<()> {
+    let path = series_path(vault);
+    std::fs::create_dir_all(vault.join("state"))?;
+    let tmp = path.with_file_name(format!("calendar-series.json.tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes.as_bytes())?;
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// §3.3's per-calendar refresh. `fresh` holds each calendar read fresh and complete this run
@@ -1912,15 +1965,31 @@ pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
 ///   plan review M13): then its series and its date go 14 days after its last read, never to
 ///   `ended` — the student removed the source, not the class.
 /// - An `ended` entry goes 28 days after `dropped`, or at once when its key is held again.
+/// - A record with no `last_seen` (the engine never writes one; only a hand-edited file) counts
+///   as unseen for 14 days already, so a fresh read that does not return it ages it out at once.
 ///
-/// The file is written only when `fresh` is non-empty and the bytes differ. Warnings: the old
-/// file's, and a failed write's.
+/// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
+/// then rename). A file that could not be *read* (an I/O error, not a parse failure) is left
+/// alone and not rewritten this run, with one warning; the returned data then holds only this
+/// run's fresh calendars. Warnings: the old file's, and a failed write's.
 pub fn refresh_series(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
     today: Date,
 ) -> (SeriesFile, Vec<String>) {
-    let (old, mut warnings) = read_series_file(vault);
+    let (old, mut warnings, writable) = match load_series_file(vault) {
+        Loaded::Read(file) => (file, Vec::new(), true),
+        Loaded::Malformed(why) => (
+            SeriesFile::default(),
+            vec![format!("series file: {SERIES_FILE} malformed ({why}); starting empty")],
+            true,
+        ),
+        Loaded::Unreadable(kind) => (
+            SeriesFile::default(),
+            vec![format!("series file: {SERIES_FILE} unreadable ({kind}); not written this run")],
+            false,
+        ),
+    };
     let feeds = crate::calfeed::calendar_entries(vault);
     let names: BTreeSet<&str> = feeds.iter().map(|(name, _)| name.as_str()).collect();
     let google = feeds.iter().any(|(_, url)| url == "cloud:google");
@@ -1983,13 +2052,10 @@ pub fn refresh_series(
     }
 
     let file = SeriesFile { calendars, ended, series };
-    if !fresh.is_empty() {
+    if !fresh.is_empty() && writable {
         let bytes = file_bytes(&file);
-        let path = series_path(vault);
-        if std::fs::read(&path).ok().as_deref() != Some(bytes.as_bytes()) {
-            let written = std::fs::create_dir_all(vault.join("state"))
-                .and_then(|()| std::fs::write(&path, bytes.as_bytes()));
-            if let Err(err) = written {
+        if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
+            if let Err(err) = write_series_file(vault, &bytes) {
                 warnings.push(format!("series file: could not write {SERIES_FILE} ({})", err.kind()));
             }
         }
@@ -3638,6 +3704,71 @@ mod series_tests {
     }
 
     #[test]
+    fn an_unreadable_google_item_takes_its_calendar_out_of_the_fresh_read() {
+        let d0 = date(2026, 9, 21);
+        let good = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        let mut reply = good.clone();
+        reply["calendars_read"] = json!(["google:aa", "google:bb"]);
+        let mut hidden = good["items"][0].clone();
+        hidden["calendar"] = json!("google:bb");
+        hidden["id"] = json!("inv2");
+        let mut broken = hidden.clone();
+        broken["id"] = json!("inv3");
+        broken["title"] = json!(5);
+        reply["items"].as_array_mut().unwrap().extend([hidden, broken]);
+        let (series, read, warnings) = series_from_google(&reply, &chicago(), d0);
+        assert_eq!(read, vec!["google:aa".to_string()]);
+        assert!(series.iter().all(|s| s.calendar == "google:aa"), "{series:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("google:bb"), "{warnings:?}");
+
+        // A file already holding google:bb's series: the partial read neither replaces nor ages it.
+        let v = vault("google-partial", &[]);
+        let old = ser("gcal-series:old", "google:bb", &[d0]);
+        refresh_series(&v, &[("google:bb".into(), vec![old])], d0);
+        let before = read_series_file(&v).0;
+        let later = plus(d0, 30);
+        let fresh: Vec<(String, Vec<Series>)> = read
+            .iter()
+            .map(|cal| (cal.clone(), series.iter().filter(|s| &s.calendar == cal).cloned().collect()))
+            .collect();
+        let (file, _) = refresh_series(&v, &fresh, later);
+        assert_eq!(file.calendars.get("google:bb"), Some(&d0));
+        let bb: Vec<&Series> = file.series.iter().filter(|s| s.calendar == "google:bb").collect();
+        assert_eq!(bb, before.series.iter().collect::<Vec<_>>());
+        assert!(file.ended.is_empty());
+
+        // No items list at all: no calendar is read.
+        let (s, read, w) = series_from_google(&json!({"calendars_read": ["google:aa"]}), &chicago(), d0);
+        assert!(s.is_empty() && read.is_empty());
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn a_calendar_key_without_the_google_prefix_is_skipped_with_a_warning() {
+        // Fix round 1, M2: a Google read may never replace an ICS feed's series.
+        let mut reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        reply["calendars_read"] = json!(["google:aa", "personal"]);
+        let mut twin = reply["items"][0].clone();
+        twin["calendar"] = json!("personal");
+        reply["items"].as_array_mut().unwrap().push(twin);
+        let (series, read, warnings) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert_eq!(read, vec!["google:aa".to_string()]);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].calendar, "google:aa");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn an_event_type_is_cut_to_40() {
+        // Fix round 1, M4: bounded, and never emptied into `None` (which would read as eligible).
+        let mut reply = google_one(&["RRULE:FREQ=WEEKLY;BYDAY=TU,TH"], "2026-09-01T09:30:00-05:00", "Hall 1", "");
+        reply["items"][0]["event_type"] = json!("x".repeat(90));
+        let (series, _, _) = series_from_google(&reply, &chicago(), date(2026, 9, 21));
+        assert_eq!(series[0].event_type.as_ref().unwrap().chars().count(), 40);
+    }
+
+    #[test]
     fn meets_keeps_triples_seen_twice_and_groups_by_time() {
         let i = |d: Date, s: Time, e: Time| Instance { date: d, start: Some(s), end: Some(e) };
         let mon = date(2026, 9, 21);
@@ -3706,6 +3837,27 @@ mod series_tests {
         // name the room.
         assert_eq!(where_of("https://zoom.us/j/1?pwd=abc", "Room 3"), Some("Room 3".to_string()));
         assert_eq!(where_of("Zoom", ""), None);
+        // Fix round 1, I1: the single words match on letter boundaries only.
+        for line in ["PIN1234", "pin: 1234", "PIN: 42", "pwd=abcd", "us02web.zoom.us/j/1", "Teams-call"] {
+            assert_eq!(where_of("", line), None, "{line}");
+            assert_eq!(where_of(line, ""), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_building_name_holding_a_meeting_word_keeps_its_where() {
+        for place in ["Pine Hall 2", "Chapin Hall", "Spinning Studio", "Steamship Rm", "Shipping Office", "Opinion Lab"] {
+            assert_eq!(where_of(place, ""), Some(place.to_string()), "{place}");
+            assert_eq!(where_of("", place), Some(place.to_string()), "{place}");
+        }
+    }
+
+    #[test]
+    fn a_multi_line_location_keeps_its_first_line() {
+        // Fix round 1, M3: `where` is one line.
+        assert_eq!(where_of("\n Hall 4 \nsecond line", ""), Some("Hall 4".to_string()));
+        // A first line that is a link is never stored; the description may still name the room.
+        assert_eq!(where_of("https://example.test/x\nHall 4", "Room 3"), Some("Room 3".to_string()));
     }
 
     /// A one-master ICS feed: Tuesdays and Thursdays 09:30–10:45 from 2026-09-01.
@@ -4075,6 +4227,11 @@ mod series_tests {
         let mut calendars = BTreeMap::new();
         calendars.insert("google:aa".to_string(), d0);
         calendars.insert("personal".to_string(), plus(d0, 3));
+        // As refresh_series leaves them: each seen on its calendar's last read.
+        let (mut g, mut p, mut day) = (g, p, day);
+        g.last_seen = Some(d0);
+        p.last_seen = Some(plus(d0, 3));
+        day.last_seen = Some(plus(d0, 3));
         let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day] };
         let map = file.instances_map();
         assert_eq!(
@@ -4083,5 +4240,54 @@ mod series_tests {
         );
         // An all-day instance has no span to draw.
         assert_eq!(map["ics-series:allday"], (plus(d0, 3), plus(d0, 31), Vec::new()));
+    }
+
+    #[test]
+    fn a_series_its_fresh_calendar_stopped_returning_blocks_no_time_in_the_horizon() {
+        // Fix round 1, M1 (R21): the fresh read says it has no instance in [read, read + 28), so
+        // it subtracts nothing there at once; the record (and its instances, for P12's
+        // `last_instance`) stays until it ages into `ended`.
+        let d0 = date(2026, 9, 21);
+        let v = vault("stale-instances", &[]);
+        let a = ser("ics-series:a", "personal", &[plus(d0, 1), plus(d0, 8)]);
+        let b = ser("ics-series:b", "personal", &[plus(d0, 2)]);
+        refresh_series(&v, &[("personal".into(), vec![a, b.clone()])], d0);
+        let d1 = plus(d0, 3);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![b])], d1);
+        let map = file.instances_map();
+        assert_eq!(map["ics-series:a"], (d1, plus(d1, 28), Vec::new()));
+        assert_eq!(map["ics-series:b"].2.len(), 1);
+        let a = file.series.iter().find(|s| s.source_uid == "ics-series:a").unwrap();
+        assert_eq!(a.instances.len(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_left_alone_and_not_rewritten() {
+        // Fix round 1, M6: an I/O error (here: the path is a folder) is not a corrupt file.
+        let v = vault("io-error", &[]);
+        std::fs::create_dir_all(v.join(SERIES_FILE)).unwrap();
+        let d0 = date(2026, 9, 21);
+        let (_, warnings) = refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("not written"), "{warnings:?}");
+        assert!(v.join(SERIES_FILE).is_dir());
+        let (file, warnings) = read_series_file(&v);
+        assert_eq!(file, SeriesFile::default());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn the_file_is_replaced_whole_leaving_no_temporary_file() {
+        // Fix round 1, M5: written beside itself, then renamed over.
+        let d0 = date(2026, 9, 21);
+        let v = vault("atomic", &[]);
+        refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
+        let (file, _) = refresh_series(&v, &[("personal".into(), vec![ser("ics-series:b", "personal", &[d0])])], plus(d0, 1));
+        let names: Vec<String> = std::fs::read_dir(v.join("state"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["calendar-series.json".to_string()]);
+        assert_eq!(read_series_file(&v), (file, Vec::new()));
     }
 }
