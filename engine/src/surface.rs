@@ -887,24 +887,26 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
 
     // Each confirmed commitment span active today draws its own block (§6.2) — `kind: "class"`
     // for a class or lab, `"busy"` otherwise, `label` the note's title — clamped to the window and
-    // dropped if wholly outside it. Two ranges are kept per span: `commitment_raw` (the
-    // UNCLAMPED span) matches a Google event, which is never clamped either (I1: a class that
-    // straddles the window — the normal case, since confirmed commitments come from Google series
-    // — must still de-duplicate against its own event, which sits at the unclamped time);
-    // `commitment_drawn` (the clamped, drawn range) matches a template class-gap block covering
-    // the identical span (M1).
+    // dropped if wholly outside it. Two ranges are kept, but only for a span that IS drawn: a span
+    // wholly outside the window `continue`s before either is recorded, so a Google event mirroring
+    // an out-of-window commitment still shows (NEW-1) rather than being silently dropped by a
+    // commitment that itself left no trace. `commitment_raw` (the UNCLAMPED span) matches a Google
+    // event, which is never clamped either (I1: a class that straddles the window — the normal
+    // case, since confirmed commitments come from Google series — must still de-duplicate against
+    // its own event, which sits at the unclamped time); `commitment_drawn` (the clamped, drawn
+    // range) matches a template class-gap block covering the identical span (M1).
     let mut commitment_raw: Vec<(DateTime, DateTime)> = Vec::new();
     let mut commitment_drawn: Vec<(DateTime, DateTime)> = Vec::new();
     for (start, end, span) in l.cal.spans_on(today) {
-        commitment_raw.push((start, end));
-        let start = start.max(day_start);
-        let end = end.min(day_end);
-        if start >= end {
-            continue; // wholly outside window(today): not drawn (R15)
+        let clamped_start = start.max(day_start);
+        let clamped_end = end.min(day_end);
+        if clamped_start >= clamped_end {
+            continue; // wholly outside window(today): not drawn (R15), and no trace kept either
         }
+        commitment_raw.push((start, end));
         let kind = if span.kind == "class" || span.kind == "lab" { "class" } else { "busy" };
-        blocks.push(DayBlock { start: hm(start), end: hm(end), kind: kind.into(), label: span.title.clone(), hours: hours_between(start, end), takes: Vec::new() });
-        commitment_drawn.push((start, end));
+        blocks.push(DayBlock { start: hm(clamped_start), end: hm(clamped_end), kind: kind.into(), label: span.title.clone(), hours: hours_between(clamped_start, clamped_end), takes: Vec::new() });
+        commitment_drawn.push((clamped_start, clamped_end));
     }
 
     let mut all_day = Vec::new();
@@ -2250,6 +2252,34 @@ mod tests {
         let block = d.blocks.iter().find(|b| b.label == "Early Bird").expect("the clamped block");
         assert_eq!((block.start.as_str(), block.end.as_str()), ("08:00", "08:30"));
         assert!(d.blocks.iter().all(|b| b.label != "Night Owl"), "wholly outside the window: never drawn");
+    }
+
+    /// NEW-1 (re-review of fix round 1): a commitment wholly outside the window leaves no trace
+    /// (`commitment_raw`/`commitment_drawn` never record it), so a Google event mirroring it must
+    /// not be swallowed by the event de-dup — it is the only visible sign that time is spoken for.
+    #[test]
+    fn a_google_event_matching_an_out_of_window_commitment_is_still_drawn() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday; this commitment is wholly outside.
+        commitment_note(
+            &v,
+            "night-owl.md",
+            "id: cmt_0000000012\ntype: commitment\nkind: club\ntitle: \"Night Owl\"\n\
+             meets: [{days: [fri], start: \"19:00\", end: \"20:00\"}]\n\
+             source_uid: \"gcal-series:night\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let mirror = crate::weekcal::CalEvent {
+            title: "Night Owl (calendar copy)".into(),
+            start: TODAY.at(19, 0, 0, 0),
+            end: TODAY.at(20, 0, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![mirror]);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().all(|b| b.label != "Night Owl"), "the commitment itself is still never drawn");
+        let event = d.blocks.iter().find(|b| b.label == "Night Owl (calendar copy)").expect("the event still draws");
+        assert_eq!((event.kind.as_str(), event.start.as_str(), event.end.as_str()), ("busy", "19:00", "20:00"));
     }
 
     #[test]
