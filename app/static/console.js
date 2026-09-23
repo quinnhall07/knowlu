@@ -579,20 +579,63 @@
   // D7: the minute between Finish and the first `rank`. `first_run` rides on the envelope until
   // `state/today.md` exists; while it does, the page says what is happening, lists the slot's steps
   // as they land, and asks again every three seconds so the day appears as soon as it is there
-  // rather than up to a minute later. The state paints behind it as it is — on a vault this new
-  // that is an empty day, which is exactly what the block is covering (R-C1c-plan-1).
+  // rather than up to a minute later.
+  //
+  // R-C1c-8: the view REPLACES the day. `.app` carries `first-run` while the block is on the
+  // envelope, and console.css hides the nav, the rail and everything in `main` but `#first-run`.
+  // The state still paints underneath (poll's revision logic is untouched), so the hand-over is
+  // instant; and a `display: none` row never intersects, so the 2 s dwell below sends no
+  // `object_seen` for a row nobody saw. Nothing visible paints in this mode but the view itself.
   //
   // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
-  // failing polls on forever. That is honest rather than silent: the failed step shows up in the
-  // list below the line as soon as the slot ends, and the Runs view has the rest. A cap would
-  // replace a true "still working" with a false "gave up".
+  // failing polls on forever. That is honest rather than silent: once a first slot has ended with a
+  // failed step, the view says so under the list and that Knowlu will try again, and the Runs view
+  // has the rest. A cap would replace a true "will try again" with a false "gave up".
   var FIRST_RUN_MS = 3000;
   var firstRunTimer = null;
+  var firstRunHtml = null;
+  // The steps the student is told about, by the step name's first word (before any space or
+  // parenthesis: `judge (skipped: no entitlement)` is `judge`). The slot's other steps (the sync pull
+  // and push, the backup, the usage upload, an `engine: …` line) are the Runs view's, not this one's.
+  var FIRST_RUN_SAYS = {
+    entitlement: "Checking your account",
+    coursework: "Fetching your coursework",
+    ingest: "Reading your school calendar",
+    judge: "Working out what each task needs",
+    rank: "Putting your day in order"
+  };
+  function firstRunSays(name) {
+    var word = String(name || "").split(/[ (]/)[0];
+    return Object.prototype.hasOwnProperty.call(FIRST_RUN_SAYS, word) ? FIRST_RUN_SAYS[word] : null;
+  }
+  // One row: its mark (a shape per state, so it never rests on colour alone) and its sentence.
+  // A skip says the word; the other three states are named for a screen reader on the mark.
+  function firstRunRow(state, says) {
+    var label = { done: "done", now: "in progress", failed: "failed" }[state];
+    return '<li class="fr-step" data-state="' + state + '"><span class="fr-mark"' +
+      (label ? ' role="img" aria-label="' + label + '"' : ' aria-hidden="true"') + "></span>" +
+      '<span class="fr-say">' + h(says) + "</span>" + (state === "skipped" ? '<span class="fr-note">skipped</span>' : "") + "</li>";
+  }
   function renderFirstRun(fr) {
+    fr = fr || {};
+    document.querySelector(".app").classList.add("first-run");
     EL("first-run").hidden = false;
-    EL("first-run-steps").innerHTML = (((fr && fr.steps) || []).map(function (s) {
-      return '<div class="meta">' + h(s[0]) + "</div>";
-    }).join("")) + (fr && fr.running ? '<div class="meta">still working&hellip;</div>' : "");
+    var rows = [], failed = false;
+    (fr.steps || []).forEach(function (s) {
+      var says = firstRunSays(s[0]); if (!says) { return; }
+      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 ? "done" : "failed");
+      if (state === "failed") { failed = true; }
+      rows.push(firstRunRow(state, says));
+    });
+    // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
+    var now = fr.running ? firstRunSays(fr.current) : null;
+    if (now) { rows.push(firstRunRow("now", now)); }
+    // Repainted only when it changed: a fresh row every three seconds would restart the in-progress
+    // mark's turn and re-announce the list to a screen reader.
+    var html = rows.join("");
+    if (html !== firstRunHtml) { EL("first-run-steps").innerHTML = html; firstRunHtml = html; }
+    // A first slot that ended without a day (M6, above): one more line, and the cadence carries on.
+    EL("first-run-end").hidden = !(!fr.running && failed);
     // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
     // call poll() too, and a chain per call would multiply every three seconds.
     if (firstRunTimer) { clearTimeout(firstRunTimer); }
@@ -602,13 +645,15 @@
   function hideFirstRun() {
     if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
     EL("first-run").hidden = true;
+    document.querySelector(".app").classList.remove("first-run");
   }
 
   function poll() {
     return invoke("state", { view: current.view }).then(function (env) {
       // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
       // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
-      // path, so there is no failed state to wait for. The paint below still runs.
+      // path, so there is no failed state to wait for. The paint below still runs, hidden while the
+      // view stands (R-C1c-8).
       if (env.first_run) { renderFirstRun(env.first_run); } else { hideFirstRun(); }
       if (!env.ok) { EL("delta").textContent = "engine: " + env.error; return; }
       // §6's safety net answers `ok` with no state when the read model could not be built at all;

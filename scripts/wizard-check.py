@@ -9,8 +9,9 @@ password field that is still full after the write, or a summary that states a sl
 changed a moment ago — those are what this drives.
 
 A second page boots the same files as a CONSOLE over a vault `rank` has not reached yet (C1c Task
-5, D7): the first-run block has to be on screen while `state` carries `first_run`, and gone on the
-next poll once it stops.
+5, D7, re-ruled by R-C1c-8): while `state` carries `first_run` the first-run view replaces the day
+and names each step the live slot has published, it says so when the first slot ends without a
+day, and on the next poll after the block stops coming the day takes its place.
 
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
@@ -99,15 +100,18 @@ window.__DISCOVER_EMPTY = false;
 window.__CALLS = [];
 """
 
-# The console's first-run view (C1c Task 5, D7). The 2026-09-23 live proof saw no first-run line and
-# the view's only check was a string search of the source, so this boots the real page as a console.
-# `state` answers what `commands::state_envelope` answers for a never-ranked vault with a slot in
-# flight (`app/tests/commands.rs` pins that half): `ok`, a day to paint, and `first_run` — until the
-# check clears `window.__FIRST_RUN`, which is `rank` having written `state/today.md`. The day is the
-# s1 read-model reference, read here and never written.
+# The console's first-run view (C1c Task 5, D7; R-C1c-8). The 2026-09-23 live proof saw no first-run
+# line and the view's only check was a string search of the source, so this boots the real page as a
+# console. `state` answers what `commands::state_envelope` answers for a never-ranked vault with a
+# slot in flight (`app/tests/commands.rs` pins that half): `ok`, a day to paint, and `first_run` with
+# the live slot's steps and the one in progress — until the check clears `window.__FIRST_RUN`, which
+# is `rank` having written `state/today.md`. The day is the s1 read-model reference, read here and
+# never written.
 STATE_FIXTURE = REPO / "engine" / "tests" / "fixtures" / "surface-today-s1.json"
+D7 = "Knowlu is doing its first run. Your day appears here in about a minute."
 CONSOLE_FAKE = r"""
-window.__FIRST_RUN = { running: true, steps: [["coursework", 0]] };
+window.__FIRST_RUN = { running: true, current: "judge",
+                       steps: [["entitlement (refreshed)", 0], ["coursework", 0]] };
 window.__CALLS = [];
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
   window.__CALLS.push([cmd, args]);
@@ -378,34 +382,79 @@ def state_polls(page) -> int:
 
 
 def first_run_block(page) -> dict:
-    """What the block actually is on screen: its computed display, not its `hidden` attribute —
-    `console.css` has taught three times that a class `display` beats the UA's `[hidden]`."""
+    """What the view actually is on screen: its computed display, not its `hidden` attribute —
+    `console.css` has taught three times that a class `display` beats the UA's `[hidden]` — each
+    listed step's state and words, and the day's headline as painted (hidden or not)."""
     return page.evaluate("""() => {
       const el = document.getElementById('first-run');
       return { display: getComputedStyle(el).display, text: el.innerText,
-               steps: Array.from(document.querySelectorAll('#first-run-steps .meta')).map(d => d.textContent) };
+               rows: Array.from(document.querySelectorAll('#first-run-steps [data-state]'))
+                 .map(r => ({ state: r.getAttribute('data-state'), text: r.textContent })),
+               headline: document.getElementById('headline').textContent };
     }""")
+
+
+def listed(fr, say) -> list:
+    """The states of every listed row that says `say` — one, when the view is right."""
+    return [r["state"] for r in fr["rows"] if say in r["text"]]
+
+
+# `nav`, the right-hand rail and the day's own column: R-C1c-8 hides all three while the view stands.
+THE_DAY = [("nav", "the nav"), (".app > aside", "the rail"), ("#main-today", "the day")]
 
 
 def check_first_run(page, errors) -> list:
     bad = []
-    # 1. While `state` carries `first_run`, the block is displayed with its sentence and the steps
-    #    the slot has finished, and the day paints behind it (R-C1c-plan-1).
+    # 1. A slot in flight: the view REPLACES the day (R-C1c-8) — judged by what is on screen, never
+    #    by an attribute — and names each published step in plain words: the two that have landed
+    #    as done and the live `current` as in progress. The day still paints, hidden.
     fr = first_run_block(page)
     if fr["display"] == "none" or not page.is_visible("#first-run"):
-        bad.append(f"the first-run block is not on screen while state carries first_run (display {fr['display']!r})")
-    if "doing its first run" not in fr["text"]: bad.append(f"the first-run block says {fr['text']!r}")
-    if "coursework" not in fr["steps"]: bad.append(f"the first-run block did not list the finished step: {fr['steps']!r}")
-    if not any("still working" in s for s in fr["steps"]): bad.append("a running first slot did not say it is still working")
-    if not page.inner_text("#headline").strip(): bad.append("the day did not paint behind the first-run block")
-    # 2. `rank` writes the day: the three-second poll drops the block…
+        bad.append(f"the first-run view is not on screen while state carries first_run (display {fr['display']!r})")
+    for sel, what in THE_DAY:
+        if page.is_visible(sel): bad.append(f"{what} is on screen beside the first-run view")
+    if D7 not in fr["text"]: bad.append(f"the first-run view does not say D7's sentence: {fr['text']!r}")
+    for say, state in [("Checking your account", "done"), ("Fetching your coursework", "done"),
+                       ("Working out what each task needs", "now")]:
+        if listed(fr, say) != [state]: bad.append(f"{say!r} is not listed once as {state!r}: {fr['rows']!r}")
+    if len(fr["rows"]) != 3: bad.append(f"the view does not list exactly the three published steps: {fr['rows']!r}")
+    if page.is_visible("#first-run-end"): bad.append("a slot still running says the first run did not finish")
+    if not fr["headline"].strip(): bad.append("the day did not paint behind the first-run view")
+    # The topline gear is hidden with the day, so the view carries its own way to Settings, routed by
+    # the document's `[data-settings]` delegation.
+    if not page.is_visible("#first-run [data-settings]"):
+        bad.append("there is no Settings button on screen in the first-run view")
+    else:
+        page.click("#first-run [data-settings]"); page.wait_for_timeout(150)
+        if not page.is_visible("#settings"): bad.append("the first-run view's Settings button did not open Settings")
+        page.click("#set-close"); page.wait_for_timeout(100)
+    # 2. The slot ends without a day: the list stays, the failed step is marked, nothing is in
+    #    progress, and one more line says Knowlu will try again. The cadence carries on (M6).
+    before = state_polls(page)
+    page.evaluate("""window.__FIRST_RUN = { running: false, current: null, steps: [
+      ["entitlement (refreshed)", 0], ["coursework", 0], ["judge", 0], ["rank", 1]] }""")
+    page.wait_for_timeout(3600)
+    if state_polls(page) <= before: bad.append("the first-run view did not poll again within its three-second cadence")
+    fr = first_run_block(page)
+    if listed(fr, "Putting your day in order") != ["failed"]: bad.append(f"the failed rank step is not marked failed: {fr['rows']!r}")
+    if any(r["state"] == "now" for r in fr["rows"]): bad.append(f"an ended slot still shows a step in progress: {fr['rows']!r}")
+    if not page.is_visible("#first-run-end") or "didn't finish" not in page.inner_text("#first-run-end"):
+        bad.append("a first slot that ended without a day did not say so")
+    # 3. More than the two-second dwell has passed in first-run mode: a row nobody could see must
+    #    never have been reported as seen.
+    seen = page.evaluate("window.__CALLS.filter(c => c[0] === 'ui_event' && c[1] && c[1].action === 'object_seen').length")
+    if seen: bad.append(f"{seen} object_seen event(s) were sent for rows hidden behind the first-run view")
+    # 4. `rank` writes the day: the three-second poll drops the view and the day takes its place…
     before = state_polls(page)
     page.evaluate("window.__FIRST_RUN = null")
     page.wait_for_timeout(3600)
     if state_polls(page) <= before: bad.append("the first-run view did not poll again within its three-second cadence")
     fr = first_run_block(page)
-    if fr["display"] != "none": bad.append(f"the first-run block stayed on screen after the day arrived (display {fr['display']!r})")
-    # 3. …and the cadence ends with it: nothing but the minute-long interval polls after that.
+    if fr["display"] != "none": bad.append(f"the first-run view stayed on screen after the day arrived (display {fr['display']!r})")
+    for sel, what in THE_DAY:
+        if not page.is_visible(sel): bad.append(f"{what} did not come back once the day arrived")
+    if not page.inner_text("#headline").strip(): bad.append("the day came back without its headline")
+    # 5. …and the cadence ends with it: nothing but the minute-long interval polls after that.
     settled = state_polls(page)
     page.wait_for_timeout(3600)
     if state_polls(page) != settled: bad.append("the three-second first-run poll kept running after the day arrived")

@@ -68,6 +68,9 @@ What the vault, the logs and staging showed (all verified, not inferred):
 - **D7.** The console has a first-run view: from boot until the first read model exists it paints one line —
   "Knowlu is doing its first run. Your day appears here in about a minute." — and, beneath it, the slot's steps as they
   complete, polling every 3 s instead of 60 s until the read model arrives. The white window is gone.
+  Amended 2026-09-23 (R-C1c-8): while `first_run` is present the view replaces the day (the day paints hidden);
+  `Scheduler.live` publishes each step as it starts and lands, so the list fills during the slot; the page names the
+  steps in plain words.
 - **D8.** A skipped step reaches `state/runner-log.md` as one line, in the engine's own format, written by the app through
   the engine's writer (`knowlu_engine::runs` / the runner-log appender the engine already uses), so the student and the
   Runs view see `judge (skipped: no entitlement)` the same way they see a WARN.
@@ -165,6 +168,10 @@ the sentence, then reaches Gmail.
 
 Tests: a `commands` test on a fresh scratch vault (no `today.md`) asserts the envelope shape; `static_assets` pins the block,
 the sentence and the 3 s re-poll.
+
+Amended 2026-09-23 (R-C1c-8): while `first_run` is present the view replaces the day (the day paints hidden);
+`Scheduler.live` publishes each step as it starts and lands, so the list fills during the slot; the page names the steps
+in plain words.
 
 ## 7. Exit gate (the live proof)
 

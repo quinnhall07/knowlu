@@ -604,30 +604,67 @@ fn a_captured_courses_lms_id_never_gets_a_phantom_slug() {
     );
 }
 
-/// D7 / §6: the minute between Finish and the first `rank` says what is happening instead of
-/// painting nothing. The sentence is the page's, the steps come from the envelope, and the page
-/// asks again every three seconds until the day is there — then goes back to its usual cadence.
+/// D7 / §6, re-ruled by R-C1c-8: the minute between Finish and the first `rank` is a status view of
+/// its own that REPLACES the day. `.app` carries `first-run` while the envelope carries the block,
+/// and the stylesheet hides the nav, the rail and everything in `main` but the view. The sentence is
+/// the page's, the list fills from the live slot and names five steps in plain words, a Settings
+/// button stands in for the hidden topline gear, and a first slot that ended without a day says so.
+/// The page asks again every three seconds until the day is there, then goes back to its cadence.
 #[test]
 fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
     let html = read("index.html");
-    assert!(html.contains("id=\"first-run\""), "the first-run block");
-    assert!(html.contains("id=\"first-run-steps\""), "…and the steps the slot has finished");
+    let block = html.split("id=\"first-run\"").nth(1).and_then(|s| s.split("id=\"main-today\"").next()).expect("the first-run block");
     assert!(
-        html.contains("Knowlu is doing its first run. Your day appears here in about a minute."),
+        block.contains("Knowlu is doing its first run. Your day appears here in about a minute."),
         "the sentence D7 asks for, in the page rather than in a string the engine sends"
     );
+    assert!(block.contains("id=\"first-run-steps\""), "…the list the live slot fills");
+    assert!(
+        block.contains("The first run didn't finish. Knowlu will try again on its own."),
+        "…and the line for a first slot that ended without a day"
+    );
+    // The topline gear is hidden with the rest of `main`, so the view carries its own way to Settings,
+    // routed by the document's existing `[data-settings]` delegation.
+    let at = block.find("data-settings").expect("a Settings button inside the first-run view");
+    let tag = block[..at].rfind("<button").expect("…on a button");
+    assert!(!block[tag..at].contains('>'), "data-settings is an attribute of that button");
+    // Its own treatment: never dressed as the day's lede or a row's metadata (the Task 5 defect).
+    assert!(!block.contains("lede") && !block.contains("class=\"meta\""), "the view borrows no day styles: {block}");
+
     let js = read("console.js");
     assert!(js.contains("function renderFirstRun("), "renderFirstRun");
     assert!(js.contains("function hideFirstRun("), "hideFirstRun");
     assert!(js.contains("var FIRST_RUN_MS = 3000"), "the first-run cadence is three seconds");
     assert!(js.contains("setInterval(poll, 60000)"), "…and the usual cadence is unchanged");
     assert!(js.contains("EL(\"first-run\").hidden = true"), "…and the block is hidden once the day is there");
+    assert!(
+        js.contains(".classList.add(\"first-run\")") && js.contains(".classList.remove(\"first-run\")"),
+        "the view replaces the day by a class on .app, set with the block and taken off with it"
+    );
+    for say in [
+        "Checking your account",
+        "Fetching your coursework",
+        "Reading your school calendar",
+        "Working out what each task needs",
+        "Putting your day in order",
+    ] {
+        assert!(js.contains(&format!("\"{say}\"")), "the step sentence {say:?}");
+    }
+    let render = js.split("function renderFirstRun(").nth(1).and_then(|s| s.split("function hideFirstRun(").next()).expect("renderFirstRun");
+    assert!(render.contains("fr.current"), "the step in progress is the live slot's own");
+    assert!(render.contains("first-run-end"), "…and the didn't-finish line is the render's to show");
+    assert!(!render.contains("class=\"meta\"") && !render.contains("lede"), "the rows borrow no day styles");
     let poll = js.split("function poll(").nth(1).and_then(|s| s.split("function openDrawer(").next()).expect("poll");
     // R-C1c-plan-1: the view stands on the presence of the block — which is `is_first_run` — and
     // never on a failed state, because `surface::build_state` has no failure path to wait for.
     assert!(poll.contains("if (env.first_run) {"), "the first-run view stands on is_first_run alone");
     assert!(poll.contains("renderFirstRun("), "…poll paints it");
     assert!(poll.contains("hideFirstRun()"), "…and takes it away when the key stops coming");
+
+    let css = read("console.css");
+    for sel in [".app.first-run > nav", ".app.first-run > aside", ".app.first-run > main > :not(#first-run)"] {
+        assert!(css.contains(sel), "{sel} is hidden while the first-run view stands");
+    }
 }
 
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
