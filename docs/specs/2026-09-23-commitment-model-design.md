@@ -666,9 +666,11 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
   9:30–10:45am · update?` / `CS 100 ends Dec 4 · update?`. `source_uid` is the note's. Local-only
   (R20); charged to the cap and filed before new proposals' cards (§5.2).
 - **Settlement** (the same arm): `approved` → for each field in `change`, the note's current value
-  (absent = null) and the card's `was` value are compared as canonical text —
-  `safe_dump_flow(parse(value))` for both — and any mismatch means the student changed the note
-  since: the card is archived `refused` with a warning and nothing is written. Otherwise each field
+  (absent = null) and the card's `was` value are compared as parsed, normalised values (read the
+  way `load` reads them) — and any mismatch means the student changed the note since: the card is
+  archived `superseded` (not `refused`, so a successor is never held forever) with a warning and
+  nothing is written. If the note already holds every value in `change` (a re-run after a crash),
+  the card is stamped `executed` and nothing is written. Otherwise each field
   is written with `write::write_literals` (a sequence through `to_literal` of the parsed value, so
   it reads back as the sequence `commitments::load` accepts), the card is stamped `executed` and
   archived. `rejected` → archived, no write to the note. No field is ever proposed as `null`.
@@ -680,7 +682,7 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
 - **Never re-asked:** a card with the same `target` and the same canonical `change` text in
   `approvals/` or `archive/` suppresses another; a different change is a new question.
 - **Tests:** an `until` change onto a note with no `until` applies; a `meets` change applies and
-  reads back as a sequence `load` accepts; a stale `was` is refused and archived; a split series
+  reads back as a sequence `load` accepts; a stale `was` is superseded and archived; a split series
   with the same meets files nothing; a split with new meets files exactly one card.
 
 ### 5.5 Never re-asked
