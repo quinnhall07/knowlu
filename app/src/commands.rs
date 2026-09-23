@@ -139,10 +139,10 @@ pub fn executor_ctx() -> WriteContext {
 fn mutate(cs: &ConsoleState, view: &str, f: impl FnOnce(&mut Journal) -> Result<(), String>) -> Result<Value, String> {
     // `vault_io` FIRST, then `cs.lock` — always that order, never the reverse (console spec §8/§9;
     // see `ConsoleState::vault_io`). A write is single-line surgery on a note this call has just
-    // read; `history::sync` rewrites the working tree wholesale. Serialising the two here means a
-    // housekeeping sync, a scheduler slot's pull/push and the `sync` command all queue against
+    // read; the engine's `sync` can write a pulled note or file an amend card under it. Serialising
+    // the two here means a scheduler slot's own sync step and the `sync` command all queue against
     // every write, while `cs.lock` alone still guards the read polls so a `state` poll never waits
-    // behind a git fetch.
+    // behind a sync's own network call.
     let _io = cs.vault_io.lock().map_err(|_| "vault lock poisoned".to_string())?;
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     let mut journal = Journal::new(&cs.vault);
@@ -258,14 +258,14 @@ pub fn resolve_issue_inner(cs: &ConsoleState, view: &str, id: &str, resolution: 
     mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
 }
 
-/// Runs `history::sync` OUTSIDE `cs.lock` — git and file I/O can take seconds and must not block
-/// a concurrent `state` poll — then takes the lock only to rebuild `state`. `ok` is
-/// `last_error.is_none()`, not whether anything actually changed.
+/// Runs the engine's sync OUTSIDE `cs.lock` — a pull can take seconds and must not block a
+/// concurrent `state` poll — then takes the lock only to rebuild `state`. `ok` is
+/// `last_error.is_none()`, not whether anything actually moved.
 pub fn sync_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let out = crate::state::run_sync(cs);
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     let state = build_state_value(cs, view)?;
-    Ok(json!({ "ok": out.status.last_error.is_none(), "error": out.status.last_error, "state": state }))
+    Ok(json!({ "ok": out.last_error.is_none(), "error": out.last_error, "state": state }))
 }
 
 /// Runs `backup::tick` OUTSIDE `cs.lock` for the same reason as `sync_inner`. A missing backup
@@ -273,11 +273,12 @@ pub fn sync_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
 /// the tick itself fails against comes back `Ok` with `last_error` set.
 pub fn backup_now_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     // F11 (console spec §8/§9): a backup walks and copies the WHOLE working tree, which is exactly
-    // what `history::sync` rewrites under it — mirror a tree mid-rebase and the copy is a mixture
-    // of two commits. `vault_io` FIRST and scoped to the engine call, then `cs.lock` for the state
-    // rebuild: the one ordering, never the reverse (see `ConsoleState::vault_io`). Poison-tolerant
-    // like `run_sync`'s own hold — a backup is a read, and a writer that panicked elsewhere must
-    // not turn every later backup into an error the user cannot clear without restarting.
+    // what the engine's `sync` can write under it — mirror a tree mid-pull and the copy is a
+    // mixture of two states. `vault_io` FIRST and scoped to the engine call, then `cs.lock` for the
+    // state rebuild: the one ordering, never the reverse (see `ConsoleState::vault_io`).
+    // Poison-tolerant like `run_sync`'s own hold — a backup is a read, and a writer that panicked
+    // elsewhere must not turn every later backup into an error the user cannot clear without
+    // restarting.
     let r = {
         let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
         crate::state::run_backup(cs, jiff::Timestamp::now())

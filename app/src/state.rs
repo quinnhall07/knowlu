@@ -59,18 +59,19 @@ pub struct ConsoleState {
     pub data_dir: PathBuf,
     pub settings_path: PathBuf,
     pub lock: Mutex<()>,
-    /// **Vault I/O, serialised (console spec §8 the sync lock, §9 the race).** `history::sync`
-    /// rewrites the working tree under everyone's feet — a rebase checks files out, `reconcile`
-    /// re-applies journal records — while a console write is single-line surgery on a note it has
-    /// just read. Interleave the two and the write lands on a file the rebase is about to replace.
-    /// Every path that touches the vault takes this one lock: `mutate` for the duration of a write,
-    /// `run_sync` for the duration of `history::sync`, so housekeeping, a scheduler slot's own
-    /// pull/push and the `sync` command all queue behind each other instead of racing.
+    /// **Vault I/O, serialised (console spec §8 the sync lock, §9 the race).** The engine's `sync`
+    /// can write a pulled note or file an amend card under it, while a console write is single-line
+    /// surgery on a note it has just read. Interleave the two and the write lands on a file the
+    /// pull is about to write. Every path that touches the vault takes this one lock: `mutate` for
+    /// the duration of a write, `run_sync` for the duration of the engine's own `sync` call, so
+    /// housekeeping's backup, a scheduler slot's own sync step and the `sync` command all queue
+    /// behind each other instead of racing.
     ///
     /// **Ordering, and it is one-way:** `vault_io` is taken BEFORE `lock`, never while `lock` is
-    /// held. `lock` alone still guards the read polls, so a `state` poll never waits on a git
-    /// fetch. And `vault_io` is never held across a child-process wait — a scheduler slot takes it
-    /// inside each of its own sync steps, never around `run_child`, which may run for 20 minutes.
+    /// held. `lock` alone still guards the read polls, so a `state` poll never waits on a sync's
+    /// own network call. And `vault_io` is never held across a child-process wait — a scheduler
+    /// slot takes it inside its own sync step, never around `run_child`, which may run for 20
+    /// minutes.
     pub vault_io: Mutex<()>,
     pub settings: Mutex<Settings>,
     /// `Some` when `settings.json` existed but did not parse at open — names the path and the
@@ -80,6 +81,11 @@ pub struct ConsoleState {
     pub head_sha: Mutex<Option<String>>,
     pub history: Mutex<HistoryStatus>,
     pub backup: Mutex<BackupStatus>,
+    /// What the last sync did, for the page's sync line. Filled by `commands::sync_inner` and by
+    /// the slot's own sync step; never computed in `commands.rs` (console spec §3.1). The type is
+    /// the ENGINE's, because the engine is what produces it and a second struct in the app would be
+    /// a second thing to keep in step with the run that fills it.
+    pub sync: Mutex<knowlu_engine::sync::SyncStatus>,
     pub last_write: Mutex<Option<std::time::Instant>>,
     pub pending_edits: AtomicUsize,
     pub auto_sync: AtomicBool,
@@ -106,6 +112,7 @@ impl ConsoleState {
             head_sha: Mutex::new(None),
             history: Mutex::new(HistoryStatus::default()),
             backup: Mutex::new(BackupStatus { last_ok: None, behind_days: None, last_error: None, target_reachable: false }),
+            sync: Mutex::new(knowlu_engine::sync::SyncStatus::default()),
             last_write: Mutex::new(None),
             pending_edits: AtomicUsize::new(0),
             auto_sync: AtomicBool::new(true),
@@ -139,31 +146,17 @@ pub fn refresh_head(cs: &ConsoleState) {
     *cs.head_sha.lock().unwrap() = h;
 }
 
-/// Commit-by-name, then pull/push as needed (`history::sync`), against a fresh journal — never
-/// under `cs.lock` (git and file I/O can take seconds and must not block a poll). Swaps
-/// `pending_edits` to 0 so a race that adds an edit mid-sync is not lost (the swap happens before
-/// the engine call reads anything from disk). A non-empty `conflicted` list turns auto-sync off:
-/// a device that just fought a merge conflict does not get to retry unattended.
-pub fn run_sync(cs: &ConsoleState) -> knowlu_engine::history::SyncOutcome {
-    // `vault_io`, for the whole of the engine call — a sync rewrites the working tree, and a
-    // console write must never land inside a rebase (see the field's own doc). Poison-tolerant:
-    // this returns a `SyncOutcome`, not a `Result`, and a panicked writer elsewhere must not turn
-    // every later sync into a silent no-op.
-    let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
-    let edits = cs.pending_edits.swap(0, std::sync::atomic::Ordering::SeqCst);
-    let mut journal = knowlu_engine::journal::Journal::new(&cs.vault);
-    let out = knowlu_engine::history::sync(&cs.vault, &crate::commands::console_ctx(), &mut journal, edits);
-    // A sync that never ran — another process holds `state/.sync.lock` — has not spent those
-    // edits. Give them back, or the next commit message undercounts what it carries and the
-    // housekeeping thread's `pending_edits > 0` gate stops firing for edits still on disk.
-    if out.status.last_error.as_deref().map(|e| e.contains("another sync holds")).unwrap_or(false) {
-        cs.pending_edits.fetch_add(edits, std::sync::atomic::Ordering::SeqCst);
-    }
-    if !out.status.conflicted.is_empty() {
-        cs.auto_sync.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-    *cs.history.lock().unwrap() = out.status.clone();
-    out
+/// Runs the engine's sync in-process and records what it did. **Takes `vault_io`, never `lock`**:
+/// a pull writes notes and can file a card, so it must not run under the console's read lock, and
+/// `commands::sync_inner` takes `lock` only afterwards to rebuild `state`.
+pub fn run_sync(cs: &ConsoleState) -> knowlu_engine::sync::SyncStatus {
+    let (_, lines, totals) = {
+        let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
+        knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Both, "dashboard", None)
+    };
+    let status = knowlu_engine::sync::SyncStatus::of(&totals, lines);
+    *cs.sync.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+    status
 }
 
 /// Mirror + snapshot + prune (`backup::tick`) against `settings.backup_dir`. `Err` when no
@@ -226,19 +219,23 @@ pub struct QuitFlush {
 /// the unbounded wait the cap exists to prevent). Nothing is lost when the cap fires — the edits
 /// are on disk and in the journal, and the next launch's housekeeping picks them up.
 ///
-/// `run_sync` is skipped outright on a vault with no remote or with auto-sync off: the first has
-/// nothing to push, and the second was turned off by a merge conflict, which is not a state to
-/// retry unattended at quit time.
+/// The push is skipped outright on a vault with no account: there is nothing to push, and no
+/// session or entitlement to wait on either — the engine's own `sync` names each of those a skip,
+/// never a failure, exactly as it would inside a slot.
 pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce(QuitFlush) + Send) -> QuitFlush {
-    use std::sync::atomic::Ordering::SeqCst;
     let (tx, rx) = std::sync::mpsc::channel::<QuitFlush>();
     let mut out = QuitFlush { synced: false, backed_up: false, timed_out: false };
     std::thread::scope(|s| {
         s.spawn(move || {
             let mut q = QuitFlush { synced: false, backed_up: false, timed_out: false };
-            let has_remote = cs.history.lock().unwrap_or_else(|e| e.into_inner()).has_remote;
-            if has_remote && cs.auto_sync.load(SeqCst) {
-                q.synced = run_sync(cs).status.last_error.is_none();
+            // A quit flush pushes what is already on disk; it never pulls. A pull applies writes and
+            // can file cards, and doing that while the window is closing would show the student a
+            // deck they never saw change.
+            if knowlu_engine::sync::is_configured(&cs.vault) {
+                let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
+                let (_, _, totals) =
+                    knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Push, "dashboard", None);
+                q.synced = totals.errors.is_empty();
             }
             let has_backup_dir = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).backup_dir.is_some();
             if has_backup_dir {

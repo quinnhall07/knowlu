@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use knowlu_engine::info::{self, InfoCommand};
 use knowlu_engine::issues::{self, IssueCommand};
 use knowlu_engine::write::{self, WriteCommand};
-use knowlu_engine::{cli, coursework, enrich, ingest, journal, runs};
+use knowlu_engine::{cli, coursework, enrich, ingest, journal, runs, sync};
 
 #[derive(Parser)]
 #[command(name = "knowlu-engine", version, about = "Deterministic personal operations engine")]
@@ -136,6 +136,26 @@ enum Command {
         /// path here still exits 0.
         #[arg(long, default_value_t = enrich::DEFAULT_LIMIT, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         limit: usize,
+    },
+    /// Send this device's new journal records and changed note text to the account, and apply what
+    /// another desktop of the same account wrote.
+    ///
+    /// Always exits 0: no account, no session, no entitlement and no network are all normal
+    /// outcomes (cloud design §5.5 as amended 2026-09-17), and a non-zero exit here would put the
+    /// app's scheduler into retry backoff and paint the tray amber for a student on a train.
+    Sync {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// pull | push | both. The slot runs `both`; the console's Sync now runs `both`; the two
+        /// halves are separable for a smoke test and for a restore that must not push.
+        #[arg(long, default_value = "both", value_parser = ["pull", "push", "both"])]
+        direction: String,
+        /// Without these the run's writes journal as `via: cli, run_id: null` — indistinguishable
+        /// from someone typing the command by hand.
+        #[arg(long, default_value = "cli", value_parser = journal::VIAS)]
+        via: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     /// Run records. Ports `python -m engine.runs`.
     Runs {
@@ -360,6 +380,20 @@ fn main() -> ExitCode {
             let _ = enrich::run(
                 &vault, &via, run_id.as_deref(), runtime.as_ref(), model.as_ref(), log_dir.as_ref(), limit,
             );
+            ExitCode::SUCCESS
+        }
+        Command::Sync { vault, direction, via, run_id } => {
+            // Always SUCCESS: `sync::run_lines` only ever returns 0, and this arm says so out loud
+            // rather than mapping a code that cannot occur.
+            let (_, lines) = sync::run_lines(
+                &vault,
+                sync::Direction::parse(&direction).unwrap_or(sync::Direction::Both),
+                &via,
+                run_id.as_deref(),
+            );
+            for line in lines {
+                println!("{line}");
+            }
             ExitCode::SUCCESS
         }
         Command::Runs { vault, command } => match command {

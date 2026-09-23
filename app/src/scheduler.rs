@@ -1,14 +1,15 @@
 //! The app's scheduler runtime (Knowlu plan 1, Task 12): a tick thread that fires the local
 //! runner's slots as child processes when `config/runners.yaml` says `scheduler: app` for the
 //! `local` entry AND this device is the one named there, plus a housekeeping thread for
-//! debounced sync/backup and the tray's health colour. Inert (never ticks, never runs a slot) on
+//! debounced backup and the tray's health colour. Inert (never ticks, never runs a slot) on
 //! `scheduler: script` — which is every vault today, since the live vault carries no such key.
 //!
 //! The app never builds anything and never writes to the vault itself: each slot step runs the
 //! sibling `knowlu-engine.exe` as a child process with exactly the argv the retired
-//! `scripts/local-run.ps1` used, and that engine binary's own `runs` module records the run.
-//! `run_sync` (git commit-by-name + push) is what actually commits the app's own edits and the
-//! engine's writes to the vault's git history.
+//! `scripts/local-run.ps1` used, and that engine binary's own `runs` module records the run. The
+//! slot's own first step is `sync` (C3′): the engine's `sync` subcommand pulls another desktop's
+//! writes down and pushes this device's own up to the account. `state::run_sync` runs the same
+//! engine code in-process for the console's own *Sync now* button.
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -338,7 +339,14 @@ fn judge_plan_for(state: crate::account::EntitlementState, cs: &ConsoleState) ->
 /// Never build; never write to the vault directly.
 pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan) -> Vec<(PathBuf, Vec<String>)> {
     let v = vault.to_string_lossy().to_string();
-    let mut steps = vec![(exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
+    // **`sync` first** (C3′, cloud design §5.5 as amended). The pull is the half that has to precede
+    // `rank`: a field another desktop set this morning must be in the note before the day is
+    // ordered, or every second desktop ranks a slot behind forever. The push then carries
+    // everything written since the last sync — the console's own edits and the previous slot's
+    // machine writes. One step, not two, because `run_slot_inner` names a step by `args[0]` and two
+    // rows both reading `sync` would say less than one row does. It always exits 0.
+    let mut steps = vec![(exe.to_path_buf(), vec!["sync".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
+    steps.push((exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
     // C2 Task 8: the LMS capability URL lives in the account from here on, so a cloud vault runs
     // `ingest` whether or not the vault still carries a copy — the feed lives in the account, and
     // the engine names a missing one as a skip (A-1) rather than this app leaving the step out.
@@ -512,19 +520,6 @@ pub fn run_child(exe: &Path, args: &[String], log: &Path, timeout: std::time::Du
     code
 }
 
-/// Runs `history::sync` and folds a transient lock collision into the same "this step is fine"
-/// bucket as a real success — `label` becomes `"<label> (skipped: busy)"` and the step still
-/// counts as `0`, so the housekeeping thread's own sync landing mid-slot (or vice versa) never
-/// paints the tray Warn on its own (review item 4).
-fn sync_step(cs: &ConsoleState, label: &str) -> (String, i32) {
-    let out = state::run_sync(cs);
-    match out.status.last_error {
-        None => (label.to_string(), 0),
-        Some(e) if e.contains("another sync holds") => (format!("{label} (skipped: busy)"), 0),
-        Some(_) => (label.to_string(), 1),
-    }
-}
-
 /// A refusal is a slot outcome like any other, so it is stored in `sch.last` before it is returned
 /// (final fix wave, B6): `attach_scheduler` copies `sch.last` into `topline.last_slot`, which is
 /// what the page's sync line and the tray tooltip read. Before this, a refusal was returned and
@@ -572,20 +567,18 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         *r = true;
     }
     let _guard = RunGuard(sch);
-    // The pull decision below reads `cs.history.has_remote` — refresh it first, since
-    // `ConsoleState::open` starts it at the all-false default and neither `--run-slot-once` nor a
-    // tick thread's very first iteration is guaranteed to have refreshed it yet (review item 1).
+    // `history` starts at the all-false default (`ConsoleState::open`) and neither
+    // `--run-slot-once` nor a tick thread's very first iteration is guaranteed to have refreshed it
+    // yet (review item 1) — refreshed here so it is never stale for the whole slot. The slot's own
+    // pull/push now happen inside `slot_argv`'s own `sync` step, below, not here.
     state::refresh_history(cs);
     let started = knowlu_engine::journal::now_ts(None);
     let mut steps = Vec::new();
     let mut engine_ok = true;
-    if lock(&cs.history).has_remote {
-        steps.push(sync_step(cs, "pull"));
-    }
     // A skipped step is still a step: without this line the Runs view and the sync line would show
-    // a slot with no ingest in it and no reason why. `0` because a skip is not a failure — the same
-    // shape `sync_step` uses for a busy lock. Recorded before the engine is resolved, so a missing
-    // exe does not also hide the explanation. The two reasons read differently (R-P4a-17).
+    // a slot with no ingest in it and no reason why. `0` because a skip is not a failure. Recorded
+    // before the engine is resolved, so a missing exe does not also hide the explanation. The two
+    // reasons read differently (R-P4a-17).
     //
     // A-2 fix: gated on `ingest_included`, the SAME predicate `slot_argv` uses to decide whether to
     // run the step at all — never on `ics_state` alone. A cloud vault always has `ingest_included`
@@ -627,11 +620,10 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             steps.push((format!("engine: {e}"), -1));
         }
     }
-    steps.push(sync_step(cs, "push"));
-    // F11: the backup walks and copies the whole working tree — the same tree `history::sync`
-    // rewrites — so it takes `vault_io` like every other vault-touching step. Taken HERE, after the
-    // child wait and scoped to the engine call alone: `vault_io` is never held across a child
-    // process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    // F11: the backup walks and copies the whole working tree — the same tree the slot's own `sync`
+    // step can rewrite — so it takes `vault_io` like every other vault-touching step. Taken HERE,
+    // after the child wait and scoped to the engine call alone: `vault_io` is never held across a
+    // child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
     let backed = { let _io = lock(&cs.vault_io); state::run_backup(cs, jiff::Timestamp::now()) };
     if let Ok(st) = backed {
         steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 }));
@@ -777,20 +769,16 @@ pub fn spawn(app: AppHandle) {
             n += 1;
             let cs = house.state::<ConsoleState>();
             let sch = house.state::<Scheduler>();
-            // A slot in flight already ran its own pull/push around the child steps — the
-            // housekeeping thread's syncs stand down rather than racing them for the sync lock
-            // and painting a transient collision as a slot failure (review item 4).
+            // A slot in flight already runs its own sync and its own backup around the child steps
+            // — the housekeeping thread's debounced backup stands down rather than racing it for
+            // `vault_io` (review item 4).
             let slot_running = *lock(&sch.running);
             let due_write = lock(&cs.last_write).map(|t| t.elapsed().as_secs() >= 30).unwrap_or(false) && cs.pending_edits.load(Ordering::SeqCst) > 0;
-            if !slot_running && due_write && cs.auto_sync.load(Ordering::SeqCst) {
-                let _ = state::run_sync(&cs);
+            if !slot_running && due_write {
                 // F11, as in `run_slot_inner`: the backup reads the whole working tree, so it takes
                 // `vault_io` for the engine call and gives it straight back.
                 { let _io = lock(&cs.vault_io); let _ = state::run_backup(&cs, jiff::Timestamp::now()); }
                 *lock(&cs.last_write) = None;
-            }
-            if !slot_running && n % 30 == 0 && lock(&cs.history).has_remote && cs.auto_sync.load(Ordering::SeqCst) {
-                let _ = state::run_sync(&cs);
             }
             // Once an hour: up to six slot logs a day (two slots, three steps each on a vault with
             // a feed) would otherwise accumulate forever in the user's app data with nothing ever
