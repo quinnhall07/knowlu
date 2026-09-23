@@ -665,7 +665,42 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         let _ = std::fs::remove_dir_all(&dest);
         return json!({ "ok": false, "error": format!("the sign-in could not be attached to this vault ({e}) — the new vault was removed, so nothing is half-made"), "profile": Value::Null });
     }
-    finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups))
+    // **The restore, and it is not a route — it is what Finish does** (cloud design, amendment
+    // 2026-09-17, ruling 2: "restoring is signing in on a new desktop; the mirror fills from the
+    // account"). There is no code to type and no link on the picker: a student who already has a
+    // vault in their account gets it here, and one who does not gets the nine-panel wizard's own
+    // seeds and notices nothing.
+    //
+    // **Placed after `scaffold::create_vault` and after `move_session`, and that is deliberate.**
+    // The vault has to exist (its `config/cloud.yaml` is what `restore_into` reads) and the session
+    // has to be on this profile (the pull needs a bearer). `scaffold` has therefore already seeded
+    // `archive/_migrated.md`, `tasks/get-to-know-knowlu.md` and one `courses/<slug>.md` per course —
+    // which is exactly why `restore_into` computes its allowlist from what is on disk right now
+    // rather than demanding an empty folder.
+    let restored = match knowlu_engine::sync::restore_into(&dest) {
+        // **An empty copy keeps the vault.** A student signing in on their first desktop, or on a
+        // second one before the first has ever pushed, has made a perfectly good vault; rolling it
+        // back would throw away a nine-panel wizard run to tell them, accurately and uselessly,
+        // that there was nothing to restore. The finish panel says so instead.
+        Ok(r) => r,
+        // A copy that will not read IS a failure of this path: the student asked for their vault and
+        // a half-filled folder is worse than none. A network that is simply down is NOT this arm —
+        // `restore_into` reports that as an empty result with a warning, because a first slot will
+        // fill the folder anyway and refusing to make a vault over a hotel Wi-Fi is the wrong trade.
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dest);
+            return json!({ "ok": false, "error": e, "profile": Value::Null });
+        }
+    };
+    // `finish_or_roll_back`'s envelope gains one key here, rather than inside that function, because
+    // its OTHER two callers — the backup-folder restore and the adopted-vault path — never call
+    // `sync::restore_into` and have no `Restored` to report; merging it onto the envelope only when
+    // this path produced one keeps their own envelopes exactly as they were.
+    let mut out = finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups));
+    if out["ok"] == true {
+        out["restored"] = json!({ "notes": restored.notes, "records": restored.records, "empty": restored.empty });
+    }
+    out
 }
 
 #[tauri::command(async)]
