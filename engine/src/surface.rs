@@ -855,7 +855,7 @@ pub struct TheDay {
 /// The day laid out as one lane: free blocks (carrying today's takes), calendar busy time, commitment
 /// blocks and the class gaps in the timetable — everything on the same timeline, in start order. A
 /// recurring commitment (`planning.recurring`) spends the effort budget and renders in
-/// `commitments`; it never appears as a block, because it spends Quinn's time, not a slot on
+/// `commitments`; it never appears as a block, because it spends the student's time, not a slot on
 /// today's clock — a confirmed `commitments/` note is different: it IS a slot on today's clock, so
 /// it draws one (§6.2). An all-day event never subtracts capacity (`weekcal::free_blocks` already
 /// excludes it), so it surfaces only in `all_day`, read for display and nothing else.
@@ -887,10 +887,16 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
 
     // Each confirmed commitment span active today draws its own block (§6.2) — `kind: "class"`
     // for a class or lab, `"busy"` otherwise, `label` the note's title — clamped to the window and
-    // dropped if wholly outside it. `commitment_bounds` remembers the clamped ranges so a Google
-    // event covering the same span (below) is not drawn a second time.
-    let mut commitment_bounds: Vec<(DateTime, DateTime)> = Vec::new();
+    // dropped if wholly outside it. Two ranges are kept per span: `commitment_raw` (the
+    // UNCLAMPED span) matches a Google event, which is never clamped either (I1: a class that
+    // straddles the window — the normal case, since confirmed commitments come from Google series
+    // — must still de-duplicate against its own event, which sits at the unclamped time);
+    // `commitment_drawn` (the clamped, drawn range) matches a template class-gap block covering
+    // the identical span (M1).
+    let mut commitment_raw: Vec<(DateTime, DateTime)> = Vec::new();
+    let mut commitment_drawn: Vec<(DateTime, DateTime)> = Vec::new();
     for (start, end, span) in l.cal.spans_on(today) {
+        commitment_raw.push((start, end));
         let start = start.max(day_start);
         let end = end.min(day_end);
         if start >= end {
@@ -898,32 +904,35 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
         }
         let kind = if span.kind == "class" || span.kind == "lab" { "class" } else { "busy" };
         blocks.push(DayBlock { start: hm(start), end: hm(end), kind: kind.into(), label: span.title.clone(), hours: hours_between(start, end), takes: Vec::new() });
-        commitment_bounds.push((start, end));
+        commitment_drawn.push((start, end));
     }
 
     let mut all_day = Vec::new();
     for e in l.cal.events_on(today) {
         if e.all_day {
             all_day.push(e.title.clone());
-        } else if !commitment_bounds.iter().any(|(s, en)| *s == e.start && *en == e.end) {
-            // A Google event identical to a commitment block is drawn once — the commitment's
-            // own block above, not this one (R15).
+        } else if !commitment_raw.iter().any(|(s, en)| *s == e.start && *en == e.end) {
+            // A Google event identical to a commitment's own (unclamped) span is drawn once — the
+            // commitment's own block above, not this one (R15, I1).
             blocks.push(DayBlock { start: hm(e.start), end: hm(e.end), kind: "busy".into(), label: e.title.clone(), hours: hours_between(e.start, e.end), takes: Vec::new() });
         }
     }
     // Classes are the gaps between the TEMPLATE's classes alone inside the day window —
     // `template_only_blocks` (weekcal.rs) has no commitment span folded in, so a confirmed club
     // is never mistaken for a class gap here (R15); the commitment spans draw their own blocks
-    // above instead.
+    // above instead. A gap that exactly matches a commitment's own (clamped) span is dropped too
+    // (M1, controller ruling): a class listed in both `week_template.yaml` and `commitments/` with
+    // an equal span draws once, from the commitment, since it carries the title; an unequal span
+    // draws both.
     let template = l.cal.template_only_blocks(today);
     let mut cursor = day_start;
     for b in &template {
-        if b.start > cursor {
+        if b.start > cursor && !commitment_drawn.iter().any(|(s, e)| *s == cursor && *e == b.start) {
             blocks.push(DayBlock { start: hm(cursor), end: hm(b.start), kind: "class".into(), label: "class".into(), hours: hours_between(cursor, b.start), takes: Vec::new() });
         }
         cursor = b.end;
     }
-    if cursor < day_end {
+    if cursor < day_end && !commitment_drawn.iter().any(|(s, e)| *s == cursor && *e == day_end) {
         blocks.push(DayBlock { start: hm(cursor), end: hm(day_end), kind: "class".into(), label: "class".into(), hours: hours_between(cursor, day_end), takes: Vec::new() });
     }
     blocks.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
@@ -2196,6 +2205,10 @@ mod tests {
         let d = the_day(&l, TODAY);
         let block = d.blocks.iter().find(|b| b.start == "16:00").expect("the club's block");
         assert_eq!((block.kind.as_str(), block.label.as_str(), block.end.as_str()), ("busy", "Chess Club", "17:00"));
+        // R15's exact regression: if the gap walk ever went back to `template_blocks` (which folds
+        // commitment spans into its busy list), the club would ALSO paint a generic "class" gap at
+        // this span, alongside the titled "busy" block above.
+        assert!(!d.blocks.iter().any(|b| b.kind == "class" && b.start == "16:00"), "{:?}", d.blocks);
     }
 
     #[test]
@@ -2263,6 +2276,75 @@ mod tests {
         assert_eq!(matching[0].label, "CS Extra Session", "the commitment's own block wins, the event's copy is dropped");
     }
 
+    /// I1: the de-duplication must match the event against the commitment's UNCLAMPED span, not
+    /// its clamped, drawn one — otherwise a straddling class that is also on Google (the normal
+    /// case, since confirmed commitments come from Google series) draws twice: the commitment
+    /// clamped to the window, and the event at its own, now-unmatched, times.
+    #[test]
+    fn a_google_event_matching_a_straddling_commitments_raw_span_is_drawn_once_clamped() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday; this class starts before it.
+        commitment_note(
+            &v,
+            "early-class.md",
+            "id: cmt_0000000009\ntype: commitment\nkind: class\ntitle: \"Early Class\"\n\
+             meets: [{days: [fri], start: \"07:30\", end: \"08:45\"}]\n\
+             source_uid: \"gcal-series:earlyclass\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let duplicate = crate::weekcal::CalEvent {
+            title: "Early Class (calendar copy)".into(),
+            start: TODAY.at(7, 30, 0, 0),
+            end: TODAY.at(8, 45, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![duplicate]);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().all(|b| b.label != "Early Class (calendar copy)"), "{:?}", d.blocks);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.label == "Early Class").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!((matching[0].start.as_str(), matching[0].end.as_str()), ("08:00", "08:45"), "clamped to the window");
+    }
+
+    /// M1 (controller ruling): a class in both `week_template.yaml` and `commitments/` with an
+    /// EQUAL span is drawn once — the commitment wins, since it carries the title.
+    #[test]
+    fn a_class_matching_the_template_exactly_is_drawn_once_and_the_commitment_wins() {
+        let v = fixture_full();
+        // week_template.yaml's Friday has PH 106 at 13:00-13:45.
+        commitment_note(
+            &v,
+            "ph-106-confirmed.md",
+            "id: cmt_0000000010\ntype: commitment\nkind: class\ntitle: \"PH 106 (confirmed)\"\n\
+             meets: [{days: [fri], start: \"13:00\", end: \"13:45\"}]\n\
+             source_uid: \"gcal-series:ph106\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.start == "13:00" && b.end == "13:45").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!(matching[0].label, "PH 106 (confirmed)", "the commitment wins, the generic gap is dropped");
+    }
+
+    /// M1: an UNEQUAL span (a different end than the template's class) is not deduplicated — both
+    /// the template's generic gap and the commitment's own, differently-bounded block are drawn.
+    #[test]
+    fn a_class_with_an_unequal_span_from_the_template_is_drawn_alongside_it() {
+        let v = fixture_full();
+        // week_template.yaml's Friday has CS 100 at 12:00-12:50; this commitment ends earlier.
+        commitment_note(
+            &v,
+            "cs-100-early-half.md",
+            "id: cmt_0000000011\ntype: commitment\nkind: class\ntitle: \"CS 100 (early half)\"\n\
+             meets: [{days: [fri], start: \"12:00\", end: \"12:30\"}]\n\
+             source_uid: \"gcal-series:cs100early\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().any(|b| b.start == "12:00" && b.end == "12:50" && b.label == "class"), "the template's own gap is unaffected: {:?}", d.blocks);
+        assert!(d.blocks.iter().any(|b| b.start == "12:00" && b.end == "12:30" && b.label == "CS 100 (early half)"), "the commitment's own span is drawn too: {:?}", d.blocks);
+    }
+
     #[test]
     fn the_day_uses_the_planning_window() {
         let v = fixture_full();
@@ -2274,8 +2356,16 @@ mod tests {
         );
         let l = load(&v, TODAY);
         let d = the_day(&l, TODAY);
-        assert_eq!(d.blocks.first().map(|b| b.start.as_str()), Some("07:00"));
-        assert_eq!(d.blocks.last().map(|b| b.end.as_str()), Some("20:00"));
+        // vault-full's Friday: PH 106 Lecture 09:00-10:00 and Advising appointment 14:00-15:00
+        // (state/calendar.md), classes at 12:00-12:50 and 13:00-13:45 (week_template.yaml) — the
+        // same shape `the_day_on_the_golden_friday` pins for the template's 08:00-18:00 window,
+        // now under the widened 07:00-20:00 one: every block's bounds are checked, not just the
+        // first start and last end, so a stray gap at the old 08:00/18:00 boundary would fail this.
+        let shape: Vec<(&str, &str, &str, f64)> = d.blocks.iter().map(|b| (b.start.as_str(), b.end.as_str(), b.kind.as_str(), b.hours)).collect();
+        assert_eq!(shape, [
+            ("07:00", "09:00", "free", 2.0), ("09:00", "10:00", "busy", 1.0), ("10:00", "12:00", "free", 2.0),
+            ("12:00", "12:50", "class", 0.83), ("13:00", "13:45", "class", 0.75), ("14:00", "15:00", "busy", 1.0), ("15:00", "20:00", "free", 5.0),
+        ]);
     }
 
     #[test]
