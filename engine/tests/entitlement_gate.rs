@@ -114,6 +114,36 @@ fn the_line_a_student_reads_names_the_step_and_the_reason() {
     assert_eq!(format!("{} ({})", "sync", "skipped: no entitlement"), "sync (skipped: no entitlement)");
 }
 
+#[test]
+fn a_gated_sync_persists_its_status_before_printing_the_line() {
+    // Carry-forward from Task 7's review: without this, the console keeps showing a stale "in
+    // step" (or whatever a sync run left behind before the subscription lapsed) forever after a
+    // lapse, because nothing else ever touches `state/sync-status.json` when the GATE — not
+    // `sync.rs` — is what stops the run. Asserted against the source, like the test above, for the
+    // same reason: a spawn would need a real `LOCALAPPDATA` profile and this suite has none.
+    let main = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs"),
+    ).expect("engine/src/main.rs");
+    assert!(
+        main.contains("sync::record_gated_skip"),
+        "the gate must persist a SyncStatus before it prints the sync skip line"
+    );
+}
+
+#[test]
+fn a_lapsed_vaults_sync_leaves_the_gated_status_on_disk() {
+    // Carry-forward from Task 7's review, the mechanics half: `record_gated_skip` writes through
+    // the same atomic `save_status` every other outcome uses, and the shape it writes must read
+    // distinctly from an ordinary "no account"/"no session" skip (`ok: true`) — a lapsed
+    // subscription is `ok: false`, so the page never paints it as an in-step account.
+    let vault = temp("gated-sync-status");
+    knowlu_engine::sync::record_gated_skip(&vault).expect("status saved");
+    let status = knowlu_engine::sync::load_status(&vault);
+    assert!(!status.ok, "a lapsed subscription must read distinctly from an ordinary skip");
+    assert_eq!(status.skipped.as_deref(), Some("no entitlement"));
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("knowlu-entitlement-gate-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

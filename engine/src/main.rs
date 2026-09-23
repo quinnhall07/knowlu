@@ -375,6 +375,15 @@ fn main() -> ExitCode {
     // sentence shape whichever step stopped.
     if let Some(vault) = gated_vault(&cli.command) {
         if let Some(reason) = entitle::gate(vault) {
+            // Carry-forward from Task 7's review: `sync` is the one gated step with a status file
+            // of its own (`state/sync-status.json`), and the gate stopping it here means
+            // `sync.rs` never runs to move that file. Without this, the console would keep
+            // showing whatever a sync run left behind before the subscription lapsed.
+            if matches!(cli.command, Command::Sync { .. }) {
+                if let Err(e) = sync::record_gated_skip(vault) {
+                    eprintln!("knowlu-engine: sync status could not be saved ({e})");
+                }
+            }
             println!("{} ({reason})", name_of(&cli.command));
             return ExitCode::SUCCESS;
         }

@@ -1606,6 +1606,26 @@ pub fn is_configured(vault: &Path) -> bool {
     crate::cloudmodel::load(vault).is_some()
 }
 
+/// Carry-forward from Task 7's review (C3′ Task 8). `main.rs`'s entitlement gate stops `sync`
+/// before this module ever runs — before `run_lines_with` gets anywhere near [`finish`] — so
+/// without this call, [`STATUS_FILE`] would keep whatever a sync run left there before the
+/// subscription lapsed (an "in step" from the last good day, say) and the console would show it
+/// forever. Saved through the same atomic [`save_status`] every other outcome uses.
+///
+/// **`ok: false`, unlike "no account"/"no session"** (which are `ok: true`, since `totals.errors`
+/// is empty for a normal skip): a lapsed subscription is not the same normal state as being
+/// signed out, and the page must not read it as "in step with your account."
+pub fn record_gated_skip(vault: &Path) -> Result<(), String> {
+    let status = SyncStatus {
+        ok: false,
+        at: Some(crate::journal::now_ts(None)),
+        lines: vec!["sync (skipped: no entitlement)".to_string()],
+        last_error: None,
+        skipped: Some("no entitlement".to_string()),
+    };
+    save_status(vault, &status)
+}
+
 /// Builds `SyncStatus` from what this call is about to return, saves it to [`STATUS_FILE`], and
 /// returns the same triple `run_lines_with` always has (fix round 1, review I4) — one seam so
 /// every return path but one persists, rather than a save duplicated at each one. **The lock-held
