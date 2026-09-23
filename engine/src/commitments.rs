@@ -11,12 +11,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use jiff::civil::{Date, Time};
+use jiff::civil::{Date, DateTime, Time};
 use regex::Regex;
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::models::split_frontmatter;
-use crate::planning::DAY_KEYS;
+use crate::planning::{day_key, DAY_KEYS};
 use crate::pystr;
 use crate::weekcal::{CommitmentSpan, DayKey};
 use crate::yaml::{get, text};
@@ -5265,5 +5265,276 @@ mod proposal_tests {
             &format!("type: commitment\nkind: class\ntitle: \"Intro to CS\"\n{MWF_NOON}status: confirmed\n"),
         );
         assert_eq!(keys(&run(&file_of(vec![cs100()]), &other)), vec!["gcal-series:cs100"]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// P10 — `conflicts` and `fit`, the overlap API for piece 2 (§7).
+// ---------------------------------------------------------------------------------------------
+
+/// `weekcal::WeekCalendar::with_instances`' shape (P3), also [`SeriesFile::instances_map`]'s: per
+/// `source_uid`, the fresh-read horizon `[start, end)` a calendar was last read over, and that
+/// source's actual instances inside it (R21).
+pub type InstancesMap = BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)>;
+
+/// A confirmed commitment's busy `(start, end)` pairs on `date` — the same rule
+/// `weekcal::WeekCalendar::active_spans` applies per span, read here per whole [`Commitment`]
+/// directly, so `conflicts` and capacity can never disagree (§7): inside a fresh horizon that
+/// names this commitment's `source_uid` and covers `date`, only its actual instances dated `date`
+/// are busy (a date the horizon covers but the read returned no instance for is free, even though
+/// the weekly rule would have named it busy); outside the horizon — or with no `source_uid` at
+/// all — the weekly `meets` rule applies, on `date`'s weekday, within `from`/`until`.
+fn commitment_busy_on(commitment: &Commitment, date: Date, instances: &InstancesMap) -> Vec<(Time, Time)> {
+    let horizon = commitment
+        .source_uid
+        .as_deref()
+        .and_then(|uid| instances.get(uid))
+        .filter(|(start, end, _)| *start <= date && date < *end);
+    if let Some((_, _, list)) = horizon {
+        return list
+            .iter()
+            .filter(|(d, s, e)| *d == date && s < e)
+            .map(|(_, s, e)| (*s, *e))
+            .collect();
+    }
+    let today = day_key(date);
+    let after_from = commitment.from.map_or(true, |f| f <= date);
+    let before_until = commitment.until.map_or(true, |u| date <= u);
+    if !after_from || !before_until {
+        return Vec::new();
+    }
+    commitment
+        .meets
+        .iter()
+        .filter(|meet| meet.days.iter().any(|d| *d == today))
+        .map(|meet| (meet.start, meet.end))
+        .collect()
+}
+
+/// §7: every confirmed commitment whose meeting overlaps `[start, end)` — half-open, local
+/// wall-clock in the vault's timezone, honouring actual instances inside the fresh horizon the
+/// same way `weekcal::WeekCalendar` does (P3 decision 3, [`commitment_busy_on`]). A `[start, end)`
+/// crossing midnight is split at midnight, each side checked against its own date, so a query that
+/// runs past midnight still catches the next day's commitment. Sorted by `(level: hard first,
+/// meeting start, title, id)` — the meeting start is the earliest overlapping busy time found for
+/// that commitment. Optional commitments are included (a caller asking "during office hours"
+/// wants to see them); [`fit`] is what ignores them. Pure: no clock, no I/O — `today`/the span are
+/// the caller's, and `instances` is [`SeriesFile::instances_map`]'s result, the caller's to fetch.
+pub fn conflicts<'a>(
+    set: &'a Commitments,
+    instances: &InstancesMap,
+    start: DateTime,
+    end: DateTime,
+) -> Vec<(&'a Commitment, Level)> {
+    if end <= start {
+        return Vec::new();
+    }
+    let mut earliest: BTreeMap<&'a str, (DateTime, &'a Commitment)> = BTreeMap::new();
+    let mut date = start.date();
+    let last = end.date();
+    loop {
+        let day_start = DateTime::from_parts(date, Time::midnight());
+        let tomorrow = add_days(date, 1);
+        let day_end = if tomorrow > date {
+            DateTime::from_parts(tomorrow, Time::midnight())
+        } else {
+            end
+        };
+        let seg_start = start.max(day_start);
+        let seg_end = end.min(day_end);
+        if seg_start < seg_end {
+            for commitment in &set.confirmed {
+                for (b_start, b_end) in commitment_busy_on(commitment, date, instances) {
+                    if b_end <= b_start {
+                        continue;
+                    }
+                    let busy_start = DateTime::from_parts(date, b_start);
+                    let busy_end = DateTime::from_parts(date, b_end);
+                    if busy_start < seg_end && seg_start < busy_end {
+                        earliest
+                            .entry(commitment.id.as_str())
+                            .and_modify(|slot| slot.0 = slot.0.min(busy_start))
+                            .or_insert((busy_start, commitment));
+                    }
+                }
+            }
+        }
+        if date >= last || tomorrow <= date {
+            break;
+        }
+        date = tomorrow;
+    }
+
+    let mut out: Vec<(DateTime, &'a Commitment)> = earliest.into_values().collect();
+    out.sort_by(|(a_start, a), (b_start, b)| {
+        (a.level, *a_start, &a.title, &a.id).cmp(&(b.level, *b_start, &b.title, &b.id))
+    });
+    out.into_iter().map(|(_, c)| (c, c.level)).collect()
+}
+
+/// What a candidate meeting's [`conflicts`] amounts to, before it is filed (C8, §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fit {
+    Clear,
+    OverlapsSoft(Vec<String>),
+    OverlapsHard(Vec<String>),
+}
+
+/// The rule piece 2 applies over [`conflicts`]' result, in the order [`conflicts`] already sorts
+/// by: any hard conflict wins (`OverlapsHard`, named by title — never propose); else any soft
+/// (`OverlapsSoft`, named by title — propose, the card says so); optional conflicts are ignored
+/// (`Clear`).
+pub fn fit(conflicts: &[(&Commitment, Level)]) -> Fit {
+    let hard: Vec<String> =
+        conflicts.iter().filter(|(_, level)| *level == Level::Hard).map(|(c, _)| c.title.clone()).collect();
+    if !hard.is_empty() {
+        return Fit::OverlapsHard(hard);
+    }
+    let soft: Vec<String> =
+        conflicts.iter().filter(|(_, level)| *level == Level::Soft).map(|(c, _)| c.title.clone()).collect();
+    if !soft.is_empty() {
+        return Fit::OverlapsSoft(soft);
+    }
+    Fit::Clear
+}
+
+/// P10's tests: `conflicts` and `fit`, the overlap API (§7). Invented data only; every date below
+/// falls on the weekday its `meets` entry names (2026-08-31 is a Monday, so 2026-09-01 is a
+/// Tuesday and 2026-09-02 a Wednesday).
+#[cfg(test)]
+mod conflicts_tests {
+    use super::*;
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn dt(y: i16, mo: i8, d: i8, h: i8, mi: i8) -> DateTime {
+        DateTime::constant(y, mo, d, h, mi, 0, 0)
+    }
+
+    /// A confirmed commitment with one weekly `meets` entry and no `source_uid` (the weekly rule
+    /// applies everywhere no instances-map horizon overrides it) — every field the tests below do
+    /// not vary is a fixed, invented default.
+    fn commitment(id: &str, level: Level, title: &str, day: DayKey, start: Time, end: Time) -> Commitment {
+        Commitment {
+            id: id.into(),
+            path: PathBuf::from(format!("commitments/{id}.md")),
+            kind: match level {
+                Level::Hard => "class".into(),
+                Level::Soft => "club".into(),
+                Level::Optional => "office-hours".into(),
+            },
+            level,
+            title: title.into(),
+            course: None,
+            meets: vec![Meet { days: vec![day], start, end }],
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: None,
+        }
+    }
+
+    fn set(confirmed: Vec<Commitment>) -> Commitments {
+        Commitments { confirmed, ..Commitments::default() }
+    }
+
+    #[test]
+    fn a_hard_class_overlapping_by_one_minute_is_overlaps_hard() {
+        let cs100 = commitment("cmt_a", Level::Hard, "CS 100", "tue", t(9, 0), t(10, 0));
+        let set = set(vec![cs100]);
+        let instances = InstancesMap::new();
+        // 09:59-10:59 overlaps 09:00-10:00 by exactly one minute.
+        let got = conflicts(&set, &instances, dt(2026, 9, 1, 9, 59), dt(2026, 9, 1, 10, 59));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0.title, "CS 100");
+        assert_eq!(got[0].1, Level::Hard);
+        assert_eq!(fit(&got), Fit::OverlapsHard(vec!["CS 100".to_string()]));
+    }
+
+    #[test]
+    fn touching_end_to_start_is_clear() {
+        let cs100 = commitment("cmt_a", Level::Hard, "CS 100", "tue", t(9, 0), t(10, 0));
+        let set = set(vec![cs100]);
+        let instances = InstancesMap::new();
+        // The query starts exactly when the class ends: half-open, so no overlap.
+        let got = conflicts(&set, &instances, dt(2026, 9, 1, 10, 0), dt(2026, 9, 1, 11, 0));
+        assert!(got.is_empty());
+        assert_eq!(fit(&got), Fit::Clear);
+    }
+
+    #[test]
+    fn a_soft_club_gives_overlaps_soft_with_its_title() {
+        let club = commitment("cmt_b", Level::Soft, "Chess Club", "tue", t(17, 0), t(18, 0));
+        let set = set(vec![club]);
+        let instances = InstancesMap::new();
+        let got = conflicts(&set, &instances, dt(2026, 9, 1, 17, 30), dt(2026, 9, 1, 18, 30));
+        assert_eq!(got.len(), 1);
+        assert_eq!(fit(&got), Fit::OverlapsSoft(vec!["Chess Club".to_string()]));
+    }
+
+    #[test]
+    fn decline_markers_never_conflict() {
+        let mut declined = set(Vec::new());
+        declined.declined.insert("gcal-series:declined-club".into());
+        let instances = InstancesMap::new();
+        let got = conflicts(&declined, &instances, dt(2026, 9, 1, 0, 0), dt(2026, 9, 2, 0, 0));
+        assert!(got.is_empty());
+        assert_eq!(fit(&got), Fit::Clear);
+    }
+
+    #[test]
+    fn a_span_outside_from_until_is_clear() {
+        let mut club = commitment("cmt_c", Level::Soft, "Study Group", "tue", t(9, 0), t(10, 0));
+        club.from = Some(jiff::civil::date(2026, 8, 25));
+        club.until = Some(jiff::civil::date(2026, 9, 1));
+        let confirmed = set(vec![club]);
+        let instances = InstancesMap::new();
+        // The following Tuesday, 2026-09-08, is past `until`.
+        let got = conflicts(&confirmed, &instances, dt(2026, 9, 8, 9, 0), dt(2026, 9, 8, 10, 0));
+        assert!(got.is_empty());
+        assert_eq!(fit(&got), Fit::Clear);
+    }
+
+    #[test]
+    fn a_cancelled_instance_inside_the_horizon_is_clear() {
+        let mut class = commitment("cmt_d", Level::Hard, "CS 200", "tue", t(9, 0), t(10, 0));
+        class.source_uid = Some("gcal-series:cs200".into());
+        let confirmed = set(vec![class]);
+        let mut instances = InstancesMap::new();
+        // The horizon covers 2026-09-01 but the fresh read returned no instance for it: cancelled.
+        instances.insert(
+            "gcal-series:cs200".to_string(),
+            (jiff::civil::date(2026, 8, 25), jiff::civil::date(2026, 9, 22), Vec::new()),
+        );
+        let got = conflicts(&confirmed, &instances, dt(2026, 9, 1, 9, 0), dt(2026, 9, 1, 10, 0));
+        assert!(got.is_empty());
+        assert_eq!(fit(&got), Fit::Clear);
+    }
+
+    #[test]
+    fn a_midnight_crossing_span_meets_the_next_days_commitment() {
+        // An early Wednesday lab, 00:00-01:00 — no wraparound of its own; the QUERY is what
+        // crosses midnight (Tuesday 23:30 into Wednesday 00:30), and it must be split so
+        // Wednesday's side is checked against Wednesday's commitment.
+        let lab = commitment("cmt_e", Level::Hard, "CS 100 Lab", "wed", t(0, 0), t(1, 0));
+        let confirmed = set(vec![lab]);
+        let instances = InstancesMap::new();
+        let got = conflicts(&confirmed, &instances, dt(2026, 9, 1, 23, 30), dt(2026, 9, 2, 0, 30));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0.title, "CS 100 Lab");
+        assert_eq!(fit(&got), Fit::OverlapsHard(vec!["CS 100 Lab".to_string()]));
+    }
+
+    #[test]
+    fn optional_conflicts_are_returned_but_fit_is_clear() {
+        let oh = commitment("cmt_f", Level::Optional, "Office Hours", "tue", t(9, 0), t(10, 0));
+        let set = set(vec![oh]);
+        let instances = InstancesMap::new();
+        let got = conflicts(&set, &instances, dt(2026, 9, 1, 9, 0), dt(2026, 9, 1, 10, 0));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, Level::Optional);
+        assert_eq!(fit(&got), Fit::Clear);
     }
 }
