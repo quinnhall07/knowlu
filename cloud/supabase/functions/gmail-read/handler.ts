@@ -201,7 +201,11 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
     if (req.method !== "POST") return Response.json({ error: "POST only" }, { status: 405 });
     try {
       const { account_id } = await entitle(req);
-      const body = await req.json().catch(() => ({})) as { ack?: unknown; accepts?: unknown };
+      const body = await req.json().catch(() => ({})) as { ack?: unknown; accepts?: unknown; timezone?: unknown };
+      // Due-fix: the vault's own timezone, so an email's relative deadline resolves against the
+      // student's local date (`judge_due.ts`). Absent from an older engine; the resolver then
+      // falls back to the Date header's own offset.
+      const timezone = typeof body.timezone === "string" && body.timezone !== "" ? body.timezone : undefined;
       const accepts = Array.isArray(body.accepts)
         ? body.accepts.filter((t): t is string => typeof t === "string")
         : [];
@@ -302,6 +306,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           kind: "email",
           item: { message_id: uid, subject: message.subject, from: message.from, date: message.date, text: message.text },
           heuristics_seed: seed,
+          timezone,
         }, pipeline);
         // The text is out of scope from here: nothing below this line can reach it.
         if (reply.verdict === null) {

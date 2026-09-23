@@ -370,11 +370,22 @@ pub fn task_request(item: &judge::Item, h: &judge::Heuristics, seed: &judge::Ver
 pub struct CloudModel<'a> {
     client: &'a CloudClient,
     fatal: Cell<Option<&'static str>>,
+    timezone: Option<String>,
 }
 
 impl<'a> CloudModel<'a> {
     pub fn new(client: &'a CloudClient) -> CloudModel<'a> {
-        CloudModel { client, fatal: Cell::new(None) }
+        CloudModel { client, fatal: Cell::new(None), timezone: None }
+    }
+
+    /// Carry the vault's own timezone name onto `/judge-email` (`cli::vault_timezone_name`), the
+    /// same field `pull_gmail_queue` carries directly for `/gmail-read` — Gmail judgment runs
+    /// server-side and never through this trait (D12), so this is for the eval harness's parity
+    /// check and §13's forwarding fallback, not the production Gmail path. Every existing
+    /// `CloudModel::new` caller is unaffected: `None` here sends no `timezone` key at all.
+    pub fn with_timezone(mut self, timezone: Option<String>) -> CloudModel<'a> {
+        self.timezone = timezone;
+        self
     }
 
     /// Set once a call comes back 401, 402 or 403. `enrich` prints it as one summary line instead
@@ -563,8 +574,13 @@ pub struct GmailItem {
 /// The body of `POST /judge-email`. Used by the eval harness's parity check and by §13's
 /// forwarding fallback; **not by the Gmail path**, which judges server-side because Gmail message
 /// text must never reach the device (D12).
-pub fn email_request(item: &judge::EmailItem) -> Value {
-    json!({
+///
+/// `timezone` is the vault's own IANA name (`cli::vault_timezone_name`) — an optional key so the
+/// due resolver can convert a relative word ("tonight") onto the student's clock instead of the
+/// email header's own offset. Omitted entirely, never sent null or empty, when the vault names
+/// none (T4 follow-up to `_shared/judge_due.ts`).
+pub fn email_request(item: &judge::EmailItem, timezone: Option<&str>) -> Value {
+    let mut body = json!({
         "kind": "email",
         "item": {
             "message_id": item.message_id,
@@ -574,12 +590,16 @@ pub fn email_request(item: &judge::EmailItem) -> Value {
             "text": judge::clip(item.text.trim(), judge::MAX_BODY_CHARS),
         },
         "heuristics_seed": { "known_courses": item.known_courses }
-    })
+    });
+    if let Some(tz) = timezone.filter(|t| !t.is_empty()) {
+        body["timezone"] = json!(tz);
+    }
+    body
 }
 
 impl judge::EmailModel for CloudModel<'_> {
     fn judge_email(&self, item: &judge::EmailItem) -> Result<judge::EmailVerdict, ModelError> {
-        let reply = self.call("/judge-email", &email_request(item))?;
+        let reply = self.call("/judge-email", &email_request(item, self.timezone.as_deref()))?;
         let verdict = self.verdict_of(&reply)?;
         let text = |key: &str| verdict.get(key).and_then(Value::as_str).map(str::to_string);
         Ok(judge::EmailVerdict {
@@ -619,14 +639,25 @@ pub struct GmailPull {
     pub deferred: u64,
 }
 
-pub fn pull_gmail_queue(client: &CloudClient, ack: &[String]) -> Result<GmailPull, CloudError> {
+pub fn pull_gmail_queue(
+    client: &CloudClient,
+    ack: &[String],
+    timezone: Option<&str>,
+) -> Result<GmailPull, CloudError> {
     // R-C2-E41: an unconfigured deployment (no P2) is the one situation `/gmail-read` answers
     // with a real HTTP failure rather than `quiet: true` — there may be no account row to name a
     // reason against at all. Caught here, once, so every caller downstream sees the same closed
     // `QuietReason` set regardless of which of the two shapes the service used to say it.
     // T9: `accepts` declares the tiers this engine routes; the service hands `completion` to no
     // device that does not declare it (an older engine would file it as a `kind: task` card).
-    let reply = match client.post("/gmail-read", &json!({ "ack": ack, "accepts": ["completion"] })) {
+    // `timezone` is the vault's own IANA name (`cli::vault_timezone_name`), so `judge_due.ts`'s
+    // resolver can convert a relative word onto the student's clock rather than the message's own
+    // header offset — omitted entirely, never null or empty, when the vault names none.
+    let mut body = json!({ "ack": ack, "accepts": ["completion"] });
+    if let Some(tz) = timezone.filter(|t| !t.is_empty()) {
+        body["timezone"] = json!(tz);
+    }
+    let reply = match client.post("/gmail-read", &body) {
         Ok(reply) => reply,
         Err(CloudError::Status { code: 503, ref detail }) if detail == GMAIL_NOT_CONFIGURED_DETAIL => {
             return Err(CloudError::Quiet(QuietReason::NotConfigured));

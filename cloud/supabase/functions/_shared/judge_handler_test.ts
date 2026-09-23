@@ -142,3 +142,33 @@ Deno.test("the event handler answers unsure only to a request that declares it",
   const malformed = await ask(event({ accepts: "unsure" }));
   assertEquals(malformed.verdict, null, "a non-array accepts declares nothing");
 });
+
+// Due-fix (2026-09-23): the device's `/judge-email` request carries the vault's timezone, and the
+// handler hands it to the pipeline so the due resolver reads the email's local date.
+Deno.test("the email handler carries the request's timezone through to the due resolver", async () => {
+  const verdict = {
+    tier: "task", title: "Submit lab writeup", course: null, due: "tomorrow", effort_hours: 1,
+    importance: 3, why: "the message sets a deadline", confidence: 0.9,
+  };
+  const emailDeps = (): Promise<PipelineDeps> =>
+    Promise.resolve({
+      row: { ...ROW, kind: "email" as const, prompt_version: "email-3", grammar_version: "email-1" },
+      model: new ScriptedModel([verdict]),
+      rules: NO_RULES,
+      caps: ALWAYS,
+      log: SINK,
+      origin: "device",
+      now: () => 0,
+    });
+  const body = JSON.stringify({
+    kind: "email",
+    item: { message_id: "gmail:7e0d1", from: "a@example.edu", subject: "Lab", date: "Fri, 18 Sep 2026 04:30:00 +0000", text: "by tomorrow" },
+    heuristics_seed: {},
+    timezone: "America/Chicago",
+  });
+  const response = await judgeHandler("email", OK, emailDeps)(
+    new Request("http://127.0.0.1/judge-email", { method: "POST", body }),
+  );
+  assertEquals(response.status, 200);
+  assertEquals((await response.json()).verdict.due, "2026-09-18");
+});

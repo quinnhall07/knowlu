@@ -1,36 +1,45 @@
-// Builds the request the paid run would send, and estimates its cost, without sending anything.
+// Builds the request the paid run sends, and estimates its cost, without sending anything.
 //
-// Two things this file is honest about rather than papering over:
+// **Transport, verified by the controller's smoke call on 2026-09-23.** `typesafe/jev-1.13` is a
+// *decisions* model, not a chat model: `POST https://openrouter.ai/api/v1/chat/completions` answers
+// 400 "cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint
+// instead." The working call is `POST https://openrouter.ai/api/alpha/decisions` with
 //
-// 1. **Transport is genuinely unverified.** Jev's native interface (`docs/reports/
-//    2026-09-22-jev-system-one-assessment.md` line 65, 193-195) is `POST
-//    https://api.typesafe.ai/v1/systemone` with body `{state, model, questions}`, answering
-//    `{answers, usage}` — no system/user split, no JSON schema, nothing like the product's own
-//    `judge_openrouter.ts` (`ModelRequest = {model, system, user, schema, maxTokens, sampling,
-//    route}`). Going through OpenRouter (the decision this brief made, not TypeSafe direct) means
-//    OpenRouter's normal contract — one OpenAI-compatible `/chat/completions` body, whatever the
-//    underlying provider's native shape — applies, the same way `judge_openrouter.ts` calls every
-//    other model. `buildOpenRouterChatBody` follows that contract: the native `{state, questions}`
-//    intent travels as structured JSON inside the user message, not as top-level fields, because
-//    nothing in the assessment confirms OpenRouter exposes Jev's native fields directly. This is a
-//    real open question, not a detail — see the report's "before the paid run" note.
-// 2. **The cost table is denominated in input tokens with output free** (assessment §5, procured
-//    from docs.typesafe.ai/models). `estimateTokens` is a chars/4 heuristic, the common rough
-//    approximation for English prose — good enough to bound a two-cent experiment, not a billing
-//    reconciliation.
+//   { model, state: <any JSON>, questions: { <key>: {type: "choice", instructions, criteria:
+//     {<option>: <description>}} | {type: "noul", instructions: <a statement>} }, provider }
+//
+// and the reply is `{model, answers: {<key>: {type: "choice", choice, probabilities, confidence} |
+// {type: "noul", noul}}, usage: {input_tokens, output_tokens, cost}, id, provider}`; errors come as
+// `{error: {code, message}}`. The zero-retention provider block `{order: ["typesafe"],
+// allow_fallbacks: false, zdr: true}` was accepted on that call, so it is exactly what `ZDR_ROUTE`
+// sends — `require_parameters` (which `judge_openrouter.ts` pins for chat models) was not part of
+// the verified call and is left out rather than guessed at.
+//
+// So Jev's native `{state, questions}` shape travels as-is; there is no system/user split and no
+// JSON-in-a-prompt. Two identical calls gave slightly different probabilities (0.72 vs 0.67): the
+// model is not deterministic, which the report weighs.
+//
+// **Criteria are written from the review rubric's own definitions** (the SDD code-reviewer
+// template's Critical / Important / Minor headings, and the four dispositions procedure §1 names),
+// never from any finding's text, so nothing in a question carries a label. `findLeaks` still guards
+// the state: `buildDecisionsBody` throws if a severity word survives in it.
+//
+// The cost table is denominated in input tokens with output free (assessment §5). `estimateTokens`
+// is a chars/4 heuristic — good enough to bound a fraction-of-a-cent experiment; the real run reads
+// the cost from each reply's `usage.cost`.
 
-import type { CorpusFinding } from "./types.ts";
+import type { CorpusFinding, Disposition } from "./types.ts";
+import { findLeaks } from "./severity.ts";
 
 export const JEV_MODEL_ID = "typesafe/jev-1.13";
-export const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+export const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
 export const INPUT_COST_PER_MILLION_USD = 0.042; // output free — assessment §5
 
-/** The zero-retention pin, matching judge_openrouter.ts's `assertPinnedRoute` shape exactly. */
+/** The zero-retention pin, exactly the provider block the verified smoke call carried. */
 export const ZDR_ROUTE = {
   order: ["typesafe"],
   allow_fallbacks: false,
   zdr: true,
-  require_parameters: true,
 } as const;
 
 export interface JevState {
@@ -39,24 +48,62 @@ export interface JevState {
   context: string;
 }
 
-export type JevQuestion =
-  | { type: "choice"; options: string[]; prompt: string }
-  | { type: "noul"; prompt: string };
+export interface ChoiceQuestion {
+  type: "choice";
+  instructions: string;
+  criteria: Record<string, string>;
+}
 
-export const QUESTIONS: Record<"grade" | "blocks" | "disposition", JevQuestion> = {
+export interface NoulQuestion {
+  type: "noul";
+  instructions: string;
+}
+
+/** Severity options, from the review rubric (Critical / Important / Minor) and nothing else. */
+export const SEVERITY_CRITERIA: Record<"critical" | "important" | "minor", string> = {
+  critical:
+    "Must be fixed: a bug, a security issue, a data-loss risk, or functionality that is broken as written.",
+  important:
+    "Should be fixed: an architecture problem, a missing feature, poor error handling, or a gap in the tests.",
+  minor: "Nice to have: code style, an optimisation opportunity, or polish to documentation or comments.",
+};
+
+/** Disposition options, from the four rulings procedure §1 names. */
+export const DISPOSITION_CRITERIA: Record<"fix" | "rule_against" | "hand_off" | "defer", string> = {
+  fix: "Accept the finding and fix it in this round, before the work merges.",
+  rule_against:
+    "Rule against the finding: the current code or wording stays as it is, because the finding is " +
+    "mistaken or its fix is not worth making.",
+  hand_off: "Hand the finding off: it is real but lies outside this work's scope, so someone else takes it.",
+  defer: "Defer the finding: it is real, but it is recorded as a follow-up for later rather than fixed now.",
+};
+
+/** Disposition option key → the corpus's disposition label. */
+export const DISPOSITION_OPTION_TO_LABEL: Record<keyof typeof DISPOSITION_CRITERIA, Disposition> = {
+  fix: "fixed",
+  rule_against: "ruled_against",
+  hand_off: "handed_off",
+  defer: "deferred",
+};
+
+export const DECISION_QUESTIONS: {
+  grade: ChoiceQuestion;
+  blocks: NoulQuestion;
+  disposition: ChoiceQuestion;
+} = {
   grade: {
     type: "choice",
-    options: ["critical", "important", "minor"],
-    prompt: "How severe is this code-review finding?",
+    instructions: "How severe is this code-review finding?",
+    criteria: SEVERITY_CRITERIA,
   },
   blocks: {
     type: "noul",
-    prompt: "This finding must be fixed before the branch merges.",
+    instructions: "This finding must be fixed before the branch merges.",
   },
   disposition: {
     type: "choice",
-    options: ["fix now", "rule against", "hand off", "defer"],
-    prompt: "What should happen to this finding?",
+    instructions: "What should happen to this code-review finding?",
+    criteria: DISPOSITION_CRITERIA,
   },
 };
 
@@ -94,46 +141,26 @@ export function buildState(finding: CorpusFinding): JevState {
   };
 }
 
-/** The intent the procedure's own pseudocode (§Step 2) specifies — one request, one price. */
-export function buildJevNativeBody(finding: CorpusFinding): Record<string, unknown> {
-  return { state: buildState(finding), model: JEV_MODEL_ID, questions: QUESTIONS };
-}
-
-function renderQuestionsAsPrompt(): string {
-  const lines: string[] = [];
-  for (const [key, q] of Object.entries(QUESTIONS)) {
-    if (q.type === "choice") {
-      lines.push(`${key} (choice, one of ${JSON.stringify(q.options)}): ${q.prompt}`);
-    } else {
-      lines.push(`${key} (noul, a calibrated probability 0-1): ${q.prompt}`);
-    }
-  }
-  return lines.join("\n");
-}
-
 /**
- * The transport-level body for OpenRouter's `/chat/completions`, per this file's header note: the
- * native `state`/`questions` intent travels as JSON inside the user message, and the reply is
- * asked to come back as one JSON object keyed by question name. Unverified against a live call —
- * the report says so.
+ * The decisions-endpoint body (this file's header note): Jev's native `{state, questions}` shape
+ * plus the model id and the zero-retention provider pin. Throws if the state still carries a
+ * severity word — the leak check is the first stop rule and is enforced here, at the last moment
+ * before anything could leave the machine.
  */
-export function buildOpenRouterChatBody(finding: CorpusFinding): Record<string, unknown> {
+export function buildDecisionsBody(finding: CorpusFinding): {
+  model: string;
+  state: JevState;
+  questions: typeof DECISION_QUESTIONS;
+  provider: typeof ZDR_ROUTE;
+} {
   const state = buildState(finding);
-  const userContent = [
-    "You are triaging one code-review finding. Answer strictly as JSON with exactly these keys: " +
-    "grade, blocks, disposition. Do not include any other text.",
-    "",
-    "STATE:",
-    JSON.stringify(state, null, 2),
-    "",
-    "QUESTIONS:",
-    renderQuestionsAsPrompt(),
-  ].join("\n");
-  return {
-    model: JEV_MODEL_ID,
-    messages: [{ role: "user", content: userContent }],
-    provider: ZDR_ROUTE,
-  };
+  // Scan the state's own strings, never its JSON: `JSON.stringify` writes a newline before "it" as
+  // `\nit`, which `\bnit\b` matches — a false leak that stopped the first paid pass.
+  const leaks = [state.finding, state.file ?? "", state.context].flatMap(findLeaks);
+  if (leaks.length > 0) {
+    throw new Error(`buildDecisionsBody: severity leak in ${finding.id}'s state: ${JSON.stringify(leaks)}`);
+  }
+  return { model: JEV_MODEL_ID, state, questions: DECISION_QUESTIONS, provider: ZDR_ROUTE };
 }
 
 /** chars/4, the common rough approximation for English prose — see this file's header note. */
@@ -148,14 +175,12 @@ export interface CostEstimate {
   estimatedCostUsd: number;
 }
 
-/** Estimates the cost of one pass over `findings`, minimal-state shape (finding + file + context + questions). */
+/** Estimates the cost of one pass over `findings`: the state plus every question's instructions and criteria. */
 export function estimateCorpusCost(findings: CorpusFinding[]): CostEstimate {
   let totalChars = 0;
+  const questionsText = JSON.stringify(DECISION_QUESTIONS);
   for (const f of findings) {
-    const state = buildState(f);
-    const stateText = JSON.stringify(state);
-    const questionsText = renderQuestionsAsPrompt();
-    totalChars += stateText.length + questionsText.length;
+    totalChars += JSON.stringify(buildState(f)).length + questionsText.length;
   }
   const tokens = estimateTokens("x".repeat(totalChars));
   return {

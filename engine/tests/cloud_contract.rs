@@ -451,6 +451,55 @@ fn the_event_request_declares_it_accepts_unsure() {
     assert_eq!(body["accepts"], serde_json::json!(["unsure"]), "{body}");
 }
 
+fn email_item() -> judge::EmailItem {
+    judge::EmailItem {
+        message_id: "msg-1".to_string(),
+        subject: "Quiz due".to_string(),
+        from: "prof@example.edu".to_string(),
+        date: "Tue, 22 Sep 2026 23:30:00 +0000".to_string(),
+        text: "Submit tonight.".to_string(),
+        known_courses: vec!["cs-100".to_string()],
+    }
+}
+
+/// T4 follow-up: `email_request` (used by the eval harness's parity check and §13's forwarding
+/// fallback, per its own doc comment — not by the production Gmail path) carries the vault's
+/// timezone when it has one, and the key is absent, never null or empty, when it does not.
+#[test]
+fn the_email_request_carries_the_vaults_timezone_when_given_one() {
+    let with_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some("America/Chicago"));
+    assert_eq!(with_tz["timezone"], serde_json::json!("America/Chicago"), "{with_tz}");
+
+    let without_tz = knowlu_engine::cloudmodel::email_request(&email_item(), None);
+    assert!(without_tz.get("timezone").is_none(), "{without_tz}");
+
+    let blank_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some(""));
+    assert!(blank_tz.get("timezone").is_none(), "{blank_tz}");
+}
+
+const EMPTY_GMAIL_REPLY: &str = r#"{"items":[],"more":false,"deferred":0}"#;
+
+/// The other half of the T4 follow-up: `pull_gmail_queue`'s `/gmail-read` body is the DOMINANT
+/// production path for email judgment (Gmail text never reaches the device, D12), so this is
+/// where a live, UTC-stamped evening email actually gets fixed.
+#[test]
+fn the_gmail_read_body_carries_the_vaults_timezone_when_given_one() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], Some("America/Chicago"));
+    let sent = server.requests().remove(0);
+    assert!(sent.contains("\"timezone\": \"America/Chicago\""), "{sent}");
+}
+
+#[test]
+fn the_gmail_read_body_has_no_timezone_key_when_the_vault_names_none() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], None);
+    let sent = server.requests().remove(0);
+    assert!(!sent.contains("timezone"), "{sent}");
+}
+
 #[test]
 fn tier1_still_answers_without_the_service_being_reached_at_all() {
     // The seam is unchanged (cloud design §3.2): a vendor-stated effort plus a pinned course is a

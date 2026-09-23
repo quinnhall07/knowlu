@@ -168,3 +168,99 @@ Deno.test("parseDateLine: an unparseable string is null, not a thrown error", ()
 Deno.test("parseDateLine: the empty string is null", () => {
   assertEquals(parseDateLine(""), null);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Due-fix (2026-09-23, from scoring the pinned email model against the labelled set): two bugs.
+//
+// 1. The model often writes an explicit date in LONG FORM, copied from the email --
+//    "Friday, September 18, 2026 11:59:00 PM CDT" -- and the resolver used to return null for it
+//    (6 of 50 real task emails lost their deadline). A long form is now accepted, its named US
+//    zone converted to the right instant and expressed on the student's own clock; an unknown
+//    zone, or a weekday that names a different day than the date, is null -- never a guess.
+// 2. Relative words were resolved against the Date header's own wall clock, which for mail a
+//    server stamped in UTC is the UTC calendar date -- a 23:30 CDT email's "tomorrow" came out a
+//    day late. They now resolve against the email's local date in the student's timezone (the
+//    vault's `config/ingest.yaml` `timezone`, sent on the request).
+// ---------------------------------------------------------------------------------------------
+
+interface ZonedRow extends Row {
+  timeZone: string | null | undefined;
+}
+
+// Wed 16 Sep 2026, 14:23 CDT -- the email that carries the long form.
+const WED = "Wed, 16 Sep 2026 14:23:00 -0500";
+const CHI = "America/Chicago";
+
+const ZONED_ROWS: ZonedRow[] = [
+  // -- long forms, on a Chicago clock (CDT, UTC-5, in September) --
+  { category: "long form: weekday, seconds, 12-hour, CDT (the form the model writes)", phrase: "Friday, September 18, 2026 11:59:00 PM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: no weekday", phrase: "September 18, 2026 11:59:00 PM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: no seconds", phrase: "Friday, September 18, 2026 11:59 PM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: 'at' before the time", phrase: "Friday, September 18, 2026 at 11:59 PM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: lower-case am/pm", phrase: "Friday, September 18, 2026 9:05 am CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T09:05" },
+  { category: "long form: 24-hour clock", phrase: "Friday, September 18, 2026 23:59 CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: date only, with weekday", phrase: "Friday, September 18, 2026", dateLine: WED, timeZone: CHI, expected: "2026-09-18" },
+  { category: "long form: date only, no weekday", phrase: "September 18, 2026", dateLine: WED, timeZone: CHI, expected: "2026-09-18" },
+  { category: "long form: abbreviated month 'Sept'", phrase: "Sept 18, 2026", dateLine: WED, timeZone: CHI, expected: "2026-09-18" },
+  { category: "long form: abbreviated weekday and month", phrase: "Fri, Sep 18, 2026 11:59 PM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+  { category: "long form: a time with no zone is the email's own wall clock, as stated", phrase: "Friday, September 18, 2026 11:59 PM", dateLine: WED, timeZone: CHI, expected: "2026-09-18T23:59" },
+
+  // -- each US zone, 10:00 AM on Fri 18 Sep 2026, onto a Chicago (CDT) clock --
+  { category: "zone CDT (UTC-5)", phrase: "September 18, 2026 10:00 AM CDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T10:00" },
+  { category: "zone CST (UTC-6)", phrase: "September 18, 2026 10:00 AM CST", dateLine: WED, timeZone: CHI, expected: "2026-09-18T11:00" },
+  { category: "zone EDT (UTC-4)", phrase: "September 18, 2026 10:00 AM EDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T09:00" },
+  { category: "zone EST (UTC-5)", phrase: "September 18, 2026 10:00 AM EST", dateLine: WED, timeZone: CHI, expected: "2026-09-18T10:00" },
+  { category: "zone MDT (UTC-6)", phrase: "September 18, 2026 10:00 AM MDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T11:00" },
+  { category: "zone MST (UTC-7)", phrase: "September 18, 2026 10:00 AM MST", dateLine: WED, timeZone: CHI, expected: "2026-09-18T12:00" },
+  { category: "zone PDT (UTC-7)", phrase: "September 18, 2026 10:00 AM PDT", dateLine: WED, timeZone: CHI, expected: "2026-09-18T12:00" },
+  { category: "zone PST (UTC-8)", phrase: "September 18, 2026 10:00 AM PST", dateLine: WED, timeZone: CHI, expected: "2026-09-18T13:00" },
+  { category: "zone conversion crosses midnight onto the next local day", phrase: "Friday, September 18, 2026 11:59 PM PDT", dateLine: WED, timeZone: CHI, expected: "2026-09-19T01:59" },
+  { category: "zone conversion onto an Eastern student's clock", phrase: "Friday, September 18, 2026 11:59 PM CDT", dateLine: WED, timeZone: "America/New_York", expected: "2026-09-19T00:59" },
+  { category: "zone CST in winter onto a Chicago (CST) clock", phrase: "Friday, December 4, 2026 11:59 PM CST", dateLine: WED, timeZone: CHI, expected: "2026-12-04T23:59" },
+
+  // -- long forms that are not sure -> null --
+  { category: "long form: unknown zone abbreviation", phrase: "Friday, September 18, 2026 11:59 PM XYZ", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: an ambiguous non-US abbreviation (BST) is unknown", phrase: "Friday, September 18, 2026 11:59 PM BST", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: weekday names a different day than the date", phrase: "Thursday, September 18, 2026 11:59 PM CDT", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: weekday inconsistent, date only", phrase: "Monday, September 18, 2026", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: not a real calendar day", phrase: "February 30, 2026", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: 13 PM is not a 12-hour time", phrase: "September 18, 2026 13:00 PM CDT", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: no year is not one calendar day", phrase: "Friday, September 18 11:59 PM CDT", dateLine: WED, timeZone: CHI, expected: null },
+  { category: "long form: a zoned time with no clock to put it on is null", phrase: "Friday, September 18, 2026 11:59 PM CDT", dateLine: "garbled, not a date", timeZone: null, expected: null },
+  { category: "long form: a date-only long form needs no clock", phrase: "Friday, September 18, 2026", dateLine: "garbled, not a date", timeZone: null, expected: "2026-09-18" },
+  { category: "long form: no student timezone falls back to the Date header's own offset (-0400)", phrase: "Friday, September 18, 2026 11:59 PM CDT", dateLine: "Wed, 16 Sep 2026 14:23:00 -0400", timeZone: undefined, expected: "2026-09-19T00:59" },
+
+  // -- relative words against the student's local date: the late-evening email --
+  // 23:30 CDT on Thu 17 Sep 2026 is 04:30 UTC on Fri 18 Sep. "tomorrow" is Friday the 18th.
+  { category: "evening email, CDT-stamped header: 'tomorrow' is the next local day", phrase: "tomorrow", dateLine: "Thu, 17 Sep 2026 23:30:00 -0500", timeZone: CHI, expected: "2026-09-18" },
+  { category: "evening email, UTC-stamped header: 'tomorrow' is the next LOCAL day, not UTC's", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-18" },
+  { category: "evening email, ISO Z date line: 'tomorrow'", phrase: "tomorrow", dateLine: "2026-09-18T04:30:00Z", timeZone: CHI, expected: "2026-09-18" },
+  { category: "evening email, UTC-stamped: 'today' is the local Thursday", phrase: "today", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-17" },
+  { category: "evening email, UTC-stamped: 'tonight' is the local Thursday", phrase: "tonight", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-17" },
+  { category: "evening email, UTC-stamped: 'tonight at 11:59pm'", phrase: "tonight at 11:59pm", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-17T23:59" },
+  { category: "evening email, UTC-stamped: bare weekday equal to the local day is today", phrase: "Thursday", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-17" },
+  { category: "evening email, UTC-stamped: 'this Friday' from the local Thursday", phrase: "this Friday", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-09-18" },
+  { category: "evening email, UTC-stamped: 'next Friday' is still null", phrase: "next Friday", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: null },
+  { category: "evening email, UTC-stamped: 'next week' is still null", phrase: "next week", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: null },
+
+  // -- the UTC-midnight boundary --
+  { category: "UTC midnight exactly is still the previous local evening: 'tomorrow'", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 00:00:00 +0000", timeZone: CHI, expected: "2026-09-18" },
+  { category: "local midnight (05:00 UTC in CDT) is the new local day: 'today'", phrase: "today", dateLine: "Fri, 18 Sep 2026 05:00:00 +0000", timeZone: CHI, expected: "2026-09-18" },
+  { category: "one minute before local midnight: 'today' is still Thursday", phrase: "today", dateLine: "Fri, 18 Sep 2026 04:59:00 +0000", timeZone: CHI, expected: "2026-09-17" },
+  { category: "east of UTC: 20:00 UTC Thursday is already Friday in Kolkata", phrase: "today", dateLine: "Thu, 17 Sep 2026 20:00:00 +0000", timeZone: "Asia/Kolkata", expected: "2026-09-18" },
+  { category: "'end of the month' on the local date, across a UTC month boundary", phrase: "end of the month", dateLine: "Thu, 1 Oct 2026 03:00:00 +0000", timeZone: CHI, expected: "2026-09-30" },
+  { category: "a named header zone (EDT) is converted too", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 00:30:00 EDT", timeZone: CHI, expected: "2026-09-18" },
+
+  // -- fallbacks when no student timezone is usable --
+  { category: "no timezone: the Date header's own offset is the clock (UTC-stamped -> UTC date)", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: undefined, expected: "2026-09-19" },
+  { category: "null timezone reads as none", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: null, expected: "2026-09-19" },
+  { category: "an unknown IANA name reads as none, never a thrown error", phrase: "tomorrow", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: "Not/AZone", expected: "2026-09-19" },
+  { category: "a header with no offset at all stays on its own wall clock", phrase: "tomorrow", dateLine: "2026-09-17T23:30:00", timeZone: CHI, expected: "2026-09-18" },
+  { category: "absolute passthrough is untouched by the timezone", phrase: "2026-10-01T17:00", dateLine: "Fri, 18 Sep 2026 04:30:00 +0000", timeZone: CHI, expected: "2026-10-01T17:00" },
+];
+
+for (const row of ZONED_ROWS) {
+  Deno.test(`resolveDue (zoned): ${row.category} (phrase=${JSON.stringify(row.phrase)}, tz=${JSON.stringify(row.timeZone)})`, () => {
+    assertEquals(resolveDue(row.phrase, row.dateLine, row.timeZone), row.expected, row.category);
+  });
+}

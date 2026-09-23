@@ -357,7 +357,7 @@ pub fn run_lines_with(
             ),
         };
     };
-    let model = crate::cloudmodel::CloudModel::new(client);
+    let model = crate::cloudmodel::CloudModel::new(client).with_timezone(crate::cli::vault_timezone_name(vault));
     // C2 Task 9 fix 1 (R-C2-E22 #2): the cloud arm's wall clock starts here, before the probe —
     // the events pass below shares `opts.budget` with the enrichment batch rather than getting a
     // fresh fifteen minutes of its own, and the two together must still land inside
@@ -581,6 +581,9 @@ pub fn pull_gmail(
     let mut deferred = 0u64;
     let mut ack: Vec<String> = Vec::new();
     let started = std::time::Instant::now();
+    // The vault's own clock, carried onto every `/gmail-read` call in this slot so a relative
+    // word ("tonight") in a message body resolves on the student's day, not the header's offset.
+    let timezone = crate::cli::vault_timezone_name(vault);
 
     for round in 0..PULL_ROUNDS {
         // R-C2-E42: the same discipline `judge_roster` uses — checked BEFORE the round, not
@@ -598,7 +601,7 @@ pub fn pull_gmail(
             }
             break;
         }
-        let pulled = match crate::cloudmodel::pull_gmail_queue(client, &ack) {
+        let pulled = match crate::cloudmodel::pull_gmail_queue(client, &ack, timezone.as_deref()) {
             Ok(got) => got,
             // R-C2-E41: a calendar-only grant is not a failure at all — a step left out, exactly
             // like `judge (skipped: no model)` — so it prints nothing rather than a line that
@@ -737,7 +740,7 @@ pub fn pull_gmail(
     }
 
     if !ack.is_empty() {
-        if let Err(e) = crate::cloudmodel::pull_gmail_queue(client, &ack) {
+        if let Err(e) = crate::cloudmodel::pull_gmail_queue(client, &ack, timezone.as_deref()) {
             lines.push(format!(
                 "gmail: {} written but not acknowledged ({e}); they will come back next slot",
                 ack.len()

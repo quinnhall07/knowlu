@@ -620,3 +620,18 @@ Deno.test("T9 fix 1: a model 'completion' from a sender with no template is left
   await readHandler(OK, deps)(post({ accepts: ["completion"] }));
   assertEquals(queued[0].tier, "completion");
 });
+
+// Due-fix (2026-09-23): the device sends the vault's timezone on `/gmail-read`, and the handler
+// hands it to the pipeline, so a UTC-stamped evening email's "tomorrow" is the next LOCAL day.
+Deno.test("the request's timezone reaches the due resolver for every message the read judges", async () => {
+  const { deps, queued } = fakes([{
+    tier: "task", title: "Submit lab writeup", course: null, due: "tomorrow",
+    effort_hours: 1, importance: 3, why: "the message sets a deadline", confidence: 0.9,
+  }], ["m1"], {
+    subject: "Lab writeup", from: "Instructor <instructor@example.invalid>",
+    date: "Fri, 18 Sep 2026 04:30:00 +0000", text: "Submit the writeup by tomorrow.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"], timezone: "America/Chicago" }));
+  assertEquals(queued.length, 1);
+  assertEquals(queued[0].payload.due, "2026-09-18");
+});

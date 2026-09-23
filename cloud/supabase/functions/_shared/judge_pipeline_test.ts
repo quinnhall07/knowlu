@@ -389,3 +389,39 @@ Deno.test("an undeclared event request still gets the three old words untouched"
   assertEquals(reply.outcome, "answered");
   assertEquals(reply.verdict?.verdict, "drop");
 });
+
+// Due-fix (2026-09-23): the request's `timezone` (the vault's own, sent by the device) reaches the
+// resolver, so a relative phrase resolves against the email's LOCAL date. The Date header here is
+// stamped in UTC, as server-sent mail often is: 04:30 UTC Friday is 23:30 CDT Thursday, so the
+// student's "tomorrow" is Friday the 18th -- the UTC calendar would have said the 19th.
+Deno.test("the request's timezone reaches the due resolver, so 'tomorrow' is the student's next local day", async () => {
+  const item = {
+    message_id: "gmail:7e0d1",
+    from: "instructor@example.edu",
+    subject: "Lab writeup",
+    date: "Fri, 18 Sep 2026 04:30:00 +0000",
+    text: "Submit the writeup by tomorrow.",
+  };
+  const verdict = {
+    tier: "task",
+    title: "Submit lab writeup",
+    course: null,
+    due: "tomorrow",
+    effort_hours: 1,
+    importance: 3,
+    why: "the message sets a deadline",
+    confidence: 0.9,
+  };
+  const row = { ...ROW, kind: "email" as const, prompt_version: "email-3", grammar_version: "email-1" };
+  const zoned = await judge("acct-1", { kind: "email", item, heuristics_seed: {}, timezone: "America/Chicago" }, {
+    ...deps(new ScriptedModel([verdict]), new Sink(), new Caps()),
+    row,
+  });
+  assertEquals(zoned.verdict?.due, "2026-09-18");
+  // No timezone on the request: the Date header's own offset (UTC here) is the only clock left.
+  const bare = await judge("acct-1", { kind: "email", item, heuristics_seed: {} }, {
+    ...deps(new ScriptedModel([verdict]), new Sink(), new Caps()),
+    row,
+  });
+  assertEquals(bare.verdict?.due, "2026-09-19");
+});
