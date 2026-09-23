@@ -680,7 +680,8 @@ pub fn load_discovered_events(
 
 /// F9: the paged, budgeted, clock-injected form. `now` builds Engage's `endsAfter`; `elapsed` is
 /// wall-clock time since the call began (production: a closure over one [`Instant`]; tests: a
-/// `Cell<Duration>` the fake fetcher advances). `judge_roster`'s call moves here in F10.
+/// `Cell<Duration>` the fake fetcher advances). `events::judge_roster` (F10) calls this directly,
+/// with its own budget capping `per_run` and its own `Instant` feeding `elapsed`.
 pub fn load_discovered_events_at(
     vault: &Path,
     fetcher: Option<&dyn Fn(&str) -> Result<String, String>>,

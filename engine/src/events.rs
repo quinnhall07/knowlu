@@ -360,10 +360,20 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// **Judged from the FEEDS, not from `state/events.md`.** `eventroster::read_roster` reconstructs
 /// six fields and hard-codes `source: "roster"`; the description, the categories, the audiences and
 /// the series uid — most of what the prompt is written around, and two of the four promotion
-/// features — are not in it. So this calls `eventfeed::load_discovered_events`, the same function
-/// `rank`'s events pass calls, through the same `Fetchers.events` seam and therefore through the
-/// same server-side proxy (hand-off H4). One extra fetch per slot buys a judgment that can see the
-/// event.
+/// features — are not in it. So this calls `eventfeed::load_discovered_events_at`, the same
+/// paged/budgeted fetch `rank`'s events pass calls (through `Fetchers.events`'s thin wrapper) and
+/// therefore through the same server-side proxy (hand-off H4). One extra fetch per slot buys a
+/// judgment that can see the event.
+///
+/// **Judges only what `rank` would keep (F10).** The feed can carry far more than the roster ever
+/// shows — events past the roster window, standing exhibits, `never` interests, staff-only
+/// audiences — and `rank` drops all of that unjudged (`cli.rs`'s own `prefilter_events` call).
+/// Paying the model for it is waste that F9's paging multiplies by about 30, so `pending` is drawn
+/// from `eventfilter::prefilter_events`'s survivors — the SAME call `rank` makes, never a copy, so
+/// the two commands' idea of "the roster" cannot drift apart. A new instance of an already-settled
+/// series (`eventemit::settled_series`) is excluded too: `rank`'s series inheritance answers it on
+/// the very next run, so judging it first would be waste, and a confident machine verdict would
+/// block the student's own answer (F1's supersede-`unsure`-only rule).
 ///
 /// **Writes only the ledger.** Nothing here writes `state/events.md` — `rank` regenerates it a few
 /// seconds later, and by then the verdicts are in the ledger it reads.
@@ -376,7 +386,10 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// with no bound of its own it could push up to `cap` sequential `/judge-event` calls (150 by
 /// default, 120 seconds each) well past `scheduler::CHILD_TIMEOUT`. Items cut by the budget are
 /// folded into the same "left for the next slot" line as items cut by `cap` — nothing is lost,
-/// and no slot is held for hours.
+/// and no slot is held for hours. **F10 (review I-3):** `started` is taken before the feed load, so
+/// time `load_discovered_events_at` spends paging Localist/Engage counts against this same budget
+/// instead of extending it; the feed's own `per_run` limit is `min(180s, budget)`, so the two
+/// budgets are never more than a heartbeat apart.
 pub fn judge_roster(
     vault: &Path,
     model: &dyn crate::judge::EventModel,
@@ -390,7 +403,23 @@ pub fn judge_roster(
     if !config.sources.iter().any(|s| s.enabled) {
         return lines;
     }
-    let (discovered, warnings) = crate::eventfeed::load_discovered_events(vault, fetch);
+    // F10 (review I-3, the `judge` side): `started` moves above the feed load, so paging time
+    // spends this pass's own budget rather than extending it — the item loop's
+    // `started.elapsed() >= budget` check below counts it too. The feed's own `per_run` bound is
+    // capped at this same `budget` (never more than the default 180s), so the cloud arm's overall
+    // bound stays `BATCH_BUDGET` (15 min) plus one call in flight, inside `CHILD_TIMEOUT`.
+    let started = std::time::Instant::now();
+    let limits = crate::eventfeed::PagingLimits {
+        per_source: std::time::Duration::from_secs(90),
+        per_run: std::cmp::min(std::time::Duration::from_secs(180), budget),
+    };
+    let (discovered, warnings) = crate::eventfeed::load_discovered_events_at(
+        vault,
+        fetch,
+        jiff::Timestamp::now(),
+        limits,
+        &move || started.elapsed(),
+    );
     for warning in warnings {
         lines.push(format!("events: {warning}"));
     }
@@ -403,13 +432,26 @@ pub fn judge_roster(
         .map(|t| crate::judge::clip(t.trim(), crate::judge::MAX_PREFS_CHARS))
         .unwrap_or_default();
 
-    let pending: Vec<&DiscoveredEvent> = discovered
+    // F10: judge only what `rank` would keep. `eventfilter::prefilter_events` is the SAME call
+    // `cli.rs`'s events pass makes (never a copy), so the two commands' idea of "the roster"
+    // cannot drift apart. The filtered half is `rank`'s to audit (`· filtered` in the roster);
+    // `judge` just stops paying to have them judged.
+    let (filter_interests, _) = load_interests(&vault.join("profile").join("interests.md"));
+    let (candidates, _filtered) =
+        crate::eventfilter::prefilter_events(&discovered, &filter_interests, &config, today);
+
+    // F10 decision 2 (review I-1, the `judge` side): a new instance of an already-settled series
+    // is answered by `rank`'s series inheritance on its next run (F2) — paying the model for it
+    // first would be waste, and a confident machine verdict would block the student's own answer
+    // (F1's supersede-`unsure`-only rule).
+    let settled = crate::eventemit::settled_series(vault);
+    let pending: Vec<&DiscoveredEvent> = candidates
         .iter()
         .filter(|e| ledger.get(&e.uid).and_then(|entry| entry.verdict.as_ref()).is_none())
+        .filter(|e| !settled.contains_key(&e.series_uid))
         .collect();
     let left_for_cap = pending.len().saturating_sub(cap);
     let batch: Vec<&DiscoveredEvent> = pending.into_iter().take(cap).collect();
-    let started = std::time::Instant::now();
     let mut judged = 0usize;
     let mut processed = 0usize;
 
@@ -1049,6 +1091,193 @@ mod tests {
         let summary = lines.last().expect("a summary line");
         assert!(summary.starts_with("events: 1 judged"), "only the first item should have started: {summary}");
         assert!(summary.contains("1 left"), "the other one must be folded into the existing line: {summary}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- F10: judge only what `rank` would keep -----------------------------------------
+
+    /// Four invented events, one per `eventfilter::prefilter_events` rule: past the roster
+    /// window, a standing exhibit, a `never`-interest match, and an audience with no inclusive
+    /// label survives. `judge_roster` must choose `pending` from the SAME prefilter `rank` uses
+    /// (never a copy), so none of the four ever reach the model or the ledger.
+    #[test]
+    fn judge_roster_does_not_pay_for_an_event_rank_would_filter() {
+        let dir = std::env::temp_dir().join(format!("knowlu-f10-filtered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("profile")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: campus\n    type: localist\n    url: https://example.invalid/localist\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        std::fs::write(dir.join("profile").join("interests.md"), "---\nnever:\n  - greek life\n---\n")
+            .expect("write interests.md");
+        // 101: starts 2027-01-01, past the 90-day roster window. 102: a multi-week exhibit
+        // starting at midnight. 103: title matches the `never` term "greek life". 104: its only
+        // audience, Faculty/Staff, is excluded — nothing inclusive survives.
+        let payload = "{\"events\": [\
+            {\"event\": {\"id\": 101, \"title\": \"Winter Gala\", \
+                \"filters\": {\"event_target_audience\": [{\"name\": \"Students\"}]}, \
+                \"event_instances\": [{\"event_instance\": {\
+                    \"start\": \"2027-01-01T12:00:00-06:00\", \"end\": \"2027-01-01T13:00:00-06:00\"}}]}}, \
+            {\"event\": {\"id\": 102, \"title\": \"Made in America Exhibit\", \
+                \"filters\": {\"event_target_audience\": [{\"name\": \"Students\"}]}, \
+                \"event_instances\": [{\"event_instance\": {\
+                    \"start\": \"2026-08-21T00:00:00-05:00\", \"end\": \"2026-09-30T00:00:00-05:00\"}}]}}, \
+            {\"event\": {\"id\": 103, \"title\": \"Greek Life Rush Night\", \
+                \"filters\": {\"event_target_audience\": [{\"name\": \"Students\"}]}, \
+                \"event_instances\": [{\"event_instance\": {\
+                    \"start\": \"2026-08-29T18:00:00-05:00\", \"end\": \"2026-08-29T19:00:00-05:00\"}}]}}, \
+            {\"event\": {\"id\": 104, \"title\": \"Staff Meeting\", \
+                \"filters\": {\"event_target_audience\": [{\"name\": \"Faculty/Staff\"}]}, \
+                \"event_instances\": [{\"event_instance\": {\
+                    \"start\": \"2026-08-29T09:00:00-05:00\", \"end\": \"2026-08-29T10:00:00-05:00\"}}]}}\
+        ]}"
+        .to_string();
+        let fetch = |_: &str| Ok(payload.clone());
+
+        struct NeverCalled<'a>(&'a std::cell::RefCell<Vec<String>>);
+        impl crate::judge::EventModel for NeverCalled<'_> {
+            fn judge_event(
+                &self,
+                item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                self.0.borrow_mut().push(item.uid.clone());
+                Ok(verdict("opportunity", "should never be reached"))
+            }
+        }
+        let seen = std::cell::RefCell::new(Vec::new());
+        let model = NeverCalled(&seen);
+
+        let lines = judge_roster(&dir, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert!(seen.borrow().is_empty(), "the model must never be called for an event rank would filter: {:?}", seen.borrow());
+        assert!(lines.iter().any(|l| l.starts_with("events: 0 judged")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&dir, None);
+        for uid in ["localist:101", "localist:102", "localist:103", "localist:104"] {
+            assert!(ledger.get(uid).is_none(), "{uid} must have no ledger line: {ledger:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half: an ordinary event — inside the window, not a standing exhibit, no
+    /// `never` match, an inclusive audience — must still reach the model exactly as before F10.
+    #[test]
+    fn judge_roster_still_judges_a_survivor() {
+        let (vault, feed) = scratch_vault_with_feed("survivor");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("opportunity", "matches the stated interests"))]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert!(lines.iter().any(|l| l.contains("engage:2") && l.contains("opportunity")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger["ics:engage:2"].verdict.as_deref(), Some("opportunity"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// F10 decision 2 (review I-1, the `judge` side): a series whose event-check card was
+    /// answered (`executed`) gives its later instances the same answer through `rank`'s series
+    /// inheritance (F2) on the very next run. Paying the model to judge a new instance first
+    /// would be waste, and a confident machine verdict written here would block the student's
+    /// own answer landing next (F1's supersede-`unsure`-only rule).
+    #[test]
+    fn judge_roster_does_not_judge_a_new_instance_of_a_settled_series() {
+        let dir = std::env::temp_dir().join(format!("knowlu-f10-settled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("archive")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: campus\n    type: localist\n    url: https://example.invalid/localist\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        let card = "---\ntype: approval\nkind: event-check\ntitle: \"Weekly Standup\"\nstatus: executed\n\
+                     source_uid: \"localist:77:1\"\nseries_uid: \"localist:77\"\nevents:\n- \"localist:77:1\"\n\
+                     proposed_at: 2026-08-20\nfirst_proposed_at: 2026-08-20\nexpires: 2026-08-24\n\
+                     snooze_until: null\ncreated_by: events\n---\n\nbody\n";
+        std::fs::write(dir.join("archive").join("event-check-weekly.md"), card).expect("write card");
+        // A NEW instance (id 2) of series `localist:77`, never seen before.
+        let payload = "{\"events\": [{\"event\": {\"id\": 77, \"title\": \"Weekly Standup\", \
+            \"filters\": {\"event_target_audience\": [{\"name\": \"Students\"}]}, \
+            \"event_instances\": [{\"event_instance\": {\"id\": 2, \
+                \"start\": \"2026-08-29T10:00:00-05:00\", \"end\": \"2026-08-29T11:00:00-05:00\"}}]}}]}"
+            .to_string();
+        let fetch = |_: &str| Ok(payload.clone());
+
+        struct NeverCalled<'a>(&'a std::cell::RefCell<Vec<String>>);
+        impl crate::judge::EventModel for NeverCalled<'_> {
+            fn judge_event(
+                &self,
+                item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                self.0.borrow_mut().push(item.uid.clone());
+                Ok(verdict("opportunity", "should never be reached"))
+            }
+        }
+        let seen = std::cell::RefCell::new(Vec::new());
+        let model = NeverCalled(&seen);
+
+        let lines = judge_roster(&dir, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert!(seen.borrow().is_empty(), "a new instance of a settled series must not reach the model: {:?}", seen.borrow());
+        assert!(lines.iter().any(|l| l.starts_with("events: 0 judged")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&dir, None);
+        assert!(ledger.get("localist:77:2").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F10 decision 1 (review I-3, the `judge` side): `started` moves above the feed load, so
+    /// time the feed spends paging (here, one slow source's own fetch) counts against the item
+    /// loop's wall-clock budget — the same pattern
+    /// `the_events_pass_stops_at_its_wall_clock_budget_and_reports_the_remainder` proves for the
+    /// model call, now proved for the fetch itself. The truncation warning
+    /// (`load_discovered_events_at`'s own "skipped (run time budget)") reaches the output as an
+    /// `events:` line, like every feed warning today.
+    #[test]
+    fn judge_roster_paging_time_counts_against_its_budget() {
+        let dir = std::env::temp_dir().join(format!("knowlu-f10-pagingbudget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: slow\n    type: ics\n    url: https://example.invalid/slow.ics\n    enabled: true\n  - name: fast\n    type: ics\n    url: https://example.invalid/fast.ics\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        let feed = "BEGIN:VCALENDAR\r\n\
+             BEGIN:VEVENT\r\nUID:slow:1\r\nSUMMARY:Slow Feed Event\r\n\
+             DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\nEND:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+            .to_string();
+        let fetch = |url: &str| {
+            if url.contains("slow") {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            Ok(feed.clone())
+        };
+
+        struct NeverCalled<'a>(&'a std::cell::RefCell<Vec<String>>);
+        impl crate::judge::EventModel for NeverCalled<'_> {
+            fn judge_event(
+                &self,
+                item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                self.0.borrow_mut().push(item.uid.clone());
+                Ok(verdict("drop", "should never be reached"))
+            }
+        }
+        let seen = std::cell::RefCell::new(Vec::new());
+        let model = NeverCalled(&seen);
+
+        let lines = judge_roster(&dir, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_millis(20));
+        assert!(seen.borrow().is_empty(), "the paging time already spent the budget: {:?}", seen.borrow());
+        assert!(
+            lines.iter().any(|l| l == "events: fast: skipped (run time budget)"),
+            "the truncation warning must reach the output as an events: line: {lines:?}"
+        );
+        let summary = lines.last().expect("a summary line");
+        assert!(summary.starts_with("events: 0 judged"), "no item should have started: {summary}");
+        assert!(summary.contains("1 left"), "the remainder line must name every pending event: {summary}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
