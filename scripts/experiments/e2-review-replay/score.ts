@@ -155,7 +155,14 @@ export interface ScoredSummary {
   failed: string[];
   severity: LabelScore & { demotions: string[] };
   disposition: LabelScore;
-  blocks: { n: number; positives: number; auroc: number | null; brier: number | null };
+  blocks: {
+    n: number;
+    positives: number;
+    auroc: number | null;
+    brier: number | null;
+    /** `blocks >= 0.5` read as "critical or important" — the natural cut, not one fitted to the data. */
+    accuracyAtHalf: BaselineResult;
+  };
   costUsd: number;
   inputTokens: number;
   outputTokens: number;
@@ -218,6 +225,11 @@ export function scoreResults(items: ItemResult[]): ScoredSummary {
       positives: serious.filter(Boolean).length,
       auroc: auroc(blocksP, serious),
       brier: answered.length === 0 ? null : brier(blocksP, serious),
+      accuracyAtHalf: (() => {
+        const correct = blocksP.filter((p, i) => (p >= 0.5) === serious[i]).length;
+        const n = blocksP.length;
+        return { n, correct, accuracy: n === 0 ? 0 : correct / n, ci95: wilsonInterval(correct, n) };
+      })(),
     },
     costUsd: answered.reduce((a, it) => a + it.reply.usage.costUsd, 0),
     inputTokens: answered.reduce((a, it) => a + it.reply.usage.inputTokens, 0),

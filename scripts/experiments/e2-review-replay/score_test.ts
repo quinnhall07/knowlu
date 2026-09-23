@@ -152,6 +152,9 @@ Deno.test("scoreResults: accuracy with a Wilson CI, confusion, demotions, dispos
   // blocks vs severity in {critical, important}: a=0.9 (pos), b=0.2 (pos), c=0.1 (neg) -> both pairs right.
   assertEquals(s.blocks.auroc, 1);
   assertEquals(s.blocks.positives, 2);
+  // blocks >= 0.5 read as "critical or important": a (0.9, pos) right, b (0.2, pos) wrong, c (0.1, neg) right.
+  assertEquals(s.blocks.accuracyAtHalf.correct, 2);
+  assertEquals(s.blocks.accuracyAtHalf.n, 3);
   assertAlmostEquals(s.blocks.brier!, ((0.1) ** 2 + (0.8) ** 2 + (0.1) ** 2) / 3);
   // grade confidence: right a=0.9, c=0.8; wrong b=0.3 -> separates perfectly.
   assertEquals(s.severity.confidence.auroc, 1);
