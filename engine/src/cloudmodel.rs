@@ -535,7 +535,7 @@ pub struct GmailItem {
 /// `timezone` is the vault's own IANA name (`cli::vault_timezone_name`) — an optional key so the
 /// due resolver can convert a relative word ("tonight") onto the student's clock instead of the
 /// email header's own offset. Omitted entirely, never sent null or empty, when the vault names
-/// none (T4 follow-up: the report at `.superpowers/sdd/2026-09-22-judgment-quality-plan/`).
+/// none (T4 follow-up to `_shared/judge_due.ts`).
 pub fn email_request(item: &judge::EmailItem, timezone: Option<&str>) -> Value {
     let mut body = json!({
         "kind": "email",
