@@ -45,6 +45,8 @@ What the vault, the logs and staging showed (all verified, not inferred):
 
 - **D1 (R-C1c-1).** The first slot at Finish runs the judge. A cloud vault whose entitlement is not yet cached refreshes it
   inside the slot, before the judge decision; only a refusal from the service (not a missing cache) is a named skip.
+  Amended 2026-09-23 (Quinn, R-C1c-7): an account's first two UTC judging days charge against twice each daily cap
+  (`charge_call`, migration `20260923000100`); `DAILY_CAP` itself is unchanged.
 - **D2 (R-C1c-2, direction).** Work starts as onboarding gathers information, wherever the friends-shell design's Decision 3
   ("nothing reaches this machine's disk before Finish") allows. Device-side that means: the first slot starts the instant the
   vault exists (already true) and the console shows it running (§6). Server-side pre-work — fetching and pre-judging the LMS
