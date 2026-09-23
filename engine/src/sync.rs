@@ -883,10 +883,18 @@ pub fn unexpected_notes(vault: &Path, tolerate: &[String]) -> Vec<String> {
 /// its durability guarantee to fix one caller would change it for all of them. Documented rather
 /// than silently left, per the fix round's own instruction.
 ///
-/// **`touched` (fix round 2, N5)**: every filesystem effect this call has, recorded as it happens —
-/// see [`Touched`]. `restore`'s own one-shot callers pass a throwaway accumulator they never read;
-/// [`restore_all`] threads one across every page so a later page's failure can undo them all.
-pub fn materialise(dest: &Path, page: &Pulled, touched: &mut Touched) -> Restored {
+/// **`state` (fix round 2/3, N5/R2/R4)**: every filesystem effect this call has, and every fact the
+/// cursor and a rollback need afterward — see [`RestoreState`]. `restore`'s own one-shot caller
+/// builds one it never reads back except to settle its own tombstones immediately after; `restore_all`
+/// threads one across every page so a later page's failure can undo them all and a completed restore
+/// can settle every tombstone once, at the very end (R2).
+///
+/// **Private to this module (R3, fix round 3).** The brief's own pin was `pub fn materialise(&Path,
+/// &Pulled) -> Restored`; nothing outside `sync.rs` has ever called it (confirmed by grep, both
+/// rounds this drifted), so rather than keep a wrapper around the tracked version for a caller that
+/// does not exist, the tracked version simply is not `pub` at all — narrower than `pub(crate)`, since
+/// no OTHER module needs it either.
+fn materialise(dest: &Path, page: &Pulled, state: &mut RestoreState) -> Restored {
     let mut out = Restored { warnings: page.warnings.clone(), ok: true, ..Default::default() };
     let ledger = crate::ledger::JsonlLedger::new(dest.join("state").join("journal"));
     for (_, record) in &page.records {
@@ -916,7 +924,7 @@ pub fn materialise(dest: &Path, page: &Pulled, touched: &mut Touched) -> Restore
         let before_files = journal_files(dest);
         let mut safe = true;
         for f in &before_files {
-            if let Err(e) = touched.before_write(f) {
+            if let Err(e) = state.touched.before_write(f) {
                 out.warnings.push(format!("restore: a record could not be journalled safely (an existing day file could not be read: {e})"));
                 safe = false;
                 break;
@@ -933,104 +941,130 @@ pub fn materialise(dest: &Path, page: &Pulled, touched: &mut Touched) -> Restore
                 // a moment ago, so there is nothing to read).
                 for f in journal_files(dest) {
                     if !before_files.contains(&f) {
-                        touched.mark_created(&f);
+                        state.touched.mark_created(&f);
                     }
                 }
+                // R4: the ts and hash of a record ACTUALLY appended, in the order it happened — the
+                // cursor advances over exactly this, never over every well-formed row `page` carried
+                // whether or not its own append actually succeeded.
+                let ts = record.get("ts").and_then(Value::as_str).unwrap_or_default().to_string();
+                let hash = sha256_hex(crate::ledger::dumps_value(&Value::Object(record.clone())).as_bytes());
+                state.confirmed_records.push((ts, hash));
             }
             Err(e) => out.warnings.push(format!("restore: a record could not be journalled ({e})")),
         }
     }
-    // I4: a tombstone whose path is already on disk can only be one of the tolerated seeds — restore
-    // never resurrects a path it has already settled, and nothing else is here yet. Settled with
-    // `apply`'s own tombstone semantics (`write::delete`, under `sync::ACTOR` so `build_push` never
-    // sends it back up as a new local delete) — not a raw file removal, so the seed's history is
-    // archived exactly the way a real desktop's own delete already is, and a live note this same page
-    // sends for the archived path (below) still wins whatever it says.
-    //
-    // **Tombstones before live rows, always** (mirrors `apply`'s own O1 ordering): a seed tombstoned
-    // to `archive/<name>.md` and a pulled live note landing at that same archive path are the two
-    // halves of one real event — the OTHER desktop deleted the seed and pushed its own archived copy
-    // — and processing the tombstone first is what lets the live write below land cleanly on the slot
-    // `write::delete` just freed, with the account's own text, rather than racing it for the name or
-    // leaving the seed's stale body sitting there.
-    let mut journal = Journal::new(dest);
-    let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: "dashboard".to_string(), run_id: None };
-    let ordered_notes: Vec<&PulledNote> = page
-        .notes
-        .iter()
-        .filter(|n| n.text.is_none())
-        .chain(page.notes.iter().filter(|n| n.text.is_some()))
-        .collect();
-    for note in ordered_notes {
+    // R2 (fix round 3): a tombstone is COLLECTED here, never executed — settled once, by
+    // [`settle_tombstones`], only after every page a restore needed has already succeeded. Before
+    // this round, a tombstone was settled the moment its page arrived, so a LATER page's failure
+    // left a `delete` record in the journal and the seed already moved to `archive/`, with nothing
+    // in `Touched` to undo either (the round 2 bug this closes): `write::delete`'s own journal
+    // append was never captured, and a rollback that DID know to undo the move still could not put
+    // the `delete` record back out of the journal.
+    for note in &page.notes {
+        if note.text.is_some() {
+            continue;
+        }
         if !is_note_path(dest, &note.path) {
             out.warnings.push("restore: a note named a path outside the vault's notes".to_string());
             continue;
         }
+        if exact_case_exists(&dest.join(&note.path)) {
+            state.pending_tombstones.push(note.path.clone());
+        }
+        // Else: the ordinary case — there really is nothing on disk yet for this path.
+    }
+    for note in &page.notes {
+        let Some(text) = note.text.as_deref() else { continue };
+        if !is_note_path(dest, &note.path) {
+            out.warnings.push("restore: a note named a path outside the vault's notes".to_string());
+            continue;
+        }
+        // I5: shared with `apply`'s own guard — see `note_is_foreign_sync_card`.
+        if note_is_foreign_sync_card(text) {
+            out.warnings.push(format!(
+                "restore: {} — a sync amend card from the account was refused (it can only be answered on the device that filed it)",
+                note.path
+            ));
+            continue;
+        }
         let file = dest.join(&note.path);
-        match &note.text {
-            None => {
-                if exact_case_exists(&file) {
-                    // N5: the seed's own bytes, captured before the move — a rollback writes them
-                    // straight back to this exact path, which is what undoes a settle (as opposed to
-                    // a plain delete, which `write::delete`'s own rename is not: the file moves, it
-                    // is never unlinked).
-                    if let Err(e) = touched.before_write(&file) {
-                        out.warnings.push(format!(
-                            "restore: {} could not be settled safely (its current content could not be read: {e})",
-                            note.path
-                        ));
-                        continue;
-                    }
-                    match crate::write::delete(dest, &note.path, &ctx, &mut journal) {
-                        Ok(archived_to) => {
-                            // The destination is `write::delete`'s own `free_slot` choice, made
-                            // during the call above — there is no "before" moment to read it at, but
-                            // it is new by construction, so it is marked rather than snapshotted.
-                            touched.mark_created(&archived_to);
-                            out.notes += 1;
-                        }
-                        Err(e) => out.warnings.push(format!("restore: {} could not be settled ({e})", note.path)),
-                    }
-                }
-                // Else: the ordinary case — there really is nothing on disk yet for this path.
-            }
-            Some(text) => {
-                // I5: shared with `apply`'s own guard — see `note_is_foreign_sync_card`.
-                if note_is_foreign_sync_card(text) {
-                    out.warnings.push(format!(
-                        "restore: {} — a sync amend card from the account was refused (it can only be answered on the device that filed it)",
-                        note.path
-                    ));
-                    continue;
-                }
-                // N5: captures "did not exist" (a new note) or the seed's own bytes (an overwrite) —
-                // either way, the ONE call that tells a rollback what belongs at this path.
-                if let Err(e) = touched.before_write(&file) {
-                    out.warnings.push(format!(
-                        "restore: {} could not be written safely (its current content could not be read: {e})",
-                        note.path
-                    ));
-                    continue;
-                }
-                if let Some(parent) = file.parent() {
-                    // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
-                    touched.note_dir(parent);
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match crate::pystr::write_text(&file, text) {
-                    Ok(()) => out.notes += 1,
-                    Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
+        // N5: captures "did not exist" (a new note) or the seed's own bytes (an overwrite) — either
+        // way, the ONE call that tells a rollback what belongs at this path.
+        if let Err(e) = state.touched.before_write(&file) {
+            out.warnings.push(format!(
+                "restore: {} could not be written safely (its current content could not be read: {e})",
+                note.path
+            ));
+            continue;
+        }
+        if let Some(parent) = file.parent() {
+            // A pulled `courses/` path has to work on a vault that has no `courses/` yet.
+            state.touched.note_dir(parent);
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match crate::pystr::write_text(&file, text) {
+            Ok(()) => {
+                out.notes += 1;
+                // R4: hash what is ACTUALLY on disk now that the write is confirmed to have
+                // succeeded — never assumed just because `page` carried a live row for this path.
+                if let Ok(on_disk) = crate::pystr::read_text(&file) {
+                    state.written_notes.insert(note.path.clone(), sha256_hex(on_disk.as_bytes()));
                 }
             }
+            Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
         }
     }
     out.empty = out.notes == 0 && out.records == 0;
     out
 }
 
-/// One page into a folder whose contents the caller vouches for. No rollback concept of its own —
-/// callers that need one (only [`restore_all`]) thread their own [`Touched`] through
-/// [`materialise`] directly; this one-shot form's accumulator is built and discarded here.
+/// R2 (fix round 3): every collected tombstone, settled — once, and only once every page a restore
+/// needed has already succeeded (the caller's own job to guarantee: [`restore`] calls this right
+/// after its one and only page, [`restore_all`] only after its whole paging loop breaks out
+/// normally, never on the error path). `apply`'s own tombstone semantics: `write::delete`, under
+/// [`ACTOR`] so `build_push` never sends it back up as a new local delete.
+fn settle_tombstones(dest: &Path, paths: &[String], touched: &mut Touched) -> (usize, Vec<String>) {
+    let mut settled = 0;
+    let mut warnings = Vec::new();
+    if paths.is_empty() {
+        return (settled, warnings);
+    }
+    let mut journal = Journal::new(dest);
+    let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: "dashboard".to_string(), run_id: None };
+    for rel in paths {
+        let file = dest.join(rel);
+        if !exact_case_exists(&file) {
+            // Already gone (another entry in `paths` for the same spot, however that could happen)
+            // or genuinely never there — nothing to settle either way.
+            continue;
+        }
+        if let Err(e) = touched.before_write(&file) {
+            warnings.push(format!("restore: {rel} could not be settled safely (its current content could not be read: {e})"));
+            continue;
+        }
+        let before_files = journal_files(dest);
+        match crate::write::delete(dest, rel, &ctx, &mut journal) {
+            Ok(archived_to) => {
+                // The destination is `write::delete`'s own `free_slot` choice, made during the call
+                // above — there is no "before" moment to read it at, but it is new by construction,
+                // so it is marked rather than snapshotted.
+                touched.mark_created(&archived_to);
+                for f in journal_files(dest) {
+                    if !before_files.contains(&f) {
+                        touched.mark_created(&f);
+                    }
+                }
+                settled += 1;
+            }
+            Err(e) => warnings.push(format!("restore: {rel} could not be settled ({e})")),
+        }
+    }
+    (settled, warnings)
+}
+
+/// One page into a folder whose contents the caller vouches for. No paging concept of its own — the
+/// one page IS the last page, so its own tombstones are settled immediately after, the same call.
 pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restored, SyncError> {
     if let Some(stray) = unexpected_notes(dest, tolerate).first() {
         // Named, not counted: a student reading this needs to know WHICH note made the folder
@@ -1038,8 +1072,13 @@ pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restor
         // thing this module could do.
         return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
     }
-    let mut touched = Touched::default();
-    Ok(materialise(dest, page, &mut touched))
+    let mut state = RestoreState::default();
+    let mut out = materialise(dest, page, &mut state);
+    let (settled, warnings) = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
+    out.notes += settled;
+    out.warnings.extend(warnings);
+    out.empty = out.notes == 0 && out.records == 0;
+    Ok(out)
 }
 
 /// N5's own boundary rule: every file currently in `dest`'s journal folder, by name — a plain
@@ -1057,9 +1096,10 @@ fn journal_files(dest: &Path) -> Vec<PathBuf> {
 /// design, and the bug that round left behind: a snapshot that could not READ some unrelated file
 /// elsewhere in the tree treated it as "did not exist", and a rollback then deleted that file for no
 /// reason but the transient read failure). Recording only the paths this call is ABOUT to touch
-/// means a rollback can never reach past them — the fix's whole point.
+/// means a rollback can never reach past them — the fix's whole point. Private (R3): opaque, no
+/// `pub` field or method, and only ever built and read from within this module.
 #[derive(Debug, Default)]
-pub struct Touched {
+struct Touched {
     /// `(path, its bytes immediately before this call touched it, or `None` if it did not exist)`.
     /// At most one entry per path — the FIRST state seen — so several appends to the same journal
     /// day file, still undo to the one true "before this call" state. Replayed on rollback:
@@ -1134,53 +1174,42 @@ impl Touched {
     }
 }
 
-/// N1 (fix round 2): what ONE pulled page adds to the cursor a restore leaves behind — every note
-/// path THIS PAGE'S OWN rows actually landed on, hashed from what is now on disk (never a whole-tree
-/// scan: a scaffold seed this page never touched must not earn an entry here, or the wizard's own
-/// local writes — the seeds, onboarding's config, their `create` records — would look, to the very
-/// next push, like the account already had them; that was the round 1 bug). Records:
-/// `pushed_through`/`boundary` advance only over records THIS page appended, in wire order, exactly
-/// the way `build_push` advances them over its own — so the cursor looks like a completed
-/// pull-then-push happened, restricted to what the account actually sent.
-fn cursor_after_page(dest: &Path, page: &Pulled, cursor: &mut Cursor) {
-    for (_, record) in &page.records {
-        if record_is_well_formed(record).is_err() {
-            continue;
-        }
-        if record_is_foreign_actor(record) {
-            continue;
-        }
-        if !is_note_path(dest, record.get("path").and_then(Value::as_str).unwrap_or_default()) {
-            continue;
-        }
-        let ts = record.get("ts").and_then(Value::as_str).unwrap_or_default().to_string();
-        let hash = sha256_hex(crate::ledger::dumps_value(&Value::Object(record.clone())).as_bytes());
-        if ts != cursor.pushed_through {
-            cursor.pushed_through = ts;
+/// Fix round 3 (R2, R3, R4): everything a paged restore accumulates across every page it
+/// materialises, threaded through by `&mut` rather than re-derived afterward from `page` a second
+/// time — R4's own bug was exactly that: a cursor built independently, by re-checking `page` against
+/// the same acceptance rules `materialise` already ran, could not tell "the write actually
+/// succeeded" from "materialise skipped it", and recorded a hash for the latter anyway. Private, like
+/// [`Touched`] (R3): built and read only within this module.
+#[derive(Debug, Default)]
+struct RestoreState {
+    touched: Touched,
+    /// R2: every tombstone `materialise` has seen so far, collected but never executed. See
+    /// [`settle_tombstones`].
+    pending_tombstones: Vec<String>,
+    /// R4: the path and hash of every live note `materialise` ACTUALLY wrote, confirmed by reading
+    /// the file back after the write succeeded.
+    written_notes: std::collections::BTreeMap<String, String>,
+    /// R4: the ts and hash of every record `materialise` ACTUALLY appended, in the order it
+    /// happened.
+    confirmed_records: Vec<(String, String)>,
+}
+
+/// N1 (fix round 2), R4 (fix round 3): what accumulated [`RestoreState`] adds to the cursor a
+/// restore leaves behind — every note path a page's OWN rows actually landed on, and the
+/// `pushed_through`/`boundary` advance over records actually appended, in the order they happened.
+/// Never re-derived from `page` (that was R4's bug): only [`RestoreState::written_notes`] and
+/// [`RestoreState::confirmed_records`], which `materialise` populates itself, at the moment each
+/// write is confirmed to have landed.
+fn fold_confirmed(state: &RestoreState, cursor: &mut Cursor) {
+    for (ts, hash) in &state.confirmed_records {
+        if ts != &cursor.pushed_through {
+            cursor.pushed_through = ts.clone();
             cursor.boundary.clear();
         }
-        cursor.boundary.push(hash);
+        cursor.boundary.push(hash.clone());
     }
-    for note in &page.notes {
-        if !is_note_path(dest, &note.path) {
-            continue;
-        }
-        match &note.text {
-            // A tombstone this page settled removes the path from the cursor's own bookkeeping too:
-            // nothing of the account's text sits there any more, so its hash must not be remembered
-            // as "matches the account" the way a genuinely restored note's does.
-            None => {
-                cursor.notes.remove(&note.path);
-            }
-            Some(text) => {
-                if note_is_foreign_sync_card(text) {
-                    continue;
-                }
-                if let Ok(on_disk) = crate::pystr::read_text(&dest.join(&note.path)) {
-                    cursor.notes.insert(note.path.clone(), sha256_hex(on_disk.as_bytes()));
-                }
-            }
-        }
+    for (path, hash) in &state.written_notes {
+        cursor.notes.insert(path.clone(), hash.clone());
     }
 }
 
@@ -1188,7 +1217,7 @@ fn cursor_after_page(dest: &Path, page: &Pulled, cursor: &mut Cursor) {
 /// second page would otherwise see the notes the first one wrote and refuse itself.
 ///
 /// **I2 (fix round 1): all or nothing.** A failure pulling any page — including the first — undoes
-/// every page this call itself materialised (`touched.rollback()`, N5's precise tracking) and
+/// every page this call itself materialised (`state.touched.rollback()`, N5's precise tracking) and
 /// returns the folder to exactly what it held before the loop started, so a half-filled vault
 /// reported as `empty: true` (the bug: real files on disk, a count of zero) can no longer happen.
 /// **No run lock is taken here** (M4): `RunLock` exists to keep the slot's own `sync` child, the
@@ -1196,11 +1225,16 @@ fn cursor_after_page(dest: &Path, page: &Pulled, cursor: &mut Cursor) {
 /// and none of those three can target this one — there is no profile until `finish_or_roll_back`
 /// returns, a few lines after `restore_into`'s own call into this function, so nothing else can be
 /// pointed at `dest` until this has already finished.
+///
+/// **R2 (fix round 3): tombstones settle only after the loop breaks out normally.** A page that
+/// fails leaves every tombstone collected so far unsettled — nothing was ever written for it, so
+/// there is nothing to roll back, and the seed it would have settled is exactly where the wizard
+/// left it.
 pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerate: &[String]) -> Result<Restored, SyncError> {
     if let Some(stray) = unexpected_notes(dest, tolerate).first() {
         return Err(SyncError::Io(format!("{stray} is already here and was not part of this new vault")));
     }
-    let mut touched = Touched::default();
+    let mut state = RestoreState::default();
     let mut cursor = Cursor::default();
     let mut total = Restored { empty: true, ok: true, ..Default::default() };
     let (mut records_after, mut notes_after) = (0i64, 0i64);
@@ -1210,14 +1244,15 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
             Err(e) => {
                 // I2: undo every page this call wrote so far and report the real failure, rather than
                 // leaving a half-filled folder for `restore_into` to describe as `empty: true`.
-                touched.rollback();
+                state.touched.rollback();
                 return Err(e);
             }
         };
-        let one = materialise(dest, &page, &mut touched);
-        // N1: accumulated per page, from the page's own rows only — never the whole journal or the
-        // whole note listing (see `cursor_after_page`'s own doc).
-        cursor_after_page(dest, &page, &mut cursor);
+        let one = materialise(dest, &page, &mut state);
+        // N1/R4: accumulated per page, from what `materialise` ACTUALLY did — never the whole
+        // journal, the whole note listing, or a re-derivation from `page` alone (see
+        // `fold_confirmed`'s own doc).
+        fold_confirmed(&state, &mut cursor);
         total.notes += one.notes;
         total.records += one.records;
         total.warnings.extend(one.warnings);
@@ -1230,15 +1265,63 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
             break;
         }
     }
+    // R2: every tombstone collected across every page, settled ONLY NOW that the whole loop above
+    // has broken out normally — never on the error path, which already returned. A path that was
+    // actually settled is removed from the cursor's own notes too: nothing of the account's text
+    // sits there any more (mirrors N1's own tombstone handling, moved here because settling itself
+    // moved here).
+    let (settled, tombstone_warnings) = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
+    total.notes += settled;
+    total.warnings.extend(tombstone_warnings);
+    for rel in &state.pending_tombstones {
+        cursor.notes.remove(rel);
+    }
     total.empty = total.notes == 0 && total.records == 0;
-    // Saved only here, after every page has landed (I2): a cursor saved mid-way would tell the next
-    // run to resume from a page whose own effects a later failure has since undone.
+    // Saved only here, after every page has landed and every tombstone settled (I2): a cursor saved
+    // mid-way would tell the next run to resume from a page whose own effects a later failure has
+    // since undone.
     cursor.record_cursor = records_after;
     cursor.note_cursor = notes_after;
     if let Err(e) = save_cursor(dest, &cursor) {
         total.warnings.push(format!("restore: the cursor could not be saved ({e})"));
     }
     Ok(total)
+}
+
+/// R1/N2 (fix round 3): every note path a FRESH vault holds, mapped to the sha256 of its bytes, read
+/// right here — before `restore_into` has done anything else. At this exact moment every one is a
+/// wizard seed, by construction (H11a: this runs after `scaffold::create_vault`, before anything
+/// else could have touched the vault). `apply`'s own replacement rule (`sync.rs`, the pre-pass ahead
+/// of its step 4) fires ONLY for a path listed here whose CURRENT bytes still match — the hash is
+/// what makes this precise where round 2's "exactly one `create` record" rule was not: a hand
+/// edit to a note's BODY is never journalled at all (`passes::detect_external` diffs frontmatter
+/// only), so a note with real, hand-typed content could carry exactly one record too. Its bytes,
+/// unlike its journal history, cannot lie.
+pub const SEED_HASHES_FILE: &str = "state/seed-hashes.json";
+
+/// Missing or unreadable is `{}`, never an error: a vault that has never restored (every vault but
+/// the ones this stream creates) simply has no seeds to protect, and `apply` then behaves exactly as
+/// it always did before round 2 ever touched it.
+fn load_seed_hashes(vault: &Path) -> std::collections::BTreeMap<String, String> {
+    crate::pystr::read_text(&vault.join(SEED_HASHES_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Written atomically (a temp file, renamed into place) so a crash mid-write never leaves a
+/// half-written, unparseable file behind — the same durability shape `save_cursor` and the cursor
+/// file already have. `state/` is never pushed (`is_note_path` only ever accepts
+/// `ids::NOTE_FOLDERS`), so this never reaches the account.
+fn save_seed_hashes(vault: &Path, map: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    let path = vault.join(SEED_HASHES_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let value = serde_json::to_value(map).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("tmp");
+    crate::pystr::write_text(&tmp, &crate::ledger::dumps_value(&value)).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// The wizard's one call (hand-off H11a). Resolve, take what is on disk right now as the allowlist,
@@ -1249,6 +1332,19 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
 /// is for a copy that exists and will not read, which is the case where a half-filled folder would
 /// be worse than none.
 pub fn restore_into(dest: &Path) -> Result<Restored, String> {
+    let tolerate = note_paths(dest);
+    // R1/N2 (fix round 3): the seed record, written UNCONDITIONALLY and first — before the account
+    // is even reached, let alone read — so it exists whether this restore goes on to succeed or
+    // fail. Best-effort: a vault this cannot be written for still gets made; `apply`'s replacement
+    // rule simply never fires later, which is the always-safe fallback this had before round 2.
+    let mut seeds = std::collections::BTreeMap::new();
+    for rel in &tolerate {
+        if let Ok(bytes) = std::fs::read(dest.join(rel)) {
+            seeds.insert(rel.clone(), sha256_hex(&bytes));
+        }
+    }
+    let _ = save_seed_hashes(dest, &seeds);
+
     let client = match crate::cloudmodel::resolve(dest) {
         Ok(c) => c,
         Err(e) => {
@@ -1256,7 +1352,6 @@ pub fn restore_into(dest: &Path) -> Result<Restored, String> {
             return Ok(Restored { empty: true, ok: false, warnings: vec![format!("restore: {e}; the first slot will fill this vault")], ..Default::default() });
         }
     };
-    let tolerate = note_paths(dest);
     match restore_all(dest, &client, &tolerate) {
         Ok(r) => Ok(r),
         // N4 carry-forward: Task 7 gave `SyncError::Service` its `{ cause, transport }` shape, so the
@@ -1432,24 +1527,6 @@ fn changes_json(changes: &[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]
     Value::Object(out)
 }
 
-/// N2 (fix round 2, reviewer's probe): this device's WHOLE journal history for the note at `file` is
-/// exactly one record — its own `create` — with nothing since: no field ever set by hand, by
-/// judge-once, or by a prior sync. A note in this state has never been the subject of a real
-/// decision on this device, so an account's own arriving copy at the same path is not a conflict to
-/// protect it from — it is the version this device never got a chance to receive before the
-/// wizard's own seed took that path first (H11a's ordering: `scaffold::create_vault` runs, then
-/// `move_session`, THEN the restore — a scaffold seed is deliberately not gated on an empty folder).
-/// A note the student HAS since edited, or that judge-once has enriched, carries more than one
-/// record and is excluded here: it falls straight through to the ordinary "never overwrite" rule
-/// below, an ordinary conflict handled exactly as today.
-fn note_is_untouched_seed(file: &Path, journal: &mut Journal) -> bool {
-    let Some(id) = crate::ids::read_meta(file).and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text)) else {
-        return false;
-    };
-    let history = journal.records_for(&id, None);
-    history.len() == 1 && history[0].get("op").and_then(Value::as_str) == Some("create")
-}
-
 /// Apply one pulled page to this vault.
 ///
 /// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
@@ -1601,6 +1678,50 @@ pub fn apply(
         .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
 
+    // N2 fix (round 3; R1's regression fixed). Seeds, identified PRECISELY — a path recorded in
+    // `state/seed-hashes.json` (every note this vault held the moment `restore_into` ran, before
+    // anything else touched it — see that function's own doc) whose CURRENT bytes still hash to
+    // what was recorded there. Run as a PRE-PASS, before step 4 below ever reads `touched`, so the
+    // account's arriving copy REPLACES the whole seed file in one write rather than being merged
+    // onto it field by field, and the seed's own id — always DIFFERENT from the account's, since the
+    // two notes were created independently on two desktops that happened to choose the same path —
+    // is excluded from step 4 entirely: reconciling the account's `create`/`set` records against a
+    // file that no longer holds the seed at all would merge fields the replacement has already
+    // delivered in full, and journal a spurious echo under the seed's OLD id for no local reason.
+    //
+    // **The hash, not the journal, is what makes this precise where round 2 was not** (R1's own
+    // regression): a hand edit to a note's BODY is never journalled at all
+    // (`passes::detect_external` diffs frontmatter only), so a note with real, hand-typed content
+    // could carry exactly one `create` record too — round 2's rule could not tell it apart from an
+    // untouched seed. Bytes cannot lie the way an absent journal record can.
+    let mut seed_hashes = load_seed_hashes(vault);
+    let mut replaced_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if !seed_hashes.is_empty() {
+        for note in &page.notes {
+            let Some(text) = note.text.as_deref() else { continue };
+            let Some(recorded) = seed_hashes.get(&note.path) else { continue };
+            let file = vault.join(&note.path);
+            let Ok(current) = std::fs::read(&file) else { continue };
+            if &sha256_hex(&current) != recorded {
+                // The bytes moved since the wizard wrote them, so this is no longer provably an
+                // untouched seed — a hand edit, a rename target, anything at all. Left alone: falls
+                // through to the ordinary "never overwrite" rule below, same as any other conflict.
+                continue;
+            }
+            match crate::pystr::write_text(&file, text) {
+                Ok(()) => {
+                    report.notes_written += 1;
+                    replaced_paths.insert(note.path.clone());
+                    seed_hashes.remove(&note.path);
+                }
+                Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
+            }
+        }
+        if !replaced_paths.is_empty() {
+            let _ = save_seed_hashes(vault, &seed_hashes);
+        }
+    }
+
     // 4. Per note, with the roles reversed exactly as the table above says.
     for (id, foreign) in &touched {
         if foreign.is_empty() { continue; }
@@ -1610,6 +1731,13 @@ pub fn apply(
             .find_map(|r| r.get("path").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
+        // N2: this path was just replaced wholesale by the pre-pass above — reconciling the
+        // account's own records (a different id than the seed's, in any case) against a file that no
+        // longer holds the seed at all would merge fields the replacement already delivered in full,
+        // and journal a spurious echo doing it. Nothing left to reconcile here.
+        if replaced_paths.contains(&path) {
+            continue;
+        }
         let file = vault.join(&path);
         let Some(meta) = crate::ids::read_meta(&file) else {
             // No local file: nothing to reconcile. The note's own text arrives below, if it came.
@@ -1948,20 +2076,10 @@ pub fn apply(
                     ));
                     continue;
                 }
-                // N2 (fix round 2, reviewer's probe): an UNTOUCHED wizard seed loses to the
-                // account's arriving copy, rather than blocking it forever behind the "never
-                // overwrite" rule just below. This changes only what the FILE holds — the seed's own
-                // `create` record is left exactly where it is in the journal, so nothing here
-                // fabricates or erases history; it is simply that the note's own NEXT push now
-                // carries the account's bytes, since the file itself has changed, and stops
-                // re-offering the seed's stale placeholder over what the account already has.
-                if exact_case_exists(&file) && note_is_untouched_seed(&file, journal) {
-                    match crate::pystr::write_text(&file, text) {
-                        Ok(()) => report.notes_written += 1,
-                        Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
-                    }
-                    continue;
-                }
+                // N2 (fix round 3): seed replacement no longer lives here — see the pre-pass ahead
+                // of step 4, which runs before this loop and replaces a PROVABLE untouched seed
+                // (state/seed-hashes.json, byte-identical) wholesale, before any record is ever
+                // reconciled onto it. This loop's own job stays exactly what it always was.
                 // **Never overwrites a note this device already has — the one recorded exception to
                 // "every write goes through `write::`".** Exactly two bounds, not the plan's original
                 // three (review M1: its third, "the note's own `create` record must already have

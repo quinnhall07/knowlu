@@ -371,6 +371,43 @@ fn restore_all_rollback_removes_only_what_it_wrote_and_prunes_only_folders_it_ma
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+/// R2 (fix round 3). Page 1 carries only a tombstone for the seed; page 2 fails. Before this round,
+/// the tombstone was settled the moment page 1 arrived — `write::delete` moved the seed to
+/// `archive/` and appended its own `delete` record, and neither the move nor the journal append was
+/// ever captured by `Touched`, so a rollback on page 2's failure could undo neither. Now a
+/// tombstone is only ever COLLECTED while paging, and settled once, after the whole loop succeeds —
+/// so a page 2 failure means it was simply never executed at all: the seed never moved, and no
+/// `delete` record was ever journalled.
+#[test]
+fn a_failed_restore_never_settles_a_tombstone_it_only_collected() {
+    let dest = temp("restore-tombstone-never-settled");
+    std::fs::create_dir_all(dest.join("tasks")).expect("mkdir");
+    let seed = dest.join("tasks").join("get-to-know-knowlu.md");
+    knowlu_engine::pystr::write_text(&seed, "---\nid: task_0000000001\n---\nthe seed\n").expect("seed");
+    let before = std::fs::read(&seed).expect("seed bytes");
+
+    let page1 = page_reply(
+        vec![],
+        vec![serde_json::json!({"path":"tasks/get-to-know-knowlu.md","device":"aaaaaaaaaaaaaaaa","deleted":true})],
+        0, 1, true,
+    );
+    let (base, handle) = loopback(vec![(200, page1), (503, r#"{"error":"down"}"#.to_string())]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    let err = sync::restore_all(&dest, &client, &tolerate).expect_err("page 2's failure fails the whole call");
+    handle.join().expect("the loopback thread did not panic");
+    assert!(format!("{err}").contains("503") || format!("{err}").contains("refused"), "{err}");
+    assert!(seed.exists(), "the seed is still live at its own path — the tombstone was never settled");
+    assert_eq!(std::fs::read(&seed).expect("seed bytes"), before, "…and it is byte-identical to before");
+    assert!(!dest.join("archive").join("get-to-know-knowlu.md").exists(), "nothing was archived");
+    let records = Journal::new(&dest).read(None, None);
+    assert!(
+        !records.iter().any(|r| r.get("op").and_then(|v| v.as_str()) == Some("delete")),
+        "no delete record was ever journalled: {records:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
 /// I3 (fix round 1): after a completed restore, the cursor left behind must read exactly like a
 /// completed pull-then-push already happened — so the very first push after Finish, with nothing
 /// else touched, sends nothing at all. Otherwise every restored note re-uploads on the first slot,

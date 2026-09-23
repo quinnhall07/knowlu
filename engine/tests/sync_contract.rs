@@ -574,6 +574,17 @@ fn an_unreadable_folder_suppresses_tombstones_for_that_folder_only() {
 // Task 6: the pull, `reconcile` with the roles reversed, and the amend card.
 // ---------------------------------------------------------------------------
 
+/// A foreign `create` record: another desktop's own note, made independently of anything on this
+/// device — its `id` never collides with a local seed's, even at the same path (fix round 3, N2).
+fn foreign_create(id: &str, path: &str, ts: &str, device: &str) -> knowlu_engine::ledger::Record {
+    let mut spec = knowlu_engine::journal::NewRecord::new("create", path, "quinn", "dashboard");
+    spec.id = Some(id);
+    spec.new = serde_json::json!({ "id": id });
+    spec.ts = Some(ts.to_string());
+    spec.device = Some(device.to_string());
+    knowlu_engine::journal::make_record(spec).expect("a record")
+}
+
 /// A foreign `set` record: another desktop, another `seq`, a chosen `ts`.
 fn foreign_set(id: &str, path: &str, field: &str, old: serde_json::Value, new: serde_json::Value, ts: &str) -> knowlu_engine::ledger::Record {
     let mut spec = knowlu_engine::journal::NewRecord::new("set", path, "quinn", "dashboard");
@@ -1987,10 +1998,10 @@ fn an_untouched_wizard_seed_loses_to_the_accounts_own_copy_at_the_same_path() {
     let dir = fixture_with_id("untouched-seed-loses");
     let mut journal = Journal::new(&dir);
     let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
-    knowlu_engine::write::create(
-        &dir, "courses/cs-100.md", "---\nid: course_0000000001\n---\nExams: TBD\n",
-        &seed_ctx, &mut journal, None,
-    ).expect("the wizard's own seed");
+    let seed_text = "---\nid: course_0000000001\n---\nExams: TBD\n";
+    knowlu_engine::write::create(&dir, "courses/cs-100.md", seed_text, &seed_ctx, &mut journal, None)
+        .expect("the wizard's own seed");
+    seed_hash(&dir, "courses/cs-100.md");
 
     let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
     let note = sync::PulledNote {
@@ -2005,26 +2016,33 @@ fn an_untouched_wizard_seed_loses_to_the_accounts_own_copy_at_the_same_path() {
         "the account's own copy wins over an untouched seed"
     );
     assert_eq!(report.notes_written, 1, "{report:?}");
+    // R1's own name for the fix: once replaced, the path is gone from seed-hashes.json — nothing
+    // left to protect or to re-replace on a later pull.
+    let remaining = knowlu_engine::pystr::read_text(&dir.join(sync::SEED_HASHES_FILE)).expect("seed-hashes.json");
+    assert!(!remaining.contains("cs-100.md"), "{remaining}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// N2's other half: a seed the student HAS edited since — a second record beyond its own `create` —
-/// is an ordinary conflict, handled exactly as today: the account's copy does NOT silently overwrite
-/// it, because a real decision has already been made here.
+/// N2's other half: a seed the student HAS edited since — its BYTES no longer match the hash
+/// `restore_into` recorded — is an ordinary conflict, handled exactly as today: the account's copy
+/// does NOT silently overwrite it, because a real change has already been made here. R1's own fix:
+/// this is a hash mismatch, not a journal-history check, so it also covers a hand-typed BODY edit,
+/// which the journal never records at all.
 #[test]
 fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
     let dir = fixture_with_id("edited-seed-keeps-rule");
     let mut journal = Journal::new(&dir);
     let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
-    knowlu_engine::write::create(
-        &dir, "courses/cs-200.md", "---\nid: course_0000000002\n---\nExams: TBD\n",
-        &seed_ctx, &mut journal, None,
-    ).expect("the wizard's own seed");
-    // The student typed something — a SECOND record beyond the seed's own `create`.
-    knowlu_engine::write::write_literals(
-        &dir, "courses/cs-200.md", &[("importance".to_string(), "5".to_string())],
-        &seed_ctx, &mut journal, &Default::default(),
-    ).expect("the student's own edit");
+    let seed_text = "---\nid: course_0000000002\n---\nExams: TBD\n";
+    knowlu_engine::write::create(&dir, "courses/cs-200.md", seed_text, &seed_ctx, &mut journal, None)
+        .expect("the wizard's own seed");
+    seed_hash(&dir, "courses/cs-200.md");
+    // The student typed real content into the body — never journalled at all (`passes::detect_external`
+    // diffs frontmatter only), so this changes only the bytes, exactly R1's own scenario.
+    knowlu_engine::pystr::write_text(
+        &dir.join("courses").join("cs-200.md"),
+        "---\nid: course_0000000002\n---\nExams: TBD, but I filled in the weights myself: 60/40\n",
+    ).expect("the student's own hand edit");
 
     let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
     let note = sync::PulledNote {
@@ -2034,9 +2052,102 @@ fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
     };
     let report = sync::apply(&dir, &pulled(vec![], vec![note]), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
     let now = knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-200.md")).expect("the note");
-    assert!(!now.contains("Exams 60%"), "an edited seed is not silently overwritten: {now:?}");
+    assert!(now.contains("I filled in the weights myself"), "a hand-edited seed is not silently overwritten: {now:?}");
     assert_eq!(report.notes_written, 0, "{report:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// N2 (fix round 3): the account's copy for the same path also carries its OWN `create` + `set`
+/// records — a real desktop's history for a note it made independently. The reviewer's own probe:
+/// round 2's fix worked only because its own test's page carried no records at all. The account's
+/// records name a DIFFERENT id than the seed's, so step 4's reconcile must never touch the seed
+/// (excluded by `replaced_paths`) — if it did, it would merge the account's fields onto the
+/// just-replaced file and journal a spurious echo under the seed's now-meaningless old id.
+#[test]
+fn field_history_on_the_accounts_copy_does_not_stop_the_seed_replacement() {
+    let dir = fixture_with_id("seed-replace-with-record-history");
+    let mut journal = Journal::new(&dir);
+    let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    let seed_text = "---\nid: task_0000000001\n---\nWelcome\n";
+    knowlu_engine::write::create(&dir, "tasks/get-to-know-knowlu.md", seed_text, &seed_ctx, &mut journal, None)
+        .expect("the wizard's own seed");
+    seed_hash(&dir, "tasks/get-to-know-knowlu.md");
+
+    let account_id = "task_00000000aa";
+    let device = "fedcba9876543210";
+    let create = foreign_create(account_id, "tasks/get-to-know-knowlu.md", "2026-09-01T10:00:00.000Z", device);
+    let set = foreign_set(account_id, "tasks/get-to-know-knowlu.md", "importance", serde_json::json!(2), serde_json::json!(7), "2026-09-02T10:00:00.000Z");
+    let note = sync::PulledNote {
+        device: device.to_string(),
+        path: "tasks/get-to-know-knowlu.md".to_string(),
+        text: Some(format!("---\nid: {account_id}\nimportance: 7\n---\nThe account's own welcome task\n")),
+    };
+    let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let report = sync::apply(&dir, &pulled(vec![create, set], vec![note]), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
+    let now = knowlu_engine::pystr::read_text(&dir.join("tasks").join("get-to-know-knowlu.md")).expect("the note");
+    assert!(now.contains("The account's own welcome task"), "the account's copy survives the first sync: {now:?}");
+    assert_eq!(report.notes_written, 1, "{report:?}");
+    // No echo journalled under the seed's own (now meaningless) id: step 4 never ran for this path.
+    journal.invalidate();
+    assert!(
+        journal.records_for("task_0000000001", None).len() == 1,
+        "the seed's own create is its whole history — nothing was merged onto it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R1's own probes, both in one test: a vault with NO `state/seed-hashes.json` — every vault but the
+/// ones this stream creates — behaves exactly as it did before round 2 ever touched `apply`. Neither
+/// a veteran desktop's hand-typed course (created once, then typed into by hand — no second record,
+/// since the body is never journalled) nor a console-created task (also one `create`) is overwritten
+/// by a foreign note arriving at the same path.
+#[test]
+fn with_no_seed_hashes_file_apply_is_unchanged() {
+    let dir = fixture_with_id("no-seed-hashes-file");
+    assert!(!dir.join(sync::SEED_HASHES_FILE).exists(), "this fixture never restored");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    // The veteran desktop: one `create`, then a hand-typed body — the shape a real, long-lived note
+    // has always had, and exactly what round 2 confused for "untouched".
+    knowlu_engine::write::create(&dir, "courses/cs-300.md", "---\nid: course_0000000003\n---\nExams: TBD\n", &ctx, &mut journal, None)
+        .expect("created once");
+    knowlu_engine::pystr::write_text(&dir.join("courses").join("cs-300.md"), "---\nid: course_0000000003\n---\nExams 60%, labs 40%, hand-typed from the syllabus\n")
+        .expect("typed in by hand, never journalled");
+    // A console-created task: one `create`, nothing else.
+    knowlu_engine::write::create(&dir, "tasks/my-own-task.md", "---\nid: task_0000000009\n---\nMine\n", &ctx, &mut journal, None)
+        .expect("created in the console");
+
+    let apply_ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let notes = vec![
+        sync::PulledNote { device: "fedcba9876543210".into(), path: "courses/cs-300.md".into(), text: Some("---\nid: course_00000000ee\n---\nForeign copy\n".into()) },
+        sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/my-own-task.md".into(), text: Some("---\nid: task_00000000ff\n---\nForeign task\n".into()) },
+    ];
+    let report = sync::apply(&dir, &pulled(vec![], notes), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
+    assert!(
+        knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-300.md")).expect("the note").contains("hand-typed"),
+        "the veteran desktop's hand-typed course is not overwritten"
+    );
+    assert!(
+        knowlu_engine::pystr::read_text(&dir.join("tasks").join("my-own-task.md")).expect("the note").contains("Mine"),
+        "the console-created task is not overwritten"
+    );
+    assert_eq!(report.notes_written, 0, "{report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Writes a one-entry `state/seed-hashes.json` for `rel`, hashed from `text` — the same shape
+/// `restore_into` itself would have written the moment the wizard made this seed.
+fn seed_hash(dir: &Path, rel: &str) {
+    // Hashed from the file's ACTUAL on-disk bytes, exactly the way `restore_into` itself does — not
+    // from whatever source string a caller happened to pass to `write::create`, since `pystr::write_text`
+    // translates line endings and the two can differ (LF in the literal, CRLF on disk).
+    let bytes = std::fs::read(dir.join(rel)).expect("read the seed to hash it");
+    let hash = sync::sha256_hex(&bytes);
+    let mut map = serde_json::Map::new();
+    map.insert(rel.to_string(), serde_json::Value::String(hash));
+    let value = serde_json::Value::Object(map);
+    knowlu_engine::pystr::write_text(&dir.join(sync::SEED_HASHES_FILE), &knowlu_engine::ledger::dumps_value(&value))
+        .expect("write state/seed-hashes.json");
 }
 
 #[test]

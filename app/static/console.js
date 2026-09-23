@@ -1457,7 +1457,13 @@
     };
     invoke("restore_vault", { backup: PICK_RESTORE_BACKUP, name: name, plan: plan }).then(function (a) {
       if (!a.ok) { EL("pick-lede").textContent = a.error; go.disabled = false; return; }
-      return invoke("open_profile", { id: a.profile.id });
+      // N6 nit (fix round 3): open_profile can itself answer ok: false (the profile vanished, the
+      // relaunch failed to spawn) — before this, that left the button disabled with no message at
+      // all, the one outcome neither the wizard's own Finish nor pick-adopt's own chain guards
+      // against either. Shown and re-enabled here rather than left silent.
+      return invoke("open_profile", { id: a.profile.id }).then(function (o) {
+        if (o && o.ok === false) { EL("pick-lede").textContent = o.error; go.disabled = false; }
+      });
     }).catch(function () { go.disabled = false; });
   });
 

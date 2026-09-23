@@ -1450,5 +1450,11 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     let call_at = go_handler.find("invoke(\"restore_vault\"").expect("the call itself");
     assert!(disable_at < call_at, "the button is disabled BEFORE restore_vault is invoked");
     assert!(go_handler.contains("go.disabled = false"), "it is re-enabled somewhere");
-    assert_eq!(go_handler.matches("go.disabled = false").count(), 2, "re-enabled on the refusal AND the catch: {go_handler}");
+    // N6 nit (fix round 3): a THIRD re-enable — open_profile can itself answer ok: false, and before
+    // this fix that left the button disabled with no message at all.
+    assert_eq!(go_handler.matches("go.disabled = false").count(), 3, "re-enabled on the restore_vault refusal, the open_profile refusal, AND the catch: {go_handler}");
+    let open_profile_call = go_handler.find("invoke(\"open_profile\"").expect("open_profile is still called");
+    let after_open_profile = &go_handler[open_profile_call..];
+    assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
+    assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }
