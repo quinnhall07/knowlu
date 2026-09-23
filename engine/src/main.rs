@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use knowlu_engine::info::{self, InfoCommand};
 use knowlu_engine::issues::{self, IssueCommand};
 use knowlu_engine::write::{self, WriteCommand};
-use knowlu_engine::{cli, coursework, enrich, ingest, journal, runs, sync};
+use knowlu_engine::{cli, coursework, enrich, entitle, ingest, journal, runs, sync};
 
 #[derive(Parser)]
 #[command(name = "knowlu-engine", version, about = "Deterministic personal operations engine")]
@@ -325,8 +325,60 @@ enum RunsCommand {
     Status,
 }
 
+/// Which commands the entitlement gate stands in front of — ruling 3 of the cloud design's
+/// amendment of 2026-09-17: *"The engine refuses to run a slot without a valid entitlement past the
+/// 72-hour grace the app already caches."*
+///
+/// **The four cloud steps, and deliberately not the others.** `surface` is what the console reads
+/// on every poll and `write` is what the console's own edits go through: gating either would freeze
+/// the window rather than the subscription, which is not what ruling 3 is for. `runs`, `info`,
+/// `issues` and `coursework-discover` are the same argument.
+///
+/// **`rank` is not here, and that is precondition P5.** Ruling 3's own reason — *"an orphaned binary
+/// ranks a hand-made folder and nothing else"* — is satisfied by gating the four steps that fill the
+/// folder; §5.1, which the amendment does not mark, promises that past the grace "the slots keep
+/// ranking" and the page never blanks. If Quinn rules the other way, `Command::Rank { vault, .. }`
+/// joins the pattern below and §5.1 is amended in the same commit. That is the whole of answer (b).
+fn gated_vault(command: &Command) -> Option<&PathBuf> {
+    match command {
+        Command::Coursework { vault, .. }
+        | Command::Ingest { vault, .. }
+        | Command::Judge { vault, .. }
+        | Command::Sync { vault, .. } => Some(vault),
+        _ => None,
+    }
+}
+
+/// The subcommand's own word, as the student sees it on the Runs view. Only the gated four need one,
+/// and the catch-all is unreachable from the call site above — it exists so this function stays total
+/// rather than panicking on a command the gate will never be asked about.
+fn name_of(command: &Command) -> &'static str {
+    match command {
+        Command::Coursework { .. } => "coursework",
+        Command::Ingest { .. } => "ingest",
+        Command::Judge { .. } => "judge",
+        Command::Sync { .. } => "sync",
+        _ => "step",
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A refusal is a named line at exit 0, never a failure: a non-zero exit sets
+    // `RunSummary.engine_ok = false`, which is retry backoff and an amber tray twice a day for a
+    // student whose card simply expired — and retrying fixes nothing here.
+    //
+    // **The line is composed here, and here only** (review I3). `entitle::gate` answers the reason;
+    // the command's own word is this file's to supply, because this file is the only place that
+    // knows which subcommand was typed. The result reads exactly like the two skips the app already
+    // prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student meets one
+    // sentence shape whichever step stopped.
+    if let Some(vault) = gated_vault(&cli.command) {
+        if let Some(reason) = entitle::gate(vault) {
+            println!("{} ({reason})", name_of(&cli.command));
+            return ExitCode::SUCCESS;
+        }
+    }
     match cli.command {
         Command::Rank { vault, today, runner, run_id } => {
             match cli::run(&vault, today.as_deref(), &runner, run_id.as_deref()) {
