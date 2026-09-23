@@ -50,7 +50,7 @@ template's fixed day.
 | Q4 | **Class source.** Onboarding shows a confirm list pre-filled from the student's Google Calendar weekly recurring series, matched to the courses the wizard already captured (c1c D4). Where Google has no match, **both**: a registrar login at supported schools, and otherwise one confirm card per unmatched course over the first week. |
 | Q5 | Observed calendars (patterns only): classes are weekly series titled by course code ("CS 100", "PH 106", "CS 100 Lab") with the room in the description; the same calendar holds club and team meetings (weekly series with non-course titles), routines ("Wake Up", "Bedtime"), office hours, one-off events and Gmail-created events (`eventType: fromGmail`). |
 | Q6 | **Planning day.** The student's routine window — wake to bed, 8am–10pm in the observed case — replaces the fixed 8am–6pm "usable" window. It is editable by the student at any time, and they can see how an edit changes the suggestions. An edit takes effect on the next rank, and the day view says what moved ("2 items moved to this evening"). |
-| Q7 | **Registrar.** Before the pilot: the University of Alabama (myBama/Banner) registrar login only; other schools after. UA gets its own phase before the pilot: credentials on the device (Credential Manager, like zyBooks/VHL), fetch on the device, and the schedule becomes confirmed-or-proposed commitments with `source_uid: registrar:ua:<crn>`. This spec holds the design only, not the scraping. |
+| Q7 | **Registrar.** Before the pilot: the University of Alabama (myBama/Banner) registrar login only; other schools after. UA gets its own phase before the pilot: sign-in through the school's own window with no stored login (ruled 2026-09-23, §11), fetch on the device, and the schedule becomes confirmed-or-proposed commitments with `source_uid: registrar:ua:<crn>`. This spec holds the design only, not the scraping. |
 
 ### 1.2 The controller's, delegated by Quinn and adopted
 
@@ -1036,13 +1036,12 @@ and written through `write::to_literal` — each with its test in `app/tests/com
 Its own plan; this is the design it implements. Other schools come after the pilot, each a code
 change.
 
-- **Credentials on the device.** The app stores the myBama login in Credential Manager as
-  `knowlu/<profile_id>/registrar-ua` (`app/src/credentials.rs`); the vault names it as a
-  `credential_target`, exactly as zyBooks and VHL are named, and the engine reads it through
-  `wincred.rs`. It never leaves the device.
-- **Fetch on the device**, as a third portal inside the `coursework` step — the slot's portal step,
-  which already owns this credential pattern, always exits 0, and treats an empty parse as a
-  failure, never an empty semester. At most once a day; a failure is a named warning.
+- **No stored login (Quinn, 2026-09-23, §11 Q1).** Knowlu never holds the myBama password. The
+  schedule is fetched through the school's own sign-in window, as the LMS link already does —
+  once per term and on demand — and the session is thrown away. The privacy page's "Knowlu never
+  asks for your university sign-in" stays true.
+- **Fetch on the device**, inside the school's sign-in window (above), never as an unattended slot
+  step; an empty parse is a failure, never an empty semester, and a failure is a named warning.
 - **Output.** Each schedule row with a meeting time becomes a series record keyed
   `registrar:ua:<term>-<crn>` (R1), kind `lab` or `class` from the row's schedule type, `course`
   from the vault's code table (§3.4). Rows that match a vault course are written **confirmed**
@@ -1069,18 +1068,11 @@ No branch touches `weekcal.rs`, `surface.rs`, `ids.rs`, `backup.rs`, `calfeed.rs
 
 ## 11. Open questions for Quinn
 
-1. **The UA login and the privacy page.** Q7 puts the myBama password in Credential Manager.
-   `site/privacy.html` promises today that "Knowlu never asks for your university sign-in, and
-   there is nowhere in the app to type one" — sign-in happens on the school's own page in a window
-   Knowlu opens, and the session is thrown away. myBama is the same campus sign-in (and likely
-   behind Duo, which an unattended fetch cannot pass). *Recommendation:* keep the promise — fetch
-   the schedule through the school's own sign-in window, as the LMS link already does, once per
-   term and on demand, storing nothing; if you want the stored login instead, the page's paragraph
-   changes before phase 3 ships, with the lawyer's read.
-2. **The consent-screen justification.** Adding "learns the student's class and work schedule from
-   repeating events" to the `calendar.readonly` justification may restart Google's verification.
-   *Recommendation:* change it at the next submission you were making anyway, not on its own;
-   the scope itself does not change.
+None. Both were ruled on 2026-09-23:
+
+1. **The UA login:** the school's own sign-in window, never a stored password (§10's registrar phase).
+2. **The consent-screen justification:** keep the current `calendar.readonly` wording; the scope does
+   not change.
 
 ---
 
