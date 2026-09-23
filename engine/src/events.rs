@@ -443,9 +443,9 @@ pub fn judge_roster(
                 continue;
             }
         };
-        // Checked again here, not only on the server: `record_verdict` refuses an unknown word and
-        // a `why` carrying a quote, a newline or the field separator, and a refusal at that depth
-        // would lose the verdict with no line to explain it.
+        // Checked again here, not only on the server: `record_judged_verdict` refuses an unknown
+        // word and a `why` carrying a quote, a newline or the field separator, and a refusal at
+        // that depth would lose the verdict with no line to explain it.
         if !crate::eventledger::VALID_VERDICTS.contains(&verdict.verdict.as_str()) {
             lines.push(format!("events {}: refused ({:?} is not a verdict)", event.uid, verdict.verdict));
             continue;
@@ -454,8 +454,8 @@ pub fn judge_roster(
             &verdict.why.replace('"', "'").replace(" \u{b7} ", " - "),
             140,
         );
-        match crate::eventledger::record_verdict(
-            vault, &event.uid, &event.title, today, &verdict.verdict, "", &why, "",
+        match crate::eventledger::record_judged_verdict(
+            vault, &event.uid, &event.title, today, &verdict.verdict, &why, verdict.judgment_id.as_deref(),
         ) {
             Ok(()) => {
                 judged += 1;
@@ -777,7 +777,13 @@ mod tests {
     }
 
     fn verdict(word: &str, why: &str) -> crate::judge::EventVerdict {
-        crate::judge::EventVerdict { verdict: word.into(), why: why.into(), confidence: 0.9, tier: 3 }
+        crate::judge::EventVerdict {
+            verdict: word.into(),
+            why: why.into(),
+            confidence: 0.9,
+            tier: 3,
+            ..Default::default()
+        }
     }
 
     /// A vault with two events on one enabled ICS source, and a verdict already recorded for the
@@ -813,6 +819,51 @@ mod tests {
              END:VCALENDAR\r\n"
             .to_string();
         (dir, feed)
+    }
+
+    /// F4 decision 4: `judge_roster` writes through `record_judged_verdict`, so a `judgment_id`
+    /// the model scripted onto its `EventVerdict` lands on the ledger line as `jid:<uuid>` — both
+    /// in the parsed `LedgerEntry` and in the file's own bytes.
+    #[test]
+    fn judge_roster_writes_the_jid_onto_the_ledger_line() {
+        const J: &str = "11111111-1111-1111-1111-111111111111";
+        let (vault, feed) = scratch_vault_with_feed("jid-write");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(crate::judge::EventVerdict {
+            verdict: "opportunity".into(),
+            why: "matches the stated interests".into(),
+            confidence: 0.9,
+            tier: 3,
+            judgment_id: Some(J.to_string()),
+        })]));
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert!(lines.iter().any(|l| l.contains("engage:2") && l.contains("opportunity")), "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger["ics:engage:2"].judgment_id, J);
+        let text = crate::pystr::read_text(&vault.join("state").join("events-seen.md")).expect("ledger file");
+        assert!(
+            text.contains(&format!("verdict:opportunity · why:\"matches the stated interests\" · jid:{J} · first seen 2026-08-28")),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The other half of F4 decision 4: a model that scripts no id (`judgment_id: None`, the
+    /// `Default` every existing scripted `EventModel` in this file still produces) must write a
+    /// line with no `jid:` field at all — byte-identical to what `judge_roster` wrote before F4.
+    #[test]
+    fn judge_roster_without_an_id_writes_todays_bytes() {
+        let (vault, feed) = scratch_vault_with_feed("jid-none");
+        let fetch = |_: &str| Ok(feed.clone());
+        let model = Scripted(std::cell::RefCell::new(vec![Ok(verdict("opportunity", "matches the stated interests"))]));
+        let _ = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        let text = crate::pystr::read_text(&vault.join("state").join("events-seen.md")).expect("ledger file");
+        assert!(
+            text.contains("- ics:engage:2 · Career Fair · verdict:opportunity · why:\"matches the stated interests\" · first seen 2026-08-28"),
+            "{text}"
+        );
+        assert!(!text.contains("jid:"), "no id scripted means no jid: field, byte-identical to before F4: {text}");
+        let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
