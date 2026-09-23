@@ -1548,3 +1548,217 @@ fn an_identical_re_pull_keeps_the_card_already_filed_and_charges_nothing() {
     assert_eq!(knowlu_engine::approvals::count_proposals_created(&dir, today), charged, "no second charge against the cap");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 5 (re-review round 4): N16, (a), (b) (R-C3′-exec-17).
+// ---------------------------------------------------------------------------
+
+/// A foreign `set` from a named desktop — `foreign_set` with the device chosen, for the tests that
+/// need two or three other desktops apart.
+fn foreign_set_on(device: &str, field: &str, old: serde_json::Value, new: serde_json::Value, ts: &str) -> knowlu_engine::ledger::Record {
+    let mut spec = knowlu_engine::journal::NewRecord::new("set", "tasks/cs-100-hw-01.md", "quinn", "dashboard");
+    spec.id = Some("task_0000000001");
+    spec.field = Some(field);
+    spec.old = old;
+    spec.new = new;
+    spec.ts = Some(ts.to_string());
+    spec.device = Some(device.to_string());
+    knowlu_engine::journal::make_record(spec).expect("a record")
+}
+
+/// One desktop's `build_push`, turned into the page the other desktop pulls — the account in the
+/// middle, minus the network.
+///
+/// **Two machines in one process.** Every record either vault journals itself carries this
+/// process's own `journal::device_name()`, because both vaults live on this machine. The account
+/// would hand the receiver those records under the SENDER's name, so this relabels them the way
+/// two real machines see each other: the sender's own records (this process's name) become
+/// `sender`, and the receiver's own records coming back round (labelled `receiver` in the sender's
+/// journal) become this process's name again — the same bytes the receiver journalled, so they
+/// dedupe by hash exactly as a real echo does. `KNOWLU_DEVICE` is never touched: it is
+/// process-global, and every other test in this file reads it in parallel.
+fn transfer(vault: &Path, cursor: &mut Cursor, journal: &mut Journal, sender: &str, receiver: &str) -> sync::Pulled {
+    let this_machine = knowlu_engine::journal::device_name();
+    let (batch, next) = sync::build_push(vault, cursor, "acct-test", journal);
+    *cursor = next;
+    let records = batch.records.iter().filter_map(|row| {
+        let mut record = match serde_json::from_str::<serde_json::Value>(row["body"].as_str()?).ok()? {
+            serde_json::Value::Object(map) => map,
+            _ => return None,
+        };
+        let device = record.get("device").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        if device == this_machine {
+            record.insert("device".to_string(), serde_json::json!(sender));
+        } else if device == receiver {
+            record.insert("device".to_string(), serde_json::json!(this_machine));
+        }
+        Some((batch.device.clone(), record))
+    }).collect();
+    let notes = batch.notes.iter().map(|row| sync::PulledNote {
+        device: batch.device.clone(),
+        path: row["path"].as_str().unwrap_or_default().to_string(),
+        text: if row.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false) { None } else { row["body"].as_str().map(str::to_string) },
+    }).collect();
+    sync::Pulled { records, notes, record_cursor: 1, note_cursor: 1, more: false, warnings: Vec::new() }
+}
+
+fn deliver(vault: &Path, page: &sync::Pulled, journal: &mut Journal) -> sync::ApplyReport {
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    sync::apply(vault, page, &ctx, journal, "2026-09-22".parse().unwrap())
+}
+
+fn by_hand(vault: &Path, journal: &mut Journal, fields: &[(&str, &str)]) {
+    let me = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    let literals: Vec<(String, String)> = fields.iter().map(|(f, v)| (f.to_string(), v.to_string())).collect();
+    knowlu_engine::write::write_literals(vault, "tasks/cs-100-hw-01.md", &literals, &me, journal, &Default::default()).expect("a hand edit");
+}
+
+fn card_rels_on_the_note(vault: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(vault.join("approvals")).expect("approvals").flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("amend-cs-100-hw-01-"))
+        .map(|n| format!("approvals/{n}"))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_card_another_desktop_filed_is_never_settled_here_and_no_tombstone_goes_out_for_it() {
+    // N16 (load-bearing), two desktops end to end through `build_push`. A card is a note, so the
+    // card desktop B files travels to desktop A like any other note — carrying the same
+    // `created_by: agent:knowlu.sync` A's own cards carry. A's stale-card settle must touch only the
+    // cards A itself filed (a `create` record for the card's id in A's own journal, under A's own
+    // device name): otherwise A archives its copy of B's still-open card, A's next push carries a
+    // tombstone for it, and B's own card is archived on B — the conflict it held is then lost on
+    // both desktops with nothing left to raise it again.
+    let a = fixture_with_id("n16-desk-a");
+    let b = fixture_with_id("n16-desk-b");
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let _ = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let _ = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    by_hand(&b, &mut jb, &[("effort_hours", "4"), ("importance", "5")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    by_hand(&a, &mut ja, &[("effort_hours", "3"), ("importance", "4")]);
+    // 1. B pulls A's later edits: both fields conflict and A's are later, so B files ONE card.
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let r1 = deliver(&b, &page, &mut jb);
+    assert_eq!(r1.cards, 1, "{r1:?}");
+    let b_card = card_rels_on_the_note(&b);
+    assert_eq!(b_card.len(), 1, "{b_card:?}");
+    let b_card = b_card[0].clone();
+    // 2. A pulls B's edits (A's are later, so A files nothing) and B's card, which lands as a note.
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let r2 = deliver(&a, &page, &mut ja);
+    assert_eq!((r2.cards, r2.notes_written), (0, 1), "{r2:?}");
+    assert!(a.join(&b_card).exists(), "B's card arrived on A as a note");
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let _ = deliver(&b, &page, &mut jb);
+    // 3. B's student sets `importance` by hand; A pulls it. A files a card of ITS OWN for the new
+    //    conflict — and leaves its copy of B's card alone.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    by_hand(&b, &mut jb, &[("importance", "6")]);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let r3 = deliver(&a, &page, &mut ja);
+    assert_eq!(r3.cards, 1, "{r3:?}");
+    assert!(a.join(&b_card).exists(), "A settled its copy of a card B filed: {r3:?} {:?}", card_rels_on_the_note(&a));
+    // 4. A's next push carries no tombstone for B's card, and B's own card survives B's pull.
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let tombstones: Vec<&str> = page.notes.iter().filter(|n| n.text.is_none()).map(|n| n.path.as_str()).collect();
+    assert!(!tombstones.contains(&b_card.as_str()), "a tombstone went out for B's card: {tombstones:?}");
+    let r4 = deliver(&b, &page, &mut jb);
+    assert_eq!(r4.moved, 0, "{r4:?}");
+    let meta = knowlu_engine::ids::read_meta(&b.join(&b_card)).expect("B's own card is still live on B");
+    assert_eq!(knowlu_engine::yaml::get(&meta, "status").and_then(knowlu_engine::yaml::text).as_deref(), Some("pending"));
+    assert_eq!(archived_cards_on_the_note(&b), 0, "nothing of B's was archived");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn a_field_the_student_answered_by_hand_is_not_carried_from_a_settled_card() {
+    // (a), probe N14. A settled card's other fields are carried into the fresh card only while the
+    // note still holds the card's own `from` for them. Here the student answered `effort_hours` by
+    // hand (3 -> 3.5), later than B's 4, instead of through the card: carrying the field would
+    // re-offer B's OLDER value over the student's own later edit. A conflict still open on the other
+    // side comes back through that side's own records.
+    let set = |field: &str, old: serde_json::Value, new: serde_json::Value, ts: &str| {
+        foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", field, old, new, ts)
+    };
+    {
+        let dir = fixture_with_id("carry-after-hand-answer");
+        let mut journal = Journal::new(&dir);
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        by_hand(&dir, &mut journal, &[("importance", "4"), ("effort_hours", "3")]);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let t2 = knowlu_engine::journal::now_ts(None);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let r1 = sync::apply(&dir, &pulled(vec![set("importance", serde_json::json!(2), serde_json::json!(5), &t2), set("effort_hours", serde_json::json!(2.5), serde_json::json!(4), &t2)], vec![]), &ctx, &mut journal, today);
+        assert_eq!(r1.cards, 1, "{r1:?}");
+        by_hand(&dir, &mut journal, &[("effort_hours", "3.5")]);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let t4 = knowlu_engine::journal::now_ts(None);
+        let r2 = sync::apply(&dir, &pulled(vec![set("importance", serde_json::json!(5), serde_json::json!(6), &t4)], vec![]), &ctx, &mut journal, today);
+        assert_eq!(r2.cards, 1, "{r2:?}");
+        assert_eq!(
+            live_cards_on_the_note(&dir),
+            vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 6}}))],
+            "N14: the hand-answered field is not re-offered: {r2:?}",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_field_a_later_clean_apply_moved_is_not_carried_from_a_settled_card() {
+    // (a), probe N14b — three desktops. Desktop C's later `effort_hours` 3 -> 6 applies cleanly on a
+    // field this device's card offers B's 4 for; B then moves `importance` again. The note no longer
+    // holds the card's `from` (3) for `effort_hours`, so the field is not carried: re-offering B's
+    // older 4 over C's later 6 would be the stale proposal the carry exists to avoid.
+    {
+        let dir = fixture_with_id("carry-after-clean-apply");
+        let mut journal = Journal::new(&dir);
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+        by_hand(&dir, &mut journal, &[("importance", "4"), ("effort_hours", "3")]);
+        let r1 = sync::apply(&dir, &pulled(vec![
+            foreign_set_on("DeskB", "importance", serde_json::json!(2), serde_json::json!(5), "2036-09-17T10:00:00.000Z"),
+            foreign_set_on("DeskB", "effort_hours", serde_json::json!(2.5), serde_json::json!(4), "2036-09-17T10:00:00.000Z"),
+        ], vec![]), &ctx, &mut journal, today);
+        assert_eq!(r1.cards, 1, "{r1:?}");
+        let rc = sync::apply(&dir, &pulled(vec![foreign_set_on("DeskC", "effort_hours", serde_json::json!(3), serde_json::json!(6), "2036-09-17T11:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+        assert_eq!(rc.applied, 1, "C's write applies cleanly: {rc:?}");
+        let rb = sync::apply(&dir, &pulled(vec![foreign_set_on("DeskB", "importance", serde_json::json!(5), serde_json::json!(8), "2036-09-17T12:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+        assert_eq!(
+            live_cards_on_the_note(&dir),
+            vec![(sync::ACTOR.to_string(), "pending".to_string(), serde_json::json!({"importance": {"from": 4, "to": 8}}))],
+            "N14b: B's older `effort_hours` is not re-offered over C's later 6: {rb:?}",
+        );
+        assert_eq!(importance_and_effort(&dir), (Some(4), Some(serde_json::json!(6))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_clean_apply_on_a_carded_field_settles_the_card_that_offered_an_older_value() {
+    // (b), probe N13 — three desktops. This device holds 4; its card offers B's 5. Desktop C, which
+    // had this device's 4, then writes 4 -> 7 LATER than B: a clean apply here. The card's `from`
+    // (4) no longer matches the note, so `approvals::apply_amendment` would refuse it for ever
+    // ("stale amendment"): a field this pull applied cleanly counts as resolved for settling —
+    // and never as a change, so no card offers anything in its place.
+    let dir = fixture_with_id("clean-apply-on-carded-field");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let today: jiff::civil::Date = "2026-09-22".parse().unwrap();
+    by_hand(&dir, &mut journal, &[("importance", "4")]);
+    let r1 = sync::apply(&dir, &pulled(vec![foreign_set_on("DeskB", "importance", serde_json::json!(2), serde_json::json!(5), "2036-09-17T10:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+    assert_eq!(r1.cards, 1, "{r1:?}");
+    let r2 = sync::apply(&dir, &pulled(vec![foreign_set_on("DeskC", "importance", serde_json::json!(4), serde_json::json!(7), "2036-09-17T11:00:00.000Z")], vec![]), &ctx, &mut journal, today);
+    assert_eq!((r2.applied, r2.cards), (1, 0), "{r2:?}");
+    assert_eq!(importance_and_effort(&dir).0, Some(7));
+    assert_eq!(live_cards_on_the_note(&dir), vec![], "the card offering B's older 5 over C's later 7 is settled: {r2:?}");
+    assert_eq!(archived_cards_on_the_note(&dir), 1, "settled into archive/, never unlinked");
+    let _ = std::fs::remove_dir_all(&dir);
+}

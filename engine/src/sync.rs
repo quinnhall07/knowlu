@@ -654,7 +654,7 @@ fn rename_case_only(from: &Path, to: &Path) -> std::io::Result<()> {
 /// `changes:` mapping as read (never re-dumped: the mapping is only inspected, and a card is only
 /// ever settled whole through `write::delete` or superseded by a fresh `propose_amendment`).
 ///
-/// Three filters, each load-bearing:
+/// Four filters, each load-bearing:
 /// - **`pending` or `snoozed`** (review O3): the fifteen-a-day cap defers a proposal past budget
 ///   rather than deleting it, so a card the cap snoozed is still an open decision — leaving it out
 ///   let a newer pull file a second, live card beside it, and the snoozed one would later wake up
@@ -664,13 +664,25 @@ fn rename_case_only(from: &Path, to: &Path) -> std::io::Result<()> {
 ///   `agent:knowlu.enrich` — or any card a person or another agent filed — is a decision the student
 ///   has not made, and "a proposal is deferred, never deleted". Sync's convergence or a newer sync
 ///   conflict on the same field says nothing about it, so sync never settles or archives it.
+/// - **Filed by THIS device** (probe N16, fix round 5): the card's `id` is in `own`, the ids that
+///   have a `create` record in this device's own journal under this device's own `device_name()`.
+///   A card is a note, so a card another desktop filed travels here like any other note — carrying
+///   the same `created_by` — and settling this device's copy of it would archive it, send a
+///   tombstone, and archive the other desktop's still-open card there too, with nothing left on
+///   either desktop to raise the conflict it held. `propose_amendment` goes through `write::create`,
+///   which journals exactly that record; the other desktop's `create` is under `ACTOR` and is never
+///   pushed, so a card that arrived as a note has none here. No frontmatter key is added for this.
 /// - **Any field set**: the caller decides which cards a pull resolves (review D1, fix round 4);
 ///   matching one exact field set is what let a two-field card survive a pull that resolved one of
 ///   its fields.
 ///
 /// Kept as its own scan rather than widening the shared `write::find_pending_amendment`, which the
 /// judge-once re-propose path in `write_literals` also uses.
-fn live_sync_cards(vault: &Path, target_rel: &str) -> Vec<(PathBuf, serde_yaml_ng::Mapping)> {
+fn live_sync_cards(
+    vault: &Path,
+    target_rel: &str,
+    own: &std::collections::BTreeSet<String>,
+) -> Vec<(PathBuf, serde_yaml_ng::Mapping)> {
     let Ok(entries) = std::fs::read_dir(vault.join("approvals")) else { return Vec::new() };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -688,6 +700,7 @@ fn live_sync_cards(vault: &Path, target_rel: &str) -> Vec<(PathBuf, serde_yaml_n
             || !matches!(text("status").as_deref(), Some("pending") | Some("snoozed"))
             || text("created_by").as_deref() != Some(ACTOR)
             || text("target").as_deref() != Some(target_rel)
+            || !text("id").is_some_and(|id| own.contains(&id))
         {
             continue;
         }
@@ -831,6 +844,20 @@ pub fn apply(
     }
     journal.invalidate();
 
+    // This machine's own device name, and the ids of the notes it CREATED itself — read once, after
+    // the record pass. R1 below uses the first; `live_sync_cards` uses the second to tell the amend
+    // cards this device filed from the ones that arrived as notes from another desktop (probe N16).
+    let this_device = crate::journal::device_name();
+    let own_created: std::collections::BTreeSet<String> = journal
+        .read(None, None)
+        .into_iter()
+        .filter(|r| {
+            r.get("op").and_then(Value::as_str) == Some("create")
+                && r.get("device").and_then(Value::as_str) == Some(this_device.as_str())
+        })
+        .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
     // 4. Per note, with the roles reversed exactly as the table above says.
     for (id, foreign) in &touched {
         if foreign.is_empty() { continue; }
@@ -881,7 +908,6 @@ pub fn apply(
         // explains the note's value, which is the contender `resolve` is asking for. Only another
         // device's records: when THIS device's own latest record disagrees with the note, the note
         // was edited by hand since, and the mtime stand-in is exactly the right contender for that.
-        let this_device = crate::journal::device_name();
         let never_took_effect = |r: &Record| {
             let field = r.get("field").and_then(Value::as_str).unwrap_or_default();
             r.get("op").and_then(Value::as_str) == Some("set")
@@ -912,8 +938,9 @@ pub fn apply(
         // 5. **A carded field is withheld from `apply`: the card IS the write** (review C2). A field
         //    with a supersede record is a field both desktops moved; if a card could ever apply to
         //    it, writing the foreign value here would overwrite this device's and leave the card's
-        //    `from` no longer matching the note, which `approvals::validate_amendment` refuses. So
-        //    the note keeps what this device had until the student answers.
+        //    `from` no longer matching the note, which `approvals::apply_amendment`'s from-check
+        //    refuses as a "stale amendment" (`validate_amendment` checks only shape, amendability and
+        //    writability). So the note keeps what this device had until the student answers.
         let folder = path.split('/').next().unwrap_or_default();
         let card_folder = crate::approvals::AMENDABLE_FOLDERS.contains(&folder);
         let superseded_fields: std::collections::BTreeSet<String> = resolution
@@ -969,6 +996,14 @@ pub fn apply(
         // resolves no card either (an earlier card on it may still carry a later offer from a
         // third desktop).
         //
+        // **A cardable field this pull applied CLEANLY resolves a card too — for settling, never as
+        // a change** (probe N13, fix round 5). Only a third desktop can reach it: this device's
+        // card offers B's value over this device's own, then desktop C, which had this device's
+        // value, writes the field again. `reconcile::resolve` sees "upstream never moved" and
+        // applies C's value, so the card's `from` no longer matches the note and
+        // `approvals::apply_amendment` would refuse it for ever ("stale amendment"). C's write is
+        // already on the note, so there is nothing to propose in the card's place.
+        //
         // **YAML values on both sides** (review R3): `propose_amendment`'s `changes` is
         // `&[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]`. `from` comes straight out of
         // the note's own frontmatter mapping — re-read after the write above, never round-tripped
@@ -977,31 +1012,40 @@ pub fn apply(
         let holds = |field: &str| crate::yaml::get(&now_meta, field).cloned().unwrap_or(serde_yaml_ng::Value::Null);
         let mut changes: Vec<(String, serde_yaml_ng::Value, serde_yaml_ng::Value)> = Vec::new();
         let mut resolved: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for field in superseded_fields.iter().filter(|f| cardable(f)) {
-            let Some(value) = resolution.apply.get(field) else { continue };
+        for (field, value) in resolution.apply.iter().filter(|(field, _)| cardable(field)) {
+            resolved.insert(field.clone());
+            if !superseded_fields.contains(field) {
+                // Applied cleanly above: resolved for settling, never a change.
+                continue;
+            }
             let to = crate::yaml::from_json(value);
             let from = holds(field);
-            resolved.insert(field.clone());
             if from != to {
                 changes.push((field.clone(), from, to));
             }
         }
         if !resolved.is_empty() {
-            // Every still-open card sync filed on this note that names ANY field this pull resolved
-            // — converged or carded — is settled, whatever else it names. Keyed on one exact field
-            // set (rounds 1-3), a two-field card survived a pull that resolved only one of its
-            // fields and went on offering a value neither desktop holds (probes N10a, N10b), and a
-            // pull that grew the conflicting set filed a second card beside the stale one (N10c). A
-            // card sync did not file is never among these (review R2: `live_sync_cards`).
-            let touching: Vec<(PathBuf, serde_yaml_ng::Mapping)> = live_sync_cards(vault, &path)
+            // Every still-open card this device filed on this note that names ANY field this pull
+            // resolved — converged, carded or applied cleanly — is settled, whatever else it names.
+            // Keyed on one exact field set (rounds 1-3), a two-field card survived a pull that
+            // resolved only one of its fields and went on offering a value neither desktop holds
+            // (probes N10a, N10b), and a pull that grew the conflicting set filed a second card
+            // beside the stale one (N10c). A card sync did not file (review R2), or that another
+            // desktop filed and that travelled here as a note (N16), is never among these: see
+            // `live_sync_cards`.
+            let touching: Vec<(PathBuf, serde_yaml_ng::Mapping)> = live_sync_cards(vault, &path, &own_created)
                 .into_iter()
                 .filter(|(_, card)| card.keys().filter_map(crate::yaml::text).any(|f| resolved.contains(&f)))
                 .collect();
             // What a settled card named that this pull did NOT resolve is still an open question, so
             // it is carried into the one fresh card rather than dropped with the card that held it —
-            // never a silent loss. Re-based on what the note holds now, because
-            // `approvals::apply_amendment`'s from-check refuses a card whose `from` no longer
-            // matches the note; and left out only when the note already holds its `to`.
+            // **but only while the note still holds that card's own `from` for the field** (probes
+            // N14, N14b; fix round 5). Once the note has moved on — the student answered the field
+            // by hand, or a later write from a third desktop applied cleanly — the card's `to` is an
+            // OLDER value than what the note now holds, and carrying it (re-based on the new value)
+            // would re-offer it over that later write. The field is dropped instead: a conflict still
+            // open on the other side comes back through that side's own records. A card whose
+            // `from` equals its `to` proposes nothing and is dropped too.
             let mut carried: std::collections::BTreeMap<String, (serde_yaml_ng::Value, serde_yaml_ng::Value)> =
                 std::collections::BTreeMap::new();
             for (_, card) in &touching {
@@ -1010,10 +1054,15 @@ pub fn apply(
                     if resolved.contains(&field) || carried.contains_key(&field) || !cardable(&field) {
                         continue;
                     }
-                    let Some(to) = spec.as_mapping().and_then(|m| crate::yaml::get(m, "to")).cloned() else { continue };
+                    let Some(spec) = spec.as_mapping() else { continue };
+                    let (Some(card_from), Some(to)) = (crate::yaml::get(spec, "from"), crate::yaml::get(spec, "to")) else {
+                        continue;
+                    };
                     let from = holds(&field);
-                    if crate::yaml::to_json(&from) != crate::yaml::to_json(&to) {
-                        carried.insert(field, (from, to));
+                    if crate::yaml::to_json(&from) == crate::yaml::to_json(card_from)
+                        && crate::yaml::to_json(&from) != crate::yaml::to_json(to)
+                    {
+                        carried.insert(field, (from, to.clone()));
                     }
                 }
             }
@@ -1043,7 +1092,7 @@ pub fn apply(
                         "sync: {path} — a stale amend card for `{names}` could not be settled ({e})"
                     )),
                     Ok(_) if changes.is_empty() => report.warnings.push(format!(
-                        "sync: {path} — the amend card for `{names}` is settled: both desktops now agree"
+                        "sync: {path} — the amend card for `{names}` is settled: a later write already answers it"
                     )),
                     Ok(_) => {}
                 }

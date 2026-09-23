@@ -237,7 +237,7 @@ pub fn write_literals(
     let kind = kind_for(&path, Some(&meta));
     let mut result = WriteResult { path: path.clone(), ..Default::default() };
     // `(name, old, new)` — `propose_amendment` writes both sides into the card's `changes` block,
-    // and `validate_amendment` compares `from` against the note before it applies.
+    // and `approvals::apply_amendment` compares `from` against the note before it applies.
     let mut proposed: Vec<(String, Value, Value)> = Vec::new();
 
     for (name, literal) in literals {
@@ -597,7 +597,8 @@ pub const AMEND_BUTTONS: &str = "\n```meta-bind-button\nlabel: Approve\nstyle: p
 ///
 /// 1. **`from` is the note's current value and `to` is the agent's**, both put through
 ///    `yaml::to_json` first (Python's `jsonable`), because `approvals::validate_amendment` refuses a
-///    collection on either side and compares `from` against the note before applying.
+///    collection on either side and `approvals::apply_amendment` compares `from` against the note
+///    before applying.
 /// 2. **`expires: null`** — an amendment does not go stale on a date; it is answered or it is not.
 /// 3. **`proposed_at` and `first_proposed_at` are both today.** The second is the S1 field
 ///    `age_days` and `oldest_pending_days` read, set once and never rewritten;
