@@ -1444,15 +1444,7 @@ fn settle_event_check(
     journal: &mut Journal,
 ) -> Result<(), WriteError> {
     let source = truthy_str(meta, "source_uid");
-    let mut uids: Vec<String> = match crate::yaml::get(meta, "events") {
-        Some(Value::Sequence(items)) => items
-            .iter()
-            .filter_map(crate::yaml::text)
-            .map(|uid| pystr::strip(&uid).to_string())
-            .filter(|uid| !uid.is_empty())
-            .collect(),
-        _ => Vec::new(),
-    };
+    let mut uids = crate::eventemit::card_event_uids(meta);
     if uids.is_empty() && !source.is_empty() {
         uids.push(source.clone());
     }
