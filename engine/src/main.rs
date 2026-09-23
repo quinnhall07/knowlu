@@ -368,23 +368,30 @@ fn main() -> ExitCode {
     // `RunSummary.engine_ok = false`, which is retry backoff and an amber tray twice a day for a
     // student whose card simply expired — and retrying fixes nothing here.
     //
-    // **The line is composed here, and here only** (review I3). `entitle::gate` answers the reason;
-    // the command's own word is this file's to supply, because this file is the only place that
-    // knows which subcommand was typed. The result reads exactly like the two skips the app already
-    // prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student meets one
-    // sentence shape whichever step stopped.
+    // **The line is composed here, and here only** (review I3; fix round 1, M2 makes it literally
+    // one `let` rather than one `format!` echoed in a second place). `entitle::gate` answers the
+    // reason; the command's own word is this file's to supply, because this file is the only place
+    // that knows which subcommand was typed. The result reads exactly like the two skips the app
+    // already prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student
+    // meets one sentence shape whichever step stopped.
     if let Some(vault) = gated_vault(&cli.command) {
         if let Some(reason) = entitle::gate(vault) {
+            let line = format!("{} ({reason})", name_of(&cli.command));
             // Carry-forward from Task 7's review: `sync` is the one gated step with a status file
             // of its own (`state/sync-status.json`), and the gate stopping it here means
             // `sync.rs` never runs to move that file. Without this, the console would keep
-            // showing whatever a sync run left behind before the subscription lapsed.
+            // showing whatever a sync run left behind before the subscription lapsed. Fix round 1,
+            // M2: `record_gated_skip` takes this same composed `line`, never a second copy of it.
             if matches!(cli.command, Command::Sync { .. }) {
-                if let Err(e) = sync::record_gated_skip(vault) {
+                if let Err(e) = sync::record_gated_skip(vault, &line) {
                     eprintln!("knowlu-engine: sync status could not be saved ({e})");
                 }
             }
-            println!("{} ({reason})", name_of(&cli.command));
+            // Fix round 1, M3: every other cloud-step skip a student can meet reaches the Runs view
+            // through `state/runner-log.md` — `coursework::main`'s own routine skips append exactly
+            // this way, with a routine `ok` status, because a skip is not a failure.
+            let _ = cli::append_run_log(vault, "local", "ok", &line, None);
+            println!("{line}");
             return ExitCode::SUCCESS;
         }
     }

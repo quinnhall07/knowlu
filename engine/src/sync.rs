@@ -1615,11 +1615,29 @@ pub fn is_configured(vault: &Path) -> bool {
 /// **`ok: false`, unlike "no account"/"no session"** (which are `ok: true`, since `totals.errors`
 /// is empty for a normal skip): a lapsed subscription is not the same normal state as being
 /// signed out, and the page must not read it as "in step with your account."
-pub fn record_gated_skip(vault: &Path) -> Result<(), String> {
+///
+/// **`line` is the caller's, and only the caller's** (fix round 1, M2). `main.rs`'s gate is where
+/// the reason and the command's own word are composed — "composed here, and here only" is H4b's own
+/// rule — so this function takes that finished sentence rather than assembling a second copy of it;
+/// two copies of the same sentence is how the log and the status file end up disagreeing the day
+/// either one changes wording.
+///
+/// **Takes the same lock every other writer of [`STATUS_FILE`] takes** (fix round 1, M1).
+/// `save_status`'s single fixed temp name is safe only because every writer serialises through
+/// [`RunLock`] first; without it, the slot's gated `sync` could race the console's own *Sync now*
+/// (which runs in-process and holds this lock for the whole of its call) and either lose this
+/// write to a `rename` collision or clobber a result that just succeeded. `Ok(None)` — another live
+/// handle already holds it — writes nothing, exactly as `run_lines_with`'s own lock-held skip
+/// (review N3) writes nothing: the holder saves its own result.
+pub fn record_gated_skip(vault: &Path, line: &str) -> Result<(), String> {
+    let _lock = match RunLock::try_acquire(vault).map_err(|e| e.to_string())? {
+        Some(lock) => lock,
+        None => return Ok(()),
+    };
     let status = SyncStatus {
         ok: false,
         at: Some(crate::journal::now_ts(None)),
-        lines: vec!["sync (skipped: no entitlement)".to_string()],
+        lines: vec![line.to_string()],
         last_error: None,
         skipped: Some("no entitlement".to_string()),
     };
