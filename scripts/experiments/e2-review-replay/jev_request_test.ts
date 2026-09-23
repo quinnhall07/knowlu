@@ -107,6 +107,19 @@ Deno.test("buildDecisionsBody refuses a state that still carries a severity word
   assertThrows(() => buildDecisionsBody(leaky), Error, "leak");
 });
 
+Deno.test("buildDecisionsBody does not mistake a JSON newline escape before 'it' for a leak", () => {
+  // JSON.stringify writes "\n" + "it" as `\nit`, and `\bnit\b` matches that — the paid run's first
+  // pass stopped on exactly this at B-task3-2. The guard reads the state's own strings instead.
+  const f = fixture({ text: "the listener binds before the deadline\nit then polls `accept` in a loop." });
+  assertEquals(findLeaks(f.text), []);
+  buildDecisionsBody(f);
+});
+
+Deno.test("buildDecisionsBody still refuses a leak in the state's context or file, not only the finding", () => {
+  const leaky = fixture({ source: "nit-notes.md" }); // unmapped source -> context "Source: nit-notes.md"
+  assertThrows(() => buildDecisionsBody(leaky), Error, "leak");
+});
+
 Deno.test("the state of a clean finding has no leak terms", () => {
   assertEquals(findLeaks(JSON.stringify(buildDecisionsBody(fixture()).state)), []);
 });

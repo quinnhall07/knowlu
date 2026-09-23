@@ -154,7 +154,9 @@ export function buildDecisionsBody(finding: CorpusFinding): {
   provider: typeof ZDR_ROUTE;
 } {
   const state = buildState(finding);
-  const leaks = findLeaks(JSON.stringify(state));
+  // Scan the state's own strings, never its JSON: `JSON.stringify` writes a newline before "it" as
+  // `\nit`, which `\bnit\b` matches — a false leak that stopped the first paid pass.
+  const leaks = [state.finding, state.file ?? "", state.context].flatMap(findLeaks);
   if (leaks.length > 0) {
     throw new Error(`buildDecisionsBody: severity leak in ${finding.id}'s state: ${JSON.stringify(leaks)}`);
   }
