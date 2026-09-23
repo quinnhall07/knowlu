@@ -2922,6 +2922,265 @@ pub fn emit_checks(
     (filed, count, warnings)
 }
 
+// ---------------------------------------------------------------------------------------------
+// P12 — change detection: changed, ended, succeeded (§5.4, R22).
+// ---------------------------------------------------------------------------------------------
+
+/// The key prefixes a calendar series carries (R6); only notes keyed so are watched for changes.
+const SERIES_KEY_PREFIXES: [&str; 2] = ["gcal-series:", "ics-series:"];
+
+/// A `meets` list as the set of `(DAY_KEYS index, start, end)` triples — the comparison §3.5's
+/// signature makes, so neither entry order nor day order is a change.
+fn meet_set(meets: &[Meet]) -> BTreeSet<(usize, Time, Time)> {
+    signature("", None, "", meets, &Codes::default()).meets
+}
+
+/// A series is the note's series now and the calendar still returns it: `false` when its
+/// calendar's last fresh read did not return it (`last_seen` before that read date) — the same
+/// test [`SeriesFile::instances_map`] makes.
+fn is_live(file: &SeriesFile, series: &Series) -> bool {
+    let read = file.calendars.get(&series.calendar).copied().or(series.last_seen);
+    series.last_seen.is_some_and(|seen| read.is_none_or(|read| seen >= read))
+}
+
+/// A live, classified series of the file, one per key (R22's "fresh series").
+struct Candidate<'a> {
+    key: &'a str,
+    series: &'a Series,
+    kind: String,
+    course: Option<String>,
+    sig: Signature,
+    by_title: Signature,
+}
+
+impl Candidate<'_> {
+    /// Carries `sig` — by course, or by title for a note with no `course` (P9 fix round 1, M4).
+    fn carries(&self, sig: &Signature) -> bool {
+        self.sig == *sig || self.by_title == *sig
+    }
+
+    /// The date it starts: its `first`, else its earliest instance.
+    fn first(&self) -> Option<Date> {
+        self.series.first.or_else(|| self.series.instances.iter().map(|i| i.date).min())
+    }
+}
+
+fn to_value(json: serde_json::Value) -> Value {
+    crate::yaml::from_json(&json)
+}
+
+fn text_value(text: Option<&str>) -> Value {
+    text.map_or(Value::Null, |t| Value::String(t.to_string()))
+}
+
+/// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
+/// `gcal-series:`/`ics-series:`, over [`SeriesFile::by_key`] and `file.ended`. `fresh` is the set
+/// of calendar keys read fresh and complete this run. Returns `(changes, warnings)`, in note order.
+///
+/// - **changed** — the note's record is live on a calendar in `fresh` and differs in `meets`, in
+///   a non-empty `where`, or in `until` (a `None` `until` is never proposed). An `until` that ends
+///   earlier is not proposed while another live series with the note's signature runs past it —
+///   a "this and following" split with the same times (R22: the note is seen).
+/// - **ended** — the note's key is under no calendar, is in `file.ended`, and no live series has
+///   the note's signature → `until` = `last_instance`, else `until`; neither → one warning and no
+///   change; nothing when the note's `until` is on or before that date.
+/// - **succeeded** (R22) — while the note's series is ending (its record gone stale, its key in
+///   `ended`, or its `until` newly earlier than the note's), a live, eligible series of the note's
+///   kind (`class` or `lab`) and course, with different `meets`, first meeting on or after the old
+///   series' last day, not answered (a note or marker has its key) and not already a confirmed
+///   note's signature → one change: `meets`, `where` (when set and different) and `source_uid` =
+///   the new key. Twins (one meeting under two keys) share a signature, so one is chosen — the
+///   earliest `first`, then [`precedence`], then the key — and one change is made.
+///
+/// A note whose `until` is before `today` is finished and not watched. `was` holds the note's
+/// current value of every changed field, an absent one as `null`; no field is proposed as `null`.
+pub fn detect_changes(
+    file: &SeriesFile,
+    set: &Commitments,
+    codes: &Codes,
+    planning: &[String],
+    fresh: &BTreeSet<String>,
+    today: Date,
+) -> (Vec<Change>, Vec<String>) {
+    let by_key = file.by_key();
+    let live: Vec<Candidate> = by_key
+        .iter()
+        .filter(|(_, series)| is_live(file, series))
+        .filter_map(|(key, series)| match classify(series, codes, planning)? {
+            Class::Kind { kind, course } => Some(Candidate {
+                key,
+                series,
+                sig: signature(&kind, course.as_deref(), &series.title, &series.meets, codes),
+                by_title: signature(&kind, None, &series.title, &series.meets, codes),
+                kind,
+                course,
+            }),
+            Class::Routine { .. } => None,
+        })
+        .collect();
+    let answered: BTreeSet<&str> = set
+        .confirmed
+        .iter()
+        .chain(set.planning_day.iter())
+        .filter_map(|n| n.source_uid.as_deref())
+        .chain(set.declined.iter().map(String::as_str))
+        .collect();
+    let confirmed_sigs: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
+
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    for note in &set.confirmed {
+        let Some(key) = note.source_uid.as_deref() else { continue };
+        if !SERIES_KEY_PREFIXES.iter().any(|p| key.starts_with(p)) || note.until.is_some_and(|u| u < today) {
+            continue;
+        }
+        let sig = note.signature(codes);
+        let successor = |old_last: Option<Date>| -> Option<Change> {
+            let old_last = old_last?;
+            let course = course_key(note.course.as_deref()?, codes);
+            if !matches!(note.kind.as_str(), "class" | "lab") {
+                return None;
+            }
+            let mine = meet_set(&note.meets);
+            let next = live
+                .iter()
+                .filter(|c| c.key != key && c.kind == note.kind && !c.series.meets.is_empty())
+                .filter(|c| c.course.as_deref().is_some_and(|k| course_key(k, codes) == course))
+                .filter(|c| meet_set(&c.series.meets) != mine)
+                .filter(|c| c.first().is_some_and(|first| first >= old_last))
+                .filter(|c| c.series.until.is_none_or(|until| until >= today))
+                .filter(|c| !answered.contains(c.key) && !confirmed_sigs.contains(&c.sig))
+                .min_by(|a, b| {
+                    (a.first(), precedence(a.series), a.key).cmp(&(b.first(), precedence(b.series), b.key))
+                })?;
+            let mut change = Mapping::new();
+            let mut was = Mapping::new();
+            change.insert("meets".into(), to_value(meets_json(&next.series.meets)));
+            was.insert("meets".into(), to_value(meets_json(&note.meets)));
+            if let Some(place) = next.series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
+                if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
+                    change.insert("where".into(), Value::String(place.to_string()));
+                    was.insert("where".into(), text_value(note.where_.as_deref()));
+                }
+            }
+            change.insert("source_uid".into(), Value::String(next.key.to_string()));
+            was.insert("source_uid".into(), Value::String(key.to_string()));
+            Some(make_change(note, key, change, was))
+        };
+
+        match by_key.get(key) {
+            Some(series) => {
+                if !fresh.contains(&series.calendar) {
+                    continue;
+                }
+                let last_instance = series.instances.iter().map(|i| i.date).max();
+                let live_now = is_live(file, series);
+                let ends_earlier = series.until.filter(|u| note.until.is_none_or(|n| *u < n));
+                if !live_now || ends_earlier.is_some() {
+                    let old_last = match live_now {
+                        true => series.until.or(last_instance),
+                        false => last_instance.or(series.until),
+                    };
+                    if let Some(change) = successor(old_last) {
+                        out.push(change);
+                        continue;
+                    }
+                }
+                if !live_now {
+                    continue;
+                }
+                let mut change = Mapping::new();
+                let mut was = Mapping::new();
+                if !series.meets.is_empty() && meet_set(&series.meets) != meet_set(&note.meets) {
+                    change.insert("meets".into(), to_value(meets_json(&series.meets)));
+                    was.insert("meets".into(), to_value(meets_json(&note.meets)));
+                }
+                if let Some(place) = series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
+                    if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
+                        change.insert("where".into(), Value::String(place.to_string()));
+                        was.insert("where".into(), text_value(note.where_.as_deref()));
+                    }
+                }
+                if let Some(until) = series.until.filter(|u| note.until != Some(*u)) {
+                    let continues = live.iter().any(|c| {
+                        c.key != key && c.carries(&sig) && c.series.until.is_none_or(|other| other > until)
+                    });
+                    if !continues {
+                        change.insert("until".into(), Value::String(until.to_string()));
+                        was.insert("until".into(), to_value(date_json(note.until)));
+                    }
+                }
+                if !change.is_empty() {
+                    out.push(make_change(note, key, change, was));
+                }
+            }
+            None => {
+                let Some(ended) = file.ended.get(key) else { continue };
+                if live.iter().any(|c| c.carries(&sig)) {
+                    continue;
+                }
+                let end = ended.last_instance.or(ended.until);
+                if let Some(change) = successor(end) {
+                    out.push(change);
+                    continue;
+                }
+                let Some(end) = end else {
+                    warnings.push(format!(
+                        "commitments: {key} ended with no last instance and no until; no end card"
+                    ));
+                    continue;
+                };
+                if note.until.is_some_and(|u| u <= end) {
+                    continue;
+                }
+                let mut change = Mapping::new();
+                let mut was = Mapping::new();
+                change.insert("until".into(), Value::String(end.to_string()));
+                was.insert("until".into(), to_value(date_json(note.until)));
+                out.push(make_change(note, key, change, was));
+            }
+        }
+    }
+    (out, warnings)
+}
+
+fn make_change(note: &Commitment, key: &str, change: Mapping, was: Mapping) -> Change {
+    Change {
+        target: note.path.to_string_lossy().replace('\\', "/"),
+        source_uid: key.to_string(),
+        title: note.title.clone(),
+        change,
+        was,
+    }
+}
+
+/// The successor keys a change card holds (§5.4, §5.5, plan review I5): the `change.source_uid`
+/// of every `commitment-check` card in `approvals/` and `archive/` whose status is not
+/// `superseded` — pending, snoozed, approved or rejected. `rank` passes them to [`proposals`] as
+/// `held`, so a successor is never proposed as a class of its own beside its change card.
+pub fn successor_keys(vault: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        let dir = vault.join(folder);
+        if !dir.is_dir() {
+            continue;
+        }
+        for path in crate::approvals::sorted_md(&dir) {
+            let Ok(raw) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&raw) else { continue };
+            let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+            if field("type") != "approval" || field("kind") != COMMITMENT_CHECK || field("status") == "superseded" {
+                continue;
+            }
+            let Some(Value::Mapping(change)) = get(&meta, "change") else { continue };
+            if let Some(key) = get(change, "source_uid").and_then(text).filter(|k| !k.trim().is_empty()) {
+                out.insert(key);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6915,5 +7174,562 @@ mod card_tests {
              change: {until: '2026-12-04'}\nwas: {until: null}\nfirst_proposed_at: 2026-09-01\n",
         );
         assert!(emit(&v, &[], &[until_change()], 15).0.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    //! P12: `detect_changes` and `successor_keys` (§5.4, R22, plan review I1, I2, I5). Every
+    //! title, room, key and calendar is invented.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::weekcal::WeekCalendar;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+    use serde_json::json;
+
+    /// A Monday.
+    const TODAY: Date = Date::constant(2026, 10, 5);
+    const GOOGLE: &str = "google:abc";
+    const OLD: &str = "gcal-series:cs100";
+    const NEW: &str = "gcal-series:cs100-new";
+
+    /// A scratch vault removed when the test ends, its `config/ingest.yaml` naming `personal`
+    /// (a direct ICS feed) and the Google grant.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn vault(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-p12-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("ingest.yaml"),
+            "timezone: America/Chicago\ncalendars:\n  - name: personal\n    ics_url: https://a.test/a.ics\n  \
+             - name: google\n    ics_url: 'cloud:google'\n",
+        )
+        .unwrap();
+        Scratch(dir)
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn meet(days: &[DayKey], s: Time, e: Time) -> Meet {
+        Meet { days: days.to_vec(), start: s, end: e }
+    }
+
+    /// A weekly series on `days`, `s`–`e`, for `weeks` weeks from the Monday `monday`, last seen
+    /// today; `meets` as P8 derives it, `first` its first instance.
+    #[allow(clippy::too_many_arguments)]
+    fn series(uid: &str, cal: &str, title: &str, days: &[DayKey], s: Time, e: Time, monday: Date, weeks: i64) -> Series {
+        let mut instances = Vec::new();
+        for week in 0..weeks {
+            for day in days {
+                let offset = DAY_KEYS.iter().position(|k| k == day).unwrap() as i64;
+                instances.push(Instance { date: add_days(monday, week * 7 + offset), start: Some(s), end: Some(e) });
+            }
+        }
+        instances.sort_by_key(|i| i.date);
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            meets: meets_of(&instances),
+            first: instances.first().map(|i| i.date),
+            instances,
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn mwf() -> Vec<Meet> {
+        vec![meet(&["mon", "wed", "fri"], t(12, 0), t(12, 50))]
+    }
+
+    /// The note's series as the calendar holds it now: CS 100, Mon/Wed/Fri 12–12:50pm in Room 101,
+    /// until Dec 4.
+    fn cs100(uid: &str, cal: &str) -> Series {
+        let mut s = series(uid, cal, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), TODAY, 3);
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 12, 4));
+        s
+    }
+
+    /// Tue/Thu 9:30–10:45am in Room 2 from the week of Oct 19 — a successor's new times.
+    fn tue_thu(uid: &str, cal: &str) -> Series {
+        let mut s = series(uid, cal, "CS 100", &["tue", "thu"], t(9, 30), t(10, 45), date(2026, 10, 19), 3);
+        s.where_ = Some("Room 2".into());
+        s.until = Some(date(2026, 12, 4));
+        s
+    }
+
+    /// `cs100` split by "this and following": it now ends Oct 14.
+    fn ending(uid: &str, cal: &str) -> Series {
+        let mut s = series(uid, cal, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), TODAY, 2);
+        s.instances.retain(|i| i.date <= date(2026, 10, 14));
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 10, 14));
+        s
+    }
+
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        file
+    }
+
+    fn codes() -> Codes {
+        Codes { table: [("CS100".to_string(), "cs-100".to_string())].into_iter().collect(), names: BTreeMap::new() }
+    }
+
+    /// The confirmed note `commitments/cs-100.md`.
+    fn note(uid: &str) -> Commitment {
+        Commitment {
+            id: "cmt_0001".into(),
+            path: PathBuf::from("commitments/cs-100.md"),
+            kind: "class".into(),
+            level: Level::Hard,
+            title: "CS 100".into(),
+            course: Some("cs-100".into()),
+            meets: mwf(),
+            where_: Some("Room 101".into()),
+            from: Some(date(2026, 8, 19)),
+            until: Some(date(2026, 12, 4)),
+            source_uid: Some(uid.into()),
+        }
+    }
+
+    fn set_of(notes: Vec<Commitment>) -> Commitments {
+        Commitments { confirmed: notes, ..Commitments::default() }
+    }
+
+    fn fresh(cals: &[&str]) -> BTreeSet<String> {
+        cals.iter().map(|c| c.to_string()).collect()
+    }
+
+    fn detect_on(file: &SeriesFile, set: &Commitments, cals: &[&str], today: Date) -> (Vec<Change>, Vec<String>) {
+        detect_changes(file, set, &codes(), &[], &fresh(cals), today)
+    }
+
+    fn detect(file: &SeriesFile, set: &Commitments, cals: &[&str]) -> (Vec<Change>, Vec<String>) {
+        detect_on(file, set, cals, TODAY)
+    }
+
+    /// A mapping as JSON, so key order does not matter to a comparison.
+    fn js(map: &Mapping) -> serde_json::Value {
+        crate::yaml::to_json(&Value::Mapping(map.clone()))
+    }
+
+    fn ctx() -> WriteContext {
+        WriteContext::new("agent:rank", "cli")
+    }
+
+    fn emit(v: &Path, changes: &[Change], proposals: &[Proposal]) -> Vec<PathBuf> {
+        let mut journal = Journal::new(v);
+        emit_checks(v, proposals, changes, TODAY, 15, &ctx(), &mut journal).0
+    }
+
+    fn front(path: &Path) -> Mapping {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        split_frontmatter(&raw).unwrap().0
+    }
+
+    fn field(meta: &Mapping, key: &str) -> String {
+        field_text(meta, key).unwrap_or_default()
+    }
+
+    fn assert_no_null(changes: &[Change]) {
+        for c in changes {
+            for (key, value) in &c.change {
+                assert!(!matches!(value, Value::Null), "{key:?} proposed as null in {c:?}");
+            }
+        }
+    }
+
+    // --- changed ---------------------------------------------------------------------------
+
+    #[test]
+    fn a_meets_change_on_a_fresh_calendar_files_one_change_card() {
+        // The note's series now meets Tue/Thu; its Outlook twin (another key, same series) too.
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        let mut twin = moved.clone();
+        twin.source_uid = "ics-series:cs100-twin".into();
+        twin.calendar = "personal".into();
+        let file = file_of(vec![moved, twin]);
+        let set = set_of(vec![note(OLD)]);
+        let (changes, warnings) = detect(&file, &set, &[GOOGLE, "personal"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        let c = &changes[0];
+        assert_eq!(c.target, "commitments/cs-100.md");
+        assert_eq!(c.source_uid, OLD);
+        assert_eq!(c.title, "CS 100");
+        assert_eq!(js(&c.change), json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}]}));
+        assert_eq!(js(&c.was), json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]}));
+
+        let v = vault("meets");
+        let paths = emit(&v, &changes, &[]);
+        assert_eq!(paths.len(), 1);
+        let meta = front(&paths[0]);
+        assert_eq!(field(&meta, "title"), "CS 100 now meets Tue/Thu 9:30\u{2013}10:45am · update?");
+        assert_eq!(field(&meta, "target"), "commitments/cs-100.md");
+        assert_eq!(field(&meta, "source_uid"), OLD);
+        // Asked once: the next run detects the same change and files nothing.
+        let (again, _) = detect(&file, &set, &[GOOGLE, "personal"]);
+        assert!(emit(&v, &again, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_calendar_not_read_fresh_files_nothing() {
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        moved.where_ = Some("Room 2".into());
+        moved.until = Some(date(2026, 11, 20));
+        let file = file_of(vec![moved]);
+        let set = set_of(vec![note(OLD)]);
+        assert!(detect(&file, &set, &[]).0.is_empty());
+        assert!(detect(&file, &set, &["personal"]).0.is_empty());
+        assert_eq!(detect(&file, &set, &[GOOGLE]).0.len(), 1);
+    }
+
+    #[test]
+    fn a_non_empty_where_change_is_a_change_and_an_empty_one_is_not() {
+        let set = set_of(vec![note(OLD)]);
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.where_ = Some("Room 2".into());
+        let (changes, _) = detect(&file_of(vec![moved]), &set, &[GOOGLE]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"where": "Room 2"}));
+        assert_eq!(js(&changes[0].was), json!({"where": "Room 101"}));
+        for empty in [None, Some(String::new()), Some("   ".to_string())] {
+            let mut gone = cs100(OLD, GOOGLE);
+            gone.where_ = empty;
+            assert!(detect(&file_of(vec![gone]), &set, &[GOOGLE]).0.is_empty());
+        }
+        // The same room is no change.
+        assert!(detect(&file_of(vec![cs100(OLD, GOOGLE)]), &set, &[GOOGLE]).0.is_empty());
+    }
+
+    #[test]
+    fn an_until_change_proposes_the_new_end_and_an_extension_too() {
+        let set = set_of(vec![note(OLD)]);
+        for until in [date(2026, 11, 20), date(2026, 12, 11)] {
+            let mut s = cs100(OLD, GOOGLE);
+            s.until = Some(until);
+            let (changes, _) = detect(&file_of(vec![s]), &set, &[GOOGLE]);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(js(&changes[0].change), json!({"until": until.to_string()}));
+            assert_eq!(js(&changes[0].was), json!({"until": "2026-12-04"}));
+        }
+    }
+
+    // --- ended -----------------------------------------------------------------------------
+
+    #[test]
+    fn an_ended_series_proposes_until_the_last_instance() {
+        // Built by P8's `refresh_series` aging the series out (plan review I1), not by hand.
+        let d0 = date(2026, 9, 21);
+        let v = vault("ended");
+        let mut a = series("ics-series:a", "personal", "CS 100", &["tue"], t(9, 0), t(9, 50), d0, 2);
+        a.until = Some(date(2026, 12, 4));
+        refresh_series(&v, &[("personal".into(), vec![a.clone()])], d0);
+        let mut n = note("ics-series:a");
+        n.meets = a.meets.clone();
+        n.where_ = None;
+        let set = set_of(vec![n]);
+
+        // Unseen for a week: stale, not ended yet — nothing.
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], add_days(d0, 7));
+        assert!(detect_on(&file, &set, &["personal"], add_days(d0, 7)).0.is_empty());
+
+        // Unseen for 14 days: dropped into `ended`, and the end card is proposed.
+        let drop_day = add_days(d0, 14);
+        let (file, _) = refresh_series(&v, &[("personal".into(), Vec::new())], drop_day);
+        assert!(file.ended.contains_key("ics-series:a"));
+        let (changes, warnings) = detect_on(&file, &set, &["personal"], drop_day);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].source_uid, "ics-series:a");
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-09-29"}));
+        assert_eq!(js(&changes[0].was), json!({"until": "2026-12-04"}));
+        // A later run, the series still gone: the same question, which is never asked twice.
+        let (later, _) = refresh_series(&v, &[("personal".into(), Vec::new())], add_days(drop_day, 3));
+        assert_eq!(detect_on(&later, &set, &["personal"], add_days(drop_day, 3)).0, changes);
+    }
+
+    fn ended_file(last_instance: Option<Date>, until: Option<Date>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        file.calendars.insert("personal".into(), TODAY);
+        file.ended.insert(
+            "ics-series:a".into(),
+            Ended { calendar: "personal".into(), dropped: TODAY, last_instance, until },
+        );
+        file
+    }
+
+    #[test]
+    fn an_ended_entry_with_no_instance_uses_its_last_known_until() {
+        let set = set_of(vec![note("ics-series:a")]);
+        let (changes, warnings) = detect(&ended_file(None, Some(date(2026, 11, 20))), &set, &["personal"]);
+        assert!(warnings.is_empty());
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-11-20"}));
+        // A note with no `until`: `was` carries it as null.
+        let mut open = note("ics-series:a");
+        open.until = None;
+        let (changes, _) = detect(&ended_file(Some(date(2026, 10, 20)), None), &set_of(vec![open]), &["personal"]);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-10-20"}));
+        assert_eq!(js(&changes[0].was), json!({"until": null}));
+        // Neither: no change, and one warning.
+        let (changes, warnings) = detect(&ended_file(None, None), &set, &["personal"]);
+        assert!(changes.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("ics-series:a"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_ended_note_whose_until_already_ends_it_files_nothing() {
+        let file = ended_file(Some(date(2026, 10, 20)), Some(date(2026, 12, 4)));
+        for until in [date(2026, 10, 20), date(2026, 10, 16)] {
+            let mut n = note("ics-series:a");
+            n.until = Some(until);
+            let (changes, warnings) = detect(&file, &set_of(vec![n]), &["personal"]);
+            assert!(changes.is_empty(), "{changes:?}");
+            assert!(warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_key_still_held_by_another_calendar_is_not_ended() {
+        // Built by `refresh_series` (plan review I2): `personal` stops returning the key while
+        // `google:aa` still holds it.
+        let d0 = date(2026, 9, 21);
+        let v = vault("held");
+        let k = "gcal-series:twin";
+        let on = |cal: &str| series(k, cal, "Robotics Club", &["tue"], t(18, 0), t(19, 0), d0, 2);
+        refresh_series(&v, &[("personal".into(), vec![on("personal")]), ("google:aa".into(), vec![on("google:aa")])], d0);
+        let day = add_days(d0, 14);
+        let (file, _) =
+            refresh_series(&v, &[("personal".into(), Vec::new()), ("google:aa".into(), vec![on("google:aa")])], day);
+        let mut n = note(k);
+        n.kind = "club".into();
+        n.level = Level::Soft;
+        n.title = "Robotics Club".into();
+        n.course = None;
+        n.meets = on("google:aa").meets;
+        n.where_ = None;
+        n.until = None;
+        let set = set_of(vec![n]);
+        assert!(detect_on(&file, &set, &["personal", "google:aa"], day).0.is_empty());
+        // Even with a stray `ended` entry for it, a key some calendar holds is not ended.
+        let mut stray = file.clone();
+        stray.ended.insert(k.into(), Ended { calendar: "personal".into(), dropped: day, last_instance: Some(d0), until: None });
+        assert!(detect_on(&stray, &set, &["personal", "google:aa"], day).0.is_empty());
+    }
+
+    // --- succeeded (R22) -------------------------------------------------------------------
+
+    #[test]
+    fn a_split_series_with_the_same_meets_files_nothing() {
+        // "This and following" with the same times: the old key ends Oct 14, a new key carries
+        // the note's signature from Oct 19. The note counts as seen.
+        let mut same = series(NEW, GOOGLE, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), date(2026, 10, 19), 3);
+        same.where_ = Some("Room 101".into());
+        same.until = Some(date(2026, 12, 4));
+        let set = set_of(vec![note(OLD)]);
+        let file = file_of(vec![ending(OLD, GOOGLE), same.clone()]);
+        let (changes, warnings) = detect(&file, &set, &[GOOGLE]);
+        assert!(changes.is_empty(), "{changes:?}");
+        assert!(warnings.is_empty());
+        // Nor once the old key has aged into `ended`.
+        let mut gone = file_of(vec![same]);
+        gone.ended.insert(
+            OLD.into(),
+            Ended { calendar: GOOGLE.into(), dropped: TODAY, last_instance: Some(date(2026, 10, 14)), until: Some(date(2026, 10, 14)) },
+        );
+        assert!(detect(&gone, &set, &[GOOGLE]).0.is_empty());
+        // And the new key is not proposed as a class of its own (P9's signature rule).
+        let got = proposals(&gone, &set, &codes(), &[], &WeekCalendar::new(&Mapping::new(), Vec::new()), &BTreeSet::new(), TODAY, true);
+        assert!(got.iter().all(|p| p.source_uid != NEW), "{got:?}");
+    }
+
+    /// A split to new times: the old key (and its Outlook twin) end Oct 14; the new key (and its
+    /// twin) meet Tue/Thu from Oct 20.
+    fn split_file() -> SeriesFile {
+        file_of(vec![
+            ending(OLD, GOOGLE),
+            ending("ics-series:cs100-twin", "personal"),
+            tue_thu(NEW, GOOGLE),
+            tue_thu("ics-series:cs100-new-twin", "personal"),
+        ])
+    }
+
+    #[test]
+    fn a_split_with_new_meets_files_exactly_one_card_moving_source_uid() {
+        let set = set_of(vec![note(OLD)]);
+        let (changes, warnings) = detect(&split_file(), &set, &[GOOGLE, "personal"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        let c = &changes[0];
+        assert_eq!(c.source_uid, OLD);
+        assert_eq!(
+            js(&c.change),
+            json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}], "where": "Room 2", "source_uid": NEW})
+        );
+        assert_eq!(
+            js(&c.was),
+            json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}], "where": "Room 101", "source_uid": OLD})
+        );
+        let v = vault("split");
+        let paths = emit(&v, &changes, &[]);
+        assert_eq!(paths.len(), 1);
+        let meta = front(&paths[0]);
+        assert_eq!(field(&meta, "title"), "CS 100 now meets Tue/Thu 9:30\u{2013}10:45am · update?");
+        assert_eq!(field(&meta, "source_uid"), OLD);
+
+        // Once the old key has aged into `ended`, the same change is detected — and never re-asked.
+        let mut later = file_of(vec![tue_thu(NEW, GOOGLE), tue_thu("ics-series:cs100-new-twin", "personal")]);
+        later.ended.insert(
+            OLD.into(),
+            Ended { calendar: GOOGLE.into(), dropped: TODAY, last_instance: Some(date(2026, 10, 14)), until: Some(date(2026, 10, 14)) },
+        );
+        let (again, _) = detect(&later, &set, &[GOOGLE, "personal"]);
+        assert_eq!(again, changes);
+        assert!(emit(&v, &again, &[]).is_empty());
+
+        // A successor that starts before the old series' last instance is no successor: the old
+        // one's end is asked on its own.
+        let mut early = tue_thu(NEW, GOOGLE);
+        early.first = Some(date(2026, 10, 13));
+        let (changes, _) = detect(&file_of(vec![ending(OLD, GOOGLE), early]), &set, &[GOOGLE]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-10-14"}));
+    }
+
+    #[test]
+    fn a_declined_successor_leaves_the_end_to_the_ended_rule() {
+        // §5.4 M-d: a rejected successor's key carries a decline marker; the old note then ends.
+        let mut set = set_of(vec![note(OLD)]);
+        set.declined.insert(NEW.into());
+        set.declined.insert("ics-series:cs100-new-twin".into());
+        let (changes, _) = detect(&split_file(), &set, &[GOOGLE, "personal"]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-10-14"}));
+    }
+
+    // --- successor keys ----------------------------------------------------------------------
+
+    fn card(v: &Path, folder: &str, name: &str, front: &str) {
+        let dir = v.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), format!("---\ntype: approval\n{front}---\n\nInvented.\n")).unwrap();
+    }
+
+    #[test]
+    fn successor_keys_skips_superseded_cards() {
+        let v = vault("keys");
+        let change = |key: &str| format!("change: {{meets: [{{days: [tue], start: '09:00', end: '10:00'}}], source_uid: '{key}'}}\n");
+        card(&v, "approvals", "a.md", &format!("kind: commitment-check\nstatus: pending\ntarget: commitments/a.md\n{}", change("gcal-series:pending")));
+        card(&v, "approvals", "b.md", &format!("kind: commitment-check\nstatus: snoozed\ntarget: commitments/b.md\n{}", change("gcal-series:snoozed")));
+        card(&v, "archive", "c.md", &format!("kind: commitment-check\nstatus: rejected\ntarget: commitments/c.md\n{}", change("gcal-series:rejected")));
+        card(&v, "archive", "d.md", &format!("kind: commitment-check\nstatus: executed\ntarget: commitments/d.md\n{}", change("gcal-series:approved")));
+        card(&v, "archive", "e.md", &format!("kind: commitment-check\nstatus: superseded\ntarget: commitments/e.md\n{}", change("gcal-series:superseded")));
+        // Not a successor: another kind, a change without a new key, a proposal card.
+        card(&v, "approvals", "f.md", &format!("kind: amend\nstatus: pending\n{}", change("gcal-series:amend")));
+        card(&v, "approvals", "g.md", "kind: commitment-check\nstatus: pending\ntarget: commitments/g.md\nchange: {until: '2026-12-04'}\n");
+        card(&v, "approvals", "h.md", "kind: commitment-check\nstatus: pending\nsource_uid: gcal-series:proposal\n");
+        let got: Vec<String> = successor_keys(&v).into_iter().collect();
+        assert_eq!(got, ["gcal-series:approved", "gcal-series:pending", "gcal-series:rejected", "gcal-series:snoozed"]);
+        assert!(successor_keys(&vault("keys-empty")).is_empty());
+    }
+
+    #[test]
+    fn the_successor_is_not_proposed_while_its_change_card_exists() {
+        let v = vault("held-successor");
+        let file = split_file();
+        let set = set_of(vec![note(OLD)]);
+        let template = WeekCalendar::new(&Mapping::new(), Vec::new());
+        let run = |held: &BTreeSet<String>| proposals(&file, &set, &codes(), &[], &template, held, TODAY, true);
+        // With no card, the new times would be a class of their own.
+        assert!(run(&BTreeSet::new()).iter().any(|p| p.source_uid == NEW));
+
+        let (changes, _) = detect(&file, &set, &[GOOGLE, "personal"]);
+        let paths = emit(&v, &changes, &[]);
+        assert_eq!(paths.len(), 1);
+        let held = successor_keys(&v);
+        assert_eq!(held.iter().collect::<Vec<_>>(), [NEW]);
+        let got = run(&held);
+        assert!(got.iter().all(|p| p.source_uid != NEW && p.source_uid != "ics-series:cs100-new-twin"), "{got:?}");
+
+        // Rejected and archived, it still holds the key; withdrawn as superseded, it does not.
+        let raw = std::fs::read_to_string(&paths[0]).unwrap();
+        let archived = v.join("archive").join(paths[0].file_name().unwrap());
+        std::fs::create_dir_all(v.join("archive")).unwrap();
+        std::fs::write(&archived, raw.replace("status: pending", "status: rejected")).unwrap();
+        std::fs::remove_file(&paths[0]).unwrap();
+        assert!(run(&successor_keys(&v)).iter().all(|p| p.source_uid != NEW));
+        let raw = std::fs::read_to_string(&archived).unwrap();
+        std::fs::write(&archived, raw.replace("status: rejected", "status: superseded")).unwrap();
+        assert!(successor_keys(&v).is_empty());
+        assert!(run(&successor_keys(&v)).iter().any(|p| p.source_uid == NEW));
+    }
+
+    // --- no null -------------------------------------------------------------------------------
+
+    #[test]
+    fn no_field_is_proposed_as_null() {
+        let mut all: Vec<Change> = Vec::new();
+        // The series lost its end date and its room: neither is proposed as null.
+        let mut open = cs100(OLD, GOOGLE);
+        open.until = None;
+        open.where_ = None;
+        open.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        let (changes, _) = detect(&file_of(vec![open]), &set_of(vec![note(OLD)]), &[GOOGLE]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}]}));
+        all.extend(changes);
+        // A successor with no room: `where` is left out, not proposed as null.
+        let mut roomless = tue_thu(NEW, GOOGLE);
+        roomless.where_ = None;
+        let (changes, _) = detect(&file_of(vec![ending(OLD, GOOGLE), roomless]), &set_of(vec![note(OLD)]), &[GOOGLE]);
+        assert_eq!(changes.len(), 1);
+        assert!(get(&changes[0].change, "where").is_none());
+        assert!(get(&changes[0].was, "where").is_none());
+        all.extend(changes);
+        // A note with no room: `was` carries null, the change never does.
+        let mut bare = note(OLD);
+        bare.where_ = None;
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.where_ = Some("Room 2".into());
+        let (changes, _) = detect(&file_of(vec![moved]), &set_of(vec![bare]), &[GOOGLE]);
+        assert_eq!(js(&changes[0].was), json!({"where": null}));
+        all.extend(changes);
+        assert_no_null(&all);
     }
 }
