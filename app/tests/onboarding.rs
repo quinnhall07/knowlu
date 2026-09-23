@@ -463,17 +463,37 @@ fn create_vault_without_a_pending_session_refuses_and_creates_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A loopback server that answers exactly one `GET` (`/sync-pull`) with a page that carries nothing
-/// — the shape `sync::pulled_from_reply` builds when an account has never pushed. Modelled on
-/// `engine/tests/sync_contract.rs`'s own `loopback` (same protocol: `cloudmodel::CloudClient` is the
-/// client on both sides of it), kept to one reply since that is all H11a's restore call ever sends
-/// from a vault this fresh — one page, `more: false`.
+/// A loopback server that answers exactly one `GET` (`/sync-pull`) with `body` verbatim — one page,
+/// which is all H11a's restore call ever sends from a vault this fresh (`more: false` in `body`).
+/// Modelled on `engine/tests/sync_contract.rs`'s own `loopback` (same protocol:
+/// `cloudmodel::CloudClient` is the client on both sides of it).
+///
+/// **I6 (fix round 1): an accept deadline**, the same nonblocking-plus-10s-poll shape
+/// `app/tests/account.rs`'s own `loopback` already uses — a request that never arrives now fails
+/// this test loudly in seconds, where the original blocking `accept()` would have hung until the
+/// suite's own outer timeout killed it, with no line saying why.
 #[cfg(windows)]
-fn empty_account_loopback() -> (String, std::thread::JoinHandle<()>) {
+fn restore_loopback(body: &str) -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
     let port = listener.local_addr().expect("addr").port();
+    let body = body.to_string();
     let handle = std::thread::spawn(move || {
-        let Ok((mut stream, _)) = listener.accept() else { return };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!("restore_loopback: no client connected within 10s");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("restore_loopback: accept failed: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).expect("blocking stream");
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
         // Drain the request head so a client that flushes only after a full write is never left
         // waiting on us — the request is a `GET` with no body, so a blank line ends it.
         {
@@ -486,7 +506,6 @@ fn empty_account_loopback() -> (String, std::thread::JoinHandle<()>) {
                 }
             }
         }
-        let body = r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             body.len(),
@@ -516,7 +535,7 @@ fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-restore-empty");
-    let (base, handle) = empty_account_loopback();
+    let (base, handle) = restore_loopback(r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
     let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
     assert_eq!(out["ok"], true, "{out}");
@@ -526,6 +545,53 @@ fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
     assert_eq!(out["restored"]["notes"], 0, "{out}");
     assert_eq!(out["restored"]["records"], 0, "{out}");
     assert!(home.join("Knowlu").join("Fall 2026").is_dir(), "an empty account copy keeps the vault");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// I6 (fix round 1): the success-path test above only ever exercises an EMPTY page, which an
+/// `empty: true` alone cannot tell apart from a pull that connected and then failed (`restore_into`
+/// folds both the same way). This is the other half: a real note and a real record come down, and
+/// the assertion is the actual bytes the account sent, landed on the actual disk this call made.
+#[cfg(windows)]
+#[test]
+fn a_finish_whose_account_copy_has_content_writes_it_into_the_new_vault() {
+    let root = tmp("restore-content");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-restore-content");
+    let device = "aaaaaaaaaaaaaaaa";
+    let note_text = "---\nid: task_0000000099\n---\nfrom the account\n";
+    let record = serde_json::json!({
+        "op": "create", "path": "tasks/from-account.md", "actor": "quinn", "via": "dashboard",
+        "device": device, "ts": "2026-08-01T10:00:00.000Z", "id": "task_0000000099",
+        "new": { "id": "task_0000000099" }
+    });
+    let record_body = knowlu_engine::ledger::dumps_value(&record);
+    let page = serde_json::json!({
+        "records": [{
+            "seq": 1, "device": device,
+            "record_hash": knowlu_engine::sync::sha256_hex(record_body.as_bytes()),
+            "body": record_body
+        }],
+        "notes": [{ "path": "tasks/from-account.md", "device": device, "deleted": false, "body": note_text }],
+        "record_cursor": 1, "note_cursor": 1, "more": false
+    });
+    let (base, handle) = restore_loopback(&knowlu_engine::ledger::dumps_value(&page));
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    assert_eq!(out["restored"]["empty"], false, "{out}");
+    assert_eq!(out["restored"]["notes"], 1, "{out}");
+    assert_eq!(out["restored"]["records"], 1, "{out}");
+    let restored_note = home.join("Knowlu").join("Fall 2026").join("tasks").join("from-account.md");
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&restored_note).expect("the restored note"),
+        note_text,
+        "the account's own note text is what actually landed on disk, not merely a count"
+    );
     handle.join().expect("the loopback thread did not panic");
     let _ = std::fs::remove_dir_all(&root);
 }
