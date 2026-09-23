@@ -128,9 +128,9 @@ async function main() {
     for (const line of dryRunLines(cases, row)) console.log(line);
     return;
   }
-  const { key, source } = await resolveOpenRouterKey();
+  const { key, source, diagnostics } = await resolveOpenRouterKey();
   if (!key) {
-    console.log(noKeyMessage());
+    console.log(noKeyMessage(diagnostics));
     for (const line of dryRunLines(cases, row)) console.log(line);
     return;
   }
