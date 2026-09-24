@@ -3448,6 +3448,17 @@ pub fn create_marker(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<Option<PathBuf>, crate::write::WriteError> {
+    create_marker_as(vault, key, &ctx.with_actor(CARD_ACTOR), journal)
+}
+
+/// [`create_marker`] under the context it is given (Plan ruling Q3-a): the confirm screen's
+/// markers are the student's own writes (phase-2 spec §3), a settlement's are `agent:commitments`.
+fn create_marker_as(
+    vault: &Path,
+    key: &str,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Option<PathBuf>, crate::write::WriteError> {
     if load(vault).declined.contains(key) {
         return Ok(None);
     }
@@ -3459,14 +3470,7 @@ pub fn create_marker(
     ])
     .map_err(|e| io(format!("marker not written: {e}")))?;
     let rel = free_rel(vault, &marker_stem(key));
-    let path = crate::write::create(
-        vault,
-        &rel,
-        &format!("---\n{front}---\n"),
-        &ctx.with_actor(CARD_ACTOR),
-        journal,
-        None,
-    )?;
+    let path = crate::write::create(vault, &rel, &format!("---\n{front}---\n"), ctx, journal, None)?;
     Ok(Some(path))
 }
 
@@ -3556,6 +3560,18 @@ pub fn create_confirmed(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<PathBuf, crate::write::WriteError> {
+    create_confirmed_as(vault, commitment, source_uid, today, &ctx.with_actor(CARD_ACTOR), journal)
+}
+
+/// [`create_confirmed`] under the context it is given (Plan ruling Q3-a).
+fn create_confirmed_as(
+    vault: &Path,
+    commitment: &Mapping,
+    source_uid: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<PathBuf, crate::write::WriteError> {
     let p = proposed(commitment).map_err(|e| io(format!("commitment not created: {e}")))?;
     let id = crate::ids::new_id("cmt");
     let mut fields: Vec<(&str, Field)> = vec![
@@ -3601,14 +3617,7 @@ pub fn create_confirmed(
     fields.push(("confirmed_at", Field::Scalar(Node::Date(today))));
     let front = front_matter(&fields).map_err(|e| io(format!("commitment not created: {e}")))?;
     let rel = free_rel(vault, &stem);
-    crate::write::create(
-        vault,
-        &rel,
-        &format!("---\n{front}---\n\n{body}"),
-        &ctx.with_actor(CARD_ACTOR),
-        journal,
-        None,
-    )
+    crate::write::create(vault, &rel, &format!("---\n{front}---\n\n{body}"), ctx, journal, None)
 }
 
 /// A field's value as `load` would read it, as comparable text (carry-forward 2): `meets` and
@@ -4023,6 +4032,182 @@ pub fn withdrawal_reason(
             None
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 2 — `commitments --confirm` (phase-2 spec §3, D4).
+// ---------------------------------------------------------------------------------------------
+
+/// The proposals as the series file holds them now: [`read_series_file`], never
+/// [`refresh_series`], so nothing is fetched. What `--confirm` and [`overview`] read. `proposals`
+/// is the current set of questions over the real notes. `unanswered` is the same computation over
+/// no notes, so a key the notes have since answered can still be found (a second Finish). Both are
+/// built with `for_cards: false`, so office hours are included.
+pub struct Stored {
+    pub file: SeriesFile,
+    pub set: Commitments,
+    pub codes: Codes,
+    pub template: crate::weekcal::WeekCalendar,
+    pub proposals: Vec<Proposal>,
+    pub unanswered: Vec<Proposal>,
+    pub warnings: Vec<String>,
+}
+
+pub fn stored_proposals(vault: &Path, today: Date) -> Stored {
+    let (file, mut warnings) = read_series_file(vault);
+    let set = load(vault);
+    warnings.extend(set.warnings.iter().cloned());
+    let (codes, code_warnings) = Codes::load(vault);
+    warnings.extend(code_warnings_hit(code_warnings, &file));
+    let planning = crate::planning::load_planning(&vault.join("config").join("planning.yaml"));
+    let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    let template = crate::weekcal::WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
+    let held = successor_keys(vault);
+    let current = proposals(&file, &set, &codes, &names, &template, &held, today, false);
+    let unanswered = proposals(&file, &Commitments::default(), &codes, &names, &template, &held, today, false);
+    Stored { file, set, codes, template, proposals: current, unanswered, warnings }
+}
+
+/// The screen's answers (phase-2 spec §3): keys, levels and a window, never event data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfirmInput {
+    /// `(source_uid, level)`, in input order.
+    pub mine: Vec<(String, String)>,
+    pub not_mine: Vec<String>,
+    /// A flow sequence shaped like the planning-day note's `window`.
+    pub window: Option<String>,
+}
+
+/// What `--confirm` did: `{"created", "declined", "window", "warnings"}`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfirmReport {
+    pub created: usize,
+    /// Decline markers written, twins included (Plan ruling Q3-c).
+    pub declined: usize,
+    /// `created`, `updated` or `unchanged`; `None` when no window was given.
+    pub window: Option<&'static str>,
+    pub warnings: Vec<String>,
+}
+
+impl ConfirmReport {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "created": self.created,
+            "declined": self.declined,
+            "window": self.window,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+/// The `--confirm` file (phase-2 spec §3). Every key is optional; `null` is absent. `Err` is
+/// unreadable input, and the CLI exits 2.
+pub fn parse_confirm(text: &str) -> Result<ConfirmInput, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("--confirm is not JSON ({e})"))?;
+    let obj = value.as_object().ok_or("--confirm is not a JSON object")?;
+    let mut input = ConfirmInput::default();
+    if let Some(rows) = obj.get("mine").filter(|v| !v.is_null()) {
+        for row in rows.as_array().ok_or("mine is not a list")? {
+            let key = row.get("source_uid").and_then(|v| v.as_str()).ok_or("a mine row has no source_uid")?;
+            let level = row.get("level").and_then(|v| v.as_str()).unwrap_or("");
+            input.mine.push((key.to_string(), level.to_string()));
+        }
+    }
+    if let Some(keys) = obj.get("not_mine").filter(|v| !v.is_null()) {
+        for key in keys.as_array().ok_or("not_mine is not a list")? {
+            input.not_mine.push(key.as_str().ok_or("a not_mine key is not a string")?.to_string());
+        }
+    }
+    if let Some(window) = obj.get("window").filter(|v| !v.is_null()) {
+        input.window = Some(window.as_str().ok_or("window is not a string")?.to_string());
+    }
+    Ok(input)
+}
+
+/// The two signatures that close a proposal's question, as [`proposals`] closes one.
+fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
+    vec![p.signature(codes), signature(&p.kind, None, &p.title, &p.meets, codes)]
+}
+
+/// `commitments --confirm` (phase-2 spec §3): the screen's answers, written under `ctx` (the
+/// console's human context; parent §2.5). Every row is re-derived from the series file
+/// ([`stored_proposals`]). Nothing from the app becomes a field value but `level`.
+///
+/// - **`mine`** → [`create_confirmed_as`] at the chosen level. A key a confirmed note already holds,
+///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
+/// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
+///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
+///   silently.
+/// - A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
+///   write that fails is reported, and the rest still run.
+///
+/// No card is filed, so nothing is charged to the cap.
+pub fn confirm(
+    vault: &Path,
+    input: &ConfirmInput,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<ConfirmReport, String> {
+    let stored = stored_proposals(vault, today);
+    let codes = &stored.codes;
+    let mut report = ConfirmReport::default();
+    let stale = |key: &str| format!("{key}: not a current proposal; skipped");
+
+    for (key, level) in &input.mine {
+        let set = load(vault);
+        if set.confirmed.iter().any(|n| n.source_uid.as_deref() == Some(key.as_str())) {
+            continue;
+        }
+        let Some(p) = stored.unanswered.iter().find(|p| &p.source_uid == key && !p.is_window()) else {
+            report.warnings.push(stale(key));
+            continue;
+        };
+        let sigs = proposal_signatures(p, codes);
+        if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+            continue;
+        }
+        if set.declined.contains(key) || !stored.proposals.iter().any(|q| &q.source_uid == key) {
+            report.warnings.push(stale(key));
+            continue;
+        }
+        let Some(level) = Level::parse(level) else {
+            report.warnings.push(format!("{key}: level {level:?} is not hard, soft or optional; skipped"));
+            continue;
+        };
+        let chosen = Proposal { level, ..p.clone() };
+        let Value::Mapping(map) = to_value(proposal_commitment(&chosen)) else {
+            report.warnings.push(format!("{key}: not written (no commitment mapping)"));
+            continue;
+        };
+        match create_confirmed_as(vault, &map, key, today, ctx, journal) {
+            Ok(_) => report.created += 1,
+            Err(e) => report.warnings.push(format!("{key}: not written ({e})")),
+        }
+    }
+
+    for key in &input.not_mine {
+        let set = load(vault);
+        if set.declined.contains(key) {
+            continue;
+        }
+        let Some(p) = stored.proposals.iter().find(|p| &p.source_uid == key && !p.is_window()) else {
+            report.warnings.push(stale(key));
+            continue;
+        };
+        let held: BTreeSet<String> = set.confirmed.iter().filter_map(|n| n.source_uid.clone()).collect();
+        for twin in twin_keys(vault, key, proposal_signatures(p, codes), codes) {
+            if held.contains(&twin) {
+                continue;
+            }
+            match create_marker_as(vault, &twin, ctx, journal) {
+                Ok(Some(_)) => report.declined += 1,
+                Ok(None) => {}
+                Err(e) => report.warnings.push(format!("{twin}: marker not written ({e})")),
+            }
+        }
+    }
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -9235,6 +9420,7 @@ mod phase2_tests {
 
     use super::*;
     use crate::journal::{make_record, Journal, NewRecord};
+    use crate::write::WriteContext;
     use jiff::civil::date;
 
     /// Tuesday 2026-09-01; `mk`'s series start on Monday 2026-08-31.
@@ -9407,5 +9593,173 @@ mod phase2_tests {
         let mut ps = vec![club, p];
         ps.sort_by(card_order);
         assert_eq!(ps[0].kind, "class", "classes first, as the cards are");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q3 — `commitments::confirm`: `mine` and `not_mine` as the human (D4, §3).
+    // -----------------------------------------------------------------------------------------
+
+    /// Three weeks of a weekly series from Monday 2026-08-31 on `days`, `s`–`e`, last seen
+    /// `TODAY`; `meets` as P8 derives it.
+    fn mk(uid: &str, cal: &str, title: &str, days: &[DayKey], s: Time, e: Time) -> Series {
+        let monday = date(2026, 8, 31);
+        let mut instances = Vec::new();
+        for week in 0..3 {
+            for day in days {
+                let offset = DAY_KEYS.iter().position(|k| k == day).unwrap() as i64;
+                instances.push(Instance { date: add_days(monday, week * 7 + offset), start: Some(s), end: Some(e) });
+            }
+        }
+        instances.sort_by_key(|i| i.date);
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            meets: meets_of(&instances),
+            instances,
+            first: Some(monday),
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn write_series(vault: &Path, series: Vec<Series>) {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(vault.join(SERIES_FILE), file_bytes(&file)).unwrap();
+    }
+
+    fn human() -> WriteContext {
+        WriteContext::new("quinn", "dashboard")
+    }
+
+    /// `courses/cs-100.md` and a series file holding CS 100 (Mon/Wed/Fri 12–12:50pm), Chess Club
+    /// (Wed 6–7pm) and CS 100 Office Hours (Thu 3–4pm), all on one Google calendar.
+    fn week_vault(name: &str) -> Scratch {
+        let v = scratch(name);
+        course(&v, "cs-100", "title: \"CS 100\"\nslug: cs-100\ncode: \"CS 100\"\nstatus: active\n");
+        write_series(
+            &v,
+            vec![
+                mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+                mk("gcal-series:chess", "google:abc", "Chess Club", &["wed"], t(18, 0), t(19, 0)),
+                mk("gcal-series:oh", "google:abc", "CS 100 Office Hours", &["thu"], t(15, 0), t(16, 0)),
+            ],
+        );
+        v
+    }
+
+    fn files(vault: &Path, folder: &str) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(vault.join(folder))
+            .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn journal_records(vault: &Path) -> Vec<crate::ledger::Record> {
+        Journal::new(vault).read(None, None)
+    }
+
+    fn input(mine: &[(&str, &str)], not_mine: &[&str], window: Option<&str>) -> ConfirmInput {
+        ConfirmInput {
+            mine: mine.iter().map(|(k, l)| (k.to_string(), l.to_string())).collect(),
+            not_mine: not_mine.iter().map(|k| k.to_string()).collect(),
+            window: window.map(String::from),
+        }
+    }
+
+    fn run(vault: &Path, given: &ConfirmInput) -> ConfirmReport {
+        confirm(vault, given, TODAY, &human(), &mut Journal::new(vault)).unwrap()
+    }
+
+    #[test]
+    fn parse_confirm_reads_every_optional_key_and_refuses_what_is_not_json() {
+        let got = parse_confirm(r#"{"mine": [{"source_uid": "gcal-series:a", "level": "soft"}], "not_mine": ["gcal-series:b"], "window": "[]"}"#).unwrap();
+        assert_eq!(got, input(&[("gcal-series:a", "soft")], &["gcal-series:b"], Some("[]")));
+        assert_eq!(parse_confirm("{}").unwrap(), ConfirmInput::default());
+        assert!(parse_confirm("not json").is_err());
+        assert!(parse_confirm(r#"{"mine": "gcal-series:a"}"#).is_err());
+    }
+
+    #[test]
+    fn mine_writes_exactly_the_rows_given_at_the_given_level_as_the_human() {
+        let v = week_vault("mine");
+        let report = run(&v, &input(&[("gcal-series:cs100", "soft")], &[], None));
+        assert_eq!((report.created, report.declined, report.window), (1, 0, None));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(files(&v, FOLDER), ["cs-100.md"], "the club and office hours were not given");
+        let set = load(&v);
+        assert_eq!(set.confirmed.len(), 1);
+        assert_eq!(set.confirmed[0].level, Level::Soft);
+        assert_eq!(set.confirmed[0].source_uid.as_deref(), Some("gcal-series:cs100"));
+        let create = journal_records(&v).into_iter()
+            .find(|r| r.get("op").and_then(|o| o.as_str()) == Some("create"))
+            .expect("a create record");
+        assert_eq!(create.get("actor").and_then(|a| a.as_str()), Some("quinn"));
+        assert_eq!(create.get("via").and_then(|a| a.as_str()), Some("dashboard"));
+        assert!(!v.join("approvals").exists(), "no card, so nothing is charged to the cap");
+    }
+
+    #[test]
+    fn an_unknown_or_stale_key_is_warned_and_skipped() {
+        let v = week_vault("stale");
+        let report = run(&v, &input(&[("gcal-series:gone", "hard")], &["gcal-series:never"], None));
+        assert_eq!((report.created, report.declined), (0, 0));
+        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with("gcal-series:gone: "), "{:?}", report.warnings);
+        assert!(report.warnings[1].starts_with("gcal-series:never: "), "{:?}", report.warnings);
+        assert!(files(&v, FOLDER).is_empty());
+    }
+
+    #[test]
+    fn a_level_outside_the_three_is_skipped_with_a_warning() {
+        let v = week_vault("badlevel");
+        let report = run(&v, &input(&[("gcal-series:cs100", "urgent")], &[], None));
+        assert_eq!(report.created, 0);
+        assert_eq!(report.warnings, ["gcal-series:cs100: level \"urgent\" is not hard, soft or optional; skipped"]);
+    }
+
+    #[test]
+    fn a_second_finish_is_a_no_op() {
+        let v = week_vault("twice");
+        let given = input(&[("gcal-series:cs100", "hard")], &["gcal-series:chess"], None);
+        let first = run(&v, &given);
+        assert_eq!((first.created, first.declined), (1, 1));
+        let before: Vec<String> = files(&v, FOLDER);
+        let records = journal_records(&v).len();
+        let second = run(&v, &given);
+        assert_eq!((second.created, second.declined), (0, 0));
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+        assert_eq!(files(&v, FOLDER), before);
+        assert_eq!(journal_records(&v).len(), records, "nothing journaled either");
+    }
+
+    #[test]
+    fn not_mine_declines_the_twin_group_together() {
+        let v = week_vault("twins");
+        // The same CS 100 seen through a direct ICS feed under its own key (an Outlook invite).
+        let mut series = vec![
+            mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+            mk("ics-series:cs100-outlook", "personal", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+        ];
+        series.push(mk("gcal-series:chess", "google:abc", "Chess Club", &["wed"], t(18, 0), t(19, 0)));
+        write_series(&v, series);
+        let report = run(&v, &input(&[], &["gcal-series:cs100"], None));
+        assert_eq!(report.declined, 2, "{report:?}");
+        let set = load(&v);
+        assert!(set.declined.contains("gcal-series:cs100") && set.declined.contains("ics-series:cs100-outlook"));
+        assert!(!set.declined.contains("gcal-series:chess"));
     }
 }
