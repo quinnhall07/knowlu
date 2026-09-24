@@ -1485,7 +1485,7 @@
   // `static_assets.rs::the_unreachable_clause_is_one_string_on_both_sides`, the same way `PRIVACY` is
   // pinned to the site's — because a guard that silently stops matching is worse than no guard.
   var UNREACHABLE = "the account service could not be reached";
-  var PRIVACY = "Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.";
+  var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
   // Escaped on purpose: the shipped page carries no bare network literal (console spec §7).
   var ICS_OK = /^https:\/\/\S+(\.ics($|\?)|\/calendar\/)/i;
   // Windows' reserved device names, matched on the part before the first dot — the same list

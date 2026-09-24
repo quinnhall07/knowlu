@@ -707,7 +707,7 @@ fn the_wizards_privacy_sentence_is_the_sites_privacy_sentence() {
     let sentence = site
         .lines()
         .map(str::trim)
-        .find(|l| l.starts_with("<p>") && l.contains("Your vault stays on this machine"))
+        .find(|l| l.starts_with("<p>") && l.contains("Your tasks and notes live in"))
         .map(|l| l.trim_start_matches("<p>").trim_end_matches("</p>").to_string())
         .expect("site/privacy.html must carry the privacy sentence in one <p>");
     let js = read("console.js");

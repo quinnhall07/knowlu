@@ -2667,3 +2667,17 @@ fn m5_m7_an_offline_pull_names_itself_and_the_push_waits() {
     assert!(!lines.iter().any(|l| l.contains(" up")), "no push was attempted: {lines:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_cloud_vault_with_no_url_does_not_exit_one_just_for_having_no_url() {
+    // C2's A-1 fix already moved the blank-`ics_url` refusal after the cloud attempt, so a cloud
+    // vault reaches the service before it can fail. This test is the proof C3' relies on it rather
+    // than on the change the superseded plan was going to make (hand-off H7, verified not edited).
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("ingest.rs"),
+    ).expect("ingest.rs");
+    let cloud_at = src.find("let cloud = crate::cloudmodel::resolve(vault).ok();").expect("the cloud resolve");
+    let refusal_at = src.find(r#"return (1, vec!["ingest: no ics_url configured".to_string()]);"#).expect("the refusal");
+    assert!(cloud_at < refusal_at, "the empty-URL refusal must stay AFTER the cloud attempt");
+    assert!(src.contains("no LMS feed on this account — skipped"), "a 404 is a named skip at exit 0");
+}

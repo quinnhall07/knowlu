@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, judge_plan, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -166,6 +166,28 @@ fn a_cloud_vault_runs_ingest_with_no_ics_url() {
 
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
+}
+
+/// C3′ Task 11, verifying hand-off H8c from the outside: the superseded plan was going to add a
+/// fourth `IcsState` for exactly this, and C2's own A-2 fix (`ingest_included`) made it unnecessary.
+/// A vault carrying `ics_url: ''` and no account at all leaves `ingest` out, same as always; the
+/// moment `config/cloud.yaml` exists, the feed lives in the account and the step runs regardless of
+/// the vault's own (now-empty) url.
+#[test]
+fn a_cloud_vault_runs_ingest_with_no_url_in_the_vault_at_all() {
+    let v = scratch("cloud-ingest");
+    std::fs::write(v.join("config").join("ingest.yaml"), "timezone: America/Chicago\nics_url: ''\n").expect("ingest.yaml");
+    assert_eq!(ics_state(&v), IcsState::NoUrl);
+    assert!(!ingest_included(&v), "with no account and no url the step is left out, as it always was");
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'https://x.example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/p/session'\naccount_id: 'acct-1'\n",
+    ).expect("cloud.yaml");
+    assert!(ingest_included(&v), "an account is a feed, wherever the URL lives");
+    let steps = slot_argv(&v, Path::new("knowlu-engine.exe"), &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    assert_eq!(steps[0].1[0], "sync", "sync runs first");
+    assert_eq!(steps.iter().filter(|(_, a)| a[0] == "ingest").count(), 1, "{steps:?}");
+    let _ = std::fs::remove_dir_all(&v);
 }
 
 /// The plan's own case for hand-off H8a: `sync` is the slot's first step, always, and it displaces

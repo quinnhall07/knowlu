@@ -238,7 +238,10 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         courses: Vec::new(),
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
-        account_id: "acc-1".into(),
+        // C3' Task 11: no account, so `ics_url` still round-trips literally below — this test is
+        // about YAML quoting fidelity, not about the account-vs-no-account routing
+        // `a_vault_with_an_account_carries_no_capability_url` covers.
+        account_id: String::new(),
     };
     create_vault(&v, &p).unwrap();
     let cfg = v.join("config").join("runners.yaml");
@@ -297,7 +300,10 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
             "timezone" => bad.timezone = "America/\u{7}Chicago".into(),
             "device name" => bad.device = "DESK\u{1}TOP".into(),
             "slot 2" => bad.slots = vec!["12:00".into(), "18:\u{9}00".into()],
-            _ => bad.ics_url = Some("https://x.invalid/\u{b}a.ics".into()),
+            // C3' Task 11: an account vault never writes `ics_url` at all (H11b), so there is
+            // nothing here for `yaml_scalar` to validate unless the plan has no account — the
+            // no-account fallback is where a bad LMS feed URL is still caught.
+            _ => { bad.account_id = String::new(); bad.ics_url = Some("https://x.invalid/\u{b}a.ics".into()); }
         }
         let err = create_vault(&root.join(format!("V-{field}")), &bad).unwrap_err();
         assert!(err.contains(field) && err.contains("control character"), "{field}: {err}");
@@ -487,7 +493,11 @@ fn a_personal_calendar_becomes_the_engines_calendars_list() {
     use knowlu::scaffold::ingest_yaml;
     // m7: a real temp path, not a bare relative one — this test never reads the derived id, but a
     // throwaway path under `temp_dir()` reads as deliberate rather than a stray.
-    let base = plan_for(&std::env::temp_dir().join("knowlu-personal-calendar-vault"));
+    let mut base = plan_for(&std::env::temp_dir().join("knowlu-personal-calendar-vault"));
+    // C3' Task 11: this test is about the calendar-entry shape, not about accounts — an account vault
+    // routes the same address through `cloud:personal` instead, and that half is
+    // `a_vault_with_an_account_carries_no_capability_url`'s job below.
+    base.account_id = String::new();
     // No calendar: the list the engine has always read, empty.
     assert!(ingest_yaml(&base).unwrap().contains("calendars: []\n"));
     // One: the shape `calfeed::load_calendar_events` parses — a list of {name, ics_url} mappings.
@@ -510,7 +520,11 @@ fn a_personal_calendar_becomes_the_engines_calendars_list() {
 #[test]
 fn a_google_grant_becomes_the_engines_calendars_list() {
     use knowlu::scaffold::ingest_yaml;
-    let base = plan_for(&std::env::temp_dir().join("knowlu-google-calendar-vault"));
+    let mut base = plan_for(&std::env::temp_dir().join("knowlu-google-calendar-vault"));
+    // C3' Task 11: the google marker is `cloud:google` with or without an account (§11a's own
+    // decision, unconditional), so only the personal-address half of this test needs the no-account
+    // plan to keep asserting the literal URL it always has.
+    base.account_id = String::new();
     // Google alone, no personal address: one entry, the marker feed.
     let mut google_only = base.clone();
     google_only.google_calendar = true;
@@ -529,6 +543,36 @@ fn a_google_grant_becomes_the_engines_calendars_list() {
         ),
         "{text}"
     );
+}
+
+#[test]
+fn a_vault_with_an_account_carries_no_capability_url() {
+    // C3', and §9's Alabama SPII line: a capability URL is a credential in all but name, and the one
+    // place it belongs is the account, encrypted, where `PUT /account/sources` already puts it.
+    let dest = temp("no-capability-url");
+    let mut plan = plan_for(&dest);
+    plan.account_id = "acc-1".into();   // `plan_for`'s own default; named here because it is the point
+    plan.ics_url = Some("https://lms.example.invalid/feed/secret-capability.ics".into());
+    plan.personal_calendar = Some("https://calendar.example.invalid/private-abc/basic.ics".into());
+    let yaml = ingest_yaml(&plan).expect("ingest.yaml");
+    assert!(!yaml.contains("secret-capability"), "{yaml}");
+    assert!(!yaml.contains("private-abc"), "{yaml}");
+    assert!(yaml.contains("ics_url: ''"), "the key stays, empty, so `ingest` still parses it: {yaml}");
+    assert!(yaml.contains("- name: personal\n    ics_url: 'cloud:personal'"), "{yaml}");
+}
+
+#[test]
+fn a_vault_with_no_account_still_carries_its_own_urls() {
+    // A friend who has not signed in still has nowhere else to keep the feed. Nothing about that
+    // path changes, and the fallback in `ingest.rs` is what reads it.
+    let dest = temp("keeps-its-urls");
+    let mut plan = plan_for(&dest);
+    plan.account_id = String::new();
+    plan.ics_url = Some("https://lms.example.invalid/feed/secret-capability.ics".into());
+    plan.personal_calendar = Some("https://calendar.example.invalid/private-abc/basic.ics".into());
+    let yaml = ingest_yaml(&plan).expect("ingest.yaml");
+    assert!(yaml.contains("secret-capability"), "{yaml}");
+    assert!(yaml.contains("private-abc"), "{yaml}");
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::fs;
 /// `site/` sits at the workspace root, one level above this crate.
 fn site(rel: &str) -> std::path::PathBuf { std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("site").join(rel) }
 
-const PRIVACY: &str = "Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.";
+const PRIVACY: &str = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
 
 #[test]
 fn the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages() {
@@ -33,4 +33,17 @@ fn the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages() {
         assert!(!index.contains(banned) && !privacy.contains(banned), "the site must not claim {banned}");
     }
     assert!(site("releases/.gitkeep").is_file(), "the drop folder exists in git");
+}
+
+/// C3′ Task 11: the bullet said, in published words, that note bodies are never stored and that if
+/// that ever changed it would be "a separate switch, off by default, with its own screen". Ruling 2
+/// changed it and there is no switch: the copy is what an account IS. A page still promising the
+/// switch would be the one thing in this stream that cannot be fixed after the fact.
+#[test]
+fn the_privacy_page_describes_the_account_vault_and_no_switch() {
+    let privacy = fs::read_to_string(site("privacy.html")).expect("site/privacy.html");
+    assert!(!privacy.contains("No note bodies"), "the old bullet is still published");
+    assert!(!privacy.contains("separate switch"), "the page still promises a switch nobody built");
+    assert!(privacy.contains("encrypted at rest"), "and the new promise is spelled out");
+    assert!(privacy.contains("Delete my data"), "with the way out named");
 }
