@@ -32,6 +32,9 @@ export interface CapStore {
  * and the database from a hot loop), while `MONTHLY_CEILING_USD` is what actually guards spend, and
  * it is sized to survive a mispriced or re-pinned row, or the day a heavier model is pinned above
  * these — not to survive a capped account running flat out on these prices.
+ *
+ * An account's first two UTC judging days charge against twice this cap; the SQL does it
+ * (`charge_call`, migration `20260923000100`, R-C1c-7), and `p_cap` below stays this value.
  */
 export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120 };
 

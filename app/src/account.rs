@@ -3,8 +3,8 @@
 //!
 //! **Two rules from `credentials.rs` carry over unchanged.** A secret is never logged, never in a run
 //! record, a backup, a fixture, a test name or an error message; and the page never sees one — a
-//! command takes a password in and gives an envelope back, and the token that comes out of it goes
-//! straight into Credential Manager without passing through the webview.
+//! command takes an email address or a one-time code in and gives an envelope back, and the token
+//! that comes out of it goes straight into Credential Manager without passing through the webview.
 use serde_json::{json, Value};
 
 /// The Supabase project this build talks to. **Both values are public**: Supabase publishes the
@@ -22,7 +22,7 @@ pub const DEFAULT_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3M
 /// a reader comparing the two should not have to hold a mapping in their head. Bump BOTH the constant
 /// and the page's date in the same commit, or the consent log points at text nobody can find.
 pub const TOS_VERSION: &str = "2026-09-10";
-pub const PRIVACY_VERSION: &str = "2026-09-16";
+pub const PRIVACY_VERSION: &str = "2026-09-17";
 
 /// Where a session lives before there is a vault to key it to. The wizard signs in on panel 2 and
 /// creates the vault on panel 9, so for those seven panels the profile id does not exist yet — and it
@@ -132,8 +132,8 @@ pub fn load_session(target: &str) -> Result<(String, Session), String> {
 }
 
 /// Read, write the new one, delete the old — in that order, never delete-then-write: a failure in
-/// between would leave the user signed out with no way back but retyping a password they may have
-/// generated. `retarget_credentials` makes the same argument about the coursework logins.
+/// between would leave the user signed out with no way back but another emailed code or another trip
+/// through the browser. `retarget_credentials` makes the same argument about the coursework logins.
 ///
 /// Idempotent both ways: a `from` that is already gone with a `to` that already holds a session is
 /// **not** an error — the move already happened, most likely on an earlier call this one is
@@ -170,7 +170,7 @@ pub const UNREACHABLE: &str = "the account service could not be reached";
 
 /// One GoTrue POST. Returns the parsed body and the status; the caller decides what a status means.
 /// **The transport failure has a stable first clause**, [`UNREACHABLE`], because the page has to
-/// tell "your password is wrong" from "there is no network" — the first is something a user can fix
+/// tell "that code is wrong" from "there is no network" — the first is something a user can fix
 /// on the panel, the second is what stands the upgrade overlay down instead of trapping someone
 /// behind it. Everything else is the provider's own sentence.
 ///
@@ -178,9 +178,9 @@ pub const UNREACHABLE: &str = "the account service could not be reached";
 /// which `app/Cargo.toml` does not enable (it carries the engine's `cookies` feature and no other) —
 /// but the choice is not free of behaviour either way: `RequestBuilder::send_json` pretty-prints
 /// with embedded newlines, and this crate's own loopback tests assert exact substrings like
-/// `"type":"magiclink"` and `"password"` against the raw request text, which a pretty-printed body
-/// would break. Serializing with `serde_json::to_string` — already a dependency — and sending the
-/// compact result as a plain string is **required**, not merely equivalent.
+/// `"type":"magiclink"` and `"create_user":true` against the raw request text, which a pretty-printed
+/// body would break. Serializing with `serde_json::to_string` — already a dependency — and sending
+/// the compact result as a plain string is **required**, not merely equivalent.
 fn post_json(url: &str, anon: &str, body: &Value) -> Result<(u16, Value), String> {
     let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
     let mut res = agent()
@@ -217,50 +217,238 @@ fn session_from(v: &Value, now_unix: i64) -> Result<(String, Session), String> {
     Ok((account_id, Session { access_token, refresh_token, expires_at: now_unix + expires_in, email }))
 }
 
-/// Email + password, with the three things migration `20260910000100`'s trigger insists on. A sign-up
-/// missing any of them is refused **by the database**, so sending them is not politeness.
-pub fn sign_up_at(
-    auth_base: &str,
-    anon: &str,
-    email: &str,
-    password: &str,
-    tos_version: &str,
-    privacy_version: &str,
-    now_unix: i64,
-) -> Result<(String, Session), String> {
-    let body = json!({
-        "email": email,
-        "password": password,
-        "data": { "age_attested": "true", "tos_version": tos_version, "privacy_version": privacy_version },
-    });
-    let (status, v) = post_json(&format!("{auth_base}/signup"), anon, &body)?;
-    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
-    // With email confirmation on, a sign-up returns the user and NO session until the link is
-    // clicked. GoTrue did not refuse anything — this `Err` is not reporting a fault, it is the one
-    // channel this function has for handing the wizard a sentence to show while it waits; the
-    // caller reads the string, not the variant, so "check your email" travels the same path a real
-    // failure would without being one.
-    if v.get("access_token").is_none() {
-        return Err("check your email and click the link, then sign in".to_string());
+/// Base64url without padding (RFC 4648 §5), written here rather than taken as a crate: it is a
+/// table lookup, and the workspace's crate budget is a product line. `-` and `_` instead of `+` and
+/// `/` is the whole point — the challenge travels in a query string.
+pub fn b64url(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        // 4 characters for 3 bytes, 3 for 2, 2 for 1 — and no `=`, which is what "unpadded" means.
+        for i in 0..(chunk.len() + 1) {
+            out.push(A[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+        }
     }
-    session_from(&v, now_unix)
+    out
 }
 
-pub fn sign_in_at(auth_base: &str, anon: &str, email: &str, password: &str, now_unix: i64) -> Result<(String, Session), String> {
-    let (status, v) = post_json(&format!("{auth_base}/token?grant_type=password"), anon, &json!({ "email": email, "password": password }))?;
-    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
-    session_from(&v, now_unix)
+/// A verifier and its challenge (RFC 7636 §4.1, §4.2). 32 bytes of OS entropy is 43 unpadded
+/// base64url characters, the low end of the standard's 43..=128 range and the length every client
+/// library uses.
+///
+/// **The entropy is `knowlu_engine::ids::new_id`'s**, five bytes at a time. `getrandom` is the
+/// engine's dependency and not the app's, and seven calls to a function that already asks the OS is
+/// a smaller change than a new crate or a new `windows` feature for one buffer. The hex it returns
+/// is decoded back to bytes rather than used as text, so the verifier really is 256 bits and not
+/// 256 bits' worth of hex digits.
+pub fn pkce_pair() -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let mut bytes = Vec::with_capacity(35);
+    while bytes.len() < 32 {
+        let id = knowlu_engine::ids::new_id("pkce");
+        let hex = id.rsplit('_').next().unwrap_or_default().to_string();
+        for pair in hex.as_bytes().chunks(2) {
+            if let Ok(b) = u8::from_str_radix(&String::from_utf8_lossy(pair), 16) {
+                bytes.push(b);
+            }
+        }
+    }
+    bytes.truncate(32);
+    let verifier = b64url(&bytes);
+    let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
 }
 
-/// A magic link never returns a session — it sends mail. Success is "we sent it", nothing more.
+/// The loopback redirect, percent-encoded as a query value. Only the six characters that appear in
+/// `http://127.0.0.1:<port>/callback` need it, so this is not a general encoder and does not pretend
+/// to be one.
+fn redirect_to(port: u16) -> String {
+    format!("http%3A%2F%2F127.0.0.1%3A{port}%2Fcallback")
+}
+
+/// `<auth>/authorize?…` — the URL the system browser is sent to.
+///
+/// **No `state`.** GoTrue owns it: a client-supplied `state` is deleted from the query before the
+/// provider is called (`reservedOAuthParams`, `internal/api/external.go`), and the flow state it
+/// creates instead is what carries the challenge across the round trip. **No `flow_type`** either:
+/// the presence of `code_challenge` is what selects PKCE (`getFlowFromChallenge`).
+pub fn authorize_url(auth_base: &str, port: u16, challenge: &str) -> String {
+    format!(
+        "{}/authorize?provider=google&redirect_to={}&code_challenge={challenge}&code_challenge_method=s256",
+        auth_base.trim_end_matches('/'),
+        redirect_to(port),
+    )
+}
+
+/// Percent-decoding, for the one query value this file reads back.
+fn pct_decode(s: &str) -> String {
+    let b = s.replace('+', " ").into_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&String::from_utf8_lossy(&b[i + 1..i + 3]), 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// The authorisation code out of `GET /callback?code=… HTTP/1.1`, or the provider's own sentence.
+///
+/// Pure, and taking the request line rather than a socket, so the parsing is tested directly — the
+/// shape `google_error_for_status` uses in this same file, and for the same reason. A request that
+/// is not the callback (a browser's `/favicon.ico`, a probe) is an `Err`, never an empty `Ok`.
+pub fn code_from_request_line(line: &str) -> Result<String, String> {
+    let target = line.split_whitespace().nth(1).unwrap_or_default();
+    let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
+    let mut code = None;
+    let mut error = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("code", v)) => code = Some(pct_decode(v)),
+            Some(("error_description", v)) => error = Some(pct_decode(v)),
+            Some(("error", v)) if error.is_none() => error = Some(pct_decode(v)),
+            _ => {}
+        }
+    }
+    match (code, error) {
+        (Some(c), _) if !c.is_empty() => Ok(c),
+        (_, Some(e)) if !e.is_empty() => Err(e),
+        _ => Err("the browser came back without a sign-in code".to_string()),
+    }
+}
+
+/// What the browser is left looking at. One sentence, no styling, no script, no link back — the
+/// student's next move is the Knowlu window that is already open behind it.
+pub const CALLBACK_PAGE: &str =
+    "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
+     <p style=\"font:16px system-ui;margin:3rem\">You are signed in to Knowlu. You can close this window.</p>";
+
+/// What the browser is left looking at when the callback carried no code — a consent screen the
+/// student declined, or any other provider refusal (F1). Never `CALLBACK_PAGE`: that sentence is
+/// only true once `code_from_request_line` has returned `Ok`.
+pub const CALLBACK_FAILED_PAGE: &str =
+    "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
+     <p style=\"font:16px system-ui;margin:3rem\">Knowlu did not get a sign-in. Go back to the Knowlu window and try again.</p>";
+
+/// The other page: anything on this machine that is not the sign-in.
+pub const NOT_FOUND_PAGE: &str =
+    "<!doctype html><meta charset=\"utf-8\"><title>Knowlu</title>\
+     <p style=\"font:16px system-ui;margin:3rem\">Nothing here. You can close this window.</p>";
+
+/// One reply, on a socket this function is finished with.
+fn write_page(stream: &mut std::net::TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let resp = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()
+}
+
+/// Serve exactly **one sign-in**: wait for the callback, answer it, and give the socket back to the
+/// OS.
+///
+/// `listener` is taken **by value** on purpose: it is dropped when this returns, so there is no way
+/// to leave a port open on a student's machine after a sign-in — successful, refused or abandoned.
+/// The deadline is enforced by polling `accept` on a non-blocking listener rather than by a second
+/// thread, so nothing outlives the call.
+///
+/// **It loops to the deadline rather than returning on the first connection** (review I3). An open
+/// loopback port is reachable by everything else on the machine — a browser preconnect, a favicon
+/// fetch, security software, a port scanner — and taking the first socket as the answer meant a
+/// stray request ended the sign-in while the real redirect was still in flight, which then met a
+/// closed port. Anything whose target is not `/callback` gets a 404 and the wait continues; the
+/// first real callback returns, and the guarantee is unchanged, because the listener dies with this
+/// call.
+///
+/// **The compensating control against a *forged or replayed* callback is the verifier, not the
+/// socket.** GoTrue owns `state` — a client-supplied one is stripped (`reservedOAuthParams`) — so
+/// this cannot carry a nonce of its own, and it does not need one: the verifier is minted per
+/// attempt and never leaves the process, so a code minted under any other challenge fails the
+/// exchange. That is the actual guarantee (review finding 3) — it is not a claim that a same-user
+/// process is locked out. The challenge itself is not secret: it travels as an argument on the
+/// browser's command line (`open_in_browser`), readable by anything running as the same Windows
+/// account, which could equally well read `knowlu/pending/session` out of Credential Manager once a
+/// sign-in lands. Same-user code execution is outside this function's threat model; a local process
+/// that only guesses the port, with no challenge of its own, can end a sign-in with a refusal
+/// sentence and nothing more.
+///
+/// The reply is sent on **every** path. A refusal is still a browser window a person is looking at,
+/// and a connection reset is not an explanation.
+pub fn serve_one_callback(listener: std::net::TcpListener, wait: std::time::Duration) -> Result<String, String> {
+    use std::io::Read;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        // Checked at the top of every iteration, not only in the `WouldBlock` arm below (review
+        // finding 1): a peer that connects and disconnects in a loop without ever sending
+        // `/callback` takes the `Ok` arm every time, `continue`s past the check that used to live
+        // only in `WouldBlock`, and never hit the deadline — holding the port, and the Tauri
+        // async-runtime worker with it, open indefinitely.
+        if std::time::Instant::now() >= deadline {
+            return Err("the Google sign-in was not finished — try again".to_string());
+        }
+        let mut stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        // The request LINE is all this needs, and a browser sends it in the first packet. Reading to
+        // the first newline rather than to EOF is also what keeps a keep-alive connection from hanging.
+        // A fixed 4096-byte buffer (review finding 4): a request line split across TCP segments would
+        // be mis-parsed, but a loopback browser sends the header block in one segment, so the risk is
+        // theoretical — and the fixed size is also what makes an oversized request line harmless (no
+        // growth, no allocation). Any future loop reading to a terminator must keep this same cap.
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let head = String::from_utf8_lossy(&buf[..n]).to_string();
+        let line = head.lines().next().unwrap_or_default().to_string();
+        let target = line.split_whitespace().nth(1).unwrap_or_default();
+        if target.split('?').next().unwrap_or_default() != "/callback" {
+            let _ = write_page(&mut stream, "404 Not Found", NOT_FOUND_PAGE);
+            continue;
+        }
+        let result = code_from_request_line(&line);
+        match &result {
+            Ok(_) => {
+                let _ = write_page(&mut stream, "200 OK", CALLBACK_PAGE);
+            }
+            Err(_) => {
+                let _ = write_page(&mut stream, "200 OK", CALLBACK_FAILED_PAGE);
+            }
+        }
+        return result;
+    }
+}
+
+/// One button: the code that both creates the account and signs in. `create_user: true` is the whole
+/// difference from C1's version — and **nothing about consent travels with it** (R-C1b-3). `data`
+/// would land as `raw_user_meta_data`, and migration `20260917000100` stopped the trigger reading
+/// it, precisely because this request is one anyone holding the public anon key can send for any
+/// address they like. The attestation is recorded after the code is typed, by `POST /account/consent`.
 pub fn magic_link_at(auth_base: &str, anon: &str, email: &str) -> Result<(), String> {
-    let (status, v) = post_json(&format!("{auth_base}/otp"), anon, &json!({ "email": email, "create_user": false }))?;
+    let (status, v) = post_json(&format!("{auth_base}/otp"), anon, &json!({ "email": email, "create_user": true }))?;
     if (200..300).contains(&status) { Ok(()) } else { Err(provider_error(status, &v)) }
 }
 
 /// …and this is how a **desktop** app finishes one. The link in the mail redirects to
 /// `https://knowlu.com/signed-in.html` with the session in the URL fragment, **in the user's
-/// browser** — a place this process will never see. So the mail carries a six-digit code beside the
+/// browser** — a place this process will never see. So the mail carries a one-time code beside the
 /// link (`config.toml`'s `[auth.email.template.magic_link]`, GoTrue's own `{{ .Token }}`), the panel
 /// asks for it, and `/verify` trades it for the same session the link would have given.
 ///
@@ -281,16 +469,60 @@ pub fn refresh_at(auth_base: &str, anon: &str, refresh_token: &str, now_unix: i6
     session_from(&v, now_unix)
 }
 
+/// R-C1c-exec-14: serializes every refresh of a stored session against every other, across every
+/// caller in this process. `valid_access_token_at` (C2's 120-second floor) and `ensure_session_for_at`
+/// (the scheduler's 45-minute pre-flight, R-C1c-13) can each independently decide the SAME Credential
+/// Manager entry needs refreshing, from different threads: the slot's own pre-flight and its
+/// entitlement/telemetry steps share one thread and so are already safe within a single slot, but the
+/// housekeeping thread's independent 6-hourly `refresh_entitlement` tick (`scheduler::spawn`) — which
+/// itself calls `valid_access_token_at` — is gated by neither `sch.running` nor a lock of its own, and
+/// can land inside the same window as a slot's refresh. GoTrue rotates the refresh token on every use:
+/// two concurrent `POST /token?grant_type=refresh_token` calls carrying the identical (about to be
+/// stale) token race the server, and simultaneous reuse of one refresh_token can be read as a
+/// stolen-token signal that revokes the whole session family, forcing a real re-sign-in.
+///
+/// **The engine never refreshes** (the C2 contract: "Refresh is C1's job") — this process is the only
+/// writer of a stored session, so a single in-process lock is sufficient; there is no second process
+/// to coordinate with, and no need for anything file- or Credential-Manager-based.
+///
+/// Held across the WHOLE load → (maybe) refresh → save sequence, taken *before* `load_session`: a
+/// caller that blocks here re-reads the entry the winner just saved once it gets the lock, rather than
+/// refreshing the stale token it would otherwise have read before waiting.
+static SESSION_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// **Refresh is C1's job** (the C2 contract, point 2). A token with under two minutes left is
 /// refreshed and the entry rewritten, so C2 — which only ever reads — finds a live token or a stale
 /// one it can wait out, and never has to hold a refresh race with this process.
 pub fn valid_access_token_at(auth_base: &str, anon: &str, target: &str, now_unix: i64) -> Result<String, String> {
+    let _guard = SESSION_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (account_id, s) = load_session(target)?;
     if s.expires_at - now_unix > 120 { return Ok(s.access_token); }
     let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
     let id = if id.is_empty() { account_id } else { id };
     save_session(target, &id, &fresh)?;
     Ok(fresh.access_token)
+}
+
+/// The scheduler's own pre-flight (R-C1c-13), not C2's read: `valid_access_token_at`'s 120-second
+/// margin is sized for a single request made right now, and every reader of it in this file (the
+/// entitlement refresh, the telemetry send) is exactly that. A slot is different — it runs several
+/// cloud steps in sequence and can take minutes end to end — so the scheduler asks THIS with a floor
+/// wide enough to survive the whole slot (45 minutes, at the call site in `scheduler.rs`) rather than
+/// the moment a single call is made.
+///
+/// Returns `Ok(true)` only when a refresh actually ran and the entry was rewritten; `Ok(false)` when
+/// the token already cleared `min_remaining_secs` and nothing was touched, network included. An `Err`
+/// covers both a session that could not be read (Credential Manager has nothing at `target`, or what
+/// is there does not parse) and a refresh the provider or the network refused — the caller decides
+/// what either means for the slot; this function only ever reads and writes Credential Manager.
+pub fn ensure_session_for_at(auth_base: &str, anon: &str, target: &str, now_unix: i64, min_remaining_secs: i64) -> Result<bool, String> {
+    let _guard = SESSION_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (account_id, s) = load_session(target)?;
+    if s.expires_at - now_unix > min_remaining_secs { return Ok(false); }
+    let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
+    let id = if id.is_empty() { account_id } else { id };
+    save_session(target, &id, &fresh)?;
+    Ok(true)
 }
 
 fn env_pair() -> Result<(String, String, String), String> {
@@ -305,38 +537,14 @@ fn ok_account(account_id: &str, email: &str) -> Value {
     json!({ "ok": true, "error": Value::Null, "account_id": account_id, "email": email })
 }
 
-/// Create the account. **The three acceptances are Rust's, not the page's**: the versions are
-/// constants here and the attestation is refused here, so a page that forgot a checkbox cannot make
-/// an account that the consent log then describes wrongly.
+/// The attestation is still refused **here**, before a single mail is sent — it is the consent the
+/// wizard's two checkboxes stand for. What changed is where it is recorded: in the account, by the
+/// route, once the code has proved the address.
 #[tauri::command(async)]
-pub fn sign_up(email: String, password: String, age_attested: bool) -> Value {
+pub fn send_magic_link(email: String, age_attested: bool) -> Value {
     if !age_attested {
-        return json!({ "ok": false, "error": "Knowlu is for people 18 or older.", "account_id": Value::Null });
+        return json!({ "ok": false, "error": "Knowlu is for people 18 or older." });
     }
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
-    match sign_up_at(&auth, &anon, email.trim(), &password, TOS_VERSION, PRIVACY_VERSION, now_unix()) {
-        Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
-            Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-        },
-        Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-    }
-}
-
-#[tauri::command(async)]
-pub fn sign_in(email: String, password: String) -> Value {
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
-    match sign_in_at(&auth, &anon, email.trim(), &password, now_unix()) {
-        Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
-            Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-        },
-        Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
-    }
-}
-
-#[tauri::command(async)]
-pub fn send_magic_link(email: String) -> Value {
     let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e }) };
     match magic_link_at(&auth, &anon, email.trim()) {
         Ok(()) => json!({ "ok": true, "error": Value::Null }),
@@ -347,22 +555,60 @@ pub fn send_magic_link(email: String) -> Value {
 /// The other half of the magic link: the code from the mail, traded for a session on this machine.
 #[tauri::command(async)]
 pub fn verify_email_code(email: String, code: String) -> Value {
-    let (auth, anon, _) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
+    let (auth, anon, base) = match env_pair() { Ok(v) => v, Err(e) => return json!({ "ok": false, "error": e, "account_id": Value::Null }) };
     match verify_email_code_at(&auth, &anon, email.trim(), &code, now_unix()) {
         Ok((id, s)) => match save_session(PENDING_TARGET, &id, &s) {
-            Ok(()) => ok_account(&id, &s.email),
+            Ok(()) => {
+                // The same call `google_sign_in` makes, for the same reason and with the same
+                // handling: the trigger records no consent on either path any more, this is the one
+                // writer, and a failure is logged rather than swallowed — `open_checkout` retries it
+                // and `billing-checkout` refuses an account that still has no attestation.
+                if let Err(e) = record_consent_at(&base, &s.access_token, TOS_VERSION, PRIVACY_VERSION) {
+                    eprintln!("Knowlu: the sign-up consent could not be recorded ({e})");
+                }
+                ok_account(&id, &s.email)
+            }
             Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
         },
         Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
     }
 }
 
-/// The system browser, by `explorer.exe <url>` — the same mechanism the tray's *Open vault folder*
-/// uses, and no new dependency for one line. Its exit code is not checked: `explorer.exe` returns
-/// non-zero on success often enough that checking it would report failures that did not happen.
+/// The system browser, by `ShellExecuteW`'s `"open"` verb — the API the shell itself uses to carry
+/// out a double click. The Explorer shell process (R-C1b-exec-7's predecessor mechanism) does
+/// **not** work on every machine: a live proof on this one found it routing every `https://` URL,
+/// even `https://example.com/?x=1`, to a Documents folder window instead of a browser tab, while
+/// `ShellExecuteW` and `rundll32 url.dll,FileProtocolHandler` both routed the same URLs correctly —
+/// so a web URL never goes through the Explorer shell process again (a folder still does; see
+/// `tray.rs`). `ShellExecuteW` needs no child process at all and is tried first; a failure (its
+/// return value, as an integer, at or below 32) falls back to spawning
+/// `rundll32.exe url.dll,FileProtocolHandler <url>` — the same mechanism a plain `<a href>` click
+/// resolves to under the hood. Every caller only ever passes a web address (the sign-in authorize
+/// URL, the Stripe checkout URL, a published policy page, the Google consent URL), so anything that
+/// is not `http://` or `https://` is refused before either mechanism is tried.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only a web address can be opened".to_string());
+    }
     use knowlu_engine::childproc::NoConsole;
-    std::process::Command::new("explorer.exe").no_console().arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is kept alive across the call by this binding; `w!("open")` is a static
+    // null-terminated literal; `None`/`None` are the unused lpparameters/lpdirectory the "open"
+    // verb does not read.
+    let result = unsafe { ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
+    if result.0 as isize > 32 {
+        return Ok(());
+    }
+    std::process::Command::new("rundll32.exe")
+        .no_console()
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// **The terms and the privacy policy, opened where they can actually be read.** `app/static/` holds
@@ -489,11 +735,26 @@ pub fn load_cache(data_dir: &std::path::Path) -> Option<EntitlementCache> {
     serde_json::from_str(&text).ok()
 }
 
+/// A counter, not a clock: two calls on the same thread in the same nanosecond are not a
+/// hypothetical on a fast machine, and `fetch_add` can never collide the way two `Timestamp::now()`
+/// reads could (R-C1c-final-5).
+static CACHE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Written atomically: the fresh bytes land in a sibling `.tmp` file first, and `fs::rename` — which
 /// on Windows calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` — swaps it into place in one step,
 /// so a reader (this process's own next `load_cache`, or a crash mid-write) never observes a
 /// half-written file. The remove-then-rename fallback below is a second attempt for the rare case
 /// where the direct rename itself fails (fix round 1, item 6).
+///
+/// **R-C1c-final-5:** the `.tmp` name is unique to this CALL — pid plus a counter — not shared by
+/// every writer the way a bare `entitlement.json.tmp` was. `scheduler::spawn`'s launch refresh (at
+/// +10 s) and a slot's own in-slot refresh (§2) can overlap when the round trip takes about that
+/// long, and with one shared name the loser's `rename` finds its own source already moved away by
+/// the winner, falls into the fallback, and `remove_file(&path)` deletes the WINNER's just-written
+/// fresh cache — leaving no cache at all and the F13 skip again, from two calls that each believed
+/// they had succeeded. A name unique per call means neither writer's source can ever be the other's
+/// to consume: the fallback here only ever retries this call's own rename against a target that may
+/// be transiently locked, never against another call's in-flight write.
 pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<(), String> {
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let v = serde_json::to_value(c).map_err(|e| e.to_string())?;
@@ -501,11 +762,14 @@ pub fn save_cache(data_dir: &std::path::Path, c: &EntitlementCache) -> Result<()
     // the engine wrote never differ by whitespace.
     let bytes = knowlu_engine::ledger::dumps_value(&v);
     let path = cache_path(data_dir);
-    let tmp = data_dir.join("entitlement.json.tmp");
+    let n = CACHE_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = data_dir.join(format!("entitlement.json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
         // Fallback, and say so: remove the stale target and retry the rename rather than leaving
-        // both the old cache and the fresh `.tmp` sitting on disk.
+        // both the old cache and the fresh `.tmp` sitting on disk. Safe now that `tmp` is this
+        // call's alone — the target this removes and replaces is never another call's still-in-flight
+        // write, only ever a target `rename` itself could not replace in place.
         let _ = std::fs::remove_file(&path);
         std::fs::rename(&tmp, &path).map_err(|e2| format!("entitlement cache rename failed ({e}); fallback also failed: {e2}"))?;
     }
@@ -775,6 +1039,64 @@ pub fn entitlement_now() -> Value {
 // `open_in_browser` is already in this file — Task 10 added it for `open_policy`, and Checkout and
 // the Portal use the same one rather than a second copy of the same three lines.
 
+/// The PKCE half of `/token`. GoTrue's `PKCEGrantParams` names `auth_code` and `code_verifier`
+/// (`internal/api/token.go`) — not `code`, not `verifier` — and either one empty is a 400 with a
+/// sentence about both being non-empty.
+pub fn exchange_pkce_at(
+    auth_base: &str,
+    anon: &str,
+    code: &str,
+    verifier: &str,
+    now_unix: i64,
+) -> Result<(String, Session), String> {
+    let body = json!({ "auth_code": code, "code_verifier": verifier });
+    let (status, v) = post_json(&format!("{auth_base}/token?grant_type=pkce"), anon, &body)?;
+    if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
+    session_from(&v, now_unix)
+}
+
+/// **One authenticated POST**, returning the status and the parsed body. `post_for_url` and
+/// `post_no_reply` are its two readings: a route that answers with a link to open, and a route whose
+/// success is the status itself. Split out for review M5 — `record_consent_at` used to detect
+/// success by string-matching `"no link came back"`, a literal private to `post_for_url` and free to
+/// be reworded, which would have turned every recorded consent into a silent failure.
+fn post_authed(api_base: &str, path: &str, token: &str, body: &Value) -> Result<(u16, Value), String> {
+    check_api_base(api_base)?;
+    let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    let mut res = agent()
+        .post(&format!("{}{path}", api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .send(text)
+        .map_err(|e| format!("{UNREACHABLE} ({e})"))?;
+    let status = res.status().as_u16();
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
+    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+}
+
+/// A route whose success has no link in it. (`post_for_url` keeps its own signature and its own
+/// `"no link came back"`; both now go through [`post_authed`].)
+fn post_no_reply(api_base: &str, path: &str, token: &str, body: &Value) -> Result<(), String> {
+    let (status, v) = post_authed(api_base, path, token, body)?;
+    if (200..300).contains(&status) { Ok(()) } else { Err(provider_error(status, &v)) }
+}
+
+/// The 18+ attestation and the two policy versions, recorded after the session exists.
+///
+/// **Why it is a second call and not metadata.** `/authorize` has no field for user metadata, and
+/// migration `20260917000100` stopped the trigger reading metadata on either path — a `/otp` request
+/// is anyone's to send, so an attestation taken from one would be an `age_18` row nobody made. This
+/// is the only writer of a consent row; `billing-checkout` refuses an account where `age_attested_at`
+/// is still null, so skipping this call is not a way around the gate.
+///
+/// Called after **both** sign-in paths — `google_sign_in` and `verify_email_code` — and idempotent on
+/// the service side, so it needs no "is this a new account" question the app has no honest way to
+/// answer, and `open_checkout` can retry it for free.
+pub fn record_consent_at(api_base: &str, token: &str, tos: &str, privacy: &str) -> Result<(), String> {
+    let body = json!({ "tos_version": tos, "privacy_version": privacy, "age_attested": true });
+    post_no_reply(api_base, "/account/consent", token, &body)
+}
+
 /// One POST that answers with a link to open. **The body is serialized and sent as a plain string**,
 /// not through `send_json`: ureq's `json` feature is not enabled in `app/Cargo.toml` (it carries the
 /// engine's `cookies` feature and no other), so `send_json` does not exist on this build —
@@ -795,13 +1117,73 @@ fn post_for_url(api_base: &str, path: &str, token: &str, body: &Value) -> Result
     v.get("url").and_then(|x| x.as_str()).map(str::to_string).ok_or_else(|| "no link came back".to_string())
 }
 
+/// The checkout link, with the consent retry in front of it (review I4). Split from the command so
+/// the order — consent, then Stripe — is a test rather than a claim; the command is what opens the
+/// browser.
+pub fn checkout_url_at(api_base: &str, token: &str, plan: &str) -> Result<String, String> {
+    // Free when the first call worked (the route writes only where the account has none), and the
+    // difference between a student who can subscribe and one whose only advice is "sign in again"
+    // when it did not. A retry that fails again is logged, never fatal: `billing-checkout`'s 403 is
+    // the honest answer and the server is the one entitled to give it.
+    if let Err(e) = record_consent_at(api_base, token, TOS_VERSION, PRIVACY_VERSION) {
+        eprintln!("Knowlu: the consent retry before checkout did not land ({e})");
+    }
+    post_for_url(api_base, "/billing-checkout", token, &json!({ "plan": plan, "terms_version": TOS_VERSION }))
+}
+
+/// **Continue with Google** (spec D1, D2). One loopback listener, one browser window, one exchange.
+///
+/// Vault-less, like `google_connect_url` beside it: the session goes to [`PENDING_TARGET`], which is
+/// where `create_vault_in` looks for it at Finish and where the upgrade overlay's `attach_account`
+/// looks for it over an existing vault. Every panel after this one is unchanged, because it cannot
+/// tell this path from the emailed code.
+///
+/// **Nothing here reaches the page.** The verifier, the code and both tokens stay in this function
+/// and in Credential Manager; what crosses the IPC is an account id and an email address, the same
+/// envelope `verify_email_code` returns.
+///
+/// The attestation is refused **here**, before a single listener is bound — the same sentence and
+/// the same reason `send_magic_link` refuses on (F2). The page gate (`console.js`) is not the only
+/// strap any more.
+#[tauri::command(async)]
+pub fn google_sign_in(age_attested: bool) -> Value {
+    if !age_attested {
+        return json!({ "ok": false, "error": "Knowlu is for people 18 or older.", "account_id": Value::Null });
+    }
+    let api = api_base();
+    let out = (|| -> Result<(String, Session), String> {
+        let auth = auth_base(&api)?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no local port for the sign-in ({e})"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let (verifier, challenge) = pkce_pair();
+        open_in_browser(&authorize_url(&auth, port, &challenge))?;
+        // Three minutes: long enough to pick an account and read a consent screen, short enough
+        // that a wizard nobody came back to is not holding a socket at bedtime.
+        let code = serve_one_callback(listener, std::time::Duration::from_secs(180))?;
+        let (id, s) = exchange_pkce_at(&auth, &anon_key(), &code, &verifier, now_unix())?;
+        save_session(PENDING_TARGET, &id, &s)?;
+        // Best effort, and second — but never silent (review I4). The session is already on this
+        // machine and an attestation that did not land is a subscribe step that says so, not a
+        // sign-in to be redone; `open_checkout` retries it before the checkout POST. The log line is
+        // `attach_in`'s shape, this file's existing way of saying "this part did not land".
+        if let Err(e) = record_consent_at(&api, &s.access_token, TOS_VERSION, PRIVACY_VERSION) {
+            eprintln!("Knowlu: the sign-up consent could not be recorded ({e})");
+        }
+        Ok((id, s))
+    })();
+    match out {
+        Ok((id, s)) => ok_account(&id, &s.email),
+        Err(e) => json!({ "ok": false, "error": e, "account_id": Value::Null }),
+    }
+}
+
 #[tauri::command(async)]
 pub fn open_checkout(plan: String) -> Value {
     let base = api_base();
     let out = (|| -> Result<String, String> {
         let auth = auth_base(&base)?;
         let token = valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, now_unix())?;
-        let url = post_for_url(&base, "/billing-checkout", &token, &json!({ "plan": plan, "terms_version": TOS_VERSION }))?;
+        let url = checkout_url_at(&base, &token, &plan)?;
         open_in_browser(&url)?;
         Ok(url)
     })();
@@ -1058,7 +1440,7 @@ fn external_url_allowed(url: &str) -> bool {
 /// the page takes it from the service; one that opened anything would be one indirection away from
 /// opening a `file:` URL or a phishing page if either the service or the page were ever wrong.
 /// There is exactly one thing it is for, and the CR/LF guard is there because a header-shaped
-/// injection into a URL that reaches `explorer.exe` is the other way this goes wrong.
+/// injection into a URL that reaches the shell is the other way this goes wrong.
 #[tauri::command(async)]
 pub fn open_external(url: String) -> Value {
     if !external_url_allowed(&url) {

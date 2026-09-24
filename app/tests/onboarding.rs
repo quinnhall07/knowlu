@@ -785,7 +785,7 @@ fn a_child_that_fails_outright_surfaces_its_exit_status_and_stderr_in_error() {
     assert!(err.contains("boom-from-fake-engine"), "the stderr is in it: {err}");
     // stdout was empty (no valid discovery JSON), so rows are empty and the note is the generic one.
     assert!(out["rows"].as_array().unwrap().is_empty());
-    assert_eq!(out["note"].as_str(), Some("we could not reach your coursework sites — fill them in below"));
+    assert_eq!(out["note"].as_str(), Some("We could not reach your coursework sites"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -920,8 +920,8 @@ fn a_page_supplied_course_slug_is_normalised_before_it_names_a_file() {
     let mut session = PendingSession::new("acc-course-slug-normalise");
     let mut plan = base_plan(false);
     plan.courses = vec![
-        knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into() },
-        knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into() },
+        knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into(), label: String::new() },
+        knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into(), label: String::new() },
     ];
     let out = create_vault_in(&root, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], true, "{out}");
