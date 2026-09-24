@@ -532,15 +532,18 @@ fn a_google_grant_becomes_the_engines_calendars_list() {
         ingest_yaml(&google_only).unwrap().contains("calendars:\n  - name: google\n    ics_url: 'cloud:google'\n"),
         "{}", ingest_yaml(&google_only).unwrap()
     );
-    // Both: personal first, google second — the fixed order the writer promises.
+    // Both, WITH the account a Google grant always implies (Task 11 review, M1: production cannot
+    // reach a grant with no account, so a no-account "both" case would pass a reorder of the two
+    // `entries.push` calls that a real vault would never survive). Personal first, google second —
+    // the fixed order the writer promises, both routed through `cloud:` because the account holds
+    // both.
     let mut both = base.clone();
+    both.account_id = "acc-1".into();
     both.personal_calendar = Some("https://calendar.google.com/calendar/ical/x/private-def/basic.ics".into());
     both.google_calendar = true;
     let text = ingest_yaml(&both).unwrap();
     assert!(
-        text.contains(
-            "calendars:\n  - name: personal\n    ics_url: 'https://calendar.google.com/calendar/ical/x/private-def/basic.ics'\n  - name: google\n    ics_url: 'cloud:google'\n"
-        ),
+        text.contains("calendars:\n  - name: personal\n    ics_url: 'cloud:personal'\n  - name: google\n    ics_url: 'cloud:google'\n"),
         "{text}"
     );
 }
