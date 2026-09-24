@@ -32,8 +32,9 @@ nothing before Finish (except credentials); and Quinn's rulings in memory:
 
   *Cost if wrong:* nothing gets asked before the first slot starts. D2 makes that harmless.
 - **D2. No `commitment-check` card is filed on the vault's first day.** The vault's first day is the
-  date of its earliest `state/journal/` file, the same date the parent spec's §5.3 day-3 rule
-  counts from. On that day, `emit_checks` files no proposal card and no window card. Without this,
+  local date, in the vault's timezone, of its earliest journal record (amended A1; the journal
+  file's name is a UTC date and only a fallback). The parent spec's §5.3 day-3 rule counts from
+  the same date. On that day, `emit_checks` files no proposal card and no window card. Without this,
   the first slot's `rank` would file cards for the rows the student is confirming on the screen at
   the same moment. The withdrawal rules would clean those cards up, but each would already have
   been charged to the 15-a-day cap and shown once.
@@ -71,7 +72,8 @@ nothing before Finish (except credentials); and Quinn's rulings in memory:
   *Cost if wrong:* none known.
 - **D6. The panel is a new console view, *Schedule*, headed "Your week".** The nav already has
   *This week* (tasks due this week), so a second "week" link would be ambiguous. The view id is
-  `schedule`.
+  `schedule`. It is a page view, not a read-model view: it polls the read model as `today`, and
+  `schedule` never reaches `surface::View::parse` (amended A4).
 - **D7. The console says what moved.** The today view prints `moved.text` under the day's
   heading when the read model carries it (§6.4). Phase 1 put `moved` in the read model and left
   showing it to phase 2.
@@ -201,17 +203,20 @@ afterwards. It is a file rather than an argument so that no argv length limit ap
   - **Save** sends `commitments_confirm({window})`, then refreshes. An invalid window, such as a start
     after its end, comes back as the engine's message and shows under the row. Nothing is written.
 
-  The editor is the same component inside `#week-setup` (§2) and in the *Schedule* view.
+  The editor is the same component inside `#week-setup` (§2) and in the *Schedule* view: the same
+  pickers. The preview runs only in the *Schedule* view, since on the first day there is no plan
+  yet to diff against (amended A6).
 - **The today view.** It shows `moved.text` under the day heading (D7), with no control.
 
 ## 5. The per-course fallback card (`commitment-ask`)
 
 The engine half follows the parent spec's §5.3 exactly. Phase 2 settles these three calls:
 
-- **The emitter.** `commitments::emit_asks(vault, today, budget, ctx, journal)` runs in `rank`
-  after `emit_checks`, with what is left of the budget.
+- **The emitter.** `commitments::emit_asks(vault, proposals, today, budget, ctx, journal)` runs in
+  `rank` after `emit_checks`, with what is left of the budget (amended A2: it needs the proposals
+  to see a pending class proposal).
   - It files at most 2 cards a day.
-  - It files nothing before the vault's day 3.
+  - It files nothing before the vault's day 3, counted from D2's first day.
   - It files cards through `file_card`, whose `LOCAL_CARD_KINDS` already allows `commitment-ask`.
   - It picks courses in slug order.
   - Each card filed adds one to `approvals.pending`, as the check cards do.
@@ -220,9 +225,12 @@ The engine half follows the parent spec's §5.3 exactly. Phase 2 settles these t
   - It writes the card's `answer_meets` through `write`, as a human edit, with `meets` passed as the
     form's flow sequence and emitted by `write::to_literal`.
   - It then runs `decide(id, "approved")`'s path. The settlement validates the answer. An invalid
-    answer puts the card back to `pending` with the warning, and the console shows the warning on
-    the card.
-  - The app validates nothing.
+    answer puts the card back to `pending` with the warning. The console shows the engine's
+    warning on the card, from `answer_card`'s envelope, until the next repaint (amended A3).
+  - The class note it creates is titled by the course note (`title`, else `name`, else the slug),
+    at `commitments/<slugify(title)>.md` (amended A5).
+  - The app validates nothing. The engine refuses `answer_card` on anything but a pending
+    `commitment-ask` card.
 - **The form.** `renderDecisionsView` gains a per-kind branch. For a card of kind `commitment-ask`,
   the body is:
   - day toggles, Mon to Sun
@@ -231,7 +239,8 @@ The engine half follows the parent spec's §5.3 exactly. Phase 2 settles these t
   - **Save times**, which calls `answer_card`
   - **No set times**, which rejects the card
 
-  Snooze stays. Every other kind renders as it does today.
+  Snooze stays. Every other kind renders as it does today. In the rail's deck, an ask shows
+  **Answer…** in place of Approve, which opens Decisions; Reject and Snooze stay (amended A7).
 
 ## 6. Commands, files and counts
 
@@ -307,3 +316,39 @@ The engine half follows the parent spec's §5.3 exactly. Phase 2 settles these t
 - **C3′.** The parent spec's §10 lists C3′ as a prerequisite. Phase 2 adds no synced note shape
   beyond phase 1's, so P21 covers it; C3′ does not block phase 2.
 - **Privacy.** Phase 2 reads no new data, so it adds nothing beyond the parent spec's §9 line.
+
+## Amendments (2026-09-24, plan review)
+
+From the pre-execution review of the plan (`docs/plans/2026-09-24-commitment-model-phase2-plan-review.md`,
+"ready with fixes"). The parent spec is not edited; where it disagrees, these amendments supersede
+it. They take effect with Quinn's go at the checkpoint.
+
+- **A1 (D2; supersedes parent §5.3's "earliest `state/journal/` file" wording).** The vault's first
+  day is the local date, in the vault's timezone, of its earliest journal record. It is not the
+  date in the earliest journal file's name. The file name is a UTC date, and after local midnight
+  east of UTC it names local yesterday: that student's first real day would be day 2, the screen
+  would never open, and the day-1 cards would be filed. The file-name date is used only when no
+  record's timestamp can be read. Parent §5.3's day 3 counts from the same date. (Plan Q1-a;
+  review finding 1.)
+- **A2 (§5, the emitter).** The signature is `emit_asks(vault, proposals, today, budget, ctx,
+  journal)`: "no pending class proposal" cannot be tested without the proposals, and `rank`
+  already holds them. (Plan Q6-a.)
+- **A3 (§5, the answer).** An invalid answer's warning is shown on the card from `answer_card`'s
+  envelope, until the next repaint. The read model gains no warning field: that would need a
+  second write onto the card for a message the student has just seen. (Plan Q7-a, Q8-c.)
+- **A4 (D6).** `schedule` is a page view. It polls the read model as `today` and never reaches
+  `surface::View::parse`, which refuses any name that is not a read-model view. (Plan Q10-a.)
+- **A5 (§5; supersedes parent §5.3's `commitments/<slug>.md`).** The class note an answered ask
+  creates is titled by the course note (`title`, else `name`, else the slug). It is written at
+  `commitments/<slugify(title)>.md`, which for a wizard-made vault is `<slug>.md`; §2.2 already
+  requires a title, and a file name is never an identity. (Plan Q7-b.)
+- **A6 (§4, the editor).** The confirm screen and the *Schedule* view share the same pickers.
+  The preview runs only in the *Schedule* view, because on the first day the first slot has not
+  ranked yet and there is no plan to diff against. (Plan Q11-a; review finding 7.)
+- **A7 (§5, the form).** In the rail's deck, a `commitment-ask` card shows **Answer…** in place of
+  Approve, which opens Decisions; Reject and Snooze stay. The parent's §5.3 warns that "a card the
+  console cannot answer would teach the student to reject". (Plan Q11-b.)
+
+The review's ruling on the plan's sixth flagged problem needs no spec change. The P16 `rank` test
+vaults gain a seeded journal day and, in one test, a `card:cs-100` marker; these are setup only,
+never assertions.
