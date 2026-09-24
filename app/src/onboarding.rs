@@ -97,21 +97,22 @@ pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool) -> Value {
     let args = discovery_argv(&id, zybooks, vhl);
     let exe = match crate::scheduler::engine_exe() {
         Ok(e) => e,
-        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("We could not look up your courses ({e})") }),
     };
     use knowlu_engine::childproc::NoConsole;
     let out = match std::process::Command::new(exe).no_console().args(&args).output() {
         Ok(o) => o,
-        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("we could not look up your courses ({e}) — fill them in below") }),
+        Err(e) => return json!({ "ok": true, "error": Value::Null, "rows": [], "note": format!("We could not look up your courses ({e})") }),
     };
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let rows = rows_from_discovery(&stdout);
     // The per-source reason, not just "something went wrong": a student whose zyBooks worked and whose
-    // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry.
+    // VHL did not needs to hear *VHL*, because the fix is their VHL password and not a retry. The page
+    // appends the way forward; this command states the reason only.
     let reasons = errors_from_discovery(&stdout);
     let note = match (rows.is_empty(), reasons.is_empty()) {
-        (_, false) => json!(format!("{} — fill those in below.", reasons.join("; "))),
-        (true, true) => json!("we could not reach your coursework sites — fill them in below"),
+        (_, false) => json!(reasons.join("; ")),
+        (true, true) => json!("We could not reach your coursework sites"),
         (false, true) => Value::Null,
     };
     // Review round 1, m5: the child's own exit status and stderr, surfaced rather than discarded.

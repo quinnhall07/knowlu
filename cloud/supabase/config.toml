@@ -12,7 +12,9 @@ max_rows = 1000
 
 [db]
 port = 54322
-major_version = 15
+# Both projects run Postgres 17 (R-C1b-exec-4) — this declaration of record must agree, or a
+# `supabase config push` from this file carries an unintended third update.
+major_version = 17
 
 [auth]
 enabled = true
@@ -25,14 +27,54 @@ enable_signup = true
 
 [auth.email]
 enable_signup = true
-enable_confirmations = true
+# **FALSE from C1b (spec D5), and it is what makes the one-button email path real.** `/otp` with
+# `create_user: true` against an address with no CONFIRMED user hands the request to `Signup` and,
+# with confirmations on, stops there — GoTrue's own comment reads "otherwise confirmation email
+# already contains 'magic link'" (internal/api/magic_link.go). That sends the CONFIRMATION template,
+# and `templates/` holds exactly one file: `magic_link.html`. A new student would get Supabase's
+# stock "Confirm your signup" mail, which carries `{{ .ConfirmationURL }}` and no `{{ .Token }}` —
+# a link a desktop app can never receive and no code to type. With confirmations off the same
+# handler signs the user up and re-enters `MagicLink`, which sends OUR template, code first.
+#
+# Nothing is weakened by it: there is no password on a Knowlu account any more (spec D4), so the
+# code sent to the address IS the proof of the address, at the only moment that proof matters.
+enable_confirmations = false
 double_confirm_changes = true
 
-# R-C1-3, second half. `enable_confirmations = true` means every sign-up depends on this mail
-# arriving, and Supabase's built-in sender is a few messages an hour and is explicitly not for
-# production — the second person to sign up in an hour would never get theirs. The provider is the
-# same one `billing-jobs` uses for the renewal reminder (P2), so there is one account to watch.
-# `pass` is a project secret (`SMTP_PASSWORD`), set by Quinn, never in this file.
+# **Set here, explicitly, rather than left at the platform default** (review I2). With no password in
+# the product, `POST /auth/v1/otp` with `create_user: true` is in practice an unauthenticated
+# endpoint — `DEFAULT_ANON_KEY` ships in every build — and with confirmations off GoTrue creates the
+# `auth.users` row before the code is ever typed. This number is the whole of the cap on that.
+#
+# **20 an hour, project-wide.** Sign-in happens once per student per device and the pilot is tens of
+# students, so a group onboarding together — with a mistyped address and a retry each — still fits,
+# while a stranger holding the public key gets at most 20 empty accounts an hour and, since migration
+# 20260917000100 records no consent at all from a sign-up, **zero** fabricated consent rows: an
+# `accounts` row with a null attestation, which `billing-checkout` refuses.
+#
+# The trade-off runs both ways and is worth saying out loud: the same 20 is the budget a flood would
+# spend, and a spent budget is a real student who cannot sign in for the rest of the hour. The
+# Supabase-native answer to that is `[auth.captcha]`, which is a separate decision (recorded in this
+# plan's resolutions), not a bigger number here. Raising it is one line and one `config push`.
+[auth.rate_limit]
+email_sent = 20
+
+# **The Google provider is the DASHBOARD's, on both projects.** Quinn enabled it there for staging
+# and for prod on 2026-09-17, and it was verified without holding a key: `/auth/v1/authorize?provider=google`
+# answers 302 to `accounts.google.com` on each project, carrying that project's own
+# `/auth/v1/callback` as `redirect_uri` and `email profile` as the scope. So this file declares **no**
+# `[auth.external.google]` block on purpose: the client id and the secret never enter this repo, this
+# file, or any shell in this session. `supabase config push` "pushes the properties your local
+# config.toml declares … properties the file does not declare are left unchanged" (CLI 2.117.0), so
+# pushing the two settings above leaves the dashboard's provider exactly as it is — and `supabase
+# config diff` before each push is what proves it (Task 7 step 3).
+
+# **`enable_confirmations = false` means every sign-up depends on the CODE mail arriving** — the same
+# dependency on the same provider, just moved down one line. Supabase's built-in sender is a few
+# messages an hour and is explicitly not for production — the second person to sign up in an hour
+# would never get theirs. The provider is the same one `billing-jobs` uses for the renewal reminder
+# (P2), so there is one account to watch. `pass` is a project secret (`SMTP_PASSWORD`), set by
+# Quinn, never in this file.
 # **Commented out until Task 4 step 1 fills it.** The first command that parses this file is Task 1
 # step 7's `supabase db push`, and four `<P2: …>` placeholders in a block the CLI validates would fail
 # there — at the exact moment P1 is being wired, for a reason that has nothing to do with P1.
@@ -49,7 +91,7 @@ pass = "env(SMTP_PASSWORD)"
 admin_email = "hello@knowlu.com"
 sender_name = "Knowlu"
 
-# The magic link's mail carries a **six-digit code as well as a link**, because a desktop app cannot
+# The magic link's mail carries a one-time code as well as a link, because a desktop app cannot
 # receive the link's redirect: `site/signed-in.html` says so, and the wizard asks for the code
 # (`account::verify_email_code`). `{{ .Token }}` is GoTrue's own placeholder for it.
 [auth.email.template.magic_link]

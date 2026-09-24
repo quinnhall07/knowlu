@@ -24,6 +24,17 @@
     return window.__TAURI__.core.invoke(cmd, args || {});
   }
 
+  // R-C1b-exec-9: the wizard's subscribe panel and the upgrade overlay both need to ask this same
+  // question — is this account entitled right now — and each used to carry its own copy of the
+  // status test. One copy, resolved `true` only on `ok` plus an active or trialing status, `false`
+  // on anything else, a refusal or a dropped invoke included: nobody downstream of this has to
+  // remember to `.catch`.
+  function checkEntitled() {
+    return invoke("entitlement_now", {}).then(function (r) {
+      return !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
+    }).catch(function () { return false; });
+  }
+
   function renderNav(state) {
     var n = state.nav_counts;
     var map = { today: n.today, overdue: n.overdue, week: n.week, later: n.later, all: n.all, decisions: n.decisions, "good-to-know": n.good_to_know, issues: n.issues, runs: n.runs_warn };
@@ -1239,6 +1250,26 @@
     EL("up-error").textContent = "";
     EL("upgrade").hidden = true;
   }
+  /** The overlay is the console window's own surface and nothing paints it, so its busy state is one
+   *  flag and two writes rather than a `WIZ` field. Without it, two presses on Continue with Google
+   *  are two commands, two loopback listeners and two browser tabs — and the second callback meets a
+   *  closed port. */
+  var UP_BUSY = false;
+  function upBusy(on) {
+    UP_BUSY = on;
+    EL("up-google").disabled = on;
+    EL("up-magic").disabled = on;
+  }
+  /** What both doors do once a session exists — the tail the old branch ended with, now that two
+   *  branches share it. */
+  function afterUpgradeSignIn() {
+    EL("up-error").textContent = "";
+    EL("up-code-row").hidden = true;
+    EL("up-subscribe").hidden = false;
+    return checkEntitled().then(function (yes) {
+      if (yes) { return finishUpgrade(); }
+    });
+  }
   EL("upgrade").addEventListener("click", function (e) {
     // The same branch the wizard has, and it matters more here: this window has a working console to
     // lose, and a plain navigation to `terms.html` would lose it while the user is ticking the box
@@ -1249,44 +1280,81 @@
       invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
       return;
     }
-    var creating = !!e.target.closest("#up-create");
-    if (creating || e.target.closest("#up-signin")) {
-      if (creating && !(EL("up-18").checked && EL("up-terms").checked)) {
+    if (e.target.closest("#up-google")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
         EL("up-error").textContent = "Tick both boxes to create an account."; return;
       }
-      var args = { email: EL("up-email").value.trim(), password: EL("up-pw").value };
-      // `ageAttested`, not the Rust spelling: Tauri v2 lower-camel-cases every argument key, and
-      // `sign_up` opts out of nothing (R-C1-55, C1 — the wizard's own call carries the same comment).
-      if (creating) { args.ageAttested = EL("up-18").checked; }
-      invoke(creating ? "sign_up" : "sign_in", args).then(function (r) {
-        EL("up-pw").value = "";
-        // A dead network is not something to hold someone behind a panel for; a wrong password is.
+      upBusy(true);
+      EL("up-error").textContent = "Finish signing in, in your browser…";
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and this
+      // is the checkbox `google_sign_in` now refuses on before it binds a listener (F2).
+      invoke("google_sign_in", { ageAttested: EL("up-18").checked }).then(function (r) {
+        upBusy(false);
+        // A dead network stands the overlay down rather than trapping someone behind it (D4).
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
         if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        EL("up-subscribe").hidden = false;
-        return invoke("entitlement_now", {}).then(function (ent) {
-          if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-        });
-      }).catch(upgradeUnreachable);
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-magic")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
+        EL("up-error").textContent = "Tick both boxes to create an account."; return;
+      }
+      upBusy(true);
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and the
+      // wizard's own call carries the same comment for the same reason.
+      invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: EL("up-18").checked }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        EL("up-error").textContent = r.ok ? "We emailed you a code. Type it below." : r.error;
+        EL("up-code-row").hidden = !r.ok;
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-code-go")) {
+      if (UP_BUSY) { return; }
+      upBusy(true);
+      invoke("verify_email_code", { email: EL("up-email").value.trim(), code: EL("up-code").value.trim() }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        if (!r.ok) { EL("up-error").textContent = r.error; return; }
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
       return;
     }
     if (e.target.closest("#up-subscribe")) {
-      invoke("open_checkout", { plan: "monthly" }).then(function (r) {
-        // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
-        // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
-        // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
-        if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        var tries = 0;
-        var tick = function () {
-          tries += 1;
-          invoke("entitlement_now", {}).then(function (ent) {
-            if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-            if (tries < 40) { setTimeout(tick, 3000); }
-          }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
-        };
-        setTimeout(tick, 3000);
+      // R-C1b-exec-9: ask before opening a second Checkout page. An account the service already
+      // calls entitled — its own poll below gave up, or the student left and came back — goes
+      // straight through; only an account that is still not entitled gets a Checkout tab.
+      checkEntitled().then(function (yes) {
+        if (yes) { return finishUpgrade(); }
+        return invoke("open_checkout", { plan: "monthly" }).then(function (r) {
+          // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
+          // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
+          // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
+          if (!r.ok) { EL("up-error").textContent = r.error; return; }
+          EL("up-error").textContent = "";
+          var tries = 0;
+          var tick = function () {
+            // The overlay can close — a sign-out, a re-render — while this is still ticking; nothing
+            // asked it to stop, so it kept polling behind a hidden panel until the count ran out.
+            if (EL("upgrade").hidden) { return; }
+            tries += 1;
+            checkEntitled().then(function (yes2) {
+              // The re-review's blocking finding: the overlay can close while this reply is still in
+              // flight, and a yes that lands after must not act on a panel nobody is looking at
+              // either — the same stand-down, checked again now that the wait is over.
+              if (EL("upgrade").hidden) { return; }
+              if (yes2) { return finishUpgrade(); }
+              if (tries < 40) { setTimeout(tick, 3000); }
+              else { EL("up-error").textContent = "Still not subscribed. When the payment page is done, press Subscribe again."; }
+            });
+          };
+          setTimeout(tick, 3000);
+        });
       }).catch(function () { EL("up-error").textContent = UNREACHABLE; });
     }
   });
@@ -1379,6 +1447,11 @@
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+              // The Google round trip runs in the system browser and can take a minute; `busy` is
+              // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
+              // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
+              // written to the DOM straight from inside a click handler).
+              busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
               // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
               // `renderWizard()` like every other wizard field — a direct DOM write from inside
@@ -1411,7 +1484,10 @@
               // decide the mapping panel between them); `checkoutOpened` is what makes the
               // subscribe panel silent until the browser has actually been sent somewhere;
               // `schoolSeq` drops a typeahead answer a later keystroke has already overtaken.
-              lmsOpen: false, discovering: false, checkoutOpened: false, schoolSeq: 0,
+              // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
+              // rows or none — the first `coursework` run files an empty parse as an issue rather
+              // than an empty semester, so a student who saw nothing here can still go on honestly.
+              lmsOpen: false, discovering: false, discovered: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "" };
 
@@ -1452,10 +1528,22 @@
   function renderWizard() {
     PANELS.forEach(function (p, i) { EL("wiz-" + p).hidden = i !== WIZ.step; });
     EL("wiz-step").textContent = "step " + (WIZ.step + 1) + " of " + PANELS.length;
-    EL("wiz-back").disabled = WIZ.step === 0;
+    // Spec §7 (a): hidden, not disabled. A greyed Back that does nothing is the control Quinn
+    // pressed; a Back that is not on screen at step 0 asks no question.
+    EL("wiz-back").hidden = WIZ.step === 0;
     EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
+    // Spec §7 (b): the ONE writer of this property. `wizGo`'s discovery latch and `wizFinish`'s
+    // re-entry guard both set `WIZ.busy` and call renderWizard, so a path that forgets to clear it
+    // is a path renderWizard still recovers from on the next render — which a direct DOM write was
+    // not. The file's own A-5 rule, applied to the last field that escaped it.
+    EL("wiz-next").disabled = WIZ.busy;
     EL("wiz-error").textContent = WIZ.error;
-    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : "";
+    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
+    EL("wiz-google-signin").disabled = WIZ.busy;
+    // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
+    // presses are worth the same guard.
+    EL("wiz-magic").disabled = WIZ.busy;
+    EL("wiz-code-go").disabled = WIZ.busy;
     // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
     // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
     EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
@@ -1505,6 +1593,9 @@
       // vault's ingest.yaml; set before the write resolved, they promised a login that a failed
       // write had not stored (review round 1, IMPORTANT 2).
       stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
+      // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
+      // stand in for one against these.
+      if (stored.length) { WIZ.discovered = false; }
       WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
       clearCredentialFields();
       return true;
@@ -1523,9 +1614,25 @@
     WIZ.autostart = EL("wiz-autostart").checked;
   }
 
+  // A refusal belongs on screen AND has to register as an answer to THIS press. `#wiz-error` sits
+  // at the left of the nav row, so a second Next against the same unmet gate rewrote the same red
+  // sentence and looked like nothing happened at all. One re-flow, one animation frame, and the
+  // sentence arrives again.
+  function flashError() {
+    var el = EL("wiz-error");
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+  }
+
+  // The discovery command states a reason and nothing else now (onboarding.rs's own rule); the
+  // page is what appends the way forward, and a reason that already ends in a stop needs its own
+  // trimmed before the page's own sentence follows it.
+  function tidy(s) { return String(s || "").replace(/[.\s]+$/, ""); }
+
   function wizValid() {
     WIZ.error = "";
-    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Create an account or sign in first."; }
+    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
     if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
     if (WIZ.step === 3) {
       var n = WIZ.name.trim();
@@ -1544,7 +1651,24 @@
   }
 
   function wizGo(n) {
-    if (n > WIZ.step && !wizValid()) { renderWizard(); return Promise.resolve(); }
+    // R-C1b-exec-9: the only thing that ever set WIZ.entitled true used to be the two-minute poll
+    // below, and a student who came back to the wizard after that poll had already given up found
+    // Next refusing forever with no way to ask again. One re-ask, here, before the refusal — and
+    // never from inside it, since an account that truly is not entitled must not ask the service
+    // forever.
+    if (n > WIZ.step && WIZ.step === 2 && !WIZ.entitled) {
+      WIZ.busy = true; renderWizard();
+      return checkEntitled().then(function (yes) {
+        WIZ.busy = false;
+        if (yes) { WIZ.entitled = true; }
+        return wizStep(n);
+      });
+    }
+    return wizStep(n);
+  }
+
+  function wizStep(n) {
+    if (n > WIZ.step && !wizValid()) { renderWizard(); flashError(); return Promise.resolve(); }
     // A refusal belongs to the panel that raised it: stepping back clears it rather than carrying
     // a red line about a field that is no longer on screen.
     if (n < WIZ.step) { WIZ.error = ""; }
@@ -1578,10 +1702,10 @@
         // can run. Stay on the panel while it does — the mapping is the whole point of having asked
         // for the logins — and let Next work again the moment the rows are on screen.
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length) { renderWizard(); return; }
+        if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }
         WIZ.step = leaving;
         WIZ.discovering = true;
-        EL("wiz-next").disabled = true;
+        WIZ.busy = true;
         EL("wiz-map").hidden = false;
         EL("wiz-map-note").textContent = "Looking up your books and sections…";
         renderWizard();
@@ -1589,16 +1713,27 @@
           WIZ.map = ((d && d.rows) || []).map(function (r) {
             return { source: r.source, key: r.key, detail: r.detail, suggested: r.suggested, course: r.suggested || "", ignore: !!r.ignored };
           });
-          EL("wiz-map-note").textContent = (d && d.note)
-            || "Knowlu found these on your accounts. Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for.";
+          // R-C1b-exec-10: set BEFORE renderMapping() runs — the first `coursework` run files an
+          // empty parse as an issue rather than an empty semester, so a finished discovery that
+          // found nothing is still a finished discovery, and renderMapping() has to know that on
+          // this very paint or the panel it is about to draw is the empty one nobody could see.
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = WIZ.map.length
+            ? (d && d.note ? tidy(d.note) + ". " : "Knowlu found these on your accounts. ") + "Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for."
+            : tidy((d && d.note) || "We could not reach your coursework sites") + ". You can go on — Knowlu will try again on its first run.";
           renderMapping();
         }).catch(function () {
-          EL("wiz-map-note").textContent = "We could not look those up — fill them in below.";
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = "We could not look those up. You can go on — Knowlu will try again on its first run.";
+          renderMapping();
         }).then(function () {
           // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
-          // comes back.
+          // comes back. Repainted here rather than left for a later render: nothing else touches the
+          // DOM once this chain settles, and a WIZ field nobody repaints is a Next button nobody can
+          // press.
           WIZ.discovering = false;
-          EL("wiz-next").disabled = false;
+          WIZ.busy = false;
+          renderWizard();
         });
       });
     }
@@ -1620,7 +1755,7 @@
     WIZ.vhl = false;
     WIZ.credVault = "";
     WIZ.step = 5;
-    EL("wiz-next").disabled = false;
+    WIZ.busy = false;
     renderWizard();
   }
 
@@ -1628,7 +1763,11 @@
     // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
     // second Finish click landing in that window used to start a second `retarget_credentials`/
     // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
-    EL("wiz-next").disabled = true;
+    // Painted immediately, synchronously, before readSlotsPanel or any await: the DOM `disabled`
+    // property is what actually stops a second physical click from ever reaching this function again
+    // — `WIZ.busy` alone is an in-memory flag nothing reads at the door.
+    WIZ.busy = true;
+    renderWizard();
     readSlotsPanel();
     // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
     // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
@@ -1673,7 +1812,7 @@
         if (!rt || !rt.ok) { credentialsStranded(); return; }
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
-          if (!r.ok) { WIZ.error = r.error; EL("wiz-next").disabled = false; renderWizard(); return; }
+          if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
           // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
           // from the pending target onto this profile, so this is the first moment the cache can be
           // written where the console will look for it — and the console relaunches into a vault whose
@@ -1685,7 +1824,7 @@
           });
         });
       });
-    }).catch(function (e) { WIZ.error = String(e.message || e); EL("wiz-next").disabled = false; renderWizard(); });
+    }).catch(function (e) { WIZ.error = String(e.message || e); WIZ.busy = false; renderWizard(); });
   }
 
   // The Checkout page is in the system browser, so the app cannot be told when it is done: it asks.
@@ -1694,14 +1833,22 @@
   function pollEntitlement() {
     var tries = 0;
     var tick = function () {
+      // The student can leave panel 2 without waiting on this — Back, or the pre-ask in `wizGo`
+      // already got a yes — and a poll that kept ticking behind a panel nobody is looking at is a
+      // poll that outlives the question it was asked.
+      if (WIZ.entitled || WIZ.step !== 2) { return; }
       tries += 1;
-      invoke("entitlement_now", {}).then(function (r) {
-        if (r.ok && (r.status === "active" || r.status === "trialing")) {
+      checkEntitled().then(function (yes) {
+        // The re-review's blocking finding: the student can leave panel 2 while this reply is still
+        // in flight, and a yes that lands after they moved on must not act on a panel nobody is
+        // looking at either — the same stand-down, checked again now that the wait is over.
+        if (WIZ.entitled || WIZ.step !== 2) { return; }
+        if (yes) {
           WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
         }
         if (tries < 40) { setTimeout(tick, 3000); }
-        else { WIZ.error = "Still not subscribed. Try the payment page again."; renderWizard(); }
-      }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
+        else { WIZ.error = "Still not subscribed. When the payment page is done, press Next."; renderWizard(); }
+      });
     };
     setTimeout(tick, 3000);
   }
@@ -1709,48 +1856,53 @@
   EL("wizard").addEventListener("click", function (e) {
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
-    if (e.target.closest("#wiz-create") || e.target.closest("#wiz-signin")) {
-      var creating = !!e.target.closest("#wiz-create");
-      if (creating && !(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+    // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
+    // are Rust's, and the page never sees any of them. The browser round trip can take a minute, so
+    // the button says what is happening — `WIZ.busy` is what renderWizard paints (Task 6).
+    if (e.target.closest("#wiz-google-signin")) {
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
         WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
       }
-      var cmd = creating ? "sign_up" : "sign_in";
-      var args = { email: EL("wiz-email").value.trim(), password: EL("wiz-pw").value };
-      // **`ageAttested`, not the Rust spelling** (R-C1-55, C1). Tauri v2 lower-camel-cases every
-      // argument key (tauri-macros' `ArgumentCase::Camel`) unless the command opts out with
-      // `rename_all = "snake_case"` — which exactly one command in this crate does
-      // (`onboarding::retarget_credentials`, and its own comment says why). Sent snake_case, the
-      // invoke is rejected before `sign_up`'s body runs, the `.catch` below paints UNREACHABLE,
-      // and `wizValid`'s step-1 gate then refuses Next forever: no new account, ever.
-      if (creating) { args.ageAttested = EL("wiz-18").checked; }
-      invoke(cmd, args).then(function (r) {
-        EL("wiz-pw").value = "";                     // the password leaves page memory at once
+      WIZ.busy = true; WIZ.error = ""; WIZ.accountNote = "Finish signing in, in your browser…";
+      renderWizard();
+      // **`ageAttested`, not the Rust spelling** — the checkbox `google_sign_in` now refuses on
+      // before it binds a listener (F2), the same gate `send_magic_link` has always had.
+      invoke("google_sign_in", { ageAttested: EL("wiz-18").checked }).then(function (r) {
+        WIZ.busy = false; WIZ.accountNote = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.accountNote = ""; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-magic")) {
-      invoke("send_magic_link", { email: EL("wiz-email").value.trim() }).then(function (r) {
+      if (WIZ.busy) { return; }
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+        WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
+      }
+      // **`ageAttested`, not the Rust spelling.** Tauri v2 camel-cases every argument key; sent
+      // snake_case the invoke is rejected before the command's body runs.
+      WIZ.busy = true; renderWizard();
+      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: EL("wiz-18").checked }).then(function (r) {
+        WIZ.busy = false;
         WIZ.error = r.ok ? "" : r.error;
-        // The link in the mail lands in the BROWSER, which this process never sees — so the mail also
-        // carries a six-digit code, and this is where it is typed. `verify_email_code` trades it for
-        // the same session the link would have given.
         EL("wiz-code-row").hidden = !r.ok;
+        WIZ.accountNote = r.ok ? "We emailed you a code. Type it below." : "";
         renderWizard();
-        EL("wiz-account-note").textContent = r.ok ? "We emailed you a 6-digit code. Type it below." : "";
-      }).catch(function () {});
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-code-go")) {
+      if (WIZ.busy) { return; }
+      WIZ.busy = true; renderWizard();
       invoke("verify_email_code", { email: EL("wiz-email").value.trim(), code: EL("wiz-code").value }).then(function (r) {
+        WIZ.busy = false;
         EL("wiz-code").value = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         EL("wiz-code-row").hidden = true;
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     // **The two policies open in the system browser, not in this window.** `app/static/` holds four
@@ -1765,11 +1917,16 @@
     }
     if (e.target.closest("#wiz-sub-month") || e.target.closest("#wiz-sub-year")) {
       var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
-      invoke("open_checkout", { plan: which }).then(function (r) {
-        if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-        WIZ.checkoutOpened = true;
-        renderWizard();
-        pollEntitlement();
+      // R-C1b-exec-9: ask before opening a second Checkout page — an account the service already
+      // calls entitled goes straight to the vault panel, never back through Stripe.
+      checkEntitled().then(function (yes) {
+        if (yes) { WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
+        return invoke("open_checkout", { plan: which }).then(function (r) {
+          if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
+          WIZ.checkoutOpened = true;
+          renderWizard();
+          pollEntitlement();
+        });
       }).catch(function () {});
       return;
     }
@@ -1859,7 +2016,10 @@
   /// student corrects. A row left blank is a source that stays unmapped — which is a choice, and is
   /// why the panel says what the consequence is rather than refusing Next.
   function renderMapping() {
-    EL("wiz-map").hidden = WIZ.map.length === 0;
+    // A finished discovery that found nothing still has a note to show — only an UNfinished one
+    // (nothing asked yet) has no panel to paint.
+    EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
+    EL("wiz-map-heading").hidden = WIZ.map.length === 0;
     EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
       return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
              (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +

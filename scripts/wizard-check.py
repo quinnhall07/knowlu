@@ -29,7 +29,7 @@ DEST_NEW = "C:\\Users\\Ada\\Knowlu\\Spring 2027"
 # are the ones that READ, the ones that make the ACCOUNT (which is not this machine's disk), the two
 # that write a credential, and the sign-in window's own three. Anything else here would mean
 # something reached this machine's disk before the user said go.
-BEFORE_FINISH_OK = {"launch_state", "pick_folder", "sign_up", "sign_in", "send_magic_link",
+BEFORE_FINISH_OK = {"launch_state", "pick_folder", "google_sign_in", "send_magic_link",
                     "verify_email_code", "entitlement_now", "open_checkout", "open_policy",
                     "open_lms_window", "capture_calendar_link", "capture_courses",
                     "paste_calendar_link", "close_lms_window", "discover_coursework",
@@ -43,14 +43,11 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       tz: 'America/Chicago', default_parent: 'C:\\Users\\Ada\\Knowlu',
       default_backup: 'C:\\Users\\Ada\\Knowlu\\Backups',
       }); }
-  if (cmd === 'sign_up' || cmd === 'sign_in') {
-    return (args.email || '').indexOf('fail') === 0
-      ? Promise.resolve({ ok: false, error: 'Invalid login credentials', account_id: null })
-      : Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: args.email }); }
+  if (cmd === 'google_sign_in') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'send_magic_link') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'verify_email_code') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'open_checkout') { return Promise.resolve({ ok: true, error: null }); }
-  if (cmd === 'entitlement_now') { return Promise.resolve({ ok: true, error: null, status: 'trialing', plan: 'monthly', current_period_end: null }); }
+  if (cmd === 'entitlement_now') { return Promise.resolve({ ok: true, error: null, status: (window.__ENTITLED ? 'trialing' : 'none'), plan: 'monthly', current_period_end: null }); }
   if (cmd === 'open_policy') { return Promise.resolve({ ok: true, error: null }); }
   // R-C1-40 I2: the command answers with no session directory — the page never learns where the
   // sign-in window keeps its data.
@@ -71,9 +68,11 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
     return Promise.resolve({ ok: true, error: null, typed: false,
       courses: [{ code: 'UACS100Fall2026', name: 'CS 100 Intro', slug: 'cs-100' }] }); }
   if (cmd === 'discover_coursework') {
-    return Promise.resolve({ ok: true, error: null, note: null, rows: [
-      { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
-      { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
+    return window.__DISCOVER_EMPTY
+      ? Promise.resolve({ ok: true, error: null, note: 'We could not reach your coursework sites', rows: [] })
+      : Promise.resolve({ ok: true, error: null, note: null, rows: [
+        { source: 'zybooks', key: 'UACS100Fall2026', detail: null, suggested: 'CS 100', mapped: false, ignored: false },
+        { source: 'vhl', key: '2102121', detail: 'course 1623220', suggested: null, mapped: false, ignored: false }] }); }
   if (cmd === 'store_credentials') {
     return (args.user || '').indexOf('fail') === 0
       ? Promise.resolve({ ok: false, error: 'credential write failed for ' + args.source })
@@ -87,6 +86,8 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'set_settings') { return Promise.resolve({ ok: true, settings: { profile_id: 'p1', backup_dir: 'C:\\b', autostart: true, quit_at: null } }); }
   return Promise.resolve({ ok: true, error: null });
 } } };
+window.__ENTITLED = false;
+window.__DISCOVER_EMPTY = false;
 window.__CALLS = [];
 """
 
@@ -113,29 +114,40 @@ def check(page) -> list:
     if page.is_hidden("#wizard") or page.is_hidden("#wiz-welcome"): bad.append("wizard did not open on panel 1")
     if "of 9" not in page.inner_text("#wiz-step"): bad.append(f"step counter says {page.inner_text('#wiz-step')!r}")
 
-    # 2. Panel 2 is the account, and it refuses to make one until BOTH boxes are ticked (spec §9).
+    # 2. Panel 2 is the account. Continue with Google leads it, there is no password field anywhere,
+    #    and neither door opens until both boxes are ticked (spec §9's minors row).
     page.click("#wiz-next"); page.wait_for_timeout(120)
     if page.is_hidden("#wiz-account"): bad.append("Next did not reach the account panel")
-    page.fill("#wiz-email", "a@example.invalid"); page.fill("#wiz-pw", "not-a-real-password")
-    page.click("#wiz-create"); page.wait_for_timeout(200)
-    if "sign_up" in names(page): bad.append("an account was created with the boxes unticked")
+    if page.query_selector("#wiz-pw"): bad.append("the account panel still has a password field")
+    if not page.query_selector("#wiz-google-signin"): bad.append("there is no Continue with Google button")
+    page.click("#wiz-google-signin"); page.wait_for_timeout(200)
+    if "google_sign_in" in names(page): bad.append("a Google sign-in ran with the boxes unticked")
     if "Tick both" not in page.inner_text("#wiz-error"): bad.append("the refusal said nothing about the boxes")
     page.check("#wiz-18"); page.check("#wiz-terms")
-    page.click("#wiz-create"); page.wait_for_timeout(300)
-    if "sign_up" not in names(page): bad.append("sign_up was not invoked")
-    if page.input_value("#wiz-pw") != "": bad.append("the password field was not cleared")
-    su = first_args(page, "sign_up") or {}
-    # Tauri v2 lower-camel-cases argument keys (tauri-macros' ArgumentCase::Camel); `age_attested`
-    # here would pass the fake and fail the real command with a missing argument.
-    if su.get("ageAttested") is not True: bad.append("sign_up did not carry the attestation")
-    if page.is_hidden("#wiz-subscribe"): bad.append("a created account did not advance to the subscribe panel")
+    page.click("#wiz-google-signin"); page.wait_for_timeout(300)
+    if "google_sign_in" not in names(page): bad.append("google_sign_in was not invoked")
+    ga = first_args(page, "google_sign_in") or {}
+    # Tauri v2 lower-camel-cases argument keys; `age_attested` here would pass the fake and fail the
+    # real command with a missing argument (R-C1b-exec-6: the Rust-side gate is back on the Google path).
+    if ga.get("ageAttested") is not True: bad.append("google_sign_in did not carry the attestation")
+    if page.is_hidden("#wiz-subscribe"): bad.append("a signed-in account did not advance to the subscribe panel")
 
-    # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled.
+    # 3. Subscribe opens Checkout in the system browser and polls until the account is entitled
+    #    (R-C1b-exec-9). A Next off the subscribe panel re-asks the service rather than trusting a
+    #    stale WIZ.entitled — and once the account really is entitled, a second Next press
+    #    never opens a second Checkout page.
     page.click("#wiz-sub-month"); page.wait_for_timeout(3600)
-    if "open_checkout" not in names(page): bad.append("open_checkout was not invoked")
+    if names(page).count("open_checkout") != 1: bad.append("open_checkout was not invoked exactly once")
     if (first_args(page, "open_checkout") or {}).get("plan") != "monthly": bad.append("open_checkout named the wrong plan")
     if "entitlement_now" not in names(page): bad.append("the wizard did not poll for the subscription")
+    if page.is_hidden("#wiz-subscribe"): bad.append("an unentitled account left the subscribe panel")
+    page.click("#wiz-next"); page.wait_for_timeout(400)
+    if page.is_hidden("#wiz-subscribe"): bad.append("Next advanced an account the service still calls unentitled")
+    if "Finish the payment page" not in page.inner_text("#wiz-error"): bad.append("Next's re-ask did not say what was still missing")
+    page.evaluate("window.__ENTITLED = true")
+    page.click("#wiz-next"); page.wait_for_timeout(400)
     if page.is_hidden("#wiz-vault"): bad.append("an entitled account did not advance to the name panel")
+    if names(page).count("open_checkout") != 1: bad.append("a second Next press opened a second Checkout page")
 
     # 4. Panel 4 names the setup. NO folder is picked, and the path is shown before Finish.
     page.fill("#wiz-name", "Fall 2026"); page.wait_for_timeout(120)
@@ -191,10 +203,30 @@ def check(page) -> list:
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-logins"): bad.append("a failed credential write advanced anyway")
     if page.input_value("#wiz-zy-pass") == "": bad.append("a failed write cleared the fields the user must retype")
-    page.fill("#wiz-zy-user", "a@example.invalid")
+
+    # R-C1b-exec-10: an empty discovery — no rows, for any reason — must not trap the student on
+    # this panel, and must say something rather than show an empty div.
+    page.evaluate("window.__DISCOVER_EMPTY = true")
+    page.fill("#wiz-zy-user", "a@example.invalid"); page.fill("#wiz-zy-pass", secret)
+    page.click("#wiz-next"); page.wait_for_timeout(400)
+    if page.is_hidden("#wiz-logins"): bad.append("an empty discovery left the credentials panel on its own")
+    if names(page).count("discover_coursework") != 1: bad.append("an empty discovery did not run exactly once")
+    if page.is_hidden("#wiz-map"): bad.append("an empty discovery hid the panel — the student saw nothing")
+    if page.inner_text("#wiz-map-rows").strip() != "": bad.append("an empty discovery still listed rows")
+    if "You can go on" not in page.inner_text("#wiz-map-note"): bad.append("an empty discovery did not say the way forward")
+    if not page.is_hidden("#wiz-map-heading"): bad.append("an empty discovery still showed the mapping heading")
+    page.click("#wiz-next"); page.wait_for_timeout(300)
+    if page.is_hidden("#wiz-gmail"): bad.append("an empty discovery trapped the student on the logins panel")
+    if names(page).count("discover_coursework") != 1: bad.append("Next re-ran discovery on an already-finished empty result")
+
+    page.click("#wiz-back"); page.wait_for_timeout(150)
+    if page.is_hidden("#wiz-logins"): bad.append("Back did not return to the credentials panel")
+    page.evaluate("window.__DISCOVER_EMPTY = false")
     # R-OB-1: the first Next after a successful store runs discovery and STAYS on the panel with the
     # rows; the second one moves on. A wizard that took the password and skipped the mapping is the
-    # run this exists because of.
+    # run this exists because of. The fields were cleared by the earlier successful store, so they
+    # are re-typed here — a re-typed login is a new answer and runs discovery again.
+    page.fill("#wiz-zy-user", "a@example.invalid"); page.fill("#wiz-zy-pass", secret)
     page.click("#wiz-next"); page.wait_for_timeout(400)
     if page.is_hidden("#wiz-logins"): bad.append("the mapping step was skipped after the credentials were stored")
     if "discover_coursework" not in names(page): bad.append("discovery did not run after the credentials were stored")
@@ -202,6 +234,7 @@ def check(page) -> list:
     rows = page.inner_text("#wiz-map-rows")
     if "UACS100Fall2026" not in rows or "2102121" not in rows: bad.append(f"the discovered sources are not listed: {rows!r}")
     if page.input_value('[data-course-for="0"]') != "CS 100": bad.append("the suggestion was not pre-filled")
+    if names(page).count("discover_coursework") != 2: bad.append("re-typed logins did not run discovery again")
     page.fill('[data-course-for="1"]', "GN 103"); page.wait_for_timeout(120)
     page.click("#wiz-next"); page.wait_for_timeout(300)
     if page.is_hidden("#wiz-gmail"): bad.append("a confirmed mapping did not advance to the Gmail panel")

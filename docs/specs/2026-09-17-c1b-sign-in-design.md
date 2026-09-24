@@ -252,7 +252,7 @@ existing `auth.users` row and inserts nothing, so it never reaches the trigger.)
   attestation and **zero** `consents` rows; a consent row can then only exist behind a session whose
   address was proved, which is what the exit gate checks.
 - **The tooth that replaces the raise:** `billing-checkout` selects `age_attested_at` alongside
-  `email` and `stripe_customer_id` and answers `403 "the 18+ attestation is missing"` when it is
+  `email` and `stripe_customer_id` and answers `403 "the 18+ attestation is missing — sign in again"` when it is
   null — before the Stripe customer is created and before the consent row is written. That is now the
   whole of the server-side 18+ gate, and the migration's comment says exactly that in place of the
   old promise: a patched client that skips the consent call gets an account it cannot subscribe with.
