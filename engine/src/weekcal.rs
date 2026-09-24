@@ -276,13 +276,16 @@ impl WeekCalendar {
         if day_key(day) != span.day {
             return None;
         }
-        let after_from = span.from.map_or(true, |f| f <= day);
-        let before_until = span.until.map_or(true, |u| day <= u);
-        if after_from && before_until {
+        if Self::inside_note_span(day, span) {
             Some((span.start, span.end))
         } else {
             None
         }
+    }
+
+    /// `from <= day <= until`, each bound optional and inclusive (§2.2).
+    fn inside_note_span(day: Date, span: &CommitmentSpan) -> bool {
+        span.from.map_or(true, |f| f <= day) && span.until.map_or(true, |u| day <= u)
     }
 
     /// Every commitment span active on `day`, with the time it is actually busy that day.
@@ -296,10 +299,18 @@ impl WeekCalendar {
     /// each of a multi-day note's spans would independently find the same instance and draw it
     /// once per weekday. A span whose source has no horizon entry, or whose horizon does not cover
     /// `day`, falls back to `weekly_span_block`, per span as before.
+    ///
+    /// The note's own `from`/`until` (inclusive) gate **both** paths, before the horizon is looked
+    /// up: a student who ends a class by setting `until` gets the time back at once, although the
+    /// series still carries instances after it (final review I1). R21 still decides *which* times
+    /// are busy on a date inside the span. `commitments::commitment_busy_on` applies the same gate.
     fn active_spans(&self, day: Date) -> Vec<(Time, Time, &CommitmentSpan)> {
         let mut out = Vec::new();
         let mut handled_sources: HashSet<&str> = HashSet::new();
         for span in &self.commitment_spans {
+            if !Self::inside_note_span(day, span) {
+                continue;
+            }
             let horizon = self
                 .instances
                 .get(span.source_uid.as_str())
@@ -704,6 +715,58 @@ mod tests {
             ],
             "a day past the horizon uses the weekly span"
         );
+    }
+
+    /// Final review I1: the note's own `from`/`until` gate its instances too. A student who ends a
+    /// class by setting `until` gets the time back at once, even though the series file still holds
+    /// live instances after it; a `from` still ahead blocks nothing before it.
+    #[test]
+    fn a_notes_from_and_until_gate_its_instances_inside_the_horizon() {
+        let horizon_start = Date::constant(2026, 8, 24);
+        let horizon_end = Date::constant(2026, 9, 21);
+        let span = |uid: &str, from: Option<Date>, until: Option<Date>| CommitmentSpan {
+            day: "tue",
+            start: Time::constant(15, 0, 0, 0),
+            end: Time::constant(15, 50, 0, 0),
+            from,
+            until,
+            title: "Tuesday class".into(),
+            kind: "class".into(),
+            source_uid: uid.into(),
+        };
+        let tuesdays = [
+            Date::constant(2026, 8, 25),
+            Date::constant(2026, 9, 1),
+            Date::constant(2026, 9, 8),
+            Date::constant(2026, 9, 15),
+        ];
+        let live: Vec<(Date, Time, Time)> = tuesdays
+            .iter()
+            .map(|d| (*d, Time::constant(15, 0, 0, 0), Time::constant(15, 50, 0, 0)))
+            .collect();
+        let mut instances = BTreeMap::new();
+        instances.insert("test:dropped".to_string(), (horizon_start, horizon_end, live.clone()));
+        instances.insert("test:later".to_string(), (horizon_start, horizon_end, live));
+
+        let until = Date::constant(2026, 9, 1); // inclusive
+        let from = Date::constant(2026, 9, 15);
+        let dropped = WeekCalendar::new(&Mapping::new(), Vec::new())
+            .with_commitments(vec![span("test:dropped", None, Some(until))], [None; 7])
+            .with_instances(instances.clone());
+        let later = WeekCalendar::new(&Mapping::new(), Vec::new())
+            .with_commitments(vec![span("test:later", Some(from), None)], [None; 7])
+            .with_instances(instances);
+
+        assert_eq!(dropped.spans_on(until).len(), 1, "until is inclusive: busy on its own day");
+        assert!(
+            dropped.spans_on(Date::constant(2026, 9, 8)).is_empty(),
+            "a day after the note's until is free although the series still has an instance"
+        );
+        assert!(
+            later.spans_on(Date::constant(2026, 9, 8)).is_empty(),
+            "a day before the note's from is free although the series has an instance"
+        );
+        assert_eq!(later.spans_on(from).len(), 1, "from is inclusive: busy on its own day");
     }
 
     #[test]

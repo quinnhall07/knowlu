@@ -733,7 +733,10 @@ Then:
 - **`template_blocks(day)`** takes its busy list as the template's spans for `day_key(day)`
   **plus** each commitment span active that day: when `day` is inside the span's source horizon in
   `instances`, the span's actual instances on that date (none on a cancelled date, the moved time on
-  a moved one); otherwise the weekly span on its weekday when `from ≤ day ≤ until`. The sort, the
+  a moved one); otherwise the weekly span on its weekday when `from ≤ day ≤ until`. The note's own
+  `from`/`until` gate both paths: outside them the span is inactive even where the series still
+  has instances, so a student who ends a class by setting `until` gets the time back at once (final
+  review I1). The sort, the
   cursor walk and the clamp to the window's end are unchanged, so overlapping or duplicate spans
   behave exactly as overlapping template classes already do.
 - **`free_blocks`, `capacity`, `template_capacity`** follow from `template_blocks` with no change,

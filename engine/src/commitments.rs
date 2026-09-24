@@ -7033,8 +7033,16 @@ pub type InstancesMap = BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)>;
 /// names this commitment's `source_uid` and covers `date`, only its actual instances dated `date`
 /// are busy (a date the horizon covers but the read returned no instance for is free, even though
 /// the weekly rule would have named it busy); outside the horizon — or with no `source_uid` at
-/// all — the weekly `meets` rule applies, on `date`'s weekday, within `from`/`until`.
+/// all — the weekly `meets` rule applies, on `date`'s weekday. Either way, nothing is busy outside
+/// the note's own `from`/`until`.
 fn commitment_busy_on(commitment: &Commitment, date: Date, instances: &InstancesMap) -> Vec<(Time, Time)> {
+    // The note's own `from`/`until` gate both paths, before the horizon (final review I1) — the
+    // same order `WeekCalendar::active_spans` uses.
+    let after_from = commitment.from.map_or(true, |f| f <= date);
+    let before_until = commitment.until.map_or(true, |u| date <= u);
+    if !after_from || !before_until {
+        return Vec::new();
+    }
     let horizon = commitment
         .source_uid
         .as_deref()
@@ -7048,11 +7056,6 @@ fn commitment_busy_on(commitment: &Commitment, date: Date, instances: &Instances
             .collect();
     }
     let today = day_key(date);
-    let after_from = commitment.from.map_or(true, |f| f <= date);
-    let before_until = commitment.until.map_or(true, |u| date <= u);
-    if !after_from || !before_until {
-        return Vec::new();
-    }
     commitment
         .meets
         .iter()
@@ -7288,6 +7291,48 @@ mod conflicts_tests {
         assert_eq!(fit(&got), Fit::Clear);
     }
 
+    /// Final review I1: a note's own `from`/`until` gate its instances inside the fresh horizon,
+    /// exactly as `WeekCalendar::active_spans` does. Tuesdays 2026-08-25 .. 2026-09-15 all carry a
+    /// live instance in the series file.
+    #[test]
+    fn a_notes_from_and_until_gate_its_instances_inside_the_horizon() {
+        let live: Vec<(Date, Time, Time)> = [(8, 25), (9, 1), (9, 8), (9, 15)]
+            .iter()
+            .map(|(m, d)| (jiff::civil::date(2026, *m, *d), t(9, 0), t(10, 0)))
+            .collect();
+        let mut instances = InstancesMap::new();
+        let horizon = (jiff::civil::date(2026, 8, 24), jiff::civil::date(2026, 9, 21));
+        instances.insert("gcal-series:dropped".into(), (horizon.0, horizon.1, live.clone()));
+        instances.insert("gcal-series:later".into(), (horizon.0, horizon.1, live));
+
+        let mut dropped = commitment("cmt_d", Level::Hard, "CS 100", "tue", t(9, 0), t(10, 0));
+        dropped.source_uid = Some("gcal-series:dropped".into());
+        dropped.until = Some(jiff::civil::date(2026, 9, 1));
+        let mut later = commitment("cmt_l", Level::Hard, "CS 200", "tue", t(9, 0), t(10, 0));
+        later.source_uid = Some("gcal-series:later".into());
+        later.from = Some(jiff::civil::date(2026, 9, 15));
+
+        let sep_8 = jiff::civil::date(2026, 9, 8);
+        assert_eq!(
+            commitment_busy_on(&dropped, jiff::civil::date(2026, 9, 1), &instances),
+            vec![(t(9, 0), t(10, 0))],
+            "until is inclusive"
+        );
+        assert!(commitment_busy_on(&dropped, sep_8, &instances).is_empty(), "after until: free");
+        assert!(commitment_busy_on(&later, sep_8, &instances).is_empty(), "before from: free");
+        assert_eq!(
+            commitment_busy_on(&later, jiff::civil::date(2026, 9, 15), &instances),
+            vec![(t(9, 0), t(10, 0))],
+            "from is inclusive"
+        );
+
+        let set = set(vec![dropped]);
+        assert!(
+            conflicts(&set, &instances, dt(2026, 9, 8, 9, 0), dt(2026, 9, 8, 10, 0)).is_empty(),
+            "a dropped class conflicts with nothing after its until"
+        );
+    }
+
     // --- P15 cross-check: `commitment_busy_on` (P10) must never drift from what
     // `weekcal::WeekCalendar::for_vault` (P15) subtracts, since both read the same vault. ---
 
@@ -7344,6 +7389,42 @@ mod conflicts_tests {
         )
         .unwrap();
 
+        // Final review I1: two more classes whose own `from`/`until` gate live instances — a
+        // Tuesday class dropped with `until: 2026-09-01`, a Thursday class that starts
+        // `from: 2026-09-10`. Their series still carry instances on either side.
+        std::fs::write(
+            vault.join(FOLDER).join("dropped.md"),
+            "---
+type: commitment
+kind: class
+title: \"CS 110\"
+meets: [{days: [tue], start: \"10:00\", end: \"10:50\"}]
+until: 2026-09-01
+source_uid: \"gcal-series:cs110\"
+status: confirmed
+---
+
+Invented.
+",
+        )
+        .unwrap();
+        std::fs::write(
+            vault.join(FOLDER).join("later.md"),
+            "---
+type: commitment
+kind: class
+title: \"CS 120\"
+meets: [{days: [thu], start: \"14:00\", end: \"14:50\"}]
+from: 2026-09-10
+source_uid: \"gcal-series:cs120\"
+status: confirmed
+---
+
+Invented.
+",
+        )
+        .unwrap();
+
         let read_date = jiff::civil::date(2026, 8, 24); // Monday, the horizon's first day
         let moved_date = jiff::civil::date(2026, 8, 31); // second Monday, inside the horizon
         let last_in_horizon = jiff::civil::date(2026, 9, 14); // last Monday before the horizon ends
@@ -7366,9 +7447,34 @@ mod conflicts_tests {
             until: None,
             last_seen: Some(read_date),
         };
+        let weekly = |uid: &str, title: &str, day: DayKey, dates: &[(i8, i8)], start: Time, end: Time| Series {
+            source_uid: uid.into(),
+            calendar: "google:abc".into(),
+            title: title.into(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: dates
+                .iter()
+                .map(|(m, d)| Instance { date: jiff::civil::date(2026, *m, *d), start: Some(start), end: Some(end) })
+                .collect(),
+            meets: vec![Meet { days: vec![day], start, end }],
+            first: Some(read_date),
+            until: None,
+            last_seen: Some(read_date),
+        };
+        let dropped_series =
+            weekly("gcal-series:cs110", "CS 110", "tue", &[(8, 25), (9, 1), (9, 8), (9, 15)], t(10, 0), t(10, 50));
+        let later_series =
+            weekly("gcal-series:cs120", "CS 120", "thu", &[(8, 27), (9, 3), (9, 10), (9, 17)], t(14, 0), t(14, 50));
         let mut file = SeriesFile::default();
         file.calendars.insert("google:abc".into(), read_date);
         file.series.push(series);
+        file.series.push(dropped_series);
+        file.series.push(later_series);
         write_series_file(&vault, &file_bytes(&file)).unwrap();
 
         let set = load(&vault);
@@ -7396,6 +7502,12 @@ mod conflicts_tests {
             horizon_end,
             past_horizon,
             past_horizon_wed,
+            // I1: the dropped Tuesday class on its `until` and a week after; the Thursday class a
+            // week before its `from` and on it.
+            jiff::civil::date(2026, 9, 1),
+            jiff::civil::date(2026, 9, 8),
+            jiff::civil::date(2026, 9, 3),
+            jiff::civil::date(2026, 9, 10),
         ];
         for date in dates {
             let mut from_commitments: Vec<(Time, Time)> = set
@@ -7418,6 +7530,15 @@ mod conflicts_tests {
                 "{date}: commitment_busy_on and WeekCalendar::for_vault must never disagree"
             );
         }
+
+        // Final review I1: absolute values for the gated notes, not just agreement.
+        let on = |d: Date| -> Vec<(Time, Time)> {
+            calendar.spans_on(d).into_iter().map(|(s, e, _)| (s.time(), e.time())).collect()
+        };
+        assert_eq!(on(jiff::civil::date(2026, 9, 1)), vec![(t(10, 0), t(10, 50))], "until is inclusive");
+        assert!(on(jiff::civil::date(2026, 9, 8)).is_empty(), "after until: free despite a live instance");
+        assert!(on(jiff::civil::date(2026, 9, 3)).is_empty(), "before from: free despite a live instance");
+        assert_eq!(on(jiff::civil::date(2026, 9, 10)), vec![(t(14, 0), t(14, 50))], "from is inclusive");
 
         // Fix round 1, I1: pin the exclusive-horizon-end boundary with absolute values, not just
         // agreement between the two readers.
