@@ -109,10 +109,9 @@ fn the_gauge_renders_from_the_payload_and_invents_nothing() {
 #[test]
 fn the_page_says_it_once_and_says_it_honestly() {
     let js = read("console.js");
-    // C2: `engine newer than console` belongs to the sync line — the health line — and is
-    // rendered there and nowhere else. renderTopline used to say it too, one line above, so the
-    // same warning read as two problems.
-    assert_eq!(js.matches("engine newer than console").count(), 1, "the stale-build warning is rendered exactly once");
+    // C3', Task 10: `engine newer than console` left with git — it compared the vault's git HEAD
+    // against this build, and a vault has not been a git repository since cloud design §4.1.
+    assert_eq!(js.matches("engine newer than console").count(), 0, "the stale-build warning left with git");
     assert!(!js.contains("class=\"stale\""), "renderTopline's duplicate span is gone");
     assert!(!read("console.css").contains(".stale"), "…and so is its now-dead rule");
     // C4: effort_hours/slice_hours have a floor and no ceiling — the refusal must not read
@@ -209,21 +208,20 @@ fn seen_is_stamped_at_the_end_of_the_look_and_events_are_emitted() {
 #[test]
 fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     let js = read("console.js");
-    // R-F1 (re-ruling of R-T15a): `topline.sync.ahead` is `rev-list --count HEAD...origin/main` —
-    // a count of COMMITS. The plan's "N edits pending push" assumed a number the app never had, so
-    // the copy now says commits and pluralises at 1.
-    assert!(js.contains("commit\" + (s.ahead === 1 ? \"\" : \"s\") + \" pending push"), "R-F1: N commit / N commits pending push");
-    assert!(!js.contains("edits pending push"), "R-F1: the edit-count copy is gone");
-    // R-T15a still stands for the conflict line: flat copy, verbatim, count in the title only.
-    assert!(js.contains("conflict — auto-sync stopped"), "R-T15a: the plan's exact flat copy");
-    assert!(js.contains("title=\"conflict in "), "the per-note detail moves to a title attribute");
-    // R-T15d: auto_sync and last_slot are read, not merely listed as consumed.
-    assert!(js.contains("auto-sync off"));
+    // C3', Task 10: the git-shaped sync copy (R-F1's "N commit(s) pending push", R-T15a's conflict
+    // line, R-T15d's `auto-sync off`) left with git — `topline.sync` is the engine's `SyncStatus`
+    // now, and none of `ahead`, `conflicted` or `auto_sync` exist on it any more.
+    assert!(!js.contains("pending push"), "the commit/edit-count copy left with git");
+    assert!(!js.contains("conflict — auto-sync stopped"), "the conflict line left with git");
+    assert!(!js.contains("auto-sync off"), "auto_sync left with git");
+    assert!(js.contains("in step with your account"), "the new calm sync copy");
+    assert!(js.contains("not synced yet"), "the new calm no-sync-yet copy");
+    // R-T15d's `last_slot` half still stands.
     assert!(js.contains("last slot"));
     // Plan 2 Task 5 (F4): a retried slot names the attempt, so the same slot failing twice reads as
     // one slot being retried rather than two unrelated failures.
     assert!(js.contains("attempt "), "the last-slot line names the attempt on a retry");
-    assert!(js.contains("t.auto_sync") && js.contains("t.last_slot"));
+    assert!(js.contains("t.last_slot"));
     // R-T15b: every [data-id] template carries a data-kind token the observer reads back
     // instead of guessing "task" for everything.
     assert!(js.contains("data-kind=\"task\""), "task rows");

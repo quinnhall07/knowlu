@@ -291,12 +291,15 @@ fn issue_flag_needs_a_category_and_snapshots_the_object_and_info_closes() {
 }
 
 #[test]
-fn sync_on_a_non_repo_vault_is_calm_and_backup_needs_a_folder() {
+fn sync_on_a_vault_with_no_account_is_calm_and_backup_needs_a_folder() {
     let v = scratch("sync");
     let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-sync-data-{}", std::process::id())));
     let env = sync_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], true);
-    assert_eq!(env["state"]["topline"]["sync"]["is_repo"], false);
+    // C3', Task 10: `topline.sync` is the engine's `SyncStatus`, not the old git-shaped
+    // `HistoryStatus` — a vault with no `config/cloud.yaml` is a calm, named skip, never an error.
+    assert_eq!(env["state"]["topline"]["sync"]["skipped"], "no account");
+    assert!(env["state"]["topline"]["sync"]["last_error"].is_null());
     let env = backup_now_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], false); assert!(env["error"].as_str().unwrap().contains("backup folder"));
     let bk = std::env::temp_dir().join(format!("qo-sync-bk-{}", std::process::id()));
@@ -355,35 +358,35 @@ fn ui_events_land_ids_only_and_refuse_text() {
     assert_eq!(text.lines().count(), 1); assert!(text.contains(&cs.session) && !text.contains("Exam"));
 }
 
+// C3', Task 10: `vault_head` and `engine_newer` left with git (H9b) — they compared the vault's git
+// HEAD against this build, and a vault has not been a git repository since cloud design §4.1. The
+// two tests that exercised them (`engine_newer_compares_the_console_build_with_the_vaults_head_and_
+// is_false_without_a_repo`, `engine_newer_is_true_only_when_a_present_head_differs_from_the_console_
+// build`) go with them — `state::refresh_head` and `ConsoleState::head_sha` no longer exist.
+
+/// The topline's `sync` key is the engine's own `SyncStatus`, copied through verbatim rather than
+/// assembled field by field in `commands.rs` (console spec §3.1: nothing here computes) — every
+/// field `SyncStatus` carries round-trips exactly, including one this test sets by hand so the
+/// assertion is not just "whatever a scratch vault happens to produce" (the case the sync test above
+/// already covers).
 #[test]
-fn engine_newer_compares_the_console_build_with_the_vaults_head_and_is_false_without_a_repo() {
-    let v = scratch("head");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-head-data-{}", std::process::id())));
-    knowlu::state::refresh_head(&cs);
+fn topline_sync_is_the_engines_sync_status_verbatim() {
+    let v = scratch("sync-verbatim");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-sync-verbatim-data-{}", std::process::id())));
+    let status = knowlu_engine::sync::SyncStatus {
+        ok: true,
+        at: Some("2026-09-24T07:00:00.000Z".to_string()),
+        lines: vec!["sync: 1 record(s) and 0 note(s) down; 1 applied, 0 card(s), 0 refused".to_string()],
+        last_error: None,
+        skipped: None,
+    };
+    *cs.sync.lock().unwrap() = status.clone();
     let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], false, "a non-git scratch vault has no head: never a false alarm");
-    assert!(s["state"]["topline"]["vault_head"].is_null());
-}
-
-#[test]
-fn engine_newer_is_true_only_when_a_present_head_differs_from_the_console_build() {
-    // `refresh_head` alone can't exercise the true branch (a scratch vault has no `.git`, so the
-    // cached head is always `None`) — inject the head directly, `head_sha` being `pub`. `build.rs`
-    // always sets `KNOWLU_BUILD_SHA` (to a real short SHA, or "unknown" outside a checkout), so
-    // `CONSOLE_BUILD` is `Some` in every cargo build; assert that rather than assuming it.
-    let v = scratch("head-diff");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-head-diff-data-{}", std::process::id())));
-    let build = knowlu::commands::CONSOLE_BUILD;
-    assert!(build.is_some(), "build.rs always sets KNOWLU_BUILD_SHA");
-
-    *cs.head_sha.lock().unwrap() = Some("deadbee".into());
-    let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], true, "a present head that differs from the console build must be flagged");
-    assert_eq!(s["state"]["topline"]["vault_head"], "deadbee");
-
-    *cs.head_sha.lock().unwrap() = Some(build.unwrap().to_string());
-    let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], false, "a head equal to the console build is not newer");
+    let expected = serde_json::to_value(&status).unwrap();
+    assert_eq!(s["state"]["topline"]["sync"], expected, "the wire value must be exactly SyncStatus's own serialisation");
+    assert!(s["state"]["topline"].get("vault_head").is_none(), "vault_head left with git");
+    assert!(s["state"]["topline"].get("engine_newer").is_none(), "engine_newer left with git");
+    assert!(s["state"]["topline"].get("auto_sync").is_none(), "auto_sync left with git");
 }
 
 // The brief's `first_id` reads `state["must_do"]["groups"][0]["rows"][0]["id"]` — the first

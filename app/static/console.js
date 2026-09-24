@@ -75,10 +75,11 @@
     parts.push('<span id="gauge" class="gauge"></span>');
     parts.push("<span>" + h(t.active) + " active</span>");
     parts.push("<span>" + (t.generated_at ? "generated " + h(t.generated_at) + " by " + h(t.generated_by) : "no run recorded") + "</span>");
-    // `engine_newer` is NOT repeated here (final fix wave, C2). It is a health fact, and the line
-    // directly below — renderSyncLine — is the health line: repo, remote, backup, missed slots,
+    // A stale-build warning is NOT repeated here (final fix wave, C2). It is a health fact, and the
+    // line directly below — renderSyncLine — is the health line: cloud copy, backup, missed slots,
     // last slot, scheduler, and this. Saying it twice, one line apart, made the same warning read
-    // as two different problems.
+    // as two different problems. (C3', Task 10: the warning itself left with git — this comment
+    // records why the line stays split, not what used to fill it.)
     // Plan 4a Task 7: one of the panel's two ways in (the other is the tray). Last, so the
     // gear sits at the end of the line and never moves as the facts before it change width.
     parts.push('<button class="b" type="button" data-settings title="Settings">&#9881;</button>');
@@ -379,24 +380,18 @@
   // backup/scheduler health, never computed here. Every source object (t.sync, t.backup,
   // t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a vault with no
   // scheduler info yet) — `|| {}` and truthiness checks below must never throw on a missing key.
+  // C3', Task 10: the topline's cloud-copy/backup/scheduler line. `t.sync` is the engine's
+  // `SyncStatus` (state.rs fills it from `sync::run_lines_with`), never computed here. A vault with
+  // no account says so calmly: it is a state, not a fault, and the wizard is where it changes.
   function renderSyncLine(state) {
     var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [];
-    // The conflict copy is verbatim (R-T15a) — the flat "conflict — auto-sync stopped", with the
-    // per-note detail in the element's title attribute and never in the visible text.
-    if (!s.is_repo) { bits.push('<span class="calm">local history</span>'); }
-    else if (s.conflicted && s.conflicted.length) { bits.push('<span class="crit" title="conflict in ' + s.conflicted.length + " note" + (s.conflicted.length === 1 ? "" : "s") + '">conflict — auto-sync stopped</span>'); }
-    else if (s.last_error) { bits.push('<span class="amber">' + h(s.last_error.split("\n")[0]) + "</span>"); }
-    else if (!s.has_remote) { bits.push('<span class="calm">no remote — local history</span>'); }
-    // R-F1 (re-ruling of R-T15a): `sync.ahead` is `rev-list --count HEAD...origin/main` — a count
-    // of COMMITS, not of edits. One commit can carry twenty edits, and the plan's "N edits" string
-    // assumed a number the app has never had. Say what the number is, and pluralise it honestly.
-    else if (s.ahead > 0) { bits.push('<span class="amber">' + s.ahead + " commit" + (s.ahead === 1 ? "" : "s") + " pending push" + (t.auto_sync === false ? " (auto-sync off)" : "") + "</span>"); }
-    else { bits.push('<span class="calm">synced</span>'); }
+    if (s.last_error) { bits.push('<span class="amber">' + h(String(s.last_error).split("\n")[0]) + "</span>"); }
+    else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
+    else { bits.push('<span class="calm">not synced yet</span>'); }
     if (b.last_error) { bits.push('<span class="amber">backup: ' + h(b.last_error.split("\n")[0]) + "</span>"); }
     else if (b.behind_days != null && b.behind_days >= 1) { bits.push('<span class="amber">backup ' + b.behind_days + " day" + (b.behind_days === 1 ? "" : "s") + " behind</span>"); }
     else if (b.last_ok) { bits.push('<span class="calm">backed up</span>'); }
     if (t.startup_missed > 0) { bits.push('<span class="amber">' + t.startup_missed + " slot" + (t.startup_missed === 1 ? "" : "s") + " missed while quit</span>"); }
-    if (t.engine_newer) { bits.push('<span class="amber">engine newer than console</span>'); }
     // R-T15d: topline.last_slot may be absent (no scheduler slot has run yet, or a hard-error
     // envelope) — tolerate it missing entirely, same as scheduler above.
     if (t.last_slot) {

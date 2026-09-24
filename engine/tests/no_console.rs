@@ -48,5 +48,7 @@ fn every_non_test_spawn_suppresses_its_console_window() {
     assert!(scanned >= 10, "the scan found suspiciously few source files: {scanned}");
     // A guard that cannot fail is worse than no guard: if the spawn sites ever vanish entirely,
     // this test would pass vacuously and nobody would notice it had stopped meaning anything.
-    assert!(with_spawns >= 3, "expected at least three files to spawn children, found {with_spawns}");
+    // `history.rs` was one of the three engine files that spawned a child process (git leaves the
+    // product, C3' Task 10) and it is gone; `runs::git_sha` and `runtime.rs` are the two that remain.
+    assert!(with_spawns >= 2, "expected at least two files to spawn children, found {with_spawns}");
 }
