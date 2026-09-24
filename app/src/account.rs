@@ -469,16 +469,60 @@ pub fn refresh_at(auth_base: &str, anon: &str, refresh_token: &str, now_unix: i6
     session_from(&v, now_unix)
 }
 
+/// R-C1c-exec-14: serializes every refresh of a stored session against every other, across every
+/// caller in this process. `valid_access_token_at` (C2's 120-second floor) and `ensure_session_for_at`
+/// (the scheduler's 45-minute pre-flight, R-C1c-13) can each independently decide the SAME Credential
+/// Manager entry needs refreshing, from different threads: the slot's own pre-flight and its
+/// entitlement/telemetry steps share one thread and so are already safe within a single slot, but the
+/// housekeeping thread's independent 6-hourly `refresh_entitlement` tick (`scheduler::spawn`) — which
+/// itself calls `valid_access_token_at` — is gated by neither `sch.running` nor a lock of its own, and
+/// can land inside the same window as a slot's refresh. GoTrue rotates the refresh token on every use:
+/// two concurrent `POST /token?grant_type=refresh_token` calls carrying the identical (about to be
+/// stale) token race the server, and simultaneous reuse of one refresh_token can be read as a
+/// stolen-token signal that revokes the whole session family, forcing a real re-sign-in.
+///
+/// **The engine never refreshes** (the C2 contract: "Refresh is C1's job") — this process is the only
+/// writer of a stored session, so a single in-process lock is sufficient; there is no second process
+/// to coordinate with, and no need for anything file- or Credential-Manager-based.
+///
+/// Held across the WHOLE load → (maybe) refresh → save sequence, taken *before* `load_session`: a
+/// caller that blocks here re-reads the entry the winner just saved once it gets the lock, rather than
+/// refreshing the stale token it would otherwise have read before waiting.
+static SESSION_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// **Refresh is C1's job** (the C2 contract, point 2). A token with under two minutes left is
 /// refreshed and the entry rewritten, so C2 — which only ever reads — finds a live token or a stale
 /// one it can wait out, and never has to hold a refresh race with this process.
 pub fn valid_access_token_at(auth_base: &str, anon: &str, target: &str, now_unix: i64) -> Result<String, String> {
+    let _guard = SESSION_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (account_id, s) = load_session(target)?;
     if s.expires_at - now_unix > 120 { return Ok(s.access_token); }
     let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
     let id = if id.is_empty() { account_id } else { id };
     save_session(target, &id, &fresh)?;
     Ok(fresh.access_token)
+}
+
+/// The scheduler's own pre-flight (R-C1c-13), not C2's read: `valid_access_token_at`'s 120-second
+/// margin is sized for a single request made right now, and every reader of it in this file (the
+/// entitlement refresh, the telemetry send) is exactly that. A slot is different — it runs several
+/// cloud steps in sequence and can take minutes end to end — so the scheduler asks THIS with a floor
+/// wide enough to survive the whole slot (45 minutes, at the call site in `scheduler.rs`) rather than
+/// the moment a single call is made.
+///
+/// Returns `Ok(true)` only when a refresh actually ran and the entry was rewritten; `Ok(false)` when
+/// the token already cleared `min_remaining_secs` and nothing was touched, network included. An `Err`
+/// covers both a session that could not be read (Credential Manager has nothing at `target`, or what
+/// is there does not parse) and a refresh the provider or the network refused — the caller decides
+/// what either means for the slot; this function only ever reads and writes Credential Manager.
+pub fn ensure_session_for_at(auth_base: &str, anon: &str, target: &str, now_unix: i64, min_remaining_secs: i64) -> Result<bool, String> {
+    let _guard = SESSION_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (account_id, s) = load_session(target)?;
+    if s.expires_at - now_unix > min_remaining_secs { return Ok(false); }
+    let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
+    let id = if id.is_empty() { account_id } else { id };
+    save_session(target, &id, &fresh)?;
+    Ok(true)
 }
 
 fn env_pair() -> Result<(String, String, String), String> {
