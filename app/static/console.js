@@ -604,6 +604,11 @@
   //
   // `sync` is C3′'s step, not a step on this branch yet: its sentence is here before the merge so a
   // merged first run shows its first seconds in progress (R-C1c-final2 M2).
+  //
+  // `session` (R-C1c-13's pre-flight) is left out on purpose, not an oversight: the first slot runs
+  // minutes after sign-in minted a one-hour token, so on the first-run page the step is idle every
+  // time. A later refresh failure surfaces through the entitlement row or the downstream steps' own
+  // text instead — no row here.
   var FIRST_RUN_SAYS = {
     sync: "Syncing with your account",
     entitlement: "Checking your account",

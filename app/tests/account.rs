@@ -594,6 +594,93 @@ fn ensure_session_for_at_leaves_a_token_with_fifty_minutes_left_against_a_forty_
     assert_eq!(back, s);
 }
 
+/// A server for the F1 race test (R-C1c-exec-14): unlike `loopback`, above, it does not know in
+/// advance how many requests to expect — that count is exactly what the test is proving. It answers
+/// every `POST …/token?grant_type=refresh_token` that arrives within `window`, holding each one for
+/// `hold` before it replies (long enough that two callers racing the same refresh genuinely overlap,
+/// not merely by chance), and reports how many it actually served. It stops early once `cap` requests
+/// have landed, so the GREEN case (one request, then nothing) is the only one that pays the full
+/// `window`.
+#[cfg(windows)]
+fn racing_token_server(hold: std::time::Duration, window: std::time::Duration, cap: usize) -> (String, std::thread::JoinHandle<usize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + window;
+        let mut served = 0usize;
+        while std::time::Instant::now() < deadline && served < cap {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking stream");
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+                    // One read is enough: a loopback client's small JSON POST arrives in one segment
+                    // (the same reasoning `serve_one_callback`'s own doc gives for its request line).
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(hold);
+                    served += 1;
+                    let body = format!(
+                        r#"{{"access_token":"fresh-at-{served}","refresh_token":"fresh-rt-{served}","expires_in":3600,"user":{{"id":"acc-1","email":"a@example.invalid"}}}}"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+        served
+    });
+    (format!("http://127.0.0.1:{port}/auth/v1"), handle)
+}
+
+/// F1 (R-C1c-exec-14): the scheduler's pre-flight (`ensure_session_for_at`, 45-minute floor) and
+/// C2's own read (`valid_access_token_at`, 120-second floor) can both decide, on different threads,
+/// that the SAME stored session needs refreshing — the slot's pre-flight and its entitlement/telemetry
+/// steps run on one thread each slot, but the housekeeping thread's independent 6-hourly
+/// `refresh_entitlement` tick (which itself calls `valid_access_token_at`) is gated by no lock at all.
+/// GoTrue rotates the refresh token on every use, so two concurrent refreshes of the same token are a
+/// real hazard, not just wasted work. A one-minute-left session is under BOTH floors, so both
+/// functions independently decide to refresh; only one request may ever reach the token endpoint.
+#[cfg(windows)]
+#[test]
+fn a_concurrent_preflight_and_read_only_ever_hit_the_token_endpoint_once() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, save_session, valid_access_token_at, Session};
+    let target = format!("knowlu/test-race-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        // One minute left: under `valid_access_token_at`'s 120-second floor AND a 45-minute
+        // pre-flight floor, so both callers independently decide a refresh is needed.
+        expires_at: now + 60,
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a near-expiry session");
+
+    let (base, handle) = racing_token_server(std::time::Duration::from_millis(300), std::time::Duration::from_secs(3), 2);
+    let (base1, base2) = (base.clone(), base.clone());
+    let (target1, target2) = (target.clone(), target.clone());
+    let (r1, r2) = std::thread::scope(|scope| {
+        let t1 = scope.spawn(move || ensure_session_for_at(&base1, "anon-key", &target1, now, 45 * 60));
+        let t2 = scope.spawn(move || valid_access_token_at(&base2, "anon-key", &target2, now));
+        (t1.join().unwrap(), t2.join().unwrap())
+    });
+    let served = handle.join().expect("server thread");
+    assert!(r1.is_ok(), "{r1:?}");
+    assert!(r2.is_ok(), "{r2:?}");
+    assert_eq!(served, 1, "exactly one refresh must reach the token endpoint, never two racing the same refresh_token");
+}
+
 /// Base64url without padding, as a JWT segment is — a dozen lines here rather than a `base64`
 /// dependency the app does not otherwise need.
 fn decode_b64url(s: &str) -> String {

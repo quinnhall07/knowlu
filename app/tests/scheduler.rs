@@ -695,6 +695,52 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// F2 (task-11-review.md, round 1): `cloud_config`'s own host check compares scheme and host only,
+/// never the path, so a `cloud.yaml` whose `api_base` names the right host but the wrong path (no
+/// trailing `/functions/v1`) passes `cloud_config` and only then fails `auth_base` — reachable only
+/// from a hand-edited or corrupted file, never from anything the wizard writes, but the session
+/// pre-flight must name this failure exactly like a refused refresh rather than sit silent while the
+/// entitlement block right below (gated the same way, and hitting the identical broken value) visibly
+/// reports its own.
+#[test]
+fn a_malformed_api_base_names_the_session_step_instead_of_silence() {
+    let v = scratch("sessionbadbase");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // The host matches this build's own `api_base()` (set below via `KNOWLU_API_BASE`), so
+    // `cloud_config`'s host check accepts it; the path does not end in `/functions/v1`, so only
+    // `auth_base` refuses it.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/not-functions'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "sessionbadbase");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-sessionbadbase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/not-functions")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let session_at = named.iter().position(|n| n.starts_with("session (refresh failed:"))
+        .unwrap_or_else(|| panic!("no session step: {named:?}"));
+    let coursework_at = named.iter().position(|n| n == "coursework")
+        .unwrap_or_else(|| panic!("no coursework step: {named:?}"));
+    assert!(session_at < coursework_at, "the session failure is still named before any engine step: {named:?}");
+    assert_eq!(s.steps[session_at].1, 0, "a malformed api_base is not a failed slot");
+    assert!(named[session_at].contains("functions/v1"), "the auth_base error names what is wrong: {}", named[session_at]);
+    assert!(s.engine_ok, "a named session failure must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// R-C1c-13: the slot refreshes the account session before its first cloud step — the entitlement
 /// refresh right after it is itself one such step, and every child process after that (coursework,
 /// ingest, judge) authenticates with the same session. A one-hour token is routinely down to single
