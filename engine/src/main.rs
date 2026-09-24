@@ -61,6 +61,18 @@ enum Command {
         #[arg(long)]
         window: Option<String>,
     },
+    /// Fetch, refresh the series file, and print the current commitment proposals — the
+    /// phase-2 confirm screen's data source (spec §5.1, R14). Writes no note, no card and no
+    /// journal record; `state/calendar.md` is untouched. Always exits 0.
+    Commitments {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Pin the run date (YYYY-MM-DD). Without it, the vault's zone and the system date.
+        #[arg(long)]
+        today: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Sync zyBooks + VHL coursework into tasks/. Ports `python -m engine.coursework`.
     ///
     /// Always exits 0: coursework must never fail the run, because the rank matters more than
@@ -344,6 +356,26 @@ fn main() -> ExitCode {
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS
         }
+        // commitments command: begin
+        Command::Commitments { vault, today, json } => {
+            let report = cli::commitments_report(&vault, today.as_deref());
+            if json {
+                let value = serde_json::json!({
+                    "proposals": report.proposals.iter().map(cli::proposal_json).collect::<Vec<_>>(),
+                    "warnings": report.warnings,
+                });
+                println!("{}", knowlu_engine::ledger::dumps_value(&value));
+            } else {
+                for p in &report.proposals {
+                    println!("{}", cli::proposal_line(p));
+                }
+                for w in &report.warnings {
+                    eprintln!("warning: {w}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        // commitments command: end
         Command::Coursework { vault, dry_run, via, run_id } => {
             match coursework::main(&vault, dry_run, &via, run_id.as_deref()) {
                 0 => ExitCode::SUCCESS,

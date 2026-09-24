@@ -752,9 +752,44 @@ fn a_calendar_reply_with_series_returns_it() {
 /// proxy. So it is pinned the way the SDK boundary is pinned (`dependency_boundary.rs`): cheaply,
 /// statically, and at the moment somebody writes the wrong line rather than the moment a slot
 /// starts judging in the wrong step.
+/// The bounds of `main.rs`'s `// commitments command: begin` / `// commitments command: end`
+/// markers, panicking (not silently empty) if either is missing — the same "cannot pass
+/// vacuously" property [`the_commitments_arm_markers_exist`] pins on its own.
+fn commitments_arm(main: &str) -> &str {
+    let begin = main
+        .find("// commitments command: begin")
+        .expect("main.rs must carry the `// commitments command: begin` marker");
+    let end = main
+        .find("// commitments command: end")
+        .expect("main.rs must carry the `// commitments command: end` marker");
+    assert!(begin < end, "the commitments markers are out of order in main.rs");
+    &main[begin..end]
+}
+
+/// P19, spec §6.5: the markers exist and actually wrap the `commitments` match arm, not two
+/// adjacent lines with nothing between — otherwise [`rank_cannot_reach_a_judgment_endpoint`]'s
+/// extended scan would pass on an empty slice no matter what `main.rs` contained.
+#[test]
+fn the_commitments_arm_markers_exist() {
+    let main = include_str!("../src/main.rs");
+    let arm = commitments_arm(main);
+    assert!(
+        arm.contains("Command::Commitments"),
+        "the `// commitments command` markers must wrap the `Command::Commitments` match arm: {arm:?}"
+    );
+}
+
+/// `rank` never calls a model (decision 11), extended by P19/§6.5 (M5) to the two other places
+/// that now reach the calendar transport the same way `rank` does: `commitments.rs` (the series,
+/// classifier and proposal machinery the new `commitments` command as well as `rank` call into)
+/// and `main.rs`'s `commitments` arm. Scanning `commitments.rs` whole is deliberate — nothing in
+/// it may ever gain a judgment call, not just the slice P19 added.
 #[test]
 fn rank_cannot_reach_a_judgment_endpoint() {
     let cli = include_str!("../src/cli.rs");
+    let commitments = include_str!("../src/commitments.rs");
+    let main = include_str!("../src/main.rs");
+    let arm = commitments_arm(main);
     for forbidden in ["/judge-task", "/judge-event", "/judge-email", "judge_task", "CloudModel", "EventModel", "EmailModel"] {
         assert!(
             !cli.contains(forbidden),
@@ -762,6 +797,17 @@ fn rank_cannot_reach_a_judgment_endpoint() {
              (cloudmodel::fetch_event_source, cloudmodel::fetch_ics) and for nothing else: judgment \
              is the separate `judge` command, which runs before `rank` and writes fields into notes \
              (Knowlu spec decision 11, CLAUDE.md)."
+        );
+        assert!(
+            !commitments.contains(forbidden),
+            "engine/src/commitments.rs mentions `{forbidden}`. Nothing in the commitment model \
+             (§6.5: \"nothing in §6 reads the clock, the network or a model\") may reach a \
+             judgment endpoint."
+        );
+        assert!(
+            !arm.contains(forbidden),
+            "main.rs's `commitments` arm mentions `{forbidden}`. The `commitments` command reaches \
+             the calendar transport only, exactly as `rank` does (spec §6.5, M5)."
         );
     }
     // And the two transport functions ARE allowed, so this test fails loudly if H4 was never
