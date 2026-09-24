@@ -70,10 +70,13 @@ fn the_review_amendments_i2_i3_and_i4_are_on_the_page() {
     assert!(privacy.contains("kept by neither of them"), "the corrected claim is on the page");
     // I4 (M3's fourth assertion): every synced journal record carries the computer's name, and the
     // page now says so, in the same entry that discloses the journal at all.
+    // Wording §6 (vi) (R-C3'-exec-41, N4): an issue note carries the computer's name too
+    // (`opened_on`), and `issues/` syncs, so the disclosure names both.
     assert!(
-        privacy.contains("Each change in the journal also carries the name Windows gives the computer it was made on"),
-        "the computer-name disclosure is on the page"
+        privacy.contains("Each change in the journal, and each issue you raise, also carries the name Windows gives the computer it was made on, so that Knowlu can tell your computers apart."),
+        "the computer-name disclosure is on the page, issues included"
     );
+    assert!(!privacy.contains("Each change in the journal also carries"), "the journal-only wording is still published");
     // §5(iv): the retention bullet's own "except…" clause is scoped to what `keep` actually is
     // (a human `set`/`create`), not to "the changes you made yourself" — Gmail-derived and other
     // system-made entries are pruned at 400 days same as anything else.
@@ -81,8 +84,11 @@ fn the_review_amendments_i2_i3_and_i4_are_on_the_page() {
         !privacy.contains("except the changes you made yourself, which stay as long as the account does"),
         "the old, over-broad retention clause is still published"
     );
+    // Wording §6 (vii) (R-C3'-exec-41, N5): `keep` exempts every `agent:` actor, imports as well as
+    // judgments, so the clause names both.
     assert!(
-        privacy.contains("except the entries that set a value or create a note other than by Knowlu's automatic judgments"),
+        privacy.contains("except the entries that set a value or create a note other than by one of Knowlu's own automatic steps (its imports and its judgments), which stay as long as the account does"),
         "the corrected retention clause is on the page"
     );
+    assert!(!privacy.contains("other than by Knowlu's automatic judgments"), "the judgments-only clause is still published");
 }
