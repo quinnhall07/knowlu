@@ -522,12 +522,26 @@ pub fn run_with(
     }
 
     // Calendar busy-time ingest — wave 4, PORTED.
-    let (cal_events, cal_warnings) = load_calendar_events(vault, today, fetchers.calendar);
+    let (cal_events, mut cal_warnings) = load_calendar_events(vault, today, fetchers.calendar);
 
-    let cal = WeekCalendar::from_file(
-        &vault.join("config").join("week_template.yaml"),
-        cal_events,
+    // The commitment passes (spec §4.2, §5.2, §5.4; P16): after the calendar closure filled the
+    // stash and before the calendar is built. Every warning joins the `calendar` step (R13: no new
+    // step). The cards they file are counted into this run's pending line, as the events pass
+    // counts its checks (re-review M-a).
+    let (commitment_checks, commitments) = commitment_passes(
+        vault,
+        today,
+        &planning,
+        fetchers.series,
+        &ctx,
+        &mut journal,
+        &mut cal_warnings,
     );
+    approvals.pending += commitment_checks;
+
+    // §6.1 (C3): the one constructor `surface` uses too, so `today.md` and the console agree.
+    let cal = WeekCalendar::for_vault(vault, cal_events);
+    cal_warnings.extend(crate::commitments::record_baseline(vault, &commitments, &cal, today));
 
     let mut skipped: Vec<String> = Vec::new();
     let mut tasks = load_tasks(&vault.join("tasks"), Some(&mut skipped));
@@ -728,6 +742,101 @@ pub fn run_with(
     );
 
     Ok(RunOutcome { output, status, summary, steps, not_ported, run_id })
+}
+
+/// §3.2 over one run's stash: each entry becomes `(calendar key, its series)` for every calendar
+/// it read fresh and complete. A Google entry is normalised directly (its `calendars_read` are
+/// the keys; a calendar with an unreadable item is left out by `series_from_google`); an ICS entry
+/// is normalised once per `config/ingest.yaml` feed whose url it was fetched from, under that
+/// feed's name (text that is not a calendar is no read at all). In stash (url) order, so the same
+/// stash always gives the same list. Returns `(fresh, warnings)`.
+fn normalise_stash(
+    vault: &Path,
+    entries: &BTreeMap<String, StashEntry>,
+    tz: &TimeZone,
+    today: Date,
+) -> (Vec<(String, Vec<crate::commitments::Series>)>, Vec<String>) {
+    let feeds = crate::calfeed::calendar_entries(vault);
+    let mut fresh: Vec<(String, Vec<crate::commitments::Series>)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for (url, entry) in entries {
+        match entry {
+            StashEntry::Google(value) => {
+                let (series, calendars, found) = crate::commitments::series_from_google(value, tz, today);
+                warnings.extend(found);
+                for calendar in calendars {
+                    let list = series.iter().filter(|s| s.calendar == calendar).cloned().collect();
+                    fresh.push((calendar, list));
+                }
+            }
+            StashEntry::Ics(text) => {
+                for (name, _) in feeds.iter().filter(|(_, feed_url)| feed_url == url) {
+                    let (series, found) = crate::commitments::series_from_ics(name, text, tz, today);
+                    warnings.extend(found);
+                    if let Some(series) = series {
+                        fresh.push((name.clone(), series));
+                    }
+                }
+            }
+        }
+    }
+    (fresh, warnings)
+}
+
+/// The commitment passes of one `rank`, in the order plan review I5 and the P13/P8 carry-forwards
+/// fix: normalise the stash; `refresh_series` → the file; `commitments::load` → the set (after
+/// `process_approvals`, so this run's settlements are in it); `withdraw_stale` — skipped when the
+/// series file could not be read, as is the **ended** rule, because a bad read is never "gone";
+/// `detect_changes`; `successor_keys`; `proposals`; `emit_checks`, with the budget recounted here
+/// after the events pass took its share. Pure of clocks, networks and models: the stash was filled
+/// by the calendar closure and everything here is deterministic. Returns the number of cards filed
+/// and the set (for `record_baseline`); every warning is pushed onto `warnings`.
+#[allow(clippy::too_many_arguments)]
+fn commitment_passes(
+    vault: &Path,
+    today: Date,
+    planning: &crate::planning::PlanningConfig,
+    stash: Option<&SeriesStash>,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    warnings: &mut Vec<String>,
+) -> (i64, crate::commitments::Commitments) {
+    use crate::commitments as cm;
+    let entries: BTreeMap<String, StashEntry> = stash.map(|s| s.borrow().clone()).unwrap_or_default();
+    let (fresh, normalise_warnings) = normalise_stash(vault, &entries, &vault_zone(vault), today);
+    warnings.extend(normalise_warnings);
+
+    let (file, series_warnings) = cm::refresh_series(vault, &fresh, today);
+    let read_failed = cm::series_read_failed(&series_warnings);
+    warnings.extend(series_warnings);
+
+    let set = cm::load(vault);
+    warnings.extend(set.warnings.iter().cloned());
+
+    if !read_failed {
+        let (_, withdrawal_warnings) =
+            crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
+        warnings.extend(withdrawal_warnings);
+    }
+
+    let (codes, code_warnings) = cm::Codes::load(vault);
+    warnings.extend(code_warnings);
+    let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
+    let watched = match read_failed {
+        true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
+        false => file.clone(),
+    };
+    let (changes, change_warnings) = cm::detect_changes(&watched, &set, &codes, &names, &fresh_keys, today);
+    warnings.extend(change_warnings);
+
+    let held = cm::successor_keys(vault);
+    let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
+    let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, true);
+    let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
+    let (_, filed, card_warnings) = cm::emit_checks(vault, &proposals, &changes, today, budget, ctx, journal);
+    warnings.extend(card_warnings);
+    (filed as i64, set)
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -2246,5 +2355,439 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         assert!(fetch("cloud:google").is_err(), "a body with no ics field must be Err");
         assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
         handle.join().expect("the loopback thread did not panic");
+    }
+
+    // --- P16: the commitment passes inside `rank` ----------------------------------------------
+
+    /// Spec §8 test 5 (M7): `vault-full` ranked through the production `run` (its feed has no
+    /// `ics_url`, so nothing is fetched) gains no series file, no plan file, no `commitments/` and
+    /// no card, and its `calendar` step says exactly what it said before P16 (captured on a7efe3d).
+    #[test]
+    fn rank_on_vault_full_writes_no_new_state() {
+        let vault = fixture("p16full", "tests/fixtures/vault-full");
+        run(&vault, Some("2026-08-28"), "manual", None).unwrap();
+        assert!(!vault.join("state").join("calendar-series.json").exists());
+        assert!(!vault.join("state").join("plan.json").exists());
+        assert!(!vault.join("commitments").exists());
+        assert!(md_names(&vault.join("approvals"), "commitment-check-").is_empty());
+        let recs = run_records(&vault);
+        let calendar = step_of(recs.last().unwrap(), "calendar");
+        assert_eq!(calendar["message"], serde_json::json!("personal: no ics_url"), "{calendar:?}");
+        assert_eq!(calendar["result"], serde_json::json!("WARN"), "{calendar:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Two feeds (the Google grant and one direct address), all invented.
+    const P16_FEEDS: &str = "timezone: America/Chicago\ncalendars:\n  - name: google\n    ics_url: 'cloud:google'\n  - name: personal\n    ics_url: https://calendar.example.test/personal.ics\n";
+    const P16_ICS_URL: &str = "https://calendar.example.test/personal.ics";
+    const P16_GOOGLE: &str = "google:0a1b2c3d4e5f6071";
+    /// A Monday; every series below starts on it.
+    const P16_MONDAY: Date = Date::constant(2026, 9, 7);
+
+    /// A migrated scratch vault with a flat 08:00–18:00 week template, the two feeds, one active
+    /// task (so `today.md` carries its capacity line) and `courses/cs-100.md` (so `CS 100`
+    /// classifies as a class).
+    fn p16_vault(name: &str) -> PathBuf {
+        let vault = scratch(name);
+        for dir in ["config", "tasks", "courses"] {
+            std::fs::create_dir_all(vault.join(dir)).unwrap();
+        }
+        let write = |rel: &str, text: &str| pystr::write_text(&vault.join(rel), text).unwrap();
+        write(
+            "config/week_template.yaml",
+            "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        );
+        write("config/ingest.yaml", P16_FEEDS);
+        write("tasks/essay.md", "---\ntitle: Invented essay\ndue: 2026-10-30\neffort_hours: 2\nimportance: 3\n---\n");
+        write("courses/cs-100.md", "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n");
+        seed_migrated(&vault);
+        vault
+    }
+
+    fn p16_day(offset: i64) -> Date {
+        P16_MONDAY.checked_add(jiff::Span::new().days(offset)).unwrap()
+    }
+
+    /// One Google `series` item: weekly on `days` (0 = Monday) from `P16_MONDAY`, `start`–`end`
+    /// (CDT), for `weeks` weeks.
+    fn google_item(id: &str, title: &str, days: &[i64], start: &str, end: &str, weeks: i64) -> serde_json::Value {
+        let names = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+        let mut instances = Vec::new();
+        for week in 0..weeks {
+            for d in days {
+                let day = p16_day(week * 7 + d);
+                instances.push(serde_json::json!({
+                    "start": format!("{day}T{start}:00-05:00"),
+                    "end": format!("{day}T{end}:00-05:00"),
+                }));
+            }
+        }
+        let byday: Vec<&str> = days.iter().map(|d| names[*d as usize]).collect();
+        serde_json::json!({
+            "calendar": P16_GOOGLE,
+            "id": id,
+            "title": title,
+            "location": "",
+            "description": "",
+            "event_type": "default",
+            "first": instances[0]["start"].clone(),
+            "recurrence": [format!("RRULE:FREQ=WEEKLY;BYDAY={}", byday.join(","))],
+            "instances": instances,
+        })
+    }
+
+    /// A fresh, complete read of `P16_GOOGLE` returning `items`.
+    fn google_entry(items: Vec<serde_json::Value>) -> StashEntry {
+        StashEntry::Google(serde_json::json!({ "calendars_read": [P16_GOOGLE], "items": items }))
+    }
+
+    fn cs100_item() -> serde_json::Value {
+        google_item("cs100aa", "CS 100", &[0, 2, 4], "12:00", "12:50", 8)
+    }
+
+    /// `run_with` on `day` with `entries` injected into the stash (no network: every feed answers
+    /// an empty calendar and stashes nothing itself).
+    fn rank_p16(vault: &Path, day: Date, entries: Vec<(&str, StashEntry)>) -> RunOutcome {
+        let stash: SeriesStash =
+            RefCell::new(entries.into_iter().map(|(url, entry)| (url.to_string(), entry)).collect());
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        run_with(vault, Some(&day.to_string()), "manual", None, fetchers).unwrap()
+    }
+
+    fn commitment_note(vault: &Path, file: &str, front: &str) {
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        pystr::write_text(&vault.join("commitments").join(file), &format!("---\n{front}---\n\nInvented.\n"))
+            .unwrap();
+    }
+
+    /// `CS 100`, confirmed, exactly as `cs100_item` meets.
+    const CS100_NOTE: &str = "id: cmt_00000000a1\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"CS 100\"\n\
+        course: cs-100\nmeets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]\n\
+        source_uid: \"gcal-series:cs100aa\"\nstatus: confirmed\n";
+
+    /// `PH 106`, confirmed at 13:00–14:45; its series (`ph106_moved`) now meets an hour later.
+    const PH106_NOTE: &str = "id: cmt_00000000a2\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"PH 106\"\n\
+        meets: [{days: [tue, thu], start: \"13:00\", end: \"14:45\"}]\n\
+        source_uid: \"gcal-series:ph106aa\"\nstatus: confirmed\n";
+
+    fn ph106_moved() -> serde_json::Value {
+        google_item("ph106aa", "PH 106", &[1, 3], "14:00", "15:45", 8)
+    }
+
+    const PLANNING_NOTE: &str = "id: cmt_00000000b1\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+        window: [{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]\n";
+
+    fn checks(vault: &Path, folder: &str) -> Vec<String> {
+        md_names(&vault.join(folder), "commitment-check-")
+    }
+
+    fn capacity_today(vault: &Path) -> f64 {
+        let text = page(vault);
+        let at = text.find("Capacity today: ").unwrap_or_else(|| panic!("no capacity line: {text}"));
+        let rest = &text[at + "Capacity today: ".len()..];
+        rest[..rest.find('h').unwrap()].parse().unwrap()
+    }
+
+    fn plan_json(vault: &Path) -> String {
+        std::fs::read_to_string(vault.join("state").join("plan.json")).unwrap()
+    }
+
+    #[test]
+    fn rank_files_a_commitment_check_for_an_injected_class_series_and_counts_it_pending() {
+        let vault = p16_vault("p16card");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let cards = checks(&vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card = vault.join("approvals").join(&cards[0]);
+        assert_eq!(meta_str(&card, "title"), "CS 100 · Mon/Wed/Fri 12–12:50pm · a class?");
+        assert_eq!(meta_str(&card, "source_uid"), "gcal-series:cs100aa");
+        assert!(page(&vault).contains("**Approvals: 1 pending**"), "{}", page(&vault));
+        let recs = run_records(&vault);
+        assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["pending"], serde_json::json!(1));
+        assert!(vault.join("state").join("calendar-series.json").is_file());
+        // R18: a proposal is never a note.
+        assert!(!vault.join("commitments").exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn commitment_checks_take_only_what_the_events_pass_left() {
+        let vault = p16_vault("p16budget");
+        pystr::write_text(
+            &vault.join("config").join("events.yaml"),
+            "sources:\n  - name: campus\n    type: ics\n    url: unreachable://x\n    enabled: true\n",
+        )
+        .unwrap();
+        pystr::write_text(&vault.join("config").join("planning.yaml"), "daily_approval_budget: 15\n").unwrap();
+        pending_proposals(&vault, 12);
+        let ics = judged_feed(&vault, 2);
+        let events = |_: &str| Ok(ics.clone());
+        let items = vec![
+            cs100_item(),
+            google_item("cs100lab", "CS 100 Lab", &[1], "15:00", "16:50", 8),
+            google_item("chess01", "Chess Club", &[3], "18:00", "19:00", 8),
+        ];
+        let stash: SeriesStash = RefCell::new(BTreeMap::from([("cloud:google".to_string(), google_entry(items))]));
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let today = Date::constant(2026, 8, 26);
+        for _ in 0..2 {
+            let fetchers = Fetchers { calendar: Some(&empty), events: Some(&events), series: Some(&stash) };
+            run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
+            // 12 proposals + a 2-event digest leave 1: the class takes it, and nothing is deferred.
+            assert_eq!(digest_uids(&vault).len(), 2);
+            assert_eq!(checks(&vault, "approvals").len(), 1, "{:?}", checks(&vault, "approvals"));
+            assert_eq!(count_proposals_created(&vault, today), 15);
+            let recs = run_records(&vault);
+            assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["deferred"], serde_json::json!(0));
+            for i in 0..12 {
+                let path = vault.join("approvals").join(format!("task-{i}.md"));
+                assert_eq!(meta_str(&path, "status"), "pending", "task-{i}");
+            }
+        }
+        let card = vault.join("approvals").join(&checks(&vault, "approvals")[0]);
+        assert_eq!(meta_str(&card, "source_uid"), "gcal-series:cs100aa");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_subtracts_a_confirmed_class_from_capacity() {
+        let vault = p16_vault("p16capacity");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let before = capacity_today(&vault);
+        commitment_note(
+            &vault,
+            "seminar.md",
+            "id: cmt_00000000a3\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"Invented Seminar\"\n\
+             meets: [{days: [mon], start: \"15:00\", end: \"16:00\"}]\nstatus: confirmed\n",
+        );
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let after = capacity_today(&vault);
+        assert!((before - after - 1.0).abs() < 1e-9, "before {before}, after {after}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_withdraws_a_card_whose_series_left_the_file() {
+        let vault = p16_vault("p16withdraw");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let filed = checks(&vault, "approvals");
+        assert_eq!(filed.len(), 1);
+        // Fourteen days of fresh reads without it: the series leaves the file, the card goes.
+        rank_p16(&vault, p16_day(14), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert!(checks(&vault, "approvals").is_empty());
+        assert_eq!(checks(&vault, "archive"), filed);
+        assert_eq!(meta_str(&vault.join("archive").join(&filed[0]), "status"), "superseded");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// C1: a change card is not withdrawn by the next ranks and not filed again.
+    #[test]
+    fn a_change_card_survives_two_more_ranks() {
+        let vault = p16_vault("p16change");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        for _ in 0..3 {
+            rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![ph106_moved()]))]);
+            let cards = checks(&vault, "approvals");
+            assert_eq!(cards.len(), 1, "{cards:?}");
+            let card = vault.join("approvals").join(&cards[0]);
+            assert_eq!(meta_str(&card, "status"), "pending");
+            assert_eq!(meta_str(&card, "target"), "commitments/ph-106.md");
+            assert!(checks(&vault, "archive").is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// C1: a proposal card, a window card and a change card, ranked on three consecutive days with
+    /// the same stash, are each filed once, never archived, and charged only on day one.
+    #[test]
+    fn no_card_is_withdrawn_and_refiled_across_three_ranks() {
+        let vault = p16_vault("p16three");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        let items = || {
+            vec![
+                cs100_item(),
+                ph106_moved(),
+                google_item("wake01", "Wake up", &[0, 1, 2, 3, 4], "07:00", "07:15", 8),
+                google_item("bed01", "Bedtime", &[0, 1, 2, 3, 4], "22:30", "22:45", 8),
+            ]
+        };
+        for offset in 0..3 {
+            rank_p16(&vault, p16_day(offset), vec![("cloud:google", google_entry(items()))]);
+            let cards = checks(&vault, "approvals");
+            assert_eq!(cards.len(), 3, "day {offset}: {cards:?}");
+            let mut kinds: Vec<&str> = Vec::new();
+            for name in &cards {
+                let card = vault.join("approvals").join(name);
+                assert_eq!(meta_str(&card, "status"), "pending", "{name}");
+                assert_eq!(meta_str(&card, "first_proposed_at"), "2026-09-07", "{name}");
+                assert_eq!(meta_str(&card, "proposed_at"), "2026-09-07", "{name}");
+                kinds.push(match (meta_str(&card, "target").is_empty(), meta_str(&card, "source_uid")) {
+                    (false, _) => "change",
+                    (true, key) if key.starts_with("window:") => "window",
+                    (true, _) => "proposal",
+                });
+            }
+            kinds.sort();
+            assert_eq!(kinds, vec!["change", "proposal", "window"], "day {offset}");
+            assert!(checks(&vault, "archive").is_empty(), "day {offset}");
+            assert_eq!(count_proposals_created(&vault, p16_day(offset)), if offset == 0 { 3 } else { 0 });
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Ranks `CS100_NOTE`'s vault on `P16_MONDAY` with its series, then on days 7 and 14 with fresh
+    /// reads that no longer return it (the drop run is day 14).
+    fn age_out_cs100(vault: &Path, drop_budget: Option<i64>) {
+        commitment_note(vault, "cs-100.md", CS100_NOTE);
+        rank_p16(vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(checks(vault, "approvals").is_empty(), "the note matches its series");
+        rank_p16(vault, p16_day(7), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert!(checks(vault, "approvals").is_empty());
+        if let Some(budget) = drop_budget {
+            pystr::write_text(
+                &vault.join("config").join("planning.yaml"),
+                &format!("daily_approval_budget: {budget}\n"),
+            )
+            .unwrap();
+        }
+        rank_p16(vault, p16_day(14), vec![("cloud:google", google_entry(Vec::new()))]);
+    }
+
+    /// The last instance the day-0 read held: Friday Oct 2, inside `[Sep 7, Oct 5)`.
+    fn assert_one_end_card(vault: &Path) {
+        let cards = checks(vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card = vault.join("approvals").join(&cards[0]);
+        assert_eq!(meta_str(&card, "title"), "CS 100 ends Oct 2 · update?");
+        assert_eq!(meta_str(&card, "target"), "commitments/cs-100.md");
+        let meta = crate::ids::read_meta(&card).unwrap();
+        let change = crate::yaml::to_json(crate::yaml::get(&meta, "change").unwrap());
+        assert_eq!(change, serde_json::json!({ "until": "2026-10-02" }));
+    }
+
+    /// I1: an aged-out series files exactly one end card, `until` its last instance.
+    #[test]
+    fn an_aged_out_series_files_exactly_one_end_card_with_its_last_instance() {
+        let vault = p16_vault("p16ended");
+        age_out_cs100(&vault, None);
+        assert_one_end_card(&vault);
+        rank_p16(&vault, p16_day(15), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert_one_end_card(&vault);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I1: the drop run had no budget; the next day's rank files the card from `ended`.
+    #[test]
+    fn an_end_card_starved_by_the_budget_is_filed_on_the_next_run() {
+        let vault = p16_vault("p16starved");
+        age_out_cs100(&vault, Some(0));
+        assert!(checks(&vault, "approvals").is_empty());
+        let series = std::fs::read_to_string(vault.join("state").join("calendar-series.json")).unwrap();
+        assert!(series.contains("gcal-series:cs100aa"), "{series}");
+        pystr::write_text(&vault.join("config").join("planning.yaml"), "daily_approval_budget: 15\n").unwrap();
+        rank_p16(&vault, p16_day(15), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert_one_end_card(&vault);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I2: one series reaching the file through the Google grant and a direct ICS feed (a Google
+    /// UID keeps its `gcal-series:` key on both routes) is one card.
+    #[test]
+    fn one_series_from_google_and_ics_files_one_card() {
+        let vault = p16_vault("p16twin");
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Invented//EN\nBEGIN:VEVENT\nUID:cs100aa@google.com\n\
+                   SUMMARY:CS 100\nDTSTART;TZID=America/Chicago:20260907T120000\n\
+                   DTEND;TZID=America/Chicago:20260907T125000\nRRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\n\
+                   END:VEVENT\nEND:VCALENDAR\n";
+        rank_p16(
+            &vault,
+            P16_MONDAY,
+            vec![
+                ("cloud:google", google_entry(vec![cs100_item()])),
+                (P16_ICS_URL, StashEntry::Ics(ics.to_string())),
+            ],
+        );
+        let series = std::fs::read_to_string(vault.join("state").join("calendar-series.json")).unwrap();
+        assert_eq!(series.matches("\"gcal-series:cs100aa\"").count(), 2, "held under both calendars: {series}");
+        let cards = checks(&vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(meta_str(&vault.join("approvals").join(&cards[0]), "source_uid"), "gcal-series:cs100aa");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_records_the_template_window_when_plan_json_is_missing() {
+        let vault = p16_vault("p16plan1");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), "{\"date\": \"2026-09-07\", \"end\": \"18:00\", \"start\": \"08:00\"}\n");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_keeps_the_days_first_window_across_runs() {
+        let vault = p16_vault("p16plan2");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let first = plan_json(&vault);
+        commitment_note(&vault, "planning-day.md", &PLANNING_NOTE.replace("22:00", "23:00"));
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), first);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_records_todays_window_on_a_new_day() {
+        let vault = p16_vault("p16plan3");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        pystr::write_text(
+            &vault.join("state").join("plan.json"),
+            "{\"date\": \"2026-09-06\", \"end\": \"18:00\", \"start\": \"08:00\"}\n",
+        )
+        .unwrap();
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), "{\"date\": \"2026-09-07\", \"end\": \"22:00\", \"start\": \"08:00\"}\n");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_writes_no_plan_json_without_a_planning_day_note() {
+        let vault = p16_vault("p16plan4");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(!vault.join("state").join("plan.json").exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// P8's carry-forward: a malformed series file warns in the `calendar` step (no new step), and
+    /// that run withdraws nothing — a card whose key is not in this run's (fresh-only) file stays.
+    #[test]
+    fn a_malformed_series_file_warns_in_the_calendar_step() {
+        let vault = p16_vault("p16malformed");
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(vault.join("state").join("calendar-series.json"), "{not json").unwrap();
+        std::fs::create_dir_all(vault.join("approvals")).unwrap();
+        let card = vault.join("approvals").join("commitment-check-old-seminar.md");
+        pystr::write_text(
+            &card,
+            "---\ntype: approval\nkind: commitment-check\ntitle: \"Old Seminar · Tue 3–4pm · a class?\"\n\
+             status: pending\nsource_uid: \"gcal-series:elsewhere\"\nproposed_at: 2026-09-06\n\
+             first_proposed_at: 2026-09-06\nexpires: null\nsnooze_until: null\ncreated_by: agent:commitments\n\
+             ---\n\nInvented.\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(Vec::new()))]);
+        let names: Vec<&str> = out.steps.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["passes", "tasks", "calendar", "events", "approvals"]);
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!(calendar.result, "WARN");
+        assert!(
+            calendar.message.contains("series file: state/calendar-series.json malformed"),
+            "{}",
+            calendar.message
+        );
+        assert!(card.is_file(), "a bad read is never \"gone\"");
+        assert_eq!(meta_str(&card, "status"), "pending");
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

@@ -3872,6 +3872,63 @@ pub fn withdrawal_reason(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// P16 — what `rank` needs beside the passes above: the series file's read outcome and the day's
+// first window (§6.4).
+// ---------------------------------------------------------------------------------------------
+
+/// Whether [`refresh_series`]' warnings say the series file could not be **read** — malformed or
+/// unreadable, never a failed write. The returned file then holds only this run's fresh calendars,
+/// so a key held under an unread calendar would look as if it left the file: `rank` skips card
+/// withdrawal and the **ended** rule that run (P8 review; never infer "gone" from a bad read).
+pub fn series_read_failed(warnings: &[String]) -> bool {
+    let malformed = format!("series file: {SERIES_FILE} malformed (");
+    let unreadable = format!("series file: {SERIES_FILE} unreadable (");
+    warnings.iter().any(|w| w.starts_with(&malformed) || w.starts_with(&unreadable))
+}
+
+/// The day's first window (§6.4), generated and device-local.
+pub const PLAN_FILE: &str = "state/plan.json";
+
+/// §6.4, as `rank` runs it: only when a confirmed `planning-day` note exists (so a vault without
+/// one — every fixture — gains no file). The file's `date` is today: left alone, so the baseline
+/// stays the day's first window however often the note is edited. Another day: today's current
+/// `cal.window(today)`. Missing or malformed: the **template's** `(day_start, day_end)` — the
+/// window the day was planned in before any note existed (re-review N2). An I/O error other than
+/// not-found leaves the file alone with one warning (it may be fine). Written as
+/// `{"date", "start", "end"}` through `ledger::dumps_value` with a trailing newline. No diff here:
+/// `moved` is `surface`'s (P18). Returns warnings.
+pub fn record_baseline(
+    vault: &Path,
+    set: &Commitments,
+    cal: &crate::weekcal::WeekCalendar,
+    today: Date,
+) -> Vec<String> {
+    if set.planning_day.is_none() {
+        return Vec::new();
+    }
+    let path = vault.join("state").join("plan.json");
+    let recorded: Option<Date> = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("date")?.as_str()?.parse::<Date>().ok()),
+        Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData) => None,
+        Err(err) => return vec![format!("plan file: {PLAN_FILE} unreadable ({}); not written this run", err.kind())],
+    };
+    let (start, end) = match recorded {
+        Some(day) if day == today => return Vec::new(),
+        Some(_) => cal.window(today),
+        None => (cal.day_start, cal.day_end),
+    };
+    let value = serde_json::json!({ "date": today.to_string(), "start": hm(start), "end": hm(end) });
+    let bytes = crate::ledger::dumps_value(&value) + "\n";
+    let written = std::fs::create_dir_all(vault.join("state")).and_then(|_| std::fs::write(&path, bytes));
+    match written {
+        Ok(()) => Vec::new(),
+        Err(err) => vec![format!("plan file: could not write {PLAN_FILE} ({})", err.kind())],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
