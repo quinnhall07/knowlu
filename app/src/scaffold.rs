@@ -501,6 +501,42 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     Ok(s)
 }
 
+/// Task 11 review, I1 (`R-C3'-exec-40`): the account save `lms_link::finish` attempts at paste or
+/// capture time is a `note`, never an error, so a save that failed used to leave the feed in
+/// **neither** place — `ingest_yaml` above had already blanked the vault's own copy on the strength
+/// of an account this call never reached. `create_vault_in` calls this only after its own retry
+/// (under the session it has just moved onto the new profile) has ALSO failed, so the feed is written
+/// into the vault exactly as `ingest_yaml` would have written it for a vault with no account at all —
+/// patched into the file `create_vault` already wrote, rather than regenerated from the plan, because
+/// `create_vault_in` has no reason to keep the whole plan around just for this.
+///
+/// Refuses a `kind` this crate does not write, and a file that does not carry the blanked line this
+/// call exists to replace — both are a plan or a call-site bug, never a student's, so they fail
+/// loudly rather than silently doing nothing.
+pub fn restore_capability_url(vault: &Path, kind: &str, url: &str) -> Result<(), String> {
+    let path = vault.join("config").join("ingest.yaml");
+    let text = knowlu_engine::pystr::read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let patched = match kind {
+        "lms_ics" => {
+            let scalar = yaml_scalar("LMS feed URL", url)?;
+            if !text.contains("ics_url: ''\n") {
+                return Err(format!("{}: no blanked LMS feed line to restore", path.display()));
+            }
+            text.replacen("ics_url: ''\n", &format!("ics_url: {scalar}\n"), 1)
+        }
+        "calendar_ics" => {
+            let scalar = yaml_scalar("personal calendar address", url)?;
+            let blanked = "- name: personal\n    ics_url: 'cloud:personal'\n";
+            if !text.contains(blanked) {
+                return Err(format!("{}: no blanked personal-calendar line to restore", path.display()));
+            }
+            text.replacen(blanked, &format!("- name: personal\n    ics_url: {scalar}\n"), 1)
+        }
+        other => return Err(format!("{other}: not a capability url this restores")),
+    };
+    knowlu_engine::pystr::write_text(&path, &patched).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Decision 4: `scheduler: app` and `device:` from birth. `grace_minutes: 20` is the local
 /// runner's own number, unchanged; `cloud` is deliberately absent — a friend has no cloud runner,
 /// and an expected-but-never-seen runner would paint every Runs view amber forever.

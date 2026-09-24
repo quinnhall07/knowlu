@@ -593,10 +593,15 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
 /// It is also the only place C1 exercises `requireActiveEntitlement` in production, which is how the
 /// 402 contract C2 imports gets proved by something that ships.
 ///
-/// **A failure here does not fail the panel.** The vault copy still works, `ingest` still runs on the
-/// next slot, and the wizard is not the place to relitigate a subscription — so a 402 becomes one
-/// sentence beside the link and everything else becomes a quieter one. The account copy is
-/// back-filled by Task 18's `attach_in` for a vault that was onboarded before it worked.
+/// **A failure here does not fail the panel, and it is not final** (Task 11 review, I1;
+/// `R-C3'-exec-40`). `onboarding::create_vault_in` retries this same call once more at Finish, under
+/// the session it has just moved onto the new profile; only if that retry also fails does the vault
+/// gain a local copy of the URL (`scaffold::restore_capability_url`), exactly as it did before this
+/// task, so the feed is never silently lost. The wizard is not the place to relitigate a subscription
+/// either way, so a 402 becomes one sentence beside the link and everything else becomes a quieter
+/// one — and both sentences now say what actually happens next rather than claiming the vault already
+/// has it. The account copy is also back-filled by Task 18's `attach_in` for a vault that was
+/// onboarded before it worked.
 pub fn put_source_at(api_base: &str, token: &str, kind: &str, url: &str) -> Result<(), String> {
     crate::account::check_api_base(api_base)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -618,8 +623,8 @@ pub fn put_source_at(api_base: &str, token: &str, kind: &str, url: &str) -> Resu
     let _ = res.body_mut().with_config().limit(1 << 16).read_to_string();
     match status {
         200..=299 => Ok(()),
-        402 => Err("finish subscribing first — your calendar link is saved on this machine either way".to_string()),
-        other => Err(format!("your calendar link is saved on this machine, but we could not save it to your account ({other})")),
+        402 => Err("finish subscribing first — Knowlu will try again when you finish setup, and keeps the link on this machine until it reaches your account".to_string()),
+        other => Err(format!("we could not save your calendar link to your account yet ({other}) — Knowlu will try again when you finish setup, and keeps it on this machine if it still can't")),
     }
 }
 

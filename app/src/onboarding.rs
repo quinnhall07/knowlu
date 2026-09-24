@@ -665,6 +665,26 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         let _ = std::fs::remove_dir_all(&dest);
         return json!({ "ok": false, "error": format!("the sign-in could not be attached to this vault ({e}) — the new vault was removed, so nothing is half-made"), "profile": Value::Null });
     }
+    // **Task 11 review, I1 (R-C3'-exec-40).** `lms_link::finish`'s own save, at paste or capture
+    // time, is a `note` the panel never blocks on — so a save that failed there used to leave the
+    // feed in neither the account nor the vault, because `scaffold::ingest_yaml` above had already
+    // blanked the vault's own copy on the strength of an account it never reached. Retry each pasted
+    // feed once more here, under the session `move_session` just attached to this profile; a feed
+    // that still cannot be saved is written into the vault instead (`restore_capability_url`), so it
+    // is never silently lost. A vault with no account has nothing to retry — `ingest_yaml` never
+    // blanked anything for it.
+    if !vp.account_id.is_empty() {
+        let target = crate::account::session_target(&profile_id);
+        for (kind, url) in [("lms_ics", vp.ics_url.as_deref()), ("calendar_ics", vp.personal_calendar.as_deref())] {
+            let Some(url) = url else { continue };
+            if crate::lms_link::store_source(&vp.api_base, &target, kind, url).is_err() {
+                if let Err(e) = crate::scaffold::restore_capability_url(&dest, kind, url) {
+                    let _ = std::fs::remove_dir_all(&dest);
+                    return json!({ "ok": false, "error": e, "profile": Value::Null });
+                }
+            }
+        }
+    }
     // **The restore, and it is not a route — it is what Finish does** (cloud design, amendment
     // 2026-09-17, ruling 2: "restoring is signing in on a new desktop; the mirror fills from the
     // account"). There is no code to type and no link on the picker: a student who already has a

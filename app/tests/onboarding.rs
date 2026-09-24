@@ -518,6 +518,74 @@ fn restore_loopback(body: &str) -> (String, std::thread::JoinHandle<()>) {
     (format!("http://127.0.0.1:{port}/functions/v1"), handle)
 }
 
+/// Serves `responses.len()` requests, one per accepted connection, in order — the shape Task 11's
+/// fix round I1 needs: `create_vault_in`'s retry (`PUT /account/sources`) and then, if that lands,
+/// `sync::restore_into`'s own pull (`GET /sync-pull`), against the same base URL. Modelled on
+/// `app/tests/account.rs::loopback` (same nonblocking-accept-plus-10s-deadline and
+/// Content-Length-aware read this file's own `restore_loopback` already uses) — copied rather than
+/// shared, since each `tests/*.rs` file is its own crate.
+#[cfg(windows)]
+fn multi_loopback(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut seen = Vec::new();
+        for (status, body) in responses {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!("multi_loopback: no client connected within 10s");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("multi_loopback: accept failed: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let head_end = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 { break buf.len(); }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") { break i + 4; }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let want: usize = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + want {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            seen.push(String::from_utf8_lossy(&buf).to_string());
+            let reason = if (200..300).contains(&status) { "OK" } else { "Error" };
+            let resp = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+}
+
+/// The empty, successful `/sync-pull` page `restore_into` reads once a vault has just been made —
+/// the same body `restore_loopback`'s own callers pass, kept here as one literal so the three I1
+/// tests below do not each spell it out.
+const EMPTY_PULL_PAGE: &str = r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#;
+
 /// C3' Task 9, H11a: Finish now calls `sync::restore_into(&dest)` right after the session moves onto
 /// the new profile, and an account that has never pushed answers with a real, successful, empty page
 /// — never a network failure. This is that case, end to end: the vault Finish just made is kept
@@ -603,6 +671,100 @@ fn a_finish_whose_account_copy_has_content_writes_it_into_the_new_vault() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Task 11 review, I1 (`R-C3'-exec-40`): `lms_link::finish`'s save at paste or capture time is a
+/// `note`, never an error, so before this fix a save that failed there lost the feed for good —
+/// `ingest_yaml` had already blanked the vault's own copy on the strength of an account that call
+/// could not reach. `create_vault_in` now retries the same call once more, under the session it has
+/// just moved onto the new profile. This is the retry succeeding: the paste-time save is simulated
+/// directly (the exact call `finish` makes, `lms_link::store_source`) against the loopback's first,
+/// failing response, and `create_vault_in` is then given a plan that still carries the URL — exactly
+/// what the wizard's own state holds after a save `finish` could only log as a `note` — and its own
+/// retry is the loopback's second response.
+#[cfg(windows)]
+#[test]
+fn a_feed_that_failed_at_paste_is_saved_by_the_retry_at_finish() {
+    let root = tmp("i1-retry-succeeds");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-i1-retry-ok");
+    let (base, handle) = multi_loopback(vec![
+        (503, ""),                       // the paste-time save `finish` attempted, and that failed
+        (200, r#"{"kind":"lms_ics"}"#),   // `create_vault_in`'s own retry, this time it lands
+        (200, EMPTY_PULL_PAGE),           // the restore's own pull, once the vault exists
+    ]);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    assert!(
+        knowlu::lms_link::store_source(&knowlu::account::api_base(), knowlu::account::PENDING_TARGET, "lms_ics", "https://x.invalid/a.ics").is_err(),
+        "the simulated paste-time save must actually fail, or this test proves nothing"
+    );
+    let mut plan = base_plan(false);
+    plan.ics_url = Some("https://x.invalid/a.ics".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(ingest.contains("ics_url: ''\n"), "the retry landed, so the link is in the account and the vault stays empty: {ingest}");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The other half: the retry ALSO fails, so the feed is written into the vault instead of being lost
+/// — the same shape `ingest_yaml` would have written for a vault with no account at all.
+#[cfg(windows)]
+#[test]
+fn a_feed_that_fails_the_retry_too_is_kept_on_this_machine() {
+    let root = tmp("i1-retry-fails");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-i1-retry-fail");
+    let (base, handle) = multi_loopback(vec![
+        (503, ""),               // the paste-time save, simulated, failed
+        (503, ""),               // `create_vault_in`'s retry fails too
+        (200, EMPTY_PULL_PAGE),  // the restore still runs — one feed's own save is not the account
+    ]);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    assert!(
+        knowlu::lms_link::store_source(&knowlu::account::api_base(), knowlu::account::PENDING_TARGET, "lms_ics", "https://x.invalid/b.ics").is_err()
+    );
+    let mut plan = base_plan(false);
+    plan.ics_url = Some("https://x.invalid/b.ics".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(ingest.contains("ics_url: 'https://x.invalid/b.ics'\n"), "the feed is never lost, even when the account never answers: {ingest}");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A save that lands the first time `create_vault_in` tries it — no prior failure to simulate — never
+/// reaches the vault at all: `ingest_yaml`'s blank stays blank.
+#[cfg(windows)]
+#[test]
+fn a_feed_saved_on_the_first_try_never_touches_the_vault() {
+    let root = tmp("i1-first-try");
+    let home = root.join("home");
+    let app_data = root.join("appdata");
+    let mut session = PendingSession::new("acc-i1-first-try");
+    let (base, handle) = multi_loopback(vec![
+        (200, r#"{"kind":"lms_ics"}"#), // `create_vault_in`'s own retry, its only attempt, succeeds
+        (200, EMPTY_PULL_PAGE),
+    ]);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let mut plan = base_plan(false);
+    plan.ics_url = Some("https://x.invalid/c.ics".to_string());
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
+    assert!(ingest.contains("ics_url: ''\n"), "a successful save never reaches the vault: {ingest}");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // M2 (fix round 1): the source-text test that used to stand here,
 // `h11a_rolls_the_vault_back_when_the_restore_cannot_read_the_account`, is gone. Its own reasoning
 // still holds — `sync::restore_into` computes its allowlist from `note_paths(dest)` in the same
@@ -651,15 +813,14 @@ fn a_webcal_personal_calendar_is_rewritten_to_https() {
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
-    // C3' Task 11: `create_vault_in` requires a session to reach here at all, so the vault's own
-    // copy of the address is masked to `cloud:personal` (H11b) — exactly
-    // `a_vault_with_an_account_carries_no_capability_url`'s case, reached through the real wizard
-    // path rather than `VaultPlan` directly. The rewrite itself is still proved, against the one
-    // implementation (`lms_link::https_from_webcal`) `normalize_personal_calendar` calls.
-    assert_eq!(knowlu::lms_link::https_from_webcal(raw.trim()), "https://x.invalid/y.ics");
+    // Task 11 review, M2 (fixed with I1's retry-then-fallback landing): `PendingSession::new` points
+    // `KNOWLU_API_BASE` at a closed loopback, so `create_vault_in`'s own retry of the account save
+    // fails exactly as an unreachable service would, and the fallback writes the rewritten address
+    // into the vault — `create_vault_in` itself is what this test now exercises end to end, not
+    // `https_from_webcal` called a second time beside it.
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
     assert!(
-        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'cloud:personal'\n"),
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
         "{ingest}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -695,12 +856,12 @@ fn a_padded_personal_calendar_is_trimmed() {
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
-    // C3' Task 11: same masking as the webcal case above — the trim is still proved directly, and
-    // the vault's own copy is `cloud:personal` because this path always has an account.
-    assert_eq!(knowlu::lms_link::https_from_webcal(raw.trim()), "https://x.invalid/y.ics");
+    // Task 11 review, M2: same fix as the webcal case above — the closed loopback fails the retry
+    // too, so the fallback writes the trimmed address into the vault and `create_vault_in` is what
+    // this test exercises, end to end.
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
     assert!(
-        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'cloud:personal'\n"),
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
         "{ingest}"
     );
     let _ = std::fs::remove_dir_all(&root);
