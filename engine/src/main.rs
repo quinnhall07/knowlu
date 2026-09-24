@@ -387,9 +387,11 @@ fn main() -> ExitCode {
                     eprintln!("knowlu-engine: sync status could not be saved ({e})");
                 }
             }
-            // Fix round 1, M3: every other cloud-step skip a student can meet reaches the Runs view
-            // through `state/runner-log.md` — `coursework::main`'s own routine skips append exactly
-            // this way, with a routine `ok` status, because a skip is not a failure.
+            // Fix round 1, M3: the skip is written to `state/runner-log.md`, as `coursework::main`'s
+            // own routine skips are, with a routine `ok` status, because a skip is not a failure.
+            // (Task 8 re-review N2: that log is NOT the console's Runs view, which is built from run
+            // records; there the gated step still shows its exit code, 0. The sync line shows
+            // `sync`'s own skip, through `record_gated_skip` above.)
             let _ = cli::append_run_log(vault, "local", "ok", &line, None);
             println!("{line}");
             return ExitCode::SUCCESS;

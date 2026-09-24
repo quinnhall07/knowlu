@@ -105,10 +105,12 @@ pub mod cloudmodel;
 // `agent:knowlu.enrich`, log. The cloud routine's step 3, run locally, so that step starves.
 pub mod enrich;
 
-// Knowlu C3 — journal sync (cloud design §5.5). Every record this device writes goes up sealed with
-// a key that lives only in this machine's Credential Manager; every record another device of the
-// same account wrote comes down and is applied through `write`. Transport, never judgment: `rank`
-// does not reach it, and `sync` always exits 0.
+// Knowlu C3′ — journal sync (cloud design §5.5, as amended 2026-09-17). Every record this device
+// writes, and the text of every note that changed, goes up to the account's own copy as it is —
+// readable by our service, encrypted at rest, and said so on the privacy page (there is no
+// device-held key); every record another desktop of the same account wrote comes down and is
+// applied through `write`. Transport, never judgment: `rank` does not reach it, and `sync` always
+// exits 0.
 pub mod sync;
 // Knowlu C3′ — the entitlement gate (cloud design, amendment 2026-09-17, ruling 3). The app caches
 // `GET /entitlement` with a 72-hour grace; past it, the four cloud slot steps refuse to run and say
