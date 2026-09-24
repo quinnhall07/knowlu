@@ -165,13 +165,54 @@ pub fn refresh_sync(cs: &ConsoleState) {
     *cs.sync.lock().unwrap_or_else(|e| e.into_inner()) = s;
 }
 
+/// **The session is refreshed first** (C3′ final review, C1; R-C3′-exec-43). The engine only ever
+/// READS the access token (`cloudmodel::session_token`: "Refresh is C1's job"), and the token lives
+/// an hour, so a sync that merely handed over whatever Credential Manager held met a 401 on most
+/// clicks — "signed out" on a signed-in, paying student's machine. `account::valid_access_token_at`
+/// is the app's one refresh: it costs no round trip while more than two minutes remain.
+///
+/// `None` when there is nothing to refresh — no account (the engine says "no account") or no stored
+/// session at all (the engine says "no session") — and when the refresh succeeded or was not needed.
+/// `Some(why)` only when there IS a session and it could not be refreshed. The sync still runs then:
+/// a token with a minute left still works, and when it does not, the engine's own answer ("signed
+/// out", "offline: …") is what the page shows. What this adds is the refresh's own cause, named in
+/// the status's lines rather than swallowed. The cloud.yaml error is a fixed sentence because its
+/// own message carries the vault's path, which no sync line ever does.
+fn refresh_session(vault: &Path) -> Option<String> {
+    if !knowlu_engine::sync::is_configured(vault) {
+        return None;
+    }
+    let Ok(cfg) = crate::account::cloud_config(vault) else {
+        return Some("the app could not read config/cloud.yaml".to_string());
+    };
+    crate::account::load_session(&cfg.session_credential_target).ok()?;
+    let auth = match crate::account::auth_base(&cfg.api_base) {
+        Ok(a) => a,
+        Err(e) => return Some(e),
+    };
+    let now = jiff::Timestamp::now().as_second();
+    crate::account::valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now).err()
+}
+
+/// The engine's sync, after [`refresh_session`], with a failed refresh named as the first line.
+/// Shared by *Sync now* and the quit push; the caller holds `vault_io`.
+fn sync_with_a_fresh_session(vault: &Path, direction: knowlu_engine::sync::Direction) -> (Vec<String>, knowlu_engine::sync::Totals) {
+    let refresh = refresh_session(vault);
+    let (_, mut lines, totals) = knowlu_engine::sync::run_lines_with(vault, direction, "dashboard", None);
+    if let Some(why) = refresh {
+        lines.insert(0, format!("sync: the session could not be refreshed ({why})"));
+    }
+    (lines, totals)
+}
+
 /// Runs the engine's sync in-process and records what it did. **Takes `vault_io`, never `lock`**:
 /// a pull writes notes and can file a card, so it must not run under the console's read lock, and
-/// `commands::sync_inner` takes `lock` only afterwards to rebuild `state`.
+/// `commands::sync_inner` takes `lock` only afterwards to rebuild `state`. The session is refreshed
+/// first ([`refresh_session`]).
 pub fn run_sync(cs: &ConsoleState) -> knowlu_engine::sync::SyncStatus {
-    let (_, lines, totals) = {
+    let (lines, totals) = {
         let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
-        knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Both, "dashboard", None)
+        sync_with_a_fresh_session(&cs.vault, knowlu_engine::sync::Direction::Both)
     };
     let status = knowlu_engine::sync::SyncStatus::of(&totals, lines);
     *cs.sync.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
@@ -261,8 +302,8 @@ pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce
             // deck they never saw change.
             if knowlu_engine::sync::is_configured(&cs.vault) {
                 let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
-                let (_, _, totals) =
-                    knowlu_engine::sync::run_lines_with(&cs.vault, knowlu_engine::sync::Direction::Push, "dashboard", None);
+                // C1 (final review): refreshed first, like *Sync now* — see `refresh_session`.
+                let (_, totals) = sync_with_a_fresh_session(&cs.vault, knowlu_engine::sync::Direction::Push);
                 // Fix round 1, review M4: a skip (signed out, no entitlement) is not a completed
                 // push either. `QuitFlush`'s own contract is "this completed, never this was
                 // attempted" — `errors.is_empty()` alone reads a skip as success, since a skip
