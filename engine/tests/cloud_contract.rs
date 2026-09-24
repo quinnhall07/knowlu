@@ -689,12 +689,62 @@ fn the_calendar_fetch_is_a_get_that_names_the_feed_and_no_address() {
     );
     let mut server = loopback(vec![(200, body)]);
     let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
-    let got = knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    let (got, series) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
     assert!(got.contains("BEGIN:VEVENT"));
+    assert_eq!(series, None, "no series field in the reply must parse to None");
     let sent = server.requests().remove(0);
-    assert!(sent.starts_with("GET /functions/v1/ingest-calendar?name=google HTTP/1.1"), "{sent}");
+    assert!(
+        sent.starts_with("GET /functions/v1/ingest-calendar?name=google&accepts=series HTTP/1.1"),
+        "{sent}"
+    );
     // The device does not know the secret address any more and must not be able to name one.
     assert!(!sent.contains("ics_url") && !sent.contains("calendar_ics"), "{sent}");
+}
+
+/// §4.3 "new engine, old function": a reply with no `series` field — every reply until the
+/// function ships §4.1 — must parse to `None`, not an empty object or a default value that would
+/// read as "the account has no series" when the truth is "the server never said".
+#[test]
+fn a_calendar_reply_without_series_parses_to_none() {
+    let body = knowlu_engine::ledger::dumps_value(
+        &serde_json::json!({ "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "source": "google_calendar" }),
+    );
+    let server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (_, series) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    assert_eq!(series, None);
+}
+
+/// The §4.1 example reply, verbatim: the function hands the whole `series` object back untouched
+/// — parsing and normalising it is `commitments::refresh_series`'s job (P16), not this one's.
+#[test]
+fn a_calendar_reply_with_series_returns_it() {
+    let series = serde_json::json!({
+        "calendars_read": ["google:3b9e0c1d2a4f5e60"],
+        "items": [{
+            "calendar": "google:3b9e0c1d2a4f5e60",
+            "id": "4k2q9x7m1abc",
+            "title": "CS 100",
+            "location": "",
+            "description": "Room 101",
+            "event_type": "default",
+            "first": "2026-08-19T12:00:00-05:00",
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+            "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]
+        }]
+    });
+    let body = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+        "source": "google_calendar",
+        "series": series
+    }));
+    let server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (_, got) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    assert_eq!(got, Some(series));
 }
 
 /// `rank` never calls a model (decision 11), and after hand-off H4 that is a property of the

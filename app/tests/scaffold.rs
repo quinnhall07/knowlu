@@ -99,6 +99,7 @@ fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
     let fetchers = knowlu_engine::cli::Fetchers {
         calendar: Some(&no_net as &dyn Fn(&str) -> Result<String, String>),
         events: Some(&no_net as &dyn Fn(&str) -> Result<String, String>),
+        ..Default::default()
     };
     let out = knowlu_engine::cli::run_with(&v, Some("2026-09-07"), "local", None, fetchers).expect("rank runs");
     assert!(out.output.is_file(), "state/today.md was written");

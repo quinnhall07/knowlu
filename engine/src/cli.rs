@@ -14,6 +14,8 @@
 //! by construction and a test pins it that way; it stays in the outcome (and `rank` still prints
 //! it when non-empty) so that a step removed from this function can only ever be removed loudly.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use jiff::civil::{Date, DateTime};
@@ -216,8 +218,29 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
     counts.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).unwrap_or(0)
 }
 
-/// The two network reads a run performs, replaceable so a test can drive the **whole** run offline
-/// against a scripted feed.
+/// One calendar feed's raw series material, stashed by the closure that fetched it (spec §4.2),
+/// keyed by the feed's **URL** exactly as the calendar closure received it (`cloud:google`, or a
+/// direct `https://` address) — the same string `calfeed::calendar_entries` hands back, so P16's
+/// `commitments::refresh_series` can match a stash entry to its `config/ingest.yaml` row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StashEntry {
+    /// `/ingest-calendar`'s `series` field, verbatim, for `cloud:google` (§4.1) — normalised
+    /// directly, with no ICS round trip.
+    Google(serde_json::Value),
+    /// The ICS text of any other feed the closure fetched — a direct address, `cloud:personal`
+    /// (which the function never sends series for), or `cloud:google` against a server that
+    /// predates §4.1 (`series` absent). `calfeed::weekly_series` derives series from this text.
+    Ics(String),
+}
+
+/// One run's series material, gathered while `Fetchers.calendar` runs and read afterward by P16's
+/// `commitments::refresh_series` — never written to or read from inside the calendar closure
+/// itself except to insert. A `RefCell` because the closure `run` hands to `run_with` is a shared
+/// `&dyn Fn`, not a `FnMut`.
+pub type SeriesStash = RefCell<BTreeMap<String, StashEntry>>;
+
+/// The three network reads a run performs, replaceable so a test can drive the **whole** run
+/// offline against a scripted feed.
 ///
 /// Python's `test_cli.py` monkeypatches `calfeed.fetch_ics` and `eventfeed.fetch_event_source`
 /// as module globals; `calfeed` and `eventfeed` already carry this seam one level down, and
@@ -225,12 +248,58 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
 /// `events` closure that tries the service first and falls back to `eventfeed::fetch_event_source`,
 /// and a `calendar` closure that routes a `cloud:<name>` url to the service and everything else to
 /// `calfeed::fetch_ics`. Only tests construct a bare `Fetchers` directly, and several of those pass
-/// `Fetchers::default()`, which leaves both closures at `None` — the on-device fallbacks `calfeed`
-/// and `eventfeed` would have used anyway.
+/// `Fetchers::default()`, which leaves every field at `None` — the on-device fallbacks `calfeed`
+/// and `eventfeed` would have used anyway, and no series stash.
+///
+/// `series` is explicit rather than folded into the `calendar` closure's own state (plan review
+/// I8): `run_with`'s callers hand it a `&SeriesStash` so a test can inspect what the closure
+/// stashed, or inject series ahead of time, with no network at all.
 #[derive(Default, Clone, Copy)]
 pub struct Fetchers<'a> {
     pub calendar: Option<&'a dyn Fn(&str) -> Result<String, String>>,
     pub events: Option<&'a dyn Fn(&str) -> Result<String, String>>,
+    pub series: Option<&'a SeriesStash>,
+}
+
+/// Builds the real `calendar` closure `run` hands to `run_with` — pulled out of `run` itself so a
+/// test can drive it directly against a loopback service or a loopback feed, with no vault and no
+/// `run_with` call at all.
+///
+/// A `cloud:<name>` url routes to `cloudmodel::fetch_calendar`. For `name == "google"` the reply's
+/// `series` is stashed as `StashEntry::Google` **only when the reply carried one** — an old server
+/// (§4.3) leaves that feed's stash untouched, exactly as if this run had never asked. Every other
+/// successfully fetched feed — a direct address, or a `cloud:`-routed feed the function sends no
+/// series for — stashes its ICS text as `StashEntry::Ics` instead. A failed fetch stashes nothing,
+/// under either branch. The closure's own `Fn(&str) -> Result<String, String>` shape is unchanged,
+/// so `calfeed::load_calendar_events` and every oracle test are untouched (spec §4.2).
+fn calendar_fetcher<'a>(
+    cloud: &'a Option<crate::cloudmodel::CloudClient>,
+    stash: &'a SeriesStash,
+) -> impl Fn(&str) -> Result<String, String> + 'a {
+    move |url: &str| -> Result<String, String> {
+        match (url.strip_prefix("cloud:"), cloud) {
+            (Some(name), Some(client)) => {
+                let (ics, series) = crate::cloudmodel::fetch_calendar(client, name)?;
+                match series {
+                    Some(series) if name == "google" => {
+                        stash.borrow_mut().insert(url.to_string(), StashEntry::Google(series));
+                    }
+                    _ => {
+                        stash.borrow_mut().insert(url.to_string(), StashEntry::Ics(ics.clone()));
+                    }
+                }
+                Ok(ics)
+            }
+            // A `cloud:` feed on a vault with no account is not an error worth failing a run for:
+            // `load_calendar_events` turns this into "using snapshot" and the day still ranks.
+            (Some(_), None) => Err("no account on this vault".to_string()),
+            (None, _) => {
+                let ics = crate::calfeed::fetch_ics(url)?;
+                stash.borrow_mut().insert(url.to_string(), StashEntry::Ics(ics.clone()));
+                Ok(ics)
+            }
+        }
+    }
 }
 
 /// Rank, run the passes, and write `state/today.md`.
@@ -261,22 +330,16 @@ pub fn run(
     // iCal address, rendered as ICS. Every other url is fetched on the device exactly as before,
     // so the `calendar_ics` secret-address path keeps working with no account at all. `calfeed`
     // then parses, bounds to its 28-day horizon, dedups and snapshots it like any other feed:
-    // there is no second parser and no new vault file.
-    let calendar = |url: &str| -> Result<String, String> {
-        match (url.strip_prefix("cloud:"), &cloud) {
-            (Some(name), Some(client)) => crate::cloudmodel::fetch_calendar(client, name),
-            // A `cloud:` feed on a vault with no account is not an error worth failing a run for:
-            // `load_calendar_events` turns this into "using snapshot" and the day still ranks.
-            (Some(_), None) => Err("no account on this vault".to_string()),
-            (None, _) => crate::calfeed::fetch_ics(url),
-        }
-    };
+    // there is no second parser and no new vault file. `run` owns the one stash the closure fills
+    // (spec §4.2); P16's `commitments::refresh_series` reads it after `load_calendar_events` runs.
+    let stash: SeriesStash = RefCell::new(BTreeMap::new());
+    let calendar = calendar_fetcher(&cloud, &stash);
     run_with(
         vault,
         today_iso,
         runner,
         run_id,
-        Fetchers { calendar: Some(&calendar), events: Some(&events) },
+        Fetchers { calendar: Some(&calendar), events: Some(&events), series: Some(&stash) },
     )
 }
 
@@ -1388,7 +1451,7 @@ calendars:
             "---\ntitle: Test task\ndue: 2026-09-25\neffort_hours: 2\nimportance: 3\n---\n",
         )
         .unwrap();
-        let fetchers = Fetchers { calendar: Some(&fetch), events: None };
+        let fetchers = Fetchers { calendar: Some(&fetch), events: None, series: None };
         run_with(&vault, Some("2026-09-07"), "manual", None, fetchers).unwrap();
         let out = page(&vault);
         assert!(out.contains("- 09:00\u{2013}09:30 Client call"), "{out}");
@@ -1422,7 +1485,7 @@ calendars:
         )
         .unwrap();
         let boom = |_: &str| Err("tunnel closed".to_string());
-        let fetchers = Fetchers { calendar: Some(&boom), events: None };
+        let fetchers = Fetchers { calendar: Some(&boom), events: None, series: None };
         run_with(&vault, Some("2026-09-07"), "local", None, fetchers).unwrap();
         let out = page(&vault);
         assert!(out.contains("- 09:00\u{2013}09:30 Client call"), "{out}"); // snapshot kept the event
@@ -1588,7 +1651,7 @@ Bring questions.
         pending_proposals(&vault, 14);
         let ics = judged_feed(&vault, 2);
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
         assert_eq!(digest_uids(&vault), vec!["ics:ev-0".to_string()]);
         let _ = std::fs::remove_dir_all(&vault);
@@ -1608,7 +1671,7 @@ Bring questions.
         pending_proposals(&vault, 5);
         let ics = judged_feed(&vault, 1);
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         // Sorted by (expires, stem) with all five sharing one expiry date, the allowance of 3
@@ -1684,7 +1747,7 @@ Bring questions.
         }
         let ics = format!("BEGIN:VCALENDAR\n{}\nEND:VCALENDAR\n", blocks.join("\n"));
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         // remaining budget = 15 - 5 Gmail proposals = 10; exactly 10 of the 11 eligible events
@@ -1718,7 +1781,7 @@ Bring questions.
         )
         .unwrap();
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         let cards = md_names(&vault.join("approvals"), "event-check-");
@@ -1733,7 +1796,7 @@ Bring questions.
         assert!(md_names(&vault.join("approvals"), "events-digest-").is_empty());
 
         // The next run asks nothing new and still counts the card pending.
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
         assert_eq!(md_names(&vault.join("approvals"), "event-check-").len(), 1);
         let recs = run_records(&vault);
@@ -1781,7 +1844,7 @@ Bring questions.
         )
         .unwrap();
         let fetch = |_: &str| Ok(feed.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         let seen = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
@@ -1962,5 +2025,153 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
             .collect();
         assert!(external.is_empty(), "{external:?}");
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- the series stash (P14, spec §4.2) ----------------------------------------------------
+
+    /// A one-shot loopback HTTP server (CLAUDE.md's loopback-only rule; mirrors
+    /// `cloud_contract.rs`'s `loopback`, kept local since these tests read no header or request
+    /// line — only `calendar_fetcher`'s own return value and what it left in the stash). Answers
+    /// exactly one request, at 200, with `body`; hands back the bare `http://127.0.0.1:<port>`
+    /// base and the server thread's handle, so a test can join it and see a panic if the read or
+    /// write ever failed.
+    fn loopback_once(body: String) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (stream, _) = listener.accept().expect("accept the one connection");
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone the stream"));
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap_or(0);
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let mut stream = reader.into_inner();
+            let response = format!(
+                "HTTP/1.1 200 X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write the response");
+            stream.flush().expect("flush the response");
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    fn cloud_config(api_base: String) -> crate::cloudmodel::CloudConfig {
+        crate::cloudmodel::CloudConfig {
+            api_base,
+            anon_key: "anon-not-a-secret".to_string(),
+            session_credential_target: "knowlu/test-profile/session".to_string(),
+            account_id: "acct-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn fetchers_default_has_no_calendar_events_or_series() {
+        let fetchers = Fetchers::default();
+        assert!(fetchers.calendar.is_none());
+        assert!(fetchers.events.is_none());
+        assert!(fetchers.series.is_none());
+    }
+
+    #[test]
+    fn the_calendar_closure_stashes_google_series_by_url() {
+        let series = serde_json::json!({
+            "calendars_read": ["google:3b9e0c1d2a4f5e60"],
+            "items": [{
+                "calendar": "google:3b9e0c1d2a4f5e60",
+                "id": "4k2q9x7m1abc",
+                "title": "CS 100",
+                "location": "",
+                "description": "Room 101",
+                "event_type": "default",
+                "first": "2026-08-19T12:00:00-05:00",
+                "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+                "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]
+            }]
+        });
+        let ics = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "google_calendar", "series": series }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:google").expect("the service answered");
+        assert!(got.contains("BEGIN:VCALENDAR"), "{got}");
+        match stash.borrow().get("cloud:google") {
+            Some(StashEntry::Google(value)) => assert_eq!(value, &series),
+            other => panic!("expected a stashed Google series at \"cloud:google\", got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// `cloud:personal` gets no `series` field (spec §4.1) — same branch as an old server: the
+    /// closure falls back to stashing the ICS text under the feed's own url rather than leaving
+    /// the stash empty, so a later refresh still has ICS text to derive series from.
+    #[test]
+    fn the_calendar_closure_stashes_ics_text_for_a_cloud_feed_with_no_series() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:p1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "personal_ics" }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:personal").expect("the service answered");
+        assert_eq!(got, ics);
+        match stash.borrow().get("cloud:personal") {
+            Some(StashEntry::Ics(text)) => assert_eq!(text, ics),
+            other => panic!("expected stashed ICS text at \"cloud:personal\", got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    #[test]
+    fn the_calendar_closure_stashes_ics_text_for_a_direct_feed() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:d1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".to_string();
+        let (base, handle) = loopback_once(ics.clone());
+        let cloud: Option<crate::cloudmodel::CloudClient> = None;
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let url = format!("{base}/cal.ics");
+        let got = fetch(&url).expect("the feed answered");
+        assert_eq!(got, ics);
+        match stash.borrow().get(&url) {
+            Some(StashEntry::Ics(text)) => assert_eq!(text, &ics),
+            other => panic!("expected stashed ICS text at {url:?}, got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// Two failing branches, neither of which touches the stash: a direct feed whose scheme
+    /// `calfeed::fetch_ics` cannot even parse a connector for, and a `cloud:` feed on a vault with
+    /// no account (`cloud: None`) — the "no account on this vault" arm `run`'s own closure takes
+    /// on a vault that has never signed in.
+    #[test]
+    fn a_failed_fetch_stashes_nothing() {
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let cloud: Option<crate::cloudmodel::CloudClient> = None;
+        let fetch = calendar_fetcher(&cloud, &stash);
+
+        let err = fetch("unreachable://example.test/cal.ics").unwrap_err();
+        assert!(!err.is_empty());
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+
+        let err = fetch("cloud:google").unwrap_err();
+        assert_eq!(err, "no account on this vault");
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
     }
 }
