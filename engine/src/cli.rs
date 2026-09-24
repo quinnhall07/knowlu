@@ -894,6 +894,9 @@ pub fn proposal_json(p: &crate::commitments::Proposal) -> serde_json::Value {
         "from": p.from.map(|d| d.to_string()),
         "until": p.until.map(|d| d.to_string()),
         "source_uid": p.source_uid,
+        // M3 (fix round 1): explicit, so the phase-2 screen can group the window row under "Your
+        // day" without knowing `commitments::WINDOW_PREFIX`.
+        "window": p.is_window(),
     })
 }
 
@@ -963,11 +966,25 @@ pub fn commitments_report_with(
     if config_path.exists() {
         match pystr::read_text(&config_path) {
             Err(err) => warnings.push(format!("config unreadable: {err}")),
-            Ok(text) => {
-                if let Err(err) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
-                    warnings.push(format!("config unreadable: {err}"));
+            Ok(text) => match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
+                Err(err) => warnings.push(format!("config unreadable: {err}")),
+                Ok(config) => {
+                    // M4 (fix round 1): a `calendars:` value that is present and truthy but not a
+                    // list is exactly the shape `calendars_feeds` (private to `calfeed.rs`) still
+                    // iterates without error — a string one character at a time, a mapping one key
+                    // at a time — and `calendar_entries` then filters every one of those out
+                    // silently (`feed.as_mapping()` is `None`), so today's command would otherwise
+                    // report "no proposals, no warnings" for a config it could not use at all.
+                    if let Some(value) = config.get("calendars") {
+                        if pystr::yaml_truthy(value) && value.as_sequence().is_none() {
+                            warnings.push(format!(
+                                "config: calendars is not a list ({}); no feed will be read",
+                                pystr::yaml_type_name(value)
+                            ));
+                        }
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -3224,6 +3241,234 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
             report.warnings
         );
         assert_eq!(changed_paths(&before, &snapshot(&vault)), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M2 (fix round 1): `for_cards: false` is the one behaviour that separates this command's
+    /// proposal list from `rank`'s own card-filing pass — `commitments::proposals`'s
+    /// `office_hours_are_never_filed`/`office_hours_is_proposed_for_the_screen_not_for_cards`
+    /// tests pin the library function; this pins that the command actually passes `false`, since
+    /// flipping it to `true` would still pass every other test in this file.
+    #[test]
+    fn commitments_command_includes_office_hours_because_for_cards_is_false() {
+        let vault = p16_vault("p19officehours");
+        let stash: SeriesStash = RefCell::new(BTreeMap::from([(
+            "cloud:google".to_string(),
+            google_entry(vec![
+                cs100_item(),
+                google_item("cs100oh", "CS 100 Office Hours", &[3], "15:00", "16:00", 8),
+            ]),
+        )]));
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+        assert_eq!(report.proposals.len(), 2, "{:?}", report.proposals);
+        assert!(
+            report
+                .proposals
+                .iter()
+                .any(|p| p.kind == "office-hours" && p.title == "CS 100 Office Hours"),
+            "office hours must be in the command's list even though `rank` would never file a card \
+             for one: {:?}",
+            report.proposals
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M3 (fix round 1): `proposal_json` carries an explicit `"window"` boolean (`Proposal::is_window`)
+    /// rather than making the phase-2 screen infer it from `commitments::WINDOW_PREFIX`.
+    #[test]
+    fn proposal_json_carries_an_explicit_window_flag() {
+        let ordinary = crate::commitments::Proposal {
+            kind: "class".to_string(),
+            level: crate::commitments::Level::Hard,
+            title: "CS 100".to_string(),
+            course: Some("cs-100".to_string()),
+            meets: Vec::new(),
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: "gcal-series:cs100aa".to_string(),
+        };
+        assert_eq!(proposal_json(&ordinary)["window"], serde_json::json!(false));
+
+        let window = crate::commitments::Proposal {
+            kind: crate::commitments::PLANNING_DAY.to_string(),
+            level: crate::commitments::Level::Optional,
+            title: "Your day".to_string(),
+            course: None,
+            meets: Vec::new(),
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: format!("{}mon-wake,tue-wake", crate::commitments::WINDOW_PREFIX),
+        };
+        assert_eq!(proposal_json(&window)["window"], serde_json::json!(true));
+    }
+
+    /// M4 (fix round 1): a `calendars:` value that parses as YAML but is not a list is exactly the
+    /// shape `calendars_feeds` (private to `calfeed.rs`) still "iterates" without error — a string
+    /// one character at a time — and `calendar_entries` then filters every resulting non-mapping
+    /// "feed" out silently, so the command would otherwise answer "no proposals, no warnings" for
+    /// a config it could not use at all.
+    #[test]
+    fn commitments_command_warns_on_a_wrongly_shaped_calendars_value() {
+        let vault = scratch("p19badshape");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        pystr::write_text(
+            &vault.join("config").join("ingest.yaml"),
+            "calendars: \"https://calendar.example.test/personal.ics\"\n",
+        )
+        .unwrap();
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report.proposals.is_empty(), "{:?}", report.proposals);
+        assert!(
+            report.warnings.iter().any(|w| w.starts_with("config: calendars is not a list")),
+            "{:?}",
+            report.warnings
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // A falsy `calendars:` (no feeds intended at all) must stay silent — the same shape
+        // `calendars_feeds` reads as `Ok(None)`, not a config problem.
+        let vault2 = scratch("p19nocalendars");
+        std::fs::create_dir_all(vault2.join("config")).unwrap();
+        pystr::write_text(&vault2.join("config").join("ingest.yaml"), "calendars: null\n").unwrap();
+        let report2 = commitments_report_with(&vault2, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report2.warnings.is_empty(), "{:?}", report2.warnings);
+        let _ = std::fs::remove_dir_all(&vault2);
+    }
+
+    // --- I1 (fix round 1): the runtime trap ------------------------------------------------------
+    //
+    // The lexical scan in `cloud_contract.rs` proves no forbidden substring appears in source
+    // text; this proves something a scan cannot — over one concrete `rank`, against a server that
+    // would happily answer a judgment request too, none is ever sent (spelled out, not written as
+    // the literal endpoint text, so this file itself stays clean of it for that same scan).
+
+    /// A loopback server that answers every request with a valid `/ingest-calendar` reply and
+    /// records the request line it saw (via `tx`), rather than accepting exactly one connection
+    /// and refusing the rest — a stray extra request during the run under test is caught, not left
+    /// to hang a listener that only ever answered once. Stops on a `/__stop__` request, which the
+    /// caller sends itself once the run under test has returned.
+    fn judge_trap_server() -> (String, std::sync::mpsc::Receiver<String>, u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            loop {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone the stream"));
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).unwrap_or(0);
+                    if n == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                let mut stream = reader.into_inner();
+                if request_line.contains("__stop__") {
+                    let body = "{}";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    break;
+                }
+                let _ = tx.send(request_line.trim_end().to_string());
+                let body = crate::ledger::dumps_value(&serde_json::json!({
+                    "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                    "source": "google_calendar",
+                }));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), rx, port, handle)
+    }
+
+    /// I1: a `rank` (`run_with`, the same production function `run` calls) against a vault that
+    /// already carries a confirmed commitment, a series file and a pending `commitment-check` card
+    /// — so `commitment_passes` exercises `approvals::withdraw_stale`, `calfeed`, `weekcal` and
+    /// `commitments::proposals` fully, not just an empty vault's early returns — never sends a
+    /// request to anything but `/ingest-calendar`, even with a server on the other end that would
+    /// happily answer a judgment request instead of refusing it. The assertion below is a
+    /// **whitelist** (every request must be the calendar transport), which is what actually rules
+    /// a judgment request out — a blacklist checked against the literal endpoint text would have
+    /// to write that text into this very file, which the extended `rank_cannot_reach_a_judgment_endpoint`
+    /// scan (I1) then correctly refuses.
+    #[test]
+    fn rank_never_sends_a_request_to_a_judge_endpoint_on_a_vault_with_commitments_series_and_pending_cards() {
+        let vault = scratch("p19trap");
+        for dir in ["config", "tasks", "courses", "approvals"] {
+            std::fs::create_dir_all(vault.join(dir)).unwrap();
+        }
+        let write = |rel: &str, text: &str| pystr::write_text(&vault.join(rel), text).unwrap();
+        write(
+            "config/week_template.yaml",
+            "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        );
+        write(
+            "config/ingest.yaml",
+            "timezone: America/Chicago\ncalendars:\n  - name: google\n    ics_url: 'cloud:google'\n",
+        );
+        write(
+            "courses/cs-100.md",
+            "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n",
+        );
+        // "commitments": CS 100 is already confirmed.
+        commitment_note(&vault, "cs100.md", CS100_NOTE);
+        // "pending cards": a card for a series this run will not fetch.
+        write(
+            "approvals/commitment-check-old-seminar.md",
+            "---\ntype: approval\nkind: commitment-check\ntitle: \"Old Seminar · Tue 3–4pm · a class?\"\n\
+             status: pending\nsource_uid: \"gcal-series:elsewhere\"\nproposed_at: 2026-09-06\n\
+             first_proposed_at: 2026-09-06\nexpires: null\nsnooze_until: null\ncreated_by: agent:commitments\n\
+             ---\n\nInvented.\n",
+        );
+        // "series": the series file, written offline (no network at all) before the trap run.
+        let entries: BTreeMap<String, StashEntry> =
+            BTreeMap::from([("cloud:google".to_string(), google_entry(vec![cs100_item()]))]);
+        let (fresh, _) = normalise_stash(&vault, &entries, &vault_zone(&vault), P16_MONDAY);
+        let (_file, _warn) = crate::commitments::refresh_series(&vault, &fresh, P16_MONDAY);
+        assert!(vault.join("state").join("calendar-series.json").is_file());
+
+        // The runtime trap: a real round trip through the same `calendar_fetcher` `rank` itself
+        // builds, against a server that would answer any path at all rather than refuse one.
+        let (base, rx, port, handle) = judge_trap_server();
+        let cloud = Some(crate::cloudmodel::CloudClient::new(&cloud_config(base), "jwt-not-a-secret"));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let fetchers = Fetchers { calendar: Some(&fetch), events: None, series: Some(&stash) };
+        run_with(&vault, Some(&P16_MONDAY.to_string()), "manual", None, fetchers)
+            .expect("a vault this shaped must still rank");
+
+        // Tell the server to stop, then check what it actually saw.
+        {
+            use std::io::Write;
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                let _ = write!(s, "GET /__stop__ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            }
+        }
+        handle.join().expect("the loopback thread did not panic");
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(!requests.is_empty(), "the calendar fetch must have reached the loopback server");
+        for r in &requests {
+            // A whitelist, not a blacklist against the literal endpoint text (see the doc comment
+            // above): every request this run made was the calendar transport and nothing else.
+            assert!(r.contains("/ingest-calendar"), "unexpected request, not the calendar transport: {r}");
+        }
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
