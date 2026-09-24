@@ -1502,6 +1502,10 @@
               // written to the DOM straight from inside a click handler).
               busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
+              // Task 11 re-review N1 (R-C3'-exec-41): what the paste or capture said about the link it
+              // checked — `{ url, stored }` when it validated, `null` when it was refused. `feedFlags`
+              // turns it into the plan's per-feed flags at Finish, for the value the field holds then.
+              icsFeed: null, calFeed: null,
               // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
               // `renderWizard()` like every other wizard field — a direct DOM write from inside
               // the click handler was invisible to it and got wiped by the next render a Back, a
@@ -1864,7 +1868,10 @@
     return invoke("google_connected").then(function (status) {
       return (status && status.ok) ? status.calendar === true : WIZ.google;
     }).catch(function () { return WIZ.google; }).then(function (googleCalendar) {
+      var icsFlags = feedFlags(WIZ.icsFeed, WIZ.ics), calFlags = feedFlags(WIZ.calFeed, WIZ.cal);
       var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
+                   ics_validated: icsFlags.validated, ics_stored: icsFlags.stored,
+                   personal_calendar_validated: calFlags.validated, personal_calendar_stored: calFlags.stored,
                    google_calendar: googleCalendar,
                    timezone: WIZ.tz, slots: WIZ.slots,
                    zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
@@ -2038,9 +2045,11 @@
       invoke("capture_calendar_link", { unitid: WIZ.campus.unitid }).then(function (c) {
         if (c.ok && c.link) {
           WIZ.ics = c.link.url;
+          WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };
           WIZ.icsNote = feedSummary(c.link);
-          // `note` is the one thing `PUT /account/sources` could not do. The link is saved on this
-          // machine either way, so it is a sentence beside the count, not a failure.
+          // `note` is the one thing `PUT /account/sources` could not do. Finish tries that save again
+          // and keeps the link on this machine if it still can't, so it is a sentence beside the
+          // count, not a failure.
           if (c.note) { WIZ.icsNote += " " + c.note; }
         } else {
           WIZ.icsNote = (c.error || "No link found") + " — paste it below instead.";
@@ -2067,12 +2076,21 @@
     WIZ.ics = EL("wiz-ics").value.trim();
     if (!WIZ.ics) { WIZ.icsNote = ""; renderWizard(); return; }
     // The pasted path validates exactly as the captured one does — same command, same sentence.
-    invoke("paste_calendar_link", { kind: "lms_ics", url: WIZ.ics }).then(function (r) {
+    var sent = WIZ.ics;
+    invoke("paste_calendar_link", { kind: "lms_ics", url: sent }).then(function (r) {
+      WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
       WIZ.icsNote = r.ok ? feedSummary(r.link) : r.error;
       if (r.ok && r.note) { WIZ.icsNote += " " + r.note; }
       renderWizard();
     }).catch(function () {});
   });
+  /// Task 11 re-review N1 (R-C3'-exec-41): the plan's two flags for one feed, true only for the
+  /// value the field holds NOW. A link typed over after its check is neither validated nor stored,
+  /// so Finish never sends it to the account (`onboarding::create_vault_in` keeps it in the vault).
+  function feedFlags(feed, value) {
+    var same = !!(feed && value && feed.url === value);
+    return { validated: same, stored: same && feed.stored === true };
+  }
   /// One row per enrolled course, removable (Task 14b, I2: the capture is unfiltered — past terms,
   /// organisations and TA roles come back with the rest, and the student is the only one who can say
   /// which are this semester's). The vault identifier is made in Rust at Finish, from the code; the
@@ -2123,7 +2141,9 @@
   EL("wiz-cal-ics").addEventListener("change", function () {
     WIZ.cal = EL("wiz-cal-ics").value.trim();
     if (!WIZ.cal) { WIZ.calNote = ""; renderWizard(); return; }
-    invoke("paste_calendar_link", { kind: "calendar_ics", url: WIZ.cal }).then(function (r) {
+    var sent = WIZ.cal;
+    invoke("paste_calendar_link", { kind: "calendar_ics", url: sent }).then(function (r) {
+      WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
       // Zero is a connection, not a failure: an address that fetches and holds nothing is somebody
       // who has not put anything in their calendar yet (`validate_for`).
       WIZ.calNote = !r.ok ? r.error

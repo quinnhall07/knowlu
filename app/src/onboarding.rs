@@ -430,9 +430,23 @@ pub fn refresh(app: &tauri::AppHandle, root: &Path) {
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardPlan {
     pub ics_url: Option<String>,
+    /// **What the paste or capture already did with `ics_url`** (Task 11 re-review N1,
+    /// R-C3'-exec-41): `validated` — it is the link `lms_link::finish_with` accepted; `stored` — and
+    /// the account holds it now. `create_vault_in` retries only a validated feed that is not stored,
+    /// and never sends an unvalidated one to the account. `#[serde(default)]`: a page that predates
+    /// the flags reads as "not validated", so its links stay on this machine and are never sent.
+    #[serde(default)]
+    pub ics_validated: bool,
+    #[serde(default)]
+    pub ics_stored: bool,
     /// The personal calendar's secret iCal address (spec §11a). Same panel as the school feed, and
     /// the same treatment: validated on the device, stored on the account, written into the vault.
     pub personal_calendar: Option<String>,
+    /// The same two flags as `ics_validated`/`ics_stored`, for `personal_calendar`.
+    #[serde(default)]
+    pub personal_calendar_validated: bool,
+    #[serde(default)]
+    pub personal_calendar_stored: bool,
     /// Did the student connect a Google calendar on panel 5 (§11a)? A flag, not a URL: the grant
     /// lives on the account and the vault only needs to know the feed exists. `#[serde(default)]`
     /// so a page that predates C2 still deserialises.
@@ -668,16 +682,28 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     // **Task 11 review, I1 (R-C3'-exec-40).** `lms_link::finish`'s own save, at paste or capture
     // time, is a `note` the panel never blocks on — so a save that failed there used to leave the
     // feed in neither the account nor the vault, because `scaffold::ingest_yaml` above had already
-    // blanked the vault's own copy on the strength of an account it never reached. Retry each pasted
+    // blanked the vault's own copy on the strength of an account it never reached. Retry a pasted
     // feed once more here, under the session `move_session` just attached to this profile; a feed
     // that still cannot be saved is written into the vault instead (`restore_capability_url`), so it
     // is never silently lost. A vault with no account has nothing to retry — `ingest_yaml` never
     // blanked anything for it.
+    //
+    // **Only a feed the paste validated and could not store is retried** (Task 11 re-review N1,
+    // R-C3'-exec-41; the plan's per-feed flags). One the account already holds is left alone — a
+    // second save could only fail transiently and put it in the vault too, or hold Finish up. One the
+    // paste REJECTED is never sent to the account, where it would replace a validated link; it is
+    // kept in the vault, as a vault with no account keeps any link.
     if !vp.account_id.is_empty() {
         let target = crate::account::session_target(&profile_id);
-        for (kind, url) in [("lms_ics", vp.ics_url.as_deref()), ("calendar_ics", vp.personal_calendar.as_deref())] {
+        let feeds = [
+            ("lms_ics", vp.ics_url.as_deref(), plan.ics_validated, plan.ics_stored),
+            ("calendar_ics", vp.personal_calendar.as_deref(), plan.personal_calendar_validated, plan.personal_calendar_stored),
+        ];
+        for (kind, url, validated, stored) in feeds {
             let Some(url) = url else { continue };
-            if crate::lms_link::store_source(&vp.api_base, &target, kind, url).is_err() {
+            if validated && stored { continue }
+            let saved = validated && crate::lms_link::store_source(&vp.api_base, &target, kind, url).is_ok();
+            if !saved {
                 if let Err(e) = crate::scaffold::restore_capability_url(&dest, kind, url) {
                     let _ = std::fs::remove_dir_all(&dest);
                     return json!({ "ok": false, "error": e, "profile": Value::Null });

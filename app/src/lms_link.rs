@@ -373,7 +373,7 @@ pub fn cookie_url(window_url: Option<&str>, feed: &str) -> String {
 /// reading `kind` or `note` must never find `undefined` on the paths where it is telling the student
 /// something went wrong. A capture is always a school feed, so the kind is not in doubt.
 fn capture_failed(error: impl std::fmt::Display) -> Value {
-    json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null })
+    json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null, "stored": false })
 }
 
 /// **One agent, one shape, for both captures** (the calendar link, and Task 14b's course list).
@@ -595,7 +595,9 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
 ///
 /// **A failure here does not fail the panel, and it is not final** (Task 11 review, I1;
 /// `R-C3'-exec-40`). `onboarding::create_vault_in` retries this same call once more at Finish, under
-/// the session it has just moved onto the new profile; only if that retry also fails does the vault
+/// the session it has just moved onto the new profile — for a feed that validated and did not land
+/// (its `stored` flag, [`finish_with`], R-C3'-exec-41), never for one that did or one that was
+/// rejected; only if that retry also fails does the vault
 /// gain a local copy of the URL (`scaffold::restore_capability_url`), exactly as it did before this
 /// task, so the feed is never silently lost. The wizard is not the place to relitigate a subscription
 /// either way, so a 402 becomes one sentence beside the link and everything else becomes a quieter
@@ -623,7 +625,9 @@ pub fn put_source_at(api_base: &str, token: &str, kind: &str, url: &str) -> Resu
     let _ = res.body_mut().with_config().limit(1 << 16).read_to_string();
     match status {
         200..=299 => Ok(()),
-        402 => Err("finish subscribing first — Knowlu will try again when you finish setup, and keeps the link on this machine until it reaches your account".to_string()),
+        // Task 11 re-review N2 (R-C3'-exec-41): nothing moves a link the vault kept into the account
+        // later, so this says what the other refusal below says rather than promise that it will.
+        402 => Err("finish subscribing first — Knowlu will try again when you finish setup, and keeps it on this machine if it still can't".to_string()),
         other => Err(format!("we could not save your calendar link to your account yet ({other}) — Knowlu will try again when you finish setup, and keeps it on this machine if it still can't")),
     }
 }
@@ -674,17 +678,37 @@ pub fn validate_for(
 /// returns a `webcal://` link is covered by the same line, and the link that reaches the vault and
 /// `PUT /account/sources` is the `https://` one either way.
 fn finish(kind: &str, url: &str) -> Value {
+    finish_with(kind, url, &|u| knowlu_engine::calfeed::fetch_ics(u), &|kind, url| {
+        store_source(&crate::account::api_base(), crate::account::PENDING_TARGET, kind, url)
+    })
+}
+
+/// [`finish`], with the fetch and the account save handed in — the seam a test drives without a
+/// network or a session.
+///
+/// **`stored` says whether the account now holds the link** (Task 11 re-review N1,
+/// R-C3'-exec-41). The page carries it into the plan per feed, and `onboarding::create_vault_in`
+/// retries at Finish only a feed that validated here and did not land: a second, needless save of a
+/// link the account already holds could only fail transiently and put the link in the vault too.
+/// **Only a link that passed validation is ever sent**: a rejected one returns before `store` is
+/// called, here and — because its flag says so — at Finish.
+pub fn finish_with(
+    kind: &str,
+    url: &str,
+    fetch: &dyn Fn(&str) -> Result<String, String>,
+    store: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Value {
     let url = &https_from_webcal(url);
-    match validate_for(kind, url, &|u| knowlu_engine::calfeed::fetch_ics(u)) {
+    match validate_for(kind, url, fetch) {
         Ok(link) => {
             // The account copy. A failure is a `note`, never an `error`: the panel goes on.
-            let note = match store_source(&crate::account::api_base(), crate::account::PENDING_TARGET, kind, &link.url) {
-                Ok(()) => Value::Null,
-                Err(e) => json!(e),
+            let (stored, note) = match store(kind, &link.url) {
+                Ok(()) => (true, Value::Null),
+                Err(e) => (false, json!(e)),
             };
-            json!({ "ok": true, "error": Value::Null, "kind": kind, "link": link, "note": note })
+            json!({ "ok": true, "error": Value::Null, "kind": kind, "link": link, "note": note, "stored": stored })
         }
-        Err(e) => json!({ "ok": false, "error": e.to_string(), "kind": kind, "link": Value::Null, "note": Value::Null }),
+        Err(e) => json!({ "ok": false, "error": e.to_string(), "kind": kind, "link": Value::Null, "note": Value::Null, "stored": false }),
     }
 }
 

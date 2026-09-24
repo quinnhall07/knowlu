@@ -227,6 +227,24 @@ fn the_sync_line_reads_skipped_before_at_and_never_says_in_step_over_a_skip() {
     assert!(!skipped_branch.contains("in step with your account"), "a skip must never fall through to the calm in-step copy: {skipped_branch}");
 }
 
+/// Task 11 re-review N1 (R-C3′-exec-41): what the paste or capture did with each feed reaches the
+/// plan, as the four flags `onboarding::WizardPlan` reads — and only for the value the field holds
+/// at Finish, so a link typed over after its check is never sent to the account as if validated.
+#[test]
+fn the_wizard_carries_each_feeds_validated_and_stored_flags_into_the_plan() {
+    let js = read("console.js");
+    for key in ["ics_validated: icsFlags.validated", "ics_stored: icsFlags.stored",
+                "personal_calendar_validated: calFlags.validated", "personal_calendar_stored: calFlags.stored"] {
+        assert!(js.contains(key), "the plan must carry {key}");
+    }
+    assert!(js.contains("feedFlags(WIZ.icsFeed, WIZ.ics)") && js.contains("feedFlags(WIZ.calFeed, WIZ.cal)"), "the flags are for the field's value at Finish");
+    assert!(js.contains("var same = !!(feed && value && feed.url === value);"), "a changed link is neither validated nor stored");
+    // All three places a feed is checked record the envelope's own `stored`, never `note`'s absence.
+    assert!(js.contains("WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };"), "the capture");
+    assert!(js.contains("WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted school feed");
+    assert!(js.contains("WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted personal calendar");
+}
+
 #[test]
 fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     let js = read("console.js");
