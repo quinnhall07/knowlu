@@ -273,9 +273,10 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   gives each unanswered instance the same answer, and the series is never asked about again. A card
   that expires or is deleted unanswered is not an answer: it writes nothing, its own instances are
   never asked again, and the series' next instance may be.
-- **`kind: commitment-check` — "Is this a class you go to every week?"** `rank` classifies repeating
-  calendar events (`commitments.rs`) into proposals — a class, a lab, work, a club, a meeting, or
-  the day's wake-to-bed window — and files up to 5 a day as cards, on top of the 15-approval budget.
+- **`kind: commitment-check` — "Is this part of your week? Knowlu found it repeating on your
+  calendar."** `rank` classifies repeating calendar events (`commitments.rs`) into proposals — a
+  class, a lab, work, a club, a meeting, or the day's wake-to-bed window — and files up to 5 a day
+  as cards, charged to the day's 15-approval budget (they count against the 15, not on top of it).
   The deck renders these like any other card. **Approve** writes a confirmed note in `commitments/`
   (or the `planning-day` note, for the window card); **Reject** writes an anonymous decline marker
   holding only the source's opaque key, and marks every twin of the same underlying series (a
