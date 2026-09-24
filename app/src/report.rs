@@ -244,7 +244,7 @@ pub fn preview_text(cs: &ConsoleState, view: &str) -> String {
     if let Some(e) = &cs.settings_error {
         header.push_str(&format!("settings error: {}\n", scrub(e)));
     }
-    if let Some(e) = &crate::scheduler::lock(&cs.history).last_error {
+    if let Some(e) = &crate::scheduler::lock(&cs.sync).last_error {
         header.push_str(&format!("sync error: {}\n", scrub(e)));
     }
     if let Some(e) = &crate::scheduler::lock(&cs.backup).last_error {

@@ -191,7 +191,7 @@ pub fn diagnostics_text(cs: &ConsoleState) -> String {
         out.push_str(&redact(&format!("expected {} {} {}", e.runner, e.due, e.status)));
         out.push('\n');
     }
-    if let Some(e) = &scheduler::lock(&cs.history).last_error { out.push_str(&redact(&format!("sync error: {e}"))); out.push('\n'); }
+    if let Some(e) = &scheduler::lock(&cs.sync).last_error { out.push_str(&redact(&format!("sync error: {e}"))); out.push('\n'); }
     if let Some(e) = &scheduler::lock(&cs.backup).last_error { out.push_str(&redact(&format!("backup error: {e}"))); out.push('\n'); }
     out
 }

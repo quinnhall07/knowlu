@@ -119,10 +119,9 @@ pub mod entitle;
 // only caller; never read by the engine.
 pub mod backup;
 
-// Git as a transport for the console's sync loop (Knowlu plan 1, Task 5). The journal is the
-// real history; this module only drives `git` — status, commit by name, push/rebase, the lock.
+// `childproc` outlives `history`: `runs::git_sha` and `runtime.rs` both spawn children, and a GUI
+// application's child process must never flash a console window.
 pub mod childproc;
-pub mod history;
 
 #[cfg(windows)]
 pub mod wincred;

@@ -568,11 +568,6 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         *r = true;
     }
     let _guard = RunGuard(sch);
-    // `history` starts at the all-false default (`ConsoleState::open`) and neither
-    // `--run-slot-once` nor a tick thread's very first iteration is guaranteed to have refreshed it
-    // yet (review item 1) — refreshed here so it is never stale for the whole slot. The slot's own
-    // pull/push now happen inside `slot_argv`'s own `sync` step, below, not here.
-    state::refresh_history(cs);
     let started = knowlu_engine::journal::now_ts(None);
     let mut steps = Vec::new();
     let mut engine_ok = true;
@@ -649,8 +644,6 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         },
     };
     steps.push(telemetry);
-    state::refresh_head(cs);
-    state::refresh_history(cs);
     // Fix round 1, review I4: the slot's own `sync` step is a child process and cannot fill
     // `cs.sync` itself, so this reads back what it (or its own skip) left in `state/sync-status.json`.
     state::refresh_sync(cs);
@@ -791,8 +784,6 @@ pub fn spawn(app: AppHandle) {
                 let _ = prune_logs(&log_dir(&cs), LOGS_KEPT);
             }
             if n % 6 == 0 {
-                state::refresh_head(&cs);
-                state::refresh_history(&cs);
                 *lock(&sch.mode_device) = (mode(&cs.vault), device_ok(&cs.vault));
                 let warn = knowlu_engine::runs::expected_status(&cs.vault, jiff::Timestamp::now())
                     .map(|rows| rows.iter().any(|r| r.status == "missing" || r.status == "crashed"))

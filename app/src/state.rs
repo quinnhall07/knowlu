@@ -2,9 +2,9 @@
 //! settings, sync/backup/run status, and one lock so console operations on the vault are
 //! serialised (spec §3.2; Knowlu plan 1, Task 7 adds settings and the status fields Task 8+ fill).
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
-use knowlu_engine::{backup::BackupStatus, history::HistoryStatus};
+use knowlu_engine::backup::BackupStatus;
 
 /// Per-profile settings, round-tripped through `settings.json` in the app data dir. `profile_id`
 /// is derived from the vault path, never hand-named (Task 7's rename-stage-1 rule: no new
@@ -84,8 +84,6 @@ pub struct ConsoleState {
     /// error. Fixed at open; never mutated afterward, so no `Mutex` is needed.
     pub settings_error: Option<String>,
     pub session: String,
-    pub head_sha: Mutex<Option<String>>,
-    pub history: Mutex<HistoryStatus>,
     pub backup: Mutex<BackupStatus>,
     /// What the last sync did, for the page's sync line. Filled by `commands::sync_inner` and by
     /// the slot's own sync step; never computed in `commands.rs` (console spec §3.1). The type is
@@ -94,7 +92,6 @@ pub struct ConsoleState {
     pub sync: Mutex<knowlu_engine::sync::SyncStatus>,
     pub last_write: Mutex<Option<std::time::Instant>>,
     pub pending_edits: AtomicUsize,
-    pub auto_sync: AtomicBool,
     pub startup_missed: AtomicUsize,
     /// **Test-only seam.** `None` (the only value any real caller ever sets) means "today" is
     /// wherever `commands::now_in` finds the real clock, exactly as before this field existed — no
@@ -123,8 +120,6 @@ impl ConsoleState {
             settings: Mutex::new(settings),
             settings_error,
             session: knowlu_engine::ids::new_id("sess"),
-            head_sha: Mutex::new(None),
-            history: Mutex::new(HistoryStatus::default()),
             backup: Mutex::new(BackupStatus { last_ok: None, behind_days: None, last_error: None, target_reachable: false }),
             // Fix round 1, review I4: read back whatever the last run (this launch's or an
             // earlier one's) left in `state/sync-status.json` — a missing or unreadable file is
@@ -135,7 +130,6 @@ impl ConsoleState {
             sync: Mutex::new(knowlu_engine::sync::load_status(&vault)),
             last_write: Mutex::new(None),
             pending_edits: AtomicUsize::new(0),
-            auto_sync: AtomicBool::new(true),
             startup_missed: AtomicUsize::new(0),
             test_today: Mutex::new(None),
             vault,
@@ -160,26 +154,10 @@ impl ConsoleState {
     }
 }
 
-/// Re-reads history status from the vault into the cache. Cheap (a handful of `git` calls) —
-/// called after any command that might have changed the working tree, and stands alone so
-/// `commands.rs` never has to know how the cache is refreshed.
-pub fn refresh_history(cs: &ConsoleState) {
-    let s = knowlu_engine::history::status(&cs.vault);
-    *cs.history.lock().unwrap() = s;
-}
-
-/// Re-reads the vault's git HEAD into the cache (`knowlu_engine::runs::git_sha`, a subprocess with a
-/// 5 s deadline) so `build_state_value` can compare it against `CONSOLE_BUILD` without ever
-/// spawning git on the UI thread itself. `None` for a non-git vault — never a false alarm.
-pub fn refresh_head(cs: &ConsoleState) {
-    let h = knowlu_engine::runs::git_sha(&cs.vault);
-    *cs.head_sha.lock().unwrap() = h;
-}
-
 /// Re-reads the persisted sync status into the cache (fix round 1, review I4). The slot's own
 /// `sync` step is a child process — `run_slot_inner` records only its exit code, and the lines it
 /// printed went to a log file, not to `cs.sync` — so this is how a slot's sync reaches the page at
-/// all. Called right after the slot's own child steps, beside `refresh_head`/`refresh_history`.
+/// all. Called right after the slot's own child steps (git leaves the product, C3' Task 10).
 /// `commands::sync_inner` needs no equivalent call: `state::run_sync` already fills `cs.sync`
 /// directly, in-process, for *Sync now*.
 pub fn refresh_sync(cs: &ConsoleState) {

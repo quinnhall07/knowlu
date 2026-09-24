@@ -29,20 +29,15 @@ fn build_state_value(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let now = now_in(cs);
     let state = knowlu_engine::surface::build_state(&cs.vault, view, now.date(), &now, cs.seen_at().as_deref());
     let mut v = serde_json::to_value(&state).map_err(|e| e.to_string())?;
-    // The shell adds its own build, and the vault's git HEAD (cached by `refresh_head`, never
-    // read here — a `git` spawn has no business on a `state` poll), so the page can say "the
-    // rank engine has moved past this console" (spec §15 Q1). `Some(c) != Some(h)` only — a
-    // missing build or a non-git vault must never read as a false alarm (Task 11 decision).
-    let head = cs.head_sha.lock().map_err(|_| "lock")?.clone();
+    // `vault_head` and `engine_newer` went with git (C3′, Task 10): they compared the VAULT's git
+    // HEAD against this build, and a vault has not been a git repository since §4.1. The console's
+    // own build stays — the diagnostics blob and the issue report both name it.
     v["topline"]["console_build"] = json!(CONSOLE_BUILD);
-    v["topline"]["vault_head"] = json!(head);
-    v["topline"]["engine_newer"] = json!(matches!((CONSOLE_BUILD, head.as_deref()), (Some(c), Some(h)) if c != h));
     v["topline"]["seen_at"] = json!(cs.seen_at());
-    // Sync/backup/auto-sync/startup-missed come from the caches Task 10's commands fill —
+    // Sync/backup/startup-missed come from the caches Task 10's commands fill —
     // copied here verbatim, never recomputed (spec §3.1: nothing in `commands.rs` computes).
-    v["topline"]["sync"] = serde_json::to_value(&*cs.history.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
+    v["topline"]["sync"] = serde_json::to_value(&*cs.sync.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
     v["topline"]["backup"] = serde_json::to_value(&*cs.backup.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
-    v["topline"]["auto_sync"] = json!(cs.auto_sync.load(std::sync::atomic::Ordering::SeqCst));
     v["topline"]["startup_missed"] = json!(cs.startup_missed.load(std::sync::atomic::Ordering::SeqCst));
     Ok(v)
 }

@@ -166,15 +166,6 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             use tauri_plugin_autostart::ManagerExt;
             let al = app.autolaunch();
             if autostart { let _ = al.enable(); } else { let _ = al.disable(); }
-            // Both git calls (`refresh_head`, and `refresh_history`'s ahead/behind check) belong
-            // off the UI thread (F17) — spawned once at startup; Task 12's housekeeping thread
-            // repeats both every 60 s.
-            let h = app.handle().clone();
-            std::thread::spawn(move || {
-                let cs = h.state::<ConsoleState>();
-                knowlu::state::refresh_head(&cs);
-                knowlu::state::refresh_history(&cs);
-            });
             // The scheduler's tick and housekeeping threads (Task 12) — inert unless
             // `config/runners.yaml`'s `local` entry says `scheduler: app`.
             scheduler::spawn(app.handle().clone());
