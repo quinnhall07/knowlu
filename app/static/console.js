@@ -24,6 +24,17 @@
     return window.__TAURI__.core.invoke(cmd, args || {});
   }
 
+  // R-C1b-exec-9: the wizard's subscribe panel and the upgrade overlay both need to ask this same
+  // question — is this account entitled right now — and each used to carry its own copy of the
+  // status test. One copy, resolved `true` only on `ok` plus an active or trialing status, `false`
+  // on anything else, a refusal or a dropped invoke included: nobody downstream of this has to
+  // remember to `.catch`.
+  function checkEntitled() {
+    return invoke("entitlement_now", {}).then(function (r) {
+      return !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
+    }).catch(function () { return false; });
+  }
+
   function renderNav(state) {
     var n = state.nav_counts;
     var map = { today: n.today, overdue: n.overdue, week: n.week, later: n.later, all: n.all, decisions: n.decisions, "good-to-know": n.good_to_know, issues: n.issues, runs: n.runs_warn };
@@ -565,12 +576,126 @@
     return poll();
   }
 
+  // D7: the minute between Finish and the first `rank`. `first_run` rides on the envelope until
+  // `state/today.md` exists; while it does, the page says what is happening, lists the slot's steps
+  // as they land, and asks again every three seconds so the day appears as soon as it is there
+  // rather than up to a minute later.
+  //
+  // R-C1c-8: the view REPLACES the day. `.app` carries `first-run` while the block is on the
+  // envelope, and console.css hides the nav, the rail and everything in `main` but `#first-run`.
+  // The state still paints underneath (poll's revision logic is untouched), so the hand-over is
+  // instant; and a `display: none` row never intersects, so the 2 s dwell below sends no
+  // `object_seen` for a row nobody saw. Nothing visible paints in this mode but the view itself.
+  // Leaving the view forgets the displayed day (`hideFirstRun`), so the first ranked state paints
+  // whole rather than behind R28's reorder hold (R-C1c-exec-8a).
+  //
+  // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
+  // failing polls on forever, and a rejected call re-arms it too. That is honest rather than
+  // silent: once a first slot has ended with any failed step, listed here or not (an `engine: …`
+  // line counts), the view says so under the list and that Knowlu will try again. The Runs view
+  // and the sync line that would say more are hidden in this mode. A cap would replace a true
+  // "will try again" with a false "gave up".
+  var FIRST_RUN_MS = 3000;
+  var firstRunTimer = null;
+  var firstRunHtml = null;
+  // The steps the student is told about, by the step name's first word (before any space or
+  // parenthesis: `judge (skipped: no entitlement)` is `judge`). The slot's other steps (the sync pull
+  // and push, the backup, the usage upload, an `engine: …` line) are the Runs view's, not this one's.
+  //
+  // `sync` is C3′'s step, not a step on this branch yet: its sentence is here before the merge so a
+  // merged first run shows its first seconds in progress (R-C1c-final2 M2).
+  var FIRST_RUN_SAYS = {
+    sync: "Syncing with your account",
+    entitlement: "Checking your account",
+    coursework: "Fetching your coursework",
+    ingest: "Reading your school calendar",
+    judge: "Working out what each task needs",
+    rank: "Putting your day in order"
+  };
+  function firstRunSays(name) {
+    var word = String(name || "").split(/[ (]/)[0];
+    return Object.prototype.hasOwnProperty.call(FIRST_RUN_SAYS, word) ? FIRST_RUN_SAYS[word] : null;
+  }
+  // One row: its mark (a shape per state, so it never rests on colour alone) and its sentence.
+  // A skip says the word; the other three states are named for a screen reader on the mark, and a
+  // row may carry a short note of its own.
+  function firstRunRow(state, says, note) {
+    var label = { done: "done", now: "in progress", failed: "failed" }[state];
+    var said = state === "skipped" ? "skipped" : note;
+    return '<li class="fr-step" data-state="' + state + '"><span class="fr-mark"' +
+      (label ? ' role="img" aria-label="' + label + '"' : ' aria-hidden="true"') + "></span>" +
+      '<span class="fr-say">' + h(says) + "</span>" + (said ? '<span class="fr-note">' + h(said) + "</span>" : "") + "</li>";
+  }
+  function renderFirstRun(fr) {
+    fr = fr || {};
+    document.querySelector(".app").classList.add("first-run");
+    EL("first-run").hidden = false;
+    var rows = [];
+    (fr.steps || []).forEach(function (s) {
+      var says = firstRunSays(s[0]); if (!says) { return; }
+      // R-C1c-final2 M1: an account check that could not reach the service lands at code 0 (a
+      // network is not a failed slot, for the tray or the retry ladder), but a check mark would say
+      // it worked. It shows as failed, with a note; the "didn't finish" line below still reads codes.
+      var unchecked = String(s[0]).indexOf("entitlement (refresh failed") === 0;
+      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 && !unchecked ? "done" : "failed");
+      rows.push(firstRunRow(state, says, unchecked ? "couldn't check — will retry" : null));
+    });
+    // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
+    var now = fr.running ? firstRunSays(fr.current) : null;
+    if (now) { rows.push(firstRunRow("now", now)); }
+    // Repainted only when it changed: a fresh row every three seconds would restart the in-progress
+    // mark's turn and re-announce the list to a screen reader.
+    var html = rows.join("");
+    if (html !== firstRunHtml) { EL("first-run-steps").innerHTML = html; firstRunHtml = html; }
+    // A first slot that ended without a day (M6, above): one more line, and the cadence carries on.
+    // Any failed step counts, listed or not: the engine missing is `engine: …` at -1, which has no row.
+    var failed = (fr.steps || []).some(function (s) { return s[1] !== 0; });
+    EL("first-run-end").hidden = !(!fr.running && failed);
+    armFirstRun();
+  }
+
+  // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
+  // call poll() too, and a chain per call would multiply every three seconds.
+  function armFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); }
+    firstRunTimer = setTimeout(poll, FIRST_RUN_MS);
+  }
+
+  function hideFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
+    EL("first-run").hidden = true;
+    var app = document.querySelector(".app");
+    // R-C1c-exec-8a (I1): on the way OUT only, forget the displayed day, as `route()` does for a
+    // view change. The day painted under the view is the vault as it was before the slot, and every
+    // state since has a new order, so R28's hold would keep that pre-slot Must do beneath the ranked
+    // headline behind "refresh order". Cleared here, the same poll paints the ranked day whole: poll
+    // calls this before its revision check. Cleared on every poll without the block, the hold would
+    // never work again.
+    if (app.classList.contains("first-run")) {
+      app.classList.remove("first-run");
+      current.state = null; current.revision = null; current.pendingOrder = null;
+    }
+  }
+
   function poll() {
     return invoke("state", { view: current.view }).then(function (env) {
+      // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
+      // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
+      // path, so there is no failed state to wait for. The paint below still runs, hidden while the
+      // view stands (R-C1c-8).
+      if (env.first_run) { renderFirstRun(env.first_run); } else { hideFirstRun(); }
       if (!env.ok) { EL("delta").textContent = "engine: " + env.error; return; }
+      // §6's safety net answers `ok` with no state when the read model could not be built at all;
+      // the line above is what the student reads while that is true.
+      if (!env.state) { return; }
       if (env.state.revision === current.revision) { return; }
       paint(env.state, false);
-    }).catch(function (e) { EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")"; });
+    }).catch(function (e) {
+      EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")";
+      // R-C1c-exec-8a (M1): while the view stands the line above is hidden, and nothing else would
+      // re-arm the three-second cadence after a rejected call.
+      if (document.querySelector(".app").classList.contains("first-run")) { armFirstRun(); }
+    });
   }
 
   // Task 13: the four fields the write path always refuses (app/src/commands.rs's comment on
@@ -1239,6 +1364,26 @@
     EL("up-error").textContent = "";
     EL("upgrade").hidden = true;
   }
+  /** The overlay is the console window's own surface and nothing paints it, so its busy state is one
+   *  flag and two writes rather than a `WIZ` field. Without it, two presses on Continue with Google
+   *  are two commands, two loopback listeners and two browser tabs — and the second callback meets a
+   *  closed port. */
+  var UP_BUSY = false;
+  function upBusy(on) {
+    UP_BUSY = on;
+    EL("up-google").disabled = on;
+    EL("up-magic").disabled = on;
+  }
+  /** What both doors do once a session exists — the tail the old branch ended with, now that two
+   *  branches share it. */
+  function afterUpgradeSignIn() {
+    EL("up-error").textContent = "";
+    EL("up-code-row").hidden = true;
+    EL("up-subscribe").hidden = false;
+    return checkEntitled().then(function (yes) {
+      if (yes) { return finishUpgrade(); }
+    });
+  }
   EL("upgrade").addEventListener("click", function (e) {
     // The same branch the wizard has, and it matters more here: this window has a working console to
     // lose, and a plain navigation to `terms.html` would lose it while the user is ticking the box
@@ -1249,44 +1394,81 @@
       invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
       return;
     }
-    var creating = !!e.target.closest("#up-create");
-    if (creating || e.target.closest("#up-signin")) {
-      if (creating && !(EL("up-18").checked && EL("up-terms").checked)) {
+    if (e.target.closest("#up-google")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
         EL("up-error").textContent = "Tick both boxes to create an account."; return;
       }
-      var args = { email: EL("up-email").value.trim(), password: EL("up-pw").value };
-      // `ageAttested`, not the Rust spelling: Tauri v2 lower-camel-cases every argument key, and
-      // `sign_up` opts out of nothing (R-C1-55, C1 — the wizard's own call carries the same comment).
-      if (creating) { args.ageAttested = EL("up-18").checked; }
-      invoke(creating ? "sign_up" : "sign_in", args).then(function (r) {
-        EL("up-pw").value = "";
-        // A dead network is not something to hold someone behind a panel for; a wrong password is.
+      upBusy(true);
+      EL("up-error").textContent = "Finish signing in, in your browser…";
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and this
+      // is the checkbox `google_sign_in` now refuses on before it binds a listener (F2).
+      invoke("google_sign_in", { ageAttested: EL("up-18").checked }).then(function (r) {
+        upBusy(false);
+        // A dead network stands the overlay down rather than trapping someone behind it (D4).
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
         if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        EL("up-subscribe").hidden = false;
-        return invoke("entitlement_now", {}).then(function (ent) {
-          if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-        });
-      }).catch(upgradeUnreachable);
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-magic")) {
+      if (UP_BUSY) { return; }
+      if (!(EL("up-18").checked && EL("up-terms").checked)) {
+        EL("up-error").textContent = "Tick both boxes to create an account."; return;
+      }
+      upBusy(true);
+      // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and the
+      // wizard's own call carries the same comment for the same reason.
+      invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: EL("up-18").checked }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        EL("up-error").textContent = r.ok ? "We emailed you a code. Type it below." : r.error;
+        EL("up-code-row").hidden = !r.ok;
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
+      return;
+    }
+    if (e.target.closest("#up-code-go")) {
+      if (UP_BUSY) { return; }
+      upBusy(true);
+      invoke("verify_email_code", { email: EL("up-email").value.trim(), code: EL("up-code").value.trim() }).then(function (r) {
+        upBusy(false);
+        if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
+        if (!r.ok) { EL("up-error").textContent = r.error; return; }
+        return afterUpgradeSignIn();
+      }).catch(function () { upBusy(false); upgradeUnreachable(); });
       return;
     }
     if (e.target.closest("#up-subscribe")) {
-      invoke("open_checkout", { plan: "monthly" }).then(function (r) {
-        // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
-        // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
-        // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
-        if (!r.ok) { EL("up-error").textContent = r.error; return; }
-        EL("up-error").textContent = "";
-        var tries = 0;
-        var tick = function () {
-          tries += 1;
-          invoke("entitlement_now", {}).then(function (ent) {
-            if (ent.ok && (ent.status === "active" || ent.status === "trialing")) { return finishUpgrade(); }
-            if (tries < 40) { setTimeout(tick, 3000); }
-          }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
-        };
-        setTimeout(tick, 3000);
+      // R-C1b-exec-9: ask before opening a second Checkout page. An account the service already
+      // calls entitled — its own poll below gave up, or the student left and came back — goes
+      // straight through; only an account that is still not entitled gets a Checkout tab.
+      checkEntitled().then(function (yes) {
+        if (yes) { return finishUpgrade(); }
+        return invoke("open_checkout", { plan: "monthly" }).then(function (r) {
+          // R-C1-57 (I2): read the envelope. Every refusal `open_checkout` can answer with — a dead
+          // session, a refused base, a non-2xx from Stripe, a reply with no link in it — used to be
+          // silence plus a two-minute poll for an entitlement no Checkout page was ever opened to buy.
+          if (!r.ok) { EL("up-error").textContent = r.error; return; }
+          EL("up-error").textContent = "";
+          var tries = 0;
+          var tick = function () {
+            // The overlay can close — a sign-out, a re-render — while this is still ticking; nothing
+            // asked it to stop, so it kept polling behind a hidden panel until the count ran out.
+            if (EL("upgrade").hidden) { return; }
+            tries += 1;
+            checkEntitled().then(function (yes2) {
+              // The re-review's blocking finding: the overlay can close while this reply is still in
+              // flight, and a yes that lands after must not act on a panel nobody is looking at
+              // either — the same stand-down, checked again now that the wait is over.
+              if (EL("upgrade").hidden) { return; }
+              if (yes2) { return finishUpgrade(); }
+              if (tries < 40) { setTimeout(tick, 3000); }
+              else { EL("up-error").textContent = "Still not subscribed. When the payment page is done, press Subscribe again."; }
+            });
+          };
+          setTimeout(tick, 3000);
+        });
       }).catch(function () { EL("up-error").textContent = UNREACHABLE; });
     }
   });
@@ -1379,6 +1561,11 @@
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+              // The Google round trip runs in the system browser and can take a minute; `busy` is
+              // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
+              // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
+              // written to the DOM straight from inside a click handler).
+              busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
               // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
               // `renderWizard()` like every other wizard field — a direct DOM write from inside
@@ -1411,7 +1598,14 @@
               // decide the mapping panel between them); `checkoutOpened` is what makes the
               // subscribe panel silent until the browser has actually been sent somewhere;
               // `schoolSeq` drops a typeahead answer a later keystroke has already overtaken.
-              lmsOpen: false, discovering: false, checkoutOpened: false, schoolSeq: 0,
+              // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
+              // rows or none — the first `coursework` run files an empty parse as an issue rather
+              // than an empty semester, so a student who saw nothing here can still go on honestly.
+              // R-C1c-plan-3: `mapWarned` is whether the blank-row sentence has been shown once.
+              // `wizStep` sets `WIZ.step` BEFORE the panel branch runs and `renderWizard` hides
+              // every other panel, so a sentence written on the way out is a sentence nobody reads
+              // — the first Next stays on the panel to show it, the second goes on.
+              lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "" };
 
@@ -1452,10 +1646,22 @@
   function renderWizard() {
     PANELS.forEach(function (p, i) { EL("wiz-" + p).hidden = i !== WIZ.step; });
     EL("wiz-step").textContent = "step " + (WIZ.step + 1) + " of " + PANELS.length;
-    EL("wiz-back").disabled = WIZ.step === 0;
+    // Spec §7 (a): hidden, not disabled. A greyed Back that does nothing is the control Quinn
+    // pressed; a Back that is not on screen at step 0 asks no question.
+    EL("wiz-back").hidden = WIZ.step === 0;
     EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
+    // Spec §7 (b): the ONE writer of this property. `wizGo`'s discovery latch and `wizFinish`'s
+    // re-entry guard both set `WIZ.busy` and call renderWizard, so a path that forgets to clear it
+    // is a path renderWizard still recovers from on the next render — which a direct DOM write was
+    // not. The file's own A-5 rule, applied to the last field that escaped it.
+    EL("wiz-next").disabled = WIZ.busy;
     EL("wiz-error").textContent = WIZ.error;
-    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : "";
+    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
+    EL("wiz-google-signin").disabled = WIZ.busy;
+    // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
+    // presses are worth the same guard.
+    EL("wiz-magic").disabled = WIZ.busy;
+    EL("wiz-code-go").disabled = WIZ.busy;
     // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
     // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
     EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
@@ -1505,6 +1711,9 @@
       // vault's ingest.yaml; set before the write resolved, they promised a login that a failed
       // write had not stored (review round 1, IMPORTANT 2).
       stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
+      // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
+      // stand in for one against these.
+      if (stored.length) { WIZ.discovered = false; WIZ.mapWarned = false; }
       WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
       clearCredentialFields();
       return true;
@@ -1523,9 +1732,25 @@
     WIZ.autostart = EL("wiz-autostart").checked;
   }
 
+  // A refusal belongs on screen AND has to register as an answer to THIS press. `#wiz-error` sits
+  // at the left of the nav row, so a second Next against the same unmet gate rewrote the same red
+  // sentence and looked like nothing happened at all. One re-flow, one animation frame, and the
+  // sentence arrives again.
+  function flashError() {
+    var el = EL("wiz-error");
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+  }
+
+  // The discovery command states a reason and nothing else now (onboarding.rs's own rule); the
+  // page is what appends the way forward, and a reason that already ends in a stop needs its own
+  // trimmed before the page's own sentence follows it.
+  function tidy(s) { return String(s || "").replace(/[.\s]+$/, ""); }
+
   function wizValid() {
     WIZ.error = "";
-    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Create an account or sign in first."; }
+    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
     if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
     if (WIZ.step === 3) {
       var n = WIZ.name.trim();
@@ -1544,7 +1769,24 @@
   }
 
   function wizGo(n) {
-    if (n > WIZ.step && !wizValid()) { renderWizard(); return Promise.resolve(); }
+    // R-C1b-exec-9: the only thing that ever set WIZ.entitled true used to be the two-minute poll
+    // below, and a student who came back to the wizard after that poll had already given up found
+    // Next refusing forever with no way to ask again. One re-ask, here, before the refusal — and
+    // never from inside it, since an account that truly is not entitled must not ask the service
+    // forever.
+    if (n > WIZ.step && WIZ.step === 2 && !WIZ.entitled) {
+      WIZ.busy = true; renderWizard();
+      return checkEntitled().then(function (yes) {
+        WIZ.busy = false;
+        if (yes) { WIZ.entitled = true; }
+        return wizStep(n);
+      });
+    }
+    return wizStep(n);
+  }
+
+  function wizStep(n) {
+    if (n > WIZ.step && !wizValid()) { renderWizard(); flashError(); return Promise.resolve(); }
     // A refusal belongs to the panel that raised it: stepping back clears it rather than carrying
     // a red line about a field that is no longer on screen.
     if (n < WIZ.step) { WIZ.error = ""; }
@@ -1578,10 +1820,18 @@
         // can run. Stay on the panel while it does — the mapping is the whole point of having asked
         // for the logins — and let Next work again the moment the rows are on screen.
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length) { renderWizard(); return; }
+        if (WIZ.map.length || WIZ.discovered) {
+          // R-C1c-plan-3: the first Next after a finished discovery with blank, un-ignored rows
+          // writes the sentence and stays here — `WIZ.step` was advanced above, so putting it back
+          // is what keeps the panel, and its note, on screen. The next Next goes on whatever the
+          // rows say: this is a sentence, not a gate.
+          if (!WIZ.mapWarned && noteUnmapped()) { WIZ.mapWarned = true; WIZ.step = leaving; }
+          renderWizard();
+          return;
+        }
         WIZ.step = leaving;
         WIZ.discovering = true;
-        EL("wiz-next").disabled = true;
+        WIZ.busy = true;
         EL("wiz-map").hidden = false;
         EL("wiz-map-note").textContent = "Looking up your books and sections…";
         renderWizard();
@@ -1589,16 +1839,27 @@
           WIZ.map = ((d && d.rows) || []).map(function (r) {
             return { source: r.source, key: r.key, detail: r.detail, suggested: r.suggested, course: r.suggested || "", ignore: !!r.ignored };
           });
-          EL("wiz-map-note").textContent = (d && d.note)
-            || "Knowlu found these on your accounts. Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for.";
+          // R-C1b-exec-10: set BEFORE renderMapping() runs — the first `coursework` run files an
+          // empty parse as an issue rather than an empty semester, so a finished discovery that
+          // found nothing is still a finished discovery, and renderMapping() has to know that on
+          // this very paint or the panel it is about to draw is the empty one nobody could see.
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = WIZ.map.length
+            ? (d && d.note ? tidy(d.note) + ". " : "Knowlu found these on your accounts. ") + "Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for."
+            : tidy((d && d.note) || "We could not reach your coursework sites") + ". You can go on — Knowlu will try again on its first run.";
           renderMapping();
         }).catch(function () {
-          EL("wiz-map-note").textContent = "We could not look those up — fill them in below.";
+          WIZ.discovered = true;
+          EL("wiz-map-note").textContent = "We could not look those up. You can go on — Knowlu will try again on its first run.";
+          renderMapping();
         }).then(function () {
           // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
-          // comes back.
+          // comes back. Repainted here rather than left for a later render: nothing else touches the
+          // DOM once this chain settles, and a WIZ field nobody repaints is a Next button nobody can
+          // press.
           WIZ.discovering = false;
-          EL("wiz-next").disabled = false;
+          WIZ.busy = false;
+          renderWizard();
         });
       });
     }
@@ -1620,7 +1881,7 @@
     WIZ.vhl = false;
     WIZ.credVault = "";
     WIZ.step = 5;
-    EL("wiz-next").disabled = false;
+    WIZ.busy = false;
     renderWizard();
   }
 
@@ -1628,7 +1889,11 @@
     // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
     // second Finish click landing in that window used to start a second `retarget_credentials`/
     // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
-    EL("wiz-next").disabled = true;
+    // Painted immediately, synchronously, before readSlotsPanel or any await: the DOM `disabled`
+    // property is what actually stops a second physical click from ever reaching this function again
+    // — `WIZ.busy` alone is an in-memory flag nothing reads at the door.
+    WIZ.busy = true;
+    renderWizard();
     readSlotsPanel();
     // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
     // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
@@ -1640,7 +1905,15 @@
     var vhlRows = WIZ.map.filter(function (r) { return r.source === "vhl" && !r.ignore && r.course; });
     var codes = {};
     zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
-    WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
+    // Final review, I4 (a C1 Task 17 bug predating this branch): only a TYPED course belongs here —
+    // it carries `slug: ""`, and this is the only place anything derives one for it. A CAPTURED
+    // course already carries its own slug and is covered by the engine's `course_fragments`
+    // (`app/src/scaffold.rs`); sending it here too would give its LMS id a *second*, phantom
+    // `[id, ""]` entry that `create_vault_in` derives an ENGINE slug for on the empty second
+    // element — and because `course_map_lines` is first-wins by key with the page's entries first,
+    // that phantom slug wins over the real one `course_fragments` would have written, so the id
+    // ends up pointing at a course that doesn't exist (D4's `[LMS id -> slug]` guarantee broken).
+    WIZ.courses.forEach(function (c) { if (c.code && !c.slug) { codes[c.code] = true; } });
     // A-5 (b): re-read the truth rather than trust the poll loop's last tick. A consent that
     // finished (in the browser, or after the poll was cancelled by leaving and returning to the
     // panel) after the loop last checked must still birth the vault with the `cloud:google` entry
@@ -1658,9 +1931,13 @@
                    // The second element is the slug, and the page has none: an empty string is what
                    // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
                    course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
-                   // Review round 1, I2: every discovered zyBook the student declined. Out of this list
-                   // an unmapped book is `not in config; skipped` on every healthy run, forever.
-                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
+                   // Final review, I2: only the rows the student explicitly ticked as ignored — never
+                   // a blank one. A blank zyBooks row must stay UNMAPPED so the engine files a
+                   // coursework-map card for it (R-OB-1), the same as a blank VHL row; putting it in
+                   // this list instead made it `not in config; skipped` on every healthy run, forever,
+                   // and made noteUnmapped's "N of these will be asked about in the app" false for
+                   // zyBooks.
+                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && r.ignore; })
                                           .map(function (r) { return r.key; }),
                    courses: WIZ.courses };
       // Before anything is created: move the credentials if the path has changed since they were
@@ -1673,11 +1950,13 @@
         if (!rt || !rt.ok) { credentialsStranded(); return; }
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
-          if (!r.ok) { WIZ.error = r.error; EL("wiz-next").disabled = false; renderWizard(); return; }
-          // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
-          // from the pending target onto this profile, so this is the first moment the cache can be
-          // written where the console will look for it — and the console relaunches into a vault whose
-          // grace clock has already started rather than one that must reach the network to paint.
+          if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
+          // R-C1-31, corrected by the final review (Minor 8): `entitlement_now` writes NO cache —
+          // it only reads the PENDING session, which `create_vault` has just moved onto this
+          // profile, so this call typically finds nothing there any more and resolves to null. The
+          // real first cache write is the in-slot refresh D1 added (`scheduler::run_slot_inner`,
+          // spec §2), keyed off the profile's own vault and data dir. Left in place as a harmless
+          // best-effort poll rather than removed here.
           // Best effort in both directions: a refusal, or a build where the command is not yet
           // registered, must never stop a finished wizard from opening.
           return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {
@@ -1685,7 +1964,7 @@
           });
         });
       });
-    }).catch(function (e) { WIZ.error = String(e.message || e); EL("wiz-next").disabled = false; renderWizard(); });
+    }).catch(function (e) { WIZ.error = String(e.message || e); WIZ.busy = false; renderWizard(); });
   }
 
   // The Checkout page is in the system browser, so the app cannot be told when it is done: it asks.
@@ -1694,14 +1973,22 @@
   function pollEntitlement() {
     var tries = 0;
     var tick = function () {
+      // The student can leave panel 2 without waiting on this — Back, or the pre-ask in `wizGo`
+      // already got a yes — and a poll that kept ticking behind a panel nobody is looking at is a
+      // poll that outlives the question it was asked.
+      if (WIZ.entitled || WIZ.step !== 2) { return; }
       tries += 1;
-      invoke("entitlement_now", {}).then(function (r) {
-        if (r.ok && (r.status === "active" || r.status === "trialing")) {
+      checkEntitled().then(function (yes) {
+        // The re-review's blocking finding: the student can leave panel 2 while this reply is still
+        // in flight, and a yes that lands after they moved on must not act on a panel nobody is
+        // looking at either — the same stand-down, checked again now that the wait is over.
+        if (WIZ.entitled || WIZ.step !== 2) { return; }
+        if (yes) {
           WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
         }
         if (tries < 40) { setTimeout(tick, 3000); }
-        else { WIZ.error = "Still not subscribed. Try the payment page again."; renderWizard(); }
-      }).catch(function () { if (tries < 40) { setTimeout(tick, 3000); } });
+        else { WIZ.error = "Still not subscribed. When the payment page is done, press Next."; renderWizard(); }
+      });
     };
     setTimeout(tick, 3000);
   }
@@ -1709,48 +1996,53 @@
   EL("wizard").addEventListener("click", function (e) {
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
-    if (e.target.closest("#wiz-create") || e.target.closest("#wiz-signin")) {
-      var creating = !!e.target.closest("#wiz-create");
-      if (creating && !(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+    // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
+    // are Rust's, and the page never sees any of them. The browser round trip can take a minute, so
+    // the button says what is happening — `WIZ.busy` is what renderWizard paints (Task 6).
+    if (e.target.closest("#wiz-google-signin")) {
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
         WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
       }
-      var cmd = creating ? "sign_up" : "sign_in";
-      var args = { email: EL("wiz-email").value.trim(), password: EL("wiz-pw").value };
-      // **`ageAttested`, not the Rust spelling** (R-C1-55, C1). Tauri v2 lower-camel-cases every
-      // argument key (tauri-macros' `ArgumentCase::Camel`) unless the command opts out with
-      // `rename_all = "snake_case"` — which exactly one command in this crate does
-      // (`onboarding::retarget_credentials`, and its own comment says why). Sent snake_case, the
-      // invoke is rejected before `sign_up`'s body runs, the `.catch` below paints UNREACHABLE,
-      // and `wizValid`'s step-1 gate then refuses Next forever: no new account, ever.
-      if (creating) { args.ageAttested = EL("wiz-18").checked; }
-      invoke(cmd, args).then(function (r) {
-        EL("wiz-pw").value = "";                     // the password leaves page memory at once
+      WIZ.busy = true; WIZ.error = ""; WIZ.accountNote = "Finish signing in, in your browser…";
+      renderWizard();
+      // **`ageAttested`, not the Rust spelling** — the checkbox `google_sign_in` now refuses on
+      // before it binds a listener (F2), the same gate `send_magic_link` has always had.
+      invoke("google_sign_in", { ageAttested: EL("wiz-18").checked }).then(function (r) {
+        WIZ.busy = false; WIZ.accountNote = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.accountNote = ""; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-magic")) {
-      invoke("send_magic_link", { email: EL("wiz-email").value.trim() }).then(function (r) {
+      if (WIZ.busy) { return; }
+      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
+        WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
+      }
+      // **`ageAttested`, not the Rust spelling.** Tauri v2 camel-cases every argument key; sent
+      // snake_case the invoke is rejected before the command's body runs.
+      WIZ.busy = true; renderWizard();
+      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: EL("wiz-18").checked }).then(function (r) {
+        WIZ.busy = false;
         WIZ.error = r.ok ? "" : r.error;
-        // The link in the mail lands in the BROWSER, which this process never sees — so the mail also
-        // carries a six-digit code, and this is where it is typed. `verify_email_code` trades it for
-        // the same session the link would have given.
         EL("wiz-code-row").hidden = !r.ok;
+        WIZ.accountNote = r.ok ? "We emailed you a code. Type it below." : "";
         renderWizard();
-        EL("wiz-account-note").textContent = r.ok ? "We emailed you a 6-digit code. Type it below." : "";
-      }).catch(function () {});
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     if (e.target.closest("#wiz-code-go")) {
+      if (WIZ.busy) { return; }
+      WIZ.busy = true; renderWizard();
       invoke("verify_email_code", { email: EL("wiz-email").value.trim(), code: EL("wiz-code").value }).then(function (r) {
+        WIZ.busy = false;
         EL("wiz-code").value = "";
         if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
         WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
         EL("wiz-code-row").hidden = true;
         wizGo(2);
-      }).catch(function () { WIZ.error = UNREACHABLE; renderWizard(); });
+      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
       return;
     }
     // **The two policies open in the system browser, not in this window.** `app/static/` holds four
@@ -1765,11 +2057,16 @@
     }
     if (e.target.closest("#wiz-sub-month") || e.target.closest("#wiz-sub-year")) {
       var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
-      invoke("open_checkout", { plan: which }).then(function (r) {
-        if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-        WIZ.checkoutOpened = true;
-        renderWizard();
-        pollEntitlement();
+      // R-C1b-exec-9: ask before opening a second Checkout page — an account the service already
+      // calls entitled goes straight to the vault panel, never back through Stripe.
+      checkEntitled().then(function (yes) {
+        if (yes) { WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
+        return invoke("open_checkout", { plan: which }).then(function (r) {
+          if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
+          WIZ.checkoutOpened = true;
+          renderWizard();
+          pollEntitlement();
+        });
       }).catch(function () {});
       return;
     }
@@ -1841,9 +2138,28 @@
   /// page never invents one.
   function renderCourses() {
     EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.code || c.name) +
-             (c.name && c.name !== c.code ? " &middot; " + h(c.name) : "") +
+      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
+      // when there was no code to read, or when the two are the same string (a typed course is
+      // both). The page never reads a code out of a name: that rule lives in
+      // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
+      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
+    }).join("");
+    renderCourseCodes();
+  }
+
+  /// D5: the codes a mapping row offers, so a student picks a class rather than typing one from
+  /// memory — the VHL row that nobody filled is why `sections: {}` reached the engine.
+  ///
+  /// The VALUE is the human code the capture read (R-C1c-plan-2's `label`) and the course's own
+  /// slug otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to
+  /// the note the course already has. The LMS's opaque key would not — it would make a second
+  /// course. The LABEL is what the student recognises (M4), so the list reads as their class list
+  /// rather than as identifiers.
+  function renderCourseCodes() {
+    EL("wiz-course-codes").innerHTML = WIZ.courses.map(function (c) {
+      return '<option value="' + h(c.label || c.slug) + '">' + h(c.name || c.code) + "</option>";
     }).join("");
   }
   EL("wiz-courses").addEventListener("click", function (e) {
@@ -1851,7 +2167,7 @@
     if (drop) { WIZ.courses.splice(Number(drop.getAttribute("data-drop")), 1); renderCourses(); return; }
     if (e.target.closest("#wiz-course-add-go")) {
       var code = EL("wiz-course-add").value.trim();
-      if (code) { WIZ.courses.push({ code: code, name: code, slug: "" }); EL("wiz-course-add").value = ""; renderCourses(); }
+      if (code) { WIZ.courses.push({ code: code, name: code, slug: "", label: code }); EL("wiz-course-add").value = ""; renderCourses(); }
     }
   });
 
@@ -1859,14 +2175,33 @@
   /// student corrects. A row left blank is a source that stays unmapped — which is a choice, and is
   /// why the panel says what the consequence is rather than refusing Next.
   function renderMapping() {
-    EL("wiz-map").hidden = WIZ.map.length === 0;
+    // A finished discovery that found nothing still has a note to show — only an UNfinished one
+    // (nothing asked yet) has no panel to paint.
+    EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
+    EL("wiz-map-heading").hidden = WIZ.map.length === 0;
     EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
+      // D6: a row nobody can guess for says so. Computed at paint, never on every keystroke —
+      // re-rendering the rows under the cursor would take the focus out of the field being typed
+      // into — so the hint goes on the next paint, which is what the student has already answered.
+      var hint = (!r.suggested && !r.course) ? '<span class="meta">type the course this belongs to</span>' : "";
       return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
              (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +
-             '<input type="text" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
-             '" placeholder="Course code, e.g. CS 100">' +
+             '<input type="text" list="wiz-course-codes" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
+             '" placeholder="Course code, e.g. CS 100">' + hint +
              '<label><input type="checkbox" data-ignore-for="' + i + '"' + (r.ignore ? " checked" : "") + '> Ignore</label></div>';
     }).join("");
+  }
+
+  /// D6: leaving the logins panel with rows still blank is a choice, not a refusal
+  /// (R-C1b-exec-10 already lets Next through) — but it has a consequence, and the panel says what
+  /// it is: the engine files a coursework-map card for each one (R-OB-1) and the app asks about it
+  /// there. Silent when nothing is blank; the singular reads correctly without a special case.
+  ///
+  /// Returns the count, so the caller can decide whether there is anything to stay for.
+  function noteUnmapped() {
+    var n = WIZ.map.filter(function (r) { return !r.ignore && !r.course; }).length;
+    if (n) { EL("wiz-map-note").textContent = n + " of these will be asked about in the app"; }
+    return n;
   }
   EL("wiz-map").addEventListener("input", function (e) {
     var f = e.target.getAttribute("data-course-for");

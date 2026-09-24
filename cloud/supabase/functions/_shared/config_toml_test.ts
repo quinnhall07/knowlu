@@ -38,3 +38,27 @@ Deno.test("every deployed function has its own verify_jwt = false entry in confi
   assertEquals([...declared].filter((d) => !deployed.includes(d)), []);
   assert(deployed.length >= 19, `expected every function directory, found ${deployed.length}`);
 });
+
+Deno.test("config.toml declares no auth provider, and says why — the Google provider is the dashboard's", async () => {
+  // R-C1b-5. A block here would put a client id in the repo and need `GOOGLE_SECRET` in every
+  // pushing shell — and a push from a shell without it would DISABLE a provider that works. The
+  // file therefore declares none, and the comment is what a reviewer reads instead: "we chose not
+  // to write a block" is otherwise invisible on a diff.
+  const toml = await Deno.readTextFile(CONFIG_TOML);
+  assert(!/^\[auth\.external\./m.test(toml), "no auth provider may be declared in the repo");
+  assert(
+    toml.includes("The Google provider is the DASHBOARD's, on both projects"),
+    "…and the file has to say so, or the next reader adds one",
+  );
+  // The other two halves of the same decision: D5, and the number that bounds what D5 costs (I2).
+  assert(toml.includes("enable_confirmations = false"), "D5: email confirmations are off");
+  assert(/^\[auth\.rate_limit\]/m.test(toml), "[auth.rate_limit] is declared, not defaulted");
+  assert(/^email_sent = \d+$/m.test(toml), "…with a number on the diff");
+  // **And the table starts AFTER `double_confirm_changes`** (review R3). A `[auth.rate_limit]`
+  // header placed one line too early does not fail to parse — it silently adopts the key below it,
+  // so `[auth.email]` loses `double_confirm_changes` and a push carries that loss to the project.
+  assert(
+    toml.indexOf("double_confirm_changes") < toml.indexOf("[auth.rate_limit]"),
+    "[auth.rate_limit] must not capture double_confirm_changes",
+  );
+});

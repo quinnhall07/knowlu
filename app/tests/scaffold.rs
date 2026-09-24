@@ -92,6 +92,7 @@ fn a_scaffolded_vault_ranks_without_the_unmigrated_warning() {
         code: "UACS100Fall2026".into(),
         name: "CS 100 Intro to Computer Science".into(),
         slug: "cs-100".into(),
+        label: "CS 100".into(),
     }];
     create_vault(&v, &p).unwrap();
 
@@ -590,6 +591,65 @@ fn a_zybook_code_suggests_the_course_it_obviously_is() {
     assert_eq!(slugify(&"x".repeat(80)).len(), 60);
 }
 
+/// D4: one course code, one slug. Blackboard names a course by term, department, number and
+/// section (`202640-BUI-100-101`), which `suggest_course` refuses because of the dash — so the
+/// vault used to hold `courses/202640-bui-100-101.md` beside a typed `BUI 100` that could never
+/// meet it. The name's own code is read, with no institution-prefix peel: the letters immediately
+/// before the number are the subject, and there is nothing glued in front of them to peel.
+#[test]
+fn a_course_name_gives_up_the_code_its_school_wrote_into_it() {
+    use knowlu::scaffold::course_code_in_name;
+    use knowlu_engine::ingest::slugify;
+    assert_eq!(course_code_in_name("202640-BUI-100-101").as_deref(), Some("BUI 100"));
+    assert_eq!(course_code_in_name("MATH-125-001").as_deref(), Some("MATH 125"));
+    assert_eq!(course_code_in_name("CS 100 Intro to Computer Science").as_deref(), Some("CS 100"));
+    assert_eq!(course_code_in_name("PSYC 101H Honors").as_deref(), Some("PSYC 101H"));
+    // No code in it at all, and never a guess: an invented fragment matches somebody else's course.
+    assert_eq!(course_code_in_name("Biology"), None);
+    assert_eq!(course_code_in_name(""), None);
+    // A number that is not three digits is not a course number.
+    assert_eq!(course_code_in_name("MATH-1250-001"), None);
+    // The glued form is `suggest_course`'s, not this one's — reading it here would peel nothing
+    // and answer `UACS 100`, which is nobody's course.
+    assert_eq!(course_code_in_name("UACS100Fall2026"), None);
+    assert_eq!(slugify("BUI 100"), "bui-100");
+}
+
+/// …and the note that course gets is titled by the code, keeps the school's own name, and keeps the
+/// LMS's key: the title is what a student reads, `name:` is what their LMS calls it, and `code:` is
+/// the fragment `ingest::match_course` matches a UID against.
+#[test]
+fn a_seeded_course_note_is_titled_by_its_code_and_keeps_the_lms_name() {
+    let root = temp("coursenote");
+    let v = root.join("Vault");
+    let mut p = plan_for(&v);
+    p.courses = vec![
+        knowlu::scaffold::CourseSeed {
+            code: "_404752_1".into(),
+            name: "202640-BUI-100-101".into(),
+            slug: "bui-100".into(),
+            label: "BUI 100".into(),
+        },
+        // No readable code anywhere: the label is empty and the note keeps today's behaviour.
+        knowlu::scaffold::CourseSeed {
+            code: "Independent Study".into(),
+            name: "Independent Study".into(),
+            slug: "independent-study".into(),
+            label: String::new(),
+        },
+    ];
+    create_vault(&v, &p).unwrap();
+    let note = std::fs::read_to_string(v.join("courses").join("bui-100.md")).unwrap().replace("\r\n", "\n");
+    assert!(note.contains("title: BUI 100\n"), "{note}");
+    assert!(note.contains("name: 202640-BUI-100-101\n"), "{note}");
+    assert!(note.contains("code: _404752_1\n"), "{note}");
+    assert!(note.contains("slug: bui-100\n"), "{note}");
+    // A course whose id and name both carry no readable code keeps today's behaviour — the name.
+    let plain = std::fs::read_to_string(v.join("courses").join("independent-study.md")).unwrap().replace("\r\n", "\n");
+    assert!(plain.contains("title: Independent Study\n"), "{plain}");
+    assert!(plain.contains("name: Independent Study\n"), "{plain}");
+}
+
 #[test]
 fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
     use knowlu::scaffold::{ingest_yaml, BookMapping, SectionMapping, VaultPlan};
@@ -665,6 +725,7 @@ fn a_duplicate_zybook_key_is_refused_rather_than_written_unparsable() {
 /// R-OB-2: one note per enrolled course, in the shape `judge::Heuristics::load` reads — the stem is
 /// the slug, the frontmatter carries `title` and `slug`, and the `## Grade weights` heading is there
 /// and empty, because the weights are the student's to write and the model's to read.
+/// D4: the note is titled by the human code the capture read and `name:` carries the LMS's own name.
 #[test]
 fn every_enrolled_course_becomes_a_note_the_engine_can_find() {
     use knowlu::scaffold::{create_vault, CourseSeed};
@@ -674,16 +735,21 @@ fn every_enrolled_course_becomes_a_note_the_engine_can_find() {
     let dest = root.join("Fall 2026");
     let mut p = plan_for(&dest);          // the helper the other scaffold tests already use
     p.courses = vec![
-        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
-        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+        CourseSeed { code: "CS 100".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into(), label: "CS 100".into() },
+        CourseSeed { code: "GN 103".into(), name: "GN 103 German".into(), slug: "gn-103".into(), label: "GN 103".into() },
     ];
     p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
     create_vault(&dest, &p).expect("create");
 
-    for (slug, title) in [("cs-100", "CS 100 Intro to Computer Science"), ("gn-103", "GN 103 German")] {
+    // D4: the note is titled by the human code, and `name:` carries the school's own name.
+    for (slug, title, name) in [
+        ("cs-100", "CS 100", "CS 100 Intro to Computer Science"),
+        ("gn-103", "GN 103", "GN 103 German"),
+    ] {
         let note = dest.join("courses").join(format!("{slug}.md"));
         let text = knowlu_engine::pystr::read_text(&note).unwrap_or_else(|e| panic!("{}: {e}", note.display()));
         assert!(text.contains(&format!("title: {title}")), "{text}");
+        assert!(text.contains(&format!("name: {name}")), "{text}");
         assert!(text.contains(&format!("slug: {slug}")), "{text}");
         assert!(text.contains("## Grade weights"), "{text}");
         // Every note has an opaque id, like every other note this app writes.
@@ -708,13 +774,13 @@ fn a_captured_course_maps_by_its_lms_id_and_by_the_code_a_summary_spells() {
     let dest = temp("captured-courses").join("Fall 2026");
     let mut p = plan_for(&dest);
     p.courses = vec![
-        CourseSeed { code: "UACS100Fall2026".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into() },
+        CourseSeed { code: "UACS100Fall2026".into(), name: "CS 100 Intro to Computer Science".into(), slug: "cs-100".into(), label: "CS 100".into() },
         // The lab section of the same course: a second LMS id under the SAME slug. Both ids become
         // fragments, and the note is written once — a student enrolled in a lecture and its lab must
         // not be a wizard that refuses to make a vault.
-        CourseSeed { code: "UACS100LFall2026".into(), name: "CS 100 Lab".into(), slug: "cs-100".into() },
+        CourseSeed { code: "UACS100LFall2026".into(), name: "CS 100 Lab".into(), slug: "cs-100".into(), label: "CS 100".into() },
         // …and a course whose id carries no readable code at all: the human half comes off the name.
-        CourseSeed { code: "202610-GN-103-001".into(), name: "GN 103 German".into(), slug: "gn-103".into() },
+        CourseSeed { code: "202610-GN-103-001".into(), name: "GN 103 German".into(), slug: "gn-103".into(), label: "GN 103".into() },
     ];
     let text = ingest_yaml(&p).expect("ingest.yaml");
     for line in [
@@ -767,7 +833,7 @@ fn every_mapped_course_is_a_slug_the_vault_knows() {
     p.vhl = true;
     p.zybooks_courses = vec![BookMapping { code: "UACS100Fall2026".into(), course: "cs-100".into(), label: "CS 100".into() }];
     p.vhl_sections = vec![SectionMapping { section: "2102121".into(), course: "gn-103".into(), label: "GN 103".into() }];
-    p.courses = vec![CourseSeed { code: "CS 100".into(), name: "CS 100 Intro".into(), slug: "cs-100".into() }];
+    p.courses = vec![CourseSeed { code: "CS 100".into(), name: "CS 100 Intro".into(), slug: "cs-100".into(), label: "CS 100".into() }];
     p.course_map = vec![("CS 100".into(), "cs-100".into()), ("GN 103".into(), "gn-103".into())];
     create_vault(&dest, &p).expect("create");
 

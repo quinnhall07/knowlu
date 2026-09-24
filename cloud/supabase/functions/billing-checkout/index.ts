@@ -21,10 +21,12 @@ Deno.serve(async (req) => {
     return await handle(req, {
       verify: (token) => authGetUser(rest, token),
       getAccount: async (id) => {
-        const rows = await restSelect<{ email: string; stripe_customer_id: string | null }>(
+        const rows = await restSelect<
+          { email: string; stripe_customer_id: string | null; age_attested_at: string | null }
+        >(
           rest,
           "accounts",
-          `id=eq.${encodeURIComponent(id)}&select=email,stripe_customer_id&limit=1`,
+          `id=eq.${encodeURIComponent(id)}&select=email,stripe_customer_id,age_attested_at&limit=1`,
         );
         return rows[0] ?? null;
       },

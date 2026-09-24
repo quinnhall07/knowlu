@@ -11,9 +11,18 @@ permissions: { contents: read }
 env:
   RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
+# The repository variable CI_SELF_HOSTED: the literal `on` sends every job below to
+# [self-hosted, windows, x64, knowlu-ci]; unset (or anything else), each job falls back to the
+# hosted image it ran on before, so going back to hosted runners is deleting the variable, never a
+# code change. On the self-hosted runner, `cloud` and `eval-gate` still run on Windows: `deno check`
+# expands its own `**` globs (verified 2026-09-22 with deno 2.9.6 in PowerShell, where the shell
+# passes them literally), and the `shell: bash` steps (eval-gate's own, and dtolnay/rust-toolchain's
+# internal ones) need Git for Windows' bash.exe ahead of WSL's on the runner's PATH — a runner-setup
+# requirement, not a workflow one. release.yml never reads this switch: its signing and publish
+# secrets stay on GitHub-hosted runners.
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'windows-latest' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -62,7 +71,7 @@ jobs:
   # and the Rust job above is the long pole. C1 hand-off H7, applied early (R-C1-23); C2 amends this one
   # job (R-X-7) — nothing adds a second `cloud` job.
   cloud:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -123,7 +132,7 @@ jobs:
   # each on the pinned OpenRouter models (provider swap Task 4; the figure was Haiku-priced before
   # 2026-09-16) — well under a dollar — and the run prints its own case count before each kind's loop.
   eval-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
     needs: cloud
     if: github.event_name == 'pull_request'
     timeout-minutes: 20
