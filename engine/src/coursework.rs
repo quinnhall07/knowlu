@@ -4579,6 +4579,12 @@ mod tests {
     /// the sink, exactly as the real one reports what the payload it just fetched says.
     fn run_with_figure(vault: &Path, dry_run: bool, earned: f64) -> i32 {
         let sink: CompletionSink = std::cell::RefCell::new(Vec::new());
+        // R-C1c-6: a group with no history archives an item already past on the vault's clock, so
+        // `plain()`'s fixed 2026-08-26 due date would be archived rather than created. The same
+        // assignment, due three days ahead on the clock the code under test reads, keeps these
+        // tests about the completion card (the fix `main_writes_a_coursework_run_record_…` uses).
+        let soon = crate::cli::local_now(vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
+        let due = soon.at(23, 59, 0, 0);
         let zy = |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
             sink.borrow_mut().push(crate::completion::VendorCompletion {
                 source: "zybooks".to_string(),
@@ -4586,7 +4592,7 @@ mod tests {
                 earned,
                 possible: 193.0,
             });
-            Ok(vec![plain()])
+            Ok(vec![Assignment { due, ..plain() }])
         };
         let fetchers: [(&str, Fetcher); 1] = [("zybooks", &zy)];
         main_with_sources(vault, dry_run, "local-runner", None, Some(&fetchers), Some(&sink))
