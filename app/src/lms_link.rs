@@ -586,11 +586,9 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
     json!({ "ok": true, "error": Value::Null, "courses": courses, "typed": false })
 }
 
-/// **The link is stored twice, and this is the half that is easy to forget** (Interfaces with C2,
-/// item 3). The vault copy goes into `config/ingest.yaml` at Finish, through `WizardPlan.ics_url`;
-/// the account copy goes to `PUT /account/sources` **here**, the moment a link validates, because
-/// C2's `/ingest/ics` reads that row server-side and an empty `sources` table makes C2's whole ICS
-/// path dead on arrival.
+/// **The account is the only writer of this URL from C3′ on** (amendment 2026-09-17, ruling 2, and
+/// §9's SPII line). `scaffold::ingest_yaml` writes `ics_url: ''` into a vault that has an account;
+/// a vault with no account still keeps its own copy, because it has nowhere else to keep it.
 ///
 /// It is also the only place C1 exercises `requireActiveEntitlement` in production, which is how the
 /// 402 contract C2 imports gets proved by something that ships.

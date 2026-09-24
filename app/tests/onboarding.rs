@@ -644,15 +644,22 @@ fn a_webcal_personal_calendar_is_rewritten_to_https() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-cal-webcal");
+    let raw = "webcal://x.invalid/y.ics";
     let mut plan = base_plan(false);
-    plan.personal_calendar = Some("webcal://x.invalid/y.ics".to_string());
+    plan.personal_calendar = Some(raw.to_string());
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
+    // C3' Task 11: `create_vault_in` requires a session to reach here at all, so the vault's own
+    // copy of the address is masked to `cloud:personal` (H11b) — exactly
+    // `a_vault_with_an_account_carries_no_capability_url`'s case, reached through the real wizard
+    // path rather than `VaultPlan` directly. The rewrite itself is still proved, against the one
+    // implementation (`lms_link::https_from_webcal`) `normalize_personal_calendar` calls.
+    assert_eq!(knowlu::lms_link::https_from_webcal(raw.trim()), "https://x.invalid/y.ics");
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
     assert!(
-        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'cloud:personal'\n"),
         "{ingest}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -681,15 +688,19 @@ fn a_padded_personal_calendar_is_trimmed() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-cal-padded");
+    let raw = "  https://x.invalid/y.ics  ";
     let mut plan = base_plan(false);
-    plan.personal_calendar = Some("  https://x.invalid/y.ics  ".to_string());
+    plan.personal_calendar = Some(raw.to_string());
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
+    // C3' Task 11: same masking as the webcal case above — the trim is still proved directly, and
+    // the vault's own copy is `cloud:personal` because this path always has an account.
+    assert_eq!(knowlu::lms_link::https_from_webcal(raw.trim()), "https://x.invalid/y.ics");
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
     assert!(
-        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'https://x.invalid/y.ics'\n"),
+        ingest.contains("calendars:\n  - name: personal\n    ics_url: 'cloud:personal'\n"),
         "{ingest}"
     );
     let _ = std::fs::remove_dir_all(&root);

@@ -395,7 +395,15 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         return Err("vhl_sections is set but vhl is not enabled — a plan bug, not a student's".to_string());
     }
     let mut s = String::new();
-    if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
+    // C3′, Task 11 (cloud design §9, Alabama SPII): a capability URL is a credential in all but
+    // name, and on a vault that has an account the one place it belongs is the account, encrypted,
+    // where `PUT /account/sources` already put it. The KEY stays, empty, so `ingest` still parses
+    // the file and so a reader can see the feed is elsewhere rather than missing.
+    if !p.account_id.is_empty() {
+        s.push_str("ics_url: ''\n");
+    } else if let Some(u) = &p.ics_url {
+        s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?));
+    }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
     // R-OB-2 and R-C1-48: what the student confirmed, plus two fragments per enrolled course.
     let course_map = course_map_lines(p);
@@ -413,8 +421,15 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     // wizard value goes through: `personal` (the secret iCal address, C1's) and `google` (the
     // marker for the account's grant, C2's — §11a).
     let mut entries: Vec<String> = Vec::new();
-    if let Some(u) = &p.personal_calendar {
-        entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
+    if p.personal_calendar.is_some() {
+        if p.account_id.is_empty() {
+            let u = p.personal_calendar.as_deref().unwrap_or_default();
+            entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
+        } else {
+            // The same removal and the same argument; `cloud:personal` is C2's own routing
+            // (`cli.rs:241-250`) and resolves to `/ingest-calendar?name=personal`.
+            entries.push("  - name: personal\n    ics_url: 'cloud:personal'\n".to_string());
+        }
     }
     if p.google_calendar {
         entries.push("  - name: google\n    ics_url: 'cloud:google'\n".to_string());
