@@ -441,10 +441,17 @@ supplies — nothing here is computed client-side; the severity class (`calm` / 
 rides with the string. Read top to bottom, first match per group wins:
 
 **Sync (`state.topline.sync`, an `engine::sync::SyncStatus`, checked in this order):**
-- `last_error` set → its first line (amber).
-- else `skipped` set → `sync skipped — <reason>` — amber for `no entitlement` and `no session` (the
-  two a student can act on: subscribe again, sign back in), calm for `no account` and `another sync
-  is running` (ordinary, expected states, C3′ Task 7 review R-C3′-exec-38/-39).
+- `last_error` set, else `skipped` set → the engine's word, mapped through the page's `SYNC_SAYS`
+  (C3′'s final fix wave, R-C3′-exec-39/-43; `app/tests/static_assets.rs` reads every such word out of
+  `engine/src/cloudmodel.rs` and `sync.rs` and fails if the table lacks one):
+  - `no session` / `signed out` → `signed out — sign in to sync` (amber);
+  - `no entitlement` → `can't confirm your subscription — changes stay on this computer` (amber; a
+    paying student more than 72 h offline lands here too, so it never says "inactive");
+  - `offline: the account could not be reached` → `offline — changes stay on this computer` (amber);
+  - `no account`, `another sync is running` → `sync skipped — <word>` (calm, ordinary states);
+  - any other word → its own first line (amber for an error, calm after `sync skipped — ` for a skip).
+  *Sync now*'s refusal toast says the same words. The diagnostics blob and the issue report keep the
+  engine's raw word.
 - else `at` set (a sync has completed) → `in step with your account` (calm).
 - otherwise (no sync has ever run) → `not synced yet` (calm).
 
