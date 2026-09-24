@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, judge_state_in, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, judge_state_in, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, LiveSlot, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -722,6 +722,9 @@ fn a_vault_that_has_never_been_ranked_is_owed_its_first_run_at_launch() {
 /// sit side by side in the Runs view and a reader should not have to learn two conventions.
 #[test]
 fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_green() {
+    // D1: this vault has an account and no cache, so the slot now attempts one refresh, which
+    // reaches `valid_access_token_at` and the real Credential Manager (CLAUDE.md).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let v = scratch("noentitlement");
     std::fs::write(
         v.join("config").join("runners.yaml"),
@@ -808,13 +811,143 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// F2 (task-11-review.md, round 1): `cloud_config`'s own host check compares scheme and host only,
+/// never the path, so a `cloud.yaml` whose `api_base` names the right host but the wrong path (no
+/// trailing `/functions/v1`) passes `cloud_config` and only then fails `auth_base` — reachable only
+/// from a hand-edited or corrupted file, never from anything the wizard writes, but the session
+/// pre-flight must name this failure exactly like a refused refresh rather than sit silent while the
+/// entitlement block right below (gated the same way, and hitting the identical broken value) visibly
+/// reports its own.
+#[test]
+fn a_malformed_api_base_names_the_session_step_instead_of_silence() {
+    let v = scratch("sessionbadbase");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // The host matches this build's own `api_base()` (set below via `KNOWLU_API_BASE`), so
+    // `cloud_config`'s host check accepts it; the path does not end in `/functions/v1`, so only
+    // `auth_base` refuses it.
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/not-functions'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "sessionbadbase");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-sessionbadbase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/not-functions")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let session_at = named.iter().position(|n| n.starts_with("session (refresh failed:"))
+        .unwrap_or_else(|| panic!("no session step: {named:?}"));
+    let coursework_at = named.iter().position(|n| n == "coursework")
+        .unwrap_or_else(|| panic!("no coursework step: {named:?}"));
+    assert!(session_at < coursework_at, "the session failure is still named before any engine step: {named:?}");
+    assert_eq!(s.steps[session_at].1, 0, "a malformed api_base is not a failed slot");
+    assert!(named[session_at].contains("functions/v1"), "the auth_base error names what is wrong: {}", named[session_at]);
+    assert!(s.engine_ok, "a named session failure must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// R-C1c-13: the slot refreshes the account session before its first cloud step — the entitlement
+/// refresh right after it is itself one such step, and every child process after that (sync,
+/// coursework, ingest, judge) authenticates with the same session. Since the C3′ merge this also
+/// pins that the refresh precedes the `sync` child, the first to spend the token. A one-hour token is routinely down to single
+/// digits by a noon or 6pm slot, and the app's only other refresh point (`valid_access_token_at`'s own
+/// 120-second margin) is reached only at the slot's END, by telemetry — too late for anything earlier
+/// in the same slot. A session with ten minutes left, under this pre-flight's 45-minute floor, and an
+/// `api_base` that answers nothing (port 9, the closed host this file's other tests already use) must
+/// still leave the slot green: a network refusing the refresh is not a failed slot, and the failure is
+/// named and sanitized exactly as the entitlement step's own is (R-C1c-final-3).
+#[test]
+fn a_near_expiry_session_is_refreshed_before_any_engine_step_and_a_failure_is_named() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("sessionrefresh");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    let target = format!("knowlu/test-sessionrefresh-{}-{}", std::process::id(), line!());
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        format!("api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    ).unwrap();
+    let _cred_cleanup = CredCleanup(target.clone());
+    knowlu::account::save_session(&target, "acc-1", &knowlu::account::Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        // Ten minutes left — under the 45-minute floor the scheduler's pre-flight asks for, so a
+        // refresh is attempted (and, against the closed port below, fails).
+        expires_at: jiff::Timestamp::now().as_second() + 600,
+        email: "a@example.invalid".into(),
+    }).unwrap();
+    let cs = open(&v, "sessionrefresh");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-sessionrefresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        // `cloud_config`'s R-C1-59 I1 host check needs this build's own `api_base()` to name the
+        // same port-9 host the vault's `cloud.yaml` does, above.
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let session_at = named.iter().position(|n| n.starts_with("session (refresh failed:"))
+        .unwrap_or_else(|| panic!("no session step: {named:?}"));
+    let coursework_at = named.iter().position(|n| n == "coursework")
+        .unwrap_or_else(|| panic!("no coursework step: {named:?}"));
+    assert!(session_at < coursework_at, "the session is refreshed before any engine step: {named:?}");
+    // The C3′ merge: `slot_argv` puts `sync` first, ahead of coursework, and the engine's `sync`
+    // spends this same token on `/sync-pull` and `/sync-push` — so the one session refresh a slot
+    // makes has to come before `sync` too, or a second-day slot syncs on a stale token and reads
+    // "signed out". This vault's slot runs `sync` (it is unconditional in `slot_argv`).
+    let sync_at = named.iter().position(|n| n == "sync")
+        .unwrap_or_else(|| panic!("no sync step: {named:?}"));
+    assert!(
+        session_at < sync_at,
+        "the session is refreshed before the sync step, because the engine's sync spends the token: {named:?}"
+    );
+    assert!(sync_at < coursework_at, "sync is the slot's first engine step: {named:?}");
+    assert_eq!(
+        named.iter().filter(|n| n.starts_with("session")).count(),
+        1,
+        "exactly one session refresh per slot — never one per step: {named:?}"
+    );
+    assert_eq!(s.steps[session_at].1, 0, "a network refusing the refresh is not a failed slot");
+    assert!(s.engine_ok, "a failed session refresh must never paint the tray amber: {:?}", s.steps);
+    // R-C1c-final-3: the runner log gets the sanitized line, never the service's failure reason.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok session (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// Case (c): entitled once, but not for four days. The grace is over, the cloud step stands down as a
 /// named step, and the day is still ranked.
 ///
 /// Fix round 1, item 4: driven through `run_slot_inner`, exactly as its `…no_entitlement…` sibling
 /// above, so the name is true of the whole slot — not just of `judge_plan` in isolation.
+///
+/// R-C1c-11: this cache is now past-grace, so `run_slot_inner` attempts its own refresh before the
+/// judge decision (`a_stale_entitlement_is_refreshed_inside_the_slot_before_it_decides` proves the
+/// ordering) — which reaches `valid_access_token_at` and the real Credential Manager, so this test
+/// takes this file's lock too, as CLAUDE.md requires of every test that touches the store.
 #[test]
 fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use knowlu::account::{save_cache, EntitlementCache};
     let v = scratch("pastgrace");
     std::fs::write(
@@ -856,6 +989,199 @@ fn an_entitlement_past_the_grace_skips_judge_by_name_and_keeps_the_slot_green() 
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// §2 / D1: the first slot of a brand-new cloud vault used to lose a race. `scheduler::spawn`
+/// starts the first slot and the launch entitlement refresh on two threads, and on the first live
+/// onboarding the slot reached the judge decision before the refresh had written its cache — so the
+/// judge was skipped for want of an answer that was already on its way. A vault that has an account
+/// and has never cached an entitlement now refreshes it INSIDE the slot, before the decision.
+#[test]
+fn a_first_slot_refreshes_the_entitlement_before_it_decides_about_judge() {
+    // The refresh reaches `valid_access_token_at`, which reads the real Credential Manager
+    // (CLAUDE.md: every test that touches the store takes this file's lock).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entrefresh");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entrefresh");
+    assert!(!knowlu::account::cache_path(&cs.data_dir).exists(), "nothing has been cached yet");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entrefresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    // D8: and the skip reaches the file a student can open, in the engine's own format — with
+    // status `ok`, because a skip is routine (Ruling R-C1c-plan-4).
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok judge (skipped: no entitlement)"), "{log}");
+    assert!(!log.contains("local skip"), "a skip must not be a non-ok line: {log}");
+    // Final review, I3: the entitlement step reaches `state/runner-log.md` too, as an `ok` line —
+    // but never with the service's failure reason. `s.steps` (asserted above via `refresh`) keeps
+    // the full `entitlement (refresh failed: <reason>)` for the in-memory `RunSummary`; the file a
+    // student can open gets the bare sentence only.
+    assert!(log.contains("local ok entitlement (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// R-C1c-11: the same race Task 2 fixed for a cache that was MISSING also applies to one that
+/// EXISTS but is past its 72-hour grace. `scheduler::spawn` starts the first slot and the launch
+/// refresh on two threads; a student who reopens the laptop after a long weekend used to get a
+/// first slot with every cloud step skipped (`judge (skipped: no entitlement)`) while the launch
+/// refresh — and the six-hourly housekeeping refresh behind it — was still hours away. This proves
+/// the slot itself asks once, synchronously, before it decides, exactly as it already does for a
+/// cache that has never been written at all.
+#[test]
+fn a_stale_entitlement_is_refreshed_inside_the_slot_before_it_decides() {
+    // The refresh reaches `valid_access_token_at`, which reads the real Credential Manager
+    // (CLAUDE.md: every test that touches the store takes this file's lock).
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entstale");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entstale");
+    // Well past the grace, computed from the clock at run time — never a hard-coded date.
+    let stale = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(100)).to_string();
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: Some("monthly".into()), checked_at: stale,
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entstale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    // R-C1c-final-3: the runner log gets the sanitized line, never the service's failure reason.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok entitlement (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and the same is true of a cache that is fresh but no longer `active`/`trialing` — cancelled,
+/// for instance. `checked_at` being recent does not matter: `account::decide` reads the status
+/// first, and a lapsed status is asked again exactly as a stale one is.
+#[test]
+fn a_cancelled_entitlement_is_asked_again_inside_the_slot() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entcancelled");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entcancelled");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "canceled".into(), current_period_end: None, plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entcancelled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let refresh = named.iter().position(|n| n.starts_with("entitlement (refresh failed:"))
+        .unwrap_or_else(|| panic!("no entitlement step: {named:?}"));
+    let judge = named.iter().position(|n| n == "judge (skipped: no entitlement)")
+        .unwrap_or_else(|| panic!("no judge skip: {named:?}"));
+    assert!(refresh < judge, "the refresh is attempted BEFORE the decision: {named:?}");
+    assert_eq!(s.steps[refresh].1, 0, "a service that could not be reached is not a failed slot");
+    assert!(s.engine_ok, "an entitlement refresh must never paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// …and a cache that is FRESH and `active` — `Entitled` — is still never refreshed here: the
+/// six-hourly housekeeping refresh alone owns re-asking a question that already has a good answer.
+/// R-C1c-11 changes every OTHER cache shape (missing, stale, or no longer active/trialing); this is
+/// the one case that must not.
+#[test]
+fn a_fresh_active_entitlement_is_never_refreshed_inside_the_slot() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("entcached");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/profile_x/session'\naccount_id: 'acc-1'\n",
+    ).unwrap();
+    let cs = open(&v, "entcached");
+    knowlu::account::save_cache(&cs.data_dir, &knowlu::account::EntitlementCache {
+        status: "active".into(), current_period_end: None, plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    }).unwrap();
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-entcached-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
+    // Nothing was skipped, so nothing was written: D8 adds a line for a skip, not for every slot.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
+    assert!(!log.contains("(skipped:"), "{log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// Fix round 1, item 2: `config/cloud.yaml` exists but does not parse — a corrupted file, or one
 /// edited by hand and left broken. This must NOT collapse into `NoAccount` (which would fall through
 /// to the local runtime/model gate and run `judge` with no account at all): it is named as its own
@@ -885,6 +1211,36 @@ fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
     assert!(named.contains(&"judge (skipped: cloud.yaml unreadable)".to_string()), "{named:?}");
     assert!(!named.iter().any(|n| n == "judge"), "the step itself never ran");
     assert!(s.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Task 10 review (Important): a `config/cloud.yaml` that exists but is unreadable must NOT trigger
+/// the R-C1c-11 in-slot refresh either — `refresh_entitlement`'s own first call is the identical
+/// `cloud_config` that already fails the gate, so a refresh attempt here could only ever record a
+/// doomed `entitlement (refresh failed: …)` step, forever, for a vault that will never recover on
+/// its own. `judge_plan_for` already names this vault's own skip (`cloud.yaml unreadable`); a second,
+/// separate step naming the same broken file a second way adds nothing a student can act on.
+#[test]
+fn an_unreadable_cloud_yaml_never_triggers_an_entitlement_refresh_either() {
+    let v = scratch("unreadablecloudent");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    // Garbage: present, but neither valid YAML nor a mapping with the required keys — exactly its
+    // sibling test's fixture above, kept in its own vault so the two tests never share state.
+    std::fs::write(v.join("config").join("cloud.yaml"), "not: [valid\n").unwrap();
+    let cs = open(&v, "unreadablecloudent");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-unreadablecloudent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
@@ -971,5 +1327,159 @@ fn a_new_vault_needs_a_first_run_and_an_adopted_one_does_not() {
     assert!(needs_first_run(&v), "a root today.md is not the ranked page");
     std::fs::write(&today, b"# Today\n").unwrap();
     assert!(!needs_first_run(&v), "an adopted vault already has state/today.md and must not run again");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// An app-scheduled `local` runner on this device, so `run_slot_inner` runs rather than refuses.
+fn app_scheduled(v: &Path) {
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+}
+
+/// R-C1c-8: the first-run view reads `Scheduler.live` while a slot runs, because `Scheduler.last`
+/// is written only when the slot ends — by which time `rank` has written the day and the view is
+/// gone. So every step the slot records has to reach `live` as it lands, from every kind of site
+/// (a named skip, a child, the backup, telemetry), and when the slot is over the two lists are the
+/// same list. `current` names a step in progress; a finished slot has none.
+///
+/// The sync steps are not named (R-C1c-final2 M2): C3′ replaces the pull and the push with a `sync`
+/// child, and `live.steps == summary.steps` already covers whatever the slot records.
+///
+/// The `cmd` stand-in engine and a temp `LOCALAPPDATA`, under `ENGINE_ENV_LOCK`, exactly as the
+/// skip tests above.
+#[test]
+fn a_slot_publishes_every_step_it_records_while_it_runs() {
+    let v = scratch("livesteps");
+    app_scheduled(&v);
+    let cs = open(&v, "livesteps");
+    // A backup folder, so the backup step lands too and the mirror is proved over it.
+    let bdir = std::env::temp_dir().join(format!("qo-console-sched-livesteps-backup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bdir);
+    { cs.settings.lock().unwrap().backup_dir = Some(bdir.clone()); }
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-livesteps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    assert!(s.reason.is_none(), "not refused: {:?}", s.reason);
+    let live = lock(&sch.live).clone();
+    assert_eq!(live.steps, s.steps, "the published list is the slot's own list, step for step");
+    assert!(live.current.is_none(), "a slot that has ended has nothing in progress: {live:?}");
+    let named: Vec<&str> = live.steps.iter().map(|(n, _)| n.as_str()).collect();
+    for want in ["ingest (skipped: no ics_url)", "coursework", "rank", "backup", "telemetry (skipped: no account)"] {
+        assert!(named.contains(&want), "{want} did not reach the published list: {named:?}");
+    }
+    assert!(named.iter().any(|n| n.starts_with("judge (skipped:")), "{named:?}");
+    let _ = std::fs::remove_dir_all(&bdir);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// R-C1c-8: a slot that really starts clears the published list in the same step that sets
+/// `running`, so no poll can pair `running: true` with the previous slot's steps. A slot that does
+/// not start — refused, or turned away because one is already running — leaves it alone.
+#[test]
+fn a_new_slot_starts_with_an_empty_live_list() {
+    let v = scratch("livereset");
+    app_scheduled(&v);
+    let cs = open(&v, "livereset");
+    let sch = Scheduler::default();
+    let junk = || LiveSlot { steps: vec![("an older slot's step".to_string(), 7)], current: Some("an older slot's step in progress".to_string()) };
+    *lock(&sch.live) = junk();
+
+    // Turned away: a slot is already running, and that slot's list is the one on the page.
+    *lock(&sch.running) = true;
+    let _ = run_slot_inner(&cs, &sch, None, false);
+    *lock(&sch.running) = false;
+    assert_eq!(lock(&sch.live).steps, junk().steps, "an overlapping trigger must not clear the running slot's list");
+    // Refused: vault-full's own runners.yaml says `scheduler: script`.
+    let refused_vault = scratch("livereset-refused");
+    let refused = run_slot_inner(&open(&refused_vault, "livereset-refused"), &sch, None, false);
+    assert!(refused.reason.is_some(), "this slot was refused: {refused:?}");
+    assert_eq!(lock(&sch.live).current, junk().current, "a refusal never started, so it publishes nothing");
+
+    let fake = std::env::temp_dir().join(format!("qo-sched-livereset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let live = lock(&sch.live).clone();
+    assert!(!live.steps.iter().any(|(n, _)| n == "an older slot's step"), "the older slot's step survived: {live:?}");
+    assert!(live.current.is_none(), "the older slot's step in progress survived: {live:?}");
+    assert_eq!(live.steps, s.steps);
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&refused_vault);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Creates the handshake's go-ahead file when dropped — on a failing assertion too — so the
+/// stand-in engine below never waits out the twenty-minute child cap.
+struct GoAhead(PathBuf);
+impl Drop for GoAhead {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"go");
+    }
+}
+
+/// R-C1c-8: while a step does its work, `live.current` names it and `live.steps` holds exactly what
+/// has landed before it. Observed by handshake, not by timing: the stand-in engine is a batch file
+/// that, when called as `coursework`, drops a `started` marker and then waits until this test
+/// writes `go`, so the slot is provably inside that step while `live` is read. Every other step
+/// exits 0 at once.
+#[test]
+fn a_slot_names_the_step_in_progress_while_it_runs() {
+    let v = scratch("livecurrent");
+    app_scheduled(&v);
+    let cs = open(&v, "livecurrent");
+    let sch = Scheduler::default();
+    let hs = std::env::temp_dir().join(format!("qo-sched-handshake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&hs);
+    std::fs::create_dir_all(&hs).unwrap();
+    // CRLF inside the file: `goto` in a batch file with bare LF line ends is unreliable.
+    let bat = hs.join("engine.bat");
+    std::fs::write(&bat, concat!(
+        "@echo off\r\n",
+        "if not \"%1\"==\"coursework\" exit /b 0\r\n",
+        "echo started>\"%KNOWLU_TEST_HANDSHAKE%\\started\"\r\n",
+        ":wait\r\n",
+        "if exist \"%KNOWLU_TEST_HANDSHAKE%\\go\" exit /b 0\r\n",
+        "ping -n 2 127.0.0.1 >nul\r\n",
+        "goto wait\r\n",
+    )).unwrap();
+    let fake = std::env::temp_dir().join(format!("qo-sched-livecurrent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", bat.as_os_str()),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_TEST_HANDSHAKE", hs.as_os_str()),
+    ]);
+    let (mid, s) = std::thread::scope(|scope| {
+        let slot = scope.spawn(|| run_slot_inner(&cs, &sch, None, false));
+        let go = GoAhead(hs.join("go"));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !hs.join("started").exists() {
+            assert!(!slot.is_finished(), "the slot ended without the stand-in engine reaching coursework");
+            assert!(Instant::now() < deadline, "the stand-in engine never reached coursework");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mid = lock(&sch.live).clone();
+        drop(go);
+        (mid, slot.join().unwrap())
+    });
+    assert_eq!(mid.current.as_deref(), Some("coursework"), "the step in progress is named: {mid:?}");
+    let landed: Vec<(String, i32)> = s.steps.iter().take_while(|(n, _)| n != "coursework").cloned().collect();
+    assert!(!landed.is_empty(), "the named skips land before the first child: {:?}", s.steps);
+    assert_eq!(mid.steps, landed, "mid-slot, the list is exactly what has landed so far");
+    assert_eq!(s.steps.iter().find(|(n, _)| n == "coursework").map(|(_, c)| *c), Some(0), "{:?}", s.steps);
+    assert!(lock(&sch.live).current.is_none(), "nothing is in progress once the slot has ended");
+    let _ = std::fs::remove_dir_all(&hs);
+    let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }

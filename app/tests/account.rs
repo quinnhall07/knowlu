@@ -403,6 +403,50 @@ fn a_cache_round_trips_through_the_profile_folder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R-C1c-final-5: `scheduler::spawn`'s launch refresh (at +10 s) and a slot's own in-slot refresh
+/// (§2) can overlap when the round trip takes about that long. With one shared `.tmp` name, the
+/// loser's `rename` finds its own source already moved away by the winner, falls into the fallback,
+/// and `remove_file(&path)` deletes the WINNER's just-written fresh cache — both calls report
+/// success and the profile is left with none at all (the F13 skip again). Many rounds of two
+/// barrier-synchronised threads, to give that interleaving room to land within one test run. This
+/// never touches Credential Manager, so — per CLAUDE.md — it does not take `CREDMAN_LOCK`.
+#[test]
+fn overlapping_saves_never_clobber_each_other_into_no_cache_at_all() {
+    use knowlu::account::{cache_path, load_cache, save_cache, EntitlementCache};
+    let dir = std::env::temp_dir().join(format!("knowlu-ent-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for round in 0..200u32 {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for i in 0..2u32 {
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let c = EntitlementCache {
+                    status: if i == 0 { "active" } else { "trialing" }.into(),
+                    current_period_end: None,
+                    plan: Some("monthly".into()),
+                    checked_at: format!("2026-09-22T00:00:{round:02}.00{i}Z"),
+                };
+                // Lines both threads up at the same starting gate so the write-then-rename windows
+                // of the two calls actually overlap, rather than one finishing before the other starts.
+                barrier.wait();
+                save_cache(&dir, &c)
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().expect("an overlapping save must still succeed");
+        }
+        assert!(
+            load_cache(&dir).is_some(),
+            "round {round}: the cache must end up present and parseable, never deleted by the other writer's fallback"
+        );
+    }
+    assert!(cache_path(&dir).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fix round 1, item 5a: a profile with no session credential at all — the ordinary state for a
 /// signed-out or never-signed-in install — must fail the refresh outright and leave no
 /// `entitlement.json` behind. No loopback server needed — nothing here ever answers a request — but
@@ -490,6 +534,151 @@ fn refresh_entitlement_saves_the_cache_from_a_live_reply() {
     assert_eq!(cached.checked_at, "2026-09-10T12:00:00.000Z");
     let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// R-C1c-13: the scheduler's pre-flight, run before the first cloud step of a slot. Unlike
+/// `valid_access_token_at`'s 120-second margin (reached only at a slot's own end, by the telemetry
+/// step), this one is asked with a floor wide enough to survive the slot itself — 45 minutes here —
+/// so a token minted hours ago by an earlier slot is refreshed before anything tries to spend it.
+#[cfg(windows)]
+#[test]
+fn ensure_session_for_at_refreshes_a_token_with_ten_minutes_left_against_a_forty_five_minute_floor() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, load_session, save_session, Session};
+    let target = format!("knowlu/test-ensure-refresh-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "stale-at".into(),
+        refresh_token: "rt-1".into(),
+        expires_at: now + 600, // ten minutes left
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a near-expiry session");
+
+    let body = r#"{"access_token":"fresh-at","refresh_token":"fresh-rt","expires_in":3600,"user":{"id":"acc-1","email":"a@example.invalid"}}"#;
+    let (base, handle) = loopback(vec![(200, body.to_string())]);
+    let refreshed = ensure_session_for_at(&format!("{base}/auth/v1"), "anon-key", &target, now, 45 * 60).expect("refresh");
+    let seen = handle.join().expect("server thread");
+    assert!(refreshed, "ten minutes left against a forty-five-minute floor must refresh");
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    assert!(seen[0].contains("\"refresh_token\":\"rt-1\""), "{}", seen[0]);
+    let (_, back) = load_session(&target).expect("the rewritten entry");
+    assert_eq!(back.access_token, "fresh-at");
+    assert_eq!(back.refresh_token, "fresh-rt");
+}
+
+/// …and a token that already clears the floor is left alone — no request at all, so pointing it at a
+/// port nothing listens on still succeeds and the stored entry is byte-for-byte what it was.
+#[cfg(windows)]
+#[test]
+fn ensure_session_for_at_leaves_a_token_with_fifty_minutes_left_against_a_forty_five_minute_floor() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, load_session, save_session, Session};
+    let target = format!("knowlu/test-ensure-fresh-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "still-good-at".into(),
+        refresh_token: "rt-2".into(),
+        expires_at: now + 3000, // fifty minutes left
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a comfortably fresh session");
+
+    let base = closed_loopback_base();
+    let refreshed = ensure_session_for_at(&base, "anon-key", &target, now, 45 * 60)
+        .expect("a token that clears the floor must never even attempt the network");
+    assert!(!refreshed, "fifty minutes left against a forty-five-minute floor must not refresh");
+    let (_, back) = load_session(&target).expect("the untouched entry");
+    assert_eq!(back, s);
+}
+
+/// A server for the F1 race test (R-C1c-exec-14): unlike `loopback`, above, it does not know in
+/// advance how many requests to expect — that count is exactly what the test is proving. It answers
+/// every `POST …/token?grant_type=refresh_token` that arrives within `window`, holding each one for
+/// `hold` before it replies (long enough that two callers racing the same refresh genuinely overlap,
+/// not merely by chance), and reports how many it actually served. It stops early once `cap` requests
+/// have landed, so the GREEN case (one request, then nothing) is the only one that pays the full
+/// `window`.
+#[cfg(windows)]
+fn racing_token_server(hold: std::time::Duration, window: std::time::Duration, cap: usize) -> (String, std::thread::JoinHandle<usize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.set_nonblocking(true).expect("nonblocking listener");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + window;
+        let mut served = 0usize;
+        while std::time::Instant::now() < deadline && served < cap {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking stream");
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+                    // One read is enough: a loopback client's small JSON POST arrives in one segment
+                    // (the same reasoning `serve_one_callback`'s own doc gives for its request line).
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(hold);
+                    served += 1;
+                    let body = format!(
+                        r#"{{"access_token":"fresh-at-{served}","refresh_token":"fresh-rt-{served}","expires_in":3600,"user":{{"id":"acc-1","email":"a@example.invalid"}}}}"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+        served
+    });
+    (format!("http://127.0.0.1:{port}/auth/v1"), handle)
+}
+
+/// F1 (R-C1c-exec-14): the scheduler's pre-flight (`ensure_session_for_at`, 45-minute floor) and
+/// C2's own read (`valid_access_token_at`, 120-second floor) can both decide, on different threads,
+/// that the SAME stored session needs refreshing — the slot's pre-flight and its entitlement/telemetry
+/// steps run on one thread each slot, but the housekeeping thread's independent 6-hourly
+/// `refresh_entitlement` tick (which itself calls `valid_access_token_at`) is gated by no lock at all.
+/// GoTrue rotates the refresh token on every use, so two concurrent refreshes of the same token are a
+/// real hazard, not just wasted work. A one-minute-left session is under BOTH floors, so both
+/// functions independently decide to refresh; only one request may ever reach the token endpoint.
+#[cfg(windows)]
+#[test]
+fn a_concurrent_preflight_and_read_only_ever_hit_the_token_endpoint_once() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, save_session, valid_access_token_at, Session};
+    let target = format!("knowlu/test-race-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        // One minute left: under `valid_access_token_at`'s 120-second floor AND a 45-minute
+        // pre-flight floor, so both callers independently decide a refresh is needed.
+        expires_at: now + 60,
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a near-expiry session");
+
+    let (base, handle) = racing_token_server(std::time::Duration::from_millis(300), std::time::Duration::from_secs(3), 2);
+    let (base1, base2) = (base.clone(), base.clone());
+    let (target1, target2) = (target.clone(), target.clone());
+    let (r1, r2) = std::thread::scope(|scope| {
+        let t1 = scope.spawn(move || ensure_session_for_at(&base1, "anon-key", &target1, now, 45 * 60));
+        let t2 = scope.spawn(move || valid_access_token_at(&base2, "anon-key", &target2, now));
+        (t1.join().unwrap(), t2.join().unwrap())
+    });
+    let served = handle.join().expect("server thread");
+    assert!(r1.is_ok(), "{r1:?}");
+    assert!(r2.is_ok(), "{r2:?}");
+    assert_eq!(served, 1, "exactly one refresh must reach the token endpoint, never two racing the same refresh_token");
 }
 
 /// Base64url without padding, as a JWT segment is — a dozen lines here rather than a `base64`

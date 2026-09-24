@@ -455,6 +455,35 @@ fn an_enrolled_course_list_is_read_from_either_lms_shape() {
     }
 }
 
+/// D4, from the real enrolment: UA's Blackboard hands back an opaque `courseId` and puts the code
+/// in the NAME. The slug that decides `courses/<slug>.md`, every task's `course:` field and the key
+/// `judge::Heuristics::knows_course` matches now comes from either place — never from the whole
+/// name, which is how one course ended up with two slugs.
+#[test]
+fn a_course_whose_code_is_only_in_its_name_still_slugs_to_that_code() {
+    use knowlu::lms_link::courses_from_json;
+    let body = r#"{"results":[{"courseId":"_404752_1","course":{"name":"202640-BUI-100-101"}},{"courseId":"_404999_1","course":{"name":"202640-MATH-125-001"}}]}"#;
+    let got = courses_from_json(body);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].code, "_404752_1", "the LMS's own key is untouched");
+    assert_eq!(got[0].name, "202640-BUI-100-101");
+    assert_eq!(got[0].slug, "bui-100");
+    // R-C1c-plan-2: the human code, read once here and carried — the page never reads one itself.
+    assert_eq!(got[0].label, "BUI 100");
+    assert_eq!(got[1].slug, "math-125");
+    assert_eq!(got[1].label, "MATH 125");
+    // The id still wins where it carries a code: `UACS100Fall2026` is `suggest_course`'s, peel and
+    // all, and reading the name instead would answer the same thing the long way round.
+    let glued = r#"{"results":[{"courseId":"UACS100Fall2026","course":{"name":"CS 100 Intro to Computer Science"}}]}"#;
+    assert_eq!(courses_from_json(glued)[0].slug, "cs-100");
+    assert_eq!(courses_from_json(glued)[0].label, "CS 100");
+    // And a name with no code in it still slugs from the name, rather than being dropped — with an
+    // empty label, which is what tells every reader there was nothing to read.
+    let odd = courses_from_json(r#"[{"name":"Independent Study"}]"#);
+    assert_eq!(odd[0].slug, "independent-study");
+    assert_eq!(odd[0].label, "");
+}
+
 /// **The endpoint Task 13's second answer recorded, verbatim** — `?expand=course` included, because
 /// the `course` object, and so every course's `name`, is in the body only when it is asked for.
 ///
@@ -493,9 +522,9 @@ fn the_course_list_is_read_from_the_endpoint_the_spike_recorded_and_never_by_nav
 
 /// **What `capture_courses` hands the page is what the wizard plan takes back.** The panel sends the
 /// captured list straight into `create_vault`'s plan as `courses:`, so `Course` and
-/// `scaffold::CourseSeed` are one shape in two crates' worth of code — three fields, the same names,
-/// and nothing else riding along. A fourth field here (a cookie, a session, an internal id) would go
-/// out to a page and come back into a vault.
+/// `scaffold::CourseSeed` are one shape in two crates' worth of code — four fields, the same names,
+/// and nothing else riding along. Four fields since R-C1c-plan-2, and still nothing else riding
+/// along — a fifth would go out to a page and come back into a vault.
 #[test]
 fn a_captured_course_is_exactly_what_the_wizard_plan_takes_back() {
     use knowlu::lms_link::courses_from_json;
@@ -504,11 +533,12 @@ fn a_captured_course_is_exactly_what_the_wizard_plan_takes_back() {
     let v = serde_json::to_value(&course).expect("serialize");
     let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["code", "name", "slug"], "{v}");
+    assert_eq!(keys, ["code", "label", "name", "slug"], "{v}");
     let seed: knowlu::scaffold::CourseSeed = serde_json::from_value(v).expect("the wizard plan's own struct");
     assert_eq!(seed.code, "UACS100Fall2026");
     assert_eq!(seed.name, "CS 100 Intro to Computer Science");
     assert_eq!(seed.slug, "cs-100");
+    assert_eq!(seed.label, "CS 100");
 }
 
 /// R-OB-4: every endpoint is built from the school's **own** host. A constant host per LMS kind was

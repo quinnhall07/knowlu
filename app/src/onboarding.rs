@@ -648,6 +648,10 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
             code: c.code.clone(),
             name: if c.name.trim().is_empty() { c.code.clone() } else { c.name.clone() },
             slug: slug(if c.slug.trim().is_empty() { &c.code } else { &c.slug }),
+            // R-C1c-plan-2: whatever the page sent, trimmed. An empty label is a course whose id
+            // and name carried no code, and the note is titled by its name — never by a guess made
+            // here, two panels away from the only function that knows the rule.
+            label: c.label.trim().to_string(),
         })
         .filter(|c| !c.slug.is_empty())
         .collect();

@@ -598,12 +598,131 @@
     return poll();
   }
 
+  // D7: the minute between Finish and the first `rank`. `first_run` rides on the envelope until
+  // `state/today.md` exists; while it does, the page says what is happening, lists the slot's steps
+  // as they land, and asks again every three seconds so the day appears as soon as it is there
+  // rather than up to a minute later.
+  //
+  // R-C1c-8: the view REPLACES the day. `.app` carries `first-run` while the block is on the
+  // envelope, and console.css hides the nav, the rail and everything in `main` but `#first-run`.
+  // The state still paints underneath (poll's revision logic is untouched), so the hand-over is
+  // instant; and a `display: none` row never intersects, so the 2 s dwell below sends no
+  // `object_seen` for a row nobody saw. Nothing visible paints in this mode but the view itself.
+  // Leaving the view forgets the displayed day (`hideFirstRun`), so the first ranked state paints
+  // whole rather than behind R28's reorder hold (R-C1c-exec-8a).
+  //
+  // M6: nothing ends the three-second cadence but the day arriving, so a vault whose `rank` keeps
+  // failing polls on forever, and a rejected call re-arms it too. That is honest rather than
+  // silent: once a first slot has ended with any failed step, listed here or not (an `engine: …`
+  // line counts), the view says so under the list and that Knowlu will try again. The Runs view
+  // and the sync line that would say more are hidden in this mode. A cap would replace a true
+  // "will try again" with a false "gave up".
+  var FIRST_RUN_MS = 3000;
+  var firstRunTimer = null;
+  var firstRunHtml = null;
+  // The steps the student is told about, by the step name's first word (before any space or
+  // parenthesis: `judge (skipped: no entitlement)` is `judge`). The slot's other steps (the sync pull
+  // and push, the backup, the usage upload, an `engine: …` line) are the Runs view's, not this one's.
+  //
+  // `sync` is C3′'s step, not a step on this branch yet: its sentence is here before the merge so a
+  // merged first run shows its first seconds in progress (R-C1c-final2 M2).
+  //
+  // `session` (R-C1c-13's pre-flight) is left out on purpose, not an oversight: the first slot runs
+  // minutes after sign-in minted a one-hour token, so on the first-run page the step is idle every
+  // time. A later refresh failure surfaces through the entitlement row or the downstream steps' own
+  // text instead — no row here.
+  var FIRST_RUN_SAYS = {
+    sync: "Syncing with your account",
+    entitlement: "Checking your account",
+    coursework: "Fetching your coursework",
+    ingest: "Reading your school calendar",
+    judge: "Working out what each task needs",
+    rank: "Putting your day in order"
+  };
+  function firstRunSays(name) {
+    var word = String(name || "").split(/[ (]/)[0];
+    return Object.prototype.hasOwnProperty.call(FIRST_RUN_SAYS, word) ? FIRST_RUN_SAYS[word] : null;
+  }
+  // One row: its mark (a shape per state, so it never rests on colour alone) and its sentence.
+  // A skip says the word; the other three states are named for a screen reader on the mark, and a
+  // row may carry a short note of its own.
+  function firstRunRow(state, says, note) {
+    var label = { done: "done", now: "in progress", failed: "failed" }[state];
+    var said = state === "skipped" ? "skipped" : note;
+    return '<li class="fr-step" data-state="' + state + '"><span class="fr-mark"' +
+      (label ? ' role="img" aria-label="' + label + '"' : ' aria-hidden="true"') + "></span>" +
+      '<span class="fr-say">' + h(says) + "</span>" + (said ? '<span class="fr-note">' + h(said) + "</span>" : "") + "</li>";
+  }
+  function renderFirstRun(fr) {
+    fr = fr || {};
+    document.querySelector(".app").classList.add("first-run");
+    EL("first-run").hidden = false;
+    var rows = [];
+    (fr.steps || []).forEach(function (s) {
+      var says = firstRunSays(s[0]); if (!says) { return; }
+      // R-C1c-final2 M1: an account check that could not reach the service lands at code 0 (a
+      // network is not a failed slot, for the tray or the retry ladder), but a check mark would say
+      // it worked. It shows as failed, with a note; the "didn't finish" line below still reads codes.
+      var unchecked = String(s[0]).indexOf("entitlement (refresh failed") === 0;
+      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 && !unchecked ? "done" : "failed");
+      rows.push(firstRunRow(state, says, unchecked ? "couldn't check — will retry" : null));
+    });
+    // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
+    var now = fr.running ? firstRunSays(fr.current) : null;
+    if (now) { rows.push(firstRunRow("now", now)); }
+    // Repainted only when it changed: a fresh row every three seconds would restart the in-progress
+    // mark's turn and re-announce the list to a screen reader.
+    var html = rows.join("");
+    if (html !== firstRunHtml) { EL("first-run-steps").innerHTML = html; firstRunHtml = html; }
+    // A first slot that ended without a day (M6, above): one more line, and the cadence carries on.
+    // Any failed step counts, listed or not: the engine missing is `engine: …` at -1, which has no row.
+    var failed = (fr.steps || []).some(function (s) { return s[1] !== 0; });
+    EL("first-run-end").hidden = !(!fr.running && failed);
+    armFirstRun();
+  }
+
+  // One timer, cleared before it is set: the 60 s interval and the window's focus handler both
+  // call poll() too, and a chain per call would multiply every three seconds.
+  function armFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); }
+    firstRunTimer = setTimeout(poll, FIRST_RUN_MS);
+  }
+
+  function hideFirstRun() {
+    if (firstRunTimer) { clearTimeout(firstRunTimer); firstRunTimer = null; }
+    EL("first-run").hidden = true;
+    var app = document.querySelector(".app");
+    // R-C1c-exec-8a (I1): on the way OUT only, forget the displayed day, as `route()` does for a
+    // view change. The day painted under the view is the vault as it was before the slot, and every
+    // state since has a new order, so R28's hold would keep that pre-slot Must do beneath the ranked
+    // headline behind "refresh order". Cleared here, the same poll paints the ranked day whole: poll
+    // calls this before its revision check. Cleared on every poll without the block, the hold would
+    // never work again.
+    if (app.classList.contains("first-run")) {
+      app.classList.remove("first-run");
+      current.state = null; current.revision = null; current.pendingOrder = null;
+    }
+  }
+
   function poll() {
     return invoke("state", { view: current.view }).then(function (env) {
+      // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
+      // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
+      // path, so there is no failed state to wait for. The paint below still runs, hidden while the
+      // view stands (R-C1c-8).
+      if (env.first_run) { renderFirstRun(env.first_run); } else { hideFirstRun(); }
       if (!env.ok) { EL("delta").textContent = "engine: " + env.error; return; }
+      // §6's safety net answers `ok` with no state when the read model could not be built at all;
+      // the line above is what the student reads while that is true.
+      if (!env.state) { return; }
       if (env.state.revision === current.revision) { return; }
       paint(env.state, false);
-    }).catch(function (e) { EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")"; });
+    }).catch(function (e) {
+      EL("delta").textContent = (current.state ? current.state.texts.offline : "The engine did not answer.") + " (" + e.message + ")";
+      // R-C1c-exec-8a (M1): while the view stands the line above is hidden, and nothing else would
+      // re-arm the three-second cadence after a rejected call.
+      if (document.querySelector(".app").classList.contains("first-run")) { armFirstRun(); }
+    });
   }
 
   // Task 13: the four fields the write path always refuses (app/src/commands.rs's comment on
@@ -1560,7 +1679,11 @@
               // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
               // rows or none — the first `coursework` run files an empty parse as an issue rather
               // than an empty semester, so a student who saw nothing here can still go on honestly.
-              lmsOpen: false, discovering: false, discovered: false, checkoutOpened: false, schoolSeq: 0,
+              // R-C1c-plan-3: `mapWarned` is whether the blank-row sentence has been shown once.
+              // `wizStep` sets `WIZ.step` BEFORE the panel branch runs and `renderWizard` hides
+              // every other panel, so a sentence written on the way out is a sentence nobody reads
+              // — the first Next stays on the panel to show it, the second goes on.
+              lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
               zy: false, vhl: false, credVault: "", error: "",
               // M1 (fix round 1): what Finish's own restore found, painted the ordinary A-5 way —
@@ -1676,7 +1799,7 @@
       stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
       // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
       // stand in for one against these.
-      if (stored.length) { WIZ.discovered = false; }
+      if (stored.length) { WIZ.discovered = false; WIZ.mapWarned = false; }
       WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
       clearCredentialFields();
       return true;
@@ -1783,7 +1906,15 @@
         // can run. Stay on the panel while it does — the mapping is the whole point of having asked
         // for the logins — and let Next work again the moment the rows are on screen.
         if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length || WIZ.discovered) { renderWizard(); return; }
+        if (WIZ.map.length || WIZ.discovered) {
+          // R-C1c-plan-3: the first Next after a finished discovery with blank, un-ignored rows
+          // writes the sentence and stays here — `WIZ.step` was advanced above, so putting it back
+          // is what keeps the panel, and its note, on screen. The next Next goes on whatever the
+          // rows say: this is a sentence, not a gate.
+          if (!WIZ.mapWarned && noteUnmapped()) { WIZ.mapWarned = true; WIZ.step = leaving; }
+          renderWizard();
+          return;
+        }
         WIZ.step = leaving;
         WIZ.discovering = true;
         WIZ.busy = true;
@@ -1880,7 +2011,15 @@
     var vhlRows = WIZ.map.filter(function (r) { return r.source === "vhl" && !r.ignore && r.course; });
     var codes = {};
     zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
-    WIZ.courses.forEach(function (c) { if (c.code) { codes[c.code] = true; } });
+    // Final review, I4 (a C1 Task 17 bug predating this branch): only a TYPED course belongs here —
+    // it carries `slug: ""`, and this is the only place anything derives one for it. A CAPTURED
+    // course already carries its own slug and is covered by the engine's `course_fragments`
+    // (`app/src/scaffold.rs`); sending it here too would give its LMS id a *second*, phantom
+    // `[id, ""]` entry that `create_vault_in` derives an ENGINE slug for on the empty second
+    // element — and because `course_map_lines` is first-wins by key with the page's entries first,
+    // that phantom slug wins over the real one `course_fragments` would have written, so the id
+    // ends up pointing at a course that doesn't exist (D4's `[LMS id -> slug]` guarantee broken).
+    WIZ.courses.forEach(function (c) { if (c.code && !c.slug) { codes[c.code] = true; } });
     // A-5 (b): re-read the truth rather than trust the poll loop's last tick. A consent that
     // finished (in the browser, or after the poll was cancelled by leaving and returning to the
     // panel) after the loop last checked must still birth the vault with the `cloud:google` entry
@@ -1901,9 +2040,13 @@
                    // The second element is the slug, and the page has none: an empty string is what
                    // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
                    course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
-                   // Review round 1, I2: every discovered zyBook the student declined. Out of this list
-                   // an unmapped book is `not in config; skipped` on every healthy run, forever.
-                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && (r.ignore || !r.course); })
+                   // Final review, I2: only the rows the student explicitly ticked as ignored — never
+                   // a blank one. A blank zyBooks row must stay UNMAPPED so the engine files a
+                   // coursework-map card for it (R-OB-1), the same as a blank VHL row; putting it in
+                   // this list instead made it `not in config; skipped` on every healthy run, forever,
+                   // and made noteUnmapped's "N of these will be asked about in the app" false for
+                   // zyBooks.
+                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && r.ignore; })
                                           .map(function (r) { return r.key; }),
                    courses: WIZ.courses };
       // Before anything is created: move the credentials if the path has changed since they were
@@ -1921,10 +2064,12 @@
           // restore actually found, never the claim the OLD static sentence made before Finish ran.
           WIZ.restoreNote = restoreSentence(r.restored);
           renderWizard();
-          // R-C1-31: one entitlement refresh after Finish. `create_vault` has just moved the session
-          // from the pending target onto this profile, so this is the first moment the cache can be
-          // written where the console will look for it — and the console relaunches into a vault whose
-          // grace clock has already started rather than one that must reach the network to paint.
+          // R-C1-31, corrected by the final review (Minor 8): `entitlement_now` writes NO cache —
+          // it only reads the PENDING session, which `create_vault` has just moved onto this
+          // profile, so this call typically finds nothing there any more and resolves to null. The
+          // real first cache write is the in-slot refresh D1 added (`scheduler::run_slot_inner`,
+          // spec §2), keyed off the profile's own vault and data dir. Left in place as a harmless
+          // best-effort poll rather than removed here.
           // Best effort in both directions: a refusal, or a build where the command is not yet
           // registered, must never stop a finished wizard from opening.
           return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {
@@ -2117,9 +2262,28 @@
   /// page never invents one.
   function renderCourses() {
     EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + h(c.code || c.name) +
-             (c.name && c.name !== c.code ? " &middot; " + h(c.name) : "") +
+      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
+      // when there was no code to read, or when the two are the same string (a typed course is
+      // both). The page never reads a code out of a name: that rule lives in
+      // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
+      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
+      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
              '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
+    }).join("");
+    renderCourseCodes();
+  }
+
+  /// D5: the codes a mapping row offers, so a student picks a class rather than typing one from
+  /// memory — the VHL row that nobody filled is why `sections: {}` reached the engine.
+  ///
+  /// The VALUE is the human code the capture read (R-C1c-plan-2's `label`) and the course's own
+  /// slug otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to
+  /// the note the course already has. The LMS's opaque key would not — it would make a second
+  /// course. The LABEL is what the student recognises (M4), so the list reads as their class list
+  /// rather than as identifiers.
+  function renderCourseCodes() {
+    EL("wiz-course-codes").innerHTML = WIZ.courses.map(function (c) {
+      return '<option value="' + h(c.label || c.slug) + '">' + h(c.name || c.code) + "</option>";
     }).join("");
   }
   EL("wiz-courses").addEventListener("click", function (e) {
@@ -2127,7 +2291,7 @@
     if (drop) { WIZ.courses.splice(Number(drop.getAttribute("data-drop")), 1); renderCourses(); return; }
     if (e.target.closest("#wiz-course-add-go")) {
       var code = EL("wiz-course-add").value.trim();
-      if (code) { WIZ.courses.push({ code: code, name: code, slug: "" }); EL("wiz-course-add").value = ""; renderCourses(); }
+      if (code) { WIZ.courses.push({ code: code, name: code, slug: "", label: code }); EL("wiz-course-add").value = ""; renderCourses(); }
     }
   });
 
@@ -2140,12 +2304,28 @@
     EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
     EL("wiz-map-heading").hidden = WIZ.map.length === 0;
     EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
+      // D6: a row nobody can guess for says so. Computed at paint, never on every keystroke —
+      // re-rendering the rows under the cursor would take the focus out of the field being typed
+      // into — so the hint goes on the next paint, which is what the student has already answered.
+      var hint = (!r.suggested && !r.course) ? '<span class="meta">type the course this belongs to</span>' : "";
       return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
              (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +
-             '<input type="text" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
-             '" placeholder="Course code, e.g. CS 100">' +
+             '<input type="text" list="wiz-course-codes" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
+             '" placeholder="Course code, e.g. CS 100">' + hint +
              '<label><input type="checkbox" data-ignore-for="' + i + '"' + (r.ignore ? " checked" : "") + '> Ignore</label></div>';
     }).join("");
+  }
+
+  /// D6: leaving the logins panel with rows still blank is a choice, not a refusal
+  /// (R-C1b-exec-10 already lets Next through) — but it has a consequence, and the panel says what
+  /// it is: the engine files a coursework-map card for each one (R-OB-1) and the app asks about it
+  /// there. Silent when nothing is blank; the singular reads correctly without a special case.
+  ///
+  /// Returns the count, so the caller can decide whether there is anything to stay for.
+  function noteUnmapped() {
+    var n = WIZ.map.filter(function (r) { return !r.ignore && !r.course; }).length;
+    if (n) { EL("wiz-map-note").textContent = n + " of these will be asked about in the app"; }
+    return n;
   }
   EL("wiz-map").addEventListener("input", function (e) {
     var f = e.target.getAttribute("data-course-for");

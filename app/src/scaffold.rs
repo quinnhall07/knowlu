@@ -277,19 +277,66 @@ pub struct CourseSeed {
     pub name: String,
     #[serde(default)]
     pub slug: String,
+    /// R-C1c-plan-2: the human course code (`BUI 100`) when the LMS's id or its name carried one,
+    /// empty when neither did. Read once, in `lms_link::courses_from_json`, and carried from there:
+    /// the note's title, the wizard's row and the mapping datalist all read this rather than each
+    /// deriving a code of their own.
+    #[serde(default)]
+    pub label: String,
 }
 
-/// `CS 100 Intro to Computer Science` → `CS 100`: the course code a **display name** leads with, when
-/// it leads with one. This is the half of R-C1-48's pair that a feed's `SUMMARY` can carry, and the
-/// shape is the only one this product has met — two to four capitals, then three digits, which is
-/// exactly how `lms_link::summarise` counts the courses in a feed. `None` for a name without one, and
-/// never a guess: an invented fragment matches somebody else's course.
-fn code_in_name(name: &str) -> Option<String> {
-    let mut words = name.split_whitespace();
-    let (a, b) = (words.next()?, words.next()?);
-    let alpha = a.len() >= 2 && a.len() <= 4 && a.chars().all(|c| c.is_ascii_uppercase());
-    let digits = b.len() == 3 && b.chars().all(|c| c.is_ascii_digit());
-    (alpha && digits).then(|| format!("{a} {b}"))
+/// **D4: the course code an LMS wrote into a display name.** `202640-BUI-100-101` → `BUI 100`,
+/// `MATH-125-001` → `MATH 125`, `CS 100 Intro to Computer Science` → `CS 100` (the two-word form
+/// this replaces read, and still reads).
+///
+/// Two to four capitals, one separator — a dash or a space — then exactly three digits and an
+/// optional trailing letter. **No institution-prefix peel**, unlike [`suggest_course`]: a name's
+/// letters sit next to a separator rather than glued to a term, so there is nothing in front of the
+/// subject to peel, and peeling `MATH` to `TH` would name a course nobody is taking.
+///
+/// Hand-rolled rather than a regex, like its sibling, because the two conditions a regex cannot
+/// state without a lookahead are the ones that matter: the capitals must START a run (`BUI`, never
+/// `UI`), and the number must END one (`MATH-1250` is not `MATH 125`).
+///
+/// `None` for a name with no code in it, and never a guess: an invented fragment matches somebody
+/// else's course.
+pub fn course_code_in_name(name: &str) -> Option<String> {
+    let chars: Vec<char> = name.chars().collect();
+    for start in 0..chars.len() {
+        if start > 0 && chars[start - 1].is_ascii_uppercase() {
+            continue;
+        }
+        let letters: String = chars[start..].iter().take_while(|c| c.is_ascii_uppercase()).collect();
+        if letters.len() < 2 || letters.len() > 4 {
+            continue;
+        }
+        let mut i = start + letters.len();
+        // The separator is required: the glued form (`UACS100Fall2026`) is `suggest_course`'s, and
+        // answering it here would skip the peel that makes it `CS 100`.
+        if chars.get(i).map(|c| *c == '-' || c.is_whitespace()) != Some(true) {
+            continue;
+        }
+        i += 1;
+        // `take_while` collects the whole run, so four digits is a length of four and is refused
+        // here rather than truncated into a course number nobody wrote.
+        let digits: String = chars[i..].iter().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.len() != 3 {
+            continue;
+        }
+        i += digits.len();
+        let suffix = match chars.get(i) {
+            Some(c) if c.is_ascii_alphabetic() => {
+                i += 1;
+                c.to_ascii_uppercase().to_string()
+            }
+            _ => String::new(),
+        };
+        if chars.get(i).map(|c| c.is_ascii_alphanumeric()) == Some(true) {
+            continue;
+        }
+        return Some(format!("{letters} {digits}{suffix}"));
+    }
+    None
 }
 
 /// **R-C1-48: the two `course_map` fragments one enrolled course contributes**, both pointing at its
@@ -307,7 +354,7 @@ fn code_in_name(name: &str) -> Option<String> {
 fn course_fragments(c: &CourseSeed) -> Vec<String> {
     let code = c.code.trim();
     let mut out = vec![code.to_string()];
-    if let Some(human) = suggest_course(code).or_else(|| code_in_name(&c.name)) {
+    if let Some(human) = suggest_course(code).or_else(|| course_code_in_name(&c.name)) {
         out.push(human);
     }
     out.retain(|f| !f.is_empty());
@@ -701,8 +748,16 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     // `## Grade weights` is present and empty on purpose: the weights are the student's to write and
     // the judgment's to read, and an invented weight would be a number nobody chose.
     for c in seeded_courses(plan) {
+        // D4: the note is TITLED by the human code the capture read (R-C1c-plan-2's `label`), so a
+        // typed `BUI 100` on the coursework panel and this note are the same course. `name:` always
+        // carries the school's own name, so nothing the student recognises is lost; `code:` stays
+        // the LMS's own key, which is the `course_map` fragment `ingest::match_course` matches a
+        // UID against. A course whose id and name both carried no code has an empty label and keeps
+        // today's behaviour — the name. Nothing is recomputed here: one reader, one rule.
+        let title = if c.label.trim().is_empty() { c.name.as_str() } else { c.label.as_str() };
         let front = Node::map(vec![
-            ("title", Node::text(&c.name)),
+            ("title", Node::text(title)),
+            ("name", Node::text(&c.name)),
             ("slug", Node::text(&c.slug)),
             ("code", Node::text(&c.code)),
             ("status", Node::text("active")),

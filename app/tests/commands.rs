@@ -7,6 +7,7 @@ use knowlu::commands::{
     resolve_issue_inner, set_fields_inner, set_settings_inner, state_inner, sync_inner,
     ui_event_inner,
 };
+use knowlu::scheduler::{lock, LiveSlot, RunSummary, Scheduler};
 
 /// Every journal record across `state/journal/*.jsonl`, parsed. Files are CRLF (translate on
 /// read per the repo's line-ending rule) and one JSON object per line.
@@ -52,6 +53,135 @@ fn state_returns_the_envelope_with_the_read_model_and_never_writes() {
     let bad = state_inner(&cs, "tomorrow").unwrap();
     assert_eq!(bad["ok"], false);
     assert!(bad["error"].as_str().unwrap().contains("tomorrow"));
+}
+
+/// D7 / §6: between Finish and the first `rank` a vault has no read model, and the window painted
+/// nothing for about a minute — a white page with an error line in it. The envelope now carries a
+/// block that says so, with the steps the slot has finished, and the page has a sentence for it.
+#[test]
+fn a_vault_with_no_read_model_yet_carries_the_first_run_block() {
+    let v = scratch("firstrun");
+    assert!(!v.join("state").join("today.md").exists(), "this vault has never been ranked");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-console-appdata-firstrun-{}", std::process::id())));
+    // R-C1c-plan-1, the premise tested rather than assumed: the read model builds fine without
+    // `state/today.md` (`surface::build_state` has no failure path), so `ok` is true and the BLOCK
+    // — not a failed envelope — is what the page keys on.
+    let env = state_inner(&cs, "today").unwrap();
+    assert_eq!(env["ok"], true);
+    let sch = Scheduler::default();
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("a vault with no today.md carries it");
+    assert_eq!(fr["running"], false);
+    // No slot has run yet: an empty list, never an invented step.
+    assert_eq!(fr["steps"], json!([]));
+
+    *lock(&sch.last) = Some(RunSummary {
+        started: "2026-09-22T19:14:37Z".into(),
+        ended: "2026-09-22T19:15:38Z".into(),
+        steps: vec![("coursework".into(), 0), ("judge (skipped: no entitlement)".into(), 0)],
+        ok: true,
+        engine_ok: true,
+        late: false,
+        reason: None,
+        attempts: 1,
+    });
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("still no read model");
+    assert_eq!(fr["steps"][1][0], "judge (skipped: no entitlement)");
+    assert_eq!(fr["steps"][1][1], 0);
+
+    // …and the moment `rank` has written the day, the block is gone and the page paints normally.
+    std::fs::create_dir_all(v.join("state")).unwrap();
+    std::fs::write(v.join("state").join("today.md"), b"# Today\n").unwrap();
+    assert!(knowlu::commands::first_run_value(&cs, &sch).is_none());
+}
+
+/// R-C1c-8: while a slot runs, the block carries what `Scheduler.live` has published (the steps
+/// that have landed and the one in progress), never `Scheduler.last`, which belongs to an earlier
+/// slot and is written only when a slot ends. With no slot running it is `last`'s steps, as before,
+/// and nothing is in progress.
+#[test]
+fn the_first_run_block_reads_the_live_slot_while_one_runs_and_the_last_one_after() {
+    let v = scratch("firstrun-live");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-console-appdata-firstrun-live-{}", std::process::id())));
+    let sch = Scheduler::default();
+    *lock(&sch.last) = Some(RunSummary {
+        started: "2026-09-22T19:14:37Z".into(),
+        ended: "2026-09-22T19:15:38Z".into(),
+        steps: vec![("coursework".into(), 0), ("rank".into(), 1)],
+        ok: false,
+        engine_ok: false,
+        late: false,
+        reason: None,
+        attempts: 1,
+    });
+    *lock(&sch.live) = LiveSlot { steps: vec![("coursework".into(), 0)], current: Some("judge".into()) };
+    *lock(&sch.running) = true;
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("no read model yet");
+    assert_eq!(fr["running"], true);
+    assert_eq!(fr["current"], "judge", "the step in progress: {fr}");
+    assert_eq!(fr["steps"], json!([["coursework", 0]]), "the live steps, not the last slot's: {fr}");
+
+    *lock(&sch.running) = false;
+    let fr = knowlu::commands::first_run_value(&cs, &sch).expect("still no read model");
+    assert_eq!(fr["running"], false);
+    assert_eq!(fr.get("current"), Some(&serde_json::Value::Null), "nothing is in progress: {fr}");
+    assert_eq!(fr["steps"], json!([["coursework", 0], ["rank", 1]]), "the ended slot's steps: {fr}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The C1c Task 5 live proof (2026-09-23) found no first-run line on screen, and the test above
+/// only reaches `first_run_value`. This drives the whole envelope the `state` command hands the
+/// page (`commands::state_envelope`, which the `#[tauri::command]` is one call to) over a vault made
+/// the way the wizard makes one (`scaffold::create_vault`: config, the seed task, nothing ranked),
+/// with a slot in flight as there was live. `attach_scheduler` runs after the block is attached;
+/// this proves it leaves the block alone and still fills the topline.
+#[test]
+fn the_state_command_carries_the_first_run_block_on_a_wizard_made_vault() {
+    let parent = std::env::temp_dir().join(format!("qo-console-firstrun-envelope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let v = parent.join("Fall 2026");
+    let plan = knowlu::scaffold::VaultPlan {
+        profile_id: knowlu::profiles::id_for(&v),
+        ics_url: None,
+        personal_calendar: None,
+        google_calendar: false,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "M".into(),
+        campus: "none".into(),
+        campus_choice: Default::default(),
+        zybooks: false,
+        vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        api_base: knowlu::account::api_base(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+    };
+    knowlu::scaffold::create_vault(&v, &plan).unwrap();
+    assert!(!v.join("state").join("today.md").exists(), "a wizard-made vault has never been ranked");
+    let cs = ConsoleState::open(v.clone(), parent.join("appdata"));
+    let sch = Scheduler::default();
+    *lock(&sch.running) = true;
+
+    let env = knowlu::commands::state_envelope(&cs, &sch, "today");
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["first_run"]["running"], true, "{env}");
+    assert_eq!(env["first_run"]["steps"], json!([]), "a slot in flight has recorded nothing yet");
+    // R-C1c-8's shape: the step in progress rides on the block too, null until a step starts.
+    assert_eq!(env["first_run"].get("current"), Some(&serde_json::Value::Null), "{env}");
+    assert!(env["state"]["must_do"].is_object(), "the day is built and painted behind the block");
+    assert!(env["state"]["topline"]["scheduler"].is_object(), "attach_scheduler still ran: {env}");
+
+    // `rank` writes the day: the block stops coming, and nothing else about the envelope changes.
+    std::fs::write(v.join("state").join("today.md"), b"# Today\n").unwrap();
+    let env = knowlu::commands::state_envelope(&cs, &sch, "today");
+    assert!(env.get("first_run").is_none(), "{env}");
+    assert_eq!(env["ok"], true);
+    let _ = std::fs::remove_dir_all(&parent);
 }
 
 #[test]
@@ -318,7 +448,14 @@ fn issue_flag_needs_a_category_and_snapshots_the_object_and_info_closes() {
 #[test]
 fn sync_on_a_vault_with_no_account_is_calm_and_backup_needs_a_folder() {
     let v = scratch("sync");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-sync-data-{}", std::process::id())));
+    // Both folders are keyed by PID, and a persistent machine (the self-hosted CI runner, a dev
+    // laptop) reuses PIDs: a folder left by an earlier run already holds a `backup_dir` in its
+    // settings, and "backup needs a folder" then fails. Start clean and leave nothing behind.
+    let data = std::env::temp_dir().join(format!("qo-sync-data-{}", std::process::id()));
+    let bk = std::env::temp_dir().join(format!("qo-sync-bk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&bk);
+    let cs = ConsoleState::open(v.clone(), data.clone());
     let env = sync_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], true);
     // C3', Task 10: `topline.sync` is the engine's `SyncStatus`, not the old git-shaped
@@ -327,7 +464,6 @@ fn sync_on_a_vault_with_no_account_is_calm_and_backup_needs_a_folder() {
     assert!(env["state"]["topline"]["sync"]["last_error"].is_null());
     let env = backup_now_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], false); assert!(env["error"].as_str().unwrap().contains("backup folder"));
-    let bk = std::env::temp_dir().join(format!("qo-sync-bk-{}", std::process::id()));
     let mut patch = serde_json::Map::new(); patch.insert("backup_dir".into(), json!(bk.to_string_lossy()));
     assert_eq!(set_settings_inner(&cs, patch).unwrap()["ok"], true);
     let env = backup_now_inner(&cs, "today").unwrap();
@@ -336,6 +472,9 @@ fn sync_on_a_vault_with_no_account_is_calm_and_backup_needs_a_folder() {
     assert!(bk.join(&cs.settings.lock().unwrap().profile_id).join("vault/tasks").is_dir());
     let mut bad = serde_json::Map::new(); bad.insert("profile_id".into(), json!("me"));
     assert_eq!(set_settings_inner(&cs, bad).unwrap()["ok"], false, "only backup_dir and autostart are settable");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&bk);
 }
 
 // R-T10 (Task 10 review): `serde_json::Map` iterates alphabetically, so "autostart" is applied

@@ -1344,8 +1344,8 @@ fn a_page_supplied_course_slug_is_normalised_before_it_names_a_file() {
     let mut session = PendingSession::new("acc-course-slug-normalise");
     let mut plan = base_plan(false);
     plan.courses = vec![
-        knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into() },
-        knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into() },
+        knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into(), label: String::new() },
+        knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into(), label: String::new() },
     ];
     let out = create_vault_in(&root, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], true, "{out}");
