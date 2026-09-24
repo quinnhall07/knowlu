@@ -869,6 +869,8 @@ struct CommitmentPasses {
 /// them raised. Never a note, a card or a journal record.
 pub struct CommitmentsReport {
     pub proposals: Vec<crate::commitments::Proposal>,
+    /// Phase-2 spec §2: the courses with neither a class proposal nor a confirmed class note.
+    pub uncovered: Vec<crate::commitments::UncoveredCourse>,
     pub warnings: Vec<String>,
 }
 
@@ -882,25 +884,9 @@ fn hm(time: Time) -> String {
 /// would put in a card's `commitment:` mapping, plus the `source_uid` the app answers back with
 /// (§5.1: "the app passes keys, levels and the window ... re-derives each proposal from the
 /// series file by its `source_uid`"). Not a byte contract — no frozen fixture pins this shape.
+/// Delegates to `commitments::proposal_value` (phase 2 adds `when`).
 pub fn proposal_json(p: &crate::commitments::Proposal) -> serde_json::Value {
-    serde_json::json!({
-        "kind": p.kind,
-        "level": p.level.as_str(),
-        "title": p.title,
-        "course": p.course,
-        "meets": p.meets.iter().map(|m| serde_json::json!({
-            "days": m.days,
-            "start": hm(m.start),
-            "end": hm(m.end),
-        })).collect::<Vec<_>>(),
-        "where": p.where_,
-        "from": p.from.map(|d| d.to_string()),
-        "until": p.until.map(|d| d.to_string()),
-        "source_uid": p.source_uid,
-        // M3 (fix round 1): explicit, so the phase-2 screen can group the window row under "Your
-        // day" without knowing `commitments::WINDOW_PREFIX`.
-        "window": p.is_window(),
-    })
+    crate::commitments::proposal_value(p)
 }
 
 /// One proposal, one line, for a human running `commitments` without `--json`.
@@ -1022,7 +1008,8 @@ pub fn commitments_report_with(
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
-    CommitmentsReport { proposals, warnings }
+    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
+    CommitmentsReport { proposals, uncovered, warnings }
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -3320,6 +3307,23 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
              for one: {:?}",
             report.proposals
         );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Phase-2 spec §2: the command names each course with no class row. `p16_vault` has
+    /// `courses/cs-100.md`: with no feed it is uncovered; once CS 100's series is proposed, it is not.
+    #[test]
+    fn commitments_command_reports_courses_with_no_class_row() {
+        let vault = p16_vault("p2uncovered");
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert_eq!(report.uncovered.len(), 1, "{:?}", report.uncovered);
+        assert_eq!(report.uncovered[0].slug, "cs-100");
+        assert_eq!(report.uncovered[0].title, "CS 100 Intro to Computing");
+        let stash: SeriesStash = RefCell::new([("cloud:google".to_string(), google_entry(vec![cs100_item()]))].into_iter().collect());
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+        assert!(report.uncovered.is_empty(), "{:?}", report.uncovered);
         let _ = std::fs::remove_dir_all(&vault);
     }
 

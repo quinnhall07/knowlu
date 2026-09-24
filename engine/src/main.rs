@@ -360,8 +360,12 @@ fn main() -> ExitCode {
         Command::Commitments { vault, today, json } => {
             let report = cli::commitments_report(&vault, today.as_deref());
             if json {
+                // Plan ruling Q2-b: the screen's rows in §5.2's card order.
+                let mut ordered: Vec<&knowlu_engine::commitments::Proposal> = report.proposals.iter().collect();
+                ordered.sort_by(|a, b| knowlu_engine::commitments::card_order(a, b));
                 let value = serde_json::json!({
-                    "proposals": report.proposals.iter().map(cli::proposal_json).collect::<Vec<_>>(),
+                    "proposals": ordered.into_iter().map(cli::proposal_json).collect::<Vec<_>>(),
+                    "uncovered_courses": report.uncovered,
                     "warnings": report.warnings,
                 });
                 println!("{}", knowlu_engine::ledger::dumps_value(&value));

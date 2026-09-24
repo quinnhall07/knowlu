@@ -841,6 +841,86 @@ impl Codes {
     }
 }
 
+/// A course with neither a class proposal nor a confirmed class note (phase-2 spec §2): the
+/// confirm screen lists it, and from the vault's day 3 a `commitment-ask` card asks when it meets.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UncoveredCourse {
+    pub slug: String,
+    pub title: String,
+}
+
+/// Every active course note (`status:` absent or `active`, Plan ruling Q2-c), as `(slug, title)`
+/// in slug order. The slug is read as `code_table` reads it: the `slug:` field, else the file
+/// stem. The title is the `title:` field, else `name:`, else the slug.
+fn active_courses(vault: &Path) -> Vec<(String, String)> {
+    let dir = vault.join("courses");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+        if !path.is_file() || !name.ends_with(".md") {
+            continue;
+        }
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        let status = field_text(&meta, "status").unwrap_or_default();
+        if !status.trim().is_empty() && status.trim() != "active" {
+            continue;
+        }
+        let stem = name.trim_end_matches(".md").to_string();
+        let slug = field_text(&meta, "slug").filter(|s| !s.is_empty()).unwrap_or(stem);
+        let title = field_text(&meta, "title")
+            .or_else(|| field_text(&meta, "name"))
+            .map(|t| single_line(&t).trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| slug.clone());
+        out.push((slug, title));
+    }
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// Phase-2 spec §2 and parent §5.3: every active course (`active_courses`, slug order) that has no
+/// class proposal in `proposals` and no confirmed `class` note. Courses are compared the way the
+/// §3.5 signature compares them, by slug or code (`course_key`). A class note with no `course:`
+/// covers the course whose code leads its title (Plan ruling Q2-c). A lab or office hours covers
+/// nothing.
+pub fn uncovered_courses(vault: &Path, set: &Commitments, proposals: &[Proposal], codes: &Codes) -> Vec<UncoveredCourse> {
+    let mut covered = covered_course_keys(set, codes);
+    for p in proposals.iter().filter(|p| p.kind == "class") {
+        if let Some(course) = p.course.as_deref() {
+            covered.insert(course_key(course, codes));
+        }
+    }
+    active_courses(vault)
+        .into_iter()
+        .filter(|(slug, _)| !covered.contains(&course_key(slug, codes)))
+        .map(|(slug, title)| UncoveredCourse { slug, title })
+        .collect()
+}
+
+/// Every course a confirmed `class` note covers, as `course_key`s: its `course:`, or, with none,
+/// the code that leads its title (Plan ruling Q2-c). The one rule `uncovered_courses` and Q7's
+/// ask settlement and withdrawal share (review finding 3).
+fn covered_course_keys(set: &Commitments, codes: &Codes) -> BTreeSet<String> {
+    let mut covered = BTreeSet::new();
+    for note in set.confirmed.iter().filter(|n| n.kind == "class") {
+        match note.course.as_deref() {
+            Some(course) => {
+                covered.insert(course_key(course, codes));
+            }
+            None => {
+                if let Some(code) = to_code_exempt(&note.title, &BTreeSet::new()) {
+                    covered.insert(course_key(&code, codes));
+                }
+            }
+        }
+    }
+    covered
+}
+
 /// One instance of a series (§3.2.1): `start`/`end` are `None` together for an all-day event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instance {
@@ -2654,6 +2734,25 @@ fn proposal_commitment(p: &Proposal) -> serde_json::Value {
     })
 }
 
+/// One proposal as the app reads it (phase-2 spec §2): the fields a card's `commitment:` carries,
+/// plus `source_uid` (what the app answers with), `window` (true only for the window proposal),
+/// and `when`, the §5.2 card label (Plan ruling Q2-a), `null` when there are no meetings.
+pub fn proposal_value(p: &Proposal) -> serde_json::Value {
+    serde_json::json!({
+        "kind": p.kind,
+        "level": p.level.as_str(),
+        "title": p.title,
+        "course": p.course,
+        "meets": meets_json(&p.meets),
+        "when": meets_label(&p.meets),
+        "where": p.where_,
+        "from": date_json(p.from),
+        "until": date_json(p.until),
+        "source_uid": p.source_uid,
+        "window": p.is_window(),
+    })
+}
+
 fn proposal_body(p: &Proposal) -> String {
     let sentence = if p.is_window() {
         WINDOW_SENTENCE
@@ -2843,6 +2942,12 @@ fn proposal_order(p: &Proposal) -> (usize, usize, Time, &str) {
         (day.unwrap_or(DAY_KEYS.len()), m.start)
     });
     (rank, day, start, p.source_uid.as_str())
+}
+
+/// §5.2's card order as a comparator: the confirm screen's rows are sorted as the cards are
+/// (phase-2 spec §2, Plan ruling Q2-b).
+pub fn card_order(a: &Proposal, b: &Proposal) -> std::cmp::Ordering {
+    proposal_order(a).cmp(&proposal_order(b))
 }
 
 /// File today's `commitment-check` cards (§5.2, §5.4): change cards first, then proposals in
@@ -9198,5 +9303,109 @@ mod phase2_tests {
         journal_at(&v, "2026-09-23T22:30:00.000Z");
         assert_eq!(vault_day(&v, date(2026, 9, 24)), 1);
         assert_eq!(vault_day(&v, date(2026, 9, 25)), 2);
+    }
+
+    fn course(vault: &Path, slug: &str, front: &str) {
+        let dir = vault.join("courses");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{slug}.md")), format!("---\n{front}---\n\nInvented.\n")).unwrap();
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn meet(days: &[DayKey], s: Time, e: Time) -> Meet {
+        Meet { days: days.to_vec(), start: s, end: e }
+    }
+
+    fn note_of(kind: &str, title: &str, course: Option<&str>) -> Commitment {
+        Commitment {
+            id: "cmt_00000000c1".into(),
+            path: PathBuf::from("commitments/x.md"),
+            kind: kind.into(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.into(),
+            course: course.map(String::from),
+            meets: vec![meet(&["tue"], t(9, 0), t(10, 0))],
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: None,
+        }
+    }
+
+    fn proposal_of(kind: &str, title: &str, course: Option<&str>, uid: &str) -> Proposal {
+        Proposal {
+            kind: kind.into(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.into(),
+            course: course.map(String::from),
+            meets: vec![meet(&["mon", "wed", "fri"], t(12, 0), t(12, 50))],
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: uid.into(),
+        }
+    }
+
+    /// `ant-101` (title `ANT 101`), `bui-100` (`BUI 100`) and `cs-100` (`CS 100`), all active.
+    fn three_courses(name: &str) -> Scratch {
+        let v = scratch(name);
+        course(&v, "ant-101", "title: \"ANT 101\"\nslug: ant-101\ncode: \"ANT 101\"\nstatus: active\n");
+        course(&v, "bui-100", "title: \"BUI 100\"\nslug: bui-100\ncode: \"BUI 100\"\nstatus: active\n");
+        course(&v, "cs-100", "title: \"CS 100\"\nslug: cs-100\ncode: \"CS 100\"\nstatus: active\n");
+        v
+    }
+
+    fn slugs(got: &[UncoveredCourse]) -> Vec<&str> {
+        got.iter().map(|c| c.slug.as_str()).collect()
+    }
+
+    #[test]
+    fn every_active_course_with_no_class_is_uncovered_in_slug_order() {
+        let v = three_courses("uncovered");
+        let (codes, _) = Codes::load(&v);
+        let got = uncovered_courses(&v, &Commitments::default(), &[], &codes);
+        assert_eq!(slugs(&got), ["ant-101", "bui-100", "cs-100"]);
+        assert_eq!(got[1], UncoveredCourse { slug: "bui-100".into(), title: "BUI 100".into() });
+    }
+
+    #[test]
+    fn a_confirmed_class_or_a_class_proposal_covers_its_course_by_slug_or_code() {
+        let v = three_courses("covered");
+        let (codes, _) = Codes::load(&v);
+        let set = Commitments {
+            confirmed: vec![note_of("class", "BUI 100", Some("BUI 100")), note_of("class", "ANT 101 Lecture", None)],
+            ..Commitments::default()
+        };
+        let proposals = [proposal_of("class", "CS 100", Some("cs-100"), "gcal-series:cs100")];
+        assert!(uncovered_courses(&v, &set, &proposals, &codes).is_empty());
+    }
+
+    #[test]
+    fn a_lab_or_office_hours_does_not_cover_and_an_inactive_course_is_left_out() {
+        let v = three_courses("labonly");
+        course(&v, "old-200", "title: \"OLD 200\"\nslug: old-200\nstatus: archived\n");
+        let (codes, _) = Codes::load(&v);
+        let set = Commitments { confirmed: vec![note_of("lab", "CS 100 Lab", Some("cs-100"))], ..Commitments::default() };
+        let proposals = [proposal_of("office-hours", "CS 100 Office Hours", Some("cs-100"), "gcal-series:oh")];
+        assert_eq!(slugs(&uncovered_courses(&v, &set, &proposals, &codes)), ["ant-101", "bui-100", "cs-100"]);
+    }
+
+    #[test]
+    fn a_proposal_value_carries_the_card_label_and_the_window_flag() {
+        let p = proposal_of("class", "CS 100", Some("cs-100"), "gcal-series:cs100");
+        let v = proposal_value(&p);
+        assert_eq!(v["when"], serde_json::json!("Mon/Wed/Fri 12–12:50pm"));
+        assert_eq!(v["meets"], serde_json::json!([{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]));
+        assert_eq!(v["window"], serde_json::json!(false));
+        assert_eq!(v["source_uid"], serde_json::json!("gcal-series:cs100"));
+        let mut club = proposal_of("club", "Chess Club", None, "gcal-series:a-club");
+        club.meets = Vec::new();
+        assert_eq!(proposal_value(&club)["when"], serde_json::Value::Null);
+        let mut ps = vec![club, p];
+        ps.sort_by(card_order);
+        assert_eq!(ps[0].kind, "class", "classes first, as the cards are");
     }
 }
