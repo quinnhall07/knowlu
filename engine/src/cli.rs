@@ -841,8 +841,11 @@ fn commitment_passes(
     let held = cm::successor_keys(vault);
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, true);
+    // Phase-2 spec D2 (Plan ruling Q1-b): on the vault's first day the confirm screen asks, so no
+    // proposal or window card is filed. Change cards cannot exist yet, and pass through unchanged.
+    let asked: &[cm::Proposal] = if cm::vault_day(vault, today) == 1 { &[] } else { &proposals };
     let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
-    let (_, filed, card_warnings) = cm::emit_checks(vault, &proposals, &changes, today, budget, ctx, journal);
+    let (_, filed, card_warnings) = cm::emit_checks(vault, asked, &changes, today, budget, ctx, journal);
     warnings.extend(card_warnings);
     CommitmentPasses { filed: filed as i64, withdrawn_pending, set }
 }
@@ -2584,7 +2587,19 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         write("tasks/essay.md", "---\ntitle: Invented essay\ndue: 2026-10-30\neffort_hours: 2\nimportance: 3\n---\n");
         write("courses/cs-100.md", "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n");
         seed_migrated(&vault);
+        // Q1-c: P16_MONDAY is the vault's day 2, so checks are filed and asks (day 3+) are not.
+        seed_journal_day(&vault, "2026-09-06");
         vault
+    }
+
+    /// One journal record stamped noon UTC on `day` (Q1-c): the vault's first day for
+    /// `commitments::vault_day`. A pinned-`ts` `create` record, the shape `commitment_note` already
+    /// appends; `verify_tail` only replays `set` records, so it is inert.
+    fn seed_journal_day(vault: &Path, day: &str) {
+        let mut spec = crate::journal::NewRecord::new("create", "archive/_migrated.md", "system:migration", "cli");
+        spec.ts = Some(format!("{day}T12:00:00.000Z"));
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
     }
 
     fn p16_day(offset: i64) -> Date {
@@ -2654,7 +2669,7 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let mut spec = crate::journal::NewRecord::new("create", &rel_path, crate::commitments::CARD_ACTOR, "cli");
         spec.id = Some(&id);
         spec.new = whole;
-        spec.ts = Some("2026-09-01T00:00:00.000Z".into());
+        spec.ts = Some("2026-09-06T12:00:00.000Z".into());
         let mut rec = crate::journal::make_record(spec).unwrap();
         Journal::new(vault).append(&mut rec).unwrap();
     }
@@ -2709,9 +2724,27 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Phase-2 D2: on the vault's first day `rank` files no proposal card, because the confirm
+    /// screen is asking at the same moment. From day 2 it files them as before.
+    #[test]
+    fn no_commitment_check_is_filed_on_the_vaults_first_day() {
+        let vault = p16_vault("p2day1");
+        // `p16_vault`'s journal starts 2026-09-06 (Q1-c): that date is day 1.
+        rank_p16(&vault, Date::constant(2026, 9, 6), vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(checks(&vault, "approvals").is_empty(), "{:?}", checks(&vault, "approvals"));
+        assert!(vault.join("state").join("calendar-series.json").is_file(), "the series file still refreshes");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert_eq!(checks(&vault, "approvals").len(), 1, "day 2 files the class card");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn commitment_checks_take_only_what_the_events_pass_left() {
         let vault = p16_vault("p16budget");
+        // This test ranks on 2026-08-26, before `p16_vault`'s Q1-c seed (2026-09-06): without an
+        // earlier record the vault's day-1 gate (Q1-b) would eat the class card this test is
+        // about. Antedate the journal so 2026-08-26 is day 2.
+        seed_journal_day(&vault, "2026-08-25");
         pystr::write_text(
             &vault.join("config").join("events.yaml"),
             "sources:\n  - name: campus\n    type: ics\n    url: unreachable://x\n    enabled: true\n",

@@ -1395,6 +1395,24 @@ fn days_since(from: Date, to: Date) -> i64 {
     from.until(to).map(|span| i64::from(span.get_days())).unwrap_or(0)
 }
 
+/// The vault's day number on `today` (phase-2 spec D2 as amended, parent §5.3's day 3). Day 1 is
+/// the **vault-local date of the earliest journal record** (`cli::vault_zone`); the next date is
+/// day 2, and so on. A vault with no journal is on day 1, and so is a pinned `today` before that
+/// date. When no record's `ts` parses, the earliest file's name (a UTC date) stands in
+/// (Plan ruling Q1-a).
+pub fn vault_day(vault: &Path, today: Date) -> i64 {
+    let ledger = crate::journal::Journal::new(vault).ledger;
+    let first = ledger
+        .first_ts()
+        .and_then(|ts| ts.parse::<jiff::Timestamp>().ok())
+        .map(|ts| ts.to_zoned(crate::cli::vault_zone(vault)).date())
+        .or_else(|| ledger.first_day());
+    match first {
+        None => 1,
+        Some(first) => (days_since(first, today) + 1).max(1),
+    }
+}
+
 /// At most `max` characters (code points, never a split one), trailing space trimmed.
 fn cut(text: &str, max: usize) -> String {
     text.chars().take(max).collect::<String>().trim_end().to_string()
@@ -9102,5 +9120,83 @@ mod moved_tests {
         ] {
             assert!(parse_window(bad).is_err(), "{bad} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod phase2_tests {
+    //! Phase 2 (spec `docs/specs/2026-09-24-commitment-model-phase2-design.md`). Every title,
+    //! key, room and course is invented.
+
+    use super::*;
+    use crate::journal::{make_record, Journal, NewRecord};
+    use jiff::civil::date;
+
+    /// Tuesday 2026-09-01; `mk`'s series start on Monday 2026-08-31.
+    const TODAY: Date = Date::constant(2026, 9, 1);
+
+    /// A scratch vault removed when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-p2-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        Scratch(dir)
+    }
+
+    /// One journal record stamped `ts` (UTC, `…Z`).
+    fn journal_at(vault: &Path, ts: &str) {
+        let mut spec = NewRecord::new("create", "archive/_seed.md", "system:migration", "cli");
+        spec.ts = Some(ts.to_string());
+        let mut rec = make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
+    }
+
+    /// One journal record stamped noon UTC on `day`: that date in every zone from UTC−11 to UTC+11,
+    /// so the vault's first local day is `day` on any development machine.
+    fn journal_on(vault: &Path, day: &str) {
+        journal_at(vault, &format!("{day}T12:00:00.000Z"));
+    }
+
+    #[test]
+    fn a_vault_with_no_journal_is_on_day_one() {
+        let v = scratch("noday");
+        assert_eq!(vault_day(&v, TODAY), 1);
+    }
+
+    #[test]
+    fn the_day_counts_from_the_earliest_journal_record() {
+        let v = scratch("days");
+        journal_on(&v, "2026-09-24");
+        journal_on(&v, "2026-09-26");
+        assert_eq!(vault_day(&v, date(2026, 9, 23)), 1, "a pinned --today before the first record is day 1");
+        assert_eq!(vault_day(&v, date(2026, 9, 24)), 1);
+        assert_eq!(vault_day(&v, date(2026, 9, 25)), 2);
+        assert_eq!(vault_day(&v, date(2026, 9, 26)), 3);
+    }
+
+    /// Review finding 1: east of UTC, a wizard finished at 00:30 local on Sep 24 journals at
+    /// 22:30 UTC on Sep 23. The first day is the vault-local date, Sep 24, not the file's.
+    #[test]
+    fn the_first_day_is_the_vault_local_date_of_the_earliest_record() {
+        let v = scratch("athens");
+        std::fs::write(v.join("config").join("ingest.yaml"), "timezone: Europe/Athens\n").unwrap();
+        journal_at(&v, "2026-09-23T22:30:00.000Z");
+        assert_eq!(vault_day(&v, date(2026, 9, 24)), 1);
+        assert_eq!(vault_day(&v, date(2026, 9, 25)), 2);
     }
 }
