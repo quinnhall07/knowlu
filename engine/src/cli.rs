@@ -227,9 +227,10 @@ pub enum StashEntry {
     /// `/ingest-calendar`'s `series` field, verbatim, for `cloud:google` (§4.1) — normalised
     /// directly, with no ICS round trip.
     Google(serde_json::Value),
-    /// The ICS text of any other feed the closure fetched — a direct address, `cloud:personal`
-    /// (which the function never sends series for), or `cloud:google` against a server that
-    /// predates §4.1 (`series` absent). `calfeed::weekly_series` derives series from this text.
+    /// The ICS text of any other feed the closure fetched — a direct address, or `cloud:personal`
+    /// (which the function never sends series for). **Not** `cloud:google` with no `series`: that
+    /// case stashes nothing at all (§3.3/§4.3 — see `calendar_fetcher`). `calfeed::weekly_series`
+    /// derives series from this text.
     Ics(String),
 }
 
@@ -266,12 +267,16 @@ pub struct Fetchers<'a> {
 /// `run_with` call at all.
 ///
 /// A `cloud:<name>` url routes to `cloudmodel::fetch_calendar`. For `name == "google"` the reply's
-/// `series` is stashed as `StashEntry::Google` **only when the reply carried one** — an old server
-/// (§4.3) leaves that feed's stash untouched, exactly as if this run had never asked. Every other
-/// successfully fetched feed — a direct address, or a `cloud:`-routed feed the function sends no
-/// series for — stashes its ICS text as `StashEntry::Ics` instead. A failed fetch stashes nothing,
-/// under either branch. The closure's own `Fn(&str) -> Result<String, String>` shape is unchanged,
-/// so `calfeed::load_calendar_events` and every oracle test are untouched (spec §4.2).
+/// `series` is stashed as `StashEntry::Google` **only when the reply carried one**; when it did
+/// not — an old server that predates §4.1, or a new one whose series budget ran out or whose
+/// series gathering failed — that feed's stash is left **untouched**, exactly as if this run had
+/// never asked (§3.3: "a Google reply that carried no `series` field — keeps its series and its
+/// date untouched"; §4.3: "`series` absent → `None` → that feed's series keep their previous
+/// state"). Every other successfully fetched feed — a direct address, or a `cloud:`-routed feed
+/// the function never sends series for (`cloud:personal`) — stashes its ICS text as
+/// `StashEntry::Ics` instead. A failed fetch stashes nothing, under every branch. The closure's
+/// own `Fn(&str) -> Result<String, String>` shape is unchanged, so `calfeed::load_calendar_events`
+/// and every oracle test are untouched (spec §4.2).
 fn calendar_fetcher<'a>(
     cloud: &'a Option<crate::cloudmodel::CloudClient>,
     stash: &'a SeriesStash,
@@ -280,10 +285,14 @@ fn calendar_fetcher<'a>(
         match (url.strip_prefix("cloud:"), cloud) {
             (Some(name), Some(client)) => {
                 let (ics, series) = crate::cloudmodel::fetch_calendar(client, name)?;
-                match series {
-                    Some(series) if name == "google" => {
+                match (series, name) {
+                    (Some(series), "google") => {
                         stash.borrow_mut().insert(url.to_string(), StashEntry::Google(series));
                     }
+                    // §3.3/§4.3: no `series` field on a `cloud:google` reply means this calendar
+                    // was not read this run — the stash must stay exactly as it was, never gain a
+                    // phantom ICS-derived entry under the same url.
+                    (None, "google") => {}
                     _ => {
                         stash.borrow_mut().insert(url.to_string(), StashEntry::Ics(ics.clone()));
                     }
@@ -2036,6 +2045,12 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
     /// base and the server thread's handle, so a test can join it and see a panic if the read or
     /// write ever failed.
     fn loopback_once(body: String) -> (String, std::thread::JoinHandle<()>) {
+        loopback_once_status(200, body)
+    }
+
+    /// [`loopback_once`] with the status line spelled out (M1, review round 1: a non-2xx reply
+    /// from the cloud route).
+    fn loopback_once_status(status: u16, body: String) -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
         let port = listener.local_addr().expect("the listener has an address").port();
         let handle = std::thread::spawn(move || {
@@ -2051,7 +2066,7 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
             }
             let mut stream = reader.into_inner();
             let response = format!(
-                "HTTP/1.1 200 X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\
+                "HTTP/1.1 {status} X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\
                  connection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -2114,9 +2129,37 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         handle.join().expect("the loopback thread did not panic");
     }
 
-    /// `cloud:personal` gets no `series` field (spec §4.1) — same branch as an old server: the
-    /// closure falls back to stashing the ICS text under the feed's own url rather than leaving
-    /// the stash empty, so a later refresh still has ICS text to derive series from.
+    /// I1 (review round 1): a `cloud:google` reply with no `series` field — an old server that
+    /// predates §4.1, or a new one whose series budget ran out or whose series gathering failed
+    /// (§4.1: "`series` is omitted") — must stash **nothing** for that feed. §3.3: "a Google reply
+    /// that carried no `series` field — keeps its series and its date untouched"; §4.3: "`series`
+    /// absent → `None` → that feed's series keep their previous state". The `ics` this reply
+    /// carries is `toIcs` output (no `RRULE`); stashing it as `StashEntry::Ics` would let P16's
+    /// `refresh_series` derive a fresh, empty series read and mint a phantom ICS-keyed calendar
+    /// beside the real `google:<hash>` keys — exactly the state drift the two specs rule out.
+    #[test]
+    fn the_calendar_closure_stashes_nothing_for_google_without_series() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "google_calendar" }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:google").expect("the service answered");
+        assert_eq!(got, ics);
+        assert!(stash.borrow().get("cloud:google").is_none(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// `cloud:personal` gets no `series` field (spec §4.1): the closure stashes the ICS text under
+    /// the feed's own url rather than leaving the stash empty, so a later refresh still has ICS
+    /// text to derive series from. Unlike `cloud:google` (see the test above), `personal` never
+    /// carries series at all — this is its only branch, not a fallback from a missing one.
     #[test]
     fn the_calendar_closure_stashes_ics_text_for_a_cloud_feed_with_no_series() {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:p1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -2173,5 +2216,35 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let err = fetch("cloud:google").unwrap_err();
         assert_eq!(err, "no account on this vault");
         assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+    }
+
+    /// M1 (review round 1): the cloud route itself can fail two ways `fetch_calendar` surfaces as
+    /// `Err` — a non-2xx status, and a 200 whose body carries no `ics` field — and the `?` in
+    /// `calendar_fetcher` must return before either ever reaches an `insert`.
+    #[test]
+    fn a_failed_cloud_fetch_stashes_nothing() {
+        let (base, handle) =
+            loopback_once_status(409, crate::ledger::dumps_value(&serde_json::json!({ "error": "conflict" })));
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        assert!(fetch("cloud:google").is_err());
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
+
+        let (base, handle) =
+            loopback_once(crate::ledger::dumps_value(&serde_json::json!({ "source": "google_calendar" })));
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        assert!(fetch("cloud:google").is_err(), "a body with no ics field must be Err");
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
     }
 }
