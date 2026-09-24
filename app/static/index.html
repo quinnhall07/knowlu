@@ -35,6 +35,13 @@
     <div class="upd" id="upd" hidden></div>
     <div id="syncline" class="syncline"></div>
     <div class="delta" id="delta"></div>
+    <div id="first-run" hidden>
+      <span class="mark" aria-hidden="true"></span>
+      <h1>Knowlu is doing its first run. Your day appears here in about a minute.</h1>
+      <ol id="first-run-steps" aria-live="polite"></ol>
+      <p id="first-run-end" hidden>The first run didn't finish. Knowlu will try again on its own.</p>
+      <div class="fr-foot"><button class="b" type="button" data-settings>Settings</button></div>
+    </div>
     <div id="main-today">
       <h1 id="headline"></h1>
       <p class="lede" id="lede"></p>
@@ -133,6 +140,7 @@
     <p class="lede">Optional. Stored in Windows Credential Manager on this machine &mdash; never in the vault, never in a backup, and never sent to us.</p>
     <div class="wiz-row"><input type="text" id="wiz-zy-user" placeholder="zyBooks email"><input type="password" id="wiz-zy-pass" placeholder="zyBooks password"></div>
     <div class="wiz-row"><input type="text" id="wiz-vhl-user" placeholder="VHL email"><input type="password" id="wiz-vhl-pass" placeholder="VHL password"></div>
+    <datalist id="wiz-course-codes"></datalist>
     <div id="wiz-map" hidden>
       <h3 id="wiz-map-heading">Which class is which?</h3>
       <p class="meta" id="wiz-map-note">Knowlu found these on your accounts. Confirm the course each one belongs to &mdash; without this, Knowlu can see the work but not what it is for.</p>

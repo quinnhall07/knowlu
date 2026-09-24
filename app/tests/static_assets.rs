@@ -526,6 +526,172 @@ fn the_logins_panel_maps_what_it_finds_to_a_course() {
         "Next is disabled while discovery is in flight and re-enabled when it settles");
 }
 
+/// D5 and D6: the mapping row offers the classes the wizard already captured rather than asking
+/// for a code from memory, a row with nothing to offer says what it needs, and leaving one blank is
+/// a choice whose consequence the panel states before Next goes on. The first live onboarding left
+/// the VHL row blank, wrote `sections: {}` and spent the whole next run warning about it.
+#[test]
+fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
+    assert!(panel.contains("<datalist id=\"wiz-course-codes\">"), "the panel keeps one datalist");
+    let js = read("console.js");
+    assert!(js.contains("function renderCourseCodes("), "renderCourseCodes fills it");
+    assert!(js.contains("list=\"wiz-course-codes\""), "every mapping row's field reads it");
+    // The list offers what round-trips to the vault's own name for the course — the human code the
+    // capture read, or the slug — never the LMS's opaque key, which would be slugged into a course
+    // note nobody has (R-C1c-plan-2).
+    assert!(js.contains("c.label || c.slug"), "the datalist offers the human code, and the slug otherwise");
+    assert!(js.contains("type the course this belongs to"), "a row with no suggestion says what it needs");
+    assert!(js.contains(" of these will be asked about in the app"), "…and Next says what blank rows cost");
+    assert!(js.contains("function noteUnmapped("), "noteUnmapped");
+    // R-C1c-plan-3: the sentence is read BEFORE the panel goes — the first Next latches and stays,
+    // the second goes on. Asserted over the `wizGo`/`wizStep` slice (the split runs to
+    // `wizRegister`, so it spans both), because `wizFinish`'s own bookkeeping must not stand in.
+    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo/wizStep");
+    assert!(go.contains("noteUnmapped()"), "the count is written on the way out of the panel");
+    assert!(go.contains("WIZ.mapWarned"), "…and the panel stays once, so the student reads it");
+    assert!(js.contains("mapWarned: false"), "the latch starts clear on a fresh wizard");
+    assert!(
+        js.contains("WIZ.discovered = false; WIZ.mapWarned = false"),
+        "…and re-typed logins clear it with the discovery they invalidate"
+    );
+    // R-C1b-exec-10 still holds: the sentence is a note, never a refusal — the second Next goes on
+    // whatever the rows say, and nothing writes an error for a blank one.
+    assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
+}
+
+/// Final review, I2: `wizFinish` must put only the rows the student explicitly ticked as ignored
+/// into `zybooks_ignore` — never a blank row. A blank zyBooks row left out of both `courses` and
+/// `ignore` is `BookRouting::Unmapped` (`route_zybook`, `engine/src/coursework.rs`) and the cloud
+/// handler's mirror (`routeZybook`, `cloud/supabase/functions/ingest-coursework/parse_zybooks.ts`)
+/// files a coursework-map card for it — the same path a blank VHL row already takes. Putting a
+/// blank row in `zybooks_ignore` instead makes it silently skipped forever and makes
+/// `noteUnmapped`'s "N of these will be asked about in the app" false for zyBooks.
+#[test]
+fn a_blank_zybooks_row_is_never_sent_as_ignored() {
+    let js = read("console.js");
+    let finish = js.find("function wizFinish(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("\n  // The Checkout page").next())
+        .expect("wizFinish");
+    assert!(
+        finish.contains("r.source === \"zybooks\" && r.ignore; }"),
+        "zybooks_ignore takes only rows the student ticked as ignored"
+    );
+    assert!(
+        !finish.contains("r.source === \"zybooks\" && (r.ignore || !r.course)"),
+        "a blank, un-ignored zyBooks row must not reach zybooks_ignore"
+    );
+}
+
+/// Final review, I4 (a C1 Task 17 bug predating this branch, undoing part of D4): a captured
+/// course already carries its own slug and is covered by `course_fragments`
+/// (`app/src/scaffold.rs`) — sending its LMS id into `course_map` a second time with an empty
+/// slug lets `create_vault_in` fill it with `slugify(<LMS id>)`, and because `course_map_lines` is
+/// first-wins with the page's entries first, that phantom slug wins over the real one. Only a
+/// TYPED course (`slug: ""`) belongs in this list.
+#[test]
+fn a_captured_courses_lms_id_never_gets_a_phantom_slug() {
+    let js = read("console.js");
+    let finish = js.find("function wizFinish(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("\n  // The Checkout page").next())
+        .expect("wizFinish");
+    assert!(
+        finish.contains("if (c.code && !c.slug)"),
+        "only a typed course (no slug of its own) contributes its code to course_map"
+    );
+}
+
+/// D7 / §6, re-ruled by R-C1c-8: the minute between Finish and the first `rank` is a status view of
+/// its own that REPLACES the day. `.app` carries `first-run` while the envelope carries the block,
+/// and the stylesheet hides the nav, the rail and everything in `main` but the view. The sentence is
+/// the page's, the list fills from the live slot and names five steps in plain words, a Settings
+/// button stands in for the hidden topline gear, and a first slot that ended without a day says so.
+/// The page asks again every three seconds until the day is there, then goes back to its cadence.
+#[test]
+fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
+    let html = read("index.html");
+    let block = html.split("id=\"first-run\"").nth(1).and_then(|s| s.split("id=\"main-today\"").next()).expect("the first-run block");
+    assert!(
+        block.contains("Knowlu is doing its first run. Your day appears here in about a minute."),
+        "the sentence D7 asks for, in the page rather than in a string the engine sends"
+    );
+    assert!(block.contains("id=\"first-run-steps\""), "…the list the live slot fills");
+    assert!(
+        block.contains("The first run didn't finish. Knowlu will try again on its own."),
+        "…and the line for a first slot that ended without a day"
+    );
+    // The topline gear is hidden with the rest of `main`, so the view carries its own way to Settings,
+    // routed by the document's existing `[data-settings]` delegation.
+    let at = block.find("data-settings").expect("a Settings button inside the first-run view");
+    let tag = block[..at].rfind("<button").expect("…on a button");
+    assert!(!block[tag..at].contains('>'), "data-settings is an attribute of that button");
+    // Its own treatment: never dressed as the day's lede or a row's metadata (the Task 5 defect).
+    assert!(!block.contains("lede") && !block.contains("class=\"meta\""), "the view borrows no day styles: {block}");
+
+    let js = read("console.js");
+    assert!(js.contains("function renderFirstRun("), "renderFirstRun");
+    assert!(js.contains("function hideFirstRun("), "hideFirstRun");
+    assert!(js.contains("var FIRST_RUN_MS = 3000"), "the first-run cadence is three seconds");
+    assert!(js.contains("setInterval(poll, 60000)"), "…and the usual cadence is unchanged");
+    assert!(js.contains("EL(\"first-run\").hidden = true"), "…and the block is hidden once the day is there");
+    assert!(
+        js.contains(".classList.add(\"first-run\")") && js.contains(".classList.remove(\"first-run\")"),
+        "the view replaces the day by a class on .app, set with the block and taken off with it"
+    );
+    for say in [
+        "Checking your account",
+        "Fetching your coursework",
+        "Reading your school calendar",
+        "Working out what each task needs",
+        "Putting your day in order",
+    ] {
+        assert!(js.contains(&format!("\"{say}\"")), "the step sentence {say:?}");
+    }
+    // R-C1c-final2 M2: C3′ makes `sync` a slot step; its sentence is here before the merge, so the
+    // first seconds of a merged first run are not a view with nothing in progress.
+    assert!(js.contains("sync: \"Syncing with your account\""), "the sync step's sentence");
+    let render = js.split("function renderFirstRun(").nth(1).and_then(|s| s.split("function hideFirstRun(").next()).expect("renderFirstRun");
+    assert!(render.contains("fr.current"), "the step in progress is the live slot's own");
+    // R-C1c-final2 M1: a failed account check lands at code 0 (a network is not a failed slot), and
+    // is shown as what it is — the failed mark and a short note — never as a check mark.
+    assert!(render.contains("String(s[0]).indexOf(\"entitlement (refresh failed\") === 0"), "the failed account check is recognised by name");
+    assert!(render.contains("\"couldn't check — will retry\""), "…and says so in a short note");
+    // R-C1c-exec-8a (M2): an ended slot with ANY failed step, listed or not (`engine: …` at -1 is
+    // not), says it did not finish.
+    assert!(
+        render.contains("var failed = (fr.steps || []).some(function (s) { return s[1] !== 0; });"),
+        "the didn't-finish line counts every step, listed or not"
+    );
+    assert!(render.contains("EL(\"first-run-end\").hidden = !(!fr.running && failed);"), "…once the slot has ended");
+    assert!(!render.contains("class=\"meta\"") && !render.contains("lede"), "the rows borrow no day styles");
+    // R-C1c-exec-8a (I1): leaving the view forgets the displayed day, as a view change does, so the
+    // first ranked state paints whole instead of holding the pre-slot order behind "refresh order".
+    // Only on the way OUT: clearing on every poll without the block would defeat the hold for good.
+    let hide = js.split("function hideFirstRun(").nth(1).and_then(|s| s.split("function poll(").next()).expect("hideFirstRun");
+    assert!(hide.contains("if (app.classList.contains(\"first-run\")) {"), "the reset runs only on the transition out");
+    assert!(hide.contains("current.state = null; current.revision = null; current.pendingOrder = null;"), "…and forgets the displayed day");
+    let poll = js.split("function poll(").nth(1).and_then(|s| s.split("function openDrawer(").next()).expect("poll");
+    // R-C1c-plan-1: the view stands on the presence of the block — which is `is_first_run` — and
+    // never on a failed state, because `surface::build_state` has no failure path to wait for.
+    assert!(poll.contains("if (env.first_run) {"), "the first-run view stands on is_first_run alone");
+    assert!(poll.contains("renderFirstRun("), "…poll paints it");
+    assert!(poll.contains("hideFirstRun()"), "…and takes it away when the key stops coming");
+    // R-C1c-exec-8a (M1): a rejected call re-arms the cadence while the view stands, since the error
+    // line it writes is hidden in this mode.
+    assert!(
+        poll.contains("if (document.querySelector(\".app\").classList.contains(\"first-run\")) { armFirstRun(); }"),
+        "a rejected state call keeps the first-run cadence going"
+    );
+
+    let css = read("console.css");
+    for sel in [".app.first-run > nav", ".app.first-run > aside", ".app.first-run > main > :not(#first-run)"] {
+        assert!(css.contains(sel), "{sel} is hidden while the first-run view stands");
+    }
+}
+
 /// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
 #[test]
 fn the_account_panel_leads_with_google_asks_for_no_password_and_still_gates_on_eighteen() {

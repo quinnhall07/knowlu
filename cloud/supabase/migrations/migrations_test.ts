@@ -306,9 +306,11 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // non-writing — the widened guard does not require its revoke, but the file carries one anyway
   // and that revoke is still one more definition parsed) and `trim_user_metadata` (SECURITY
   // DEFINER, `returns trigger`, so exempt from the revoke by kind exactly as handle_new_user is,
-  // and carries a revoke of its own regardless) —
+  // and carries a revoke of its own regardless), plus R-C1c-7's `create or replace function
+  // charge_call` in 20260923000100 (still a writing, non-definer function — revoked again in the
+  // same file, and one more definition parsed) —
   // counted by hand against today's corpus.
-  assertEquals(parsed, 21, "today's corpus should parse exactly 21 function creations");
+  assertEquals(parsed, 22, "today's corpus should parse exactly 22 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -791,5 +793,53 @@ Deno.test("the last definition of export_training_rows excludes both gmail_api a
     last!.body.includes("origin not in ('gmail_api', 'events')"),
     `${last!.name}: the LAST export_training_rows definition must exclude both origins ` +
       `(cloud design §5.3/§9, provider swap Task 2)`,
+  );
+});
+
+Deno.test("the last charge_call doubles the cap on an account's first two judging days (R-C1c-7)", async () => {
+  // R-C1c-7: both live proofs of the first day showed the same thing — a new account's first slot
+  // judges a whole semester at once (every task, every calendar event, the email backlog), so the
+  // steady-state DAILY_CAP (`_shared/judge_caps.ts`, unchanged by this task) cut the run off partway
+  // through. Quinn's ruling doubles the effective cap for the account's first two UTC judging days;
+  // the SQL alone decides that, never `judge_caps.ts`. Forward-only, the same way the
+  // export_training_rows test just above reads the LAST definition: a later migration's
+  // `create or replace` is what actually governs the function today, not the original one.
+  const files = await everyMigrationFile();
+  const marker = "create or replace function charge_call";
+  let last: { name: string; body: string } | undefined;
+  for (const [name, sql] of files) {
+    const stripped = stripLineComments(sql);
+    const idx = stripped.lastIndexOf(marker);
+    if (idx !== -1) last = { name, body: stripped.slice(idx) };
+  }
+  assert(last !== undefined, "no migration defines charge_call");
+  // Normalised-whitespace substring checks, not a SQL parser (the plan's own instruction) — this
+  // guard only needs to prove the shape is present, not that it compiles.
+  const normalized = last!.body.replace(/\s+/g, " ").toLowerCase();
+  assert(
+    normalized.includes("select min(day) into first_day from usage_daily where account_id = p_account"),
+    `${last!.name}: charge_call must read the account's first judging day from usage_daily`,
+  );
+  assert(
+    normalized.includes("current_date - 1"),
+    `${last!.name}: charge_call must compare the first judging day against current_date - 1`,
+  );
+  assert(
+    normalized.includes("after <= p_cap * 2"),
+    `${last!.name}: charge_call must return after <= p_cap * 2 on an account's first two judging days`,
+  );
+  assert(
+    normalized.includes("after <= p_cap;"),
+    `${last!.name}: charge_call must return after <= p_cap once the first two judging days have passed`,
+  );
+  const inserts = normalized.match(/insert into usage_daily/g) ?? [];
+  assertEquals(
+    inserts.length,
+    1,
+    `${last!.name}: charge_call must still make exactly one insert into usage_daily`,
+  );
+  assert(
+    normalized.includes("on conflict"),
+    `${last!.name}: charge_call's single insert must still be the on-conflict upsert`,
   );
 });

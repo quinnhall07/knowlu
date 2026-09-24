@@ -504,3 +504,54 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .wiz-hits .hit { padding: 6px 8px; cursor: pointer; }
 .wiz-hits .hit:hover, .wiz-hits .hit:focus { background: var(--s2c); outline: none; }
 #report-text { width: 100%; font: 12px/1.5 var(--mono); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }
+
+/* ---- C1c Task 8 (R-C1c-8): the first-run view replaces the day ---- */
+/* While `first_run` is on the envelope, `.app` carries `first-run` (console.js, renderFirstRun) and
+   this view is the whole window. The day still paints underneath, so the hand-over is instant, and a
+   `display: none` row never intersects, so no `object_seen` is sent for a row nobody saw. One track,
+   or `main` would land in the nav's column. Specificity 0-2-0 / 0-2-1 / 1-2-1 beats every breakpoint's
+   `.app` and `aside` rule, which is what keeps the rail hidden below 1180px, where `aside` is a grid. */
+.app.first-run { grid-template-columns: minmax(0, 1fr); }
+.app.first-run > nav, .app.first-run > aside, .app.first-run > main > :not(#first-run) { display: none; }
+
+/* A page of its own: one centred column at a fixed height, so the heading stays put as the list
+   grows beneath it. Nothing here is the day's `.lede` or a row's `.meta` (the Task 5 defect). */
+#first-run { max-width: 34rem; margin: clamp(var(--s7), 14vh, 144px) auto var(--s8); }
+#first-run .mark { display: block; margin-bottom: var(--s5); }
+#first-run h1 { font-size: clamp(22px, 2vw, 27px); line-height: 1.3; letter-spacing: -.02em; max-width: none; margin: 0 0 var(--s6); color: var(--t1); }
+
+/* The steps, on one quiet surface; a row lands as the live slot records it. */
+#first-run-steps { list-style: none; margin: 0; padding: 0 var(--s4); background: var(--s1c); border: 1px solid var(--hair); border-radius: var(--r3); }
+#first-run-steps:empty { display: none; }
+.fr-step { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--s3); align-items: center; padding: var(--s3) 0; font-size: 14.5px; color: var(--t2); }
+.fr-step + .fr-step { border-top: 1px solid var(--hair); }
+.fr-note { font-family: var(--mono); font-size: 11px; color: var(--t4); }
+.fr-mark { position: relative; width: 14px; height: 14px; border-radius: 50%; }
+/* done: an accent disc carrying a check cut from the canvas */
+.fr-step[data-state="done"] .fr-mark { background: var(--acc); }
+.fr-step[data-state="done"] .fr-mark::after {
+  content: ""; position: absolute; left: 5px; top: 2.5px; width: 3px; height: 6.5px;
+  border: solid var(--canvas); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+}
+/* in progress: an accent arc turning slowly on a quiet ring, and the one row at full emphasis */
+.fr-step[data-state="now"] { color: var(--t1); font-weight: 500; }
+.fr-step[data-state="now"] .fr-mark { border: 2px solid var(--hair-2); border-top-color: var(--acc); border-right-color: var(--acc); animation: fr-turn 1.4s linear infinite; }
+@keyframes fr-turn { to { transform: rotate(360deg); } }
+/* failed: a warn ring marked "!" */
+.fr-step[data-state="failed"] { color: var(--t1); }
+.fr-step[data-state="failed"] .fr-mark { border: 1.5px solid var(--warn); background: var(--warn-dim); }
+.fr-step[data-state="failed"] .fr-mark::after {
+  content: "!"; position: absolute; inset: 0; display: grid; place-items: center;
+  font: 600 9px/1 var(--mono); color: var(--warn);
+}
+/* skipped: a hollow ring with a dash, the row stepped back, and the word said */
+.fr-step[data-state="skipped"] { color: var(--t4); }
+.fr-step[data-state="skipped"] .fr-mark { border: 1.5px solid var(--hair-2); }
+.fr-step[data-state="skipped"] .fr-mark::after { content: ""; position: absolute; left: 2.5px; right: 2.5px; top: 5.25px; height: 1.5px; background: var(--t4); }
+
+#first-run-end { margin: var(--s4) 0 0; font-size: 13.5px; color: var(--warn); }
+/* Settings, because the topline gear is hidden with the rest of the day: present, never loud. */
+#first-run .fr-foot { margin-top: var(--s6); }
+#first-run .fr-foot button.b { background: transparent; border-color: var(--hair); color: var(--t3); }
+#first-run .fr-foot button.b:hover { border-color: var(--t4); color: var(--t1); }
+@media (prefers-reduced-motion: reduce) { .fr-step[data-state="now"] .fr-mark { animation: none; } }
