@@ -536,6 +536,64 @@ fn refresh_entitlement_saves_the_cache_from_a_live_reply() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// R-C1c-13: the scheduler's pre-flight, run before the first cloud step of a slot. Unlike
+/// `valid_access_token_at`'s 120-second margin (reached only at a slot's own end, by the telemetry
+/// step), this one is asked with a floor wide enough to survive the slot itself — 45 minutes here —
+/// so a token minted hours ago by an earlier slot is refreshed before anything tries to spend it.
+#[cfg(windows)]
+#[test]
+fn ensure_session_for_at_refreshes_a_token_with_ten_minutes_left_against_a_forty_five_minute_floor() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, load_session, save_session, Session};
+    let target = format!("knowlu/test-ensure-refresh-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "stale-at".into(),
+        refresh_token: "rt-1".into(),
+        expires_at: now + 600, // ten minutes left
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a near-expiry session");
+
+    let body = r#"{"access_token":"fresh-at","refresh_token":"fresh-rt","expires_in":3600,"user":{"id":"acc-1","email":"a@example.invalid"}}"#;
+    let (base, handle) = loopback(vec![(200, body.to_string())]);
+    let refreshed = ensure_session_for_at(&format!("{base}/auth/v1"), "anon-key", &target, now, 45 * 60).expect("refresh");
+    let seen = handle.join().expect("server thread");
+    assert!(refreshed, "ten minutes left against a forty-five-minute floor must refresh");
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    assert!(seen[0].contains("\"refresh_token\":\"rt-1\""), "{}", seen[0]);
+    let (_, back) = load_session(&target).expect("the rewritten entry");
+    assert_eq!(back.access_token, "fresh-at");
+    assert_eq!(back.refresh_token, "fresh-rt");
+}
+
+/// …and a token that already clears the floor is left alone — no request at all, so pointing it at a
+/// port nothing listens on still succeeds and the stored entry is byte-for-byte what it was.
+#[cfg(windows)]
+#[test]
+fn ensure_session_for_at_leaves_a_token_with_fifty_minutes_left_against_a_forty_five_minute_floor() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{ensure_session_for_at, load_session, save_session, Session};
+    let target = format!("knowlu/test-ensure-fresh-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let now = jiff::Timestamp::now().as_second();
+    let s = Session {
+        access_token: "still-good-at".into(),
+        refresh_token: "rt-2".into(),
+        expires_at: now + 3000, // fifty minutes left
+        email: "a@example.invalid".into(),
+    };
+    save_session(&target, "acc-1", &s).expect("write a comfortably fresh session");
+
+    let base = closed_loopback_base();
+    let refreshed = ensure_session_for_at(&base, "anon-key", &target, now, 45 * 60)
+        .expect("a token that clears the floor must never even attempt the network");
+    assert!(!refreshed, "fifty minutes left against a forty-five-minute floor must not refresh");
+    let (_, back) = load_session(&target).expect("the untouched entry");
+    assert_eq!(back, s);
+}
+
 /// Base64url without padding, as a JWT segment is — a dozen lines here rather than a `base64`
 /// dependency the app does not otherwise need.
 fn decode_b64url(s: &str) -> String {

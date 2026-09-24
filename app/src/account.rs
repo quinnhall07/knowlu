@@ -481,6 +481,27 @@ pub fn valid_access_token_at(auth_base: &str, anon: &str, target: &str, now_unix
     Ok(fresh.access_token)
 }
 
+/// The scheduler's own pre-flight (R-C1c-13), not C2's read: `valid_access_token_at`'s 120-second
+/// margin is sized for a single request made right now, and every reader of it in this file (the
+/// entitlement refresh, the telemetry send) is exactly that. A slot is different — it runs several
+/// cloud steps in sequence and can take minutes end to end — so the scheduler asks THIS with a floor
+/// wide enough to survive the whole slot (45 minutes, at the call site in `scheduler.rs`) rather than
+/// the moment a single call is made.
+///
+/// Returns `Ok(true)` only when a refresh actually ran and the entry was rewritten; `Ok(false)` when
+/// the token already cleared `min_remaining_secs` and nothing was touched, network included. An `Err`
+/// covers both a session that could not be read (Credential Manager has nothing at `target`, or what
+/// is there does not parse) and a refresh the provider or the network refused — the caller decides
+/// what either means for the slot; this function only ever reads and writes Credential Manager.
+pub fn ensure_session_for_at(auth_base: &str, anon: &str, target: &str, now_unix: i64, min_remaining_secs: i64) -> Result<bool, String> {
+    let (account_id, s) = load_session(target)?;
+    if s.expires_at - now_unix > min_remaining_secs { return Ok(false); }
+    let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
+    let id = if id.is_empty() { account_id } else { id };
+    save_session(target, &id, &fresh)?;
+    Ok(true)
+}
+
 fn env_pair() -> Result<(String, String, String), String> {
     let base = api_base();
     check_api_base(&base)?;

@@ -695,6 +695,67 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// R-C1c-13: the slot refreshes the account session before its first cloud step — the entitlement
+/// refresh right after it is itself one such step, and every child process after that (coursework,
+/// ingest, judge) authenticates with the same session. A one-hour token is routinely down to single
+/// digits by a noon or 6pm slot, and the app's only other refresh point (`valid_access_token_at`'s own
+/// 120-second margin) is reached only at the slot's END, by telemetry — too late for anything earlier
+/// in the same slot. A session with ten minutes left, under this pre-flight's 45-minute floor, and an
+/// `api_base` that answers nothing (port 9, the closed host this file's other tests already use) must
+/// still leave the slot green: a network refusing the refresh is not a failed slot, and the failure is
+/// named and sanitized exactly as the entitlement step's own is (R-C1c-final-3).
+#[test]
+fn a_near_expiry_session_is_refreshed_before_any_engine_step_and_a_failure_is_named() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let v = scratch("sessionrefresh");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    let target = format!("knowlu/test-sessionrefresh-{}-{}", std::process::id(), line!());
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        format!("api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    ).unwrap();
+    let _cred_cleanup = CredCleanup(target.clone());
+    knowlu::account::save_session(&target, "acc-1", &knowlu::account::Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        // Ten minutes left — under the 45-minute floor the scheduler's pre-flight asks for, so a
+        // refresh is attempted (and, against the closed port below, fails).
+        expires_at: jiff::Timestamp::now().as_second() + 600,
+        email: "a@example.invalid".into(),
+    }).unwrap();
+    let cs = open(&v, "sessionrefresh");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-sessionrefresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        // `cloud_config`'s R-C1-59 I1 host check needs this build's own `api_base()` to name the
+        // same port-9 host the vault's `cloud.yaml` does, above.
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:9/functions/v1")),
+    ]);
+    let s = run_slot_inner(&cs, &sch, None, false);
+    let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
+    let session_at = named.iter().position(|n| n.starts_with("session (refresh failed:"))
+        .unwrap_or_else(|| panic!("no session step: {named:?}"));
+    let coursework_at = named.iter().position(|n| n == "coursework")
+        .unwrap_or_else(|| panic!("no coursework step: {named:?}"));
+    assert!(session_at < coursework_at, "the session is refreshed before any engine step: {named:?}");
+    assert_eq!(s.steps[session_at].1, 0, "a network refusing the refresh is not a failed slot");
+    assert!(s.engine_ok, "a failed session refresh must never paint the tray amber: {:?}", s.steps);
+    // R-C1c-final-3: the runner log gets the sanitized line, never the service's failure reason.
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok session (refresh failed)"), "{log}");
+    assert!(!log.contains("refresh failed:"), "a service error's text must never reach the vault: {log}");
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// Case (c): entitled once, but not for four days. The grace is over, the cloud step stands down as a
 /// named step, and the day is still ranked.
 ///

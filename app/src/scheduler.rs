@@ -661,6 +661,37 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             IcsState::Unreadable => steps.push(("ingest (skipped: config unreadable)".to_string(), 0)),
         }
     }
+    // R-C1c-13: the account session is refreshed here, before ANYTHING else in the slot spends it —
+    // the entitlement refresh right below is itself one such spend, and every child process after
+    // that (coursework, ingest, judge; sync once C3′ lands) authenticates with the same token.
+    // `account::valid_access_token_at`'s own 120-second margin is sized for the single request it
+    // guards and is reached only at a slot's own END, by the telemetry step — or not at all, when
+    // entitlement is already fresh and Task 10's block above never runs. A one-hour token minted at
+    // this morning's slot is routinely down to single digits by a noon or 6pm one, so without this a
+    // second-day student's every cloud step in the slot gets a 401 before anything here ever refreshes
+    // it. Forty-five minutes because a slot can run long (`CHILD_TIMEOUT` alone is twenty minutes a
+    // step): the 120-second margin is right for one request, not for surviving a whole slot.
+    //
+    // Guarded on `cloud_config(...).is_ok()` exactly as the entitlement block below is, and for the
+    // same reason: a vault with no `config/cloud.yaml` at all, or one that is unreadable, has no
+    // session target to ask about and no account for this to mean anything to.
+    //
+    // Exit code **0** either way, like every other named step here: a network refusing the refresh is
+    // not a slot that failed.
+    if let Ok(cfg) = crate::account::cloud_config(&cs.vault) {
+        if let Ok(auth) = crate::account::auth_base(&cfg.api_base) {
+            steps.start("session");
+            let now = jiff::Timestamp::now().as_second();
+            match crate::account::ensure_session_for_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now, 45 * 60) {
+                Ok(true) => steps.push(("session (refreshed)".to_string(), 0)),
+                // Nothing happened: the token already cleared the floor. Not a step — `idle` clears
+                // `current` the same way a backup with no folder set does, so nothing is left "in
+                // progress" for the first-run view to poll forever.
+                Ok(false) => steps.idle(),
+                Err(e) => steps.push((format!("session (refresh failed: {e})"), 0)),
+            }
+        }
+    }
     // Every arm records a step with exit code **0** and a sentence — never a non-zero code, which
     // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a
     // day for someone who has simply not paid, or not connected.
@@ -741,6 +772,14 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // failure reason. `steps` (what `RunSummary`/the settings page reads) keeps the full
     // `entitlement (refresh failed: <reason>)` from the push above; the vault gets the bare
     // sentence only, so no service error text ever reaches a file a student can open.
+    //
+    // R-C1c-13: the session pre-flight's own failure lands here too, sanitized the same way — but
+    // its SUCCESS does not. Unlike `entitlement (refreshed)`, which is routine and worth a line every
+    // time the six-hourly cache goes stale, `session (refreshed)` fires on every slot for every
+    // signed-in student whose last token happened to be old enough — twice a day, forever, on every
+    // healthy install — and a line that common is not something a student ever needs to open a file
+    // to confirm. Only a refusal is worth a line: something to notice, the same reason a busy sync
+    // lock is named but a routine pull is not.
     let skips: Vec<String> = steps
         .steps
         .iter()
@@ -751,6 +790,8 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
                 Some(n.clone())
             } else if n.starts_with("entitlement (refresh failed") {
                 Some("entitlement (refresh failed)".to_string())
+            } else if n.starts_with("session (refresh failed") {
+                Some("session (refresh failed)".to_string())
             } else {
                 None
             }
