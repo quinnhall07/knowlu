@@ -1944,9 +1944,16 @@ pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
 /// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
 /// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
 fn write_series_file(vault: &Path, bytes: &str) -> std::io::Result<()> {
-    let path = series_path(vault);
+    write_state_file(vault, "calendar-series.json", bytes)
+}
+
+/// `state/<name>`, whole: `bytes` go to `<name>.tmp<pid>` beside it, then are renamed over it, so
+/// a crash mid-write leaves the old file intact (the series file, fix round 1 M5; `plan.json`,
+/// P16 fix round 1 M2).
+fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(vault.join("state"))?;
-    let tmp = path.with_file_name(format!("calendar-series.json.tmp{}", std::process::id()));
+    let path = vault.join("state").join(name);
+    let tmp = path.with_file_name(format!("{name}.tmp{}", std::process::id()));
     std::fs::write(&tmp, bytes.as_bytes())?;
     std::fs::rename(&tmp, &path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
@@ -3887,6 +3894,21 @@ pub fn series_read_failed(warnings: &[String]) -> bool {
     warnings.iter().any(|w| w.starts_with(&malformed) || w.starts_with(&unreadable))
 }
 
+/// `code_table`'s warnings that matter to this run (P16 fix round 1, M1, controller ruling): a
+/// code two courses claim is kept only when a series in `file` carries it — its title, compacted
+/// as codes are, contains the code — so a vault that merely has clashing `courses/` notes does not
+/// turn the `calendar` step WARN on every run. Every other code-table warning goes nowhere.
+pub fn code_warnings_hit(warnings: Vec<String>, file: &SeriesFile) -> Vec<String> {
+    let titles: Vec<String> = file.series.iter().map(|s| compact(&s.title)).collect();
+    warnings
+        .into_iter()
+        .filter(|w| {
+            let code = w.strip_prefix("code ").and_then(|rest| rest.split_once(": claimed by both "));
+            code.is_some_and(|(code, _)| !code.is_empty() && titles.iter().any(|t| t.contains(code)))
+        })
+        .collect()
+}
+
 /// The day's first window (§6.4), generated and device-local.
 pub const PLAN_FILE: &str = "state/plan.json";
 
@@ -3896,7 +3918,8 @@ pub const PLAN_FILE: &str = "state/plan.json";
 /// `cal.window(today)`. Missing or malformed: the **template's** `(day_start, day_end)` — the
 /// window the day was planned in before any note existed (re-review N2). An I/O error other than
 /// not-found leaves the file alone with one warning (it may be fine). Written as
-/// `{"date", "start", "end"}` through `ledger::dumps_value` with a trailing newline. No diff here:
+/// `{"date", "start", "end"}` through `ledger::dumps_value` with a trailing newline, whole (temp
+/// file, then rename). No diff here:
 /// `moved` is `surface`'s (P18). Returns warnings.
 pub fn record_baseline(
     vault: &Path,
@@ -3922,8 +3945,7 @@ pub fn record_baseline(
     };
     let value = serde_json::json!({ "date": today.to_string(), "start": hm(start), "end": hm(end) });
     let bytes = crate::ledger::dumps_value(&value) + "\n";
-    let written = std::fs::create_dir_all(vault.join("state")).and_then(|_| std::fs::write(&path, bytes));
-    match written {
+    match write_state_file(vault, "plan.json", &bytes) {
         Ok(()) => Vec::new(),
         Err(err) => vec![format!("plan file: could not write {PLAN_FILE} ({})", err.kind())],
     }

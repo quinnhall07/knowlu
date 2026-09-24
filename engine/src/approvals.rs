@@ -1471,8 +1471,8 @@ fn transition_note(
 /// once more with the new `was` and that card then survives. `today` dates the "series has
 /// finished" test (fix round 1, m3); there is no expiry (R9).
 ///
-/// Never raises into the run: returns `(withdrawn stems, warnings)`, one `transition failed:`
-/// warning per card that could not be moved.
+/// Never raises into the run: returns the withdrawn stems, how many of them were `pending` on
+/// disk, and one `transition failed:` warning per card that could not be moved.
 pub fn withdraw_stale(
     vault: &Path,
     file: &SeriesFile,
@@ -1480,12 +1480,11 @@ pub fn withdraw_stale(
     today: Date,
     ctx: &WriteContext,
     journal: &mut Journal,
-) -> (Vec<String>, Vec<String>) {
-    let mut withdrawn = Vec::new();
-    let mut warnings = Vec::new();
+) -> Withdrawal {
+    let mut out = Withdrawal::default();
     let folder = vault.join("approvals");
     if !folder.is_dir() {
-        return (withdrawn, warnings);
+        return out;
     }
     let (codes, _) = Codes::load(vault);
     for path in sorted_md(&folder) {
@@ -1504,11 +1503,51 @@ pub fn withdraw_stale(
         let moved = write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())
             .and_then(|_| delete(vault, &rel, ctx, journal));
         match moved {
-            Ok(_) => withdrawn.push(stem_of(&path)),
-            Err(_) => warnings.push(format!("transition failed: {}", name_of(&path))),
+            Ok(_) => {
+                out.withdrawn.push(stem_of(&path));
+                if str_field(&meta, "status") == "pending" {
+                    out.pending += 1;
+                }
+            }
+            Err(_) => out.warnings.push(format!("transition failed: {}", name_of(&path))),
         }
     }
-    (withdrawn, warnings)
+    out
+}
+
+/// What [`withdraw_stale`] did. `pending` counts the withdrawn cards that were `pending` on disk
+/// — the ones `process_approvals` already counted into this run's `Approvals: N pending` line (a
+/// snoozed card never was), so `rank` takes them back out (P16 fix round 1, I1).
+#[derive(Debug, Default)]
+pub struct Withdrawal {
+    pub withdrawn: Vec<String>,
+    pub pending: i64,
+    pub warnings: Vec<String>,
+}
+
+/// The age in days of the oldest `pending` approval in `approvals/` — `first_proposed_at`, else
+/// `proposed_at`, as [`process_approvals`] ages one — or 0 when none is pending. `rank` re-reads
+/// it only after a withdrawal took cards out of the queue `process_approvals` aged (I1).
+pub fn oldest_pending_days(vault: &Path, today: Date) -> i64 {
+    let folder = vault.join("approvals");
+    if !folder.is_dir() {
+        return 0;
+    }
+    let mut oldest: Option<Date> = None;
+    for path in sorted_md(&folder) {
+        let Some((meta, _)) = read_note(&path) else { continue };
+        if str_field(&meta, "type") != "approval" || str_field(&meta, "status") != "pending" {
+            continue;
+        }
+        let first = as_date(crate::yaml::get(&meta, "first_proposed_at"))
+            .or(as_date(crate::yaml::get(&meta, "proposed_at")));
+        if let Some(first) = first {
+            if oldest.is_none_or(|current| first < current) {
+                oldest = Some(first);
+            }
+        }
+    }
+    oldest.map(|first| days_between(first, today).max(0)).unwrap_or(0)
 }
 
 /// Write the student's answer to a `kind: event-check` card into the event ledger (F3):
@@ -4021,7 +4060,8 @@ mod tests {
         fn withdraw(vault: &Path, file: &SeriesFile) -> (Vec<String>, Vec<String>) {
             let set = commitments::load(vault);
             let mut journal = Journal::new(vault);
-            withdraw_stale(vault, file, &set, TODAY, &default_ctx(), &mut journal)
+            let done = withdraw_stale(vault, file, &set, TODAY, &default_ctx(), &mut journal);
+            (done.withdrawn, done.warnings)
         }
 
         fn creates_in_commitments(vault: &Path) -> Vec<crate::ledger::Record> {

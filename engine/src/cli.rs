@@ -528,7 +528,7 @@ pub fn run_with(
     // stash and before the calendar is built. Every warning joins the `calendar` step (R13: no new
     // step). The cards they file are counted into this run's pending line, as the events pass
     // counts its checks (re-review M-a).
-    let (commitment_checks, commitments) = commitment_passes(
+    let passes = commitment_passes(
         vault,
         today,
         &planning,
@@ -537,7 +537,13 @@ pub fn run_with(
         &mut journal,
         &mut cal_warnings,
     );
-    approvals.pending += commitment_checks;
+    // A card withdrawn this run was counted pending by `process_approvals`: take it back out, and
+    // re-age the queue without it (P16 fix round 1, I1).
+    approvals.pending += passes.filed - passes.withdrawn_pending;
+    if passes.withdrawn_pending > 0 {
+        approvals.oldest_pending_days = crate::approvals::oldest_pending_days(vault, today);
+    }
+    let commitments = passes.set;
 
     // §6.1 (C3): the one constructor `surface` uses too, so `today.md` and the console agree.
     let cal = WeekCalendar::for_vault(vault, cal_events);
@@ -770,6 +776,8 @@ fn normalise_stash(
                 }
             }
             StashEntry::Ics(text) => {
+                // The closure stashes only urls `calendar_entries` handed it this run, so a url
+                // with no feed row cannot occur; if it ever did, nothing is read (no ageing).
                 for (name, _) in feeds.iter().filter(|(_, feed_url)| feed_url == url) {
                     let (series, found) = crate::commitments::series_from_ics(name, text, tz, today);
                     warnings.extend(found);
@@ -789,9 +797,8 @@ fn normalise_stash(
 /// series file could not be read, as is the **ended** rule, because a bad read is never "gone";
 /// `detect_changes`; `successor_keys`; `proposals`; `emit_checks`, with the budget recounted here
 /// after the events pass took its share. Pure of clocks, networks and models: the stash was filled
-/// by the calendar closure and everything here is deterministic. Returns the number of cards filed
-/// and the set (for `record_baseline`); every warning is pushed onto `warnings`.
-#[allow(clippy::too_many_arguments)]
+/// by the calendar closure and everything here is deterministic. Every warning is pushed onto
+/// `warnings`.
 fn commitment_passes(
     vault: &Path,
     today: Date,
@@ -800,7 +807,7 @@ fn commitment_passes(
     ctx: &WriteContext,
     journal: &mut Journal,
     warnings: &mut Vec<String>,
-) -> (i64, crate::commitments::Commitments) {
+) -> CommitmentPasses {
     use crate::commitments as cm;
     let entries: BTreeMap<String, StashEntry> = stash.map(|s| s.borrow().clone()).unwrap_or_default();
     let (fresh, normalise_warnings) = normalise_stash(vault, &entries, &vault_zone(vault), today);
@@ -813,14 +820,15 @@ fn commitment_passes(
     let set = cm::load(vault);
     warnings.extend(set.warnings.iter().cloned());
 
+    let mut withdrawn_pending = 0;
     if !read_failed {
-        let (_, withdrawal_warnings) =
-            crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
-        warnings.extend(withdrawal_warnings);
+        let withdrawal = crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
+        withdrawn_pending = withdrawal.pending;
+        warnings.extend(withdrawal.warnings);
     }
 
     let (codes, code_warnings) = cm::Codes::load(vault);
-    warnings.extend(code_warnings);
+    warnings.extend(cm::code_warnings_hit(code_warnings, &file));
     let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
     let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
     let watched = match read_failed {
@@ -836,7 +844,17 @@ fn commitment_passes(
     let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
     let (_, filed, card_warnings) = cm::emit_checks(vault, &proposals, &changes, today, budget, ctx, journal);
     warnings.extend(card_warnings);
-    (filed as i64, set)
+    CommitmentPasses { filed: filed as i64, withdrawn_pending, set }
+}
+
+/// What [`commitment_passes`] hands back to `run_with`.
+struct CommitmentPasses {
+    /// Cards filed this run (added to the pending line).
+    filed: i64,
+    /// Cards withdrawn this run that `process_approvals` had counted pending (taken back out).
+    withdrawn_pending: i64,
+    /// The notes, for `record_baseline`.
+    set: crate::commitments::Commitments,
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -2573,11 +2591,25 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
         let filed = checks(&vault, "approvals");
         assert_eq!(filed.len(), 1);
+        // One unrelated card, two days old on the drop run: after the withdrawal it is the only
+        // pending card and the oldest (P16 fix round 1, I1).
+        pystr::write_text(
+            &vault.join("approvals").join("task-reply.md"),
+            "---\ntype: approval\nkind: task\ntitle: Reply to advisor\nstatus: pending\n\
+             proposed_at: 2026-09-19\nfirst_proposed_at: 2026-09-19\nexpires: 2026-09-30\n\
+             snooze_until: null\n---\n\nInvented.\n",
+        )
+        .unwrap();
         // Fourteen days of fresh reads without it: the series leaves the file, the card goes.
         rank_p16(&vault, p16_day(14), vec![("cloud:google", google_entry(Vec::new()))]);
         assert!(checks(&vault, "approvals").is_empty());
         assert_eq!(checks(&vault, "archive"), filed);
         assert_eq!(meta_str(&vault.join("archive").join(&filed[0]), "status"), "superseded");
+        // The withdrawn card is not counted on the run that withdrew it, nor is its age.
+        let text = page(&vault);
+        assert!(text.contains("**Approvals: 1 pending** (oldest 2d)"), "{text}");
+        let recs = run_records(&vault);
+        assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["pending"], serde_json::json!(1));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -2748,6 +2780,121 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         .unwrap();
         rank_p16(&vault, P16_MONDAY, Vec::new());
         assert_eq!(plan_json(&vault), "{\"date\": \"2026-09-07\", \"end\": \"22:00\", \"start\": \"08:00\"}\n");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M2 (fix round 1): `plan.json` goes through temp-then-rename, and no temp file is left.
+    #[test]
+    fn rank_writes_plan_json_whole_and_leaves_no_temp_file() {
+        let vault = p16_vault("p16plan5");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(plan_json(&vault).ends_with("}\n"));
+        let temps = md_like(&vault.join("state"), ".tmp");
+        assert!(temps.is_empty(), "{temps:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    fn md_like(dir: &Path, needle: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.contains(needle))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// M1 (fix round 1, controller ruling): a code two courses claim is only worth a warning when
+    /// a series this run actually carries that code. A vault with the clash and nothing else keeps
+    /// a clean `calendar` step.
+    #[test]
+    fn a_course_code_clash_with_no_series_leaves_the_calendar_step_clean() {
+        let vault = p16_vault("p16codeclash");
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: America/Chicago\n").unwrap();
+        pystr::write_text(
+            &vault.join("courses").join("cs-100-honors.md"),
+            "---\nid: course_00000000c2\ntitle: \"CS 100 Honors\"\ncode: \"CS 100\"\n---\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, Vec::new());
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!((calendar.result, calendar.message.as_str()), ("ok", ""));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M1's other half: a series that carries the ambiguous code surfaces the warning.
+    #[test]
+    fn a_course_code_clash_a_series_hits_warns_in_the_calendar_step() {
+        let vault = p16_vault("p16codehit");
+        pystr::write_text(
+            &vault.join("courses").join("cs-100-honors.md"),
+            "---\nid: course_00000000c2\ntitle: \"CS 100 Honors\"\ncode: \"CS 100\"\n---\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!(calendar.result, "WARN");
+        assert!(calendar.message.contains("code CS100: claimed by both"), "{}", calendar.message);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Every file under `vault`, by vault-relative path, with its bytes.
+    fn tree_bytes(vault: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(vault, vault, &mut out);
+        out
+    }
+
+    /// M3 (fix round 1): a second rank on the same day with the same stash changes nothing but
+    /// the run's own record of itself — the run ledger, the runner log and `today.md`'s
+    /// generated-at line. Cards, the series file, `plan.json`, the journal and every note are
+    /// byte-identical. `state/.journal-index.json` (`detect_external`'s git-ignored cache) is
+    /// the one exception on the second run: it catches up to the records the first run wrote
+    /// after `detect_external` had run (its cards). A third rank leaves even that unchanged.
+    #[test]
+    fn a_second_rank_with_the_same_inputs_changes_no_file() {
+        let vault = p16_vault("p16twice");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        let entries = || vec![("cloud:google", google_entry(vec![cs100_item(), ph106_moved()]))];
+        rank_p16(&vault, P16_MONDAY, entries());
+        assert_eq!(checks(&vault, "approvals").len(), 2, "a proposal and a change card");
+        let normalise = |mut tree: BTreeMap<String, Vec<u8>>| {
+            tree.retain(|rel, _| !rel.starts_with("state/runs/") && rel != "state/runner-log.md");
+            if let Some(page) = tree.get_mut("state/today.md") {
+                let text = String::from_utf8(page.clone()).unwrap();
+                let kept: Vec<&str> = text.lines().filter(|l| !l.contains("Generated")).collect();
+                *page = kept.join("\n").into_bytes();
+            }
+            tree
+        };
+        const INDEX: &str = "state/.journal-index.json";
+        let first = normalise(tree_bytes(&vault));
+        rank_p16(&vault, P16_MONDAY, entries());
+        let second = normalise(tree_bytes(&vault));
+        assert_eq!(first.keys().collect::<Vec<_>>(), second.keys().collect::<Vec<_>>());
+        for (rel, bytes) in first.iter().filter(|(rel, _)| rel.as_str() != INDEX) {
+            assert!(second[rel] == *bytes, "{rel} changed on the second rank");
+        }
+        rank_p16(&vault, P16_MONDAY, entries());
+        let third = normalise(tree_bytes(&vault));
+        assert_eq!(second.keys().collect::<Vec<_>>(), third.keys().collect::<Vec<_>>());
+        for (rel, bytes) in &second {
+            assert!(third[rel] == *bytes, "{rel} changed on the third rank");
+        }
         let _ = std::fs::remove_dir_all(&vault);
     }
 
