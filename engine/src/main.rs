@@ -56,6 +56,10 @@ enum Command {
         /// Override the embedded build SHA (the frozen references pin this to "pinned").
         #[arg(long = "build-sha")]
         build_sha: Option<String>,
+        /// Preview a planning window (a flow sequence shaped like the planning-day note's
+        /// `window`) on the today view, with `moved` against the current window. Writes nothing.
+        #[arg(long)]
+        window: Option<String>,
     },
     /// Sync zyBooks + VHL coursework into tasks/. Ports `python -m engine.coursework`.
     ///
@@ -327,12 +331,15 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Surface { vault, view, today, now, seen_at, build_sha } => {
+        Command::Surface { vault, view, today, now, seen_at, build_sha, window } => {
             let Some(view) = knowlu_engine::surface::View::parse(&view) else { eprintln!("knowlu-engine: unknown view {view:?}"); return ExitCode::from(2); };
             let tz = knowlu_engine::cli::vault_zone(&vault);
             let today_date = match today { Some(t) => match t.parse::<jiff::civil::Date>() { Ok(d) => d, Err(_) => { eprintln!("knowlu-engine: bad --today {t:?}"); return ExitCode::from(2); } }, None => jiff::Zoned::now().with_time_zone(tz.clone()).date() };
             let now_zoned = match now { Some(n) => match n.parse::<jiff::civil::DateTime>().and_then(|d| d.to_zoned(tz.clone())) { Ok(z) => z, Err(_) => { eprintln!("knowlu-engine: bad --now {n:?}"); return ExitCode::from(2); } }, None => jiff::Zoned::now().with_time_zone(tz) };
-            let mut state = knowlu_engine::surface::build_state(&vault, view, today_date, &now_zoned, seen_at.as_deref());
+            let mut state = match window.as_deref() {
+                None => knowlu_engine::surface::build_state(&vault, view, today_date, &now_zoned, seen_at.as_deref()),
+                Some(w) => match knowlu_engine::surface::build_state_preview(&vault, view, today_date, &now_zoned, seen_at.as_deref(), w) { Ok(s) => s, Err(e) => { eprintln!("knowlu-engine: bad --window: {e}"); return ExitCode::from(2); } },
+            };
             if let Some(sha) = build_sha { state.topline.engine_build = Some(sha); state.revision = knowlu_engine::surface::revision_of(&state); }
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS

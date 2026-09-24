@@ -3951,6 +3951,183 @@ pub fn record_baseline(
     }
 }
 
+/// §6.4, as `surface` reads it, purely: the window today's plan is diffed against. No
+/// `planning-day` note: `None` (no baseline, no `moved`). `state/plan.json` dated today: its
+/// window. Missing or unreadable (a malformed file, a bad time, `start >= end`): the template's
+/// `(day_start, day_end)` — the first window of a day is diffed against the template (re-review
+/// N2). Dated another day (today's first `rank` has not run yet): the current `cal.window(today)`,
+/// so nothing is reported. Never writes.
+pub fn baseline(
+    vault: &Path,
+    set: &Commitments,
+    cal: &crate::weekcal::WeekCalendar,
+    today: Date,
+) -> Option<(Time, Time)> {
+    set.planning_day.as_ref()?;
+    let template = (cal.day_start, cal.day_end);
+    let Ok(text) = std::fs::read_to_string(vault.join("state").join("plan.json")) else {
+        return Some(template);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Some(template);
+    };
+    let field = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    match field("date").and_then(|d| d.parse::<Date>().ok()) {
+        Some(day) if day == today => {
+            let start = field("start").as_deref().and_then(parse_time);
+            let end = field("end").as_deref().and_then(parse_time);
+            match (start, end) {
+                (Some(start), Some(end)) if start < end => Some((start, end)),
+                _ => Some(template),
+            }
+        }
+        Some(_) => Some(cal.window(today)),
+        None => Some(template),
+    }
+}
+
+/// A take's part of the day, from its free block's start (§6.4): before 12:00 morning, before
+/// 17:00 afternoon, otherwise evening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Part {
+    Morning,
+    Afternoon,
+    Evening,
+}
+
+pub fn part_of_day(start: Time) -> Part {
+    if start < Time::constant(12, 0, 0, 0) {
+        Part::Morning
+    } else if start < Time::constant(17, 0, 0, 0) {
+        Part::Afternoon
+    } else {
+        Part::Evening
+    }
+}
+
+/// How many of today's takes moved to each part of the day (§6.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MovedTo {
+    pub morning: usize,
+    pub afternoon: usize,
+    pub evening: usize,
+}
+
+/// §6.4's `moved`: `{"to": {...}, "dropped": n, "text": "..."}`, the today view's line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Moved {
+    pub to: MovedTo,
+    pub dropped: usize,
+    pub text: String,
+}
+
+impl Moved {
+    /// `None` when nothing moved. `text` names the largest group first, ties in morning →
+    /// evening order, and appends `; n no longer fit(s) today` for `dropped`.
+    pub fn from_counts(to: MovedTo, dropped: usize) -> Option<Moved> {
+        let mut groups: Vec<(usize, &str)> = [
+            (to.morning, "this morning"),
+            (to.afternoon, "this afternoon"),
+            (to.evening, "this evening"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .collect();
+        if groups.is_empty() && dropped == 0 {
+            return None;
+        }
+        // Stable: equal counts keep morning → evening order.
+        groups.sort_by(|a, b| b.0.cmp(&a.0));
+        let fits = |n: usize| if n == 1 { "fits" } else { "fit" };
+        let items = |n: usize| if n == 1 { "item" } else { "items" };
+        let mut text = String::new();
+        for (i, (n, part)) in groups.iter().enumerate() {
+            if i == 0 {
+                text.push_str(&format!("{n} {} moved to {part}", items(*n)));
+            } else {
+                text.push_str(&format!(", {n} to {part}"));
+            }
+        }
+        if dropped > 0 {
+            if text.is_empty() {
+                text = format!("{dropped} {} no longer {} today", items(dropped), fits(dropped));
+            } else {
+                text.push_str(&format!("; {dropped} no longer {} today", fits(dropped)));
+            }
+        }
+        Some(Moved { to, dropped, text })
+    }
+}
+
+/// Today's takes by task slug, with the part of the day each one's free block starts in.
+fn plan_parts(
+    ranked: &[crate::models::Task],
+    today: Date,
+    cal: &crate::weekcal::WeekCalendar,
+    planning: Option<&crate::planning::PlanningConfig>,
+) -> BTreeMap<String, Part> {
+    let blocks = cal.free_blocks(today);
+    crate::ranking::designate_today_explained(ranked, today, cal, planning)
+        .into_iter()
+        .filter_map(|take| {
+            let block = blocks.get(take.block_index)?;
+            Some((take.task.slug, part_of_day(block.start.time())))
+        })
+        .collect()
+}
+
+/// §6.4, purely: designates today twice from the **same** `ranked` list — under `now_cal` and
+/// under `base_cal` — and diffs the plans by task. A take counts as moved to its part of the day
+/// when its part changed or it is new in the current plan; one only in the baseline plan is
+/// `dropped`. `None` when nothing moved. No clock, no model, no write.
+pub fn moved(
+    ranked: &[crate::models::Task],
+    today: Date,
+    now_cal: &crate::weekcal::WeekCalendar,
+    base_cal: &crate::weekcal::WeekCalendar,
+    planning: Option<&crate::planning::PlanningConfig>,
+) -> Option<Moved> {
+    let now = plan_parts(ranked, today, now_cal, planning);
+    let base = plan_parts(ranked, today, base_cal, planning);
+    let mut to = MovedTo::default();
+    for (slug, part) in &now {
+        if base.get(slug) == Some(part) {
+            continue;
+        }
+        match part {
+            Part::Morning => to.morning += 1,
+            Part::Afternoon => to.afternoon += 1,
+            Part::Evening => to.evening += 1,
+        }
+    }
+    let dropped = base.keys().filter(|slug| !now.contains_key(*slug)).count();
+    Moved::from_counts(to, dropped)
+}
+
+/// The `--window` preview's argument (§6.4 "Preview"), validated as §2.4 validates a planning-day
+/// note's `window` — but strictly: where `load` skips a bad entry or a repeated weekday with a
+/// warning, a preview refuses it, since the student is asking about exactly that value. A weekday
+/// left out keeps the template (`None`).
+pub fn parse_window(raw: &str) -> Result<[Option<(Time, Time)>; 7], String> {
+    let value: Value = serde_yaml_ng::from_str(raw).map_err(|_| format!("{raw:?} is not a flow sequence"))?;
+    let Value::Sequence(entries) = value else {
+        return Err(format!("{raw:?} is not a sequence of {{days, start, end}} entries"));
+    };
+    let mut window: [Option<(Time, Time)>; 7] = [None; 7];
+    for entry in &entries {
+        let meet = parse_entry(entry)
+            .map_err(|(days, start, end)| format!("planning day {days}: {start}–{end} is not a valid window"))?;
+        for day in &meet.days {
+            let idx = DAY_KEYS.iter().position(|k| k == day).ok_or_else(|| format!("{day}: not a day"))?;
+            if window[idx].is_some() {
+                return Err(format!("planning day {day}: listed twice"));
+            }
+            window[idx] = Some((meet.start, meet.end));
+        }
+    }
+    Ok(window)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8584,5 +8761,111 @@ mod change_tests {
         assert_eq!(js(&changes[0].was), json!({"where": null}));
         all.extend(changes);
         assert_no_null(&all);
+    }
+}
+
+#[cfg(test)]
+mod moved_tests {
+    use super::*;
+    use crate::models::Task;
+    use crate::weekcal::WeekCalendar;
+
+    /// A Thursday.
+    const DAY: Date = Date::constant(2026, 9, 24);
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::constant(h, m, 0, 0)
+    }
+
+    fn task(slug: &str) -> Task {
+        Task {
+            slug: slug.into(),
+            title: format!("Invented {slug}"),
+            due: Some(DateTime::constant(2026, 11, 30, 23, 59, 0, 0)),
+            effort_hours: 1.5,
+            importance: 3,
+            status: "todo".into(),
+            progress: 0,
+            course: None,
+            domain: "school".into(),
+            rank_override: None,
+            slice_hours: Some(2.0),
+            conflicts_with: None,
+        }
+    }
+
+    /// Weekdays busy 08:00–17:30, a flat 08:00–18:00 day: only a later window leaves room.
+    fn cal() -> WeekCalendar {
+        let yaml = "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: [['08:00', '17:30']]\n  tue: [['08:00', '17:30']]\n  wed: [['08:00', '17:30']]\n  thu: [['08:00', '17:30']]\n  fri: [['08:00', '17:30']]\n";
+        let Value::Mapping(m) = serde_yaml_ng::from_str::<Value>(yaml).unwrap() else { panic!() };
+        WeekCalendar::new(&m, Vec::new())
+    }
+
+    #[test]
+    fn moved_text_orders_largest_first_and_names_dropped() {
+        let got = Moved::from_counts(MovedTo { morning: 1, afternoon: 0, evening: 2 }, 1).unwrap();
+        assert_eq!(got.text, "2 items moved to this evening, 1 to this morning; 1 no longer fits today");
+        // A tie keeps morning → evening order.
+        let tie = Moved::from_counts(MovedTo { morning: 0, afternoon: 1, evening: 1 }, 0).unwrap();
+        assert_eq!(tie.text, "1 item moved to this afternoon, 1 to this evening");
+        let only_dropped = Moved::from_counts(MovedTo::default(), 2).unwrap();
+        assert_eq!(only_dropped.text, "2 items no longer fit today");
+        assert_eq!(Moved::from_counts(MovedTo::default(), 0), None);
+        let json = crate::ledger::dumps_value(&serde_json::to_value(&got).unwrap());
+        assert_eq!(
+            json,
+            "{\"dropped\": 1, \"text\": \"2 items moved to this evening, 1 to this morning; 1 no longer fits today\", \"to\": {\"afternoon\": 0, \"evening\": 2, \"morning\": 1}}"
+        );
+    }
+
+    #[test]
+    fn part_of_day_boundaries_are_12_and_17() {
+        assert_eq!(part_of_day(t(0, 0)), Part::Morning);
+        assert_eq!(part_of_day(t(11, 59)), Part::Morning);
+        assert_eq!(part_of_day(t(12, 0)), Part::Afternoon);
+        assert_eq!(part_of_day(t(16, 59)), Part::Afternoon);
+        assert_eq!(part_of_day(t(17, 0)), Part::Evening);
+        assert_eq!(part_of_day(t(23, 59)), Part::Evening);
+    }
+
+    #[test]
+    fn identical_plans_move_nothing() {
+        let ranked = vec![task("a"), task("b"), task("c")];
+        let now = cal().with_day_window(DAY, t(8, 0), t(22, 0));
+        assert_eq!(moved(&ranked, DAY, &now, &now.clone(), None), None);
+        let base = cal();
+        assert_eq!(moved(&ranked, DAY, &base, &base.clone(), None), None);
+    }
+
+    #[test]
+    fn a_later_window_moves_takes_to_the_evening_and_an_earlier_one_drops_them() {
+        let ranked = vec![task("a"), task("b"), task("c")];
+        let base = cal();
+        let wide = cal().with_day_window(DAY, t(8, 0), t(22, 0));
+        let got = moved(&ranked, DAY, &wide, &base, None).unwrap();
+        assert!(got.to.evening > 0, "{got:?}");
+        assert_eq!((got.to.morning, got.to.afternoon, got.dropped), (0, 0, 0), "{got:?}");
+        let back = moved(&ranked, DAY, &base, &wide, None).unwrap();
+        assert_eq!(back.dropped, got.to.evening, "{back:?}");
+        assert_eq!(back.to, MovedTo::default());
+    }
+
+    #[test]
+    fn parse_window_accepts_the_note_shape_and_refuses_what_load_would_skip() {
+        let w = parse_window("[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}, {days: [sat], start: \"10:00\", end: \"20:00\"}]").unwrap();
+        assert_eq!(w[0], Some((t(8, 0), t(22, 0))));
+        assert_eq!(w[5], Some((t(10, 0), t(20, 0))));
+        assert_eq!(w[6], None);
+        assert_eq!(parse_window("[]").unwrap(), [None; 7]);
+        for bad in [
+            "[{days: [mon], start: \"22:00\", end: \"08:00\"}]",
+            "[{days: [mon], start: \"08:00\", end: \"24:00\"}]",
+            "[{days: [funday], start: \"08:00\", end: \"18:00\"}]",
+            "[{days: [mon], start: \"08:00\", end: \"18:00\"}, {days: [mon], start: \"09:00\", end: \"18:00\"}]",
+            "{days: [mon], start: \"08:00\", end: \"18:00\"}",
+            "[{days: [mon",
+        ] {
+            assert!(parse_window(bad).is_err(), "{bad} must be refused");
+        }
     }
 }

@@ -94,6 +94,10 @@ pub struct Loaded {
     pub planning: PlanningConfig,
     pub ranked: Vec<Task>,
     pub takes: Vec<Take>,
+    /// §6.4's "what moved": today's plan against the day's first window (or, in the `--window`
+    /// preview, against the current window). `None` with no planning-day note, and whenever the
+    /// windows or the plans are equal.
+    pub moved: Option<crate::commitments::Moved>,
 }
 
 /// The one place the vault is read for the page: notes, calendar snapshot, and the ranking and
@@ -101,6 +105,34 @@ pub struct Loaded {
 /// not a fetch — capacity here is only as fresh as the last run, which is what keeps this
 /// function free of network access and file writes.
 pub fn load(vault: &Path, today: Date) -> Loaded {
+    load_with(vault, today, None)
+}
+
+/// A planning window per weekday (`DAY_KEYS` order), as `commitments::parse_window` returns it.
+pub type Window = [Option<(jiff::civil::Time, jiff::civil::Time)>; 7];
+
+/// `cal` with its whole planning window replaced by `window`: a weekday `window` leaves out gets
+/// the template's `(day_start, day_end)`. Seven consecutive days from `today` cover every weekday.
+fn with_window(mut cal: WeekCalendar, today: Date, window: &Window) -> WeekCalendar {
+    let template = (cal.day_start, cal.day_end);
+    for offset in 0..7 {
+        let day = add_days(today, offset);
+        let idx = crate::planning::DAY_KEYS
+            .iter()
+            .position(|k| *k == crate::planning::day_key(day))
+            .unwrap_or(0);
+        let (start, end) = window[idx].unwrap_or(template);
+        cal = cal.with_day_window(day, start, end);
+    }
+    cal
+}
+
+/// [`load`], optionally under a proposed planning window (the `--window` preview, §6.4). Live
+/// (`preview: None`), `moved` diffs today's plan against `commitments::baseline` — only when that
+/// baseline differs from `cal.window(today)`. Under a preview, the day is computed under the
+/// proposed window and `moved` diffs it against the **current** window. Both designations come
+/// from the same ranked list. Writes nothing.
+fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
     let planning = load_planning(&vault.join("config").join("planning.yaml"));
     let mut unreadable = Vec::new();
     let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
@@ -112,10 +144,22 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
         .into_values()
         .flatten()
         .collect();
-    let cal = WeekCalendar::for_vault(vault, events);
+    let current = WeekCalendar::for_vault(vault, events);
+    let (cal, against) = match preview {
+        Some(window) => (with_window(current.clone(), today, window), Some(current)),
+        None => {
+            let set = crate::commitments::load(vault);
+            let base = crate::commitments::baseline(vault, &set, &current, today)
+                .filter(|base| *base != current.window(today));
+            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
+            (current, against)
+        }
+    };
     let ranked = rank(&tasks, today, &cal);
     let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes }
+    let moved = against
+        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1793,6 +1837,10 @@ pub struct State {
     pub empty: Empty,
     pub texts: Texts,
     pub unreadable: Vec<String>,
+    /// §6.4's "what moved", on the today view only; omitted (not `null`) when there is none, so a
+    /// vault with no planning-day note serialises exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moved: Option<crate::commitments::Moved>,
     /// Every `Journal::warnings()` this build touched (a malformed journal line) — collected
     /// once, after every builder that opens the shared `Journal` has run.
     pub warnings: Vec<String>,
@@ -1803,7 +1851,37 @@ pub struct State {
 /// `horizon` is `None` for `Today` and every rail-only view (`Decisions`, `GoodToKnow`, `Issues`,
 /// `Runs`) — only the four horizon views (`Overdue`/`Week`/`Later`/`AllActive`) carry a `list`.
 pub fn build_state(vault: &Path, view: View, today: Date, now: &jiff::Zoned, seen_at: Option<&str>) -> State {
-    let l = load(vault, today);
+    build_state_with(vault, view, today, now, seen_at, None)
+}
+
+/// `surface --view today --window '<flow sequence>'` (§6.4 "Preview", the phase-2 window editor's
+/// data source): the today view under a proposed planning window, with `moved` against the
+/// **current** window. `window` is validated as a planning-day note's `window` is, strictly; an
+/// invalid one, or any view but today, is an `Err` the CLI turns into exit 2. Writes nothing.
+pub fn build_state_preview(
+    vault: &Path,
+    view: View,
+    today: Date,
+    now: &jiff::Zoned,
+    seen_at: Option<&str>,
+    window: &str,
+) -> Result<State, String> {
+    if view != View::Today {
+        return Err(format!("--window previews the today view, not {:?}", view.name()));
+    }
+    let window = crate::commitments::parse_window(window)?;
+    Ok(build_state_with(vault, view, today, now, seen_at, Some(&window)))
+}
+
+fn build_state_with(
+    vault: &Path,
+    view: View,
+    today: Date,
+    now: &jiff::Zoned,
+    seen_at: Option<&str>,
+    preview: Option<&Window>,
+) -> State {
+    let l = load_with(vault, today, preview);
     let civil = now.datetime();
     // `closed_this_week`'s "not closed yet" bound compares against journal `ts` values, which
     // are UTC ISO strings — `civil` above is the vault-LOCAL wall clock (it feeds the page's
@@ -1850,6 +1928,7 @@ pub fn build_state(vault: &Path, view: View, today: Date, now: &jiff::Zoned, see
         runs_panel: runs,
         issues_panel: issues,
         unreadable: l.unreadable.iter().map(|n| format!("tasks/{n}")).collect(),
+        moved: if view == View::Today { l.moved.clone() } else { None },
         warnings: Vec::new(),
     };
     state.warnings = journal.warnings().to_vec();
@@ -2948,3 +3027,239 @@ mod tests {
     }
 }
 
+
+/// P18 — §6.4's `moved`, computed live by `load` and never written; the `--window` preview.
+#[cfg(test)]
+mod moved_tests {
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::{WriteContext, WriteOpts};
+    use std::path::PathBuf;
+
+    /// A Thursday.
+    const DAY: Date = Date::constant(2026, 9, 24);
+    const NOTE: &str = "commitments/planning-day.md";
+    const WEEKDAYS_18: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"18:00\"}]";
+    const WEEKDAYS_20: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"20:00\"}]";
+    const WEEKDAYS_22: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]";
+
+    fn now() -> jiff::Zoned {
+        DAY.at(9, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap()
+    }
+
+    /// A scratch vault: weekdays busy 08:00–17:30 in a flat 08:00–18:00 template (so the day's
+    /// only room is what a later window opens), weekends free, three invented tasks due far out.
+    fn vault(name: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qo-p18-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["config", "tasks", "state"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let busy = "[['08:00', '17:30']]";
+        std::fs::write(
+            dir.join("config").join("week_template.yaml"),
+            format!("day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: {busy}\n  tue: {busy}\n  wed: {busy}\n  thu: {busy}\n  fri: {busy}\n  sat: []\n  sun: []\n"),
+        )
+        .unwrap();
+        for slug in ["essay", "lab", "reading"] {
+            std::fs::write(
+                dir.join("tasks").join(format!("{slug}.md")),
+                format!("---\ntitle: Invented {slug}\ndue: 2026-11-30\neffort_hours: 1.5\nimportance: 3\n---\n"),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// The planning-day note, created through `write::create` with `window`.
+    fn note(v: &Path, window: &str) {
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        crate::write::create(
+            v,
+            NOTE,
+            &format!("---\ntype: commitment\nkind: planning-day\nstatus: confirmed\nwindow: {window}\n---\n\nInvented.\n"),
+            &WriteContext::new("student", "dashboard"),
+            &mut Journal::new(v),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// The student edits the note's window through the engine's `write`, as the console does.
+    fn edit(v: &Path, window: &str) {
+        crate::write::write_literals(
+            v,
+            NOTE,
+            &[("window".to_string(), window.to_string())],
+            &WriteContext::new("student", "dashboard"),
+            &mut Journal::new(v),
+            &WriteOpts::default(),
+        )
+        .unwrap();
+    }
+
+    fn plan(v: &Path, date: Date, start: &str, end: &str) {
+        std::fs::write(
+            v.join("state").join("plan.json"),
+            format!("{{\"date\": \"{date}\", \"end\": \"{end}\", \"start\": \"{start}\"}}\n"),
+        )
+        .unwrap();
+    }
+
+    /// Every file under `v`, with its bytes.
+    fn snapshot(v: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut stack = vec![v.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn surface_reports_moved_at_once_after_a_window_edit_without_a_rank() {
+        let v = vault("edit");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        assert_eq!(load(&v, DAY).moved, None, "an unedited window moves nothing");
+        edit(&v, WEEKDAYS_22);
+        let moved = load(&v, DAY).moved.expect("the edit shows at once, before any rank");
+        assert!(moved.to.evening > 0, "{moved:?}");
+        assert_eq!((moved.to.morning, moved.to.afternoon, moved.dropped), (0, 0, 0), "{moved:?}");
+        assert!(moved.text.ends_with("moved to this evening"), "{}", moved.text);
+        let s = build_state(&v, View::Today, DAY, &now(), None);
+        assert_eq!(s.moved, Some(moved.clone()));
+        assert!(state_json(&s).contains("\"moved\": {"));
+        // The line is the today view's; another view carries none.
+        assert_eq!(build_state(&v, View::Week, DAY, &now(), None).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_first_window_is_diffed_against_the_template() {
+        let v = vault("first");
+        note(&v, WEEKDAYS_22);
+        assert!(!v.join("state").join("plan.json").exists());
+        let moved = load(&v, DAY).moved.expect("the template's 08:00–18:00 is the baseline");
+        assert!(moved.to.evening > 0, "{moved:?}");
+        // An unreadable plan file reads the same way.
+        std::fs::write(v.join("state").join("plan.json"), "not json\n").unwrap();
+        assert_eq!(load(&v, DAY).moved, Some(moved));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_second_edit_is_reported_against_the_days_first_window() {
+        let v = vault("second");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        let first = load(&v, DAY).moved.unwrap();
+        edit(&v, WEEKDAYS_20);
+        let second = load(&v, DAY).moved.expect("still against the morning's 08:00–18:00");
+        // Against the first edit (22:00) a 20:00 end could only drop takes; against 18:00 it opens
+        // the evening.
+        assert!(second.to.evening > 0, "{second:?}");
+        assert_eq!(second.dropped, 0, "{second:?}");
+        assert!(second.to.evening <= first.to.evening, "{first:?} {second:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn an_undone_edit_reports_nothing() {
+        let v = vault("undo");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        assert!(load(&v, DAY).moved.is_some());
+        edit(&v, WEEKDAYS_18);
+        assert_eq!(load(&v, DAY).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_plan_json_from_yesterday_reports_nothing_before_the_first_rank() {
+        let v = vault("yesterday");
+        note(&v, WEEKDAYS_22);
+        plan(&v, add_days(DAY, -1), "08:00", "18:00");
+        assert_eq!(load(&v, DAY).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn no_note_means_no_moved_key_in_the_json() {
+        let v = vault("nonote");
+        // A plan file alone is no baseline: without the note there is none.
+        plan(&v, DAY, "08:00", "12:00");
+        assert_eq!(load(&v, DAY).moved, None);
+        let s = build_state(&v, View::Today, DAY, &now(), None);
+        assert!(!state_json(&s).contains("\"moved\""), "{}", state_json(&s));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn surface_load_writes_nothing() {
+        let v = vault("nowrite");
+        note(&v, WEEKDAYS_18);
+        edit(&v, WEEKDAYS_22);
+        let before = snapshot(&v);
+        assert!(load(&v, DAY).moved.is_some());
+        let _ = build_state(&v, View::Today, DAY, &now(), None);
+        let _ = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_20).unwrap();
+        assert_eq!(snapshot(&v), before, "surface must not write, preview included");
+        assert!(!v.join("state").join("plan.json").exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn window_preview_diffs_against_the_current_window_and_writes_nothing() {
+        let v = vault("preview");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        let before = snapshot(&v);
+        // Against the current 22:00 window (not the day's 18:00 baseline), 20:00 only drops.
+        let s = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_20).unwrap();
+        let moved = s.moved.clone().expect("20:00 fits less than 22:00");
+        assert!(moved.dropped > 0, "{moved:?}");
+        assert_eq!(moved.to, crate::commitments::MovedTo::default(), "{moved:?}");
+        // The day itself is computed under the proposed window.
+        assert_eq!(s.the_day, the_day(&load_with(&v, DAY, Some(&crate::commitments::parse_window(WEEKDAYS_20).unwrap())), DAY));
+        // Proposing the current window moves nothing, whatever the baseline says.
+        let same = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_22).unwrap();
+        assert_eq!(same.moved, None);
+        // With no note at all the current window is the template, and a preview still works.
+        let bare = vault("preview-bare");
+        let opened = build_state_preview(&bare, View::Today, DAY, &now(), None, WEEKDAYS_22).unwrap();
+        assert!(opened.moved.unwrap().to.evening > 0);
+        assert_eq!(snapshot(&v), before);
+        let _ = std::fs::remove_dir_all(&v);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn a_bad_window_argument_is_refused() {
+        let v = vault("bad");
+        for bad in [
+            "[{days: [mon], start: \"22:00\", end: \"08:00\"}]",
+            "[{days: [mon], start: \"08:00\", end: \"25:00\"}]",
+            "[{days: [someday], start: \"08:00\", end: \"18:00\"}]",
+            "not a window",
+            "[{days: [mon",
+        ] {
+            let err = build_state_preview(&v, View::Today, DAY, &now(), None, bad).err();
+            assert!(err.is_some(), "{bad} must be refused");
+        }
+        assert!(build_state_preview(&v, View::Week, DAY, &now(), None, WEEKDAYS_22).is_err());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+}
