@@ -86,10 +86,10 @@ fn the_engines_grace_is_the_apps_grace_and_the_path_is_the_apps_path() {
     // not depend on `knowlu` and must not start.
     //
     // **Two files, not one** (review I2): the grace and the cache filename are `account.rs`'s
-    // (`:681`, `:687`), and the app-data root is `state.rs`'s `app_data_root_in` (`:206`) (fix
-    // round 1, M6: these were `:479`/`:485`/`:190` and had drifted). Reading `account.rs` for all
-    // three is how the first draft of this test failed on a line that was never there, so each
-    // assertion names the file it is about.
+    // (`GRACE`, `cache_path`), and the app-data root is `state.rs`'s `app_data_root_in`. No line
+    // numbers (Task 8 re-review N4): they drifted twice, on every merge from main. Reading
+    // `account.rs` for all three is how the first draft of this test failed on a line that was never
+    // there, so each assertion names the file it is about.
     //
     // **The comparison itself, not just the constant** (fix round 1, I2): a pin on `72 * 60 * 60`
     // alone never turns red if the app's own `<` became a `<=`, or its `||` became `&&`. Pinning
@@ -110,9 +110,10 @@ fn the_engines_grace_is_the_apps_grace_and_the_path_is_the_apps_path() {
 fn the_profile_id_comes_out_of_the_credential_target_and_nowhere_else() {
     assert_eq!(entitle::profile_id("knowlu/profile_0a1b2c3d4e/session"), Some("profile_0a1b2c3d4e"));
     // Fix round 1, M4: `profile_id` used to accept any non-empty middle segment. The app's own
-    // `is_profile_id` (account.rs:889-893) requires `profile_` plus exactly ten lowercase hex
-    // characters, because a profile id names folders and Credential Manager entries — anything
-    // else is not "a different id", it is a path fragment somebody typed.
+    // `is_profile_id` (account.rs) requires `profile_` plus exactly ten hex characters (either
+    // case, through `is_ascii_hexdigit`, on both sides), because a profile id names folders and
+    // Credential Manager entries — anything else is not "a different id", it is a path fragment
+    // somebody typed.
     for bad in [
         "", "knowlu/session", "knowlu//session", "profile_1", "knowlu/p/extra/session",
         // M4: a `..` id and one carrying a backslash — a path fragment, never a real profile id.

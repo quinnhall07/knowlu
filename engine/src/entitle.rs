@@ -51,7 +51,8 @@ pub fn profile_id(target: &str) -> Option<&str> {
 
 /// The exact shape `profiles::id_for` always produces (`app/src/account.rs::is_profile_id`,
 /// R-C1-57 I3, copied here because the two crates cannot share a function any more than they can
-/// share the grace constant): the literal `profile_` and exactly ten lowercase hex characters.
+/// share the grace constant): the literal `profile_` and exactly ten hex characters — either case,
+/// since both sides test `is_ascii_hexdigit` (`profiles::id_for` itself only ever writes lowercase).
 fn is_profile_id(id: &str) -> bool {
     id.strip_prefix("profile_")
         .map(|hex| hex.len() == 10 && hex.chars().all(|c| c.is_ascii_hexdigit()))

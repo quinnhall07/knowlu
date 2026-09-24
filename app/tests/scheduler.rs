@@ -597,11 +597,11 @@ fn log_retention_keeps_the_newest_slot_logs_and_leaves_everything_else_alone() {
 }
 
 /// F10 (console spec §8 push on close, Knowlu spec §4 back up on quit): the Quit arm flushes
-/// synchronously under a 10 s cap. This scratch vault has no remote, so there is nothing to push —
+/// synchronously under a 10 s cap. This scratch vault has no account, so there is nothing to push —
 /// `synced: false`, and that is not an error — and a backup folder is set, so the mirror is
 /// written. `then` runs on the caller's thread before the scope joins; in production it writes the
-/// quit log and ends the process, which is why a worker still stuck in git can never hold the
-/// click past the cap.
+/// quit log and ends the process, which is why a worker still stuck in a slow push can never hold
+/// the click past the cap.
 #[test]
 fn quit_flush_backs_up_and_reports_within_the_cap() {
     let v = scratch("quitflush");

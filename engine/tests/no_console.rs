@@ -23,7 +23,7 @@ use std::path::Path;
 /// Fix round 1, review I2. The scan must stop at the file's real `#[cfg(test)] mod …` boundary,
 /// never at an earlier BARE MENTION of the words `#[cfg(test)]` inside a doc comment —
 /// `journal.rs`'s `#[cfg(test)] pub(crate) static DEVICE_ENV_MUTEX` is a real, non-module use of
-/// the attribute that used to cut the scan off at line 92 of 594, hiding everything after it.
+/// the attribute that used to cut the scan off at its line 92, hiding everything after it.
 fn non_test_code(text: &str) -> &str {
     text.split("\n#[cfg(test)]\nmod ").next().unwrap_or(text)
 }

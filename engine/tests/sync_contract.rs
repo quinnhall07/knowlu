@@ -2683,7 +2683,9 @@ fn a_cloud_vault_with_no_url_does_not_exit_one_just_for_having_no_url() {
     // expected value, so a check over the WHOLE file cannot fail even if production dropped it —
     // only the module's own test would. Slicing off `mod tests` first means this line can only be
     // satisfied by `cloud_ics_failure_with_no_local_url` itself.
-    let production = src.split("#[cfg(test)]\nmod tests").next().expect("ingest.rs always has a test module");
+    // Task 11 re-review nit: `find`, not `split(..).next()` — the latter can never fail, so a marker
+    // that stopped matching (a reflow, CRLF) would silently slice the whole file and reopen M4.
+    let production = &src[..src.find("#[cfg(test)]\nmod tests").expect("ingest.rs always has a test module")];
     assert!(production.contains("no LMS feed on this account — skipped"), "a 404 is a named skip at exit 0, in production code");
 }
 

@@ -107,7 +107,11 @@ fn a_corrupt_settings_file_reports_an_error_and_falls_back_to_defaults() {
 fn diagnostics_text_names_a_skipped_sync_as_well_as_a_failed_one() {
     use knowlu::{state::ConsoleState, tray::diagnostics_text};
     let v = scratch("diag-skip");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-diag-skip-data-{}", std::process::id())));
+    // Final review M3: a PID-keyed folder a reused PID would find again (`cea59a9`'s pattern) —
+    // start clean and leave nothing behind.
+    let data = std::env::temp_dir().join(format!("qo-diag-skip-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(v.clone(), data.clone());
     *cs.sync.lock().unwrap() = knowlu_engine::sync::SyncStatus {
         ok: false,
         at: Some(knowlu_engine::journal::now_ts(None)),
@@ -117,6 +121,8 @@ fn diagnostics_text_names_a_skipped_sync_as_well_as_a_failed_one() {
     };
     let t = diagnostics_text(&cs);
     assert!(t.contains("sync skipped: no entitlement"), "a lapsed subscription must be visible in the diagnostics blob: {t}");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 #[test]
@@ -391,7 +397,10 @@ fn ui_events_land_ids_only_and_refuse_text() {
 #[test]
 fn topline_sync_is_the_engines_sync_status_verbatim() {
     let v = scratch("sync-verbatim");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-sync-verbatim-data-{}", std::process::id())));
+    // Final review M3: start clean and leave nothing behind (`cea59a9`'s pattern).
+    let data = std::env::temp_dir().join(format!("qo-sync-verbatim-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(v.clone(), data.clone());
     let status = knowlu_engine::sync::SyncStatus {
         ok: true,
         at: Some("2026-09-24T07:00:00.000Z".to_string()),
@@ -406,6 +415,8 @@ fn topline_sync_is_the_engines_sync_status_verbatim() {
     assert!(s["state"]["topline"].get("vault_head").is_none(), "vault_head left with git");
     assert!(s["state"]["topline"].get("engine_newer").is_none(), "engine_newer left with git");
     assert!(s["state"]["topline"].get("auto_sync").is_none(), "auto_sync left with git");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 // The brief's `first_id` reads `state["must_do"]["groups"][0]["rows"][0]["id"]` — the first
