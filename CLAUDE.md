@@ -139,7 +139,10 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   is unsupported — it skips the clean-tree gate, the sidecar staging and the placeholder check, and
   can ship a zero-byte engine. `ci.yml` is the gate on every push and PR: `cargo test --workspace` at
   0 warnings (the gate prints `warnings: N accepted (.rsrc), N tallies, N other`), the eol contract
-  (`scripts/ci/eol-check.ps1`), SHA-pinned actions (`engine/tests/workflows.rs`).
+  (`scripts/ci/eol-check.ps1`), SHA-pinned actions (`engine/tests/workflows.rs`). A repository
+  variable `CI_SELF_HOSTED` = `on` sends every `ci.yml` job to a self-hosted runner labelled
+  `knowlu-ci` (Quinn's laptop, 2026-09-22, while the Actions minutes were exhausted); unset, they
+  run on GitHub's; `release.yml` never runs self-hosted.
 - Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.

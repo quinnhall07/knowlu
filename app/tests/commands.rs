@@ -423,13 +423,19 @@ fn issue_flag_needs_a_category_and_snapshots_the_object_and_info_closes() {
 #[test]
 fn sync_on_a_non_repo_vault_is_calm_and_backup_needs_a_folder() {
     let v = scratch("sync");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-sync-data-{}", std::process::id())));
+    // Both folders are keyed by PID, and a persistent machine (the self-hosted CI runner, a dev
+    // laptop) reuses PIDs: a folder left by an earlier run already holds a `backup_dir` in its
+    // settings, and "backup needs a folder" then fails. Start clean and leave nothing behind.
+    let data = std::env::temp_dir().join(format!("qo-sync-data-{}", std::process::id()));
+    let bk = std::env::temp_dir().join(format!("qo-sync-bk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&bk);
+    let cs = ConsoleState::open(v.clone(), data.clone());
     let env = sync_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], true);
     assert_eq!(env["state"]["topline"]["sync"]["is_repo"], false);
     let env = backup_now_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], false); assert!(env["error"].as_str().unwrap().contains("backup folder"));
-    let bk = std::env::temp_dir().join(format!("qo-sync-bk-{}", std::process::id()));
     let mut patch = serde_json::Map::new(); patch.insert("backup_dir".into(), json!(bk.to_string_lossy()));
     assert_eq!(set_settings_inner(&cs, patch).unwrap()["ok"], true);
     let env = backup_now_inner(&cs, "today").unwrap();
@@ -438,6 +444,9 @@ fn sync_on_a_non_repo_vault_is_calm_and_backup_needs_a_folder() {
     assert!(bk.join(&cs.settings.lock().unwrap().profile_id).join("vault/tasks").is_dir());
     let mut bad = serde_json::Map::new(); bad.insert("profile_id".into(), json!("me"));
     assert_eq!(set_settings_inner(&cs, bad).unwrap()["ok"], false, "only backup_dir and autostart are settable");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&bk);
 }
 
 // R-T10 (Task 10 review): `serde_json::Map` iterates alphabetically, so "autostart" is applied
