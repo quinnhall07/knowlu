@@ -2704,3 +2704,130 @@ fn the_module_doc_no_longer_claims_a_machine_name_never_leaves() {
     assert!(doc.contains("A machine name does leave"), "the correction is not in the module doc: {doc}");
     assert!(doc.contains("COLUMN stays opaque"), "the doc still distinguishes the column from the body");
 }
+
+// ---------------------------------------------------------------------------
+// C3′'s final fix wave (R-C3′-exec-43): the final review's I1 and M1.
+// ---------------------------------------------------------------------------
+
+/// One `/sync-pull` reply carrying `records` (each `(device, record)`) and `notes`, with the row hash
+/// computed from the canonical body exactly as the server stores it.
+fn pull_reply(records: Vec<(&str, knowlu_engine::ledger::Record)>, notes: Vec<serde_json::Value>, cursor: i64) -> String {
+    let rows: Vec<serde_json::Value> = records
+        .into_iter()
+        .enumerate()
+        .map(|(i, (device, record))| {
+            let body = knowlu_engine::ledger::dumps_value(&serde_json::Value::Object(record));
+            serde_json::json!({ "seq": i + 1, "device": device, "record_hash": sync::sha256_hex(body.as_bytes()), "body": body })
+        })
+        .collect();
+    knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "records": rows, "notes": notes, "record_cursor": cursor, "note_cursor": cursor, "more": false
+    }))
+}
+
+/// Every journal record one `/sync-push` request carried, parsed back out of the request text the
+/// loopback saw (its JSON body follows the blank line that ends the head).
+fn pushed_records(request: &str) -> Vec<serde_json::Value> {
+    let body = request.split("\r\n\r\n").nth(1).expect("a request body");
+    let sent: serde_json::Value = serde_json::from_str(body).expect("the push body is JSON");
+    sent["records"].as_array().expect("a records array").iter()
+        .map(|row| serde_json::from_str(row["body"].as_str().expect("a body")).expect("a record"))
+        .collect()
+}
+
+/// Final review I1. Desktop A's clock runs an hour ahead of this one's, so a record A wrote reaches
+/// this desktop stamped an hour in this desktop's future. Before the clamp, the same run's push moved
+/// `pushed_through` to that stamp — and `ledger::read(since)` drops every record older than the
+/// cursor, so everything this desktop wrote in the next hour (a student's edit, a slot's
+/// `coursework` and `judge` writes seconds later) was never sent, and the other desktop never
+/// learned of it. Now the future record is still sent, but the cursor stays at or before this run's
+/// own clock: the record is re-sent (idempotently, on its own hash) until the clock passes it.
+#[test]
+fn a_foreign_record_from_a_clock_that_runs_ahead_never_hides_this_desktops_later_writes() {
+    let dir = fixture_with_id("future-foreign");
+    let ahead = knowlu_engine::journal::now_ts(Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)));
+    let foreign = foreign_create("task_0000000077", "tasks/from-a-fast-clock.md", &ahead, "FastClockDesktop");
+    let note = serde_json::json!({
+        "path": "tasks/from-a-fast-clock.md", "device": "fedcba9876543210", "deleted": false,
+        "body": "---\nid: task_0000000077\n---\nwritten on a desktop whose clock runs an hour ahead\n"
+    });
+    let empty = pull_reply(Vec::new(), Vec::new(), 1);
+    let pushed = r#"{"records":0,"notes":0}"#.to_string();
+    let mut server = loopback(vec![
+        (200, pull_reply(vec![("fedcba9876543210", foreign)], vec![note], 1)),
+        (200, pushed.clone()),
+        (200, empty),
+        (200, pushed),
+    ]);
+    let cloud = cfg(&server.base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let run = || sync::run_lines_with_client(&dir, sync::Direction::Both, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default());
+
+    let (lines, totals) = run();
+    assert!(totals.errors.is_empty(), "{lines:?}");
+    let first_cursor = sync::load_cursor(&dir);
+    let now = knowlu_engine::journal::now_ts(None);
+
+    // A student's edit on this desktop, a moment later — stamped by this desktop's clock, so an hour
+    // BEFORE the foreign record's own `ts`.
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "5".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+
+    let (lines, totals) = run();
+    assert!(totals.errors.is_empty(), "{lines:?}");
+    let seen = server.requests();
+    assert!(seen[3].starts_with("POST /functions/v1/sync-push "), "{}", seen[3]);
+    let second = pushed_records(&seen[3]);
+    assert!(
+        second.iter().any(|r| r["actor"] == "quinn" && r["field"] == "importance" && r["new"] == serde_json::json!(5)),
+        "this desktop's own later edit must reach the account: {second:?}"
+    );
+    assert!(
+        second.iter().any(|r| r["ts"] == serde_json::json!(ahead)),
+        "the future-dated record is re-sent until the clock passes it, never skipped: {second:?}"
+    );
+    // The mechanism, pinned beside the outcome: the cursor the first push saved never ran past that
+    // run's own clock.
+    assert!(first_cursor.pushed_through.as_str() <= now.as_str(), "the push cursor ran ahead of this desktop's own clock: {} > {now}", first_cursor.pushed_through);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Final review M1. `proposed_at` is the day a card charges against the fifteen-a-day budget and
+/// `first_proposed_at` is the day every age counts from, and every other writer dates them by the
+/// vault's own day. A sync card was dated by the UTC day, so on a Chicago evening it charged
+/// tomorrow's budget and aged from −1. The zone is chosen so that, whenever this test runs, the
+/// vault's day and the UTC day differ — which is what makes the assertion able to fail.
+#[test]
+fn a_sync_card_is_dated_by_the_vaults_own_day_not_the_utc_one() {
+    let dir = fixture_with_id("card-local-day");
+    let now = jiff::Timestamp::now();
+    let utc_day = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let zone = if now.to_zoned(jiff::tz::TimeZone::UTC).hour() < 12 { "Etc/GMT+12" } else { "Pacific/Kiritimati" };
+    let local_day = now.to_zoned(jiff::tz::TimeZone::get(zone).expect("an IANA zone")).date();
+    assert_ne!(utc_day, local_day, "the zone was chosen so the vault's day is not the UTC day");
+    let ingest = dir.join("config").join("ingest.yaml");
+    let text = knowlu_engine::pystr::read_text(&ingest).expect("the fixture's ingest.yaml");
+    knowlu_engine::pystr::write_text(&ingest, &text.replacen("timezone: America/Chicago", &format!("timezone: {zone}"), 1)).expect("set the vault's zone");
+
+    // The conflict `a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge` sets
+    // up, delivered through the command's own pull rather than a direct `apply` with a chosen day.
+    let mut journal = Journal::new(&dir);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+    let theirs = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
+    let mut server = loopback(vec![(200, pull_reply(vec![("fedcba9876543210", theirs)], Vec::new(), 1))]);
+    let cloud = cfg(&server.base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let (lines, totals) = sync::run_lines_with_client(&dir, sync::Direction::Pull, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default());
+    let _ = server.requests();
+    assert_eq!(totals.cards, 1, "{lines:?}");
+    let card = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+        .find(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false))
+        .expect("the sync card");
+    let text = knowlu_engine::pystr::read_text(&card).expect("the card");
+    let line = |key: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{key}: ")).map(str::to_string));
+    assert_eq!(line("proposed_at"), Some(local_day.to_string()), "the card charges the vault's own day ({local_day}), not the UTC day ({utc_day}): {text}");
+    assert_eq!(line("first_proposed_at"), Some(local_day.to_string()), "and ages from it: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

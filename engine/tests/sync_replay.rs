@@ -817,3 +817,50 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// C3′'s final fix wave, the final review's I1 on the restore path: `fold_confirmed` moved
+/// `pushed_through` to every restored record's own `ts`, so a record another desktop stamped in this
+/// desktop's future left the cursor ahead of this desktop's clock — and the first push after the
+/// restore dropped every local write older than it (`ledger::read(since)`), for good. The cursor a
+/// restore leaves is now never past the restore's own clock; the future record is simply re-sent
+/// (idempotently) by a later push until the clock passes it.
+#[test]
+fn a_restored_record_dated_in_this_desktops_future_never_hides_the_first_local_write() {
+    let dest = temp("restore-future");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let device = "aaaaaaaaaaaaaaaa";
+    let ahead = knowlu_engine::journal::now_ts(Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)));
+    let past = serde_json::json!({"op":"create","path":"tasks/a.md","actor":"quinn","via":"dashboard","device":"SlowClockDesktop","ts":"2026-08-01T10:00:00.000Z","id":"task_0000000001","new":{"id":"task_0000000001"}});
+    let future = serde_json::json!({"op":"create","path":"tasks/b.md","actor":"quinn","via":"dashboard","device":"FastClockDesktop","ts":ahead,"id":"task_0000000002","new":{"id":"task_0000000002"}});
+    let page = page_reply(
+        vec![(device, past), (device, future)],
+        vec![
+            serde_json::json!({"path":"tasks/a.md","device":device,"deleted":false,"body":"---\nid: task_0000000001\n---\nfrom the past\n"}),
+            serde_json::json!({"path":"tasks/b.md","device":device,"deleted":false,"body":"---\nid: task_0000000002\n---\nfrom a clock an hour ahead\n"}),
+        ],
+        2, 2, false,
+    );
+    let (base, handle) = loopback(vec![(200, page)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    sync::restore_all(&dest, &client, &[]).expect("the restore completes");
+    handle.join().expect("the loopback thread did not panic");
+
+    let cursor = sync::load_cursor(&dest);
+    let now = knowlu_engine::journal::now_ts(None);
+
+    let mut journal = Journal::new(&dest);
+    let mine = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&dest, "tasks/a.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("the first local write");
+    journal.invalidate();
+    let (batch, _) = sync::build_push(&dest, &cursor, "acct-1", &mut journal);
+    let sent: Vec<serde_json::Value> = batch.records.iter()
+        .map(|r| serde_json::from_str(r["body"].as_str().expect("a body")).expect("a record"))
+        .collect();
+    assert!(
+        sent.iter().any(|r| r["op"] == "set" && r["field"] == "importance" && r["new"] == serde_json::json!(4)),
+        "the first write after a restore must reach the account: {sent:?}"
+    );
+    // The mechanism, pinned beside the outcome.
+    assert!(cursor.pushed_through.as_str() <= now.as_str(), "the restore's cursor ran ahead of this desktop's clock: {} > {now}", cursor.pushed_through);
+    let _ = std::fs::remove_dir_all(&dest);
+}

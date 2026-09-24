@@ -582,6 +582,15 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
 
     let since = if cursor.pushed_through.is_empty() { None } else { Some(cursor.pushed_through.as_str()) };
     let already: std::collections::BTreeSet<&String> = cursor.boundary.iter().collect();
+    // I1 (C3′ final review): this run's own clock, the furthest `next.pushed_through` may move. A
+    // foreign record `apply` appended verbatim keeps the `ts` its own desktop stamped, and a desktop
+    // whose clock runs ahead stamps this desktop's future. Advancing the cursor to such a `ts` would
+    // make `journal.read(since)` drop every record this desktop writes until its clock catches up —
+    // a student's edit, a slot's `coursework` and `judge` writes — and none of them would ever be
+    // sent. So a record dated after `now` is still sent, but the cursor stays where it is: the record
+    // is re-sent on every push (idempotently — `/sync-push` upserts on its hash) until the clock
+    // passes it, and nothing this desktop writes meanwhile is skipped.
+    let now = crate::journal::now_ts(None);
     for record in journal.read(since, None) {
         if batch.records.len() >= PAGE { break; }
         // E3 (fix round 4, R-C3′-exec-34): the history of a wizard seed a restore removed outright
@@ -643,11 +652,14 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         if budget_used + row_len > PUSH_BUDGET_BYTES { break; }
         budget_used += row_len;
         let ts = record.get("ts").and_then(Value::as_str).unwrap_or_default().to_string();
-        if ts != next.pushed_through {
-            next.pushed_through = ts;
-            next.boundary.clear();
+        // I1: sent either way; the cursor moves only over what is not in this desktop's future.
+        if ts.as_str() <= now.as_str() {
+            if ts != next.pushed_through {
+                next.pushed_through = ts;
+                next.boundary.clear();
+            }
+            next.boundary.push(hash.clone());
         }
-        next.boundary.push(hash.clone());
         batch.records.push(row);
     }
 
@@ -1296,8 +1308,17 @@ struct RestoreState {
 /// Never re-derived from `page` (that was R4's bug): only [`RestoreState::written_notes`] and
 /// [`RestoreState::confirmed_records`], which `materialise` populates itself, at the moment each
 /// write is confirmed to have landed.
-fn fold_confirmed(state: &RestoreState, cursor: &mut Cursor) {
+///
+/// **Never past `now`** (C3′ final review, I1, the same clamp `build_push` applies): a restored
+/// record stamped in this desktop's future by a desktop whose clock runs ahead is left out of the
+/// fold, so the first push after the restore still reads, and sends, every local write made before
+/// this desktop's clock reaches that stamp. The record itself is re-sent by those pushes until then
+/// — idempotently, since the account already holds it under the same hash.
+fn fold_confirmed(state: &RestoreState, cursor: &mut Cursor, now: &str) {
     for (ts, hash) in &state.confirmed_records {
+        if ts.as_str() > now {
+            continue;
+        }
         if ts != &cursor.pushed_through {
             cursor.pushed_through = ts.clone();
             cursor.boundary.clear();
@@ -1348,8 +1369,8 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
         let one = materialise(dest, &page, &mut state);
         // N1/R4: accumulated per page, from what `materialise` ACTUALLY did — never the whole
         // journal, the whole note listing, or a re-derivation from `page` alone (see
-        // `fold_confirmed`'s own doc).
-        fold_confirmed(&state, &mut cursor);
+        // `fold_confirmed`'s own doc). I1: clamped to this page's own clock.
+        fold_confirmed(&state, &mut cursor, &crate::journal::now_ts(None));
         total.notes += one.notes;
         total.records += one.records;
         total.warnings.extend(one.warnings);
@@ -2521,7 +2542,11 @@ pub fn run_lines_with_client(
     let mut cursor = load_cursor(vault);
     let mut journal = Journal::new(vault);
     let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: via.to_string(), run_id: run_id.map(str::to_string) };
-    let today = crate::journal::now_ts(None)[..10].parse::<jiff::civil::Date>().unwrap_or(jiff::civil::date(1970, 1, 1));
+    // M1 (C3′ final review): the vault's own day, as every other writer of a card dates it — never
+    // the UTC day of `now_ts`, which on a Chicago evening is already tomorrow and would charge a sync
+    // card to tomorrow's fifteen-a-day budget and age it from −1. (The journal's day FILES stay UTC
+    // days; that is the ledger's contract, not a card's date.)
+    let today = crate::cli::local_now(vault).date();
 
     // 3. **Pull first.** A field another desktop set this morning must be in the note before the day
     //    is ordered, or every second desktop ranks a slot behind for ever.
