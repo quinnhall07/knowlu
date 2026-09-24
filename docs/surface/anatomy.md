@@ -210,6 +210,26 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **Partial takes show both figures** — `2.0h (of 6.0h left)`.
 - **Recurring commitments render as commitments, not calendar blocks.** They consume budget; a
   block does not. Rendering them identically would double-count.
+- **Commitment blocks (`commitments/`, spec §6.2).** The gap walk runs over
+  `WeekCalendar::template_only_blocks(day)` — the week template's classes alone, never the confirmed
+  commitment notes — so a confirmed club is never drawn as a generic "class" gap. Each commitment
+  span active that day (`spans_on(day)`) is then added as its own block: `kind: "class"` for a
+  `class`/`lab` note, `"busy"` otherwise, `label` the note's own title. A span is **clamped to
+  `window(day)`** (the planning day's window, §6.3, or the template's `day_start`/`day_end` with no
+  planning-day note) and dropped entirely when wholly outside it. A `busy` block built from the
+  day's Google events is dropped when its start and end exactly match a commitment block's
+  **unclamped** span, so a class that is both a confirmed commitment and a Google event draws once,
+  titled from the commitment. **Google events themselves are never clamped to the planning window —
+  only commitment blocks are** (carried forward from the P17 review): an event straddling or
+  outside the window still draws at its own time.
+- **`moved` (spec §6.4).** When a confirmed `planning-day` note's window differs from the window the
+  day started with (`state/plan.json`, written by `rank` the first time each day the window is
+  read), the today view reports what changed: how many scheduled items moved to a later or earlier
+  part of the day (morning/afternoon/evening) and how many no longer fit. It is computed **live** —
+  every `surface` read re-designates the day under both windows and diffs the result by task slug —
+  so an edit to the window shows its effect at once, not just at the next `rank`. `moved` is omitted
+  from the JSON entirely (no key, not `null`) when nothing changed, when there is no confirmed
+  planning-day note, or on any view but today.
 
 ### 3.8 Left-rail nav
 
@@ -253,6 +273,19 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   gives each unanswered instance the same answer, and the series is never asked about again. A card
   that expires or is deleted unanswered is not an answer: it writes nothing, its own instances are
   never asked again, and the series' next instance may be.
+- **`kind: commitment-check` — "Is this a class you go to every week?"** `rank` classifies repeating
+  calendar events (`commitments.rs`) into proposals — a class, a lab, work, a club, a meeting, or
+  the day's wake-to-bed window — and files up to 5 a day as cards, on top of the 15-approval budget.
+  The deck renders these like any other card. **Approve** writes a confirmed note in `commitments/`
+  (or the `planning-day` note, for the window card); **Reject** writes an anonymous decline marker
+  holding only the source's opaque key, and marks every twin of the same underlying series (a
+  Google/ICS duplicate) declined too, so it is never re-asked from either side. A calendar change to
+  an already-confirmed commitment (a new meeting time, a new room, a new end date) files the same
+  card kind with a `target` note and a `change`/`was` pair instead of a fresh `commitment:` mapping;
+  approving it amends the note, rejecting it leaves the note as it is — either way the question is
+  never asked again. These cards, their series data (`state/calendar-series.json`) and the
+  proposals themselves never leave the device (`commitments::LOCAL_CARD_KINDS`): only what the
+  student confirms or declines becomes a note, and only a note syncs.
 
 ### 3.10 AHEAD
 
