@@ -193,7 +193,10 @@ pub const PUSH_BUDGET_BYTES: usize = 3_145_728;
 pub const ACTOR: &str = "agent:knowlu.sync";
 
 /// Generated, device-local, and **never synced**: it holds two integers, one timestamp and a map of
-/// note path → content hash, every one of which is already in the vault in plainer form.
+/// note path → content hash, every one of which is already in the vault in plainer form — plus
+/// (fix round 4, R-C3′-exec-34) one flag saying a pull has reached the end of the account's copy,
+/// and the ids of any wizard seeds a restore removed outright (each already in the journal, on the
+/// seed's own `create` record).
 pub const CURSOR_FILE: &str = "state/sync-cursor.json";
 
 /// What this device has already seen and already sent.
@@ -210,6 +213,19 @@ pub struct Cursor {
     #[serde(default)] pub pushed_through: String,
     #[serde(default)] pub boundary: Vec<String>,
     #[serde(default)] pub notes: std::collections::BTreeMap<String, String>,
+    /// E1 (fix round 4, R-C3′-exec-34): a pull on this vault has reached `more: false` at least
+    /// once — a restore that paged to the end, or a slot's pull that did. Until then `build_push`
+    /// holds back every untouched wizard seed ([`SEED_HASHES_FILE`]), because the account's own
+    /// note at the same path may sit on a page this device has not read yet, and a seed pushed first
+    /// would overwrite it. Once set it stays set: after the end, a seed the account never had is
+    /// this desktop's own truth. `false` on a cursor from before this round, which costs nothing —
+    /// a vault with no seed record has nothing to hold back.
+    #[serde(default)] pub pulled_to_end: bool,
+    /// E3 (fix round 4, R-C3′-exec-34): note ids whose journal records never leave this device —
+    /// the wizard seeds a restore removed outright because the account had already settled their
+    /// paths (`settle_tombstones`). A removed seed's own `create` would otherwise reach every
+    /// desktop as the history of a note that never existed anywhere.
+    #[serde(default)] pub withheld_ids: Vec<String>,
 }
 
 /// A missing or unreadable cursor is a **fresh** cursor, never an error: the worst it costs is one
@@ -556,10 +572,20 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
     // ever sent — see `SyncCards` for the five paths and where each is closed below.
     let sync_cards = SyncCards::find(vault, &on_disk, journal);
 
+    // E1 (fix round 4, R-C3′-exec-34): until a pull has reached the end of the account's copy, an
+    // untouched wizard seed is not sent — see `Cursor::pulled_to_end`. Read only while it matters.
+    let seeds = if cursor.pulled_to_end { std::collections::BTreeMap::new() } else { load_seed_hashes(vault) };
+
     let since = if cursor.pushed_through.is_empty() { None } else { Some(cursor.pushed_through.as_str()) };
     let already: std::collections::BTreeSet<&String> = cursor.boundary.iter().collect();
     for record in journal.read(since, None) {
         if batch.records.len() >= PAGE { break; }
+        // E3 (fix round 4, R-C3′-exec-34): the history of a wizard seed a restore removed outright
+        // stays here — see `Cursor::withheld_ids`. A `continue`, like every filter below it, so it
+        // never advances `next`.
+        if record.get("id").and_then(Value::as_str).is_some_and(|id| cursor.withheld_ids.iter().any(|w| w == id)) {
+            continue;
+        }
         // **Never push what `apply` wrote** (review S1; ruling R-C3′-plan-2). When a pull applies a
         // foreign change, the `write::` function that carries it out journals a SECOND, locally
         // authored record under `ACTOR` — `write_literals` for a field, `write::move_note` for a
@@ -637,6 +663,12 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // cursor so no tombstone can ever follow it — even from a cursor written before this rule.
         if sync_cards.paths.contains(rel) {
             next.notes.remove(rel);
+            continue;
+        }
+        // E1 (fix round 4, R-C3′-exec-34): an untouched wizard seed waits for a pull to reach the
+        // end, so a page this device has not read yet can still replace it (`apply`'s seed
+        // pre-pass). Never recorded in `next`, so it is neither sent nor ever tombstoned meanwhile.
+        if is_untouched_seed(vault, rel, &seeds) {
             continue;
         }
         let Ok(text) = crate::pystr::read_text(&vault.join(rel)) else {
@@ -1011,6 +1043,12 @@ fn materialise(dest: &Path, page: &Pulled, state: &mut RestoreState) -> Restored
                 if let Ok(on_disk) = crate::pystr::read_text(&file) {
                     state.written_notes.insert(note.path.clone(), sha256_hex(on_disk.as_bytes()));
                 }
+                // E2 (fix round 4, R-C3′-exec-34): the latest row for a path wins. A tombstone an
+                // EARLIER page collected for this path is superseded by this live row (the account
+                // re-created the note while the restore was paging), so it is dropped here rather
+                // than left to archive the note just written. A tombstone arriving on a LATER page
+                // is collected after this and stays pending, which is right the other way round.
+                state.pending_tombstones.retain(|p| p != &note.path);
             }
             Err(e) => out.warnings.push(format!("restore: {} could not be written ({e})", note.path)),
         }
@@ -1019,17 +1057,47 @@ fn materialise(dest: &Path, page: &Pulled, state: &mut RestoreState) -> Restored
     out
 }
 
+/// What [`settle_tombstones`] did: how many paths it settled, the lines it has to say, and (E3) the
+/// ids of the wizard seeds it removed outright, which a paged restore keeps off the wire through
+/// [`Cursor::withheld_ids`].
+#[derive(Debug, Default)]
+struct Settled {
+    count: usize,
+    warnings: Vec<String>,
+    removed_seed_ids: Vec<String>,
+}
+
+/// Is `rel` still, byte for byte, the wizard seed `seeds` recorded for it? Raw bytes, hashed exactly
+/// as [`restore_into`] hashed them — never `pystr::read_text`'s newline-translated text, whose hash
+/// differs on a CRLF vault. An unlisted path, a missing file or an unreadable one is `false`.
+fn is_untouched_seed(vault: &Path, rel: &str, seeds: &std::collections::BTreeMap<String, String>) -> bool {
+    seeds
+        .get(rel)
+        .is_some_and(|recorded| std::fs::read(vault.join(rel)).is_ok_and(|bytes| &sha256_hex(&bytes) == recorded))
+}
+
 /// R2 (fix round 3): every collected tombstone, settled — once, and only once every page a restore
 /// needed has already succeeded (the caller's own job to guarantee: [`restore`] calls this right
 /// after its one and only page, [`restore_all`] only after its whole paging loop breaks out
 /// normally, never on the error path). `apply`'s own tombstone semantics: `write::delete`, under
 /// [`ACTOR`] so `build_push` never sends it back up as a new local delete.
-fn settle_tombstones(dest: &Path, paths: &[String], touched: &mut Touched) -> (usize, Vec<String>) {
-    let mut settled = 0;
-    let mut warnings = Vec::new();
+///
+/// **E3 (fix round 4, R-C3′-exec-34): an untouched wizard seed is removed outright instead.** When
+/// the account's tombstone settles a path whose file is still, byte for byte, the seed
+/// [`SEED_HASHES_FILE`] recorded, that file is a placeholder the wizard wrote seconds ago, with no
+/// history worth keeping. Archiving it (round 3) left a second copy beside the account's own archived
+/// one — `archive/<name>-2.md`, which the first push then sent to every desktop. So it is unlinked,
+/// with no `delete` record, its seed-hashes entry goes with it, and its id is reported so
+/// [`restore_all`] can keep its `create` record off the wire. Anything else at a tombstoned path —
+/// the account's own copy, written by an earlier page and tombstoned by a later one, or a seed with
+/// no seed record at all — is settled through `write::delete` exactly as before.
+fn settle_tombstones(dest: &Path, paths: &[String], touched: &mut Touched) -> Settled {
+    let mut out = Settled::default();
     if paths.is_empty() {
-        return (settled, warnings);
+        return out;
     }
+    let mut seeds = load_seed_hashes(dest);
+    let mut seeds_changed = false;
     let mut journal = Journal::new(dest);
     let ctx = crate::write::WriteContext { actor: ACTOR.to_string(), via: "dashboard".to_string(), run_id: None };
     for rel in paths {
@@ -1040,7 +1108,22 @@ fn settle_tombstones(dest: &Path, paths: &[String], touched: &mut Touched) -> (u
             continue;
         }
         if let Err(e) = touched.before_write(&file) {
-            warnings.push(format!("restore: {rel} could not be settled safely (its current content could not be read: {e})"));
+            out.warnings.push(format!("restore: {rel} could not be settled safely (its current content could not be read: {e})"));
+            continue;
+        }
+        if is_untouched_seed(dest, rel, &seeds) {
+            // E3: read before the file goes — the id is on the seed's own frontmatter, and it is the
+            // id its `create` record carries (`write::create` puts the same one in both).
+            let id = crate::ids::read_meta(&file).and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text));
+            match std::fs::remove_file(&file) {
+                Ok(()) => {
+                    seeds.remove(rel);
+                    seeds_changed = true;
+                    out.removed_seed_ids.extend(id);
+                    out.count += 1;
+                }
+                Err(e) => out.warnings.push(format!("restore: {rel} could not be removed ({e})")),
+            }
             continue;
         }
         let before_files = journal_files(dest);
@@ -1055,16 +1138,25 @@ fn settle_tombstones(dest: &Path, paths: &[String], touched: &mut Touched) -> (u
                         touched.mark_created(&f);
                     }
                 }
-                settled += 1;
+                out.count += 1;
             }
-            Err(e) => warnings.push(format!("restore: {rel} could not be settled ({e})")),
+            Err(e) => out.warnings.push(format!("restore: {rel} could not be settled ({e})")),
         }
     }
-    (settled, warnings)
+    // Settling runs only after every page has landed, so nothing rolls back past this point; a save
+    // that fails leaves an entry whose file is gone, which can never match again and so does nothing.
+    if seeds_changed {
+        if let Err(e) = save_seed_hashes(dest, &seeds) {
+            out.warnings.push(format!("restore: the seed record could not be updated ({e})"));
+        }
+    }
+    out
 }
 
 /// One page into a folder whose contents the caller vouches for. No paging concept of its own — the
 /// one page IS the last page, so its own tombstones are settled immediately after, the same call.
+/// It saves no cursor, so a seed it removes outright (E3) has no `withheld_ids` entry: that is
+/// [`restore_all`]'s, the path [`restore_into`] takes.
 pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restored, SyncError> {
     if let Some(stray) = unexpected_notes(dest, tolerate).first() {
         // Named, not counted: a student reading this needs to know WHICH note made the folder
@@ -1074,9 +1166,9 @@ pub fn restore(dest: &Path, page: &Pulled, tolerate: &[String]) -> Result<Restor
     }
     let mut state = RestoreState::default();
     let mut out = materialise(dest, page, &mut state);
-    let (settled, warnings) = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
-    out.notes += settled;
-    out.warnings.extend(warnings);
+    let settled = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
+    out.notes += settled.count;
+    out.warnings.extend(settled.warnings);
     out.empty = out.notes == 0 && out.records == 0;
     Ok(out)
 }
@@ -1238,6 +1330,7 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
     let mut cursor = Cursor::default();
     let mut total = Restored { empty: true, ok: true, ..Default::default() };
     let (mut records_after, mut notes_after) = (0i64, 0i64);
+    let mut reached_end = false;
     loop {
         let page = match pull(client, records_after, notes_after) {
             Ok(page) => page,
@@ -1261,6 +1354,11 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
         let stalled = page.record_cursor == records_after && page.note_cursor == notes_after;
         records_after = page.record_cursor;
         notes_after = page.note_cursor;
+        // E1: only a page that SAYS it is the last counts; a stalled page that still claims `more`
+        // stops the loop without claiming the end, and the first slot's pull goes on from here.
+        if !page.more {
+            reached_end = true;
+        }
         if !page.more || stalled {
             break;
         }
@@ -1270,12 +1368,21 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
     // actually settled is removed from the cursor's own notes too: nothing of the account's text
     // sits there any more (mirrors N1's own tombstone handling, moved here because settling itself
     // moved here).
-    let (settled, tombstone_warnings) = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
-    total.notes += settled;
-    total.warnings.extend(tombstone_warnings);
+    let settled = settle_tombstones(dest, &state.pending_tombstones, &mut state.touched);
+    total.notes += settled.count;
+    total.warnings.extend(settled.warnings);
     for rel in &state.pending_tombstones {
         cursor.notes.remove(rel);
     }
+    // E3: a seed removed outright takes its history with it — its `create` never goes up.
+    for id in settled.removed_seed_ids {
+        if !cursor.withheld_ids.contains(&id) {
+            cursor.withheld_ids.push(id);
+        }
+    }
+    // E1: a restore that paged to the end is a pull that reached it, so the first push sends the
+    // seeds the account never had (N1) instead of holding them back.
+    cursor.pulled_to_end = reached_end;
     total.empty = total.notes == 0 && total.records == 0;
     // Saved only here, after every page has landed and every tombstone settled (I2): a cursor saved
     // mid-way would tell the next run to resume from a page whose own effects a later failure has
@@ -1297,6 +1404,12 @@ pub fn restore_all(dest: &Path, client: &crate::cloudmodel::CloudClient, tolerat
 /// edit to a note's BODY is never journalled at all (`passes::detect_external` diffs frontmatter
 /// only), so a note with real, hand-typed content could carry exactly one record too. Its bytes,
 /// unlike its journal history, cannot lie.
+///
+/// **Three readers since fix round 4 (R-C3′-exec-34)**, each asking the same question: `apply`'s
+/// pre-pass (the account's copy replaces the seed), `build_push`'s hold-back (E1: an untouched seed
+/// is not sent until a pull has reached the end), and `settle_tombstones` (E3: a seed the account
+/// has already settled is removed outright). The plan's Global Constraints record the file beside
+/// [`CURSOR_FILE`] (E4a).
 pub const SEED_HASHES_FILE: &str = "state/seed-hashes.json";
 
 /// Missing or unreadable is `{}`, never an error: a vault that has never restored (every vault but
@@ -1324,6 +1437,40 @@ fn save_seed_hashes(vault: &Path, map: &std::collections::BTreeMap<String, Strin
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
+/// E4b (fix round 4, R-C3′-exec-34): why `dest` is not a vault the wizard has just made, or `None`
+/// when it is. [`restore_into`] records every note on disk as a seed, so pointed at anything else it
+/// would mark a student's own notes as placeholders the account may replace or remove. Fresh means:
+/// no [`SEED_HASHES_FILE`] and no [`CURSOR_FILE`] yet (it has neither restored nor synced), every
+/// journal record a `create`, and those creates naming exactly the notes on disk, once each — which
+/// is what `scaffold::seed_writes` leaves (one `write::create` per seed) and nothing else is.
+/// Structural on purpose: the engine does not know which notes the app's wizard seeds.
+fn not_fresh(dest: &Path) -> Option<String> {
+    for generated in [SEED_HASHES_FILE, CURSOR_FILE] {
+        if dest.join(generated).exists() {
+            return Some(format!("{generated} is already here, so this vault has restored or synced before"));
+        }
+    }
+    let on_disk: std::collections::BTreeSet<String> = note_paths(dest).into_iter().collect();
+    let mut made: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for record in Journal::new(dest).read(None, None) {
+        let op = record.get("op").and_then(Value::as_str).unwrap_or_default();
+        let path = record.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+        if op != "create" {
+            return Some(format!("its journal already records a `{op}` of {path}"));
+        }
+        if !on_disk.contains(&path) {
+            return Some(format!("its journal records {path}, which is not here"));
+        }
+        if !made.insert(path.clone()) {
+            return Some(format!("its journal records {path} being made twice"));
+        }
+    }
+    on_disk
+        .iter()
+        .find(|rel| !made.contains(*rel))
+        .map(|stray| format!("{stray} is here with no record of being made with this vault"))
+}
+
 /// The wizard's one call (hand-off H11a). Resolve, take what is on disk right now as the allowlist,
 /// page to the end.
 ///
@@ -1331,7 +1478,14 @@ fn save_seed_hashes(vault: &Path, map: &std::collections::BTreeMap<String, Strin
 /// get a vault and a first slot that fills it, not a refusal and a rolled-back folder; the `Err` arm
 /// is for a copy that exists and will not read, which is the case where a half-filled folder would
 /// be worse than none.
+///
+/// **For a fresh vault only** (E4b, fix round 4): before anything else — before the seed record is
+/// written or the account is reached — a vault that is not one the wizard has just made
+/// (`not_fresh`) is refused by name, and nothing is written.
 pub fn restore_into(dest: &Path) -> Result<Restored, String> {
+    if let Some(why) = not_fresh(dest) {
+        return Err(format!("restore refused: {why}; a restore only ever fills a vault the wizard has just made"));
+    }
     let tolerate = note_paths(dest);
     // R1/N2 (fix round 3): the seed record, written UNCONDITIONALLY and first — before the account
     // is even reached, let alone read — so it exists whether this restore goes on to succeed or
@@ -2391,6 +2545,12 @@ pub fn run_lines_with_client(
                 ));
                 cursor.record_cursor = page.record_cursor;
                 cursor.note_cursor = page.note_cursor;
+                // E1 (fix round 4, R-C3′-exec-34): this pull reached the end of the account's copy,
+                // so `apply`'s seed pre-pass has now seen every row the account holds, and a seed it
+                // did not replace is this desktop's own. Sticky: never cleared once set.
+                if !page.more {
+                    cursor.pulled_to_end = true;
+                }
                 if let Err(e) = save_cursor(vault, &cursor) {
                     totals.errors.push(e.label());
                     lines.push(format!("sync: the cursor could not be saved ({e})"));

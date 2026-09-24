@@ -227,6 +227,11 @@ fn a_restored_note_overwrites_the_seed_at_the_same_path_and_an_empty_copy_is_not
 /// `scaffold::create_vault` just wrote. The tombstone must settle the seed — `apply`'s own tombstone
 /// semantics, `write::delete` under `sync::ACTOR` — not leave it live while an unrelated archived
 /// copy also lands.
+///
+/// Fix round 4 (E3): this vault has no `state/seed-hashes.json`, so nothing proves the file is an
+/// untouched wizard seed and it is settled through `write::delete`, the fallback kept for exactly that
+/// case. With the seed record present, the seed is removed outright instead:
+/// `a_seed_the_account_already_settled_is_removed_outright_and_nothing_about_it_is_pushed`.
 #[test]
 fn a_tombstone_for_a_seed_settles_it_with_apply_s_own_tombstone_semantics() {
     let dest = temp("tombstone-seed");
@@ -478,6 +483,321 @@ fn the_first_push_after_a_restore_sends_a_wizard_made_seed_but_not_a_restored_no
     assert!(!note_paths.contains(&"tasks/e.md"), "the restored note must not be re-sent: {note_paths:?}");
     assert!(!batch.records.is_empty(), "the seed's own create record travels too");
     let _ = std::fs::remove_dir_all(&dest);
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 4 (R-C3′-exec-34): E1, E2, E3 and E4b.
+// ---------------------------------------------------------------------------
+
+/// The words the wizard leaves in a seed for the student to replace. A push that carries them has
+/// sent a placeholder.
+const SEED_PLACEHOLDER: &str = "Fill this in from your syllabus";
+
+/// A wizard seed, written the way `scaffold::seed_writes` writes one: through `write::create`, so its
+/// own `create` record is in the journal, with the placeholder body the wizard leaves behind.
+fn wizard_seed(dest: &Path, rel: &str, id: &str) {
+    let mut journal = Journal::new(dest);
+    let ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    let text = format!("---\nid: {id}\nstatus: active\n---\n\n## Grade weights\n\n{SEED_PLACEHOLDER}.\n");
+    knowlu_engine::write::create(dest, rel, &text, &ctx, &mut journal, None).expect("the wizard's own seed");
+}
+
+/// `state/seed-hashes.json` exactly as `restore_into` writes it (every note on disk, its path mapped
+/// to the sha256 of its raw bytes, through `dumps_value`), for a test that drives `restore_all`
+/// directly: `restore_into` cannot reach the account without a stored session.
+fn record_seeds(dest: &Path) {
+    let mut map = serde_json::Map::new();
+    for rel in sync::note_paths(dest) {
+        let bytes = std::fs::read(dest.join(&rel)).expect("read a seed");
+        map.insert(rel, serde_json::Value::String(sync::sha256_hex(&bytes)));
+    }
+    std::fs::create_dir_all(dest.join("state")).expect("state/");
+    knowlu_engine::pystr::write_text(
+        &dest.join(sync::SEED_HASHES_FILE),
+        &knowlu_engine::ledger::dumps_value(&serde_json::Value::Object(map)),
+    )
+    .expect("write state/seed-hashes.json");
+}
+
+/// The JSON body of one request the loopback served.
+fn body_of(request: &str) -> serde_json::Value {
+    let body = request.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
+    serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
+}
+
+/// Every note path one `/sync-push` request carried, live or tombstone.
+fn pushed_paths(request: &str) -> Vec<String> {
+    body_of(request)["notes"]
+        .as_array()
+        .map(|notes| notes.iter().filter_map(|n| n["path"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// One slot's sync, both halves, against the loopback — the same call `run_lines_with` makes once it
+/// has resolved a session.
+fn one_sync(dest: &Path, client: &CloudClient, cloud: &CloudConfig) {
+    let (lines, totals) = sync::run_lines_with_client(
+        dest, sync::Direction::Both, "cli", None, client, cloud, Vec::new(), sync::Totals::default(),
+    );
+    assert!(totals.errors.is_empty(), "{lines:?}");
+}
+
+/// The wizard's vault after a restore that failed at Finish: the seeds, `state/seed-hashes.json`
+/// written by `restore_into` itself, and no cursor. No `config/cloud.yaml` here, so `resolve` fails,
+/// which is the same fold a dead network takes (`ok: false`, and ordinary syncs fill the vault).
+fn a_failed_restore(tag: &str) -> PathBuf {
+    let dest = temp(tag);
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    wizard_seed(&dest, "courses/cs-100.md", "course_0000000001");
+    let failed = sync::restore_into(&dest).expect("a failed restore is a fold, never an Err");
+    assert!(!failed.ok, "{failed:?}");
+    assert!(dest.join(sync::SEED_HASHES_FILE).is_file(), "restore_into recorded the seeds first");
+    assert!(!dest.join(sync::CURSOR_FILE).exists(), "a failed restore saves no cursor");
+    dest
+}
+
+const PUSH_OK: &str = r#"{"records":0,"notes":0}"#;
+
+/// E1 (R-C3′-exec-34), the reviewer's probe P6. Finish's restore failed, so the vault holds only the
+/// wizard's seeds. The account's own `courses/cs-100.md` (real grade weights, typed on another
+/// desktop) sits on its SECOND page. The first slot pulls page 1 only (`more: true`), and before this
+/// round its push sent the untouched seed over the account's copy. Now the seed waits until a pull has
+/// reached the end, the second slot's pull replaces it with the account's copy, and no push ever
+/// carries the placeholder.
+#[test]
+fn after_a_failed_restore_an_untouched_seed_waits_until_a_pull_has_reached_the_end() {
+    let dest = a_failed_restore("e1-seed-waits");
+    let device = "aaaaaaaaaaaaaaaa";
+    let page1 = page_reply(
+        vec![],
+        vec![serde_json::json!({"path":"tasks/other.md","device":device,"deleted":false,"body":"---\nid: task_0000000020\n---\nsomething else\n"})],
+        0, 1, true,
+    );
+    let account_copy = "---\nid: course_00000000ab\nstatus: active\n---\n\n## Grade weights\n\nExams 60%, labs 40%\n";
+    let page2 = page_reply(
+        vec![],
+        vec![serde_json::json!({"path":"courses/cs-100.md","device":device,"deleted":false,"body":account_copy})],
+        0, 2, false,
+    );
+    let (base, handle) = loopback(vec![(200, page1), (200, PUSH_OK.into()), (200, page2), (200, PUSH_OK.into())]);
+    let cloud = cfg(&base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    one_sync(&dest, &client, &cloud);
+    one_sync(&dest, &client, &cloud);
+    let requests = handle.join().expect("the loopback thread did not panic");
+    assert_eq!(requests.len(), 4, "two pulls and two pushes");
+    let first_push = pushed_paths(&requests[1]);
+    assert!(!first_push.contains(&"courses/cs-100.md".to_string()), "the first slot held the seed back: {first_push:?}");
+    assert!(requests[1].starts_with("POST /functions/v1/sync-push "), "the first slot did push: {}", requests[1]);
+    assert!(!body_of(&requests[1]).is_null(), "and its body reads: {}", requests[1]);
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dest.join("courses").join("cs-100.md")).expect("the course"),
+        account_copy,
+        "the second slot's pull replaced the seed with the account's copy"
+    );
+    for (i, request) in requests.iter().enumerate() {
+        assert!(!request.contains(SEED_PLACEHOLDER), "request {i} carried the seed's placeholder:\n{request}");
+    }
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// E1's other half: a seed the account never had is this desktop's own truth, and once a pull has
+/// reached `more: false` it is pushed like any other local note, by the slot that got there.
+#[test]
+fn once_a_pull_has_reached_the_end_a_seed_the_account_never_had_is_pushed() {
+    let dest = a_failed_restore("e1-seed-pushed");
+    let device = "aaaaaaaaaaaaaaaa";
+    let page1 = page_reply(
+        vec![],
+        vec![serde_json::json!({"path":"tasks/other.md","device":device,"deleted":false,"body":"---\nid: task_0000000021\n---\nsomething else\n"})],
+        0, 1, true,
+    );
+    let page2 = page_reply(vec![], vec![], 0, 1, false);
+    let (base, handle) = loopback(vec![(200, page1), (200, PUSH_OK.into()), (200, page2), (200, PUSH_OK.into())]);
+    let cloud = cfg(&base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    one_sync(&dest, &client, &cloud);
+    one_sync(&dest, &client, &cloud);
+    let requests = handle.join().expect("the loopback thread did not panic");
+    assert_eq!(requests.len(), 4, "two pulls and two pushes");
+    assert!(!pushed_paths(&requests[1]).contains(&"courses/cs-100.md".to_string()), "held back before the end: {:?}", pushed_paths(&requests[1]));
+    let second_push = pushed_paths(&requests[3]);
+    assert!(second_push.contains(&"courses/cs-100.md".to_string()), "pushed once a pull reached the end: {second_push:?}");
+    assert!(requests[3].contains(SEED_PLACEHOLDER), "the seed's own text is what goes up");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// E1's guard on the success path (not a RED item: it pins that the hold-back never outlives a
+/// restore that worked). A restore that paged to `more: false` IS a pull that reached the end, so
+/// the first push after it sends a seed the account never had: N1's promise, now with
+/// `state/seed-hashes.json` present, as it always is after `restore_into`.
+#[test]
+fn a_completed_restore_counts_as_a_pull_that_reached_the_end() {
+    let dest = temp("e1-completed-restore");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    wizard_seed(&dest, "courses/cs-100.md", "course_0000000001");
+    record_seeds(&dest);
+    let device = "aaaaaaaaaaaaaaaa";
+    let page = page_reply(
+        vec![],
+        vec![serde_json::json!({"path":"tasks/other.md","device":device,"deleted":false,"body":"---\nid: task_0000000022\n---\nsomething else\n"})],
+        0, 1, false,
+    );
+    let (base, handle) = loopback(vec![(200, page)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    sync::restore_all(&dest, &client, &tolerate).expect("the restore completes");
+    handle.join().expect("the loopback thread did not panic");
+    let mut journal = Journal::new(&dest);
+    let (batch, _) = sync::build_push(&dest, &sync::load_cursor(&dest), "acct-1", &mut journal);
+    let paths: Vec<&str> = batch.notes.iter().map(|n| n["path"].as_str().unwrap_or("")).collect();
+    assert!(paths.contains(&"courses/cs-100.md"), "the seed the account never had goes out: {paths:?}");
+    assert!(!paths.contains(&"tasks/other.md"), "the restored note does not: {paths:?}");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// E2 (R-C3′-exec-34), the reviewer's probe P7. Page 1 carries a tombstone for the welcome seed's
+/// path; page 2 a live row at the same path, because the account re-created the note while this
+/// restore was paging. The later row wins: the live copy stays at its path, nothing is archived, and
+/// the first push does not send it back.
+#[test]
+fn a_live_row_on_a_later_page_outranks_a_tombstone_an_earlier_page_collected() {
+    let dest = temp("e2-later-live-row");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    wizard_seed(&dest, "tasks/get-to-know-knowlu.md", "task_0000000001");
+    record_seeds(&dest);
+    let device = "aaaaaaaaaaaaaaaa";
+    let path = "tasks/get-to-know-knowlu.md";
+    let page1 = page_reply(vec![], vec![serde_json::json!({"path":path,"device":device,"deleted":true})], 0, 1, true);
+    let live = "---\nid: task_00000000bb\nstatus: active\n---\n\nre-created on the other desktop\n";
+    let page2 = page_reply(vec![], vec![serde_json::json!({"path":path,"device":device,"deleted":false,"body":live})], 0, 2, false);
+    let (base, handle) = loopback(vec![(200, page1), (200, page2)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    sync::restore_all(&dest, &client, &tolerate).expect("the restore completes");
+    handle.join().expect("the loopback thread did not panic");
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dest.join(path)).expect("the live note is at its path"),
+        live,
+        "the later live row wins over the earlier tombstone"
+    );
+    assert!(!dest.join("archive").join("get-to-know-knowlu.md").exists(), "nothing was archived");
+    let mut journal = Journal::new(&dest);
+    let (batch, _) = sync::build_push(&dest, &sync::load_cursor(&dest), "acct-1", &mut journal);
+    let paths: Vec<&str> = batch.notes.iter().map(|n| n["path"].as_str().unwrap_or("")).collect();
+    assert!(!paths.iter().any(|p| p.contains("get-to-know-knowlu")), "the account's own copy is not sent back: {paths:?}");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// E3 (R-C3′-exec-34), the reviewer's probe P8: the usual second desktop. The student finished the
+/// welcome task on another desktop, so the account holds a tombstone for
+/// `tasks/get-to-know-knowlu.md` and that desktop's own archived copy at
+/// `archive/get-to-know-knowlu.md`. This desktop's wizard has just made its own welcome seed at the
+/// same path. The account's tombstone settles that path, so the seed (a placeholder with no history
+/// worth keeping) is removed outright. It is never archived as a second copy
+/// (`archive/get-to-know-knowlu-2.md`, which the first push used to send to every desktop), its
+/// seed-hashes entry goes with it, and nothing about it is in the first push. A seed the account never
+/// had still goes up as usual.
+#[test]
+fn a_seed_the_account_already_settled_is_removed_outright_and_nothing_about_it_is_pushed() {
+    let dest = temp("e3-seed-removed");
+    std::fs::create_dir_all(&dest).expect("mkdir");
+    let seed_id = "task_0000000001";
+    wizard_seed(&dest, "tasks/get-to-know-knowlu.md", seed_id);
+    wizard_seed(&dest, "courses/cs-100.md", "course_0000000001");
+    record_seeds(&dest);
+
+    let device = "aaaaaaaaaaaaaaaa";
+    let theirs = "task_00000000aa";
+    let created = serde_json::json!({"op":"create","path":"tasks/get-to-know-knowlu.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-09-01T10:00:00.000Z","id":theirs,"new":{"id":theirs}});
+    let finished = serde_json::json!({"op":"delete","path":"tasks/get-to-know-knowlu.md","actor":"quinn","via":"dashboard","device":device,"ts":"2026-09-02T10:00:00.000Z","id":theirs,"old":"tasks/get-to-know-knowlu.md","new":"archive/get-to-know-knowlu.md"});
+    let archived = format!("---\nid: {theirs}\nstatus: done\n---\n\nfinished on the other desktop\n");
+    let page = page_reply(
+        vec![(device, created), (device, finished)],
+        vec![
+            serde_json::json!({"path":"tasks/get-to-know-knowlu.md","device":device,"deleted":true}),
+            serde_json::json!({"path":"archive/get-to-know-knowlu.md","device":device,"deleted":false,"body":archived}),
+        ],
+        2, 2, false,
+    );
+    let (base, handle) = loopback(vec![(200, page)]);
+    let client = CloudClient::new(&cfg(&base), "jwt-not-a-secret");
+    let tolerate = sync::note_paths(&dest);
+    sync::restore_all(&dest, &client, &tolerate).expect("the restore completes");
+    handle.join().expect("the loopback thread did not panic");
+
+    assert!(!dest.join("tasks").join("get-to-know-knowlu.md").exists(), "the seed is gone from its path");
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dest.join("archive").join("get-to-know-knowlu.md")).expect("the archived note"),
+        archived,
+        "the account's archived copy is the one archived copy"
+    );
+    assert!(!dest.join("archive").join("get-to-know-knowlu-2.md").exists(), "the seed was not archived as a second copy");
+    let hashes = knowlu_engine::pystr::read_text(&dest.join(sync::SEED_HASHES_FILE)).expect("seed-hashes.json");
+    assert!(!hashes.contains("tasks/get-to-know-knowlu.md"), "its seed-hashes entry went with it: {hashes}");
+    assert!(hashes.contains("courses/cs-100.md"), "the other seed's entry stays: {hashes}");
+    let records = Journal::new(&dest).read(None, None);
+    assert!(
+        !records.iter().any(|r| r.get("op").and_then(|v| v.as_str()) == Some("delete") && r.get("id").and_then(|v| v.as_str()) == Some(seed_id)),
+        "removed outright, not settled through write::delete: {records:?}"
+    );
+
+    let mut journal = Journal::new(&dest);
+    let (batch, _) = sync::build_push(&dest, &sync::load_cursor(&dest), "acct-1", &mut journal);
+    let paths: Vec<&str> = batch.notes.iter().map(|n| n["path"].as_str().unwrap_or("")).collect();
+    assert!(!paths.iter().any(|p| p.contains("get-to-know-knowlu")), "no note row about the seed: {paths:?}");
+    let bodies: Vec<String> = batch.records.iter().map(|r| r["body"].as_str().unwrap_or("").to_string()).collect();
+    assert!(!bodies.iter().any(|b| b.contains(seed_id)), "no record about the seed: {bodies:?}");
+    assert!(paths.contains(&"courses/cs-100.md"), "a seed the account never had still goes: {paths:?}");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// E4b (R-C3′-exec-34). `restore_into` lists every note on disk as a seed, so it may only ever run
+/// on a vault the wizard has just made. Anything else is a named refusal, before anything is written:
+/// a note with no record of being made with the vault, a journal that already holds an edit, or a
+/// vault that has restored or synced before.
+#[test]
+fn restore_into_refuses_a_vault_that_is_not_fresh() {
+    // A note that was not made with this vault.
+    let stray = temp("e4b-stray-note");
+    std::fs::create_dir_all(stray.join("tasks")).expect("mkdir");
+    wizard_seed(&stray, "courses/cs-100.md", "course_0000000001");
+    knowlu_engine::pystr::write_text(&stray.join("tasks").join("mine.md"), "---\nid: task_0000000030\n---\nmine\n").expect("a note of my own");
+    let err = sync::restore_into(&stray).expect_err("a vault holding a note the wizard did not make is refused");
+    assert!(err.contains("tasks/mine.md"), "the refusal names the note: {err}");
+    assert!(!stray.join(sync::SEED_HASHES_FILE).exists(), "nothing was written: {err}");
+
+    // A journal that already records an edit.
+    let edited = temp("e4b-edited");
+    std::fs::create_dir_all(&edited).expect("mkdir");
+    wizard_seed(&edited, "courses/cs-100.md", "course_0000000001");
+    let mut journal = Journal::new(&edited);
+    let ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::write_literals(&edited, "courses/cs-100.md", &[("status".to_string(), "done".to_string())], &ctx, &mut journal, &Default::default())
+        .expect("an edit, journalled");
+    let err = sync::restore_into(&edited).expect_err("a vault whose journal holds an edit is refused");
+    assert!(err.contains("set") && err.contains("courses/cs-100.md"), "the refusal names the edit: {err}");
+    assert!(!edited.join(sync::SEED_HASHES_FILE).exists(), "nothing was written: {err}");
+
+    // A vault that has restored before.
+    let again = temp("e4b-restored-before");
+    std::fs::create_dir_all(&again).expect("mkdir");
+    wizard_seed(&again, "courses/cs-100.md", "course_0000000001");
+    record_seeds(&again);
+    let before = std::fs::read(again.join(sync::SEED_HASHES_FILE)).expect("bytes");
+    let err = sync::restore_into(&again).expect_err("a vault that has restored before is refused");
+    assert!(err.contains(sync::SEED_HASHES_FILE), "the refusal names what gave it away: {err}");
+    assert_eq!(std::fs::read(again.join(sync::SEED_HASHES_FILE)).expect("bytes"), before, "and it is not rewritten");
+
+    // The wizard's own vault is fresh: the same seeds, nothing else, and the fold as before.
+    let fresh = temp("e4b-fresh");
+    std::fs::create_dir_all(&fresh).expect("mkdir");
+    wizard_seed(&fresh, "courses/cs-100.md", "course_0000000001");
+    wizard_seed(&fresh, "tasks/get-to-know-knowlu.md", "task_0000000001");
+    assert!(sync::restore_into(&fresh).is_ok(), "a vault the wizard has just made is fresh");
+    for d in [&stray, &edited, &again, &fresh] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 fn temp(tag: &str) -> PathBuf {
