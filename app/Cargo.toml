@@ -93,7 +93,7 @@ regex = "1.13.1"
 # (which is `Windows_NT` on every Windows machine ever). `windows` is already a direct dependency
 # for the credential store, the tray's message boxes and the child-process wait; this adds two more
 # of its own feature flags, not a new crate.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
 
 # The release profile (rewrite spec §5: compiled size is a product budget line) is the workspace
 # root's — Cargo ignores [profile.*] in a member crate, and a copy here would only earn a warning.

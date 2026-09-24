@@ -77,6 +77,62 @@ pub struct Scheduler {
     /// 18:00 America/Chicago slot is 00:00 the NEXT day in UTC — it would be swept the instant it
     /// was written, which is exactly the retry storm the ladder exists to stop.
     pub attempts: Mutex<HashMap<String, (u32, std::time::Instant)>>,
+    /// The slot in flight, published step by step (R-C1c-8) for the console's first-run view.
+    /// `last` is written only when a slot ends, and on a first run that succeeds `rank` has written
+    /// the day by then, so the view that polled `last` never listed a step. `run_slot_inner` clears
+    /// this in the same locked block that sets `running` for a slot, then mirrors every step into it
+    /// as the step lands (`SlotSteps`); when the slot ends, `live.steps` equals `RunSummary.steps`. A
+    /// refusal and the "already running" return never touch it, and neither does the update-install
+    /// hold (`updates::hold_for_install`), which sets `running` with no slot at all: for those few
+    /// seconds before the relaunch a poll reads `running: true` beside the last slot's list.
+    ///
+    /// **Lock order: `running` before `live`**, wherever both are taken (`run_slot_inner`'s start and
+    /// `commands::first_run_value`), and nothing else nests them. The lock is held for one push or one
+    /// assignment, never across a child process, a network call or `vault_io`.
+    pub live: Mutex<LiveSlot>,
+}
+
+/// What `Scheduler.live` holds: the steps the running slot has recorded so far, in `RunSummary.steps`'
+/// own shape, and the step doing its work right now (named as it will be recorded, or by that name's
+/// first word when the recorded name adds a note, as `entitlement` does). `None` between steps and
+/// once the slot has ended.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LiveSlot {
+    pub steps: Vec<(String, i32)>,
+    pub current: Option<String>,
+}
+
+/// The step list `run_slot_inner` builds, published as it grows (R-C1c-8). Every step goes through
+/// `push`, which records it in the slot's own list (what `RunSummary.steps` becomes) and in
+/// `Scheduler.live` in the same call, so the two can never disagree; `start` names the step about to
+/// do work. One recorder rather than a lock at each of the dozen sites that record a step.
+///
+/// Each method takes the `live` lock for one push or one assignment and drops it before returning:
+/// the child processes, network calls and `vault_io` sections between them run with it free.
+struct SlotSteps<'a> {
+    sch: &'a Scheduler,
+    steps: Vec<(String, i32)>,
+}
+
+impl<'a> SlotSteps<'a> {
+    fn new(sch: &'a Scheduler) -> Self { SlotSteps { sch, steps: Vec::new() } }
+
+    /// The step about to do work. A named skip lands at once and never needs one.
+    fn start(&self, name: &str) { lock(&self.sch.live).current = Some(name.to_string()); }
+
+    /// A step that started and recorded nothing after all (a backup with no folder set).
+    fn idle(&self) { lock(&self.sch.live).current = None; }
+
+    /// A step has landed: recorded here and published, and nothing is in progress until the next
+    /// `start`.
+    fn push(&mut self, step: (String, i32)) {
+        {
+            let mut live = lock(&self.sch.live);
+            live.steps.push(step.clone());
+            live.current = None;
+        }
+        self.steps.push(step);
+    }
 }
 
 impl Default for Scheduler {
@@ -88,6 +144,7 @@ impl Default for Scheduler {
             pause_item: Mutex::new(None),
             mode_device: Mutex::new((SchedulerMode::Script, true)),
             attempts: Mutex::new(HashMap::new()),
+            live: Mutex::new(LiveSlot::default()),
         }
     }
 }
@@ -570,6 +627,10 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             return lock(&sch.last).clone().unwrap_or_else(|| RunSummary { started: String::new(), ended: String::new(), steps: vec![], ok: false, engine_ok: false, late, reason: None, attempts: 0 });
         }
         *r = true;
+        // R-C1c-8: cleared under the `running` guard (lock order: `running`, then `live`), so no
+        // poll sees a slot's start beside the previous slot's steps. (The update-install hold sets
+        // `running` without a slot and leaves `live` as it was; see `Scheduler.live`.)
+        *lock(&sch.live) = LiveSlot::default();
     }
     let _guard = RunGuard(sch);
     // The pull decision below reads `cs.history.has_remote` — refresh it first, since
@@ -577,9 +638,10 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     // tick thread's very first iteration is guaranteed to have refreshed it yet (review item 1).
     state::refresh_history(cs);
     let started = knowlu_engine::journal::now_ts(None);
-    let mut steps = Vec::new();
+    let mut steps = SlotSteps::new(sch);
     let mut engine_ok = true;
     if lock(&cs.history).has_remote {
+        steps.start("pull");
         steps.push(sync_step(cs, "pull"));
     }
     // A skipped step is still a step: without this line the Runs view and the sync line would show
@@ -599,22 +661,169 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             IcsState::Unreadable => steps.push(("ingest (skipped: config unreadable)".to_string(), 0)),
         }
     }
+    // R-C1c-13: the account session is refreshed here, before ANYTHING else in the slot spends it —
+    // the entitlement refresh right below is itself one such spend, and every child process after
+    // that (coursework, ingest, judge; sync once C3′ lands) authenticates with the same token.
+    // `account::valid_access_token_at`'s own 120-second margin is sized for the single request it
+    // guards and is reached only at a slot's own END, by the telemetry step — or not at all, when
+    // entitlement is already fresh and Task 10's block above never runs. A one-hour token minted at
+    // this morning's slot is routinely down to single digits by a noon or 6pm one, so without this a
+    // second-day student's every cloud step in the slot gets a 401 before anything here ever refreshes
+    // it. Forty-five minutes covers an ORDINARY slot end to end — the 120-second margin is right for
+    // one request, not for the several minutes a slot's own network calls and child processes
+    // ordinarily take. It is **not** sized against the documented worst case of every cloud-touching
+    // child (coursework, ingest, judge) each running out its own `CHILD_TIMEOUT` (twenty minutes) back
+    // to back, which a compound failure could still exceed. There is no refresh per child, and none is
+    // added here: a later child that meets an expired token in that contrived case names its own
+    // failure exactly as it would today, the slot's own retry and the next slot's pre-flight refresh it
+    // from there, and the C3′ merge (which adds `sync` as a fifth cloud-touching child) keeps exactly
+    // this one session block — never one per step.
+    //
+    // Guarded on `cloud_config(...).is_ok()` exactly as the entitlement block below is, and for the
+    // same reason: a vault with no `config/cloud.yaml` at all, or one that is unreadable, has no
+    // session target to ask about and no account for this to mean anything to.
+    //
+    // Exit code **0** either way, like every other named step here: a network refusing the refresh is
+    // not a slot that failed.
+    if let Ok(cfg) = crate::account::cloud_config(&cs.vault) {
+        steps.start("session");
+        // `cloud_config`'s own host check (R-C1-59 I1) compares scheme and host only, never the
+        // path, so a hand-edited `cloud.yaml` whose `api_base` names the right host but the wrong
+        // path (missing `/functions/v1`) passes `cloud_config` and only then fails `auth_base` here.
+        // Named exactly like a refused refresh, not left silent, so the sibling entitlement block
+        // right below — which would still surface its own `entitlement (refresh failed: …)` for the
+        // very same broken value — never reads as the only thing that noticed.
+        match crate::account::auth_base(&cfg.api_base) {
+            Ok(auth) => {
+                let now = jiff::Timestamp::now().as_second();
+                match crate::account::ensure_session_for_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now, 45 * 60) {
+                    Ok(true) => steps.push(("session (refreshed)".to_string(), 0)),
+                    // Nothing happened: the token already cleared the floor. Not a step — `idle`
+                    // clears `current` the same way a backup with no folder set does, so nothing is
+                    // left "in progress" for the first-run view to poll forever.
+                    Ok(false) => steps.idle(),
+                    Err(e) => steps.push((format!("session (refresh failed: {e})"), 0)),
+                }
+            }
+            Err(e) => steps.push((format!("session (refresh failed: {e})"), 0)),
+        }
+    }
     // Every arm records a step with exit code **0** and a sentence — never a non-zero code, which
     // would set `engine_ok = false`, paint the tray amber and put the slot into retry backoff twice a
     // day for someone who has simply not paid, or not connected.
     //
-    // Fix round 1 (M3): computed once and reused for the telemetry step below too, rather than
-    // re-reading `config/cloud.yaml` and the entitlement cache from disk a second time in the same
-    // slot — and guaranteeing the two steps agree even if the file changes mid-slot.
+    // §2 / D1: a cloud vault whose entitlement has NEVER been cached refreshes it here,
+    // synchronously, before the judge decision. `scheduler::spawn` starts the first slot and the
+    // launch refresh on two threads, and the first live onboarding proved the slot can win: the
+    // judge was skipped for want of a cache that landed eleven seconds later, and the day's tasks
+    // sat unenriched until the next slot. One HTTPS round trip, under `account::TIMEOUT`.
+    //
+    // R-C1c-11: the same hole existed for a cache that EXISTS but no longer grants entitlement —
+    // past the 72-hour grace, or a status that is no longer `active`/`trialing`. A student who
+    // reopens the laptop after a long weekend used to get a first slot with every cloud step
+    // skipped while the launch refresh — and the six-hourly housekeeping refresh behind it — was
+    // still hours away. Stream C3′'s engine-side gate makes asking here worth even more: once it
+    // lands, the engine itself refuses `sync`, `coursework` and `ingest` on this same stale cache,
+    // so a slot that never re-asks would leave every step named a skip for a student who may
+    // already be entitled again. So the condition is now two questions, not one: is this vault a
+    // cloud vault whose config actually reads (`cloud_config(...).is_ok()`, unchanged from before
+    // this task — a vault with no `config/cloud.yaml` at all, or one that is unreadable, still
+    // never triggers a refresh attempt: `judge_plan_for` already names that as its own skip, and a
+    // refresh that calls the very same `cloud_config` first would only fail the identical way, for
+    // no reason, on every slot from then on), and does the cache on disk right now — missing, past
+    // the grace, or not `active`/`trialing` — fall short of `Entitled`. A cache that IS `Entitled`
+    // (fresh and active) is still never refreshed here: the six-hourly housekeeping refresh alone
+    // owns that case. A failure leaves the previous cache exactly where it was and `judge_plan_for`
+    // names the skip exactly as it does today: only a refusal from the service, never a missing or
+    // stale cache, is what a student reads as "no entitlement".
+    if crate::account::cloud_config(&cs.vault).is_ok()
+        && entitlement_state(cs) != crate::account::EntitlementState::Entitled
+    {
+        // Exit code **0** on both arms, like every other named step here: an account service that
+        // could not be reached is not a slot that failed, and an amber tray twice a day for a
+        // network is the wrong answer.
+        steps.start("entitlement");
+        let step = match crate::account::refresh_entitlement(&cs.vault, &cs.data_dir) {
+            Ok(_) => "entitlement (refreshed)".to_string(),
+            Err(e) => format!("entitlement (refresh failed: {e})"),
+        };
+        steps.push((step, 0));
+    }
+    // Fix round 1 (M3): reused for the telemetry step below too, rather than re-reading
+    // `config/cloud.yaml` and the entitlement cache from disk a second time in the same slot — and
+    // guaranteeing the two steps agree even if the file changes mid-slot. Task 10 review (minor):
+    // `entitlement_state(cs)` is now read twice in this function, not once — once above, inside the
+    // `if`, to decide whether to ask for a refresh; once here, after that refresh may have run, to
+    // decide the slot's own judge and telemetry steps. The two reads answer different questions at
+    // different points and must not be collapsed into one.
     let est = entitlement_state(cs);
     let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
         steps.push(((*note).to_string(), 0));
     }
+    // D8: a skipped step reaches the vault too. `RunSummary` lives in this process and the Runs
+    // view reads the run record the ENGINE writes — a step this app left out appears in neither, so
+    // the first live onboarding had nothing on screen and nothing on disk saying the judge never
+    // ran. One line each, in the engine's own format, through the engine's own appender
+    // (`cli::append_run_log` → `runs::log_line`, the single renderer, F11), so a line this app
+    // wrote and a line the engine wrote are the same bytes.
+    //
+    // The named skips and the entitlement step only — a `pull (skipped: busy)` is a transient lock
+    // collision between this slot and the housekeeping thread, not something a student opens a
+    // file to read.
+    //
+    // **Ruling R-C1c-plan-4: the status is `ok`, not `skip`.** `cli::line_status` reads the fifth
+    // token and `trim_log_lines` keeps only the newest hundred NON-`ok` lines, for one stated
+    // reason: a failure must not age out while routine runs keep flowing. A skip repeats every slot
+    // — twice a day, forever, on a vault with no feed — and is not a problem, so filing it as
+    // non-`ok` would spend a failure's budget on routine. `ok` puts it in the fifty-line routine
+    // bucket, where it ages out like every other ordinary line. The step is visible in
+    // `state/runner-log.md`, not in the Runs view: that page reads the engine's own run record
+    // (`runs::Runs`), which this app-side step never enters.
+    //
+    // Under `vault_io`, and taken here rather than around the loop below: `vault_io` is never held
+    // across a child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    //
+    // R-C1c-final-3 (I3): the entitlement steps land here too, but sanitized — never the service's
+    // failure reason. `steps` (what `RunSummary`/the settings page reads) keeps the full
+    // `entitlement (refresh failed: <reason>)` from the push above; the vault gets the bare
+    // sentence only, so no service error text ever reaches a file a student can open.
+    //
+    // R-C1c-13: the session pre-flight's own failure lands here too, sanitized the same way — but
+    // its SUCCESS does not. Unlike `entitlement (refreshed)`, which is routine and worth a line every
+    // time the six-hourly cache goes stale, `session (refreshed)` fires on every slot for every
+    // signed-in student whose last token happened to be old enough — twice a day, forever, on every
+    // healthy install — and a line that common is not something a student ever needs to open a file
+    // to confirm. Only a refusal is worth a line: something to notice, the same reason a busy sync
+    // lock is named but a routine pull is not.
+    let skips: Vec<String> = steps
+        .steps
+        .iter()
+        .filter_map(|(n, _)| {
+            if n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:") {
+                Some(n.clone())
+            } else if n == "entitlement (refreshed)" {
+                Some(n.clone())
+            } else if n.starts_with("entitlement (refresh failed") {
+                Some("entitlement (refresh failed)".to_string())
+            } else if n.starts_with("session (refresh failed") {
+                Some("session (refresh failed)".to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !skips.is_empty() {
+        let _io = lock(&cs.vault_io);
+        for note in &skips {
+            let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "ok", note, None);
+        }
+    }
     match engine_exe() {
         Ok(exe) => {
             for (i, (e, args)) in slot_argv(&cs.vault, &exe, &judge).into_iter().enumerate() {
                 let log = log_dir(cs).join(format!("slot-{}-{}-{}.txt", started.replace(':', ""), i, args[0]));
+                steps.start(&args[0]);
                 let code = run_child(&e, &args, &log, CHILD_TIMEOUT);
                 if code != 0 {
                     engine_ok = false;
@@ -627,14 +836,18 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
             steps.push((format!("engine: {e}"), -1));
         }
     }
+    steps.start("push");
     steps.push(sync_step(cs, "push"));
     // F11: the backup walks and copies the whole working tree — the same tree `history::sync`
     // rewrites — so it takes `vault_io` like every other vault-touching step. Taken HERE, after the
     // child wait and scoped to the engine call alone: `vault_io` is never held across a child
     // process (see `ConsoleState::vault_io`), which may run for twenty minutes.
+    steps.start("backup");
     let backed = { let _io = lock(&cs.vault_io); state::run_backup(cs, jiff::Timestamp::now()) };
-    if let Ok(st) = backed {
-        steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 }));
+    match backed {
+        Ok(st) => steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 })),
+        // No backup folder set: no step is recorded, so nothing is in progress either.
+        Err(_) => steps.idle(),
     }
     // Spec §6: batched to `/telemetry` at each slot. **Never a failure** — a student on a train has
     // nothing to apologise for, and an analytics upload has no business turning a slot amber. Every
@@ -648,16 +861,20 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
     let telemetry = match est {
         crate::account::EntitlementState::NoAccount => ("telemetry (skipped: no account)".to_string(), 0),
         crate::account::EntitlementState::Unreadable => ("telemetry (skipped: cloud.yaml unreadable)".to_string(), 0),
-        _ => match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
-            Ok(crate::telemetry::SendOutcome::Sent(0, 0)) => ("telemetry (nothing new)".to_string(), 0),
-            Ok(crate::telemetry::SendOutcome::Sent(e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
-            Ok(crate::telemetry::SendOutcome::Refused(status)) => (format!("telemetry (refused: {status})"), 0),
-            Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
-        },
+        _ => {
+            steps.start("telemetry");
+            match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
+                Ok(crate::telemetry::SendOutcome::Sent(0, 0)) => ("telemetry (nothing new)".to_string(), 0),
+                Ok(crate::telemetry::SendOutcome::Sent(e, c)) => (format!("telemetry ({e} events, {c} corrections)"), 0),
+                Ok(crate::telemetry::SendOutcome::Refused(status)) => (format!("telemetry (refused: {status})"), 0),
+                Err(_) => ("telemetry (skipped: offline)".to_string(), 0),
+            }
+        }
     };
     steps.push(telemetry);
     state::refresh_head(cs);
     state::refresh_history(cs);
+    let steps = steps.steps;
     let ok = steps.iter().all(|(_, c)| *c == 0);
     let summary = RunSummary { started, ended: knowlu_engine::journal::now_ts(None), steps, ok, engine_ok, late, reason: None, attempts: 1 };
     *lock(&sch.last) = Some(summary.clone());
