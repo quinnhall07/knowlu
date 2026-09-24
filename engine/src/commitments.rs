@@ -4254,6 +4254,76 @@ pub fn confirm(
     Ok(report)
 }
 
+/// What the *Schedule* view and the confirm screen read (phase-2 spec §4). Built purely, with no
+/// fetch and no write, over [`stored_proposals`]. Rows are JSON (Plan ruling Q5-a).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overview {
+    /// Every confirmed note but the planning day: `{id, path, kind, level, title, course, meets,
+    /// when, where, from, until}`.
+    pub commitments: Vec<serde_json::Value>,
+    /// The office-hours proposals not yet confirmed or declined, as [`proposal_value`].
+    pub office_hours: Vec<serde_json::Value>,
+    /// The effective window per weekday, `DAY_KEYS` order: `{day, start, end, source}`, where
+    /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
+    pub window: Vec<serde_json::Value>,
+    pub uncovered_courses: Vec<UncoveredCourse>,
+    /// D3: the vault is on its first day and has no planning-day note.
+    pub setup: bool,
+    pub warnings: Vec<String>,
+}
+
+impl Overview {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "commitments": self.commitments,
+            "office_hours": self.office_hours,
+            "window": self.window,
+            "uncovered_courses": self.uncovered_courses,
+            "setup": self.setup,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+pub fn overview(vault: &Path, today: Date) -> Overview {
+    let stored = stored_proposals(vault, today);
+    let commitments = stored
+        .set
+        .confirmed
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "path": n.path.to_string_lossy().replace('\\', "/"),
+                "kind": n.kind,
+                "level": n.level.as_str(),
+                "title": n.title,
+                "course": n.course,
+                "meets": meets_json(&n.meets),
+                "when": meets_label(&n.meets),
+                "where": n.where_,
+                "from": date_json(n.from),
+                "until": date_json(n.until),
+            })
+        })
+        .collect();
+    let office_hours = stored.proposals.iter().filter(|p| p.kind == "office-hours").map(proposal_value).collect();
+    let window = DAY_KEYS
+        .iter()
+        .enumerate()
+        .map(|(i, day)| {
+            let ((start, end), source) = match stored.set.window[i] {
+                Some(span) => (span, "note"),
+                None => ((stored.template.day_start, stored.template.day_end), "template"),
+            };
+            serde_json::json!({ "day": day, "start": hm(start), "end": hm(end), "source": source })
+        })
+        .collect();
+    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes);
+    let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
+    Overview { commitments, office_hours, window, uncovered_courses, setup, warnings: stored.warnings }
+}
+
 // ---------------------------------------------------------------------------------------------
 // P16 — what `rank` needs beside the passes above: the series file's read outcome and the day's
 // first window (§6.4).
@@ -9858,5 +9928,50 @@ mod phase2_tests {
         assert!(journal_records(&v).is_empty());
         let empty = confirm(&v, &input(&[], &[], Some("[]")), TODAY, &human(), &mut Journal::new(&*v));
         assert!(empty.is_err(), "a window naming no day is invalid (Q4-b)");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q5 — `commitments::overview`: the Schedule view's read (D3, §4).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn overview_has_every_key_the_view_reads_and_seven_window_days() {
+        let v = week_vault("overview");
+        journal_on(&v, "2026-09-01");
+        run(&v, &input(&[("gcal-series:chess", "soft")], &[], None));
+        let o = overview(&v, TODAY);
+        assert!(o.setup, "day 1 (the earliest journal file is 2026-09-01) and no planning-day note");
+        let json = o.to_json();
+        for key in ["commitments", "office_hours", "window", "uncovered_courses", "setup", "warnings"] {
+            assert!(json.get(key).is_some(), "{key} missing: {json}");
+        }
+        let row = &json["commitments"][0];
+        assert_eq!(row["kind"], "club");
+        assert_eq!(row["level"], "soft");
+        assert_eq!(row["title"], "Chess Club");
+        assert_eq!(row["when"], "Wed 6–7pm");
+        assert_eq!(row["path"], "commitments/chess-club.md");
+        assert!(row["id"].as_str().unwrap().starts_with("cmt_"));
+        assert_eq!(json["office_hours"].as_array().unwrap().len(), 1);
+        assert_eq!(json["office_hours"][0]["kind"], "office-hours");
+        let window = json["window"].as_array().unwrap();
+        assert_eq!(window.len(), 7);
+        assert_eq!(window[0], serde_json::json!({"day": "mon", "start": "08:00", "end": "18:00", "source": "template"}));
+        assert_eq!(json["uncovered_courses"], serde_json::json!([]), "CS 100 has a class proposal");
+        let bytes = crate::ledger::dumps_value(&json);
+        assert!(bytes.contains("\"setup\": true"), "{bytes}");
+    }
+
+    #[test]
+    fn setup_is_true_only_on_the_first_day_with_no_planning_day() {
+        let v = week_vault("setup");
+        journal_on(&v, "2026-09-01");
+        assert!(overview(&v, TODAY).setup, "day 1, no planning-day note");
+        assert!(!overview(&v, date(2026, 9, 2)).setup, "day 2: the cards take over");
+        run(&v, &input(&[], &[], Some("[{days: [mon], start: \"07:00\", end: \"23:00\"}]")));
+        let o = overview(&v, TODAY);
+        assert!(!o.setup, "Finish wrote the planning day, so the screen never comes back");
+        assert_eq!(o.window[0], serde_json::json!({"day": "mon", "start": "07:00", "end": "23:00", "source": "note"}));
+        assert_eq!(o.window[1]["source"], "template");
     }
 }
