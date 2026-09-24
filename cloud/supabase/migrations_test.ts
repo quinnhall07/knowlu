@@ -123,3 +123,123 @@ Deno.test("a view is defined after the columns it reads (R-C1-34)", async () => 
     }
   }
 });
+
+Deno.test("the OAuth migration adds no table, no policy, no birthdate column — and no raise", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260917000100_oauth_consent.sql", import.meta.url),
+  );
+  // **The `--` lines come off first.** This migration's comment block explains at length what the
+  // function no longer reads, so an assertion over the raw text would be an assertion about the
+  // prose. `migrations/migrations_test.ts` strips comments before scanning for the same reason.
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+  // C1's three rules are pinned over the whole directory elsewhere; this one is about THIS file:
+  // it replaces one function and nothing else, so a reviewer never has to diff schema to be sure.
+  assert(!/create\s+table/i.test(code), "this migration creates no table");
+  assert(!/create\s+policy/i.test(code), "…and no policy: RLS is C1's and stays as it is");
+  assert(!/\bbirth|\bdob\b|date_of_birth/i.test(code), "no birthdate column, in this file or any other");
+  assert(
+    code.includes("create or replace function public.handle_new_user()"),
+    "the trigger's function is replaced",
+  );
+  // R-C1b-3. The function reads NOTHING out of the sign-up's metadata and raises nothing: `/otp`
+  // with `create_user: true` is reachable by anyone holding the public anon key, so a trigger that
+  // believed that request's `data` would stamp an `age_18` consent row for an address whose owner
+  // never attested to anything. The consent row is `POST /account/consent`'s to write, behind a
+  // session, and the 18+ tooth is `billing-checkout`'s 403.
+  assert(!/raise\s+exception/i.test(code), "no raise survives in the replaced function");
+  // Asserted over the SOURCE of the values, never their names: `age_attested_at` and `tos_version`
+  // are columns this migration still writes (as nulls), so banning those words would ban the insert.
+  assert(!code.includes("raw_user_meta_data"), "the trigger reads none of the sign-up's own metadata");
+  // A word boundary, not `.includes("public.consents")`: this function's own `search_path` is
+  // `public, extensions`, so an unqualified `insert into consents` would resolve to the same table
+  // and pass a check that only banned the schema-qualified spelling (nit 8).
+  assert(
+    !/\bconsents\b/i.test(code),
+    "…and writes no consent row: that is the route's, behind a session",
+  );
+});
+
+Deno.test("the metadata-trim migration allow-lists four keys, backfills existing rows, and revokes client execute (R-C1b-exec-8)", async () => {
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260922000100_trim_user_metadata.sql", import.meta.url),
+  );
+  // Same reasoning as the OAuth test above: the comment block names the six dropped keys at
+  // length, so an assertion over the raw text would be an assertion about the prose, not the code.
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+
+  assert(!/create\s+table/i.test(code), "this migration creates no table");
+  assert(!/create\s+policy/i.test(code), "…and no policy");
+
+  assert(
+    code.includes("create or replace function public.trimmed_user_metadata"),
+    "the reduction helper exists",
+  );
+  assert(
+    code.includes("create or replace function public.trim_user_metadata() returns trigger"),
+    "the trigger function exists",
+  );
+  assert(
+    /create\s+trigger\s+on_auth_user_metadata[\s\S]*?before\s+insert\s+or\s+update\s+of\s+raw_user_meta_data\s+on\s+auth\.users/i
+      .test(code),
+    "the trigger fires before insert or update of raw_user_meta_data",
+  );
+
+  // The allow-list is exactly these four keys — asserted both ways, so neither a missing key nor
+  // an extra one can pass silently, and none of the six dropped keys survives in it.
+  for (const key of ["email", "email_verified", "phone_verified", "sub"]) {
+    assert(code.includes(`'${key}'`), `the allow-list is missing '${key}'`);
+  }
+  for (const dropped of ["avatar_url", "picture", "full_name", "name"]) {
+    assert(
+      !code.includes(`'${dropped}'`),
+      `${dropped} must not survive in the allow-list — it is one of the dropped keys`,
+    );
+  }
+
+  assert(
+    /update\s+auth\.users\s+set\s+raw_user_meta_data\s*=\s*public\.trimmed_user_metadata\(raw_user_meta_data\)/i
+      .test(code),
+    "the one-time backfill update is present, using the same reduction",
+  );
+
+  const trigger = code.slice(code.indexOf("create or replace function public.trim_user_metadata()"));
+  assert(/security\s+definer/i.test(trigger), "the trigger function is SECURITY DEFINER");
+  assert(
+    /set\s+search_path\s*=\s*public\s*,\s*pg_temp/i.test(trigger),
+    "search_path is fixed, not inherited from the caller",
+  );
+
+  const revoke = code.match(
+    /revoke\s+execute\s+on\s+function\s+public\.trim_user_metadata\(\)\s+from\s+([^;]+);/i,
+  );
+  assert(revoke !== null, "execute on the trigger function is never revoked from the client roles");
+  const from = revoke![1].toLowerCase();
+  assert(
+    from.includes("anon") && from.includes("authenticated"),
+    "execute is not revoked from both anon and authenticated",
+  );
+});
+
+Deno.test("the metadata-trim grant follow-up gives supabase_auth_admin explicit EXECUTE on both functions (R-C1b-exec-8 re-review)", async () => {
+  // 20260922000100_trim_user_metadata.sql is already applied on staging and is never edited
+  // (migrations are forward-only); this is the belt, in its own file, same shape as
+  // 20260911000300_google_privileges.sql following 20260911000200_google.sql. It creates no
+  // function of its own, so it adds nothing to `migrations/migrations_test.ts`'s parsed-function
+  // count — only these two grants.
+  const sql = await Deno.readTextFile(
+    new URL("./migrations/20260922000200_trim_user_metadata_grant.sql", import.meta.url),
+  );
+  const code = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+
+  assert(!/create\s+(table|function|policy|trigger)/i.test(code), "this migration creates nothing");
+  assert(
+    /grant\s+execute\s+on\s+function\s+public\.trimmed_user_metadata\(jsonb\)\s+to\s+supabase_auth_admin\s*;/i
+      .test(code),
+    "no explicit EXECUTE grant to supabase_auth_admin on trimmed_user_metadata",
+  );
+  assert(
+    /grant\s+execute\s+on\s+function\s+public\.trim_user_metadata\(\)\s+to\s+supabase_auth_admin\s*;/i
+      .test(code),
+    "no explicit EXECUTE grant to supabase_auth_admin on trim_user_metadata",
+  );
+});

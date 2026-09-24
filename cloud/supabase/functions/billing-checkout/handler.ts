@@ -26,7 +26,9 @@ export interface ConsentRecord {
 
 export interface Deps {
   verify: VerifyToken;
-  getAccount: (accountId: string) => Promise<{ email: string; stripe_customer_id: string | null } | null>;
+  getAccount: (
+    accountId: string,
+  ) => Promise<{ email: string; stripe_customer_id: string | null; age_attested_at: string | null } | null>;
   saveCustomerId: (accountId: string, customerId: string) => Promise<void>;
   recordConsent: (c: ConsentRecord) => Promise<void>;
   stripe: StripePost;
@@ -53,6 +55,9 @@ export function checkoutForm(a: {
     // R2: a 7-day trial with the card taken up front.
     "subscription_data[trial_period_days]": "7",
     "payment_method_collection": "always",
+    // §8, R-C1b-2: Stripe's own promotion-code field, beside a card that is still taken up front.
+    // The code is typed on Stripe's page; nothing in this repo names a code, a coupon or a percentage.
+    "allow_promotion_codes": "true",
     // Stripe Tax needs an address to decide Kentucky's 6% (legal note §8).
     "automatic_tax[enabled]": "true",
     "customer_update[address]": "auto",
@@ -89,6 +94,10 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
 
   const account = await deps.getAccount(user.id);
   if (!account) throw fail(404, "no such account");
+  // Spec §5.1: migration 20260917000100 stopped the auth trigger raising on an OAuth sign-up, so
+  // the 18+ gate lives here now — before the Stripe customer, before the consent row, before the
+  // session. `POST /account/consent` is what fills it, and the app calls that on every sign-in.
+  if (!account.age_attested_at) throw fail(403, "the 18+ attestation is missing — sign in again");
 
   let customer = account.stripe_customer_id;
   if (!customer) {

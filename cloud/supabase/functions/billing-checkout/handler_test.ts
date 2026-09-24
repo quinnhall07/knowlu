@@ -18,7 +18,14 @@ Deno.test("the Checkout form carries the trial, the card, the tax and the terms 
   // R2: seven days, and the card up front — a wall before the first session costs more than a week
   // of inference, and a trial with no card is a wall in a different place.
   assertEquals(form["subscription_data[trial_period_days]"], "7");
+  // R-C1b-2. `always` STAYS: `if_required` collects a card only when the first invoice has an
+  // amount due, and `subscription_data[trial_period_days]` makes that invoice zero for every
+  // subscription — so it would take a card from nobody and falsify `site/terms.html`'s bolded
+  // "your card taken at sign-up", the version each `auto_renew` consent row is stamped with.
   assertEquals(form["payment_method_collection"], "always");
+  // Spec §8: the promotion-code field on Stripe's own page. The code is Quinn's to create in the
+  // dashboard (P3); nothing in this repo names a code, a coupon id or a percentage.
+  assertEquals(form["allow_promotion_codes"], "true");
   // §9, sales tax: Stripe Tax decides Kentucky's 6%, and an address is what lets it.
   assertEquals(form["automatic_tax[enabled]"], "true");
   assertEquals(form["customer_update[address]"], "auto");
@@ -40,7 +47,12 @@ Deno.test("an account with no Stripe customer gets one, once, and it is saved", 
     }),
     {
       verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
-      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null }),
+      getAccount: () =>
+        Promise.resolve({
+          email: "a@example.invalid",
+          stripe_customer_id: null,
+          age_attested_at: "2026-09-17T12:00:00Z",
+        }),
       saveCustomerId: (a, c) => {
         saved = [a, c];
         return Promise.resolve();
@@ -76,7 +88,12 @@ Deno.test("the auto-renew consent is logged with its version and the price, befo
     }),
     {
       verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
-      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: "cus_1" }),
+      getAccount: () =>
+        Promise.resolve({
+          email: "a@example.invalid",
+          stripe_customer_id: "cus_1",
+          age_attested_at: "2026-09-17T12:00:00Z",
+        }),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: (c) => {
         consents.push(c);
@@ -111,7 +128,12 @@ Deno.test("R-C1-59 (M4): a malformed x-forwarded-for never 502s a checkout — t
     }),
     {
       verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
-      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: "cus_1" }),
+      getAccount: () =>
+        Promise.resolve({
+          email: "a@example.invalid",
+          stripe_customer_id: "cus_1",
+          age_attested_at: "2026-09-17T12:00:00Z",
+        }),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: (c) => {
         consents.push(c);
@@ -139,7 +161,12 @@ Deno.test("an unknown plan is 400 and never reaches Stripe", async () => {
     }),
     {
       verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
-      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: "cus_1" }),
+      getAccount: () =>
+        Promise.resolve({
+          email: "a@example.invalid",
+          stripe_customer_id: "cus_1",
+          age_attested_at: "2026-09-17T12:00:00Z",
+        }),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: () => Promise.resolve(),
       stripe: () => {
@@ -154,4 +181,64 @@ Deno.test("an unknown plan is 400 and never reaches Stripe", async () => {
   ).catch((e) => e as Response);
   assertEquals(res.status, 400);
   assert(!touched);
+});
+
+Deno.test("an account that never attested to being 18 cannot reach Stripe", async () => {
+  let touched = false;
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ plan: "monthly", terms_version: "2026-09-10" }),
+    }),
+    {
+      verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
+      // Migration 20260917000100 lets an OAuth sign-up land here with a null attestation; this is
+      // the server-side tooth that replaced the trigger's `raise`.
+      getAccount: () =>
+        Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null, age_attested_at: null }),
+      saveCustomerId: () => Promise.resolve(),
+      recordConsent: () => {
+        touched = true;
+        return Promise.resolve();
+      },
+      stripe: () => {
+        touched = true;
+        return Promise.resolve({});
+      },
+      priceFor: () => "price_monthly",
+      priceCentsFor: () => 999,
+      successUrl: "https://knowlu.com/subscribed.html",
+      cancelUrl: "https://knowlu.com/index.html",
+    },
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 403);
+  assert(!touched, "no customer, no consent row, no session");
+});
+
+Deno.test("an account that did attest goes through exactly as before", async () => {
+  const res = await handle(
+    new Request("http://127.0.0.1:1/", {
+      method: "POST",
+      headers: { authorization: "Bearer good" },
+      body: JSON.stringify({ plan: "monthly", terms_version: "2026-09-10" }),
+    }),
+    {
+      verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
+      getAccount: () =>
+        Promise.resolve({
+          email: "a@example.invalid",
+          stripe_customer_id: "cus_1",
+          age_attested_at: "2026-09-17T12:00:00Z",
+        }),
+      saveCustomerId: () => Promise.resolve(),
+      recordConsent: () => Promise.resolve(),
+      stripe: () => Promise.resolve({ id: "cs_4", url: "https://checkout.stripe.com/c/cs_4" }),
+      priceFor: () => "price_monthly",
+      priceCentsFor: () => 999,
+      successUrl: "https://knowlu.com/subscribed.html",
+      cancelUrl: "https://knowlu.com/index.html",
+    },
+  );
+  assertEquals(res.status, 200);
 });

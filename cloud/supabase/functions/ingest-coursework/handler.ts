@@ -132,6 +132,10 @@ export function ingestHandler(entitle: Entitle): (req: Request) => Promise<Respo
         const name = String(source.name ?? "");
         const own: string[] = [];
         let items: Assignment[] = [];
+        // R-C1c-10: `proposals` is shared across every source in this request, so whether THIS
+        // source found a proposal is what changed between these two counts — never whether some
+        // other source in the same request did.
+        const proposalsBefore = proposals.length;
         try {
           if (name === "zybooks") items = pickZybooks(source, timeZone, own, proposals);
           else if (name === "vhl") {
@@ -176,7 +180,13 @@ export function ingestHandler(entitle: Entitle): (req: Request) => Promise<Respo
         }
         warnings.push(...own.map((w) => `${name}: ${w}`));
         if (items.length === 0) {
-          warnings.push(`${name}: 0 assignments parsed; treating as failure`);
+          // R-C1c-10: an unmapped book or section is a question, not a failed parse — the parser
+          // found work, and this source's own proposal (just pushed above) is the honest channel
+          // for it. Only a source that produced neither an item nor a proposal is the dead
+          // session or empty semester this rule exists to catch (coursework spec §9).
+          if (proposals.length === proposalsBefore) {
+            warnings.push(`${name}: 0 assignments parsed; treating as failure`);
+          }
           continue;
         }
         assignments.push(...items);
