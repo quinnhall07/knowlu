@@ -835,7 +835,7 @@ fn commitment_passes(
         true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
         false => file.clone(),
     };
-    let (changes, change_warnings) = cm::detect_changes(&watched, &set, &codes, &names, &fresh_keys, today);
+    let (changes, change_warnings) = cm::detect_changes(&watched, &set, &codes, &names, &fresh_keys, today, journal);
     warnings.extend(change_warnings);
 
     let held = cm::successor_keys(vault);
@@ -2640,8 +2640,23 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
 
     fn commitment_note(vault: &Path, file: &str, front: &str) {
         std::fs::create_dir_all(vault.join("commitments")).unwrap();
-        pystr::write_text(&vault.join("commitments").join(file), &format!("---\n{front}---\n\nInvented.\n"))
-            .unwrap();
+        let text = format!("---\n{front}---\n\nInvented.\n");
+        pystr::write_text(&vault.join("commitments").join(file), &text).unwrap();
+        // A real confirmed commitments note is minted by `create_confirmed` (actor
+        // `commitments::CARD_ACTOR`) and is already in the journal the moment any rank first sees
+        // it. Journal this fixture the same way, or `detect_external` reads it as a hand edit
+        // nobody journaled and judge-once (final-fix-report m3) locks every field a
+        // change-detection test needs to see move.
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        let id = crate::yaml::get(&meta, "id").and_then(crate::yaml::text).unwrap();
+        let whole = crate::yaml::to_json(&serde_yaml_ng::Value::Mapping(meta));
+        let rel_path = format!("commitments/{file}");
+        let mut spec = crate::journal::NewRecord::new("create", &rel_path, crate::commitments::CARD_ACTOR, "cli");
+        spec.id = Some(&id);
+        spec.new = whole;
+        spec.ts = Some("2026-09-01T00:00:00.000Z".into());
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
     }
 
     /// `CS 100`, confirmed, exactly as `cs100_item` meets.

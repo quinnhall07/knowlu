@@ -2976,6 +2976,13 @@ fn to_value(json: serde_json::Value) -> Value {
     crate::yaml::from_json(&json)
 }
 
+/// The judge-once rule, per field (final-fix-report m3): did the journal show `quinn` — not an
+/// agent, not the settlement — setting this field on this note? `journal::human_set` is the same
+/// query `write::write_literals` guards judged fields with; a change card is judge-once too.
+fn is_human_set(journal: &mut crate::journal::Journal, note_id: &str, field: &str) -> bool {
+    journal.human_set(note_id, field).is_some()
+}
+
 fn text_value(text: Option<&str>) -> Value {
     text.map_or(Value::Null, |t| Value::String(t.to_string()))
 }
@@ -3005,6 +3012,13 @@ fn text_value(text: Option<&str>) -> Value {
 ///
 /// A note whose `until` is before `today` is finished and not watched. `was` holds the note's
 /// current value of every changed field, an absent one as `null`; no field is proposed as `null`.
+///
+/// **Judge-once, per field (final-fix-report m3):** a field the journal shows the student set by
+/// hand on the note — `journal::human_set`, the same query `write::write_literals` uses — is never
+/// proposed back, on the `changed` or the `ended` path. A field the settlement itself wrote
+/// (`agent:commitments`, not `quinn`) is not a human set and is still watched, so a series whose
+/// calendar end moves still gets a card. Every other field of the same note is still watched, so a
+/// human-set `where` beside a calendar `meets` change still proposes `meets` alone.
 pub fn detect_changes(
     file: &SeriesFile,
     set: &Commitments,
@@ -3012,6 +3026,7 @@ pub fn detect_changes(
     planning: &[String],
     fresh: &BTreeSet<String>,
     today: Date,
+    journal: &mut crate::journal::Journal,
 ) -> (Vec<Change>, Vec<String>) {
     let by_key = file.by_key();
     let live: Vec<Candidate> = by_key
@@ -3102,12 +3117,17 @@ pub fn detect_changes(
                 }
                 let mut change = Mapping::new();
                 let mut was = Mapping::new();
-                if !series.meets.is_empty() && meet_set(&series.meets) != meet_set(&note.meets) {
+                if !series.meets.is_empty()
+                    && meet_set(&series.meets) != meet_set(&note.meets)
+                    && !is_human_set(journal, &note.id, "meets")
+                {
                     change.insert("meets".into(), to_value(meets_json(&series.meets)));
                     was.insert("meets".into(), to_value(meets_json(&note.meets)));
                 }
                 if let Some(place) = series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
-                    if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
+                    if note.where_.as_deref().map(str::trim) != Some(place.trim())
+                        && !is_human_set(journal, &note.id, "where")
+                    {
                         change.insert("where".into(), Value::String(place.trim().to_string()));
                         was.insert("where".into(), text_value(note.where_.as_deref()));
                     }
@@ -3116,7 +3136,7 @@ pub fn detect_changes(
                     let continues = live.iter().any(|c| {
                         c.key != key && c.carries(&sig) && c.series.until.is_none_or(|other| other > until)
                     });
-                    if !continues {
+                    if !continues && !is_human_set(journal, &note.id, "until") {
                         change.insert("until".into(), Value::String(until.to_string()));
                         was.insert("until".into(), to_value(date_json(note.until)));
                     }
@@ -3163,6 +3183,9 @@ pub fn detect_changes(
                     continue;
                 };
                 if note.until.is_some_and(|u| u <= end) {
+                    continue;
+                }
+                if is_human_set(journal, &note.id, "until") {
                     continue;
                 }
                 let mut change = Mapping::new();
@@ -8400,8 +8423,23 @@ mod change_tests {
         cals.iter().map(|c| c.to_string()).collect()
     }
 
+    /// `detect_on`, with the caller's own journal — for the judge-once tests, which need a
+    /// specific record on the note's id.
+    fn detect_on_with_journal(
+        file: &SeriesFile,
+        set: &Commitments,
+        cals: &[&str],
+        today: Date,
+        journal: &mut Journal,
+    ) -> (Vec<Change>, Vec<String>) {
+        detect_changes(file, set, &codes(), &[], &fresh(cals), today, journal)
+    }
+
     fn detect_on(file: &SeriesFile, set: &Commitments, cals: &[&str], today: Date) -> (Vec<Change>, Vec<String>) {
-        detect_changes(file, set, &codes(), &[], &fresh(cals), today)
+        // No test here cares about judge-once, so the journal is empty by construction: a vault
+        // path nothing ever wrote to.
+        let mut journal = Journal::new(PathBuf::from("knowlu-p12-no-journal"));
+        detect_on_with_journal(file, set, cals, today, &mut journal)
     }
 
     fn detect(file: &SeriesFile, set: &Commitments, cals: &[&str]) -> (Vec<Change>, Vec<String>) {
@@ -8524,6 +8562,82 @@ mod change_tests {
             assert_eq!(js(&changes[0].change), json!({"until": until.to_string()}));
             assert_eq!(js(&changes[0].was), json!({"until": "2026-12-04"}));
         }
+    }
+
+    // --- judge-once (final-fix-report m3) ---------------------------------------------------
+
+    /// A `set` record on `note.id`, as `write::write_literals` journals the dashboard's
+    /// `set_fields` — the same shape `journal::human_set` is built to find.
+    fn quinn_set(journal: &mut Journal, id: &str, field: &str, ts: &str) {
+        let mut spec = crate::journal::NewRecord::new("set", "commitments/cs-100.md", "quinn", "dashboard");
+        spec.id = Some(id);
+        spec.field = Some(field);
+        spec.new = serde_json::Value::String("x".into());
+        spec.ts = Some(ts.to_string());
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        journal.append(&mut rec).unwrap();
+    }
+
+    #[test]
+    fn a_human_set_until_is_never_proposed_back() {
+        // The student ended the class early by hand; the series is still live and runs past it.
+        let v = vault("judge-once-until");
+        let mut journal = Journal::new(v.as_path());
+        let mut n = note(OLD);
+        n.until = Some(date(2026, 10, 10));
+        quinn_set(&mut journal, &n.id, "until", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let (changes, warnings) =
+            detect_on_with_journal(&file_of(vec![cs100(OLD, GOOGLE)]), &set, &[GOOGLE], TODAY, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(changes.is_empty(), "{changes:?}");
+    }
+
+    #[test]
+    fn an_agent_set_until_is_still_proposed_when_the_calendar_moves() {
+        // Not the student: the settlement minted this note with `until` already on it, the
+        // create's `new` carrying the field (final-fix-report m3 — this is judge-once too, so it
+        // must tell the settlement's hand from the student's).
+        let v = vault("judge-once-agent-until");
+        let mut journal = Journal::new(v.as_path());
+        let mut n = note(OLD);
+        n.until = Some(date(2026, 10, 10));
+        let mut spec = crate::journal::NewRecord::new("create", "commitments/cs-100.md", CARD_ACTOR, "cli");
+        spec.id = Some(n.id.as_str());
+        spec.new = serde_json::json!({"until": "2026-10-10"});
+        spec.ts = Some("2026-09-01T12:00:00.000Z".into());
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        journal.append(&mut rec).unwrap();
+        let set = set_of(vec![n]);
+        let (changes, _) =
+            detect_on_with_journal(&file_of(vec![cs100(OLD, GOOGLE)]), &set, &[GOOGLE], TODAY, &mut journal);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(js(&changes[0].change), json!({"until": "2026-12-04"}));
+        assert_eq!(js(&changes[0].was), json!({"until": "2026-10-10"}));
+    }
+
+    #[test]
+    fn a_human_set_where_still_lets_a_meets_change_through() {
+        // The student corrected the room by hand; the calendar also moved the meeting time. Only
+        // the field the student did not set is still watched.
+        let v = vault("judge-once-where");
+        let mut journal = Journal::new(v.as_path());
+        let n = note(OLD);
+        quinn_set(&mut journal, &n.id, "where", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        moved.where_ = Some("Room 2".into());
+        let (changes, _) = detect_on_with_journal(&file_of(vec![moved]), &set, &[GOOGLE], TODAY, &mut journal);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            js(&changes[0].change),
+            json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}]})
+        );
+        assert_eq!(
+            js(&changes[0].was),
+            json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]})
+        );
     }
 
     // --- ended -----------------------------------------------------------------------------

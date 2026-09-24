@@ -4673,9 +4673,9 @@ mod tests {
             let set = commitments::load(vault);
             let (codes, _) = commitments::Codes::load(vault);
             let fresh: BTreeSet<String> = file.calendars.keys().cloned().collect();
-            let (changes, _) = commitments::detect_changes(file, &set, &codes, &[], &fresh, TODAY);
-            let ctx = WriteContext::new("agent:rank", "cli");
             let mut journal = Journal::new(vault);
+            let (changes, _) = commitments::detect_changes(file, &set, &codes, &[], &fresh, TODAY, &mut journal);
+            let ctx = WriteContext::new("agent:rank", "cli");
             commitments::emit_checks(vault, &[], &changes, TODAY, 15, &ctx, &mut journal);
         }
 
