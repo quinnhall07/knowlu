@@ -1012,6 +1012,24 @@ pub fn commitments_report_with(
     CommitmentsReport { proposals, uncovered, warnings }
 }
 
+/// Phase-2 spec §3: `commitments --confirm`. Parses the input, pins `today` (the vault's zone
+/// when none is given) and runs `commitments::confirm` under `ctx`. It fetches nothing: no
+/// calendar fetcher is built and `config/cloud.yaml` is not read. `Err` is the exit-2 message.
+pub fn commitments_confirm(
+    vault: &Path,
+    today_iso: Option<&str>,
+    input: &str,
+    ctx: &WriteContext,
+) -> Result<crate::commitments::ConfirmReport, String> {
+    let input = crate::commitments::parse_confirm(input)?;
+    let today = match today_iso {
+        Some(iso) => Date::strptime("%Y-%m-%d", iso).map_err(|_| format!("bad --today {iso:?}"))?,
+        None => Timestamp::now().to_zoned(vault_zone(vault)).date(),
+    };
+    let mut journal = Journal::new(vault);
+    crate::commitments::confirm(vault, &input, today, ctx, &mut journal)
+}
+
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
 fn first_with_count(label: &str, warnings: &[String]) -> Option<String> {
     let first = warnings.first()?;

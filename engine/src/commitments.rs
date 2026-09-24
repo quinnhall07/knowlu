@@ -4131,17 +4131,23 @@ fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
 
 /// `commitments --confirm` (phase-2 spec §3): the screen's answers, written under `ctx` (the
 /// console's human context; parent §2.5). Every row is re-derived from the series file
-/// ([`stored_proposals`]). Nothing from the app becomes a field value but `level`.
+/// ([`stored_proposals`]). Nothing from the app becomes a field value but `level` and the
+/// window.
 ///
+/// The window is validated first ([`parse_window`], strictly; one day at least, Plan ruling Q4-b).
+/// If it is invalid, this returns `Err` before any write. Then, in order (Plan ruling Q4-d):
 /// - **`mine`** → [`create_confirmed_as`] at the chosen level. A key a confirmed note already holds,
 ///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
 /// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
 ///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
 ///   silently.
-/// - A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
-///   write that fails is reported, and the rest still run.
+/// - **the window** → the planning day, created when there is none ([`create_confirmed_as`]).
+///   Otherwise its one `window:` line is written through `write_literals`, a human edit that
+///   `journal.human_set` protects. An equal window writes nothing (`unchanged`).
 ///
-/// No card is filed, so nothing is charged to the cap.
+/// A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
+/// write that fails is reported, and the rest still run. No card is filed, so nothing is charged
+/// to the cap.
 pub fn confirm(
     vault: &Path,
     input: &ConfirmInput,
@@ -4149,6 +4155,18 @@ pub fn confirm(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<ConfirmReport, String> {
+    let window = match &input.window {
+        None => None,
+        Some(raw) => {
+            let parsed = parse_window(raw)?;
+            if parsed.iter().all(Option::is_none) {
+                return Err(format!("window {raw:?} names no day"));
+            }
+            let value: Value = serde_yaml_ng::from_str(raw).map_err(|_| format!("{raw:?} is not a flow sequence"))?;
+            Some((parsed, value))
+        }
+    };
+
     let stored = stored_proposals(vault, today);
     let codes = &stored.codes;
     let mut report = ConfirmReport::default();
@@ -4205,6 +4223,32 @@ pub fn confirm(
                 Ok(None) => {}
                 Err(e) => report.warnings.push(format!("{twin}: marker not written ({e})")),
             }
+        }
+    }
+
+    if let Some((parsed, value)) = window {
+        let set = load(vault);
+        let outcome: Result<&'static str, String> = match &set.planning_day {
+            Some(_) if set.window == parsed => Ok("unchanged"),
+            Some(day) => {
+                let rel = day.path.to_string_lossy().replace('\\', "/");
+                let literals = vec![("window".to_string(), crate::write::to_literal(&value))];
+                crate::write::write_literals(vault, &rel, &literals, ctx, journal, &crate::write::WriteOpts::default())
+                    .map(|_| "updated")
+                    .map_err(|e| format!("planning day not written ({e})"))
+            }
+            None => {
+                let mut map = Mapping::new();
+                map.insert(Value::String("kind".into()), Value::String(PLANNING_DAY.into()));
+                map.insert(Value::String("window".into()), value);
+                create_confirmed_as(vault, &map, "", today, ctx, journal)
+                    .map(|_| "created")
+                    .map_err(|e| format!("planning day not written ({e})"))
+            }
+        };
+        match outcome {
+            Ok(done) => report.window = Some(done),
+            Err(why) => report.warnings.push(why),
         }
     }
     Ok(report)
@@ -9761,5 +9805,58 @@ mod phase2_tests {
         let set = load(&v);
         assert!(set.declined.contains("gcal-series:cs100") && set.declined.contains("ics-series:cs100-outlook"));
         assert!(!set.declined.contains("gcal-series:chess"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q4 — the window (D4, D5, §3): the planning day, `--confirm`, the no-network pin.
+    // -----------------------------------------------------------------------------------------
+
+    const WEEKDAYS_8_22: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]";
+
+    #[test]
+    fn a_window_creates_the_planning_day_as_the_human() {
+        let v = week_vault("wincreate");
+        let report = run(&v, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        assert_eq!(report.window, Some("created"));
+        let set = load(&v);
+        let day = set.planning_day.expect("a planning-day note");
+        assert_eq!(day.path, PathBuf::from("commitments/planning-day.md"));
+        assert_eq!(set.window[0], Some((t(8, 0), t(22, 0))));
+        assert_eq!(set.window[5], None, "Saturday keeps the template");
+        let create = journal_records(&v).into_iter().find(|r| r.get("op").and_then(|o| o.as_str()) == Some("create")).unwrap();
+        assert_eq!(create.get("actor").and_then(|a| a.as_str()), Some("quinn"));
+    }
+
+    #[test]
+    fn a_window_edit_on_an_existing_note_changes_one_line() {
+        let v = week_vault("winedit");
+        run(&v, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        let path = v.join(FOLDER).join("planning-day.md");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let later = "[{days: [mon, tue, wed, thu, fri], start: \"07:30\", end: \"22:00\"}, {days: [sat, sun], start: \"10:00\", end: \"22:00\"}]";
+        let report = run(&v, &input(&[], &[], Some(later)));
+        assert_eq!(report.window, Some("updated"));
+        let after = std::fs::read_to_string(&path).unwrap();
+        let changed: Vec<(&str, &str)> = before.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert!(changed[0].1.starts_with("window: "), "{changed:?}");
+        assert_eq!(load(&v).window[5], Some((t(10, 0), t(22, 0))));
+        let set = journal_records(&v).into_iter().find(|r| r.get("op").and_then(|o| o.as_str()) == Some("set")).unwrap();
+        assert_eq!(set.get("field").and_then(|f| f.as_str()), Some("window"));
+        assert_eq!(set.get("actor").and_then(|a| a.as_str()), Some("quinn"), "a human edit journal.human_set protects");
+        assert_eq!(run(&v, &input(&[], &[], Some(later))).window, Some("unchanged"));
+    }
+
+    #[test]
+    fn an_invalid_window_writes_nothing_at_all() {
+        let v = week_vault("winbad");
+        let bad = "[{days: [mon], start: \"15:00\", end: \"14:00\"}]";
+        let got = confirm(&v, &input(&[("gcal-series:cs100", "hard")], &["gcal-series:chess"], Some(bad)), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(got.unwrap_err().contains("planning day mon"));
+        assert!(files(&v, FOLDER).is_empty(), "not even the rows");
+        assert!(journal_records(&v).is_empty());
+        let empty = confirm(&v, &input(&[], &[], Some("[]")), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(empty.is_err(), "a window naming no day is invalid (Q4-b)");
     }
 }

@@ -63,7 +63,10 @@ enum Command {
     },
     /// Fetch, refresh the series file, and print the current commitment proposals — the
     /// phase-2 confirm screen's data source (spec §5.1, R14). Writes no note, no card and no
-    /// journal record; `state/calendar.md` is untouched. Always exits 0.
+    /// journal record; `state/calendar.md` is untouched. Always exits 0. With `--confirm`
+    /// (phase-2 spec §3) it fetches nothing: it writes the screen's answers from a JSON file,
+    /// prints `{created, declined, warnings, window}`, and exits 2 on unreadable input or an
+    /// invalid window, having written nothing.
     Commitments {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
@@ -72,6 +75,13 @@ enum Command {
         today: Option<String>,
         #[arg(long)]
         json: bool,
+        /// `{"mine": [{"source_uid", "level"}], "not_mine": [...], "window": "<flow sequence>"}`.
+        #[arg(long)]
+        confirm: Option<PathBuf>,
+        #[arg(long, default_value = "quinn")]
+        actor: String,
+        #[arg(long, default_value = "dashboard", value_parser = journal::VIAS)]
+        via: String,
     },
     /// Sync zyBooks + VHL coursework into tasks/. Ports `python -m engine.coursework`.
     ///
@@ -357,7 +367,27 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         // commitments command: begin
-        Command::Commitments { vault, today, json } => {
+        Command::Commitments { vault, today, json, confirm, actor, via } => {
+            if let Some(path) = confirm {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        eprintln!("knowlu-engine: --confirm {}: {err}", path.display());
+                        return ExitCode::from(2);
+                    }
+                };
+                let ctx = write::WriteContext::new(&actor, &via);
+                return match cli::commitments_confirm(&vault, today.as_deref(), &text, &ctx) {
+                    Ok(report) => {
+                        println!("{}", knowlu_engine::ledger::dumps_value(&report.to_json()));
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("knowlu-engine: {err}");
+                        ExitCode::from(2)
+                    }
+                };
+            }
             let report = cli::commitments_report(&vault, today.as_deref());
             if json {
                 // Plan ruling Q2-b: the screen's rows in §5.2's card order.
