@@ -2679,5 +2679,28 @@ fn a_cloud_vault_with_no_url_does_not_exit_one_just_for_having_no_url() {
     let cloud_at = src.find("let cloud = crate::cloudmodel::resolve(vault).ok();").expect("the cloud resolve");
     let refusal_at = src.find(r#"return (1, vec!["ingest: no ics_url configured".to_string()]);"#).expect("the refusal");
     assert!(cloud_at < refusal_at, "the empty-URL refusal must stay AFTER the cloud attempt");
-    assert!(src.contains("no LMS feed on this account — skipped"), "a 404 is a named skip at exit 0");
+    // Task 11 review, M4: `ingest.rs`'s own `#[cfg(test)] mod tests` asserts this same literal as an
+    // expected value, so a check over the WHOLE file cannot fail even if production dropped it —
+    // only the module's own test would. Slicing off `mod tests` first means this line can only be
+    // satisfied by `cloud_ics_failure_with_no_local_url` itself.
+    let production = src.split("#[cfg(test)]\nmod tests").next().expect("ingest.rs always has a test module");
+    assert!(production.contains("no LMS feed on this account — skipped"), "a 404 is a named skip at exit 0, in production code");
+}
+
+/// Task 11 review, I4 and §5(v): `sync.rs`'s own module doc used to list "a machine name" among what
+/// never leaves the device, which was false — every journal record carries its own `device` field
+/// (the raw `COMPUTERNAME`), and that record's body travels to the account verbatim. Only the
+/// separate `device` COLUMN is hashed. This is a documentation fix, not a behaviour change — the
+/// behaviour itself is already proved by `a_push_carries_no_bearer_no_credential_target_and_no_app_data_path`
+/// (which deliberately does not assert the hostname) and by `sync.rs`'s own
+/// `a_device_token_is_sixteen_hex_stable_and_not_the_hostname`.
+#[test]
+fn the_module_doc_no_longer_claims_a_machine_name_never_leaves() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("sync.rs"),
+    ).expect("sync.rs");
+    let doc = src.split("\nuse ").next().unwrap_or(&src);
+    assert!(!doc.contains("an app-data path or a machine name"), "the false claim is still published: {doc}");
+    assert!(doc.contains("A machine name does leave"), "the correction is not in the module doc: {doc}");
+    assert!(doc.contains("COLUMN stays opaque"), "the doc still distinguishes the column from the body");
 }

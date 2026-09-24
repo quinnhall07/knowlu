@@ -4,9 +4,13 @@
 //! wrote it, and the whole text of every note that changed. The account is the source of truth for
 //! that data (amendment ruling 2) and this folder is a mirror of it; our service can read both, and
 //! says so on the privacy page in the words Quinn and the lawyer approved. What does **not** leave
-//! is a portal password, a session token in a log, an app-data path or a machine name: the `device`
-//! column is `sha256(account_id + "\n" + hostname)` truncated to sixteen hex characters, which is an
-//! identity for "the same machine as last time" and nothing else.
+//! is a portal password, a session token in a log or an app-data path. **A machine name does leave**
+//! (Task 11 review, I4; correction R-C3'-exec-40): `journal::device_name()` (`COMPUTERNAME`) is
+//! stamped into every record's own `device` field, and that record's `body` travels to
+//! `sync_records`/`sync_notes` verbatim, so the raw name is in there. Only the separate `device`
+//! COLUMN stays opaque — `sha256(account_id + "\n" + hostname)` truncated to sixteen hex characters,
+//! an identity for "the same machine as last time" and nothing else — and it is that column, never
+//! the body, that this module keeps a machine's name out of.
 //!
 //! **What this module is not.** It is transport, never judgment: `rank` does not reach it and
 //! neither does anything under `cli.rs` except the `sync` subcommand itself. Nothing here calls a

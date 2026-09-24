@@ -46,4 +46,43 @@ fn the_privacy_page_describes_the_account_vault_and_no_switch() {
     assert!(!privacy.contains("separate switch"), "the page still promises a switch nobody built");
     assert!(privacy.contains("encrypted at rest"), "and the new promise is spelled out");
     assert!(privacy.contains("Delete my data"), "with the way out named");
+    // Task 11 review, M3: `encrypted at rest` and `Delete my data` both predate this page's new
+    // content (the Security section and the Delete bullet), so a later edit that deleted the whole
+    // (d) entry and the (g) bullet would still pass the four lines above. These two are new here.
+    assert!(privacy.contains("<dt>Your tasks and notes</dt>"), "the new collection entry is on the page");
+    assert!(privacy.contains("400 days"), "the new retention bullet names its own number");
+}
+
+/// Task 11 review amendment (R-C3'-exec-40), wording file §5: three page sentences the review found
+/// false or incomplete, plus the disclosure §5(iii) adds — none of which §2's own edits touched.
+#[test]
+fn the_review_amendments_i2_i3_and_i4_are_on_the_page() {
+    let privacy = fs::read_to_string(site("privacy.html")).expect("site/privacy.html");
+    // I2: "Your corrections" no longer claims a title correction is not recorded ANYWHERE — only
+    // that it is not kept in THIS set, because the journal under "Your tasks and notes" keeps every
+    // title change so the student's computers agree.
+    assert!(!privacy.contains("a correction to a <em>title</em> is not recorded at all"), "the old, page-wide claim is still published");
+    assert!(privacy.contains("is not kept at all"), "the corrections set's own, narrower claim is on the page");
+    assert!(privacy.contains("The journal described under <em>Your tasks and notes</em> is separate"), "and it points at the journal that does keep it");
+    // I3: the six-companies paragraph no longer claims the text is simply let go — it is not kept by
+    // either side, which is the promise (e) actually makes.
+    assert!(!privacy.contains("We hold the text for the length of the call and then let it go"), "the old, stronger claim is still published");
+    assert!(privacy.contains("kept by neither of them"), "the corrected claim is on the page");
+    // I4 (M3's fourth assertion): every synced journal record carries the computer's name, and the
+    // page now says so, in the same entry that discloses the journal at all.
+    assert!(
+        privacy.contains("Each change in the journal also carries the name Windows gives the computer it was made on"),
+        "the computer-name disclosure is on the page"
+    );
+    // §5(iv): the retention bullet's own "except…" clause is scoped to what `keep` actually is
+    // (a human `set`/`create`), not to "the changes you made yourself" — Gmail-derived and other
+    // system-made entries are pruned at 400 days same as anything else.
+    assert!(
+        !privacy.contains("except the changes you made yourself, which stay as long as the account does"),
+        "the old, over-broad retention clause is still published"
+    );
+    assert!(
+        privacy.contains("except the entries that set a value or create a note other than by Knowlu's automatic judgments"),
+        "the corrected retention clause is on the page"
+    );
 }
