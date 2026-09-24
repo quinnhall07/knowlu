@@ -119,7 +119,8 @@ pub struct RunSummary {
     pub ok: bool,
     /// The two engine steps (coursework, rank) both exited 0 — the signal the tray's warn colour
     /// and the housekeeping thread's "last slot failed" check use, so a transient sync collision
-    /// or an offline git fetch never paints the tray as if the actual work failed (review item 4).
+    /// or a sync that could not reach the account never paints the tray as if the actual work
+    /// failed (review item 4).
     pub engine_ok: bool,
     pub late: bool,
     /// `Some` only when the slot was refused outright (review item 7) — the engine was never

@@ -625,9 +625,8 @@ fn m4_quit_flush_reports_a_skip_as_a_skip_never_synced() {
 /// only way the page ever sees what a slot's sync did is by reading back the status file that
 /// child would have written. The `cmd` stand-in engine below writes no such file (it does not know
 /// sync exists), so this test writes one itself, exactly as a real engine's `sync` subcommand
-/// would, and checks that `run_slot_inner`'s own `state::refresh_sync` call — beside
-/// `refresh_head`/`refresh_history` — is what moves it into `cs.sync`, not `ConsoleState::open`
-/// (which ran first, before the file existed).
+/// would, and checks that `run_slot_inner`'s own `state::refresh_sync` call is what moves it into
+/// `cs.sync`, not `ConsoleState::open` (which ran first, before the file existed).
 #[test]
 fn a_slot_run_leaves_cs_sync_filled_from_the_status_file() {
     let v = scratch("sync-status-fill");

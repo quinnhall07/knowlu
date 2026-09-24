@@ -21,12 +21,35 @@ fn sources(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// Fix round 1, review I2. The scan must stop at the file's real `#[cfg(test)] mod …` boundary,
+/// never at an earlier BARE MENTION of the words `#[cfg(test)]` inside a doc comment — this very
+/// module's own header names the attribute in prose, and so does `app/src/account.rs`'s, which
+/// hid 1,417 of its 1,467 lines from the app-side scan before this fix.
+fn non_test_code(text: &str) -> &str {
+    text.split("\n#[cfg(test)]\nmod ").next().unwrap_or(text)
+}
+
+#[test]
+fn the_scan_is_not_fooled_by_a_doc_comment_naming_cfg_test() {
+    // A doc comment that merely NAMES `#[cfg(test)]` in prose (exactly this file's own header, and
+    // `app/src/account.rs`'s) must not be mistaken for the real test-module boundary and hide real
+    // code that follows it.
+    let text = "//! The scan below stops at the first #[cfg(test)] mention, in prose only.\n\
+                 fn oops() { std::process::Command::new(\"git\"); }\n\
+                 \n\
+                 #[cfg(test)]\n\
+                 mod tests {\n    fn t() {}\n}\n";
+    let code = non_test_code(text);
+    assert!(code.contains("Command::new(\"git\")"), "a real forbidden call after a doc-comment mention of #[cfg(test)] must still be scanned");
+    assert!(!code.contains("mod tests"), "the real test module stays excluded");
+}
+
 #[test]
 fn no_git_process_is_spawned_for_a_vault() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut scanned = 0;
     for (name, text) in sources(&src) {
-        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        let code = non_test_code(&text);
         for forbidden in ["Command::new(\"git\")", "history::", "refresh_history", "refresh_head", "git_sha"] {
             assert!(!code.contains(forbidden), "app/src/{name} still names {forbidden}");
         }
@@ -44,7 +67,7 @@ fn the_engines_git_transport_is_gone_too() {
     // folder that is not a repository, which is every vault the app creates.
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("engine").join("src");
     for (name, text) in sources(&src) {
-        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        let code = non_test_code(&text);
         assert!(!code.contains("git_with"), "engine/src/{name} still drives the git executable");
         assert!(!code.contains("SyncLock"), "engine/src/{name} still holds history.rs's lock");
     }

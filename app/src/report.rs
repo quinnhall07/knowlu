@@ -247,6 +247,11 @@ pub fn preview_text(cs: &ConsoleState, view: &str) -> String {
     if let Some(e) = &crate::scheduler::lock(&cs.sync).last_error {
         header.push_str(&format!("sync error: {}\n", scrub(e)));
     }
+    // Fix round 1, review M4: a skip (no entitlement, signed out) carries no `last_error`, so it
+    // was otherwise invisible here — exactly the student who most needs a line about sync.
+    if let Some(s) = &crate::scheduler::lock(&cs.sync).skipped {
+        header.push_str(&format!("sync skipped: {}\n", scrub(s)));
+    }
     if let Some(e) = &crate::scheduler::lock(&cs.backup).last_error {
         header.push_str(&format!("backup error: {}\n", scrub(e)));
     }

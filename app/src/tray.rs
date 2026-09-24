@@ -192,6 +192,9 @@ pub fn diagnostics_text(cs: &ConsoleState) -> String {
         out.push('\n');
     }
     if let Some(e) = &scheduler::lock(&cs.sync).last_error { out.push_str(&redact(&format!("sync error: {e}"))); out.push('\n'); }
+    // Fix round 1, review M4: a skip (no entitlement, signed out) carries no `last_error`, so it
+    // was otherwise invisible here — exactly the student who most needs a line about sync.
+    if let Some(s) = &scheduler::lock(&cs.sync).skipped { out.push_str(&redact(&format!("sync skipped: {s}"))); out.push('\n'); }
     if let Some(e) = &scheduler::lock(&cs.backup).last_error { out.push_str(&redact(&format!("backup error: {e}"))); out.push('\n'); }
     out
 }

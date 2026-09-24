@@ -75,11 +75,6 @@
     parts.push('<span id="gauge" class="gauge"></span>');
     parts.push("<span>" + h(t.active) + " active</span>");
     parts.push("<span>" + (t.generated_at ? "generated " + h(t.generated_at) + " by " + h(t.generated_by) : "no run recorded") + "</span>");
-    // A stale-build warning is NOT repeated here (final fix wave, C2). It is a health fact, and the
-    // line directly below — renderSyncLine — is the health line: cloud copy, backup, missed slots,
-    // last slot, scheduler, and this. Saying it twice, one line apart, made the same warning read
-    // as two different problems. (C3', Task 10: the warning itself left with git — this comment
-    // records why the line stays split, not what used to fill it.)
     // Plan 4a Task 7: one of the panel's two ways in (the other is the tray). Last, so the
     // gear sits at the end of the line and never moves as the facts before it change width.
     parts.push('<button class="b" type="button" data-settings title="Settings">&#9881;</button>');
@@ -376,16 +371,28 @@
     return invoke("check_for_updates", {}).then(function (u) { renderUpdateOffer(u); if (!EL("settings").hidden) { EL("set-update-state").textContent = current.updateText; } }).catch(function () {});
   }
 
-  // Task 15: the topline's sync/backup/scheduler line — a state's own words about repo/remote/
-  // backup/scheduler health, never computed here. Every source object (t.sync, t.backup,
-  // t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a vault with no
-  // scheduler info yet) — `|| {}` and truthiness checks below must never throw on a missing key.
-  // C3', Task 10: the topline's cloud-copy/backup/scheduler line. `t.sync` is the engine's
-  // `SyncStatus` (state.rs fills it from `sync::run_lines_with`), never computed here. A vault with
-  // no account says so calmly: it is a state, not a fault, and the wizard is where it changes.
+  // Task 15: the topline's sync/backup/scheduler line, never computed here. Every source object
+  // (t.sync, t.backup, t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a
+  // vault with no scheduler info yet) — `|| {}` and truthiness checks below must never throw on a
+  // missing key.
+  // C3', Task 10 (fix round 1, review I1): `t.sync` is the engine's own `SyncStatus` (state.rs
+  // fills it from `sync::run_lines_with`), never a git-shaped status any more. `SyncStatus::of`
+  // stamps `at` on every run, skipped ones included, so `s.skipped` MUST be read before `s.at` —
+  // otherwise a lapsed subscription or a signed-out machine reads as "in step with your account"
+  // for as long as the state lasts. A vault with no account, or between billing cycles, says the
+  // reason calmly and by name: it is a state, not a fault, and the wizard or account panel is
+  // where it changes.
   function renderSyncLine(state) {
     var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [];
     if (s.last_error) { bits.push('<span class="amber">' + h(String(s.last_error).split("\n")[0]) + "</span>"); }
+    else if (s.skipped) {
+      // The engine's closed set of skip words (`SyncError`/`Unavailable`, sync.rs): "no account",
+      // "no session", "no entitlement", "another sync is running". Only "no entitlement" (a lapsed
+      // subscription) and "no session" (signed out on this machine) need the student to act, so
+      // both read amber; "no account" and "another sync is running" are ordinary, expected states.
+      var needsAction = s.skipped === "no entitlement" || s.skipped === "no session";
+      bits.push('<span class="' + (needsAction ? "amber" : "calm") + '">sync skipped — ' + h(s.skipped) + "</span>");
+    }
     else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
     else { bits.push('<span class="calm">not synced yet</span>'); }
     if (b.last_error) { bits.push('<span class="amber">backup: ' + h(b.last_error.split("\n")[0]) + "</span>"); }

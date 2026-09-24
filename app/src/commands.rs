@@ -336,11 +336,11 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
 
 // Every MUTATING command carries `(async)` (final fix wave, B2). These are synchronous functions,
 // and Tauri 2 runs a plain `#[tauri::command]` on the webview's own thread — so a write that waits
-// on `vault_io` behind a git fetch, or on `process_approvals`, freezes the window itself. `(async)`
-// moves them onto Tauri's pool instead; the page's `invoke(...).then(...)` shape is unchanged, and
-// so are the `*_inner` functions the tests call. The four read commands (`state`, `note`,
-// `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take only `cs.lock`,
-// they never wait on git, and keeping them there keeps a poll cheap.
+// on `vault_io` behind a sync's own network call, or on `process_approvals`, freezes the window
+// itself. `(async)` moves them onto Tauri's pool instead; the page's `invoke(...).then(...)` shape
+// is unchanged, and so are the `*_inner` functions the tests call. The four read commands
+// (`state`, `note`, `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take
+// only `cs.lock`, they never wait on the network, and keeping them there keeps a poll cheap.
 #[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { let mut env = state_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command] pub fn note(cs: State<'_, ConsoleState>, id: String) -> Value { note_inner(&cs, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "note": Value::Null })) }
 #[tauri::command] pub fn mark_seen(cs: State<'_, ConsoleState>) -> Value { mark_seen_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e })) }

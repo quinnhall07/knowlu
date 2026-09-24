@@ -100,6 +100,25 @@ fn a_corrupt_settings_file_reports_an_error_and_falls_back_to_defaults() {
     assert!(s.backup_dir.is_none() && s.autostart && s.quit_at.is_none());
 }
 
+/// Fix round 1, review M4. `last_error` alone leaves a lapsed subscription or a signed-out machine
+/// invisible in a support report — a skip carries no `last_error`, and `HistoryStatus` (Task 10's
+/// predecessor) had no skip state to have missed in the first place.
+#[test]
+fn diagnostics_text_names_a_skipped_sync_as_well_as_a_failed_one() {
+    use knowlu::{state::ConsoleState, tray::diagnostics_text};
+    let v = scratch("diag-skip");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-diag-skip-data-{}", std::process::id())));
+    *cs.sync.lock().unwrap() = knowlu_engine::sync::SyncStatus {
+        ok: false,
+        at: Some(knowlu_engine::journal::now_ts(None)),
+        lines: vec![],
+        last_error: None,
+        skipped: Some("no entitlement".to_string()),
+    };
+    let t = diagnostics_text(&cs);
+    assert!(t.contains("sync skipped: no entitlement"), "a lapsed subscription must be visible in the diagnostics blob: {t}");
+}
+
 #[test]
 fn diagnostics_text_carries_no_note_title() {
     use knowlu::{state::ConsoleState, tray::diagnostics_text};
@@ -401,11 +420,11 @@ fn first_id(cs: &ConsoleState) -> String {
     text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().trim().to_string()
 }
 
-/// B1 (console spec §8/§9): a console write and `history::sync` must never interleave — a sync
-/// rewrites the working tree wholesale while a write is single-line surgery on a note it has just
-/// read. `ConsoleState::vault_io` is the one lock both take; `run_sync` holds it for the whole of
-/// the engine call, so holding it here from a test thread stands in for a sync in flight and the
-/// write has to wait for it.
+/// B1 (console spec §8/§9): a console write and the engine's `sync::run_lines_with` must never
+/// interleave — a pull can write a note it has never seen or file an amend card while a write is
+/// single-line surgery on a note it has just read. `ConsoleState::vault_io` is the one lock both
+/// take; `run_sync` holds it for the whole of the engine call, so holding it here from a test
+/// thread stands in for a sync in flight and the write has to wait for it.
 #[test]
 fn a_write_waits_for_the_vault_lock_a_sync_would_be_holding() {
     use std::sync::Arc;

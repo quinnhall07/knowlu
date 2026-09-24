@@ -206,6 +206,28 @@ fn seen_is_stamped_at_the_end_of_the_look_and_events_are_emitted() {
 }
 
 #[test]
+fn the_sync_line_reads_skipped_before_at_and_never_says_in_step_over_a_skip() {
+    let js = read("console.js");
+    // Fix round 1, review I1. `SyncStatus::of` stamps `at` on every run, including a skipped one
+    // (`sync.rs:2363`), so a branch that tests `s.at` before `s.skipped` reads a lapsed
+    // subscription, a signed-out machine, a mid-run collision, or an accountless vault as "in step
+    // with your account" — exactly the sentence `sync.rs:2382-2384` says the page must never show
+    // for a skip. `s.skipped` must be tested first.
+    let skipped_pos = js.find("else if (s.skipped)").expect("the sync line must test s.skipped");
+    let at_pos = js.find("else if (s.at)").expect("the sync line must test s.at");
+    assert!(skipped_pos < at_pos, "s.skipped must be tested before s.at, or a skip reads as in step");
+    // The engine's closed set of skip words (`SyncError`/`Unavailable`, sync.rs): only "no
+    // entitlement" (a lapsed subscription) and "no session" (signed out on this machine) need
+    // action from the student, so both read amber; "no account" and "another sync is running" are
+    // ordinary, expected states and read calm.
+    assert!(js.contains("\"no entitlement\""), "a lapsed subscription is named by its own word");
+    assert!(js.contains("\"no session\""), "a signed-out machine is named by its own word");
+    assert!(js.contains("sync skipped"), "the reason is said in plain words, not invented copy");
+    let skipped_branch = &js[skipped_pos..at_pos];
+    assert!(!skipped_branch.contains("in step with your account"), "a skip must never fall through to the calm in-step copy: {skipped_branch}");
+}
+
+#[test]
 fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     let js = read("console.js");
     // C3', Task 10: the git-shaped sync copy (R-F1's "N commit(s) pending push", R-T15a's conflict
