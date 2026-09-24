@@ -375,23 +375,43 @@
   // (t.sync, t.backup, t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a
   // vault with no scheduler info yet) — `|| {}` and truthiness checks below must never throw on a
   // missing key.
+  // C3′ final fix wave (R-C3′-exec-39 N1 and N4, R-C3′-exec-43): the engine's own words for a sync
+  // that was skipped (`SyncStatus.skipped`) or failed (`last_error`), and what a student reads for
+  // each. The words come from `cloudmodel::Unavailable::label` and the literals in `sync.rs`
+  // (`run_lines_with`, `record_gated_skip`, `SyncError::service`); `static_assets.rs` reads those
+  // sources and fails if one of them is not a key here. Amber is a state that keeps changes on this
+  // computer until the student acts or the network returns; calm is an ordinary one. "no
+  // entitlement" is also what a PAYING student reads after more than 72 hours offline (a cache
+  // nothing could renew), so it says what is known — the subscription could not be confirmed — and
+  // never that it is inactive. The diagnostics blob and the issue report keep the raw word.
+  var SYNC_SAYS = {
+    "no session": ["amber", "signed out — sign in to sync"],
+    "signed out": ["amber", "signed out — sign in to sync"],
+    "no entitlement": ["amber", "can't confirm your subscription — changes stay on this computer"],
+    "offline: the account could not be reached": ["amber", "offline — changes stay on this computer"],
+    "no account": ["calm", "sync skipped — no account"],
+    "another sync is running": ["calm", "sync skipped — another sync is running"]
+  };
+  /// One engine word → `[tone, text]`. A word the table does not know keeps the engine's own first
+  /// line, after `prefix`, in `tone`: a new failure is still shown, just not yet translated.
+  function syncSays(word, tone, prefix) {
+    var w = String(word).split("\n")[0];
+    return Object.prototype.hasOwnProperty.call(SYNC_SAYS, w) ? SYNC_SAYS[w] : [tone, (prefix || "") + w];
+  }
+  /// *Sync now*'s refusal says what the sync line says, never the engine's raw word.
+  function syncRefusal(err) { showRefusal(null, syncSays(err, "amber")[1]); }
   // C3', Task 10 (fix round 1, review I1): `t.sync` is the engine's own `SyncStatus` (state.rs
   // fills it from `sync::run_lines_with`), never a git-shaped status any more. `SyncStatus::of`
   // stamps `at` on every run, skipped ones included, so `s.skipped` MUST be read before `s.at` —
   // otherwise a lapsed subscription or a signed-out machine reads as "in step with your account"
-  // for as long as the state lasts. A vault with no account, or between billing cycles, says the
-  // reason calmly and by name: it is a state, not a fault, and the wizard or account panel is
-  // where it changes.
+  // for as long as the state lasts. Both fields go through `SYNC_SAYS` above.
   function renderSyncLine(state) {
-    var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [];
-    if (s.last_error) { bits.push('<span class="amber">' + h(String(s.last_error).split("\n")[0]) + "</span>"); }
+    var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [], said = null;
+    if (s.last_error) { said = syncSays(s.last_error, "amber"); bits.push('<span class="' + said[0] + '">' + h(said[1]) + "</span>"); }
     else if (s.skipped) {
-      // The engine's closed set of skip words (`SyncError`/`Unavailable`, sync.rs): "no account",
-      // "no session", "no entitlement", "another sync is running". Only "no entitlement" (a lapsed
-      // subscription) and "no session" (signed out on this machine) need the student to act, so
-      // both read amber; "no account" and "another sync is running" are ordinary, expected states.
-      var needsAction = s.skipped === "no entitlement" || s.skipped === "no session";
-      bits.push('<span class="' + (needsAction ? "amber" : "calm") + '">sync skipped — ' + h(s.skipped) + "</span>");
+      // A skip word the table does not know is an ordinary state until it is added, so calm.
+      said = syncSays(s.skipped, "calm", "sync skipped — ");
+      bits.push('<span class="' + said[0] + '">' + h(said[1]) + "</span>");
     }
     else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
     else { bits.push('<span class="calm">not synced yet</span>'); }
@@ -982,7 +1002,7 @@
     var closeBtn = e.target.closest("[data-close-info]"); if (closeBtn) { closeInfoItem(closeBtn.getAttribute("data-close-info")); return; }
     // Task 15: manual sync/backup from the topline — both return the fresh state like every
     // other mutating command (spec's envelope shape), so applyEnvelope repaints it the same way.
-    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: current.view }).then(function (env) { applyEnvelope(env); ev("sync_run", null, null, null); }).catch(function () {}); return; }
+    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: current.view }).then(function (env) { applyEnvelope(env, syncRefusal); ev("sync_run", null, null, null); }).catch(function () {}); return; }
     var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: current.view }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
     // Plan 4a Task 8: *Restart to update*. A refusal (a slot started between the offer and the

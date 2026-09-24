@@ -216,15 +216,68 @@ fn the_sync_line_reads_skipped_before_at_and_never_says_in_step_over_a_skip() {
     let skipped_pos = js.find("else if (s.skipped)").expect("the sync line must test s.skipped");
     let at_pos = js.find("else if (s.at)").expect("the sync line must test s.at");
     assert!(skipped_pos < at_pos, "s.skipped must be tested before s.at, or a skip reads as in step");
-    // The engine's closed set of skip words (`SyncError`/`Unavailable`, sync.rs): only "no
-    // entitlement" (a lapsed subscription) and "no session" (signed out on this machine) need
-    // action from the student, so both read amber; "no account" and "another sync is running" are
-    // ordinary, expected states and read calm.
+    // The skip words come from `cloudmodel::Unavailable::label` and `sync.rs`'s own literals
+    // (`run_lines_with`, `record_gated_skip`) — never from `SyncError`. The next test reads them out
+    // of those sources and pins each one, and its tone and copy, to the page's `SYNC_SAYS`.
     assert!(js.contains("\"no entitlement\""), "a lapsed subscription is named by its own word");
     assert!(js.contains("\"no session\""), "a signed-out machine is named by its own word");
     assert!(js.contains("sync skipped"), "the reason is said in plain words, not invented copy");
     let skipped_branch = &js[skipped_pos..at_pos];
     assert!(!skipped_branch.contains("in step with your account"), "a skip must never fall through to the calm in-step copy: {skipped_branch}");
+}
+
+/// R-C3′-exec-39 N1 and N4, with R-C3′-exec-43's correction. Every word the engine can leave in
+/// `SyncStatus.skipped` or `last_error` for a normal state is READ OUT OF THE ENGINE'S SOURCE here and
+/// must be a key of the page's `SYNC_SAYS`, so renaming one on either side turns this red rather
+/// than silently dropping a signed-out student's line from amber to calm. The ruled copy is pinned
+/// too, including the correction: a paying student more than 72 hours offline also reads "no
+/// entitlement", so the page may never say the subscription is inactive.
+#[test]
+fn the_sync_lines_words_are_the_engines_own_mapped_to_what_a_student_reads() {
+    let engine = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("engine").join("src");
+    let cloudmodel = fs::read_to_string(engine.join("cloudmodel.rs")).expect("engine/src/cloudmodel.rs");
+    let sync = fs::read_to_string(engine.join("sync.rs")).expect("engine/src/sync.rs");
+    // The string literal right after each occurrence of `anchor`.
+    fn literals_after(src: &str, anchor: &str) -> Vec<String> {
+        let found: Vec<String> = src.match_indices(anchor)
+            .map(|(i, _)| src[i + anchor.len()..].split('"').next().unwrap_or_default().to_string())
+            .collect();
+        assert!(!found.is_empty(), "the engine no longer has {anchor:?}; find where its word moved");
+        found
+    }
+    let mut words: Vec<String> = Vec::new();
+    for anchor in ["Unavailable::NoConfig => \"", "Unavailable::NoSession(_) => \""] {
+        words.extend(literals_after(&cloudmodel, anchor));
+    }
+    for anchor in [
+        "totals.skipped = Some(\"",                      // run_lines_with: another sync running, no account
+        "skipped: Some(\"",                              // record_gated_skip: the entitlement gate
+        "CloudError::Transport(_) => \"",                // SyncError::service, both halves
+        "CloudError::Status { code: 401, .. } => \"",
+        "CloudError::Status { code: 402, .. } => \"",
+    ] {
+        words.extend(literals_after(&sync, anchor));
+    }
+    words.sort();
+    words.dedup();
+    assert!(words.len() >= 6, "the scan stopped finding the engine's words: {words:?}");
+    let js = read("console.js");
+    for w in &words {
+        assert!(js.contains(&format!("\"{w}\": [")), "the engine says {w:?} and the page's SYNC_SAYS has no entry for it");
+    }
+    for (word, said) in [
+        ("no session", "[\"amber\", \"signed out — sign in to sync\"]"),
+        ("signed out", "[\"amber\", \"signed out — sign in to sync\"]"),
+        ("no entitlement", "[\"amber\", \"can't confirm your subscription — changes stay on this computer\"]"),
+        ("no account", "[\"calm\", \"sync skipped — no account\"]"),
+        ("another sync is running", "[\"calm\", \"sync skipped — another sync is running\"]"),
+    ] {
+        assert!(js.contains(&format!("\"{word}\": {said}")), "{word} must read {said}");
+    }
+    assert!(!js.contains("subscription inactive"), "R-C3′-exec-43: a student offline past the grace is not inactive");
+    // Both halves of the line and the *Sync now* refusal go through the one table.
+    assert!(js.contains("syncSays(s.last_error, \"amber\")") && js.contains("syncSays(s.skipped, \"calm\", \"sync skipped — \")"), "the sync line maps both fields");
+    assert!(js.contains("showRefusal(null, syncSays(err, \"amber\")[1])"), "Sync now's refusal says the same words as the line");
 }
 
 /// Task 11 re-review N1 (R-C3′-exec-41): what the paste or capture did with each feed reaches the
