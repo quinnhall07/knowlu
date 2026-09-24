@@ -134,3 +134,14 @@ Deno.test("the byte bounds and the note path's character class match the migrati
     `sync_notes.path's length bound (expected 'between ${minLen} and ${maxLen}')`,
   );
 });
+
+Deno.test("every sync query is scoped to one account, and nothing bypasses C1's helpers", async () => {
+  const src = await Deno.readTextFile(new URL("./sync_db.ts", import.meta.url));
+  for (const table of ["sync_records", "sync_notes", "sync_usage"]) {
+    for (const call of src.matchAll(new RegExp(`"${table}",\\s*\`([^\`]*)\``, "g"))) {
+      assert(call[1].includes("account_id=eq."), `${table}: a query without account_id=eq.: ${call[1]}`);
+    }
+  }
+  assertEquals([...src.matchAll(/rest\.fetch\(/g)].length, 0, "no raw fetch: C1's helpers are the only path");
+  assert(!src.includes("sync_generation"), "the key generation is gone");
+});
