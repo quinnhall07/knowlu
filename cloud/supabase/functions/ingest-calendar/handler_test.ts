@@ -235,6 +235,36 @@ Deno.test("the google calendar is never looked for in the sources table", async 
   assert(source.includes("kind=eq.calendar_ics"), "the personal calendar is the only sources row read here");
 });
 
+Deno.test("index.ts pins the series requests' privacy boundary: the fields mask and owned calendars only", async () => {
+  // Final review P5 m4. The `fields=` masks and `minAccessRole=owner` *are* spec §9's
+  // data-minimisation boundary, and `index.ts` has no unit under test: a widened mask or a dropped
+  // owner filter would otherwise pass silently. Change these only with a §9 review.
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const eventFields = [
+    'const EVENT_FIELDS = "nextPageToken,items(id,status,summary,location,description,eventType," +',
+    '  "recurringEventId,recurrence,start,end,attendees(self,responseStatus))";',
+  ].join("\n");
+  assert(source.includes(eventFields), "EVENT_FIELDS is exactly the series mask");
+  assertEquals(source.split("const EVENT_FIELDS").length, 2, "one EVENT_FIELDS declaration");
+  // Every series events page carries that mask: the one `fields` set on `eventsPage`'s URL.
+  assert(source.includes('url.searchParams.set("fields", EVENT_FIELDS);'), "eventsPage sends the mask");
+  assertEquals(
+    source.split('url.searchParams.set("fields", EVENT_FIELDS);').length,
+    2,
+    "the mask is set in exactly one place",
+  );
+  // calendarList: owned calendars only, and only the four fields `pickCalendars` reads.
+  assert(source.includes('url.searchParams.set("minAccessRole", "owner");'), "owned calendars only");
+  assert(
+    source.includes('url.searchParams.set("fields", "nextPageToken,items(id,accessRole,hidden,primary)");'),
+    "calendarList's mask",
+  );
+  assertEquals(source.split("minAccessRole").length, 2, "one minAccessRole, and it is owner");
+  assertEquals(source.split("/users/me/calendarList").length, 2, "one calendarList request");
+  // Exactly two `fields` masks exist in the file, the two above; no other request sets one.
+  assertEquals(source.split('searchParams.set("fields"').length, 3, "no other request sets a mask");
+});
+
 // ---- Series (commitment model §4.1). Every title, room and calendar below is invented. ----
 
 const NOW = new Date("2026-09-09T00:00:00Z");
