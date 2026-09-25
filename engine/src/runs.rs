@@ -569,8 +569,8 @@ mod tests {
     // reads `device_name()`. `start_run` already takes a `device` override — that is what the
     // device assertion uses; the `step` and `end` records are checked against `device_name()`
     // itself, which is the same value Python's monkeypatch was standing in for — and the test
-    // that does so holds `journal::DEVICE_ENV_MUTEX` for the whole span, since a `history.rs`
-    // test mid-`set_var` could otherwise be observed here too.
+    // that does so holds `journal::DEVICE_ENV_MUTEX` for the whole span, since a test that sets
+    // `KNOWLU_DEVICE` (`history.rs`'s did, until C3′ removed it) could otherwise be observed here.
 
     use std::path::PathBuf;
 
@@ -638,7 +638,7 @@ mod tests {
         // `add_step` below reads the process-global `device_name()` internally (no override is
         // passed), and the assertion further down compares against it — so this test holds
         // `journal::DEVICE_ENV_MUTEX` across both, the same lock every `KNOWLU_DEVICE` setter
-        // takes, rather than racing a `history.rs` test that is mid-`set_var`/`remove_var`.
+        // takes, rather than racing any test that is mid-`set_var`/`remove_var` on `KNOWLU_DEVICE`.
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = make_vault("startstepend");
         let t0 = at(17, 0, 3);

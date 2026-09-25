@@ -109,10 +109,9 @@ fn the_gauge_renders_from_the_payload_and_invents_nothing() {
 #[test]
 fn the_page_says_it_once_and_says_it_honestly() {
     let js = read("console.js");
-    // C2: `engine newer than console` belongs to the sync line — the health line — and is
-    // rendered there and nowhere else. renderTopline used to say it too, one line above, so the
-    // same warning read as two problems.
-    assert_eq!(js.matches("engine newer than console").count(), 1, "the stale-build warning is rendered exactly once");
+    // C3', Task 10: `engine newer than console` left with git — it compared the vault's git HEAD
+    // against this build, and a vault has not been a git repository since cloud design §4.1.
+    assert_eq!(js.matches("engine newer than console").count(), 0, "the stale-build warning left with git");
     assert!(!js.contains("class=\"stale\""), "renderTopline's duplicate span is gone");
     assert!(!read("console.css").contains(".stale"), "…and so is its now-dead rule");
     // C4: effort_hours/slice_hours have a floor and no ceiling — the refusal must not read
@@ -207,23 +206,115 @@ fn seen_is_stamped_at_the_end_of_the_look_and_events_are_emitted() {
 }
 
 #[test]
+fn the_sync_line_reads_skipped_before_at_and_never_says_in_step_over_a_skip() {
+    let js = read("console.js");
+    // Fix round 1, review I1. `SyncStatus::of` stamps `at` on every run, including a skipped one
+    // (`sync.rs:2363`), so a branch that tests `s.at` before `s.skipped` reads a lapsed
+    // subscription, a signed-out machine, a mid-run collision, or an accountless vault as "in step
+    // with your account" — exactly the sentence `sync.rs:2382-2384` says the page must never show
+    // for a skip. `s.skipped` must be tested first.
+    let skipped_pos = js.find("else if (s.skipped)").expect("the sync line must test s.skipped");
+    let at_pos = js.find("else if (s.at)").expect("the sync line must test s.at");
+    assert!(skipped_pos < at_pos, "s.skipped must be tested before s.at, or a skip reads as in step");
+    // The skip words come from `cloudmodel::Unavailable::label` and `sync.rs`'s own literals
+    // (`run_lines_with`, `record_gated_skip`) — never from `SyncError`. The next test reads them out
+    // of those sources and pins each one, and its tone and copy, to the page's `SYNC_SAYS`.
+    assert!(js.contains("\"no entitlement\""), "a lapsed subscription is named by its own word");
+    assert!(js.contains("\"no session\""), "a signed-out machine is named by its own word");
+    assert!(js.contains("sync skipped"), "the reason is said in plain words, not invented copy");
+    let skipped_branch = &js[skipped_pos..at_pos];
+    assert!(!skipped_branch.contains("in step with your account"), "a skip must never fall through to the calm in-step copy: {skipped_branch}");
+}
+
+/// R-C3′-exec-39 N1 and N4, with R-C3′-exec-43's correction. Every word the engine can leave in
+/// `SyncStatus.skipped` or `last_error` for a normal state is READ OUT OF THE ENGINE'S SOURCE here and
+/// must be a key of the page's `SYNC_SAYS`, so renaming one on either side turns this red rather
+/// than silently dropping a signed-out student's line from amber to calm. The ruled copy is pinned
+/// too, including the correction: a paying student more than 72 hours offline also reads "no
+/// entitlement", so the page may never say the subscription is inactive.
+#[test]
+fn the_sync_lines_words_are_the_engines_own_mapped_to_what_a_student_reads() {
+    let engine = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("engine").join("src");
+    let cloudmodel = fs::read_to_string(engine.join("cloudmodel.rs")).expect("engine/src/cloudmodel.rs");
+    let sync = fs::read_to_string(engine.join("sync.rs")).expect("engine/src/sync.rs");
+    // The string literal right after each occurrence of `anchor`.
+    fn literals_after(src: &str, anchor: &str) -> Vec<String> {
+        let found: Vec<String> = src.match_indices(anchor)
+            .map(|(i, _)| src[i + anchor.len()..].split('"').next().unwrap_or_default().to_string())
+            .collect();
+        assert!(!found.is_empty(), "the engine no longer has {anchor:?}; find where its word moved");
+        found
+    }
+    let mut words: Vec<String> = Vec::new();
+    for anchor in ["Unavailable::NoConfig => \"", "Unavailable::NoSession(_) => \""] {
+        words.extend(literals_after(&cloudmodel, anchor));
+    }
+    for anchor in [
+        "totals.skipped = Some(\"",                      // run_lines_with: another sync running, no account
+        "skipped: Some(\"",                              // record_gated_skip: the entitlement gate
+        "CloudError::Transport(_) => \"",                // SyncError::service, both halves
+        "CloudError::Status { code: 401, .. } => \"",
+        "CloudError::Status { code: 402, .. } => \"",
+    ] {
+        words.extend(literals_after(&sync, anchor));
+    }
+    words.sort();
+    words.dedup();
+    assert!(words.len() >= 6, "the scan stopped finding the engine's words: {words:?}");
+    let js = read("console.js");
+    for w in &words {
+        assert!(js.contains(&format!("\"{w}\": [")), "the engine says {w:?} and the page's SYNC_SAYS has no entry for it");
+    }
+    for (word, said) in [
+        ("no session", "[\"amber\", \"signed out — sign in to sync\"]"),
+        ("signed out", "[\"amber\", \"signed out — sign in to sync\"]"),
+        ("no entitlement", "[\"amber\", \"can't confirm your subscription — changes stay on this computer\"]"),
+        ("no account", "[\"calm\", \"sync skipped — no account\"]"),
+        ("another sync is running", "[\"calm\", \"sync skipped — another sync is running\"]"),
+    ] {
+        assert!(js.contains(&format!("\"{word}\": {said}")), "{word} must read {said}");
+    }
+    assert!(!js.contains("subscription inactive"), "R-C3′-exec-43: a student offline past the grace is not inactive");
+    // Both halves of the line and the *Sync now* refusal go through the one table.
+    assert!(js.contains("syncSays(s.last_error, \"amber\")") && js.contains("syncSays(s.skipped, \"calm\", \"sync skipped — \")"), "the sync line maps both fields");
+    assert!(js.contains("showRefusal(null, syncSays(err, \"amber\")[1])"), "Sync now's refusal says the same words as the line");
+}
+
+/// Task 11 re-review N1 (R-C3′-exec-41): what the paste or capture did with each feed reaches the
+/// plan, as the four flags `onboarding::WizardPlan` reads — and only for the value the field holds
+/// at Finish, so a link typed over after its check is never sent to the account as if validated.
+#[test]
+fn the_wizard_carries_each_feeds_validated_and_stored_flags_into_the_plan() {
+    let js = read("console.js");
+    for key in ["ics_validated: icsFlags.validated", "ics_stored: icsFlags.stored",
+                "personal_calendar_validated: calFlags.validated", "personal_calendar_stored: calFlags.stored"] {
+        assert!(js.contains(key), "the plan must carry {key}");
+    }
+    assert!(js.contains("feedFlags(WIZ.icsFeed, WIZ.ics)") && js.contains("feedFlags(WIZ.calFeed, WIZ.cal)"), "the flags are for the field's value at Finish");
+    assert!(js.contains("var same = !!(feed && value && feed.url === value);"), "a changed link is neither validated nor stored");
+    // All three places a feed is checked record the envelope's own `stored`, never `note`'s absence.
+    assert!(js.contains("WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };"), "the capture");
+    assert!(js.contains("WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted school feed");
+    assert!(js.contains("WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted personal calendar");
+}
+
+#[test]
 fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     let js = read("console.js");
-    // R-F1 (re-ruling of R-T15a): `topline.sync.ahead` is `rev-list --count HEAD...origin/main` —
-    // a count of COMMITS. The plan's "N edits pending push" assumed a number the app never had, so
-    // the copy now says commits and pluralises at 1.
-    assert!(js.contains("commit\" + (s.ahead === 1 ? \"\" : \"s\") + \" pending push"), "R-F1: N commit / N commits pending push");
-    assert!(!js.contains("edits pending push"), "R-F1: the edit-count copy is gone");
-    // R-T15a still stands for the conflict line: flat copy, verbatim, count in the title only.
-    assert!(js.contains("conflict — auto-sync stopped"), "R-T15a: the plan's exact flat copy");
-    assert!(js.contains("title=\"conflict in "), "the per-note detail moves to a title attribute");
-    // R-T15d: auto_sync and last_slot are read, not merely listed as consumed.
-    assert!(js.contains("auto-sync off"));
+    // C3', Task 10: the git-shaped sync copy (R-F1's "N commit(s) pending push", R-T15a's conflict
+    // line, R-T15d's `auto-sync off`) left with git — `topline.sync` is the engine's `SyncStatus`
+    // now, and none of `ahead`, `conflicted` or `auto_sync` exist on it any more.
+    assert!(!js.contains("pending push"), "the commit/edit-count copy left with git");
+    assert!(!js.contains("conflict — auto-sync stopped"), "the conflict line left with git");
+    assert!(!js.contains("auto-sync off"), "auto_sync left with git");
+    assert!(js.contains("in step with your account"), "the new calm sync copy");
+    assert!(js.contains("not synced yet"), "the new calm no-sync-yet copy");
+    // R-T15d's `last_slot` half still stands.
     assert!(js.contains("last slot"));
     // Plan 2 Task 5 (F4): a retried slot names the attempt, so the same slot failing twice reads as
     // one slot being retried rather than two unrelated failures.
     assert!(js.contains("attempt "), "the last-slot line names the attempt on a retry");
-    assert!(js.contains("t.auto_sync") && js.contains("t.last_slot"));
+    assert!(js.contains("t.last_slot"));
     // R-T15b: every [data-id] template carries a data-kind token the observer reads back
     // instead of guessing "task" for everything.
     assert!(js.contains("data-kind=\"task\""), "task rows");
@@ -853,7 +944,7 @@ fn the_wizards_privacy_sentence_is_the_sites_privacy_sentence() {
     let sentence = site
         .lines()
         .map(str::trim)
-        .find(|l| l.starts_with("<p>") && l.contains("Your vault stays on this machine"))
+        .find(|l| l.starts_with("<p>") && l.contains("Your tasks and notes live in"))
         .map(|l| l.trim_start_matches("<p>").trim_end_matches("</p>").to_string())
         .expect("site/privacy.html must carry the privacy sentence in one <p>");
     let js = read("console.js");
@@ -1529,4 +1620,98 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(account_entry.contains("the Google account id that identifies it"), "{account_entry}");
     assert!(account_entry.contains("your name") && account_entry.contains("a link to your profile picture"),
         "the Your account entry must agree with the Google paragraph: {account_entry}");
+}
+
+/// C3' Task 9, Step 5: Finish now restores the account's own copy of the vault (H11a) before it ever
+/// reaches this panel's copy, and an account that has nothing to bring back yet is a fact, not a
+/// failure — the finish panel says so in its own sentence rather than leaving the case to read as
+/// something having gone wrong.
+#[test]
+fn the_finish_panel_says_when_the_account_had_nothing_to_restore() {
+    let js = read("console.js");
+    // M1 (fix round 1): the OLD sentence was static, painted on every visit to the finish panel
+    // before Finish had even run — a returning student with a real account copy read a claim that
+    // was simply false. `restoreSentence` reads the actual result instead, and each of the three
+    // outcomes gets its own sentence rather than one fixed line pretending to cover all of them.
+    let sentence_fn = js.split("function restoreSentence(").nth(1).and_then(|s| s.split("\n  }").next()).expect("restoreSentence");
+    for (label, sentence) in [
+        ("restored", "Your account already had a vault here"),
+        // N3/item 2 (fix round 2): "over the next syncs", plural — a large account takes more than
+        // one page, and the round 1 wording ("at the next sync") understated that.
+        ("could not be reached", "could not be reached just now; your vault will fill in over the next syncs"),
+        ("had no vault yet", "Your account had no vault yet"),
+    ] {
+        assert!(sentence_fn.contains(sentence), "{label}: the sentence is not in restoreSentence: {sentence_fn}");
+    }
+    // N3 (fix round 2): keyed on the explicit `ok` field, never on `warnings.length` — a
+    // successful pull can carry warnings too (a refused sync card, an oversize row), and the round 1
+    // version would have misread those as "could not be reached".
+    assert!(sentence_fn.contains("!restored.ok"), "restoreSentence keys on the explicit ok field: {sentence_fn}");
+    assert!(!sentence_fn.contains("warnings"), "restoreSentence no longer reads warnings.length at all: {sentence_fn}");
+    // The static claim is gone: no fixed sentence is painted before Finish has run.
+    assert!(js.contains("restoreNote: \"\""), "WIZ.restoreNote starts blank — nothing is claimed before Finish runs");
+    assert!(js.contains("WIZ.restoreNote = restoreSentence("), "wizFinish reads the real result into it");
+    assert!(js.contains("EL(\"wiz-restore-note\").textContent = WIZ.restoreNote"), "renderWizard paints it, like every other wizard field");
+    // N3: stays visible until the relaunch and does not race entitlement_now — the sentence is set,
+    // and painted, strictly BEFORE entitlement_now/finish_onboarding are ever invoked, and nothing
+    // in between clears or repaints over it.
+    let set_at = js.find("WIZ.restoreNote = restoreSentence(").expect("the assignment");
+    let entitlement_at = js[set_at..].find("invoke(\"entitlement_now\"").map(|i| i + set_at).expect("entitlement_now follows it");
+    assert!(set_at < entitlement_at, "the sentence is set before entitlement_now is ever invoked");
+    let between = &js[set_at..entitlement_at];
+    assert_eq!(between.matches("WIZ.restoreNote").count(), 1, "nothing between the two touches WIZ.restoreNote again: {between}");
+}
+
+/// C3' Task 9, Step 6 (P3: built to yes — Quinn is away; logged for Quinn, not asked). The picker's
+/// third door: a LOCAL `Backups\` folder, never the account — the account's own copy arrives by
+/// signing in, at Finish, with no route and no code to type (H11a). `pick_folder` and `restore_vault`
+/// have both existed since C1 with no caller; this pins the first one.
+#[test]
+fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"pick-restore-backup\""), "index.html has no #pick-restore-backup");
+    let button = html.split("id=\"pick-restore-backup\"").nth(1).and_then(|s| s.split('>').next()).expect("the button's own attributes");
+    assert!(button.contains("title=\""), "the button names what it is in its own title");
+    assert!(
+        button.to_lowercase().contains("never from your account") || button.to_lowercase().contains("nothing to do with the account"),
+        "the title says this is the local mirror, not the account: {button}"
+    );
+    // M3 (fix round 1): a name field and an autostart choice, not a hardcoded name and a forced
+    // `true` — the same two defaults the nine-panel wizard itself uses ("Knowlu"; Start Knowlu with
+    // Windows checked).
+    for id in ["pick-restore-options", "pick-restore-name", "pick-restore-autostart", "pick-restore-go"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "index.html has no #{id}");
+    }
+    assert!(html.contains("id=\"pick-restore-autostart\" checked"), "autostart defaults on, like the wizard's own checkbox");
+    let js = read("console.js");
+    let handler = js
+        .find("EL(\"pick-restore-backup\").addEventListener(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("EL(\"pick-add\").addEventListener(").next())
+        .expect("the pick-restore-backup and pick-restore-go click handlers");
+    assert!(handler.contains("invoke(\"pick_folder\""), "it picks a folder first");
+    assert!(handler.contains("invoke(\"restore_vault\""), "…then restores from it");
+    assert!(handler.contains("invoke(\"open_profile\""), "…and opens the restored profile, like pick-adopt does");
+    assert!(handler.contains("EL(\"pick-restore-name\").value = \"Knowlu\""), "the name field defaults from the wizard's own convention");
+    assert!(!handler.contains("autostart: true"), "autostart is read from the checkbox, never hardcoded true");
+    assert!(handler.contains("EL(\"pick-restore-autostart\").checked"), "autostart is read from the checkbox");
+    assert!(handler.contains("name: name"), "the typed name is sent, not a literal");
+    // N6 (fix round 2): the button is disabled before the call, like the wizard's own Finish
+    // (R2-3), and re-enabled on either outcome — a refusal must leave it pressable again.
+    let go_handler = js
+        .find("EL(\"pick-restore-go\").addEventListener(")
+        .map(|i| &js[i..])
+        .and_then(|s| s.split("EL(\"pick-add\").addEventListener(").next())
+        .expect("the pick-restore-go click handler");
+    let disable_at = go_handler.find("go.disabled = true").expect("disabled before the call");
+    let call_at = go_handler.find("invoke(\"restore_vault\"").expect("the call itself");
+    assert!(disable_at < call_at, "the button is disabled BEFORE restore_vault is invoked");
+    assert!(go_handler.contains("go.disabled = false"), "it is re-enabled somewhere");
+    // N6 nit (fix round 3): a THIRD re-enable — open_profile can itself answer ok: false, and before
+    // this fix that left the button disabled with no message at all.
+    assert_eq!(go_handler.matches("go.disabled = false").count(), 3, "re-enabled on the restore_vault refusal, the open_profile refusal, AND the catch: {go_handler}");
+    let open_profile_call = go_handler.find("invoke(\"open_profile\"").expect("open_profile is still called");
+    let after_open_profile = &go_handler[open_profile_call..];
+    assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
+    assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }

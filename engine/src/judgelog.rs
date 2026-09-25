@@ -2,8 +2,8 @@
 //! sure, and what was written — **by id and by field value, never by content.**
 //!
 //! **Where it is not.** Not in the vault, so `backup::tick` (which mirrors the vault and nothing
-//! else) never copies it, `history::sync` never commits it, and a second device replaying the
-//! journal never receives it. It lives under the *profile's* app-data directory —
+//! else) never copies it, `sync` never pushes it (it is not a note and not a journal record), and a
+//! second device replaying the journal never receives it. It lives under the *profile's* app-data directory —
 //! `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments\` — which is per profile because two vaults on one
 //! machine are two different sets of judgments, unlike `updates\`, which is one bundle for the whole
 //! install.

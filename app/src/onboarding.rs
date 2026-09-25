@@ -430,9 +430,23 @@ pub fn refresh(app: &tauri::AppHandle, root: &Path) {
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardPlan {
     pub ics_url: Option<String>,
+    /// **What the paste or capture already did with `ics_url`** (Task 11 re-review N1,
+    /// R-C3'-exec-41): `validated` — it is the link `lms_link::finish_with` accepted; `stored` — and
+    /// the account holds it now. `create_vault_in` retries only a validated feed that is not stored,
+    /// and never sends an unvalidated one to the account. `#[serde(default)]`: a page that predates
+    /// the flags reads as "not validated", so its links stay on this machine and are never sent.
+    #[serde(default)]
+    pub ics_validated: bool,
+    #[serde(default)]
+    pub ics_stored: bool,
     /// The personal calendar's secret iCal address (spec §11a). Same panel as the school feed, and
     /// the same treatment: validated on the device, stored on the account, written into the vault.
     pub personal_calendar: Option<String>,
+    /// The same two flags as `ics_validated`/`ics_stored`, for `personal_calendar`.
+    #[serde(default)]
+    pub personal_calendar_validated: bool,
+    #[serde(default)]
+    pub personal_calendar_stored: bool,
     /// Did the student connect a Google calendar on panel 5 (§11a)? A flag, not a URL: the grant
     /// lives on the account and the vault only needs to know the feed exists. `#[serde(default)]`
     /// so a page that predates C2 still deserialises.
@@ -669,7 +683,80 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         let _ = std::fs::remove_dir_all(&dest);
         return json!({ "ok": false, "error": format!("the sign-in could not be attached to this vault ({e}) — the new vault was removed, so nothing is half-made"), "profile": Value::Null });
     }
-    finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups))
+    // **Task 11 review, I1 (R-C3'-exec-40).** `lms_link::finish`'s own save, at paste or capture
+    // time, is a `note` the panel never blocks on — so a save that failed there used to leave the
+    // feed in neither the account nor the vault, because `scaffold::ingest_yaml` above had already
+    // blanked the vault's own copy on the strength of an account it never reached. Retry a pasted
+    // feed once more here, under the session `move_session` just attached to this profile; a feed
+    // that still cannot be saved is written into the vault instead (`restore_capability_url`), so it
+    // is never silently lost. A vault with no account has nothing to retry — `ingest_yaml` never
+    // blanked anything for it.
+    //
+    // **Only a feed the paste validated and could not store is retried** (Task 11 re-review N1,
+    // R-C3'-exec-41; the plan's per-feed flags). One the account already holds is left alone — a
+    // second save could only fail transiently and put it in the vault too, or hold Finish up. One the
+    // paste REJECTED is never sent to the account, where it would replace a validated link; it is
+    // kept in the vault, as a vault with no account keeps any link.
+    if !vp.account_id.is_empty() {
+        let target = crate::account::session_target(&profile_id);
+        let feeds = [
+            ("lms_ics", vp.ics_url.as_deref(), plan.ics_validated, plan.ics_stored),
+            ("calendar_ics", vp.personal_calendar.as_deref(), plan.personal_calendar_validated, plan.personal_calendar_stored),
+        ];
+        for (kind, url, validated, stored) in feeds {
+            let Some(url) = url else { continue };
+            if validated && stored { continue }
+            let saved = validated && crate::lms_link::store_source(&vp.api_base, &target, kind, url).is_ok();
+            if !saved {
+                if let Err(e) = crate::scaffold::restore_capability_url(&dest, kind, url) {
+                    let _ = std::fs::remove_dir_all(&dest);
+                    return json!({ "ok": false, "error": e, "profile": Value::Null });
+                }
+            }
+        }
+    }
+    // **The restore, and it is not a route — it is what Finish does** (cloud design, amendment
+    // 2026-09-17, ruling 2: "restoring is signing in on a new desktop; the mirror fills from the
+    // account"). There is no code to type and no link on the picker: a student who already has a
+    // vault in their account gets it here, and one who does not gets the nine-panel wizard's own
+    // seeds and notices nothing.
+    //
+    // **Placed after `scaffold::create_vault` and after `move_session`, and that is deliberate.**
+    // The vault has to exist (its `config/cloud.yaml` is what `restore_into` reads) and the session
+    // has to be on this profile (the pull needs a bearer). `scaffold` has therefore already seeded
+    // `archive/_migrated.md`, `tasks/get-to-know-knowlu.md` and one `courses/<slug>.md` per course —
+    // which is exactly why `restore_into` computes its allowlist from what is on disk right now
+    // rather than demanding an empty folder.
+    let restored = match knowlu_engine::sync::restore_into(&dest) {
+        // **An empty copy keeps the vault.** A student signing in on their first desktop, or on a
+        // second one before the first has ever pushed, has made a perfectly good vault; rolling it
+        // back would throw away a nine-panel wizard run to tell them, accurately and uselessly,
+        // that there was nothing to restore. The finish panel says so instead.
+        Ok(r) => r,
+        // A copy that will not read IS a failure of this path: the student asked for their vault and
+        // a half-filled folder is worse than none. A network that is simply down is NOT this arm —
+        // `restore_into` reports that as an empty result with a warning, because a first slot will
+        // fill the folder anyway and refusing to make a vault over a hotel Wi-Fi is the wrong trade.
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dest);
+            return json!({ "ok": false, "error": e, "profile": Value::Null });
+        }
+    };
+    // `finish_or_roll_back`'s envelope gains one key here, rather than inside that function, because
+    // its OTHER two callers — the backup-folder restore and the adopted-vault path — never call
+    // `sync::restore_into` and have no `Restored` to report; merging it onto the envelope only when
+    // this path produced one keeps their own envelopes exactly as they were.
+    let mut out = finish_or_roll_back(root, &dest, Some(name.to_string()), plan, Some(backups));
+    if out["ok"] == true {
+        // M1 (fix round 1): `warnings` travels too. N3 (fix round 2): so does `ok` — the field the
+        // finish panel now keys its sentence on, since `warnings` being non-empty does not by itself
+        // mean the account could not be reached (a perfectly successful pull can carry one too).
+        out["restored"] = json!({
+            "notes": restored.notes, "records": restored.records, "empty": restored.empty,
+            "warnings": restored.warnings, "ok": restored.ok,
+        });
+    }
+    out
 }
 
 #[tauri::command(async)]
