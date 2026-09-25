@@ -3286,7 +3286,12 @@ pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde
     }
     let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
     let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
-    if field_text(&meta, "status").as_deref() != Some("confirmed") || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY) {
+    // `type: commitment` too (review M1): `resolve_target` keeps `..`, so the path test alone
+    // would let `commitments/../tasks/x.md` through.
+    if field_text(&meta, "type").as_deref() != Some("commitment")
+        || field_text(&meta, "status").as_deref() != Some("confirmed")
+        || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY)
+    {
         return Err(format!("{field} can only be set on a confirmed commitment, not {rel}"));
     }
     let word = value.as_str().ok_or_else(|| format!("{field} must be one word"))?;
@@ -3300,6 +3305,34 @@ pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde
     } else {
         Err(format!("{field} {word:?} is not one Knowlu knows"))
     }
+}
+
+/// The `commitment-ask` card's answer from the console (review I1): `meets` must be a list of
+/// `{days, start, end}` objects with no other key, `days` a list of day words, `start`/`end`
+/// `"HH:MM"` strings with start before end, and no string may carry a line break or `---`. It
+/// is validated as §2.2 validates `meets` and returned as the canonical single-line flow sequence
+/// the settlement writes into `meets:`; an error is the message for the card. Pure.
+pub fn answer_literal(meets: &serde_json::Value) -> Result<String, String> {
+    const SHAPE: &str = "answer_meets must be a list of {days, start, end}";
+    let items = meets.as_array().ok_or(SHAPE)?;
+    for item in items {
+        let entry = item.as_object().ok_or(SHAPE)?;
+        if let Some(key) = entry.keys().find(|k| !["days", "start", "end"].contains(&k.as_str())) {
+            return Err(format!("answer_meets entry has an unknown key {key:?}"));
+        }
+        let days = entry.get("days").and_then(|d| d.as_array()).ok_or(SHAPE)?;
+        let mut words: Vec<&str> = Vec::new();
+        for value in days.iter().chain([entry.get("start"), entry.get("end")].into_iter().flatten()) {
+            words.push(value.as_str().ok_or("answer_meets days, start and end must be text")?);
+        }
+        if let Some(bad) = words.iter().find(|w| crate::write::single_line_problem(w).is_some() || w.contains("---")) {
+            return Err(format!("answer_meets {bad:?} must be one line of a day or a time"));
+        }
+    }
+    let mut map = Mapping::new();
+    map.insert(Value::String("answer_meets".into()), crate::yaml::from_json(meets));
+    let parsed = strict_meets(&map, "answer_meets").map_err(|why| format!("{why}; answer again"))?;
+    Ok(crate::write::to_literal(&to_value(meets_json(&parsed))))
 }
 
 /// `answer_card`'s engine check (review finding 6): `target` is a `pending` approval of kind
@@ -10326,10 +10359,7 @@ mod phase2_tests {
         let v = week_vault("edits");
         run(&v, &input(&[("gcal-series:cs100", "hard")], &[], Some("[{days: [mon], start: \"08:00\", end: \"22:00\"}]")));
         std::fs::create_dir_all(v.join("tasks")).unwrap();
-        std::fs::write(v.join("tasks").join("essay.md"), "---
-title: Essay
----
-").unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntitle: Essay\n---\n").unwrap();
         let word = |w: &str| serde_json::json!(w);
         assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "level", &word("soft")), Ok(()));
         assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "kind", &word("lab")), Ok(()));
@@ -10348,10 +10378,48 @@ title: Essay
         let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
         assert_eq!(check_answerable(&v, &rel), Ok(()));
         std::fs::create_dir_all(v.join("tasks")).unwrap();
-        std::fs::write(v.join("tasks").join("essay.md"), "---
-title: Essay
----
-").unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntitle: Essay\n---\n").unwrap();
         assert!(check_answerable(&v, "tasks/essay.md").unwrap_err().contains("not a pending commitment-ask card"));
+    }
+
+    /// Review M1: a `..` path that starts with `commitments/` but lands on a confirmed task is
+    /// refused: the note itself must be `type: commitment`.
+    #[test]
+    fn a_dotted_path_out_of_commitments_is_refused() {
+        let v = week_vault("dotted");
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntype: task\ntitle: Essay\nstatus: confirmed\n---\n").unwrap();
+        let err = check_console_edit(&v, "commitments/../tasks/essay.md", "kind", &serde_json::json!("class")).unwrap_err();
+        assert!(err.contains("commitment"), "{err}");
+    }
+
+    /// Review I1: the answer is validated as §2.2 validates `meets` and comes back as the one
+    /// canonical single-line flow sequence the engine writes; anything else is refused.
+    #[test]
+    fn answer_literal_canonicalises_a_valid_answer_and_refuses_the_rest() {
+        let j = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        assert_eq!(
+            answer_literal(&j(r#"[{"days": ["wed", "mon"], "start": "9:00", "end": "10:15"}]"#)),
+            Ok("[{days: [wed, mon], end: '10:15', start: '09:00'}]".to_string())
+        );
+        for bad in [
+            r#"[{"days": ["mon\nx"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00\n", "end": "15:00"}]"#,
+            r#"[{"days": ["mon---x"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "---14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00", "end": "15:00", "room": "B1"}]"#,
+            r#"[{"days": ["someday"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#,
+            r#"[{"days": ["mon"], "start": 14, "end": "15:00"}]"#,
+            r#"[{"days": "mon", "start": "14:00", "end": "15:00"}]"#,
+            r#"{"days": ["mon"], "start": "14:00", "end": "15:00"}"#,
+            r#"[]"#,
+        ] {
+            assert!(answer_literal(&j(bad)).is_err(), "{bad} should be refused");
+        }
+        let why = answer_literal(&j(r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#)).unwrap_err();
+        assert!(why.starts_with("answer_meets entry mon"), "{why}");
     }
 }

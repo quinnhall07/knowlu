@@ -785,3 +785,29 @@ fn kind_and_level_are_editable_only_on_a_confirmed_commitment() {
     assert_eq!(task["ok"], false);
     assert!(task["error"].as_str().unwrap().contains("commitment"), "{task}");
 }
+
+/// Review I1: an answer carrying a line break or `---` is refused by the engine's
+/// `answer_literal` before any write. The card is byte-for-byte untouched, nothing is journaled,
+/// and it can still be answered afterwards.
+#[test]
+fn a_multi_line_or_dashed_answer_writes_nothing_and_the_card_stays_answerable() {
+    let (v, cs) = ask_vault("dashed");
+    let card = v.join("approvals/commitment-ask-when-does-bui-100-meet.md");
+    let before = std::fs::read(&card).unwrap();
+    for meets in [
+        json!([{ "days": ["mon\nstatus: approved"], "start": "14:00", "end": "15:15" }]),
+        json!([{ "days": ["mon---x"], "start": "14:00", "end": "15:15" }]),
+        json!([{ "days": ["mon"], "start": "14:00\n---", "end": "15:15" }]),
+    ] {
+        let env = answer_card_inner(&cs, "today", "appr_00000000a1", &meets).unwrap();
+        assert_eq!(env["ok"], false, "{env}");
+        assert!(env["error"].as_str().unwrap().contains("answer_meets"), "{env}");
+        assert_eq!(std::fs::read(&card).unwrap(), before, "the card is untouched");
+    }
+    assert!(!v.join("state/journal").exists() || journal_records(&v).iter().all(|r| r["field"] != "answer_meets"), "nothing journaled");
+    let good = json!([{ "days": ["tue"], "start": "09:00", "end": "10:15" }]);
+    let env = answer_card_inner(&cs, "today", "appr_00000000a1", &good).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let note = std::fs::read_to_string(v.join("commitments/bui-100.md")).unwrap();
+    assert!(note.contains("days: [tue]"), "{note}");
+}

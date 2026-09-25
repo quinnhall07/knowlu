@@ -306,7 +306,8 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
     let env = mutate(cs, view, |journal| {
         // Review finding 6: only a pending commitment-ask card takes an answer — the engine says so.
         knowlu_engine::commitments::check_answerable(&cs.vault, id)?;
-        let literal = write::to_literal(&knowlu_engine::yaml::from_json(meets));
+        // Review I1: the engine validates the answer and hands back the one-line literal to write.
+        let literal = knowlu_engine::commitments::answer_literal(meets)?;
         write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
         decision = decide_in(cs, journal, id, "approved", "", None)?;
         Ok(())
@@ -318,7 +319,11 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
         .filter(|w| !prefix.is_empty() && w.starts_with(&prefix))
         .map(|w| w[prefix.len()..].to_string())
         .collect();
-    if env["ok"] == true && !mine.is_empty() { env["ok"] = json!(false); env["error"] = json!(mine.join("; ")); }
+    // Review M2: only a card the settlement did not execute comes back `ok: false`.
+    // `executed` names cards by stem; the settlement's own stem, never a longer card's.
+    let stem = prefix.strip_suffix(".md: ").unwrap_or_default();
+    let executed = decision["executed"].as_array().into_iter().flatten().any(|e| !stem.is_empty() && e.as_str() == Some(stem));
+    if env["ok"] == true && !executed && !mine.is_empty() { env["ok"] = json!(false); env["error"] = json!(mine.join("; ")); }
     env["decision"] = decision;
     Ok(env)
 }
