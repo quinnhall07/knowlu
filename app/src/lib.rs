@@ -15,3 +15,4 @@ pub mod state;
 pub mod telemetry;
 pub mod tray;
 pub mod updates;
+pub mod week;
