@@ -35,7 +35,7 @@ older under `docs/` is history or design authority from the previous repository 
   - Staging carries C3′'s four `20260912*` migrations and `sync-push`/`sync-pull`.
   - Every task was reviewed. The final whole-branch review (opus) was followed by one fix wave (18 rows), and its re-review reads **ready with residuals, no open rows**.
   - The gate on the merge: 1451 / 0 / 4, 0 other; deno 461/0; wizard-check and settings-check ok.
-  - The ledger and every review stay in `.claude/worktrees/c3-sync/.superpowers/sdd/2026-09-17-c3-account-vault-plan/` until the stream is closed.
+  - The ledger, the whole-branch review with its fix wave and merge report, and Task 12's stream report are preserved as `docs/reports/2026-09-25-c3-account-vault-{sdd-ledger,whole-branch-review,stream-report}.md`. C1b's, C1c's and the runner's are beside them (`2026-09-24-c1b-sign-in-*`, `2026-09-24-c1c-first-day-*`, `2026-09-23-ci-self-hosted-sdd-ledger.md`). All four streams are closed: worktrees and branches deleted, and the PRs keep the record.
 - **Live Stripe is proven end to end on prod (2026-09-24).** Quinn activated the live account. A prod `POST /billing-checkout` answered a `cs_live_` session. Quinn paid with the 100% promotion code, and the webhook wrote the entitlement about 4 s later: monthly, `trialing`, period end 2026-10-01.
 - **Production is still at C1 level plus live billing.** The ordered release checklist is §4's production-parity row.
 
@@ -132,7 +132,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 
 ## 3. Sequence
 
-**▶ RESUME HERE (2026-09-25).** C1b, C1c and C3′ are merged (§1's first ▶ block). CI runs on Quinn's laptop runner, so start it before pushing. Each merged stream's SDD ledger is at `<worktree>/.superpowers/sdd/<plan basename>/progress.md`, and its rulings and deferred rows live there until the stream is closed and its workspace is deleted.
+**▶ RESUME HERE (2026-09-25).** C1b, C1c and C3′ are merged (§1's first ▶ block). CI runs on Quinn's laptop runner, so start it before pushing. The four merged streams are closed. Their ledgers, reviews, rulings and deferred rows are preserved in `docs/reports/` (§1's first ▶ block names the files).
 
 Order from here:
 - **(1) Production parity and the 0.1.1 release:** the checklist in §4's production-parity row.
