@@ -15,7 +15,9 @@ day, and on the next poll after the block stops coming the ranked day takes its 
 
 A third and fourth page boot the console over a first-day vault (commitment model phase 2): the
 confirm screen opens over the first-run view with class rows preset to *Mine*, Not now sends
-nothing, and Finish sends one `commitments_confirm` holding the expected keys.
+nothing, and Finish sends one `commitments_confirm` holding the expected keys and shows a skipped
+row's warning. Two more hold `commitment_proposals` open: Finish stays disabled and sends nothing
+until the read settles (either way), and a *Your day* edit made meanwhile is not overwritten.
 
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
@@ -158,6 +160,9 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       first_run: { running: true, current: 'coursework', steps: [] } }); }
   if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: true, commitments: [], office_hours: [],
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [] } }); }
+  if (cmd === 'commitment_proposals' && window.__HOLD) { return new Promise(function (res, rej) {
+      window.__RELEASE = function (ok) { window.__HOLD = false;
+        if (ok) { res(window.__TAURI__.core.invoke('commitment_proposals', {})); } else { rej(new Error('the held read failed')); } }; }); }
   if (cmd === 'commitment_proposals') { return Promise.resolve({ ok: true, error: null, warnings: [],
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }],
       proposals: [
@@ -170,7 +175,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
         { kind: 'office-hours', level: 'optional', title: 'CS 100 Office Hours', course: 'cs-100', when: 'Thu 3–4pm', where: null,
           source_uid: 'gcal-series:oh', window: false, meets: [{ days: ['thu'], start: '15:00', end: '16:00' }] }] }); }
   if (cmd === 'commitments_confirm') { return Promise.resolve({ ok: true, error: null, state: null,
-      result: { created: 1, declined: 0, window: 'created', warnings: [] } }); }
+      result: { created: 1, declined: 0, window: 'created', warnings: window.__CONFIRM_WARNINGS || [] } }); }
   if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
   return Promise.resolve({ ok: true, error: null });
 } } };
@@ -567,6 +572,27 @@ def check_first_run(page, errors) -> list:
 WINDOW_SENT = '[{days: [mon, tue, wed, thu, fri], start: "07:30", end: "23:00"}]'
 
 
+def check_week_wait(page, errors, succeed) -> list:
+    """Final review I1: while `commitment_proposals` is still out (the fake holds it), Finish is
+    disabled and sends nothing, and a *Your day* edit made during the wait survives the window
+    proposal's arrival. Once the read settles, succeeded or failed, Finish is live."""
+    bad = []
+    if not page.is_visible("#week-setup"):
+        return [f"the held confirm screen did not open (calls: {names(page)!r})"] + [f"page error: {e}" for e in errors]
+    if not page.is_disabled("#ws-finish"): bad.append("Finish is live while the calendar read is pending")
+    page.evaluate("document.getElementById('ws-finish').click()"); page.wait_for_timeout(200)
+    if "commitments_confirm" in names(page): bad.append("a Finish during the calendar read sent a write")
+    page.evaluate("""(() => { const i = document.querySelector('#ws-window .wrow[data-day=mon] [data-part=start]');
+        i.value = '06:45'; i.dispatchEvent(new Event('input', { bubbles: true })); })()""")
+    page.evaluate(f"window.__RELEASE({'true' if succeed else 'false'})"); page.wait_for_timeout(300)
+    kept = page.evaluate("document.querySelector('#ws-window .wrow[data-day=mon] [data-part=start]').value")
+    if kept != "06:45": bad.append(f"an edit made during the read was overwritten (Mon start {kept!r})")
+    if page.is_disabled("#ws-finish"): bad.append(f"Finish stayed disabled after the read {'succeeded' if succeed else 'failed'}")
+    if succeed and not page.query_selector("#week-setup .wsrow[data-key='gcal-series:cs100']"): bad.append("the held proposals never painted")
+    for e in errors: bad.append(f"held confirm-screen page error: {e}")
+    return bad
+
+
 def check_week_setup(page, errors, finish) -> list:
     """The confirm screen on a first-day vault (spec §2): open over the first-run view, the class
     preset to Mine and nothing else answered, BUI 100 named, no typed input anywhere. Then either
@@ -593,6 +619,7 @@ def check_week_setup(page, errors, finish) -> list:
         if "commitments_confirm" in names(page): bad.append("Finish with no hours set sent a write")
         if "at least one day" not in page.inner_text("#ws-window"): bad.append("Finish with no hours set did not say why")
         page.evaluate("(vals => document.querySelectorAll('#ws-window input[type=time]').forEach((i, n) => { i.value = vals[n]; }))", saved)
+        page.evaluate("window.__CONFIRM_WARNINGS = ['gcal-series:gone: not a current proposal; skipped']")
         page.click("#ws-finish"); page.wait_for_timeout(300)
         sent = page.evaluate("window.__CALLS.filter(c => c[0] === 'commitments_confirm').map(c => c[1])")
         if len(sent) != 1:
@@ -603,6 +630,7 @@ def check_week_setup(page, errors, finish) -> list:
             if c.get("not_mine") != []: bad.append(f"Finish declined {c.get('not_mine')!r}; blank rows must stay blank")
             if c.get("window") != WINDOW_SENT: bad.append(f"Finish sent the window {c.get('window')!r}")
         if page.is_visible("#week-setup"): bad.append("Finish did not close the screen")
+        if "not a current proposal" not in page.inner_text("#delta"): bad.append("Finish did not show the skipped row's warning")
     else:
         page.click("#ws-later"); page.wait_for_timeout(300)
         if page.is_visible("#week-setup"): bad.append("Not now did not close the screen")
@@ -639,6 +667,13 @@ def main() -> int:
                     week.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE)
                     week.goto(url); week.wait_for_timeout(600)
                     bad += check_week_setup(week, werrors, finish)
+                for succeed in (True, False):
+                    held = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
+                    herrors = []
+                    held.on("pageerror", lambda e, sink=herrors: sink.append(str(e)))
+                    held.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE + "\nwindow.__HOLD = true;")
+                    held.goto(url); held.wait_for_timeout(600)
+                    bad += check_week_wait(held, herrors, succeed)
                 browser.close()
             for line in bad: print("FAIL:", line)
             print("ok" if not bad else f"{len(bad)} failure(s)")

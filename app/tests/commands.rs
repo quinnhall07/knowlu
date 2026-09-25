@@ -730,6 +730,25 @@ fn answer_card_writes_the_answer_as_the_student_and_approves() {
     assert_eq!(answer["via"], "dashboard");
 }
 
+/// Final review M1: an ask snoozed until today is shown as pending (surface wakes it), so its
+/// answer is taken before any slot rewrites the status; one still asleep is refused.
+#[test]
+fn answer_card_takes_a_snoozed_ask_that_woke_today() {
+    let (v, cs) = ask_vault("woke");
+    let card = v.join("approvals/commitment-ask-when-does-bui-100-meet.md");
+    let text = std::fs::read_to_string(&card).unwrap();
+    let meets = json!([{ "days": ["tue"], "start": "09:00", "end": "10:15" }]);
+    std::fs::write(&card, text.replace("status: pending", "status: snoozed").replace("snooze_until: null", "snooze_until: 2026-08-29")).unwrap();
+    let env = answer_card_inner(&cs, "today", "appr_00000000a1", &meets).unwrap();
+    assert_eq!(env["ok"], false, "still asleep: {env}");
+    std::fs::write(&card, text.replace("status: pending", "status: snoozed").replace("snooze_until: null", "snooze_until: 2026-08-28")).unwrap();
+    let env = answer_card_inner(&cs, "today", "appr_00000000a1", &meets).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let note = std::fs::read_to_string(v.join("commitments/bui-100.md")).unwrap();
+    assert!(note.contains("source_uid: card:bui-100") && note.contains("kind: class"), "{note}");
+    assert!(v.join("archive/commitment-ask-when-does-bui-100-meet.md").exists());
+}
+
 /// Review finding 6: `answer_card` pointed at another approval (vault-full's pending task
 /// proposal) is refused before any write; the task is not materialised.
 #[test]

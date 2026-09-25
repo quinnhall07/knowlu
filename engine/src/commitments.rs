@@ -3336,15 +3336,20 @@ pub fn answer_literal(meets: &serde_json::Value) -> Result<String, String> {
 }
 
 /// `answer_card`'s engine check (review finding 6): `target` is a `pending` approval of kind
-/// [`COMMITMENT_ASK`]. Anything else — a task proposal, a settled card — is refused before a
-/// write, so a wrong id can never approve and materialise another card. Reads only.
-pub fn check_answerable(vault: &Path, target: &str) -> Result<(), String> {
+/// [`COMMITMENT_ASK`], or a `snoozed` one whose `snooze_until` is `today` or earlier. Anything
+/// else — a task proposal, a settled card, a card still asleep — is refused before a write, so a
+/// wrong id can never approve and materialise another card. Reads only.
+pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), String> {
     let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
     let rel = crate::ids::rel(vault, &path);
     let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
     let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
     let field = |key: &str| field_text(&meta, key).unwrap_or_default();
-    if field("type") == "approval" && field("kind") == COMMITMENT_ASK && field("status") == "pending" {
+    // Final review M1: a snooze that has come is pending in every view (surface wakes it in
+    // memory until the next slot's `process_approvals` rewrites the status), so it answers too.
+    let woke = field("status") == "snoozed"
+        && crate::approvals::as_date(get(&meta, "snooze_until")).is_some_and(|d| d <= today);
+    if field("type") == "approval" && field("kind") == COMMITMENT_ASK && (field("status") == "pending" || woke) {
         Ok(())
     } else {
         Err(format!("{rel} is not a pending commitment-ask card"))
@@ -10376,10 +10381,32 @@ mod phase2_tests {
         journal_on(&v, "2026-08-20");
         let (paths, ..) = file_asks(&v, TODAY, 15);
         let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
-        assert_eq!(check_answerable(&v, &rel), Ok(()));
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()));
         std::fs::create_dir_all(v.join("tasks")).unwrap();
         std::fs::write(v.join("tasks").join("essay.md"), "---\ntitle: Essay\n---\n").unwrap();
-        assert!(check_answerable(&v, "tasks/essay.md").unwrap_err().contains("not a pending commitment-ask card"));
+        assert!(check_answerable(&v, "tasks/essay.md", TODAY).unwrap_err().contains("not a pending commitment-ask card"));
+    }
+
+    /// Final review M1: a snoozed ask whose `snooze_until` has come is shown as pending (surface
+    /// wakes it in memory), so it takes an answer; one still asleep does not.
+    #[test]
+    fn a_snoozed_ask_that_woke_is_answerable() {
+        let v = three_courses("woke");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
+        let text = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(text.contains("status: pending") && text.contains("snooze_until: null"));
+        let snooze = |until: &str| {
+            let t = text.replace("status: pending", "status: snoozed").replace("snooze_until: null", &format!("snooze_until: {until}"));
+            std::fs::write(&paths[0], t).unwrap();
+        };
+        snooze(&TODAY.to_string());
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()), "woke today");
+        snooze(&TODAY.yesterday().unwrap().to_string());
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()), "woke yesterday");
+        snooze(&TODAY.tomorrow().unwrap().to_string());
+        assert!(check_answerable(&v, &rel, TODAY).is_err(), "still asleep");
     }
 
     /// Review M1: a `..` path that starts with `commitments/` but lands on a confirmed task is

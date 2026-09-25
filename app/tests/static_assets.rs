@@ -308,7 +308,10 @@ fn the_good_to_know_and_issues_views_are_real_and_every_observed_row_names_its_k
     assert!(js.contains("if (e.target.closest(\".row.iss .acts\")) { e.stopPropagation(); }"), "the Issues .acts must not reach the document handler");
     // A7: showRefusal(el, message, id, field) never reads `el`; the id is what prefixes the toast
     // with the note's title and re-finds the row after applyEnvelope's repaint.
-    assert_eq!(js.matches("showRefusal(null, m, id)").count(), 3, "resolveIssue, closeInfoItem and answerAsk (phase 2) all pass the id");
+    // Final review M2: counted by pattern, so renaming a callback's message parameter (Q10's
+    // `msg`) cannot hide a caller from the pin.
+    let refusals = regex::Regex::new(r"showRefusal\(null, \w+, id\)").unwrap();
+    assert_eq!(refusals.find_iter(&js).count(), 4, "resolveIssue, closeInfoItem, saveCommitment and answerAsk (phase 2) all pass the id");
     assert!(!js.contains("showRefusal(btn.closest(\".row\")"), "a detached row element says nothing");
 }
 
@@ -1607,4 +1610,13 @@ fn the_confirm_screen_and_the_ask_form_are_there() {
     assert!(js.contains("invoke(\"answer_card\", { view: stateView(), id: id, meets: meets })"));
     assert!(js.contains("data-answer-in"), "Q11-b: the deck sends an ask to Decisions");
     assert!(read("console.css").contains(".week-setup[hidden] { display: none; }"));
+    // Final review I1: Finish waits for commitment_proposals to settle, and picker edits made
+    // during the wait survive the window proposal's arrival.
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("EL(\"ws-finish\").disabled = true;") && open.matches("EL(\"ws-finish\").disabled = false;").count() == 1, "Finish is held until the read settles");
+    assert!(open.contains("if (win && !weekSetup.dirty)"), "an edit made while waiting is kept");
+    assert!(js.contains("weekSetup.dirty = true;"), "the editor marks the screen dirty");
+    // Final review M4: skipped rows are said, not swallowed.
+    let fin = js.split("function finishWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(fin.contains("env.result.warnings") && fin.contains("EL(\"delta\").textContent"), "Finish shows the skipped rows");
 }

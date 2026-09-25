@@ -751,7 +751,7 @@
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
   // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
   // screen for this console session; Finish writes the planning-day note, so it never returns.
-  var weekSetup = { dismissed: false, open: false };
+  var weekSetup = { dismissed: false, open: false, dirty: false };
 
   function checkWeekSetup() {
     if (weekSetup.dismissed || weekSetup.open) { return; }
@@ -793,17 +793,24 @@
     DAYS.forEach(function (d) { byDay[d] = { start: "08:00", end: "22:00" }; });
     EL("ws-window").innerHTML = windowEditorHtml(byDay);
     paintSetupRows([], week.uncovered_courses || []);
+    // Final review I1: Finish waits for the calendar read to settle, succeeded or failed. A Finish
+    // before it would write the planning-day note from the placeholder hours, and the routine's
+    // window proposal would never be offered again.
+    weekSetup.dirty = false;
+    EL("ws-finish").disabled = true;
+    var ready = function () { EL("ws-finish").disabled = false; };
     invoke("commitment_proposals", {}).then(function (r) {
       var ps = (r && r.proposals) || [];
       var win = ps.filter(function (p) { return p.window; })[0];
-      if (win) {
+      // An edit the student made while waiting is theirs: the proposal does not overwrite it.
+      if (win && !weekSetup.dirty) {
         byDay = {};
         win.meets.forEach(function (m) { m.days.forEach(function (d) { byDay[d] = { start: m.start, end: m.end }; }); });
         EL("ws-window").innerHTML = windowEditorHtml(byDay);
       }
       paintSetupRows(ps, (r && r.uncovered_courses) || week.uncovered_courses || []);
       EL("ws-status").textContent = ps.some(function (p) { return !p.window; }) ? "Knowlu found these on your calendar. Mark each one." : "Knowlu found nothing repeating on your calendar. Set your day below.";
-    }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; });
+    }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; }).then(ready);
   }
 
   function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
@@ -825,6 +832,12 @@
       btn.disabled = false;
       if (!env.ok) { showWindowError(EL("ws-window"), env.error); EL("ws-status").textContent = env.error; return; }
       closeWeekSetup();
+      // Final review M4: a row --confirm skipped (no longer a current proposal) comes back as a
+      // question; say so on the notice line until the next paint, rather than close in silence.
+      var skipped = (env.result && env.result.warnings) || [];
+      if (skipped.length) {
+        EL("delta").textContent = skipped.length + (skipped.length === 1 ? " row" : " rows") + " will come back as questions: " + skipped.join("; ");
+      }
     }).catch(function () { btn.disabled = false; });
   }
 
@@ -851,7 +864,7 @@
     var fin = e.target.closest("#ws-finish");
     if (fin) { finishWeekSetup(fin); }
   });
-  bindWindowEditor(EL("ws-window"), function () { showWindowError(EL("ws-window"), null); });
+  bindWindowEditor(EL("ws-window"), function () { weekSetup.dirty = true; showWindowError(EL("ws-window"), null); });
 
   // Dispatch table from view name to its main-body renderer. Every nav view is built now
   // (Task 3 finishes Issues) — the not-built placeholder is gone (R-P2-3).

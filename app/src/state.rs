@@ -69,8 +69,11 @@ pub struct ConsoleState {
     ///
     /// **Ordering, and it is one-way:** `vault_io` is taken BEFORE `lock`, never while `lock` is
     /// held. `lock` alone still guards the read polls, so a `state` poll never waits on a git
-    /// fetch. And `vault_io` is never held across a child-process wait — a scheduler slot takes it
+    /// fetch. A scheduler slot never holds `vault_io` across a child-process wait: it takes it
     /// inside each of its own sync steps, never around `run_child`, which may run for 20 minutes.
+    /// The one exception is `commitments_confirm` (`week::run_confirm`, Plan ruling Q9-a), which
+    /// holds it for the whole `commitments --confirm` child: that child writes notes, a sync must
+    /// not rewrite the tree under it, and it fetches nothing, so the hold is short.
     pub vault_io: Mutex<()>,
     pub settings: Mutex<Settings>,
     /// `Some` when `settings.json` existed but did not parse at open — names the path and the

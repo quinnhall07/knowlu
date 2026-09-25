@@ -304,8 +304,9 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
     let name = knowlu_engine::ids::resolve_target(&cs.vault, id).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
     let mut decision = Value::Null;
     let env = mutate(cs, view, |journal| {
-        // Review finding 6: only a pending commitment-ask card takes an answer — the engine says so.
-        knowlu_engine::commitments::check_answerable(&cs.vault, id)?;
+        // Review finding 6: only a pending commitment-ask card (or one whose snooze has come, final
+        // review M1) takes an answer — the engine says so.
+        knowlu_engine::commitments::check_answerable(&cs.vault, id, now_in(cs).date())?;
         // Review I1: the engine validates the answer and hands back the one-line literal to write.
         let literal = knowlu_engine::commitments::answer_literal(meets)?;
         write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
