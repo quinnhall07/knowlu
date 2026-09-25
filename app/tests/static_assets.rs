@@ -1530,3 +1530,37 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(account_entry.contains("your name") && account_entry.contains("a link to your profile picture"),
         "the Your account entry must agree with the Google paragraph: {account_entry}");
 }
+
+/// Phase 2 of the commitment model (spec D6, D7, D8, §4): the Schedule view headed "Your week",
+/// the window editor with its 400 ms preview, the today view's moved line, and `schedule` never
+/// reaching the read model as a view name.
+#[test]
+fn the_schedule_view_the_window_editor_and_the_moved_line_are_there() {
+    let html = read("index.html");
+    assert!(html.contains("<a href=\"#schedule\" data-view=\"schedule\"><span class=\"dot\"></span>Schedule<span class=\"ct\"></span></a>"), "D6: a Schedule link");
+    assert!(html.contains("<section id=\"main-schedule\" hidden>") && html.contains("<h2>Your week</h2>"), "D6: headed Your week");
+    for id in ["sched-list", "sched-oh", "sched-window", "sched-save", "sched-say", "sched-moved", "sched-items", "moved"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "missing #{id}");
+    }
+    let js = read("console.js");
+    assert!(js.contains("schedule: renderScheduleView"), "in VIEW_RENDERERS");
+    for f in ["stateView", "renderMoved", "renderScheduleView", "windowEditorHtml", "windowSequence", "bindWindowEditor", "runPreview", "confirmWeek", "bindScheduleView"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    assert!(js.contains("var PREVIEW_MS = 400;") && js.contains("setTimeout(runPreview, PREVIEW_MS)"), "§4: the preview is debounced 400 ms");
+    assert!(js.contains("invoke(\"preview_window\", { window: seq })"));
+    assert!(js.contains("\"No change to today's plan\""));
+    assert!(js.contains("items.slice(0, 5)"), "§4: the first five items of the previewed day");
+    assert!(js.contains("el.textContent = m ? m.text : \"\";"), "D7: the today view prints moved.text");
+    assert!(js.contains("data-same-as-monday"), "§4: the same-as-Monday shortcut");
+    assert!(js.contains("invoke(\"commitments_confirm\", { view: stateView(), confirm: payload })"));
+    // Q10-a: `schedule` never reaches `surface::View::parse`. ui_event is the one call that names
+    // the page's own view.
+    assert_eq!(js.matches("view: current.view").count(), 1, "only ui_event sends current.view");
+    assert!(js.contains("{ action: action, view: current.view,"), "…and it is ui_event");
+    assert!(js.contains("runs: 1, schedule: 1 }"), "route() accepts schedule");
+    assert!(!js.contains("data-remove"), "D8: no remove control in phase 2");
+    let css = read("console.css");
+    assert!(css.contains(".row.sched { grid-template-columns: minmax(0,1fr) auto; }"), "a Schedule row restates its tracks");
+    assert!(css.contains(".moved[hidden] { display: none; }"));
+}

@@ -16,6 +16,7 @@
       <a href="#week" data-view="week"><span class="dot warn"></span>This week<span class="ct"></span></a>
       <a href="#later" data-view="later"><span class="dot"></span>Later<span class="ct"></span></a>
       <a href="#all" data-view="all"><span class="dot"></span>All active<span class="ct"></span></a>
+      <a href="#schedule" data-view="schedule"><span class="dot"></span>Schedule<span class="ct"></span></a>
       <div class="grp">Attention</div>
       <a href="#decisions" data-view="decisions"><span class="dot"></span>Decisions<span class="ct"></span></a>
       <a href="#good-to-know" data-view="good-to-know"><span class="dot"></span>Good to know<span class="ct"></span></a>
@@ -44,6 +45,7 @@
     </div>
     <div id="main-today">
       <h1 id="headline"></h1>
+      <p class="moved" id="moved" hidden></p>
       <p class="lede" id="lede"></p>
       <div class="meter">
         <div class="meter-hd"><h2>Today&rsquo;s capacity</h2><span class="sub" id="metersub"></span></div>
@@ -65,6 +67,15 @@
     </section>
     <section id="main-issues" hidden>
       <div class="sec"><div class="sec-hd"><h2>Issues raised</h2><span class="n" id="issv-n"></span></div><div id="iss-list"></div></div>
+    </section>
+    <section id="main-schedule" hidden>
+      <div class="sec"><div class="sec-hd"><h2>Your week</h2><span class="n" id="sched-n"></span></div><div id="sched-list"></div></div>
+      <div class="sec"><div class="sec-hd"><h2>Office hours</h2></div><div id="sched-oh"></div></div>
+      <div class="sec"><div class="sec-hd"><h2>Your day</h2></div>
+        <div class="wined" id="sched-window"></div>
+        <div class="wined-foot"><button class="b pri y" type="button" id="sched-save">Save</button><span class="hint" id="sched-say"></span></div>
+        <div class="preview"><p id="sched-moved"></p><ol id="sched-items"></ol></div>
+      </div>
     </section>
     <section id="main-runs" hidden><h1>Runs</h1><div id="runs-view"></div></section>
   </main>

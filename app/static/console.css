@@ -555,3 +555,17 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 #first-run .fr-foot button.b { background: transparent; border-color: var(--hair); color: var(--t3); }
 #first-run .fr-foot button.b:hover { border-color: var(--t4); color: var(--t1); }
 @media (prefers-reduced-motion: reduce) { .fr-step[data-state="now"] .fr-mark { animation: none; } }
+
+/* ---- Commitment model phase 2: the moved line, the Schedule view, the window editor ---- */
+.moved { margin: 0 0 var(--s4); color: var(--acc); font-size: 13px; }
+.moved[hidden] { display: none; }
+.row.sched { grid-template-columns: minmax(0,1fr) auto; }
+.row.sched .acts select, .wrow input[type=time] { background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r1); padding: 2px var(--s2); }
+.wrow input[type=time] { font-family: var(--mono); }
+.lvl { display: inline-flex; gap: 2px; margin-left: var(--s2); }
+.lvl .b[aria-pressed="true"] { background: var(--acc-dim); color: var(--t1); border-color: var(--acc); }
+.wrow { display: grid; grid-template-columns: 44px 120px 120px auto; gap: var(--s2); align-items: center; padding: 2px 0; }
+.werr { grid-column: 2 / -1; color: var(--crit); font-size: 12px; }
+.werr:empty { display: none; }
+.wined-foot { display: flex; gap: var(--s3); align-items: center; margin-top: var(--s3); }
+.preview { margin-top: var(--s4); color: var(--t2); font-size: 13px; }
