@@ -3053,6 +3053,120 @@ pub fn emit_checks(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Phase 2 — the per-course fallback card, `commitment-ask` (parent §5.3, phase-2 spec §5).
+// ---------------------------------------------------------------------------------------------
+
+/// The per-course fallback card's kind (one of [`LOCAL_CARD_KINDS`]).
+pub const COMMITMENT_ASK: &str = "commitment-ask";
+
+/// At most this many `commitment-ask` cards are first proposed on any one day (§5.3).
+pub const ASKS_PER_DAY: i64 = 2;
+
+/// The first vault day ([`vault_day`]) on which an ask may be filed (§5.3).
+pub const ASK_FROM_DAY: i64 = 3;
+
+/// A course's ask key: the card's `source_uid`, and the decline marker's that closes it (§5.3).
+pub fn ask_key(slug: &str) -> String {
+    format!("card:{slug}")
+}
+
+fn ask_body(title: &str) -> String {
+    format!(
+        "**When does this class meet?** Knowlu didn't find {title} on your calendar.\n\n\
+         Answer with its days and times and Knowlu plans around them.\n\n\
+         Reject if it has no set meeting times (an online course), and you won't be asked again.\n"
+    )
+}
+
+/// Every course an ask card in `approvals/` or `archive/` already covers, unless that card is
+/// `superseded` or `expired` (Plan ruling Q6-c), and how many ask cards were first proposed
+/// `today`, whatever their status.
+fn asked_courses(vault: &Path, today: Date) -> (BTreeSet<String>, i64) {
+    let mut courses = BTreeSet::new();
+    let mut today_count = 0;
+    for folder in ["approvals", "archive"] {
+        let dir = vault.join(folder);
+        if !dir.is_dir() {
+            continue;
+        }
+        for path in crate::approvals::sorted_md(&dir) {
+            let Ok(raw) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&raw) else { continue };
+            let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+            if field("type") != "approval" || field("kind") != COMMITMENT_ASK {
+                continue;
+            }
+            if crate::approvals::as_date(get(&meta, "first_proposed_at")) == Some(today) {
+                today_count += 1;
+            }
+            if matches!(field("status").as_str(), "superseded" | "expired") {
+                continue;
+            }
+            let course = field("course");
+            if !course.is_empty() {
+                courses.insert(course);
+            }
+        }
+    }
+    (courses, today_count)
+}
+
+/// File today's `commitment-ask` cards (parent §5.3, phase-2 spec §5): one per
+/// [`uncovered_courses`] course, in slug order, from the vault's day [`ASK_FROM_DAY`], at most
+/// `min(budget, ASKS_PER_DAY − asks first proposed today)`. A course is skipped when its
+/// `card:<slug>` marker exists or an ask card already covers it ([`asked_courses`]). Every card
+/// goes through [`file_card`]. A card that cannot be filed is one warning, and ends this run's
+/// asks. Returns `(paths, count, warnings)`.
+pub fn emit_asks(
+    vault: &Path,
+    proposals: &[Proposal],
+    today: Date,
+    budget: i64,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (Vec<PathBuf>, usize, Vec<String>) {
+    let mut filed: Vec<PathBuf> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    if vault_day(vault, today) < ASK_FROM_DAY {
+        return (filed, 0, warnings);
+    }
+    let (mut asked, today_count) = asked_courses(vault, today);
+    let allowance = budget.min(ASKS_PER_DAY - today_count).max(0) as usize;
+    if allowance == 0 {
+        return (filed, 0, warnings);
+    }
+    let set = load(vault);
+    let (codes, _) = Codes::load(vault);
+    for course in uncovered_courses(vault, &set, proposals, &codes) {
+        if filed.len() >= allowance {
+            break;
+        }
+        let key = ask_key(&course.slug);
+        if set.declined.contains(&key) || asked.contains(&course.slug) {
+            continue;
+        }
+        let name = short_title(&course.title);
+        let fields = vec![
+            ("source_uid", Field::Scalar(Node::text(&key))),
+            ("course", Field::Scalar(Node::text(&course.slug))),
+        ];
+        let title = format!("When does {name} meet?");
+        match file_card(vault, COMMITMENT_ASK, fields, &title, &ask_body(&name), today, ctx, journal) {
+            Ok(path) => {
+                asked.insert(course.slug.clone());
+                filed.push(path);
+            }
+            Err(err) => {
+                warnings.push(err);
+                break;
+            }
+        }
+    }
+    let count = filed.len();
+    (filed, count, warnings)
+}
+
+// ---------------------------------------------------------------------------------------------
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
@@ -9973,5 +10087,83 @@ mod phase2_tests {
         assert!(!o.setup, "Finish wrote the planning day, so the screen never comes back");
         assert_eq!(o.window[0], serde_json::json!({"day": "mon", "start": "07:00", "end": "23:00", "source": "note"}));
         assert_eq!(o.window[1]["source"], "template");
+    }
+
+    fn file_asks(vault: &Path, today: Date, budget: i64) -> (Vec<PathBuf>, usize, Vec<String>) {
+        let ctx = WriteContext::new("agent:rank", "cli");
+        emit_asks(vault, &[], today, budget, &ctx, &mut Journal::new(vault))
+    }
+
+    fn front_of(path: &Path) -> Mapping {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        split_frontmatter(&raw).unwrap().0
+    }
+
+    #[test]
+    fn no_ask_before_the_vaults_third_day() {
+        let v = three_courses("day3");
+        journal_on(&v, "2026-08-31");
+        assert_eq!(file_asks(&v, TODAY, 15).1, 0, "2026-09-01 is day 2");
+        assert_eq!(file_asks(&v, date(2026, 9, 2), 15).1, 2, "day 3");
+    }
+
+    #[test]
+    fn at_most_two_a_day_in_slug_order_and_each_course_once() {
+        let v = three_courses("twoaday");
+        journal_on(&v, "2026-08-20");
+        let (paths, n, warnings) = file_asks(&v, TODAY, 15);
+        assert_eq!((n, warnings.len()), (2, 0), "{warnings:?}");
+        let courses: Vec<String> = paths.iter().map(|p| field_text(&front_of(p), "course").unwrap()).collect();
+        assert_eq!(courses, ["ant-101", "bui-100"]);
+        assert_eq!(file_asks(&v, TODAY, 15).1, 0, "two already filed today");
+        let (next, ..) = file_asks(&v, date(2026, 9, 2), 15);
+        assert_eq!(next.len(), 1);
+        assert_eq!(field_text(&front_of(&next[0]), "course").as_deref(), Some("cs-100"));
+        assert_eq!(file_asks(&v, date(2026, 9, 3), 15).1, 0, "every course asked once");
+    }
+
+    #[test]
+    fn the_budget_caps_the_asks() {
+        let v = three_courses("budget");
+        journal_on(&v, "2026-08-20");
+        assert_eq!(file_asks(&v, TODAY, 1).1, 1);
+        assert_eq!(file_asks(&v, date(2026, 9, 2), 0).1, 0);
+    }
+
+    #[test]
+    fn the_card_carries_its_kind_course_key_and_title() {
+        let v = three_courses("card");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        assert_eq!(paths[0], v.join("approvals").join("commitment-ask-when-does-ant-101-meet.md"));
+        let meta = front_of(&paths[0]);
+        let field = |k: &str| field_text(&meta, k).unwrap_or_default();
+        assert_eq!(field("type"), "approval");
+        assert_eq!(field("kind"), COMMITMENT_ASK);
+        assert_eq!(field("title"), "When does ANT 101 meet?");
+        assert_eq!(field("status"), "pending");
+        assert_eq!(field("source_uid"), "card:ant-101");
+        assert_eq!(field("course"), "ant-101");
+        assert_eq!(field("first_proposed_at"), "2026-09-01");
+        assert_eq!(field("created_by"), CARD_ACTOR);
+    }
+
+    #[test]
+    fn a_declined_or_answered_course_is_not_asked_but_a_withdrawn_one_is() {
+        let v = three_courses("closed");
+        journal_on(&v, "2026-08-20");
+        create_marker(&v, &ask_key("ant-101"), &WriteContext::new("agent:rank", "cli"), &mut Journal::new(&*v)).unwrap();
+        let archive = v.join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        for (name, course, status) in [("a.md", "bui-100", "rejected"), ("b.md", "cs-100", "superseded")] {
+            std::fs::write(
+                archive.join(name),
+                format!("---\ntype: approval\nkind: commitment-ask\nstatus: {status}\ncourse: {course}\nfirst_proposed_at: 2026-08-25\n---\n"),
+            )
+            .unwrap();
+        }
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let courses: Vec<String> = paths.iter().map(|p| field_text(&front_of(p), "course").unwrap()).collect();
+        assert_eq!(courses, ["cs-100"]);
     }
 }

@@ -796,7 +796,8 @@ fn normalise_stash(
 /// `process_approvals`, so this run's settlements are in it); `withdraw_stale` — skipped when the
 /// series file could not be read, as is the **ended** rule, because a bad read is never "gone";
 /// `detect_changes`; `successor_keys`; `proposals`; `emit_checks`, with the budget recounted here
-/// after the events pass took its share. Pure of clocks, networks and models: the stash was filled
+/// after the events pass took its share; `emit_asks` (skipped on a bad series read), with what the
+/// check cards left. Pure of clocks, networks and models: the stash was filled
 /// by the calendar closure and everything here is deterministic. Every warning is pushed onto
 /// `warnings`.
 fn commitment_passes(
@@ -847,12 +848,22 @@ fn commitment_passes(
     let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
     let (_, filed, card_warnings) = cm::emit_checks(vault, asked, &changes, today, budget, ctx, journal);
     warnings.extend(card_warnings);
-    CommitmentPasses { filed: filed as i64, withdrawn_pending, set }
+    // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
+    // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make
+    // every course look uncovered.
+    let mut asks = 0;
+    if !read_failed {
+        let ask_budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
+        let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, today, ask_budget, ctx, journal);
+        asks = n;
+        warnings.extend(ask_warnings);
+    }
+    CommitmentPasses { filed: (filed + asks) as i64, withdrawn_pending, set }
 }
 
 /// What [`commitment_passes`] hands back to `run_with`.
 struct CommitmentPasses {
-    /// Cards filed this run (added to the pending line).
+    /// Cards filed this run, checks and asks (added to the pending line).
     filed: i64,
     /// Cards withdrawn this run that `process_approvals` had counted pending (taken back out).
     withdrawn_pending: i64,
@@ -2607,6 +2618,13 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         Journal::new(vault).append(&mut rec).unwrap();
     }
 
+    /// The student already said CS 100 has no set meeting times (a `card:cs-100` marker), so a
+    /// P16 test about check cards sees no ask (phase-2 spec §5).
+    fn decline_cs100_ask(vault: &Path) {
+        let ctx = WriteContext::new("quinn", "dashboard");
+        crate::commitments::create_marker(vault, &crate::commitments::ask_key("cs-100"), &ctx, &mut Journal::new(vault)).unwrap();
+    }
+
     fn p16_day(offset: i64) -> Date {
         P16_MONDAY.checked_add(jiff::Span::new().days(offset)).unwrap()
     }
@@ -2743,6 +2761,19 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Phase-2 spec §5: from the vault's day 3, a course with no class gets one ask card, counted
+    /// into the pending line like a check card.
+    #[test]
+    fn rank_files_an_ask_for_a_course_with_no_class_from_day_three() {
+        let vault = p16_vault("p2ask");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(md_names(&vault.join("approvals"), "commitment-ask-").is_empty(), "P16_MONDAY is day 2");
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert_eq!(md_names(&vault.join("approvals"), "commitment-ask-"), ["commitment-ask-when-does-cs-100-intro-to-computing-meet.md"]);
+        assert!(page(&vault).contains("**Approvals: 1 pending**"), "{}", page(&vault));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn commitment_checks_take_only_what_the_events_pass_left() {
         let vault = p16_vault("p16budget");
@@ -2806,6 +2837,7 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
     #[test]
     fn rank_withdraws_a_card_whose_series_left_the_file() {
         let vault = p16_vault("p16withdraw");
+        decline_cs100_ask(&vault);
         rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
         let filed = checks(&vault, "approvals");
         assert_eq!(filed.len(), 1);
