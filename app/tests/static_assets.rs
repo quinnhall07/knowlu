@@ -1560,6 +1560,13 @@ fn the_schedule_view_the_window_editor_and_the_moved_line_are_there() {
     assert!(js.contains("{ action: action, view: current.view,"), "…and it is ui_event");
     assert!(js.contains("runs: 1, schedule: 1 }"), "route() accepts schedule");
     assert!(!js.contains("data-remove"), "D8: no remove control in phase 2");
+    // Q10 review I1: no click inside a Schedule row reaches the document handler, which would
+    // open the note drawer (Delete…, free field edits) on a commitment — D8 again.
+    let bind = js.split("function bindScheduleView()").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("if (e.target.closest(\".row.sched\")) { e.stopPropagation(); }"), "the whole row stays in this view");
+    assert!(!bind.contains(".row.sched .acts"), "not only its controls");
+    // Q10 review M3: the Schedule view never takes the reorder hold (must-do is not on screen).
+    assert!(js.contains("var reordered = current.view !== \"schedule\" && "), "schedule is never held");
     let css = read("console.css");
     assert!(css.contains(".row.sched { grid-template-columns: minmax(0,1fr) auto; }"), "a Schedule row restates its tracks");
     assert!(css.contains(".moved[hidden] { display: none; }"));

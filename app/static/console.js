@@ -530,6 +530,7 @@
   var LEVELS = [["hard", "Must keep"], ["soft", "Usually"], ["optional", "Optional"]];
   var PREVIEW_MS = 400;
   var previewTimer = null;
+  var windowDirty = false;   // Q10 review M5: unsaved picker edits survive a refresh
 
   // Q10-a: `schedule` is the page's view, not the read model's — the state it paints is today's.
   function stateView() { return current.view === "schedule" ? "today" : current.view; }
@@ -643,8 +644,9 @@
       }).join("") || '<div class="empty">No office hours found on your calendar.</div>';
       var host = EL("sched-window"), byDay = {};
       w.window.forEach(function (d) { byDay[d.day] = d; });
-      if (!host.contains(document.activeElement)) { host.innerHTML = windowEditorHtml(byDay); }
+      if (!windowDirty && !host.contains(document.activeElement)) { host.innerHTML = windowEditorHtml(byDay); }
       schedulePreview();
+      watchSeen();   // Q10 review M4: the rows arrive after paint's own watchSeen()
     }).catch(function () {});
   }
 
@@ -668,8 +670,9 @@
   function bindScheduleView() {
     var list = EL("sched-list");
     list.addEventListener("click", function (e) {
-      // A row's controls never reach the document handler, which would open the drawer.
-      if (e.target.closest(".row.sched .acts")) { e.stopPropagation(); }
+      // Q10 review I1: no click in a Schedule row reaches the document handler. It would open
+      // the note drawer, whose Delete… and free field edits are the remove control D8 withholds.
+      if (e.target.closest(".row.sched")) { e.stopPropagation(); }
       var b = e.target.closest("[data-level-set]"); if (!b) { return; }
       saveCommitment(b.closest(".row.sched").getAttribute("data-id"), { level: b.getAttribute("data-level-set") });
     });
@@ -681,17 +684,25 @@
       var b = e.target.closest("[data-oh-add]"); if (!b) { return; }
       b.disabled = true;
       // §4: office hours default to optional (§2.2).
-      confirmWeek({ mine: [{ source_uid: b.getAttribute("data-oh-add"), level: "optional" }] }).then(renderScheduleView).catch(function () { b.disabled = false; });
+      // Q10 review M1: a refusal says so; M2: a painted state already re-ran this view's renderer.
+      confirmWeek({ mine: [{ source_uid: b.getAttribute("data-oh-add"), level: "optional" }] }).then(function (env) {
+        if (!env.ok) { b.disabled = false; showRefusal(null, "refused: " + env.error); }
+        if (!env.state) { return renderScheduleView(); }
+      }).catch(function () { b.disabled = false; });
     });
-    bindWindowEditor(EL("sched-window"), schedulePreview);
+    bindWindowEditor(EL("sched-window"), function () {
+      windowDirty = true; EL("sched-say").textContent = "";   // Q10 review M5, M6
+      schedulePreview();
+    });
     EL("sched-save").addEventListener("click", function () {
       var host = EL("sched-window"), seq = windowSequence(host);
-      if (!seq) { return; }
+      if (!seq) { EL("sched-say").textContent = "Nothing to save"; return; }   // Q10 review M6
       confirmWeek({ window: seq }).then(function (env) {
         if (!env.ok) { showWindowError(host, env.error); return; }
+        windowDirty = false;
         showWindowError(host, null);
         EL("sched-say").textContent = env.result && env.result.window === "unchanged" ? "No change" : "Saved";
-        renderScheduleView();
+        if (!env.state) { renderScheduleView(); }   // Q10 review M2: else paint already did
       }).catch(function () {});
     });
   }
@@ -716,7 +727,8 @@
     // verdict/meter (not order-bearing) always paint. current.state stays the *displayed*
     // order's state while held — the new state lives only in pendingOrder — so orderOf(current.state)
     // keeps comparing against what is actually on screen.
-    var reordered = current.state && !force && orderOf(current.state) !== orderOf(state);
+    // Q10 review M3: the Schedule view shows no order-bearing list, so it never takes the hold.
+    var reordered = current.view !== "schedule" && current.state && !force && orderOf(current.state) !== orderOf(state);
     // Fix (final review B): pendingOrder must reflect THIS state before renderDelta runs below —
     // a later poll that returns the order to what is displayed (reordered false) has to clear a
     // stale pendingOrder from an earlier held poll, or the button stays and "refresh order"
