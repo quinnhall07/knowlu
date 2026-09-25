@@ -49,9 +49,10 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 - Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted. `proposed_at`
   is the day a proposal charges; `first_proposed_at` is set once and drives every age.
 - Commitment proposals and `state/calendar-series.json` never leave the device: a card of a kind in
-  `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; today only
-  `commitment-check` is filed) is local by kind. Until C3′'s sync is merged there is no sync; once it is,
-  P21 keeps the cards and the series file off the wire — only a **confirmed** note in `commitments/`
+  `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; both are filed, and
+  no proposal card is filed on the vault's first day — the vault-local date of its earliest journal
+  record, `commitments::vault_day`) is local by kind. Until C3′'s sync is merged there is no sync;
+  once it is, P21 keeps the cards and the series file off the wire — only a **confirmed** note in `commitments/`
   or a decline marker syncs — and `commitments.rs`'s tripwires
   (`sync_keeps_every_local_card_kind_local`, `the_servers_note_path_rules_name_every_note_folder`)
   fail until it does.
@@ -89,10 +90,15 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
   Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
   exits 2 — and reports `moved` against the current window without writing one.
-- `commitments --vault <v> [--today YYYY-MM-DD] [--json]` — fetches the configured calendar feeds,
-  refreshes `state/calendar-series.json`, and prints the current commitment proposals
+- `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`
+  — without `--confirm`, it fetches the configured calendar feeds, refreshes
+  `state/calendar-series.json`, and prints the current commitment proposals as of today
   (`coursework-discover`'s style: read-only except for the generated series-file refresh, always
-  exits 0). Writes no note, no card and no journal record.
+  exits 0; no note, no card, no journal record); `--json` adds `uncovered_courses` and orders the
+  proposals as the cards are. With `--confirm` (phase 2), it fetches nothing and writes the confirm
+  screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
+  `--actor quinn --via dashboard`), journal first. It prints `{created, declined, warnings, window}`
+  and exits 2 on unreadable input or an invalid window, having written nothing.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
@@ -113,17 +119,19 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-17 (C1b Task 7)**
-  (by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
-  registers **42**, the vault-less picker/wizard window **29** (+3 from C2's hand-off H9 phase (a) —
-  `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's H1
-  removed `account::sign_up` and `account::sign_in` with the password and added
-  `account::google_sign_in` to both lists) — **61** distinct. Commands live beside the module they serve
-  (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one
-  file. Seven mutate notes
-  (`set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,
-  `resolve_issue`); `sync`/`backup_now` move the vault without writing a note; `ui_event` writes the
-  `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-24 (commitment
+  model phase 2)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
+  registers **47** (phase 2 added `answer_card`, `commitment_proposals`, `commitments_confirm`,
+  `your_week`, `preview_window`), the vault-less picker/wizard window **29** (C2's hand-off H9
+  phase (a) added `account::google_connect_url`, `account::google_connected`,
+  `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
+  password and added `account::google_sign_in` to both lists) — **66** distinct. Commands live
+  beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
+  `report.rs`, `lms_link.rs`), never all in one file. Nine mutate notes
+  (`set_fields`, `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`,
+  `close_info`, `open_issue`, `resolve_issue`); `set_fields` edits a commitment's `kind`/`level`
+  only as `commitments::check_console_edit` allows; `sync`/`backup_now` move the vault without
+  writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
   process or the updater — never a note. Recount before quoting a number.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
