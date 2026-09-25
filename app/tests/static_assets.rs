@@ -308,7 +308,7 @@ fn the_good_to_know_and_issues_views_are_real_and_every_observed_row_names_its_k
     assert!(js.contains("if (e.target.closest(\".row.iss .acts\")) { e.stopPropagation(); }"), "the Issues .acts must not reach the document handler");
     // A7: showRefusal(el, message, id, field) never reads `el`; the id is what prefixes the toast
     // with the note's title and re-finds the row after applyEnvelope's repaint.
-    assert_eq!(js.matches("showRefusal(null, m, id)").count(), 2, "resolveIssue and closeInfoItem both pass the id");
+    assert_eq!(js.matches("showRefusal(null, m, id)").count(), 3, "resolveIssue, closeInfoItem and answerAsk (phase 2) all pass the id");
     assert!(!js.contains("showRefusal(btn.closest(\".row\")"), "a detached row element says nothing");
 }
 
@@ -1570,4 +1570,41 @@ fn the_schedule_view_the_window_editor_and_the_moved_line_are_there() {
     let css = read("console.css");
     assert!(css.contains(".row.sched { grid-template-columns: minmax(0,1fr) auto; }"), "a Schedule row restates its tracks");
     assert!(css.contains(".moved[hidden] { display: none; }"));
+}
+
+/// Phase 2 of the commitment model (spec D1, D3, §2, §5): the confirm screen over the first-run
+/// view — no typed text anywhere in it — and the commitment-ask card's form in the Decisions view,
+/// with the deck sending that card there.
+#[test]
+fn the_confirm_screen_and_the_ask_form_are_there() {
+    let html = read("index.html");
+    let start = html.find("<section class=\"week-setup\" id=\"week-setup\" hidden").expect("#week-setup");
+    let screen = &html[start..start + html[start..].find("</section>").unwrap()];
+    assert!(html.find("id=\"week-setup\"").unwrap() > html.find("<div class=\"app\">").unwrap() && html.find("id=\"week-setup\"").unwrap() < html.find("id=\"picker\"").unwrap(), "outside .app, so the first-run view does not hide it");
+    for id in ["ws-status", "ws-classes", "ws-class-rows", "ws-week", "ws-week-rows", "ws-oh", "ws-oh-rows", "ws-window", "ws-later", "ws-finish"] {
+        assert!(screen.contains(&format!("id=\"{id}\"")), "missing #{id}");
+    }
+    assert!(screen.contains("When do your classes meet?") && screen.contains("Reading your calendar"));
+    assert!(screen.contains("Rows you leave blank will come back as questions over the next few days."));
+    assert!(!screen.contains("type=\"text\"") && !screen.contains("<textarea"), "constraint 8: nothing typed");
+    let js = read("console.js");
+    for f in ["checkWeekSetup", "openWeekSetup", "setupRow", "finishWeekSetup", "closeWeekSetup", "askRow", "askTimeRow", "answerAsk"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    let row = js.split("function setupRow(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(!row.contains("type=\"text\""), "a setup row takes no typing");
+    assert!(row.contains("{ class: 1, lab: 1, work: 1 }[p.kind] ? \"mine\" : \"\""), "§2: class, lab and work start at Mine");
+    assert!(js.contains("invoke(\"commitment_proposals\", {})") && js.contains("invoke(\"your_week\", {})"));
+    assert!(js.contains("weekSetup.dismissed = true"), "D3: Not now hides it for the session");
+    assert!(js.contains("no class times found; Knowlu will ask this week"));
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("if (c.kind === \"commitment-ask\") { return askRow(c, tomorrow); }"), "§5: the per-kind branch");
+    let ask = js.split("function askRow(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    for piece in ["data-ask-save", "Save times", "No set times", "data-verdict=\"rejected\"", "data-verdict=\"snoozed\"", "data-ask-more", "add another time"] {
+        assert!(ask.contains(piece), "the ask form lacks {piece}");
+    }
+    assert!(js.contains("function askTimeRow()") && js.contains("data-ask-day"));
+    assert!(js.contains("invoke(\"answer_card\", { view: stateView(), id: id, meets: meets })"));
+    assert!(js.contains("data-answer-in"), "Q11-b: the deck sends an ask to Decisions");
+    assert!(read("console.css").contains(".week-setup[hidden] { display: none; }"));
 }

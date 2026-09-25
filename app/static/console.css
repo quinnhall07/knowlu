@@ -569,3 +569,21 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .werr:empty { display: none; }
 .wined-foot { display: flex; gap: var(--s3); align-items: center; margin-top: var(--s3); }
 .preview { margin-top: var(--s4); color: var(--t2); font-size: 13px; }
+
+/* ---- Commitment model phase 2: the confirm screen and the ask form ---- */
+/* Outside `.app`, so `.app.first-run` hides nothing of it; fixed over the whole window. */
+.week-setup { position: fixed; inset: 0; overflow: auto; background: var(--canvas); z-index: 25; padding: var(--s7) max(var(--s5), calc(50vw - 320px)); display: block; }
+.week-setup[hidden] { display: none; }
+.week-setup h1 { font-size: clamp(22px, 2vw, 27px); margin: 0 0 var(--s3); }
+.ws-group { margin-top: var(--s5); }
+.ws-group[hidden] { display: none; }
+.ws-group h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.wsrow { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: var(--s3); align-items: center; padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
+.wsrow small { display: block; color: var(--t3); }
+.wsrow:not([data-answer="mine"]) .lvl { display: none; }
+.wsrow .b[aria-pressed="true"], .b.day[aria-pressed="true"] { background: var(--acc-dim); color: var(--t1); border-color: var(--acc); }
+.ws-nav { display: flex; justify-content: flex-end; gap: var(--s3); margin-top: var(--s6); }
+.ask-time { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; margin-top: var(--s2); }
+.ask-time input[type=time] { background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r1); padding: 2px var(--s2); font-family: var(--mono); margin-left: var(--s2); }
+.ask-err { color: var(--crit); font-size: 12px; margin-top: var(--s2); }
+.ask-err[hidden] { display: none; }

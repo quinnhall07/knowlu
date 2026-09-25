@@ -300,8 +300,10 @@
     // so it can never disagree with the engine's own idea of "today" across a timezone.
     var tomorrow = state.ahead.buckets[1].date;
     d.cards.slice(0, 1).forEach(function (c) {
+      // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
+      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">Approve</button>';
       deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + "</div>" +
-        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts"><button class="b pri y" data-verdict="approved">Approve</button><button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
+        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
     if (newCard && prevId && newCard.getAttribute("data-id") === prevId) {
@@ -454,6 +456,7 @@
     var tomorrow = state.ahead.buckets[1].date;
     preserveAcross(host, ".flagpop", function () {
       host.innerHTML = d.cards.map(function (c) {
+        if (c.kind === "commitment-ask") { return askRow(c, tomorrow); }
         var changes = "";
         if (c.changes && typeof c.changes === "object" && !Array.isArray(c.changes)) {
           changes = '<div class="changes">' + Object.keys(c.changes).map(function (k) {
@@ -474,6 +477,44 @@
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
       }).join("") + (d.empty_text && !d.cards.length ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     });
+  }
+
+  // Phase 2 (spec §5): a `commitment-ask` card is answered here. Day toggles, a start and an end
+  // picker, "add another time", Save times (answer_card), No set times (reject), Snooze. The
+  // engine validates the answer; an invalid one comes back as its message, shown on the card.
+  function askTimeRow() {
+    return '<div class="ask-time">' + DAYS.map(function (d) {
+      return '<button class="b day" type="button" data-ask-day="' + d + '" aria-pressed="false">' + DAY_NAMES[d] + "</button>";
+    }).join("") + '<input type="time" data-part="start" aria-label="start"><input type="time" data-part="end" aria-label="end"></div>';
+  }
+  function askRow(c, tomorrow) {
+    return '<div class="row dec ask" data-id="' + h(c.id) + '" data-kind="approval">' +
+      '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
+      '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(c.age_days + "d old") + "</span>" +
+      '<div class="why">' + h(c.why) + '</div><div class="ask-times">' + askTimeRow() + "</div>" +
+      '<button class="lnk" type="button" data-ask-more>add another time</button><div class="ask-err" hidden></div></div>' +
+      '<div class="acts"><button class="b pri y" type="button" data-ask-save>Save times</button>' +
+      '<button class="b n" data-verdict="rejected">No set times</button>' +
+      '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
+  }
+  function answerAsk(row) {
+    var id = row.getAttribute("data-id"), meets = [];
+    row.querySelectorAll(".ask-time").forEach(function (t) {
+      var days = [];
+      t.querySelectorAll('[data-ask-day][aria-pressed="true"]').forEach(function (b) { days.push(b.getAttribute("data-ask-day")); });
+      var s = t.querySelector('[data-part="start"]').value, e = t.querySelector('[data-part="end"]').value;
+      if (days.length || s || e) { meets.push({ days: days, start: s, end: e }); }
+    });
+    row.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+    return invoke("answer_card", { view: stateView(), id: id, meets: meets }).then(function (env) {
+      ev("decision_made", id, "approval", null);
+      applyEnvelope(env, function (m) {
+        // A refusal with no state repaints nothing: this same row takes the answer again.
+        row.querySelectorAll("button").forEach(function (b) { b.disabled = false; });
+        var fresh = EL("dec-list").querySelector('.row.dec[data-id="' + id.replace(/"/g, "") + '"] .ask-err');
+        if (fresh) { fresh.textContent = m; fresh.hidden = false; } else { showRefusal(null, m, id); }
+      });
+    }).catch(function () { row.querySelectorAll("button").forEach(function (b) { b.disabled = false; }); });
   }
 
   // Plan 2 Task 2 (S2 §6.2 B11, F9): open info items as a list with the close action the rail
@@ -706,6 +747,111 @@
       }).catch(function () {});
     });
   }
+
+  // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
+  // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
+  // screen for this console session; Finish writes the planning-day note, so it never returns.
+  var weekSetup = { dismissed: false, open: false };
+
+  function checkWeekSetup() {
+    if (weekSetup.dismissed || weekSetup.open) { return; }
+    invoke("your_week", {}).then(function (r) {
+      if (r && r.ok && r.week && r.week.setup && !weekSetup.dismissed) { openWeekSetup(r.week); }
+    }).catch(function () {});
+  }
+
+  // One row: title, the §5.2 label, `where` in small type; Mine / Not mine; the level control,
+  // shown by CSS only on a Mine row. Nothing typed.
+  function setupRow(p) {
+    var preset = { class: 1, lab: 1, work: 1 }[p.kind] ? "mine" : "";
+    return '<div class="wsrow" data-key="' + h(p.source_uid) + '" data-answer="' + preset + '" data-level="' + h(p.level) + '">' +
+      '<div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") + "</span>" +
+      (p.where ? "<small>" + h(p.where) + "</small>" : "") + "</div>" +
+      '<div class="acts"><button class="b" type="button" data-answer-set="mine" aria-pressed="' + (preset === "mine") + '">Mine</button>' +
+      '<button class="b" type="button" data-answer-set="not" aria-pressed="false">Not mine</button>' + levelButtons(p.level) + "</div></div>";
+  }
+
+  function paintSetupRows(ps, uncovered) {
+    var classes = ps.filter(function (p) { return !p.window && (p.kind === "class" || p.kind === "lab"); });
+    var office = ps.filter(function (p) { return !p.window && p.kind === "office-hours"; });
+    var rest = ps.filter(function (p) { return !p.window && classes.indexOf(p) === -1 && office.indexOf(p) === -1; });
+    EL("ws-class-rows").innerHTML = classes.map(setupRow).join("") + uncovered.map(function (u) {
+      return '<div class="wsrow uncovered"><div class="ttl"><span class="a">' + h(u.title) + '</span><span class="meta">no class times found; Knowlu will ask this week</span></div></div>';
+    }).join("");
+    EL("ws-week-rows").innerHTML = rest.map(setupRow).join("");
+    EL("ws-oh-rows").innerHTML = office.map(setupRow).join("");
+    EL("ws-classes").hidden = !classes.length && !uncovered.length;
+    EL("ws-week").hidden = !rest.length;
+    EL("ws-oh").hidden = !office.length;
+  }
+
+  function openWeekSetup(week) {
+    weekSetup.open = true;
+    EL("week-setup").hidden = false;
+    EL("ws-status").textContent = "Reading your calendar…";
+    var byDay = {};
+    DAYS.forEach(function (d) { byDay[d] = { start: "08:00", end: "22:00" }; });
+    EL("ws-window").innerHTML = windowEditorHtml(byDay);
+    paintSetupRows([], week.uncovered_courses || []);
+    invoke("commitment_proposals", {}).then(function (r) {
+      var ps = (r && r.proposals) || [];
+      var win = ps.filter(function (p) { return p.window; })[0];
+      if (win) {
+        byDay = {};
+        win.meets.forEach(function (m) { m.days.forEach(function (d) { byDay[d] = { start: m.start, end: m.end }; }); });
+        EL("ws-window").innerHTML = windowEditorHtml(byDay);
+      }
+      paintSetupRows(ps, (r && r.uncovered_courses) || week.uncovered_courses || []);
+      EL("ws-status").textContent = ps.some(function (p) { return !p.window; }) ? "Knowlu found these on your calendar. Mark each one." : "Knowlu found nothing repeating on your calendar. Set your day below.";
+    }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; });
+  }
+
+  function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
+
+  function finishWeekSetup(btn) {
+    var mine = [], notMine = [];
+    document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (r) {
+      var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer");
+      if (a === "mine") { mine.push({ source_uid: key, level: r.getAttribute("data-level") }); }
+      else if (a === "not") { notMine.push(key); }
+    });
+    // Review finding 2: D3 says Finish always writes the planning-day note, so the screen never
+    // returns. An all-blank Your day would write none, so Finish asks for one day first.
+    var seq = windowSequence(EL("ws-window"));
+    if (!seq) { showWindowError(EL("ws-window"), "Set the hours for at least one day"); return; }
+    var payload = { mine: mine, not_mine: notMine, window: seq };
+    btn.disabled = true;
+    confirmWeek(payload).then(function (env) {
+      btn.disabled = false;
+      if (!env.ok) { showWindowError(EL("ws-window"), env.error); EL("ws-status").textContent = env.error; return; }
+      closeWeekSetup();
+    }).catch(function () { btn.disabled = false; });
+  }
+
+  EL("week-setup").addEventListener("click", function (e) {
+    // Q10's care: no click on this screen reaches the document handler (its drawer and its .b
+    // branch belong to the console underneath).
+    e.stopPropagation();
+    var row = e.target.closest(".wsrow[data-key]");
+    var a = e.target.closest("[data-answer-set]");
+    if (a && row) {
+      // Q11-c: a second press on the pressed button returns the row to unanswered.
+      var v = a.getAttribute("data-answer-set"), next = row.getAttribute("data-answer") === v ? "" : v;
+      row.setAttribute("data-answer", next);
+      row.querySelectorAll("[data-answer-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-answer-set") === next)); });
+      return;
+    }
+    var l = e.target.closest("[data-level-set]");
+    if (l && row) {
+      row.setAttribute("data-level", l.getAttribute("data-level-set"));
+      row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b === l)); });
+      return;
+    }
+    if (e.target.closest("#ws-later")) { weekSetup.dismissed = true; closeWeekSetup(); return; }
+    var fin = e.target.closest("#ws-finish");
+    if (fin) { finishWeekSetup(fin); }
+  });
+  bindWindowEditor(EL("ws-window"), function () { showWindowError(EL("ws-window"), null); });
 
   // Dispatch table from view name to its main-body renderer. Every nav view is built now
   // (Task 3 finishes Issues) — the not-built placeholder is gone (R-P2-3).
@@ -1182,6 +1328,7 @@
   function bindDeck() {
     var deck = EL("deck");
     deck.addEventListener("click", function (e) {
+      if (e.target.closest("[data-answer-in]")) { location.hash = "#decisions"; return; }
       var b = e.target.closest("button[data-verdict]"); if (!b) { return; }
       var card = b.closest(".card");
       if (card.dataset.busy) { return; }   // a decide is already in flight for this card
@@ -1200,6 +1347,13 @@
       // which would open the drawer (the input, a gap) or take its .b branch and emit
       // why_expanded with the literal "task" kind on an approval.
       if (e.target.closest(".row.dec .acts")) { e.stopPropagation(); }
+      // Phase 2: the ask form's own controls live in .ttl and must not open the drawer either.
+      if (e.target.closest(".row.dec.ask .ttl")) { e.stopPropagation(); }
+      var day = e.target.closest("[data-ask-day]");
+      if (day) { day.setAttribute("aria-pressed", String(day.getAttribute("aria-pressed") !== "true")); return; }
+      if (e.target.closest("[data-ask-more]")) { e.target.closest(".row.dec").querySelector(".ask-times").insertAdjacentHTML("beforeend", askTimeRow()); return; }
+      var save = e.target.closest("[data-ask-save]");
+      if (save) { answerAsk(save.closest(".row.dec")); return; }
       var b = e.target.closest("button[data-verdict]"); if (!b) { return; }
       var row = b.closest(".row.dec"); if (!row) { return; }
       decideCard(row.getAttribute("data-id"), b.getAttribute("data-verdict"), b.getAttribute("data-snooze") || null, EL("dec-list"));
@@ -1695,6 +1849,8 @@
     window.addEventListener("blur", endOfLook);
     document.addEventListener("visibilitychange", function () { if (document.hidden) { endOfLook(); } });
     route(location.hash.slice(1));
+    // Phase 2 (D1, D3, Q11-d): on the vault's first day the confirm screen opens, once a launch.
+    checkWeekSetup();
     // Plan 4a Task 8: one check at launch. The housekeeping thread repeats it once a day; a
     // failure is quiet on both paths — until the release host exists, unreachable IS the answer.
     checkForUpdates();
