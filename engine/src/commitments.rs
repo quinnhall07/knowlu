@@ -3166,6 +3166,106 @@ pub fn emit_asks(
     (filed, count, warnings)
 }
 
+/// What settling an approved `commitment-ask` card decided (phase-2 spec §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskSettled {
+    /// The class note was created: stamped `executed` and archived.
+    Executed,
+    /// Nothing written and nothing will be: stamped `refused` and archived, one warning.
+    Refused(String),
+    /// The answer is missing or invalid: back to `pending`, one warning (Plan ruling Q7-a).
+    Returned(String),
+}
+
+fn ask_course(meta: &Mapping) -> String {
+    field_text(meta, "course").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// Whether a confirmed `class` note covers `slug`, by Q2-c's two rules ([`covered_course_keys`],
+/// review finding 3): a title-only class note covers its course here exactly as it does for
+/// [`uncovered_courses`].
+fn has_class(set: &Commitments, slug: &str, codes: &Codes) -> bool {
+    covered_course_keys(set, codes).contains(&course_key(slug, codes))
+}
+
+/// Settle an approved `commitment-ask` card (parent §5.3): validate `answer_meets` as §2.2
+/// validates `meets` (every entry valid, at least one), then create the class note
+/// `{kind: class, level: hard, title, course, meets}` with `source_uid: card:<slug>`, actor
+/// `agent:commitments` (Plan ruling Q7-b). A class note the course already has refuses the card,
+/// unless this card's own settlement wrote it and the run died before the stamp.
+pub fn settle_ask_approved(
+    vault: &Path,
+    meta: &Mapping,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<AskSettled, crate::write::WriteError> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return Ok(AskSettled::Refused("the card has no course".to_string()));
+    }
+    let key = ask_key(&slug);
+    let set = load(vault);
+    let (codes, _) = Codes::load(vault);
+    if has_class(&set, &slug, &codes) {
+        if created_by_this_card(vault, meta, Some(&key), journal) {
+            return Ok(AskSettled::Executed);
+        }
+        return Ok(AskSettled::Refused(format!("{slug} already has a confirmed class; nothing written")));
+    }
+    let meets = match strict_meets(meta, "answer_meets") {
+        Ok(meets) => meets,
+        Err(why) => return Ok(AskSettled::Returned(format!("{why}; answer again"))),
+    };
+    let title = active_courses(vault).into_iter().find(|(s, _)| *s == slug).map(|(_, t)| t).unwrap_or_else(|| slug.clone());
+    let mut map = Mapping::new();
+    for (k, v) in [("kind", "class"), ("level", "hard"), ("title", title.as_str()), ("course", slug.as_str())] {
+        map.insert(Value::String(k.into()), Value::String(v.into()));
+    }
+    map.insert(Value::String("meets".into()), to_value(meets_json(&meets)));
+    create_confirmed(vault, &map, &key, today, ctx, journal)?;
+    Ok(AskSettled::Executed)
+}
+
+/// Settle a rejected `commitment-ask` card: the `card:<slug>` marker, which closes the question
+/// (parent §5.3). Returns the marker written, `None` when it existed already.
+pub fn settle_ask_rejected(
+    vault: &Path,
+    meta: &Mapping,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Option<PathBuf>, crate::write::WriteError> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    create_marker(vault, &ask_key(&slug), ctx, journal)
+}
+
+/// Why a pending or snoozed ask's question went away (Plan ruling Q7-c), or `None` while it
+/// stands: a class proposal for its course appeared (that card asks instead), a confirmed class
+/// note covers the course, or the `card:<slug>` marker exists.
+pub fn ask_withdrawal_reason(meta: &Mapping, proposals: &[Proposal], set: &Commitments, codes: &Codes) -> Option<String> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return None;
+    }
+    let wanted = course_key(&slug, codes);
+    if proposals
+        .iter()
+        .any(|p| p.kind == "class" && p.course.as_deref().is_some_and(|c| course_key(c, codes) == wanted))
+    {
+        return Some(format!("a class proposal for {slug} appeared"));
+    }
+    if has_class(set, &slug, codes) {
+        return Some(format!("{slug} already has a class"));
+    }
+    if set.declined.contains(&ask_key(&slug)) {
+        return Some(format!("{slug} was answered"));
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------------------------
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
@@ -3719,6 +3819,8 @@ fn create_confirmed_as(
         let key = single_line(source_uid).trim().to_string();
         let body = if key.starts_with("gcal-series:") {
             "Found as a weekly series on your Google Calendar.\n"
+        } else if key.starts_with("card:") {
+            "You told Knowlu when this class meets.\n"
         } else {
             "Found as a weekly series on your calendar.\n"
         };

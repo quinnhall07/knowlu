@@ -15,7 +15,7 @@ use jiff::civil::{Date, DateTime};
 use regex::Regex;
 use serde_yaml_ng::{Mapping, Value};
 
-use crate::commitments::{Codes, Commitments, SeriesFile, Settled, COMMITMENT_CHECK};
+use crate::commitments::{AskSettled, Codes, Commitments, Proposal, SeriesFile, Settled, COMMITMENT_ASK, COMMITMENT_CHECK};
 use crate::eventledger::{record_answer, record_declined, VerdictError};
 use crate::ids::resolve_lenient;
 use crate::ingest::{apply_frontmatter_fields_to_text, slugify};
@@ -1238,13 +1238,16 @@ fn transition_note(
             // P13 (§5.2, §5.4): the decline marker(s) first, so a failed write leaves the card
             // `rejected` for the next run rather than archived with the question left open.
             crate::commitments::settle_rejected(vault, meta, ctx, journal)?;
+        } else if kind == COMMITMENT_ASK {
+            // Phase-2 spec §5: the card:<slug> marker first, then the generic archive.
+            crate::commitments::settle_ask_rejected(vault, meta, ctx, journal)?;
         }
         delete(vault, &rel, ctx, journal)?;
         result.rejected.push(stem);
         return Ok(());
     }
 
-    if kind == COMMITMENT_CHECK && matches!(status.as_str(), "refused" | "superseded") {
+    if (kind == COMMITMENT_CHECK || kind == COMMITMENT_ASK) && matches!(status.as_str(), "refused" | "superseded") {
         // Fix round 1, m1 (controller ruling): the settlement's stamp landed and the run died
         // before the move. Finish it, quietly. `commitment-check` only: the amend path keeps its
         // behaviour.
@@ -1438,6 +1441,31 @@ fn transition_note(
                     .push(format!("{name}: {}", crate::commitments::single_line(why))),
                 None => result.executed.push(stem),
             }
+        } else if kind == COMMITMENT_ASK {
+            // Phase-2 spec §5 (Plan ruling Q7-a): the class note first, the stamp second. An
+            // invalid answer puts the card back to pending, unarchived, with the warning.
+            match crate::commitments::settle_ask_approved(vault, meta, today, ctx, journal)? {
+                AskSettled::Returned(why) => {
+                    let literals = vec![("status".to_string(), "pending".to_string())];
+                    write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+                    result.warnings.push(format!("{name}: {}", crate::commitments::single_line(&why)));
+                }
+                AskSettled::Executed => {
+                    let literals = vec![
+                        ("status".to_string(), "executed".to_string()),
+                        ("executed_at".to_string(), stamped),
+                    ];
+                    write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+                    delete(vault, &rel, ctx, journal)?;
+                    result.executed.push(stem);
+                }
+                AskSettled::Refused(why) => {
+                    let literals = vec![("status".to_string(), "refused".to_string())];
+                    write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+                    delete(vault, &rel, ctx, journal)?;
+                    result.warnings.push(format!("{name}: {}", crate::commitments::single_line(&why)));
+                }
+            }
         } else if kind == "coursework-map" {
             // C2 (§11a, R-OB-1): a mapping from an unmapped zyBook or VHL section to a course.
             // `rank` does not apply it — the next `coursework` step does, before it fetches, so a
@@ -1496,6 +1524,50 @@ pub fn withdraw_stale(
             continue;
         }
         if crate::commitments::withdrawal_reason(vault, &meta, file, set, &codes, today).is_none() {
+            continue;
+        }
+        let rel = rel_path(vault, &path);
+        let literals = vec![("status".to_string(), "superseded".to_string())];
+        let moved = write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())
+            .and_then(|_| delete(vault, &rel, ctx, journal));
+        match moved {
+            Ok(_) => {
+                out.withdrawn.push(stem_of(&path));
+                if str_field(&meta, "status") == "pending" {
+                    out.pending += 1;
+                }
+            }
+            Err(_) => out.warnings.push(format!("transition failed: {}", name_of(&path))),
+        }
+    }
+    out
+}
+
+/// Withdraw every pending or snoozed `commitment-ask` card whose question went away
+/// ([`crate::commitments::ask_withdrawal_reason`]): stamped `superseded` and archived, no other
+/// write. `rank` calls it once the proposals exist (Plan ruling Q7-c). Never raises into the run.
+pub fn withdraw_asks(
+    vault: &Path,
+    proposals: &[Proposal],
+    set: &Commitments,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Withdrawal {
+    let mut out = Withdrawal::default();
+    let folder = vault.join("approvals");
+    if !folder.is_dir() {
+        return out;
+    }
+    let (codes, _) = Codes::load(vault);
+    for path in sorted_md(&folder) {
+        let Some((meta, _)) = read_note(&path) else { continue };
+        if str_field(&meta, "type") != "approval"
+            || str_field(&meta, "kind") != COMMITMENT_ASK
+            || !matches!(str_field(&meta, "status").as_str(), "pending" | "snoozed")
+        {
+            continue;
+        }
+        if crate::commitments::ask_withdrawal_reason(&meta, proposals, set, &codes).is_none() {
             continue;
         }
         let rel = rel_path(vault, &path);
@@ -4848,6 +4920,141 @@ mod tests {
         #[test]
         fn amendable_folders_is_unchanged() {
             assert_eq!(AMENDABLE_FOLDERS, ["tasks", "courses"]);
+        }
+    }
+
+    // The commitment-ask card (phase-2 spec §5, parent §5.3): approve with an answer → the class
+    // note; an invalid answer → back to pending with the warning; reject → the card:<slug>
+    // marker; withdrawal once the course is covered. Every course and time is invented.
+    mod commitment_ask {
+        use super::*;
+        use crate::commitments::{self, Level, Meet, Proposal};
+        use jiff::civil::Time;
+
+        const NAME: &str = "commitment-ask-when-does-bui-100-meet.md";
+
+        fn ask_vault() -> (PathBuf, PathBuf) {
+            let v = vault();
+            let courses = v.join("courses");
+            std::fs::create_dir_all(&courses).unwrap();
+            pystr::write_text(&courses.join("bui-100.md"), "---\ntitle: \"BUI 100\"\nslug: bui-100\ncode: \"BUI 100\"\nstatus: active\n---\n").unwrap();
+            let card = proposal(
+                &v,
+                NAME,
+                "id: appr_00000000a1\ntype: approval\nkind: commitment-ask\ntitle: When does BUI 100 meet?\nstatus: pending\n\
+                 source_uid: card:bui-100\ncourse: bui-100\nproposed_at: 2026-08-20\nfirst_proposed_at: 2026-08-20\n\
+                 expires: null\nsnooze_until: null\ncreated_by: agent:commitments",
+                "Invented.\n",
+            );
+            (v, card)
+        }
+
+        /// What `answer_card` does before it approves: the answer, as the student.
+        fn answer(vault: &Path, card: &Path, literal: &str) {
+            let console = WriteContext::new("quinn", "dashboard");
+            let literals = vec![("answer_meets".to_string(), literal.to_string())];
+            write_literals(vault, &rel_path(vault, card), &literals, &console, &mut Journal::new(vault), &WriteOpts::default()).unwrap();
+        }
+
+        /// What `decide_inner` does: the status as the student, then the pass as `agent:approvals`.
+        fn decide(vault: &Path, card: &Path, status: &str) -> ApprovalsResult {
+            let console = WriteContext::new("quinn", "dashboard");
+            let mut journal = Journal::new(vault);
+            let literals = vec![("status".to_string(), status.to_string())];
+            write_literals(vault, &rel_path(vault, card), &literals, &console, &mut journal, &WriteOpts::default()).unwrap();
+            process_approvals(vault, TODAY, now(), &default_ctx(), &mut journal)
+        }
+
+        #[test]
+        fn a_valid_answer_creates_the_class_note_and_archives_the_card_executed() {
+            let (v, card) = ask_vault();
+            answer(&v, &card, "[{days: [mon, wed], start: '14:00', end: '15:15'}]");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.executed, ["commitment-ask-when-does-bui-100-meet"]);
+            let set = commitments::load(&v);
+            assert_eq!(set.confirmed.len(), 1);
+            let note = &set.confirmed[0];
+            assert_eq!(note.path, PathBuf::from("commitments/bui-100.md"));
+            assert_eq!((note.kind.as_str(), note.level, note.course.as_deref()), ("class", Level::Hard, Some("bui-100")));
+            assert_eq!(note.source_uid.as_deref(), Some("card:bui-100"));
+            assert_eq!(note.meets, vec![Meet { days: vec!["mon", "wed"], start: Time::constant(14, 0, 0, 0), end: Time::constant(15, 15, 0, 0) }]);
+            assert!(!card.exists());
+            assert!(read(&v.join("archive").join(NAME)).contains("status: executed"));
+        }
+
+        #[test]
+        fn an_invalid_answer_goes_back_to_pending_with_the_warning() {
+            let (v, card) = ask_vault();
+            answer(&v, &card, "[{days: [mon], start: '15:00', end: '14:00'}]");
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+            assert!(result.warnings[0].starts_with(&format!("{NAME}: answer_meets entry mon")), "{:?}", result.warnings);
+            assert!(card.exists(), "the card stays in approvals/");
+            assert!(read(&card).contains("status: pending"));
+            assert!(!v.join("commitments").exists());
+        }
+
+        #[test]
+        fn no_answer_at_all_also_goes_back_to_pending() {
+            let (v, card) = ask_vault();
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings[0].starts_with(&format!("{NAME}: no answer_meets")), "{:?}", result.warnings);
+            assert!(read(&card).contains("status: pending"));
+        }
+
+        #[test]
+        fn rejecting_writes_the_card_marker_and_archives() {
+            let (v, card) = ask_vault();
+            decide(&v, &card, "rejected");
+            assert!(commitments::load(&v).declined.contains("card:bui-100"));
+            assert!(!card.exists() && v.join("archive").join(NAME).exists());
+        }
+
+        fn class_for_bui() -> Proposal {
+            Proposal {
+                kind: "class".into(),
+                level: Level::Hard,
+                title: "BUI 100".into(),
+                course: Some("bui-100".into()),
+                meets: vec![Meet { days: vec!["tue"], start: Time::constant(9, 0, 0, 0), end: Time::constant(10, 0, 0, 0) }],
+                where_: None,
+                from: None,
+                until: None,
+                source_uid: "gcal-series:bui".into(),
+            }
+        }
+
+        #[test]
+        fn a_pending_ask_is_withdrawn_once_a_class_proposal_for_its_course_appears() {
+            let (v, card) = ask_vault();
+            let set = commitments::load(&v);
+            let none = withdraw_asks(&v, &[], &set, &default_ctx(), &mut Journal::new(&v));
+            assert!(none.withdrawn.is_empty());
+            let done = withdraw_asks(&v, &[class_for_bui()], &set, &default_ctx(), &mut Journal::new(&v));
+            assert_eq!(done.withdrawn, ["commitment-ask-when-does-bui-100-meet"]);
+            assert_eq!(done.pending, 1);
+            assert!(!card.exists());
+            assert!(read(&v.join("archive").join(NAME)).contains("status: superseded"));
+        }
+
+        /// Review finding 3: a hand-written class note with no `course:` whose title leads with
+        /// the course's code covers the course (Q2-c), so the pending ask is withdrawn.
+        #[test]
+        fn a_title_only_class_note_withdraws_the_ask() {
+            let (v, card) = ask_vault();
+            let folder = v.join("commitments");
+            std::fs::create_dir_all(&folder).unwrap();
+            pystr::write_text(
+                &folder.join("bui.md"),
+                "---\nid: cmt_00000000d1\ntype: commitment\nkind: class\ntitle: \"BUI 100 Lecture\"\n\
+                 meets: [{days: [tue], start: \"09:00\", end: \"10:00\"}]\nstatus: confirmed\n---\n\nMine.\n",
+            )
+            .unwrap();
+            let set = commitments::load(&v);
+            let done = withdraw_asks(&v, &[], &set, &default_ctx(), &mut Journal::new(&v));
+            assert_eq!(done.withdrawn, ["commitment-ask-when-does-bui-100-meet"]);
+            assert!(!card.exists());
         }
     }
 }

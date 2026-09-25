@@ -842,6 +842,11 @@ fn commitment_passes(
     let held = cm::successor_keys(vault);
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, true);
+    // Phase-2 spec §5 (Plan ruling Q7-c): an ask whose course now has a class proposal, a class
+    // note or a marker is withdrawn before either emitter runs.
+    let asks_out = crate::approvals::withdraw_asks(vault, &proposals, &set, ctx, journal);
+    withdrawn_pending += asks_out.pending;
+    warnings.extend(asks_out.warnings);
     // Phase-2 spec D2 (Plan ruling Q1-b): on the vault's first day the confirm screen asks, so no
     // proposal or window card is filed. Change cards cannot exist yet, and pass through unchanged.
     let asked: &[cm::Proposal] = if cm::vault_day(vault, today) == 1 { &[] } else { &proposals };
