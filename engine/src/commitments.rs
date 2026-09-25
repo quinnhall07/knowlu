@@ -3266,6 +3266,58 @@ pub fn ask_withdrawal_reason(meta: &Mapping, proposals: &[Proposal], set: &Commi
     None
 }
 
+/// The fields the console may set on a confirmed commitment (phase-2 spec D5); `window` is not
+/// one of them: it goes through `--confirm`.
+pub const CONSOLE_FIELDS: [&str; 2] = ["kind", "level"];
+
+/// The kinds a confirmed commitment may be given from the console: §2.2's list without
+/// `planning-day` (Plan ruling Q8-b).
+pub const CONSOLE_KINDS: [&str; 9] =
+    ["class", "lab", "work", "club", "meeting", "office-hours", "event", "exam", "task-block"];
+
+/// Phase-2 spec D5, the engine half of `set_fields`' checks (Plan ruling Q8-a): `field` (one of
+/// [`CONSOLE_FIELDS`]) may be set on `target` only when it is a confirmed note under
+/// `commitments/` other than the planning day, and only to a word on §2.2's list. Reads only.
+pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde_json::Value) -> Result<(), String> {
+    let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
+    let rel = crate::ids::rel(vault, &path);
+    if !rel.starts_with(&format!("{FOLDER}/")) {
+        return Err(format!("{field} can only be set on a commitment, not {rel}"));
+    }
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
+    if field_text(&meta, "status").as_deref() != Some("confirmed") || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY) {
+        return Err(format!("{field} can only be set on a confirmed commitment, not {rel}"));
+    }
+    let word = value.as_str().ok_or_else(|| format!("{field} must be one word"))?;
+    let known = match field {
+        "kind" => CONSOLE_KINDS.contains(&word),
+        "level" => Level::parse(word).is_some(),
+        _ => false,
+    };
+    if known {
+        Ok(())
+    } else {
+        Err(format!("{field} {word:?} is not one Knowlu knows"))
+    }
+}
+
+/// `answer_card`'s engine check (review finding 6): `target` is a `pending` approval of kind
+/// [`COMMITMENT_ASK`]. Anything else — a task proposal, a settled card — is refused before a
+/// write, so a wrong id can never approve and materialise another card. Reads only.
+pub fn check_answerable(vault: &Path, target: &str) -> Result<(), String> {
+    let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
+    let rel = crate::ids::rel(vault, &path);
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
+    let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+    if field("type") == "approval" && field("kind") == COMMITMENT_ASK && field("status") == "pending" {
+        Ok(())
+    } else {
+        Err(format!("{rel} is not a pending commitment-ask card"))
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
@@ -10267,5 +10319,39 @@ mod phase2_tests {
         let (paths, ..) = file_asks(&v, TODAY, 15);
         let courses: Vec<String> = paths.iter().map(|p| field_text(&front_of(p), "course").unwrap()).collect();
         assert_eq!(courses, ["cs-100"]);
+    }
+
+    #[test]
+    fn console_edits_reach_only_a_confirmed_commitment_and_only_known_values() {
+        let v = week_vault("edits");
+        run(&v, &input(&[("gcal-series:cs100", "hard")], &[], Some("[{days: [mon], start: \"08:00\", end: \"22:00\"}]")));
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---
+title: Essay
+---
+").unwrap();
+        let word = |w: &str| serde_json::json!(w);
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "level", &word("soft")), Ok(()));
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "kind", &word("lab")), Ok(()));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "level", &word("urgent")).unwrap_err().contains("level"));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &word("planning-day")).is_err());
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &serde_json::json!(3)).is_err());
+        assert!(check_console_edit(&v, "tasks/essay.md", "kind", &word("class")).unwrap_err().contains("commitment"));
+        assert!(check_console_edit(&v, "commitments/planning-day.md", "level", &word("hard")).is_err());
+    }
+
+    #[test]
+    fn only_a_pending_ask_card_is_answerable() {
+        let v = three_courses("answerable");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
+        assert_eq!(check_answerable(&v, &rel), Ok(()));
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---
+title: Essay
+---
+").unwrap();
+        assert!(check_answerable(&v, "tasks/essay.md").unwrap_err().contains("not a pending commitment-ask card"));
     }
 }

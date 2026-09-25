@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use knowlu::state::{resolve_vault, ConsoleState};
 use knowlu::commands::{
-    backup_now_inner, close_info_inner, console_ctx, create_task_inner, decide_inner,
+    answer_card_inner, backup_now_inner, close_info_inner, console_ctx, create_task_inner, decide_inner,
     delete_note_inner, get_settings_inner, mark_seen_inner, note_inner, open_issue_inner,
     resolve_issue_inner, set_fields_inner, set_settings_inner, state_inner, sync_inner,
     ui_event_inner,
@@ -694,4 +694,94 @@ fn the_inference_commands_marshal_and_refuse() {
     knowlu::inference::remove_model(&root).unwrap();
     assert!(knowlu::inference::status(&root).model.is_none());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A vault-full copy holding `courses/bui-100.md` and a pending `commitment-ask` card for it
+/// (invented), with "today" pinned to the fixture's own reference date.
+fn ask_vault(name: &str) -> (PathBuf, ConsoleState) {
+    let v = scratch(name);
+    std::fs::create_dir_all(v.join("courses")).unwrap();
+    std::fs::write(v.join("courses/bui-100.md"), "---\ntitle: \"BUI 100\"\nslug: bui-100\ncode: \"BUI 100\"\nstatus: active\n---\n").unwrap();
+    std::fs::write(
+        v.join("approvals/commitment-ask-when-does-bui-100-meet.md"),
+        "---\nid: appr_00000000a1\ntype: approval\nkind: commitment-ask\ntitle: When does BUI 100 meet?\nstatus: pending\n\
+         source_uid: card:bui-100\ncourse: bui-100\nproposed_at: 2026-08-28\nfirst_proposed_at: 2026-08-28\n\
+         expires: null\nsnooze_until: null\ncreated_by: agent:commitments\n---\n\nInvented.\n",
+    )
+    .unwrap();
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-{name}-data-{}", std::process::id())));
+    cs.set_test_today(Some("2026-08-28".parse().unwrap()));
+    (v, cs)
+}
+
+#[test]
+fn answer_card_writes_the_answer_as_the_student_and_approves() {
+    let (v, cs) = ask_vault("answer");
+    let meets = json!([{ "days": ["mon", "wed"], "start": "14:00", "end": "15:15" }]);
+    let env = answer_card_inner(&cs, "today", "appr_00000000a1", &meets).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["state"]["schema"], 1);
+    let note = std::fs::read_to_string(v.join("commitments/bui-100.md")).unwrap();
+    assert!(note.contains("source_uid: card:bui-100") && note.contains("kind: class"), "{note}");
+    assert!(v.join("archive/commitment-ask-when-does-bui-100-meet.md").exists());
+    let records = journal_records(&v);
+    let answer = records.iter().find(|r| r["field"] == "answer_meets").expect("the answer is journaled");
+    assert_eq!(answer["actor"], "quinn");
+    assert_eq!(answer["via"], "dashboard");
+}
+
+/// Review finding 6: `answer_card` pointed at another approval (vault-full's pending task
+/// proposal) is refused before any write; the task is not materialised.
+#[test]
+fn answer_card_refuses_a_card_that_is_not_an_ask() {
+    let (v, cs) = ask_vault("notask");
+    let s = state_inner(&cs, "decisions").unwrap();
+    let task = s["state"]["decisions"]["cards"].as_array().unwrap().iter().find(|c| c["kind"] == json!("task")).expect("vault-full's task proposal").clone();
+    let tasks_before = std::fs::read_dir(v.join("tasks")).unwrap().count();
+    let env = answer_card_inner(&cs, "today", task["id"].as_str().unwrap(), &json!([])).unwrap();
+    assert_eq!(env["ok"], false, "{env}");
+    assert!(env["error"].as_str().unwrap().contains("not a pending commitment-ask card"), "{env}");
+    assert_eq!(std::fs::read_dir(v.join("tasks")).unwrap().count(), tasks_before, "nothing materialised");
+    let card = std::fs::read_to_string(v.join("approvals").join(format!("{}.md", task["slug"].as_str().unwrap()))).unwrap();
+    assert!(!card.contains("answer_meets"), "no stray line on the task proposal");
+}
+
+#[test]
+fn an_invalid_answer_comes_back_as_the_engines_warning_and_the_card_stays_pending() {
+    let (v, cs) = ask_vault("badanswer");
+    let meets = json!([{ "days": ["mon"], "start": "15:00", "end": "14:00" }]);
+    let env = answer_card_inner(&cs, "today", "appr_00000000a1", &meets).unwrap();
+    assert_eq!(env["ok"], false, "{env}");
+    assert!(env["error"].as_str().unwrap().starts_with("answer_meets entry mon"), "{env}");
+    let card = std::fs::read_to_string(v.join("approvals/commitment-ask-when-does-bui-100-meet.md")).unwrap();
+    assert!(card.contains("status: pending"), "{card}");
+    assert!(!v.join("commitments").exists());
+}
+
+#[test]
+fn kind_and_level_are_editable_only_on_a_confirmed_commitment() {
+    let v = scratch("cmtedit");
+    std::fs::create_dir_all(v.join("commitments")).unwrap();
+    std::fs::write(
+        v.join("commitments/chess-club.md"),
+        "---\nid: cmt_00000000c1\ntype: commitment\nkind: club\nlevel: soft\ntitle: \"Chess Club\"\n\
+         meets: [{days: [wed], start: \"18:00\", end: \"19:00\"}]\nstatus: confirmed\n---\n\nInvented.\n",
+    )
+    .unwrap();
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-cmtedit-data-{}", std::process::id())));
+    let set = |field: &str, value: serde_json::Value, id: &str| {
+        let mut f = serde_json::Map::new();
+        f.insert(field.into(), value);
+        set_fields_inner(&cs, "today", id, f).unwrap()
+    };
+    assert_eq!(set("level", json!("optional"), "cmt_00000000c1")["ok"], true);
+    assert_eq!(set("kind", json!("meeting"), "cmt_00000000c1")["ok"], true);
+    let text = std::fs::read_to_string(v.join("commitments/chess-club.md")).unwrap();
+    assert!(text.contains("level: optional") && text.contains("kind: meeting"), "{text}");
+    let bad = set("level", json!("urgent"), "cmt_00000000c1");
+    assert_eq!(bad["ok"], false);
+    assert!(bad["error"].as_str().unwrap().contains("level"), "{bad}");
+    let task = set("kind", json!("class"), &first_id(&cs));
+    assert_eq!(task["ok"], false);
+    assert!(task["error"].as_str().unwrap().contains("commitment"), "{task}");
 }

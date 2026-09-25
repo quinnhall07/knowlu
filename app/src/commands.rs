@@ -16,7 +16,7 @@ fn envelope(result: Result<Value, String>, key: &str) -> Value {
 /// test-only seam described there — when a test has set it; every real caller leaves that `None`
 /// and gets the real clock exactly as before the seam existed. A pinned date carries noon local
 /// time, matching nothing in particular except being safely clear of both a day's midnight edges.
-fn now_in(cs: &ConsoleState) -> jiff::Zoned {
+pub(crate) fn now_in(cs: &ConsoleState) -> jiff::Zoned {
     let zone = knowlu_engine::cli::vault_zone(&cs.vault);
     match *cs.test_today.lock().unwrap() {
         Some(d) => d.at(12, 0, 0, 0).to_zoned(zone).expect("a pinned test date is always a valid zoned time"),
@@ -148,8 +148,10 @@ pub fn ui_event_inner(cs: &ConsoleState, action: &str, view: &str, object_id: Op
 }
 
 /// Frontmatter fields the console may edit. Anything else (`id`, `source_uid`, `judgment`, …) is
-/// refused rather than silently ignored — the page and the write path agree on this list.
-pub const EDITABLE: [&str; 12] = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence"];
+/// refused rather than silently ignored. `kind` and `level` are a commitment's (phase-2 spec D5):
+/// `knowlu_engine::commitments::check_console_edit` refuses them anywhere else and any value off
+/// §2.2's lists. The page's own list (`console.js`, the drawer's) keeps the first twelve.
+pub const EDITABLE: [&str; 14] = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence", "kind", "level"];
 /// Fields whose literal must go through `write::to_literal` so a colon or quote in free text
 /// survives as YAML; every other editable field is passed through as the literal the page sent.
 pub const QUOTED: [&str; 5] = ["title", "course", "importance_reason", "domain", "effort_confidence"];
@@ -217,6 +219,9 @@ pub fn set_fields_inner(cs: &ConsoleState, view: &str, id: &str, fields: serde_j
             // field as a cancel — this is the server-side half of that rule, refused by name rather
             // than written and regretted (final fix wave, B8).
             if k == "status" && v.is_null() { return Err("status cannot be empty".to_string()); }
+            if knowlu_engine::commitments::CONSOLE_FIELDS.contains(&k.as_str()) {
+                knowlu_engine::commitments::check_console_edit(&cs.vault, id, k, v)?;
+            }
             literals.push((k.clone(), literal_for(k, v)?));
         }
         let res = write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
@@ -269,20 +274,53 @@ pub fn delete_note_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Valu
 pub fn decide_inner(cs: &ConsoleState, view: &str, id: &str, verdict: &str, note: &str, snooze_until: Option<String>) -> Result<Value, String> {
     let mut decision = Value::Null;
     let env = mutate(cs, view, |journal| {
-        if !["approved", "rejected", "snoozed"].contains(&verdict) { return Err(format!("verdict must be approved, rejected or snoozed, not {verdict:?}")); }
-        let snooze = match (verdict, snooze_until.as_deref()) { ("snoozed", Some(d)) if d.len() == 10 => d.to_string(), ("snoozed", _) => return Err("snoozed needs snooze_until as YYYY-MM-DD".into()), _ => "null".into() };
-        let literals = vec![
-            ("status".to_string(), verdict.to_string()),
-            ("decision_note".to_string(), write::to_literal(&serde_yaml_ng::Value::String(note.to_string()))),
-            ("snooze_until".to_string(), snooze),
-        ];
-        write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
-        let now = now_in(cs);
-        let r = knowlu_engine::approvals::process_approvals(&cs.vault, now.date(), now.datetime(), &executor_ctx(), journal);
-        decision = json!({ "executed": r.executed, "expired": r.expired, "woken": r.woken, "rejected": r.rejected, "warnings": r.warnings });
+        decision = decide_in(cs, journal, id, verdict, note, snooze_until.as_deref())?;
         Ok(())
     })?;
     let mut env = env; env["decision"] = decision; Ok(env)
+}
+
+/// The verdict as Quinn's write, then `process_approvals` in-process as `executor_ctx()` —
+/// `decide_inner`'s body, shared with `answer_card_inner`. Returns the `decision` summary.
+fn decide_in(cs: &ConsoleState, journal: &mut Journal, id: &str, verdict: &str, note: &str, snooze_until: Option<&str>) -> Result<Value, String> {
+    if !["approved", "rejected", "snoozed"].contains(&verdict) { return Err(format!("verdict must be approved, rejected or snoozed, not {verdict:?}")); }
+    let snooze = match (verdict, snooze_until) { ("snoozed", Some(d)) if d.len() == 10 => d.to_string(), ("snoozed", _) => return Err("snoozed needs snooze_until as YYYY-MM-DD".into()), _ => "null".into() };
+    let literals = vec![
+        ("status".to_string(), verdict.to_string()),
+        ("decision_note".to_string(), write::to_literal(&serde_yaml_ng::Value::String(note.to_string()))),
+        ("snooze_until".to_string(), snooze),
+    ];
+    write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+    let now = now_in(cs);
+    let r = knowlu_engine::approvals::process_approvals(&cs.vault, now.date(), now.datetime(), &executor_ctx(), journal);
+    Ok(json!({ "executed": r.executed, "expired": r.expired, "woken": r.woken, "rejected": r.rejected, "warnings": r.warnings }))
+}
+
+/// Phase-2 spec §5: the `commitment-ask` card's answer. `answer_meets` is written as the
+/// student's edit (the form's list, emitted by `write::to_literal`), then `decide`'s approve path
+/// runs. The engine's settlement validates; nothing here does. When the card was not executed,
+/// the envelope is `ok: false` with this card's own warnings (Plan ruling Q8-c).
+pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value) -> Result<Value, String> {
+    let name = knowlu_engine::ids::resolve_target(&cs.vault, id).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+    let mut decision = Value::Null;
+    let env = mutate(cs, view, |journal| {
+        // Review finding 6: only a pending commitment-ask card takes an answer — the engine says so.
+        knowlu_engine::commitments::check_answerable(&cs.vault, id)?;
+        let literal = write::to_literal(&knowlu_engine::yaml::from_json(meets));
+        write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+        decision = decide_in(cs, journal, id, "approved", "", None)?;
+        Ok(())
+    })?;
+    let mut env = env;
+    let prefix = name.map(|n| format!("{n}: ")).unwrap_or_default();
+    let mine: Vec<String> = decision["warnings"].as_array().into_iter().flatten()
+        .filter_map(|w| w.as_str())
+        .filter(|w| !prefix.is_empty() && w.starts_with(&prefix))
+        .map(|w| w[prefix.len()..].to_string())
+        .collect();
+    if env["ok"] == true && !mine.is_empty() { env["ok"] = json!(false); env["error"] = json!(mine.join("; ")); }
+    env["decision"] = decision;
+    Ok(env)
 }
 
 pub fn close_info_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Value, String> {
@@ -400,6 +438,7 @@ pub fn state_envelope(cs: &ConsoleState, sch: &Scheduler, view: &str) -> Value {
 #[tauri::command(async)] pub fn create_task(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, fields: serde_json::Map<String, Value>) -> Value { let mut env = create_task_inner(&cs, &view, fields).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn delete_note(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = delete_note_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn decide(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, verdict: String, note: String, snooze_until: Option<String>) -> Value { let mut env = decide_inner(&cs, &view, &id, &verdict, &note, snooze_until).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command(async)] pub fn answer_card(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, meets: Value) -> Value { let mut env = answer_card_inner(&cs, &view, &id, &meets).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn close_info(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = close_info_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn open_issue(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, target: String, categories: Vec<String>, text: String) -> Value { let mut env = open_issue_inner(&cs, &view, &target, categories, &text).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn resolve_issue(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, resolution: String) -> Value { let mut env = resolve_issue_inner(&cs, &view, &id, &resolution).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }

@@ -8,8 +8,8 @@
   var EL = function (id) { return document.getElementById(id); };
   var h = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
   var fmtH = function (x) { return (Math.round(x * 10) / 10).toFixed(1) + "h"; };
-  // Task 13: the twelve fields `set_fields` accepts (app/src/commands.rs's EDITABLE) — the page
-  // and the write path must agree on the list, since only these get a data-field span.
+  // Task 13: the drawer's twelve editable fields — every one `set_fields` accepts but `kind` and
+  // `level`, which it takes only on a commitment, from the Schedule view (commands.rs's EDITABLE).
   var EDITABLE = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence"];
   var editing = null;
 
