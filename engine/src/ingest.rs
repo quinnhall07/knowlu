@@ -631,6 +631,9 @@ pub fn sync_tasks(
     let mut log: Vec<String> = Vec::new();
     let mut known = existing_by_uid(vault);
     let mut seen = load_seen(vault);
+    // Two-desktop design D3: every id this vault already holds, read once for this run and extended
+    // by `write::create_imported` as it mints — an imported note never takes an id a note has here.
+    let mut held = crate::ids::held_ids(vault);
     let tasks_dir = vault.join("tasks");
     let _ = std::fs::create_dir_all(&tasks_dir);
 
@@ -747,11 +750,19 @@ pub fn sync_tasks(
                 .replace("{uid}", &json_dumps_unicode(&event.uid))
                 .replace("{body}", &event.description);
             let rel_path = crate::ids::rel(vault, &path);
-            match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
+            match crate::write::create_imported(vault, &rel_path, &body, ctx, journal, &mut held) {
                 Ok(created) => {
                     let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                     log.push(format!("archived (imported-past) {stem}"));
                     known.insert(event.uid.clone(), created);
+                    let _ = record_seen(vault, &event.uid, &event.title, &stamp);
+                }
+                // Two-desktop design R-TD1-1: the item's note is already here under its import id —
+                // named, not written, and recorded as seen, as the backfill above records a note it
+                // found by `source_uid`.
+                Err(crate::write::WriteError::IdHeld(id)) => {
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    log.push(format!("skipped (already held as {id}): {stem}"));
                     let _ = record_seen(vault, &event.uid, &event.title, &stamp);
                 }
                 Err(err) => log.push(format!("skipped (unwritable): {err}")),
@@ -778,11 +789,17 @@ pub fn sync_tasks(
             .replace("{body}", &event.description);
 
         let rel_path = crate::ids::rel(vault, &path);
-        match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
+        match crate::write::create_imported(vault, &rel_path, &body, ctx, journal, &mut held) {
             Ok(created) => {
                 let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 log.push(format!("created {stem}"));
                 known.insert(event.uid.clone(), created);
+                let _ = record_seen(vault, &event.uid, &event.title, &stamp);
+            }
+            // Two-desktop design R-TD1-1, as in the archive branch above.
+            Err(crate::write::WriteError::IdHeld(id)) => {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                log.push(format!("skipped (already held as {id}): {stem}"));
                 let _ = record_seen(vault, &event.uid, &event.title, &stamp);
             }
             Err(err) => log.push(format!("skipped (unwritable): {err}")),
