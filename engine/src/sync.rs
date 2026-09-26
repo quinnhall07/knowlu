@@ -1908,6 +1908,14 @@ pub fn apply(
                         report.warnings.push(format!(
                             "sync: {from} is {other}, not {id}; the move to {dest} is not applied here"
                         ));
+                    } else if vault.join(&from).exists() {
+                        // Review Minor 5 (task-6-review.md), task-5-review Minor 2's class: a file
+                        // sits at `from`, but its frontmatter cannot be read (missing, bad YAML) —
+                        // named, like `move_note`'s own `NoFrontmatter` refusal, rather than silently
+                        // treated as nothing to move.
+                        report.warnings.push(format!(
+                            "sync: {from} could not be read; the move to {dest} is not applied here"
+                        ));
                     }
                     None
                 }
@@ -2324,26 +2332,37 @@ pub fn apply(
     // regardless of the order `page.notes` carries them in, is what makes the new note's
     // `create_new` land after the archive has already happened.
     // D5 (d) (two-desktop design §2.5, R-TD1-13): which ids other desktops' records have placed at each
-    // path, as alias groups — read only when this page carries a tombstone.
-    let placed_elsewhere: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
-        if page.notes.iter().any(|n| n.text.is_none()) {
-            let mut placed: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
-                std::collections::BTreeMap::new();
-            for r in journal.read(None, None) {
-                let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-                if s("device") == this_device || s("id").is_empty() {
-                    continue;
-                }
-                let group = crate::ids::canonical(&index.aliases, &s("id")).to_string();
-                placed.entry(s("path")).or_default().insert(group.clone());
-                if s("op") == "move" && !s("new").is_empty() {
-                    placed.entry(s("new")).or_default().insert(group);
-                }
+    // path, as alias groups — read only when this page carries a tombstone. `placed_ids` is the same
+    // history inverted (R-TD1-exec-10, review Important 1): every path a group has EVER been placed
+    // at, so a `free_slot` name — where D5 (c) landed a raw text no journal ever named — can be told
+    // apart from a real placement even when nothing was ever placed at THIS exact path.
+    let (placed_elsewhere, placed_ids): (
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) = if page.notes.iter().any(|n| n.text.is_none()) {
+        let mut placed: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        let mut placed_ids: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for r in journal.read(None, None) {
+            let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+            if s("device") == this_device || s("id").is_empty() {
+                continue;
             }
-            placed
-        } else {
-            std::collections::BTreeMap::new()
-        };
+            let group = crate::ids::canonical(&index.aliases, &s("id")).to_string();
+            let path = s("path");
+            placed.entry(path.clone()).or_default().insert(group.clone());
+            placed_ids.entry(group.clone()).or_default().insert(path);
+            if s("op") == "move" && !s("new").is_empty() {
+                let new_path = s("new");
+                placed.entry(new_path.clone()).or_default().insert(group.clone());
+                placed_ids.entry(group).or_default().insert(new_path);
+            }
+        }
+        (placed, placed_ids)
+    } else {
+        (std::collections::BTreeMap::new(), std::collections::BTreeMap::new())
+    };
     let live_by_lower: std::collections::BTreeMap<String, &PulledNote> = page
         .notes
         .iter()
@@ -2401,13 +2420,25 @@ pub fn apply(
                     // place a different id at this path and none of them ever placed this note's
                     // (alias groups compared), the tombstone is about another note and this one stays.
                     let ours = note_id_at(&file);
-                    if let (Some(ours), Some(theirs)) = (&ours, placed_elsewhere.get(&note.path)) {
-                        if !theirs.contains(crate::ids::canonical(&index.aliases, ours)) {
-                            report.warnings.push(format!(
-                                "sync: {} — the account settled a different note there; this one stays",
-                                note.path
-                            ));
+                    if let Some(ours) = &ours {
+                        let group = crate::ids::canonical(&index.aliases, ours).to_string();
+                        // R-TD1-exec-10 (review Important 1): other desktops' records place THIS
+                        // note's id somewhere, but never at this exact path — a `free_slot` name (D5
+                        // (c)) or a raw text this device wrote, never a real placement. Silent: no
+                        // record ever named this path as this note's, so there is nothing to tell —
+                        // a hand delete still propagates when this note's id is placed nowhere at
+                        // all (an empty or absent set here) or IS placed at this very path.
+                        if placed_ids.get(&group).is_some_and(|paths| !paths.contains(&note.path)) {
                             continue;
+                        }
+                        if let Some(theirs) = placed_elsewhere.get(&note.path) {
+                            if !theirs.contains(&group) {
+                                report.warnings.push(format!(
+                                    "sync: {} — the account settled a different note there; this one stays",
+                                    note.path
+                                ));
+                                continue;
+                            }
                         }
                     }
                     match crate::write::delete(vault, &note.path, ctx, journal) {

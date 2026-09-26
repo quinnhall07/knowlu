@@ -3155,3 +3155,125 @@ fn td1_iv_a_move_made_on_a_live_copy_never_brings_back_a_copy_archived_here() {
     assert!(dir.join("tasks/back.md").exists() && !dir.join("archive/cs-100-hw-01.md").exists(), "an un-archive applies: {report:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (task-6-review.md, Important 1; ruling R-TD1-exec-10).
+// ---------------------------------------------------------------------------
+
+/// A creates `l` and B creates `x` — two unrelated items whose course labels put them at the same
+/// path (I2/D4: `item`'s `uid` is the real identity, `slug` only the filename). One exchange each way
+/// leaves `study.md` holding each side's own item and `study-2.md` holding the other's raw copy (D5
+/// (c)) — a name neither journal ever places an id at.
+fn exec10_setup(tag: &str) -> (PathBuf, PathBuf, Journal, Journal, Cursor, Cursor) {
+    let (a, b) = (desk(&format!("exec10-{tag}-a")), desk(&format!("exec10-{tag}-b")));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let mut l = item("study", "L");
+    l.uid = "zybooks:77".to_string();
+    let mut x = item("study", "X");
+    x.uid = "zybooks:88".to_string();
+    fetch(&a, &mut ja, &[l]);
+    fetch(&b, &mut jb, &[x]);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+    (a, b, ja, jb, ca, cb)
+}
+
+/// §2.5 (d), R-TD1-exec-10: the student deletes `l` on A. B's by-id delete pass archives B's OWN copy
+/// of `l`, at B's `study-2.md` — the tombstone for `study.md` correctly leaves `x` there, both known
+/// behaviour. B's NEXT push then tombstones `study-2.md` (it just vanished from B's own disk), and
+/// that tombstone lands on A's `study-2.md`, which holds `x`'s raw copy — a path no journal, on
+/// either side, has ever named. Before this fix, no placement at that exact path read as "settle";
+/// `x` is silently archived. After it, `x`'s id was placed elsewhere (`study.md`, by B's own foreign
+/// `create`) and never at this path, so the tombstone is about a different note and `x` stays.
+#[test]
+fn td1_exec10_a_tombstone_never_archives_a_note_other_desktops_placed_elsewhere() {
+    let (a, b, mut ja, mut jb, mut ca, mut cb) = exec10_setup("delete");
+    let rel = "tasks/study.md";
+    let rel2 = "tasks/study-2.md";
+    assert!(a.join(rel).exists() && a.join(rel2).exists(), "A has l at {rel} and x's raw copy at {rel2}");
+    assert!(b.join(rel).exists() && b.join(rel2).exists(), "B has x at {rel} and l's raw copy at {rel2}");
+    let x_id = meta_id(&b, rel);
+
+    let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::delete(&a, rel, &student, &mut ja).expect("the student deletes l on A");
+
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let rb = deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let ra = deliver(&a, &page, &mut ja);
+
+    assert!(b.join(rel).exists(), "B's own x stays live: {rb:?}");
+    assert!(a.join(rel2).exists(), "A's copy of x stays live: {ra:?}");
+    assert_eq!(meta_id(&a, rel2), x_id, "A's copy is still x, untouched");
+    // No warning names x's own path: R-TD1-exec-10's new guard is silent (nothing was ever placed at
+    // `rel2` in the first place, so there is nothing to tell the student). The one warning this apply
+    // DOES carry is unrelated and pre-existing: B's own archived `l` (at its local `archive/study-2.md`)
+    // is a path this device has never sent before, so B's build_push resends it as a "new" live row —
+    // colliding, by id, with A's OWN independently-archived `l` (at `archive/study.md`). That is the
+    // ordinary "already held" guard (D5 (c)), not this fix's concern, and it names `l`'s id, never x's.
+    assert!(
+        !ra.warnings.iter().any(|w| w.contains(rel2)),
+        "no warning names x's own path {rel2}: {:?}", ra.warnings
+    );
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// Review Minor 5 (task-6-review.md, task-5-review Minor 2's class): an id'd move whose `from` note
+/// cannot be read at all — no frontmatter, so neither `note_has_no_id` nor `note_id_at` finds
+/// anything — is named, not silently treated as nothing to move.
+#[test]
+fn td1_a_move_whose_source_cannot_be_read_is_named_not_silently_skipped() {
+    let dir = desk("minor5-move");
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("plain.md"), "just some text, no frontmatter\n")
+        .expect("a note with no frontmatter at all");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let mut spec = knowlu_engine::journal::NewRecord::new("move", "tasks/plain.md", "quinn", "dashboard");
+    spec.id = Some("task_00000000dd");
+    spec.old = serde_json::json!("tasks/plain.md");
+    spec.new = serde_json::json!("tasks/plain-renamed.md");
+    spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+    spec.device = Some("OtherDesktop".to_string());
+    let rec = knowlu_engine::journal::make_record(spec).expect("a record");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert!(dir.join("tasks/plain.md").exists() && !dir.join("tasks/plain-renamed.md").exists(), "{report:?}");
+    assert_eq!(report.moved, 0, "{report:?}");
+    assert!(
+        report.warnings.contains(&"sync: tasks/plain.md could not be read; the move to tasks/plain-renamed.md is not applied here".to_string()),
+        "{:?}", report.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rename half of R-TD1-exec-10: A renames `l` instead of deleting it. The move travels by id to
+/// B's own copy of `l` (D5 (b), already correct — `l` really is one note, mirrored) and, exactly like
+/// a delete, empties a path neither journal ever named: first `study.md` on A (its tombstone correctly
+/// leaves B's `x`, already known), then `study-2.md` on B once B's own `l` copy moves away from it.
+/// That second tombstone must not reach A and archive its own raw copy of `x` at `study-2.md`.
+#[test]
+fn td1_exec10_a_foreign_rename_of_l_never_archives_xs_copy_elsewhere() {
+    let (a, b, mut ja, mut jb, mut ca, mut cb) = exec10_setup("rename");
+    let rel = "tasks/study.md";
+    let rel2 = "tasks/study-2.md";
+    let x_id = meta_id(&b, rel);
+
+    let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::move_note(&a, rel, "tasks/study-renamed.md", &student, &mut ja)
+        .expect("the student renames l on A");
+
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let rb = deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let ra = deliver(&a, &page, &mut ja);
+
+    assert!(b.join(rel).exists(), "B's own x stays live: {rb:?}");
+    assert!(a.join(rel2).exists(), "A's copy of x stays live: {ra:?}");
+    assert_eq!(meta_id(&a, rel2), x_id, "A's copy is still x, untouched");
+    assert!(ra.warnings.is_empty(), "no warning: {:?}", ra.warnings);
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
