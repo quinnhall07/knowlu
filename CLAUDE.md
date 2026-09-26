@@ -86,6 +86,16 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   (heuristics, promoted rules, the model — one process per judgment). **Always exits 0**: no runtime
   and no model are normal outcomes. Writes as `agent:knowlu.enrich` (`provenance::is_agent` is a
   `starts_with` test) with `judged: true`, `propose: true`. Judgment logs never enter the vault.
+- `sync --vault <v> [--direction pull|push|both] [--via <via>] [--run-id <id>]` — the account's copy
+  of the vault: new journal records and changed note text up, another desktop's writes down and
+  applied through `write`. **Always exits 0**: no account, no session, no entitlement and no network
+  are normal outcomes. The account is the source of truth and the folder is its mirror (cloud design,
+  amendment 2026-09-17, ruling 2); the service can read what it stores, says so on the privacy page,
+  and deletes it with the account.
+- **The engine gates itself** (ruling 3): `coursework`, `ingest`, `judge` and `sync` do not run past the
+  72-hour entitlement grace the app caches — `engine/src/entitle.rs` reads
+  `%LOCALAPPDATA%\knowlu\profiles\<id>\entitlement.json` and the refusal is a named line at exit 0.
+  `rank`, `surface` and `write` are never gated.
 - `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
   [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
   Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
@@ -119,28 +129,31 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-24 (commitment
-  model phase 2)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console window
-  registers **47** (phase 2 added `answer_card`, `commitment_proposals`, `commitments_confirm`,
-  `your_week`, `preview_window`), the vault-less picker/wizard window **29** (C2's hand-off H9
-  phase (a) added `account::google_connect_url`, `account::google_connected`,
-  `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **66** distinct. Commands live
-  beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
-  `report.rs`, `lms_link.rs`), never all in one file. Nine mutate notes
-  (`set_fields`, `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`,
-  `close_info`, `open_issue`, `resolve_issue`); `set_fields` edits a commitment's `kind`/`level`
-  only as `commitments::check_console_edit` allows; `sync`/`backup_now` move the vault without
-  writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-26 (the merge of
+  C3′ into commitment model phase 2)** (by script, over the two `generate_handler!` lists in
+  `app/src/main.rs`; C3′ added none): the console window registers **47** (phase 2 added
+  `answer_card`, `commitment_proposals`, `commitments_confirm`, `your_week`, `preview_window`), the
+  vault-less picker/wizard window **29** (C2's hand-off H9 phase (a) added
+  `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's H1
+  removed `account::sign_up` and `account::sign_in` with the password and added
+  `account::google_sign_in` to both lists) — **66** distinct. Commands live beside the module they
+  serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never
+  all in one file. **Ten** mutate notes (`set_fields`, `create_task`, `delete_note`, `decide`,
+  `answer_card`, `commitments_confirm`, `close_info`, `open_issue`, `resolve_issue`, `sync` — the
+  last applies another desktop's writes through `write` and can file a `kind: amend` card);
+  `set_fields` edits a commitment's `kind`/`level` only as `commitments::check_console_edit` allows;
+  `backup_now` is the one command that moves the vault without writing a note; `ui_event` writes the
+  `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
   process or the updater — never a note. Recount before quoting a number.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
   `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
   `app/src`, and it stays.
-- A slot is `coursework → ingest → judge → rank` (`scheduler::slot_argv`), each the sibling
+- A slot is `sync → coursework → ingest → judge → rank` (`scheduler::slot_argv`), each the sibling
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
-  named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)` —
+  named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
+  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)` —
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
   unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
   wizard-created vault carries both from birth.

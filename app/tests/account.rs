@@ -1467,3 +1467,128 @@ fn open_in_browser_refuses_anything_that_is_not_a_web_address_and_opens_nothing(
     let err = open_in_browser("file:///C:/x").unwrap_err();
     assert_eq!(err, "only a web address can be opened");
 }
+
+// ---------------------------------------------------------------------------
+// C3′'s final fix wave, the final review's C1 (R-C3′-exec-43): *Sync now* and the quit push refresh
+// the session before they reach the account. The slot's own half is C1c's (R-C1c-13).
+// ---------------------------------------------------------------------------
+
+/// A vault that has an account on the loopback `api_base`, and a session under `target` whose access
+/// token expired a minute ago — the steady state of a desktop whose last refresh was over an hour ago
+/// (`jwt_expiry = 3600`).
+#[cfg(windows)]
+fn vault_with_an_expired_session(tag: &str, api_base: &str, target: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use knowlu::account::{save_session, Session};
+    let stale = Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        expires_at: jiff::Timestamp::now().as_second() - 60,
+        email: "a@example.invalid".into(),
+    };
+    save_session(target, "acc-1", &stale).expect("write an expired session");
+    let vault = std::env::temp_dir().join(format!("knowlu-c1-{tag}-{}", std::process::id()));
+    let data = std::env::temp_dir().join(format!("knowlu-c1-{tag}-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: '{api_base}'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    ).unwrap();
+    (vault, data)
+}
+
+/// What GoTrue answers a good `grant_type=refresh_token`.
+const FRESH_SESSION: &str = r#"{"access_token":"fresh-at","refresh_token":"fresh-rt","expires_in":3600,"user":{"id":"acc-1","email":"a@example.invalid"}}"#;
+const EMPTY_PULL: &str = r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#;
+const NOTHING_PUSHED: &str = r#"{"records":0,"notes":0}"#;
+
+/// Final review C1: `state::run_sync` (*Sync now*) handed the engine whatever token Credential
+/// Manager held, and nothing had refreshed it since launch or the last six-hourly tick — so most
+/// clicks got a 401 and read "signed out" on a signed-in, paying student's machine.
+#[cfg(windows)]
+#[test]
+fn sync_now_refreshes_an_expired_session_before_it_pulls_or_pushes() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = format!("knowlu/test-c1-sync-now-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let (base, handle) = loopback(vec![
+        (200, FRESH_SESSION.to_string()),
+        (200, EMPTY_PULL.to_string()),
+        (200, NOTHING_PUSHED.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = vault_with_an_expired_session("sync-now", &api_base, &target);
+    let cs = knowlu::state::ConsoleState::open(vault.clone(), data.clone());
+
+    let status = knowlu::state::run_sync(&cs);
+    let (_, held) = knowlu::account::load_session(&target).expect("the session is still there");
+    assert_eq!(held.access_token, "fresh-at", "Sync now must refresh an expired session before it syncs: {status:?}");
+    let seen = handle.join().expect("server thread");
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    assert!(seen[1].starts_with("GET /functions/v1/sync-pull") && seen[1].contains("Bearer fresh-at"), "{}", seen[1]);
+    assert!(seen[2].starts_with("POST /functions/v1/sync-push ") && seen[2].contains("Bearer fresh-at"), "{}", seen[2]);
+    assert!(status.ok && status.last_error.is_none(), "{status:?}");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The quit push is the same call, push only, and had the same stale token.
+#[cfg(windows)]
+#[test]
+fn the_quit_push_refreshes_an_expired_session_before_it_pushes() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = format!("knowlu/test-c1-quit-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let (base, handle) = loopback(vec![(200, FRESH_SESSION.to_string()), (200, NOTHING_PUSHED.to_string())]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = vault_with_an_expired_session("quit", &api_base, &target);
+    let cs = knowlu::state::ConsoleState::open(vault.clone(), data.clone());
+
+    let q = knowlu::state::quit_flush(&cs, std::time::Duration::from_secs(30), |_| {});
+    let (_, held) = knowlu::account::load_session(&target).expect("the session is still there");
+    assert_eq!(held.access_token, "fresh-at", "the quit push must refresh an expired session first: {q:?}");
+    let seen = handle.join().expect("server thread");
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    assert!(seen[1].starts_with("POST /functions/v1/sync-push ") && seen[1].contains("Bearer fresh-at"), "{}", seen[1]);
+    assert!(q.synced && !q.timed_out, "{q:?}");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// …and a refresh that fails is named, never swallowed. Here the account service refuses the refresh
+/// token, the stale access token then meets a 401 on both halves, and the status says both: the
+/// engine's own "signed out" (which the page turns into "signed out — sign in to sync"), and a line
+/// naming the refresh that failed and why, for the diagnostics and the report.
+#[cfg(windows)]
+#[test]
+fn a_session_refresh_that_fails_is_named_in_the_sync_status() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = format!("knowlu/test-c1-refresh-fails-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    let (base, handle) = loopback(vec![
+        (400, r#"{"error":"invalid_grant","error_description":"Invalid Refresh Token: Refresh Token Not Found"}"#.to_string()),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = vault_with_an_expired_session("refresh-fails", &api_base, &target);
+    let cs = knowlu::state::ConsoleState::open(vault.clone(), data.clone());
+
+    let status = knowlu::state::run_sync(&cs);
+    assert!(
+        status.lines.iter().any(|l| l == "sync: the session could not be refreshed (Invalid Refresh Token: Refresh Token Not Found)"),
+        "the failed refresh is named: {status:?}"
+    );
+    assert_eq!(status.last_error.as_deref(), Some("signed out"), "{status:?}");
+    let seen = handle.join().expect("server thread");
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}

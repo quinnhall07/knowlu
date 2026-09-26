@@ -76,10 +76,6 @@
     parts.push('<span id="gauge" class="gauge"></span>');
     parts.push("<span>" + h(t.active) + " active</span>");
     parts.push("<span>" + (t.generated_at ? "generated " + h(t.generated_at) + " by " + h(t.generated_by) : "no run recorded") + "</span>");
-    // `engine_newer` is NOT repeated here (final fix wave, C2). It is a health fact, and the line
-    // directly below — renderSyncLine — is the health line: repo, remote, backup, missed slots,
-    // last slot, scheduler, and this. Saying it twice, one line apart, made the same warning read
-    // as two different problems.
     // Plan 4a Task 7: one of the panel's two ways in (the other is the tray). Last, so the
     // gear sits at the end of the line and never moves as the facts before it change width.
     parts.push('<button class="b" type="button" data-settings title="Settings">&#9881;</button>');
@@ -378,28 +374,54 @@
     return invoke("check_for_updates", {}).then(function (u) { renderUpdateOffer(u); if (!EL("settings").hidden) { EL("set-update-state").textContent = current.updateText; } }).catch(function () {});
   }
 
-  // Task 15: the topline's sync/backup/scheduler line — a state's own words about repo/remote/
-  // backup/scheduler health, never computed here. Every source object (t.sync, t.backup,
-  // t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a vault with no
-  // scheduler info yet) — `|| {}` and truthiness checks below must never throw on a missing key.
+  // Task 15: the topline's sync/backup/scheduler line, never computed here. Every source object
+  // (t.sync, t.backup, t.scheduler) can be ABSENT (a fixture predating Task 10/12's caches, or a
+  // vault with no scheduler info yet) — `|| {}` and truthiness checks below must never throw on a
+  // missing key.
+  // C3′ final fix wave (R-C3′-exec-39 N1 and N4, R-C3′-exec-43): the engine's own words for a sync
+  // that was skipped (`SyncStatus.skipped`) or failed (`last_error`), and what a student reads for
+  // each. The words come from `cloudmodel::Unavailable::label` and the literals in `sync.rs`
+  // (`run_lines_with`, `record_gated_skip`, `SyncError::service`); `static_assets.rs` reads those
+  // sources and fails if one of them is not a key here. Amber is a state that keeps changes on this
+  // computer until the student acts or the network returns; calm is an ordinary one. "no
+  // entitlement" is also what a PAYING student reads after more than 72 hours offline (a cache
+  // nothing could renew), so it says what is known — the subscription could not be confirmed — and
+  // never that it is inactive. The diagnostics blob and the issue report keep the raw word.
+  var SYNC_SAYS = {
+    "no session": ["amber", "signed out — sign in to sync"],
+    "signed out": ["amber", "signed out — sign in to sync"],
+    "no entitlement": ["amber", "can't confirm your subscription — changes stay on this computer"],
+    "offline: the account could not be reached": ["amber", "offline — changes stay on this computer"],
+    "no account": ["calm", "sync skipped — no account"],
+    "another sync is running": ["calm", "sync skipped — another sync is running"]
+  };
+  /// One engine word → `[tone, text]`. A word the table does not know keeps the engine's own first
+  /// line, after `prefix`, in `tone`: a new failure is still shown, just not yet translated.
+  function syncSays(word, tone, prefix) {
+    var w = String(word).split("\n")[0];
+    return Object.prototype.hasOwnProperty.call(SYNC_SAYS, w) ? SYNC_SAYS[w] : [tone, (prefix || "") + w];
+  }
+  /// *Sync now*'s refusal says what the sync line says, never the engine's raw word.
+  function syncRefusal(err) { showRefusal(null, syncSays(err, "amber")[1]); }
+  // C3', Task 10 (fix round 1, review I1): `t.sync` is the engine's own `SyncStatus` (state.rs
+  // fills it from `sync::run_lines_with`), never a git-shaped status any more. `SyncStatus::of`
+  // stamps `at` on every run, skipped ones included, so `s.skipped` MUST be read before `s.at` —
+  // otherwise a lapsed subscription or a signed-out machine reads as "in step with your account"
+  // for as long as the state lasts. Both fields go through `SYNC_SAYS` above.
   function renderSyncLine(state) {
-    var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [];
-    // The conflict copy is verbatim (R-T15a) — the flat "conflict — auto-sync stopped", with the
-    // per-note detail in the element's title attribute and never in the visible text.
-    if (!s.is_repo) { bits.push('<span class="calm">local history</span>'); }
-    else if (s.conflicted && s.conflicted.length) { bits.push('<span class="crit" title="conflict in ' + s.conflicted.length + " note" + (s.conflicted.length === 1 ? "" : "s") + '">conflict — auto-sync stopped</span>'); }
-    else if (s.last_error) { bits.push('<span class="amber">' + h(s.last_error.split("\n")[0]) + "</span>"); }
-    else if (!s.has_remote) { bits.push('<span class="calm">no remote — local history</span>'); }
-    // R-F1 (re-ruling of R-T15a): `sync.ahead` is `rev-list --count HEAD...origin/main` — a count
-    // of COMMITS, not of edits. One commit can carry twenty edits, and the plan's "N edits" string
-    // assumed a number the app has never had. Say what the number is, and pluralise it honestly.
-    else if (s.ahead > 0) { bits.push('<span class="amber">' + s.ahead + " commit" + (s.ahead === 1 ? "" : "s") + " pending push" + (t.auto_sync === false ? " (auto-sync off)" : "") + "</span>"); }
-    else { bits.push('<span class="calm">synced</span>'); }
+    var t = state.topline, s = t.sync || {}, b = t.backup || {}, bits = [], said = null;
+    if (s.last_error) { said = syncSays(s.last_error, "amber"); bits.push('<span class="' + said[0] + '">' + h(said[1]) + "</span>"); }
+    else if (s.skipped) {
+      // A skip word the table does not know is an ordinary state until it is added, so calm.
+      said = syncSays(s.skipped, "calm", "sync skipped — ");
+      bits.push('<span class="' + said[0] + '">' + h(said[1]) + "</span>");
+    }
+    else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
+    else { bits.push('<span class="calm">not synced yet</span>'); }
     if (b.last_error) { bits.push('<span class="amber">backup: ' + h(b.last_error.split("\n")[0]) + "</span>"); }
     else if (b.behind_days != null && b.behind_days >= 1) { bits.push('<span class="amber">backup ' + b.behind_days + " day" + (b.behind_days === 1 ? "" : "s") + " behind</span>"); }
     else if (b.last_ok) { bits.push('<span class="calm">backed up</span>'); }
     if (t.startup_missed > 0) { bits.push('<span class="amber">' + t.startup_missed + " slot" + (t.startup_missed === 1 ? "" : "s") + " missed while quit</span>"); }
-    if (t.engine_newer) { bits.push('<span class="amber">engine newer than console</span>'); }
     // R-T15d: topline.last_slot may be absent (no scheduler slot has run yet, or a hard-error
     // envelope) — tolerate it missing entirely, same as scheduler above.
     if (t.last_slot) {
@@ -1457,7 +1479,7 @@
     var closeBtn = e.target.closest("[data-close-info]"); if (closeBtn) { closeInfoItem(closeBtn.getAttribute("data-close-info")); return; }
     // Task 15: manual sync/backup from the topline — both return the fresh state like every
     // other mutating command (spec's envelope shape), so applyEnvelope repaints it the same way.
-    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: stateView() }).then(function (env) { applyEnvelope(env); ev("sync_run", null, null, null); }).catch(function () {}); return; }
+    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: stateView() }).then(function (env) { applyEnvelope(env, syncRefusal); ev("sync_run", null, null, null); }).catch(function () {}); return; }
     var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
     // Plan 4a Task 8: *Restart to update*. A refusal (a slot started between the offer and the
@@ -1900,6 +1922,53 @@
     }).catch(function () {});
   });
 
+  // C3' Task 9, step 6 (P3: built to yes): the LOCAL `Backups\` mirror, never the account — the
+  // account's own copy arrives by signing in, through the wizard's own Finish (H11a), with no route
+  // and no code to type. `pick_folder` and `restore_vault` have both existed since C1 with no caller;
+  // this is the first one. Only two fields of a restored vault's plan are ever read
+  // (`finish_or_roll_back` -> `finish_profile_in`: the autostart choice and the local-judgment offer
+  // marker), so the rest of this minimal plan is never looked at — the fields still have to be the
+  // shapes `WizardPlan` requires to deserialize.
+  //
+  // M3 (fix round 1): a name and an autostart choice, asked rather than assumed — the SAME two
+  // things panel 4 and panel 8 of the nine-panel wizard ask, with the SAME defaults ("Knowlu",
+  // Start Knowlu with Windows checked). Without a name, a second restore always landed at
+  // `<home>\Knowlu\Knowlu` and the second one was refused outright ("already exists"); forcing
+  // autostart enabled it without asking.
+  var PICK_RESTORE_BACKUP = "";
+  EL("pick-restore-backup").addEventListener("click", function () {
+    invoke("pick_folder", { title: "Choose the Backups folder to restore from" }).then(function (r) {
+      if (!r || !r.path) { return; }
+      PICK_RESTORE_BACKUP = r.path;
+      EL("pick-restore-name").value = "Knowlu";
+      EL("pick-restore-autostart").checked = true;
+      EL("pick-restore-options").hidden = false;
+    }).catch(function () {});
+  });
+  EL("pick-restore-go").addEventListener("click", function () {
+    // N6 (fix round 2): disabled before the call, the same guard the wizard's own Finish already
+    // has (R2-3) — a double click used to start two `restore_vault` calls, the second losing the
+    // rename race and writing its error into #pick-lede while the first was already relaunching.
+    // Re-enabled on EITHER outcome: a refusal must leave the button pressable again.
+    var go = EL("pick-restore-go");
+    go.disabled = true;
+    var name = EL("pick-restore-name").value.trim() || "Knowlu";
+    var plan = {
+      ics_url: null, personal_calendar: null, timezone: "", slots: ["12:00", "18:00"],
+      zybooks: false, vhl: false, autostart: EL("pick-restore-autostart").checked,
+    };
+    invoke("restore_vault", { backup: PICK_RESTORE_BACKUP, name: name, plan: plan }).then(function (a) {
+      if (!a.ok) { EL("pick-lede").textContent = a.error; go.disabled = false; return; }
+      // N6 nit (fix round 3): open_profile can itself answer ok: false (the profile vanished, the
+      // relaunch failed to spawn) — before this, that left the button disabled with no message at
+      // all, the one outcome neither the wizard's own Finish nor pick-adopt's own chain guards
+      // against either. Shown and re-enabled here rather than left silent.
+      return invoke("open_profile", { id: a.profile.id }).then(function (o) {
+        if (o && o.ok === false) { EL("pick-lede").textContent = o.error; go.disabled = false; }
+      });
+    }).catch(function () { go.disabled = false; });
+  });
+
   // R-P4a-15, the picker's other door: the same wizard, opened from a machine that already has a
   // profile. The shell carries every wizard command, so nothing has to be relaunched to get here.
   EL("pick-add").addEventListener("click", function () {
@@ -1916,7 +1985,7 @@
   // `static_assets.rs::the_unreachable_clause_is_one_string_on_both_sides`, the same way `PRIVACY` is
   // pinned to the site's — because a guard that silently stops matching is worse than no guard.
   var UNREACHABLE = "the account service could not be reached";
-  var PRIVACY = "Your vault stays on this machine. Knowlu's servers hold your account, the judgments they make for you, and what you correct; they never hold the text of your notes, and nothing here is ever sold or shared.";
+  var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
   // Escaped on purpose: the shipped page carries no bare network literal (console spec §7).
   var ICS_OK = /^https:\/\/\S+(\.ics($|\?)|\/calendar\/)/i;
   // Windows' reserved device names, matched on the part before the first dot — the same list
@@ -1933,6 +2002,10 @@
               // written to the DOM straight from inside a click handler).
               busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
+              // Task 11 re-review N1 (R-C3'-exec-41): what the paste or capture said about the link it
+              // checked — `{ url, stored }` when it validated, `null` when it was refused. `feedFlags`
+              // turns it into the plan's per-feed flags at Finish, for the value the field holds then.
+              icsFeed: null, calFeed: null,
               // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
               // `renderWizard()` like every other wizard field — a direct DOM write from inside
               // the click handler was invisible to it and got wiped by the next render a Back, a
@@ -1973,7 +2046,12 @@
               // — the first Next stays on the panel to show it, the second goes on.
               lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
               tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
-              zy: false, vhl: false, credVault: "", error: "" };
+              zy: false, vhl: false, credVault: "", error: "",
+              // M1 (fix round 1): what Finish's own restore found, painted the ordinary A-5 way —
+              // set once `create_vault`/`restore_vault` resolves (`restoreSentence`, in `wizFinish`),
+              // read here by `renderWizard` like every other wizard field. Blank until then: a
+              // sentence claiming an outcome before Finish has even run is the bug this replaces.
+              restoreNote: "" };
 
   // The trim and the trailing-separator strip are not cosmetic. `dest_for` in onboarding.rs trims
   // both halves and joins them with PathBuf::join, which never doubles a separator — and
@@ -2045,6 +2123,9 @@
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
+    // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
+    // has an actual answer from `restore_into`, never a claim made before Finish has even run.
+    EL("wiz-restore-note").textContent = WIZ.restoreNote;
   }
 
   // Panel 6 leaves: write whatever was typed straight into Credential Manager, then clear the
@@ -2237,6 +2318,26 @@
     return invoke("create_vault", { name: WIZ.name, plan: plan });
   }
 
+  // M1 (fix round 1): the one place all three of Finish's restore outcomes are worded, so a student
+  // never reads a claim the actual result disagrees with. `restored` is `create_vault`'s own
+  // `{notes, records, empty, warnings}` (H11a's `sync::Restored`, C3' Task 9). `empty` alone cannot
+  // tell "the account truly has nothing yet" from "the account could not be reached just now" —
+  // `restore_into` folds a failed pull into the same `empty: true` so Finish never rolls the vault
+  // back over a hotel Wi-Fi — so `warnings` (non-empty only on the failed-pull fold) is what tells
+  // the two apart here.
+  // N3 (fix round 2): keyed on `ok` (an explicit field `create_vault`'s own envelope carries,
+  // C3' Task 9's `sync::Restored.ok`), never on `warnings.length` — a perfectly successful pull can
+  // carry warnings too (a refused sync card, an oversize row), and reading those as "could not be
+  // reached" was the round 1 bug. Item 2 (N2's own follow-on): the offline sentence now says the
+  // notes arrive over the next SYNCS, plural — one page at a time, so a large account takes more
+  // than one.
+  function restoreSentence(restored) {
+    if (!restored) { return ""; }
+    if (!restored.ok) { return "Your account could not be reached just now; your vault will fill in over the next syncs."; }
+    if (!restored.empty) { return "Your account already had a vault here — it just came back."; }
+    return "Your account had no vault yet — this is the first one.";
+  }
+
   // R-P4a-23: the logins panel's entries are keyed to the path as it stood then, and Back → rename is
   // exactly what the refused-Finish panel asks for. Say where they went and send the user back to
   // panel 6 — the logins panel, which is where the fields are — rather than build a vault whose
@@ -2287,7 +2388,10 @@
     return invoke("google_connected").then(function (status) {
       return (status && status.ok) ? status.calendar === true : WIZ.google;
     }).catch(function () { return WIZ.google; }).then(function (googleCalendar) {
+      var icsFlags = feedFlags(WIZ.icsFeed, WIZ.ics), calFlags = feedFlags(WIZ.calFeed, WIZ.cal);
       var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
+                   ics_validated: icsFlags.validated, ics_stored: icsFlags.stored,
+                   personal_calendar_validated: calFlags.validated, personal_calendar_stored: calFlags.stored,
                    google_calendar: googleCalendar,
                    timezone: WIZ.tz, slots: WIZ.slots,
                    zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
@@ -2317,6 +2421,10 @@
         if (WIZ.credVault) { WIZ.credVault = dest(); }
         return wizRegister(plan).then(function (r) {
           if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
+          // M1 (fix round 1): painted before the relaunch — `restoreSentence` reads what Finish's own
+          // restore actually found, never the claim the OLD static sentence made before Finish ran.
+          WIZ.restoreNote = restoreSentence(r.restored);
+          renderWizard();
           // R-C1-31, corrected by the final review (Minor 8): `entitlement_now` writes NO cache —
           // it only reads the PENDING session, which `create_vault` has just moved onto this
           // profile, so this call typically finds nothing there any more and resolves to null. The
@@ -2463,9 +2571,11 @@
       invoke("capture_calendar_link", { unitid: WIZ.campus.unitid }).then(function (c) {
         if (c.ok && c.link) {
           WIZ.ics = c.link.url;
+          WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };
           WIZ.icsNote = feedSummary(c.link);
-          // `note` is the one thing `PUT /account/sources` could not do. The link is saved on this
-          // machine either way, so it is a sentence beside the count, not a failure.
+          // `note` is the one thing `PUT /account/sources` could not do. Finish tries that save again
+          // and keeps the link on this machine if it still can't, so it is a sentence beside the
+          // count, not a failure.
           if (c.note) { WIZ.icsNote += " " + c.note; }
         } else {
           WIZ.icsNote = (c.error || "No link found") + " — paste it below instead.";
@@ -2492,12 +2602,21 @@
     WIZ.ics = EL("wiz-ics").value.trim();
     if (!WIZ.ics) { WIZ.icsNote = ""; renderWizard(); return; }
     // The pasted path validates exactly as the captured one does — same command, same sentence.
-    invoke("paste_calendar_link", { kind: "lms_ics", url: WIZ.ics }).then(function (r) {
+    var sent = WIZ.ics;
+    invoke("paste_calendar_link", { kind: "lms_ics", url: sent }).then(function (r) {
+      WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
       WIZ.icsNote = r.ok ? feedSummary(r.link) : r.error;
       if (r.ok && r.note) { WIZ.icsNote += " " + r.note; }
       renderWizard();
     }).catch(function () {});
   });
+  /// Task 11 re-review N1 (R-C3'-exec-41): the plan's two flags for one feed, true only for the
+  /// value the field holds NOW. A link typed over after its check is neither validated nor stored,
+  /// so Finish never sends it to the account (`onboarding::create_vault_in` keeps it in the vault).
+  function feedFlags(feed, value) {
+    var same = !!(feed && value && feed.url === value);
+    return { validated: same, stored: same && feed.stored === true };
+  }
   /// One row per enrolled course, removable (Task 14b, I2: the capture is unfiltered — past terms,
   /// organisations and TA roles come back with the rest, and the student is the only one who can say
   /// which are this semester's). The vault identifier is made in Rust at Finish, from the code; the
@@ -2583,7 +2702,9 @@
   EL("wiz-cal-ics").addEventListener("change", function () {
     WIZ.cal = EL("wiz-cal-ics").value.trim();
     if (!WIZ.cal) { WIZ.calNote = ""; renderWizard(); return; }
-    invoke("paste_calendar_link", { kind: "calendar_ics", url: WIZ.cal }).then(function (r) {
+    var sent = WIZ.cal;
+    invoke("paste_calendar_link", { kind: "calendar_ics", url: sent }).then(function (r) {
+      WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
       // Zero is a connection, not a failure: an address that fetches and holds nothing is somebody
       // who has not put anything in their calendar yet (`validate_for`).
       WIZ.calNote = !r.ok ? r.error

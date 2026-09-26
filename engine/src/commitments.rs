@@ -3404,10 +3404,13 @@ fn to_value(json: serde_json::Value) -> Value {
 }
 
 /// The judge-once rule, per field (final-fix-report m3): did the journal show `quinn` — not an
-/// agent, not the settlement — setting this field on this note? `journal::human_set` is the same
-/// query `write::write_literals` guards judged fields with; a change card is judge-once too.
+/// agent, not the settlement — setting this field on this note? Only a later `set` counts
+/// (`journal::human_edited`), never the `create`: the confirm screen mints every confirmed note as
+/// `quinn` with the calendar's own `meets`, `where` and `until` in it, and `journal::human_set`
+/// (which counts a create) would freeze them against every later calendar change. An edit made
+/// after, through the Schedule view (`set_fields`), is a `set` by `quinn` and still blocks.
 fn is_human_set(journal: &mut crate::journal::Journal, note_id: &str, field: &str) -> bool {
-    journal.human_set(note_id, field).is_some()
+    journal.human_edited(note_id, field).is_some()
 }
 
 fn text_value(text: Option<&str>) -> Value {
@@ -3434,15 +3437,18 @@ fn text_value(text: Option<&str>) -> Value {
 ///   kind (`class` or `lab`) and course, with different `meets`, first meeting on or after the old
 ///   series' last day, not answered (a note or marker has its key) and not already a confirmed
 ///   note's signature → one change: `meets`, `where` (when set and different) and `source_uid` =
-///   the new key. Twins (one meeting under two keys) share a signature, so one is chosen — the
+///   the new key, less a `meets` or `where` the student set by hand (judge-once, below; the card
+///   still moves `source_uid`, the external key). Twins (one meeting under two keys) share a
+///   signature, so one is chosen — the
 ///   earliest `first`, then [`precedence`], then the key — and one change is made.
 ///
 /// A note whose `until` is before `today` is finished and not watched. `was` holds the note's
 /// current value of every changed field, an absent one as `null`; no field is proposed as `null`.
 ///
 /// **Judge-once, per field (final-fix-report m3):** a field the journal shows the student set by
-/// hand on the note — `journal::human_set`, the same query `write::write_literals` uses — is never
-/// proposed back, on the `changed` or the `ended` path. A field the settlement itself wrote
+/// hand on the note — a later `set` by `quinn` (`journal::human_edited`; the note's `create`, even
+/// the confirm screen's by `quinn`, is not one) — is never proposed back, on the `changed`, `ended`
+/// or `succeeded` path. A field the settlement itself wrote
 /// (`agent:commitments`, not `quinn`) is not a human set and is still watched, so a series whose
 /// calendar end moves still gets a card. Every other field of the same note is still watched, so a
 /// human-set `where` beside a calendar `meets` change still proposes `meets` alone.
@@ -3488,6 +3494,10 @@ pub fn detect_changes(
             continue;
         }
         let sig = note.signature(codes);
+        // Judge-once on the succeeded path too: a field the student set is never proposed back;
+        // `source_uid` is the external key, not a student field, so it still moves (R22).
+        let human_meets = is_human_set(journal, &note.id, "meets");
+        let human_where = is_human_set(journal, &note.id, "where");
         let successor = |old_last: Option<Date>| -> Option<Change> {
             let old_last = old_last?;
             let course = course_key(note.course.as_deref()?, codes);
@@ -3508,10 +3518,12 @@ pub fn detect_changes(
                 })?;
             let mut change = Mapping::new();
             let mut was = Mapping::new();
-            change.insert("meets".into(), to_value(meets_json(&next.series.meets)));
-            was.insert("meets".into(), to_value(meets_json(&note.meets)));
+            if !human_meets {
+                change.insert("meets".into(), to_value(meets_json(&next.series.meets)));
+                was.insert("meets".into(), to_value(meets_json(&note.meets)));
+            }
             if let Some(place) = next.series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
-                if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
+                if note.where_.as_deref().map(str::trim) != Some(place.trim()) && !human_where {
                     change.insert("where".into(), Value::String(place.trim().to_string()));
                     was.insert("where".into(), text_value(note.where_.as_deref()));
                 }
@@ -9295,7 +9307,7 @@ mod change_tests {
     // --- judge-once (final-fix-report m3) ---------------------------------------------------
 
     /// A `set` record on `note.id`, as `write::write_literals` journals the dashboard's
-    /// `set_fields` — the same shape `journal::human_set` is built to find.
+    /// `set_fields` — the shape `journal::human_edited` finds.
     fn quinn_set(journal: &mut Journal, id: &str, field: &str, ts: &str) {
         let mut spec = crate::journal::NewRecord::new("set", "commitments/cs-100.md", "quinn", "dashboard");
         spec.id = Some(id);
@@ -9365,6 +9377,44 @@ mod change_tests {
         assert_eq!(
             js(&changes[0].was),
             json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]})
+        );
+    }
+
+    #[test]
+    fn a_split_never_proposes_back_a_human_set_meets() {
+        // R22 with judge-once: the student set `meets` by hand, then the class split to new
+        // times. The card still moves `source_uid` (the external key, R22) and carries the room,
+        // but never the student's field.
+        let v = vault("judge-once-split-meets");
+        let mut journal = Journal::new(v.as_path());
+        let n = note(OLD);
+        quinn_set(&mut journal, &n.id, "meets", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let (changes, warnings) =
+            detect_on_with_journal(&split_file(), &set, &[GOOGLE, "personal"], TODAY, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(js(&changes[0].change), json!({"where": "Room 2", "source_uid": NEW}));
+        assert_eq!(js(&changes[0].was), json!({"where": "Room 101", "source_uid": OLD}));
+    }
+
+    #[test]
+    fn a_split_never_proposes_back_a_human_set_where() {
+        let v = vault("judge-once-split-where");
+        let mut journal = Journal::new(v.as_path());
+        let n = note(OLD);
+        quinn_set(&mut journal, &n.id, "where", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let (changes, _) =
+            detect_on_with_journal(&split_file(), &set, &[GOOGLE, "personal"], TODAY, &mut journal);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            js(&changes[0].change),
+            json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}], "source_uid": NEW})
+        );
+        assert_eq!(
+            js(&changes[0].was),
+            json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}], "source_uid": OLD})
         );
     }
 
@@ -10448,5 +10498,83 @@ mod phase2_tests {
         }
         let why = answer_literal(&j(r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#)).unwrap_err();
         assert!(why.starts_with("answer_meets entry mon"), "{why}");
+    }
+
+    // --- the controller's ruling on screen-confirmed notes: `create` is not an edit ----------
+
+    /// A vault whose one series is CS 100, Mon/Wed/Fri 12–12:50pm in Room 101 until Dec 4,
+    /// confirmed on the screen (`commitments --confirm`, as `quinn` via `dashboard`) — the create
+    /// record's `new` then carries `meets`, `where` and `until`.
+    fn screen_confirmed(name: &str) -> (Scratch, Series) {
+        let v = scratch(name);
+        course(&v, "cs-100", "title: \"CS 100\"
+slug: cs-100
+code: \"CS 100\"
+status: active
+");
+        let mut s = mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50));
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 12, 4));
+        write_series(&v, vec![s.clone()]);
+        let report = run(&v, &input(&[("gcal-series:cs100", "hard")], &[], None));
+        assert_eq!(report.created, 1, "{:?}", report.warnings);
+        (v, s)
+    }
+
+    fn detect_in(vault: &Path, file: &SeriesFile) -> Vec<Change> {
+        let set = load(vault);
+        assert_eq!(set.confirmed.len(), 1);
+        let (codes, _) = Codes::load(vault);
+        let fresh: BTreeSet<String> = file.calendars.keys().cloned().collect();
+        let (changes, _) = detect_changes(file, &set, &codes, &[], &fresh, TODAY, &mut Journal::new(vault));
+        changes
+    }
+
+    fn file_with(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        file.calendars.insert("google:abc".into(), TODAY);
+        file.series = series;
+        file
+    }
+
+    #[test]
+    fn a_screen_confirmed_note_still_gets_a_change_card_when_its_series_moves() {
+        let (v, mut s) = screen_confirmed("confirmed-moves");
+        s.meets = vec![Meet { days: vec!["tue".into(), "thu".into()], start: t(9, 30), end: t(10, 45) }];
+        let changes = detect_in(&v, &file_with(vec![s]));
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            crate::yaml::to_json(&Value::Mapping(changes[0].change.clone())),
+            serde_json::json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}]})
+        );
+    }
+
+    #[test]
+    fn a_screen_confirmed_note_still_gets_an_end_card_when_its_series_is_gone() {
+        let (v, _) = screen_confirmed("confirmed-ends");
+        let mut file = file_with(Vec::new());
+        let gone = Ended {
+            calendar: "google:abc".into(),
+            dropped: TODAY,
+            last_instance: Some(date(2026, 9, 18)),
+            until: Some(date(2026, 12, 4)),
+        };
+        file.ended.insert("gcal-series:cs100".into(), gone);
+        let changes = detect_in(&v, &file);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            crate::yaml::to_json(&Value::Mapping(changes[0].change.clone())),
+            serde_json::json!({"until": "2026-09-18"})
+        );
+    }
+
+    #[test]
+    fn a_meets_the_student_later_set_is_not_proposed_back() {
+        let (v, mut s) = screen_confirmed("confirmed-edited");
+        let literals = vec![("meets".to_string(), "[{days: [mon, wed], end: '12:50', start: '12:00'}]".to_string())];
+        crate::write::write_literals(&v, "commitments/cs-100.md", &literals, &human(), &mut Journal::new(v.as_path()), &crate::write::WriteOpts::default())
+            .unwrap();
+        s.meets = vec![Meet { days: vec!["tue".into(), "thu".into()], start: t(9, 30), end: t(10, 45) }];
+        assert!(detect_in(&v, &file_with(vec![s])).is_empty());
     }
 }
