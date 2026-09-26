@@ -570,9 +570,9 @@ fn reread_problem(text: &str, name: &str, value: &Value) -> Option<String> {
 ///
 /// This replaces a simulation that parsed a synthetic two-key document. The simulation was wrong in
 /// the way simulations always are: it modelled neither the real writer (line surgery that replaces
-/// the FIRST matching `key:` line) nor the real reader (`split_frontmatter`'s un-anchored
-/// `text.split("---", 2)`). An inline `---` truncates the block and silently discards every later
-/// key; a duplicated key means YAML reads the last while the writer rewrites the first.
+/// the FIRST matching `key:` line) nor the real reader (`split_frontmatter`, which once split on an
+/// un-anchored `---` and truncated the block at an inline marker; it now closes only on a whole
+/// `---` line). A duplicated key means YAML reads the last while the writer rewrites the first.
 ///
 /// So: apply the actual changes to the actual text, re-read with the actual parser, and require
 /// three things — every changed field reads back as intended, every untouched field is untouched,
@@ -1856,9 +1856,10 @@ mod tests {
 
     #[test]
     fn a_note_the_writer_cannot_edit_warns_instead_of_killing_the_pass() {
-        // Closing delimiter `---x`: `split_frontmatter`'s un-anchored split still parses it, but
-        // the writer's `lines.index("---", 1)` cannot find a closing marker. The pass must warn and
-        // carry on — the neighbouring proposal is still counted.
+        // Closing delimiter `--- ` (trailing space): `split_frontmatter` tolerates it, but the
+        // writer's `lines.index("---", 1)` cannot find a closing marker. The pass must warn and
+        // carry on — the neighbouring proposal is still counted. (This test once used `---x`,
+        // which only the old un-anchored split read; a `---x` line closes nothing now.)
         let v = vault();
         let front_text = PENDING
             .replace("status: pending", "status: snoozed")
@@ -1866,7 +1867,7 @@ mod tests {
         let folder = v.join("approvals");
         std::fs::create_dir_all(&folder).unwrap();
         let bad = folder.join("task-bad-delim.md");
-        pystr::write_text(&bad, &format!("---\n{front_text}\n---x\n\nbody")).unwrap();
+        pystr::write_text(&bad, &format!("---\n{front_text}\n--- \n\nbody")).unwrap();
         proposal(&v, "task-b.md", PENDING, "");
 
         let result = run(&v);
@@ -2323,27 +2324,29 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_frontmatter_marker_is_refused_and_never_drops_a_neighbouring_key() {
+    fn an_inline_frontmatter_marker_is_written_whole_and_never_drops_a_neighbouring_key() {
         // `---` mid-value is not a leading `---`, so the single-line check passes and the value is
-        // a legal plain scalar. But production reads with `text.split("---", 2)`, which truncates
-        // the block at the inline marker and silently discards every later key.
-        for (note, changes) in [
-            (
-                "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90",
-                "changes:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n",
-            ),
-            (
-                "title: T\ndue: 2026-10-09T13:00\nimportance_reason: initial",
-                "changes:\n  importance_reason:\n    from: initial\n    to: \"prof moved it --- see announcement\"\n",
-            ),
-        ] {
-            let v = vault();
-            let path = with_task(&v, "t.md", note);
-            let before = std::fs::read(&path).unwrap();
-            let meta = yaml(&format!("target: tasks/t.md\n{changes}"));
-            assert!(apply(&v, &meta).is_some());
-            assert_eq!(std::fs::read(&path).unwrap(), before);
-        }
+        // a legal plain scalar. The reader once split on an un-anchored `---`, truncating the block
+        // at the inline marker and discarding every later key, so this was refused. The reader now
+        // closes the block only on a whole `---` line: the text is legitimate and lands intact.
+        let v = vault();
+        let path = with_task(&v, "t.md", "title: T\ndue: 2026-10-09T13:00\nimportance_reason: initial\nimportance: 5");
+        let meta = yaml("target: tasks/t.md\nchanges:\n  importance_reason:\n    from: initial\n    to: \"prof moved it --- see announcement\"\n");
+        assert_eq!(apply(&v, &meta), None);
+        let parsed = split_frontmatter(&read(&path)).unwrap().0;
+        assert_eq!(
+            crate::yaml::get(&parsed, "importance_reason").and_then(crate::yaml::text).as_deref(),
+            Some("prof moved it --- see announcement")
+        );
+        assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&parsed, "importance"), -1), 5);
+
+        // A `due` with an inline marker is still refused — because it is not a date, nothing else.
+        let v = vault();
+        let path = with_task(&v, "t.md", "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90");
+        let before = std::fs::read(&path).unwrap();
+        let meta = yaml("target: tasks/t.md\nchanges:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n");
+        assert_eq!(apply(&v, &meta), Some("due: to is not a date the engine can read".to_string()));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
 
         // The sharpest form: the note would still parse, so nothing warns, but effort, importance
         // and progress would be gone and the task would keep ranking with default values.

@@ -455,7 +455,7 @@ pub fn sync_coursework(
                 continue;
             }
             let target = crate::ids::rel(vault, &path);
-            // `split_frontmatter`'s read above (`str.split("---", 2)`) tolerates a closing
+            // `split_frontmatter`'s read above tolerates a closing
             // delimiter line with trailing whitespace; the write path's `lines.index("---", 1)`
             // does not. A note can pass the read and still fail here. Unguarded, that error would
             // escape and silently drop every assignment still left in the batch.
@@ -2610,7 +2610,7 @@ mod tests {
 
     #[test]
     fn unwritable_note_does_not_stop_the_rest_of_the_batch() {
-        // split_frontmatter parses via str.split("---", 2), so it tolerates a closing delimiter
+        // split_frontmatter tolerates a closing delimiter
         // line with trailing whitespace. The write path requires an exact "---" line, so it does
         // not. A note in that state passes the read and then fails on the write. One bad note must
         // cost one note, not the tail of the batch.

@@ -52,35 +52,56 @@ impl std::fmt::Display for NoteError {
 
 /// Split a note into (frontmatter, body).
 ///
-/// Three traps, all of which change output:
+/// Four traps, all of which change output:
 ///
-/// 1. **Bounded split.** Python uses `text.split("---", 2)` — at most three parts — so a body
-///    containing `---` (a horizontal rule, common in these notes) stays intact. `splitn(3, _)` is
-///    the equivalent; an unbounded split truncates the body at the first rule.
-/// 2. **Absent frontmatter is not an error.** Returns an empty mapping and the text unchanged.
+/// 1. **The closing delimiter is a whole line.** It is the first line after the opening one that
+///    is `---` once trailing whitespace is stripped — never a `---` inside a line. Python's
+///    `text.split("---", 2)` was un-anchored, so `title: "a---b"` cut the block mid-quote and
+///    the note stopped reading; the writer (`apply_frontmatter_fields_to_text`) and
+///    `guard_block_style` always looked for a whole line, and now the reader agrees with them.
+///    Everything after the closing line's three dashes is the body, exactly as the split left it,
+///    so a body containing `---` (a horizontal rule, common in these notes) stays intact.
+/// 2. **Trailing whitespace on the closing line is tolerated** (Python's split tolerated it and
+///    the space stays at the head of the body). The writer does not tolerate it, which is why
+///    coursework and approvals treat such a note as readable but unwritable.
+/// 3. **Absent frontmatter is not an error.** Returns an empty mapping and the text unchanged.
 ///    Callers depend on the empty-map path.
-/// 3. **`lstrip("\n")` strips *all* leading newlines** from the body, not one.
+/// 4. **`lstrip("\n")` strips *all* leading newlines** from the body, not one.
 pub fn split_frontmatter(text: &str) -> Result<(Mapping, String), NoteError> {
     if !text.starts_with("---") {
         return Ok((Mapping::new(), text.to_string()));
     }
-    let parts: Vec<&str> = text.splitn(3, "---").collect();
-    if parts.len() < 3 {
-        return Ok((Mapping::new(), text.to_string()));
-    }
+    // Byte offset of the closing line: the first line after the opening one whose content,
+    // trailing whitespace stripped, is exactly `---`.
+    let mut start = match text.find('\n') {
+        Some(i) => i + 1,
+        None => return Ok((Mapping::new(), text.to_string())),
+    };
+    let close = loop {
+        if start >= text.len() {
+            return Ok((Mapping::new(), text.to_string()));
+        }
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        if text[start..end].trim_end() == "---" {
+            break start;
+        }
+        start = end + 1;
+    };
+    let yaml_text = &text[3..close];
+    let rest = &text[close + 3..];
 
     // PyYAML's safe_load("") is None, and `or {}` turns that into an empty dict.
-    let meta = if parts[1].trim().is_empty() {
+    let meta = if yaml_text.trim().is_empty() {
         Mapping::new()
     } else {
-        match serde_yaml_ng::from_str::<Value>(parts[1]) {
+        match serde_yaml_ng::from_str::<Value>(yaml_text) {
             Ok(Value::Null) => Mapping::new(),
             Ok(Value::Mapping(m)) => m,
             Ok(_) => return Err(NoteError::NotAMapping),
             Err(e) => return Err(NoteError::Yaml(e.to_string())),
         }
     };
-    Ok((meta, parts[2].trim_start_matches('\n').to_string()))
+    Ok((meta, rest.trim_start_matches('\n').to_string()))
 }
 
 fn value_to_string(v: &Value) -> Option<String> {
@@ -353,6 +374,26 @@ mod tests {
         let (meta, body) = split_frontmatter(text).unwrap();
         assert_eq!(meta.len(), 1);
         assert_eq!(body, "intro\n\n---\n\nafter the rule\n");
+    }
+
+    #[test]
+    fn dashes_inside_a_frontmatter_line_are_not_a_delimiter() {
+        // Only a whole `---` line closes the block. An un-anchored split cut the block at the
+        // `---` inside the quoted title and failed on the unclosed quote.
+        let text = "---\ntitle: \"a---b\"\nstatus: active\nnote: --- x\n---\n\nbody\n";
+        let (meta, body) = split_frontmatter(text).unwrap();
+        assert_eq!(yaml::get(&meta, "title").and_then(yaml::text).as_deref(), Some("a---b"));
+        assert_eq!(yaml::get(&meta, "status").and_then(yaml::text).as_deref(), Some("active"));
+        assert_eq!(yaml::get(&meta, "note").and_then(yaml::text).as_deref(), Some("--- x"));
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn a_closing_line_with_trailing_whitespace_still_closes_and_keeps_it_in_the_body() {
+        // Python's split tolerated `--- ` and left the space at the head of the body.
+        let (meta, body) = split_frontmatter("---\ntitle: x\n--- \n\nbody\n").unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(body, " \n\nbody\n");
     }
 
     #[test]
