@@ -24,6 +24,9 @@ fn the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages() {
     }
     assert!(privacy.contains(PRIVACY), "the privacy page carries the exact sentence");
     assert!(index.contains(PRIVACY), "so does the download page");
+    // Phase 3 (spec §4): the school window fetches three things now, the class schedule among them.
+    assert!(privacy.contains("your calendar link, your course list and, at schools Knowlu supports, your class schedule"),
+        "the privacy page names the registrar fetch");
     // M5: the stable name `release.ps1` copies beside the versioned installer, so the page's link
     // never has to change with a version. The versioned file stays there too.
     assert!(index.contains("releases/Knowlu-setup.exe"), "the download button points at the stable name");

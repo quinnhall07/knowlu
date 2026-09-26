@@ -16,17 +16,17 @@ after a friend has installed orphans all three. It changed from `app.knowlu.desk
 9, before the first installer existed; the one visible cost was that the next launch re-registered
 autostart and reset the window position once. `tauri.conf.json` has no comment syntax, hence this note.
 
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Sixty-six**
-(recounted 2026-09-24, commitment model phase 2, by script)
-`#[tauri::command]`s exist — **twenty-seven in `src/commands.rs`, four in `src/week.rs`, fourteen in
-`src/onboarding.rs`, fourteen in `src/account.rs`, five in `src/lms_link.rs` and two in
-`src/report.rs`**. Commands live beside the module they serve, never all in one file. Count them in
-`src/main.rs`'s two `generate_handler!` lists if this drifts, and note that the two lists are
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Sixty-nine**
+(recounted 2026-09-26, commitment model phase 3, by script)
+`#[tauri::command]`s exist — **twenty-seven in `src/commands.rs`, four in `src/week.rs`, three in
+`src/registrar.rs`, fourteen in `src/onboarding.rs`, fourteen in `src/account.rs`, five in
+`src/lms_link.rs` and two in `src/report.rs`**. Commands live beside the module they serve, never
+all in one file. Count them in `src/main.rs`'s two `generate_handler!` lists if this drifts, and note that the two lists are
 different windows, not one:
 
-- **The console window** registers 47 — all 27 of `commands.rs`; all four of `week.rs`;
-  `launch_state`, `pick_folder` and `pick_file` from `onboarding.rs`; eleven of `account.rs`'s
-  fourteen (the seven sign-in commands included, because an install that predates the account is
+- **The console window** registers 50 — all 27 of `commands.rs`; all four of `week.rs`; all three of
+  `registrar.rs`; `launch_state`, `pick_folder` and `pick_file` from `onboarding.rs`; eleven of
+  `account.rs`'s fourteen (the seven sign-in commands included, because an install that predates the account is
   upgraded in place, inside this window, over its own vault; the three it lacks are the picker-only
   Google ones below); and both of `report.rs`.
 - **The vault-less shell** (picker or wizard) registers 29 — the 14 of `onboarding.rs`, ten of
@@ -58,6 +58,14 @@ In `week.rs`: `your_week` and `preview_window` (in-process reads), `commitment_p
 and under `vault_io`). `answer_card` (in `commands.rs`) writes a `commitment-ask` card's
 `answer_meets` and approves it, the engine validating both (`commitments::check_answerable`,
 `commitments::answer_literal`).
+
+In `registrar.rs` (phase 3): `open_registrar_window` opens `lms_link`'s incognito, capability-less
+sign-in window on the school's registrar (`scaffold::Registrar`, UA only); `capture_registrar`
+reads that window's cookies for the registrar host only (`lms_link::cookie_url`), makes the calls
+R0 recorded, and hands the body to `commitments --registrar` through a temp file under the
+profile's `tmp\` (under `vault_io`, deleted after), then closes and wipes the window; it keeps the
+window open when Banner answers with its sign-in page. `close_registrar_window` closes and wipes.
+The console builder manages `LmsSession` and hides only `main` on close.
 
 The shell is also a **tray application**: closing the window hides it rather than quitting, a
 tray icon with seven menu items (`Open`, `Run now`, `Pause scheduling`, `Settings`, `Restart to
@@ -282,6 +290,7 @@ shell needs the engine it takes it as a path dependency — `knowlu-engine = { p
 | `src/state.rs` | `ConsoleState` — vault, settings, data dir, session id, and the live `sync`/`backup`/`last_write`/`pending_edits` fields the topline reads — plus `Settings` (profile id, backup dir, autostart, quit timestamp), `quit_flush`, and `app_data_root()`/`app_data_root_in()`: `%LOCALAPPDATA%\knowlu`, with `settings.json`, `seen.txt` and `logs\` under `profiles\<profile_id>\`. There is no `src/sync.rs` in this crate — the sync logic is `engine/src/sync.rs`'s; this file only holds the `Mutex<knowlu_engine::sync::SyncStatus>` the topline reads and the `run_sync` wrapper that calls into it under `vault_io`. |
 | `src/scheduler.rs` | the tick/housekeeping threads, `RunGuard`, `engine_exe()` (`KNOWLU_ENGINE_EXE` resolution), `mode()`/`device_ok()` (`scheduler: app` gating), `ics_state`/`has_ics_url`, `slot_argv` (coursework → ingest → judge → rank), `run_slot`/`run_slot_inner`, and `lock` — every mutex in the crate is taken through it |
 | `src/week.rs` | the commitment commands: `your_week` (`commitments::overview`) and `preview_window` (`surface::build_state_preview`) in-process; `commitment_proposals` (`commitments --json`) and `commitments_confirm` (`commitments --confirm <file>`, the file under the profile's `tmp\`, run under `vault_io`) on the sibling engine; `proposals_argv`/`confirm_argv` |
+| `src/registrar.rs` | the registrar capture: `school_of`, `call_urls`, `registrar_argv`, `run_file`, `sweep_stale_files_in` and the three commands |
 | `tauri.conf.json` | one 1280×860 window titled `Knowlu` (`minWidth: 820`), `productName: "Knowlu"`, `identifier: "com.knowlu.desktop"` (permanent, see above), `frontendDist: static`; and the bundle — `targets: ["nsis"]`, `externalBin: ["binaries/knowlu-engine"]`, `webviewInstallMode: embedBootstrapper`, `windows.nsis.installMode: "currentUser"` (**load-bearing**: `updates::install_staged`'s reasoning about the staged bundle depends on the exe living in the user's own profile), `windows.signCommand` → `scripts\sign.ps1`, `createUpdaterArtifacts: true` (one decision with `plugins.updater`, see *Releasing*); and `plugins.updater` — the release endpoint and the minisign **public** key (id `C2EC981122E1D2DF`). The private half is never in this repo: `release.ps1` reads it from Credential Manager for one build |
 | `capabilities/default.json` | `core:default`, `window-state:default`, `autostart:default`, `clipboard-manager:allow-write-text` — and **no updater permission** (R-P4a-30): the app drives the updater from Rust, where no capability applies, and `updater:default` would hand the page `allow-install` / `allow-download-and-install`, letting a page script bypass the mid-run gate and the install hold. The folder picker is `rfd` called from an app command, not a plugin, so it needs no permission here either |
 | `static/index.html`, `console.js`, `console.css` | the console page — writes, the deck and flag popover, sync/backup/scheduler/Runs/interaction events — plus plan 4a's three non-view panels in the same document and the same IIFE: the **picker** (`renderPicker`), the **wizard** (`startWizard`, seven panels) and the **settings overlay** (`openSettings`, also reachable as `window.KNOWLU_OPEN_SETTINGS` for the tray). The console also holds the **Schedule** view, the **confirm screen** (`#week-setup`) and the `commitment-ask` **ask form** in the Decisions view. `window.KNOWLU_SHOTS` is the one seam the headless scripts use |

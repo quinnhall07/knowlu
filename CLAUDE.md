@@ -100,7 +100,7 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
   Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
   exits 2 — and reports `moved` against the current window without writing one.
-- `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`
+- `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]] [--registrar <file> --school <key>]`
   — without `--confirm`, it fetches the configured calendar feeds, refreshes
   `state/calendar-series.json`, and prints the current commitment proposals as of today
   (`coursework-discover`'s style: read-only except for the generated series-file refresh, always
@@ -109,6 +109,13 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
   `--actor quinn --via dashboard`), journal first. It prints `{created, declined, warnings, window}`
   and exits 2 on unreadable input or an invalid window, having written nothing.
+  With `--registrar <file> --school ua` (phase 3) it fetches nothing either: it parses the
+  registrar's JSON (`registrar::parse_banner`, the one place that knows Banner's shape), merges the
+  term under `registrar:<school>:<term>` into `state/calendar-series.json`, and confirms each row
+  that matches a vault course at `hard` as the student (`quinn` via `dashboard`). It prints
+  `{confirmed, dropped, proposed, rows, term, warnings}` and exits 2 on an unreadable file, an
+  unknown school or no usable row, having written nothing. The app's `registrar.rs` runs it from
+  the school's own sign-in window; it is never a slot step.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
@@ -129,18 +136,20 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Knowlu (the app)
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-26 (the merge of
-  C3′ into commitment model phase 2)** (by script, over the two `generate_handler!` lists in
-  `app/src/main.rs`; C3′ added none): the console window registers **47** (phase 2 added
-  `answer_card`, `commitment_proposals`, `commitments_confirm`, `your_week`, `preview_window`), the
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-26 (commitment model
+  phase 3)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`): the console
+  window registers **50** (phase 2 added `answer_card`, `commitment_proposals`,
+  `commitments_confirm`, `your_week`, `preview_window`; phase 3 added `open_registrar_window`,
+  `capture_registrar`, `close_registrar_window`), the
   vault-less picker/wizard window **29** (C2's hand-off H9 phase (a) added
   `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's H1
   removed `account::sign_up` and `account::sign_in` with the password and added
-  `account::google_sign_in` to both lists) — **66** distinct. Commands live beside the module they
-  serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never
-  all in one file. **Ten** mutate notes (`set_fields`, `create_task`, `delete_note`, `decide`,
-  `answer_card`, `commitments_confirm`, `close_info`, `open_issue`, `resolve_issue`, `sync` — the
-  last applies another desktop's writes through `write` and can file a `kind: amend` card);
+  `account::google_sign_in` to both lists) — **69** distinct. Commands live beside the module they
+  serve (`commands.rs`, `week.rs`, `registrar.rs`, `onboarding.rs`, `account.rs`, `report.rs`,
+  `lms_link.rs`), never all in one file. **Eleven** mutate notes (`set_fields`, `create_task`,
+  `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `capture_registrar` (through the
+  engine's `--registrar`), `close_info`, `open_issue`, `resolve_issue`, `sync` — the last applies
+  another desktop's writes through `write` and can file a `kind: amend` card);
   `set_fields` edits a commitment's `kind`/`level` only as `commitments::check_console_edit` allows;
   `backup_now` is the one command that moves the vault without writing a note; `ui_event` writes the
   `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the

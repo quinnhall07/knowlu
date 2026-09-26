@@ -69,7 +69,7 @@ by one function.
 | **Picker** | one row per registered profile — name over vault path, with *Open* — and two buttons, *Use an existing vault…* (adopts a folder) and *Create a new vault…* (the wizard) | a launch with no `--vault` and more than one profile registered; or `--pick`, which is the settings overlay's *Switch profile…* |
 | **Wizard** | seven panels in order — Welcome, Your vault, Backup folder, Your LMS calendar, Coursework logins, Slots and campus, Finish. Back is always allowed and **nothing is written until *Finish*** except the Credential Manager entries, which are written when the credentials panel is left | a launch with no `--vault` and no profile registered; or the picker's *Create a new vault…* |
 | **Settings** | seven rows over the live page — profile name, vault path, backup folder, start with Windows, updates, local judgment, diagnostics | the topline gear, or *Settings* in the tray (which `eval`s `window.KNOWLU_OPEN_SETTINGS`) |
-| **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
+| **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row; at a school with a registrar it holds **Get my class times from myBama** — `open_registrar_window`, then *I'm signed in* → `capture_registrar` — and registrar rows are marked *from myBama*), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
 
 The picker and the wizard replace the whole document and run in a **vault-less window** — no
 `ConsoleState`, no tray, no scheduler, no autostart registration, because none of those has a vault
@@ -381,6 +381,10 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **The window editor** (*Your day*) previews an edit through `preview_window` after 400 ms: the
   preview's `moved.text`, or "No change to today's plan", and the first five items of the
   previewed day.
+- **Your classes** (only where `your_week`'s `registrar_label` is set): *Get my class times from
+  myBama*, or *Refresh from myBama* once `overview.registrar` holds a term, in the primary style
+  only when `registrar.refresh`; the registrar's proposals (`overview.registrar_proposals`), marked
+  *from myBama*, each with **Add** (a one-row `commitments_confirm`, level hard).
 - **Left out:** a remove control (spec D8).
 
 ---
