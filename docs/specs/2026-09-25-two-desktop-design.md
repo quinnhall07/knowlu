@@ -1,12 +1,12 @@
 # Two desktops on one account: design
 
 **Status: Quinn's answers of 2026-09-25 folded in (§9); for signature.** Written 2026-09-25 on branch
-`two-desktop-spec` at main `510a88c`; revised twice the same day after the spec review and its re-review
+`two-desktop-spec` at main `510a88c`; revised three times the same day after the spec review and its re-reviews
 (`docs/reports/2026-09-25-two-desktop-spec-review.md`) and the controller's rulings. **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its *Amendment 2026-09-17* (ruling 2: the
 account is the source of truth and each desktop keeps a mirror; ruling 4 and C5: fetch on device). **Implements:**
 Quinn's decision of 2026-09-24 on the C3′ whole-branch review's I2, "BOTH": deterministic ids for imported notes
 as the backstop, and a device fetch turn. It does not relitigate that decision. Every detail that was open is
-decided; §9 records Quinn's answers and the one new question.
+decided; §9 records Quinn's answers, and no question is open.
 
 ## 0. Where this comes from
 
@@ -59,9 +59,9 @@ What the code does today, read for this spec (all at `510a88c`):
 | **D14** | A holder that sleeps mid-slot loses the turn when its lease lapses. On waking, a refused renewal, or an unanswered one after the holder's own elapsed time since its last grant (the larger of `Instant` and wall-clock elapsed) passes that grant's `seconds_left`, skips its remaining machine steps as `(skipped: the turn passed to another computer)`. | The server's clock decides; the device measures only its own elapsed time, never compares clocks, and the wall clock counts a sleep `Instant` may not. | The step in flight may be killed at `CHILD_TIMEOUT` on resume (an amber tray until the retry); D1–D6 absorb the overlap. |
 | **D15** | A desktop refused a turn **peeks every 60 seconds** from its slot's end and runs one **catch-up** `sync → rank` as soon as every refused job is released or expired, never later than 60 minutes after its slot began (Quinn, Q2). | The holder releases right after its trailing push, so the others have its results about a minute after it finishes. | Up to ~60 peeks per refused slot, each a cheap `/turn` call with nothing to claim or release. |
 | **D16** | The first slot at Finish and *Run now* claim like any slot. *Sync now* never runs a machine step and never claims, and says Knowlu is busy while a slot, a catch-up or an update install holds `sch.running` (§5.4, M6). The quit push releases nothing; expiry does. | *Sync now* is transport only today (`commands.rs:303`), and the lease must not change that. | None beyond D13. |
-| **D17** | **The account holds the shared settings** (Quinn, Q10). `config/` splits by owner: the device-owned keys move into a new, never-synced `config/device.yaml`, by a text-only migration, and every other `config/` file is shared. | The turn makes the holder's config decide what is fetched and how it is labelled, and Quinn ruled that the profile never differs between computers. | Two computers are not called working until this ships. |
-| **D18** | The six shared files travel through C3′'s sync as whole texts, one `sync_notes` row per path, with a three-way hash check against the last text synced: an unchanged local file takes the account's text; a changed one pushes; both changed means the account's text wins and the local text is kept under `state/config-conflicts/`. | It reuses C3′'s transport and never parses or re-dumps a file; a whole-file copy is not a re-dump. | A hand edit made on two computers at once keeps only one; the other is in the conflict file, named in a line. |
-| **D19** | A second computer's wizard asks, after sign-in, whether the account already holds a vault; if it does, it skips every question the account answers and asks only for this computer's own logins. | Students bring only logins (the login-only onboarding direction). | A new wizard command, and a panel path the headless walk must cover. |
+| **D17** | **The account holds the shared settings** (Quinn, Q10). `config/` splits by owner: the device-owned keys, **and every calendar entry that is not a `cloud:` marker**, move into a new, never-synced `config/device.yaml` by a text-only migration; every other `config/` file is shared. **A capability URL never enters a synced file** (C3′ Task 11's ruling; the privacy page's promise that calendar links are stored encrypted in the account), and the push guard refuses any shared file that would carry one. | The turn makes the holder's config decide what is fetched and how it is labelled, and Quinn ruled that the profile never differs between computers. | Two computers are not called working until this ships. |
+| **D18** | The six shared files travel through C3′'s sync as whole texts, one `sync_notes` row per path, with a three-way hash check against the last text synced, and a **conditional push**: the server stores a settings row only if its text is still the one the device last synced. A refused push, or both sides changed, is a conflict: the account's text wins and the local text is kept under `state/config-conflicts/`. After every pull that replaces a settings file, approved map cards are re-applied. The whole-file replacement is the **second recorded exception** to "never rewrite a vault file wholesale". | It reuses C3′'s transport and never parses or re-dumps a file; the compare-and-set means no change is ever lost silently. | A hand edit made on two computers at once keeps only one; the other is in the conflict file, named in a line. |
+| **D19** | A second computer's wizard asks, after sign-in, whether the account already holds **settings** (`config/ingest.yaml`); if it does, it skips every question the account answers and asks only for this computer's own logins. Settings written on a computer born into an account that already holds notes are **provisional**: never pushed until a pull replaces them or the student changes them. | Students bring only logins; a new computer's defaults or fresh answers must never override the settings a working computer built up. | A new wizard command, a provisional marker in the cursor, and a panel path the headless walk must cover. |
 
 ## 2. Deterministic ids for imported notes (D1–D8)
 
@@ -290,7 +290,7 @@ apart."* becomes:
 > made on. Your account also keeps your settings, so that every computer plans your day the same way: your time
 > zone, your school, which course each coursework book or section belongs to, your calendars, the campus event
 > feeds you follow, when your day refreshes, and your weekly planning template. What belongs to one computer
-> stays on it: which logins it holds and where Windows keeps them. Your account also keeps a list of the computers you use Knowlu on: each one's Windows name, when it
+> stays on it: which logins it holds, where Windows keeps them, and any calendar link saved on it. Your account also keeps a list of the computers you use Knowlu on: each one's Windows name, when it
 > was first and last seen, and which of your coursework sites it holds a login for, never the login itself.
 > Knowlu uses that list so that your computers take turns fetching your coursework, school calendar and email and
 > having them judged, instead of each doing the same work. Each computer still reads your event and calendar
@@ -365,7 +365,8 @@ try/catch shape, and `config.toml` gets `[functions.turn] verify_jwt = false`. T
 pass `_shared/sync_rows.ts::isDeviceToken`, `name` is 1–64 characters after control characters are stripped, and
 the three lists hold at most 8 words matching the `job` check. The reply is
 `{"turns": [{"job": "feeds", "mine": true, "seconds_left": 1200}, …]}`; refusals are 400, 401, 402 and 405 in
-`_shared/http.ts`'s shape. **A peek** (empty `claim` and `release`) refreshes `last_seen` and reads the turns.
+`_shared/http.ts`'s shape. **A peek** (empty `claim` and `release`) only reads the turns: it skips the `devices`
+upsert, so a refused slot's ~60 peeks write nothing.
 The device side is `app/src/turn.rs` (new; no Tauri command), authenticating through
 `account::valid_access_token_at` under `SESSION_REFRESH_LOCK` like every account call.
 
@@ -477,63 +478,142 @@ so the account holds it, in this stream: two computers are not called working un
 
 | File | Owner |
 |---|---|
-| `config/ingest.yaml`, less three device keys | **shared**: `timezone`, `course_map`, each coursework source's `courses:`/`sections:` mappings (so every label), and `calendars:` (account-held feeds, `cloud:personal`, `cloud:google`) |
+| `config/ingest.yaml`, less its device keys | **shared**: `timezone`, `course_map`, each coursework source's `courses:`/`sections:` mappings (so every label), and the `calendars:` entries whose `ics_url` is a `cloud:` marker (`cloud:personal`, `cloud:google`) |
 | `config/runners.yaml`, less two device keys | **shared**: the slot `times`, `tz` and `grace_minutes` |
 | `config/events.yaml`, `campus.yaml`, `planning.yaml`, `week_template.yaml` | **shared**, whole |
-| `config/device.yaml` (new) | **this computer**: each source's `enabled` and `credential_target` (C5 §7 keeps both device-side), a vault-held `ics_url` fallback, and the `local` runner's `device:` and `scheduler:` |
+| `config/device.yaml` (new) | **this computer**: each source's `enabled`, `credential_target` and `base_url` (the device's own operational settings, `coursework.rs:737-739`; C5 later drops `base_url`); a vault-held `ics_url` fallback; **every `calendars:` entry whose `ics_url` is not a `cloud:` marker** (a raw capability URL); the `local` runner's `device:` and `scheduler:` |
 | `config/cloud.yaml` | **this computer**: its `session_credential_target` names the profile id |
 
-- **Readers** (`load_coursework_config`, `ingest`'s `ics_url`, `runs::runner_settings` and so `device_ok` and
-  `mode`) take a device key from `config/device.yaml` first, and from its old place only when `device.yaml` lacks
-  it, so a vault not yet migrated keeps working.
-- **The migration**, `config::move_device_keys` (new, engine), runs at the start of every `sync` until done; the
-  wizard births a split vault. Each device-owned line in a shared file is appended to `config/device.yaml`
-  (created on first use) and deleted from the shared file: line-level text edits, the kind `write_mapping` makes.
-  No file is parsed and re-dumped. It is idempotent: a key already in `device.yaml` is only deleted.
-- **The wedge guard.** `build_push` never sends a shared file that still holds a device-owned key; it stays local,
-  named in a line, until the migration has run. A device value never reaches the account, even if the migration
-  fails.
+**The invariant: a capability URL never enters a synced file** (re-review R2-C1). C3′ Task 11 ruled that the LMS
+feed and the personal calendar's address belong only in the account's encrypted `sources`, and the privacy page
+promises it. Yet `scaffold::restore_capability_url` (`app/src/scaffold.rs:557-583`) writes the raw address into
+`calendars:` when the account save failed twice, and an old or hand-edited vault can carry one. So a raw calendar
+entry is device-owned, `restore_capability_url` writes into `device.yaml` from now on, and the guard below refuses
+the rest.
+
+**`config/device.yaml`'s shape.** Written from literals, the way `scaffold::ingest_yaml` writes, never emitted from
+a parsed value. A source with no device keys is `{}`, never a bare key that reads as null. For example (the values
+are placeholders):
+
+```yaml
+coursework:
+  zybooks:
+    enabled: true
+    credential_target: 'knowlu/profile_0123456789/zybooks'
+  vhl: {}
+ics_url: ''
+calendars: []
+runner:
+  device: 'EXAMPLE-PC'
+  scheduler: app
+```
+
+- **Readers** (`load_coursework_config`, `ingest`'s `ics_url`, `calfeed`'s `calendars:`, and
+  `runs::runner_settings` and so `device_ok` and `mode`) take a device key from `config/device.yaml` first, and from
+  its old place only when `device.yaml` lacks it. `calendars:` is the union of both files. A vault not yet migrated
+  keeps working.
+- **Creation and the migration.** The wizard births a split vault. For an existing vault, `config::move_device_keys`
+  (new, engine) runs at the start of every `sync` until done. It gathers every device-owned value from the shared
+  files, writes `config/device.yaml` whole from literals (a new file, as the wizard's writes are; through a
+  temporary file and a rename), and only then deletes the moved lines from the shared files, line by line, the kind
+  of edit `write_mapping` makes. No file is parsed and re-dumped. A crash between the two steps leaves a duplicate
+  that the readers' device-first rule makes harmless and the guard keeps local. Later additions, a login saved or
+  a failed-save fallback, insert lines under their known parent in `device.yaml`.
+- **The wedge guard.** `build_push` never sends a shared file that carries any key D17 names device-owned, any
+  `calendars:` entry whose `ics_url` is not a `cloud:` marker, or any `https://` or `webcal://` value outside
+  `events.yaml`'s public campus feeds. The file stays local with the line `sync: config/<file> holds a
+  computer-only value (<key>); it stays on this computer until it is moved`. A device value, or a capability URL,
+  never reaches the account, even if the migration fails.
 
 **D18: the transport.** The six shared paths are a compiled-in list, `sync::SHARED_CONFIG` (new), and travel
 through C3′'s `sync_notes`, one text row per path, beside the notes.
 
 - **Server.** A migration widens `sync_notes`' path check to accept exactly those six paths besides the note
-  folders, and `_shared/sync_rows.ts` the same; `is_note_path` gains the list. Nothing else changes: the rows are
-  the account's data under C3′'s RLS, ceiling, purge and export.
-- **Push.** `build_push` sends a shared file whose hash differs from the cursor's (`Cursor.notes` records the last
-  text sent per path, and now also the last received). A shared file is never tombstoned: a missing one comes
-  back with the next pull, never deleted everywhere.
+  folders, and `_shared/sync_rows.ts` the same; `is_note_path` gains the list. The rows are the account's data
+  under C3′'s RLS, ceiling, purge and export. `sync_rows.ts` refuses `deleted: true` for a shared path, so
+  "never tombstoned" holds against any client (re-review r3).
+- **The conditional push** (re-review R2-I1). `sync-push` upserts `sync_notes` on `(account_id, path)` with no
+  condition (`_shared/sync_db.ts:23-26`), so of two pushes in one interval the later would win, and the earlier
+  pusher's next pull, finding its file equal to its base, would overwrite its change with no line. So a settings
+  row is stored only if the account's text is still the one this device last synced:
+  - **The row** is today's `{"path", "body"}` plus `"base"`, the SHA-256 of the text this device last synced for
+    that path (empty for none). `sync_rows.ts::checkNote` accepts `base` only on a shared path.
+  - **The handler** writes the batch's records and note rows as today, all or nothing. Then it passes each settings
+    row to a new SQL function, `save_config_row(p_account, p_path, p_body, p_device, p_base) returns boolean`, one
+    compare-and-set statement: `update … set body = p_body … where account_id = p_account and path = p_path and
+    encode(sha256(convert_to(body, 'UTF8')), 'hex') = p_base`, or, with an empty base, `insert … on conflict do
+    nothing`. The function is revoked from `public, anon, authenticated`. Settings bytes count toward the ceiling
+    like any row.
+  - **The reply** gains `"config_refused": [<path>, …]`. For a refused path the device keeps its text and its
+    base and prints `sync: config/<file> — another computer changed it first; yours waits for the next pull`.
+    That pull then takes the conflict branch below, file and line included. No change is lost silently.
+- **Push.** `build_push` sends a shared file whose hash differs from the cursor's. For `SHARED_CONFIG` paths only,
+  `Cursor.notes` records the last text received as well as the last sent (re-review r1: for a note, a skipped
+  pulled text would enter the cursor with no file on disk, and the tombstone pass would then delete the other
+  desktop's live path). A shared file is never tombstoned: a missing one comes back with the next pull.
+- **Rollout warnings** (re-review r4). A computer still on the old build refuses each settings row it pulls with
+  "a pulled note named a path outside the vault's notes" (`sync.rs:2197-2200`), once per changed file, until it
+  updates. That is harmless and expected.
 - **Pull: a three-way check** against the base, the cursor's hash for that path. A shared file has no `id:`, so
   §2.5's rules never touch it; this check replaces them.
   - The local file equals the base, or is missing: write the account's text verbatim (a whole-file copy of
     another computer's file, never a re-dump) and record it as the base.
   - The local file changed and the account's text equals the base: nothing to take; the push sends local.
-  - Both changed, a **conflict**: the account's text wins, the local text is copied to
-    `state/config-conflicts/<file>-<ts>.yaml`, and a line says `sync: config/<file> — another computer's
-    settings won; yours are in state/config-conflicts/<name>`.
+  - Both changed, or this computer's last push was refused, is a **conflict**: the account's text wins, the local
+    text is copied to `state/config-conflicts/<file>-<ts>.yaml`, and a line says `sync: config/<file> — another
+    computer's settings won; yours are in state/config-conflicts/<name>`.
   - **No base yet** (the first config sync after the upgrade) counts as "changed here": the account's text wins if
-    the account has one, and the local text is kept unless byte-identical. So the first computer to sync after
-    the upgrade provides the settings (§9 Q13).
-- **Restore.** `restore_into` records the shared files as seeds (`state/seed-hashes.json`), as it does notes, so
-  the account's settings replace the defaults the second wizard wrote, and E1's hold-back keeps an untouched seed
-  from being pushed before the pull reaches the end.
+    the account has one, and the local text is kept unless byte-identical. So **the first computer to sync after the
+    upgrade provides the settings**, as Quinn answered (Q13).
+- **Provisional settings, never published** (re-review R2-I2). A computer born into an account that already holds
+  notes (its restore brought one or more) marks its shared files **provisional**. The wizard records each one's
+  hash as it writes it, in `state/seed-hashes.json`, C3′'s precedent for telling an untouched wizard file from a
+  real one, and lists it in a new cursor field, `provisional_config`.
+  - `build_push` never sends a provisional file whose bytes still equal that hash, even after the pull reaches the
+    end (unlike E1's note seeds, which are released then).
+  - A pull that brings the account's text replaces it as "unchanged here", copying it to the conflict folder first
+    when it differs.
+  - A student's own edit makes it real and ends the mark.
+  - So neither D19's skipped-panel defaults, nor the answers of a new computer that asked every question because
+    the account had notes but no settings yet (§4.8, D19), can override the settings a working computer holds.
+    When that computer syncs its settings, they replace the provisional ones, and the fresh answers are kept in
+    the conflict folder.
+- **The second recorded exception.** Writing a pulled settings text over a local file replaces a vault file
+  wholesale. CLAUDE.md's invariant "Never rewrite a vault file wholesale" has one recorded exception today, C3′'s
+  seed pre-pass (`sync.rs:1890`); this is the second. **Hand-off for the plan:** edit CLAUDE.md to name both
+  exceptions in that bullet, and to say its scheduler sentence now reads `config/device.yaml`'s runner keys
+  instead of `config/runners.yaml`'s `local` entry.
 - **Why not a field-level account store.** It needs a server schema per setting, and a device writer that maps
   every field to a text insertion or re-dumps YAML (forbidden). Whole-file text reuses C3′ as it stands. Its cost,
-  last-writer-wins on a conflict, is rare: config changes at the wizard, by a map card, or by hand.
+  one conflict copy when two computers change one file at once, is rare: config changes at the wizard, by a map
+  card, or by hand.
 
-**`apply_approved_mappings` keeps one job** (re-review N2 and m6). A card applied on the holder now reaches every
-computer as text, so the function no longer runs every slot. It runs only after a conflict replaced this
-computer's text, and re-inserts the mapping of every card that is `approved` in `approvals/`, or `approved` or
-`executed` in `archive/` (as `apply_map_cards` leaves it, `coursework.rs:1215-1222`), that the winning text lacks.
-A mapping made from a card is never lost to a race, and one a student removes by hand stays removed.
+**`apply_approved_mappings`** (re-review N2, R2-I1, r5, m6). This new function runs after **every** pull that
+replaced a settings file. It is idempotent and cheap. It inserts the mapping of every card that is `approved` in
+`approvals/`, or `approved` or `executed` in `archive/` (as `apply_map_cards` leaves it,
+`coursework.rs:1215-1222`), whose key the file **lacks**, and it never touches a key the file already holds.
+- A mapping made from a card is therefore never lost to a race.
+- A student who changes a card-made mapping's value by hand, to another course or to `ignore`, keeps that change.
+- A student who deletes the whole line sees it come back after the next replacing pull. The card is the source of
+  truth for a key; to stop fetching a book, map it to `ignore`.
 
 **D19: the second computer's wizard.** After sign-in, a new wizard-window command,
-`onboarding::account_vault_exists` (one `/sync-pull` call: any note means yes; the window's commands go from 29
-to 30), asks whether the account already holds a vault. If it does, the wizard skips every panel whose answer is
-shared or account-held (subscribe when already active, school, the LMS capture, calendars, coursework mapping
-rows, Gmail, slots and time zone) and asks only for this computer's own portal logins, listing the sources the
-account's config sets up. Finish births a split vault with default shared files, and the restore replaces them
-(D18). The student brings only logins. An account with no vault gets today's nine panels.
+`onboarding::account_settings_exist`, asks whether the account already holds **settings**. It makes one
+`/sync-pull` call, and the answer is yes only when that call returns a `config/ingest.yaml` row; the window's
+commands go from 29 to 30.
+
+- **Settings exist.** The wizard skips every panel whose answer is shared or account-held: subscribe when already
+  active, school, the LMS capture, calendars, Gmail, slots and time zone. It asks only for this computer's own
+  portal logins. Mapping rows appear only for a source the account's settings do not yet map (re-review r6: a
+  portal first set up on this computer still gets its route; later ones arrive by map card). Finish births a
+  split vault whose shared files are provisional defaults, and the restore replaces them (D18). The student brings
+  only logins.
+- **The account has notes but no settings yet.** The first computer is still on the old build, or has not synced
+  since updating. The wizard asks every question, as for a first computer, and its answers are provisional (D18):
+  used here at once, never published, and replaced once the working computer's settings arrive. A student's own
+  later edit makes them real. *Recommended*, over publishing them: a fresh wizard's answers would otherwise beat
+  months of card-made mappings under "first to sync".
+- **An account with no vault** gets today's nine panels, and its answers are real from the start.
 
 ## 5. Interactions
 
@@ -605,10 +685,20 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
   - (vi) a restore given two rows for one id writes one file, from the highest `rev`.
 - The verdict pull: a pulled verdict fills a missing ledger line with no `why` and no `strength`, never overwrites
   one, pages past a `judged_at` tie, and a line the student deleted is not put back.
-- Shared config (D17, D18): the migration moves exactly the device keys, twice is a no-op, and a shared file
-  holding a device key is never pushed; the three-way pull takes, keeps, or on a conflict keeps the account's
-  text and copies the local one to `state/config-conflicts/`; after a conflict `apply_approved_mappings`
-  re-inserts a card's mapping from an `executed` card in `archive/`, and never runs otherwise.
+- Shared config (D17, D18, D19):
+  - **No capability URL ever travels** (R2-C1): a vault whose `calendars:` carries `ics_url: https://…` (as
+    `restore_capability_url` writes it) or `webcal://…` has that entry moved into `device.yaml`, and until it is,
+    `build_push` sends no shared file carrying it. Every row `build_push` produces for a shared path is scanned,
+    and none holds a URL outside `events.yaml`'s campus feeds.
+  - The migration moves exactly the device keys into `device.yaml`'s literal shape (`{}` for an empty source),
+    twice is a no-op, and a crash between its two steps leaves a vault the readers still read correctly.
+  - The three-way pull takes, keeps, or on a conflict keeps the account's text and copies the local one to
+    `state/config-conflicts/`; a refused push (`config_refused`) leaves text and base alone and becomes that
+    conflict at the next pull.
+  - `apply_approved_mappings` runs after every replacing pull, re-inserts a missing key from an `executed` card
+    in `archive/`, and never changes a key the file holds.
+  - A provisional file is never pushed while its bytes equal its recorded hash, is replaced by the account's
+    text, and becomes real after a local edit.
 - `eventemit`: a uid in an archived digest is never proposed again; `rank --no-digest` writes no digest; `oracle.rs`
   and `surface_oracle.rs` are unchanged.
 
@@ -623,21 +713,25 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
   never claims, holds `sch.running` only while it runs, and a slot supersedes it.
 - `turn.rs` against a loopback server: full grant, partial grant, refusal, 400, 402, 5xx, 404 and transport.
 - *Sync now* runs no machine step, makes no `/turn` call, and says Knowlu is busy while `sch.running` is held.
-- The wizard (`scripts/wizard-check.py`): with `account_vault_exists` answering yes, the walk goes from sign-in
-  to the logins panel to Finish.
+- The wizard (`scripts/wizard-check.py`): with `account_settings_exist` answering yes, the walk goes from sign-in
+  to the logins panel to Finish; with notes but no settings, it walks every panel and the plan marks its files
+  provisional.
 
 ### 6.3 Cloud: the migration and RLS guards
 
 - `turn/handler_test.ts`: validation, the account taken from the JWT only, and the reply shape.
 - `judge-event`'s new GET: only this account's `answered` event rows after `(judged_at, id)`, carrying `item_id`,
   `verdict`, `judged_at` and `id` only, 500 a page; a POST judges exactly as before.
-- `sync-push`/`sync_rows.ts`: the six shared config paths are accepted, and every other `config/` path is refused.
+- `sync-push`/`sync_rows.ts`: the six shared config paths are accepted and every other `config/` path refused; a
+  tombstone for a shared path is refused; `base` is accepted only on a shared path; two pushes of one path from
+  one base store the first and answer the second in `config_refused`.
 - The `account` function: `devices` and `fetch_turns` are in the purge list and `devices` is in the export, each
   pinned by a test.
 - `migrations_test.ts`:
-  - the function pin moves from **28 to 29** (`fetch_turn`), with its comment; the prune is plain SQL in
-    `cron.schedule`, so it adds no function; the widened `sync_notes` path check is pinned to the six paths;
-  - `fetch_turn` is revoked from `public, anon, authenticated`, and the `knowlu-devices-prune` job exists;
+  - the function pin moves from **28 to 30** (`fetch_turn`, `save_config_row`), with its comment; the prune is
+    plain SQL in `cron.schedule`, so it adds no function; the widened `sync_notes` path check is pinned to the six
+    paths;
+  - both new functions are revoked from `public, anon, authenticated`, and the `knowlu-devices-prune` job exists;
   - the view pin stays 5.
 - **The RLS guard is widened first.** It reads only C2's `20260911*` files (`ours()`, `:8`) and matches only
   `create table if not exists <unqualified name>` (`:274`), so nothing holds C1's or C3′'s tables to RLS (they do
@@ -664,7 +758,9 @@ staging account on both.
   and both values are public (staging's functions URL and its anon key). The candidate's version sorts above the
   published release, so the updater never replaces it.
 - **Quinn operates the desktop** from a short checklist the controller gives at proof time (sign in; *Run now*;
-  sleep it; edit or delete a named note; *Sync now*; remove the profile afterwards). This is recommended over a
+  sleep it; edit or delete a named note; *Sync now*; remove the profile afterwards; and last, remove the two user
+  variables, `KNOWLU_API_BASE` and `KNOWLU_ANON_KEY`, which persist and would point a later real install at
+  staging; re-review r7). This is recommended over a
   second Claude Code session on the desktop: no second harness, and a person doing what a student does. The
   controller verifies from read-only staging reads (`devices`, `fetch_turns`, `sync_notes`, `judgments`) and from
   the laptop's page and files.
@@ -678,9 +774,10 @@ staging account on both.
 **What it must show** (staging; the laptop's scratch profile removed afterwards by the controller, per the
 standing rule, and the desktop's by Quinn from the checklist). "Controller" and "Quinn" say who does each step.
 
-0. **Onboarding (D19).** The laptop onboards first (controller). On the desktop, after sign-in, the wizard asks
-   only for that computer's portal logins (Quinn), and Finish restores the laptop's notes **and** settings: the
-   desktop's shared `config/` files equal the laptop's, and its `config/device.yaml` holds only its own keys.
+0. **Onboarding (D19).** The laptop onboards first and syncs its settings (controller). On the desktop, after
+   sign-in, the wizard asks only for that computer's portal logins (Quinn), and Finish restores the laptop's notes
+   **and** settings: the desktop's shared `config/` files equal the laptop's, its provisional defaults were never
+   pushed (`sync_notes` shows only the laptop's `device`), and its `config/device.yaml` holds only its own keys.
 1. Both computers in `devices`, with their names and `logins` (controller).
 2. *Run now* on the desktop, then on the laptop within seconds (Quinn, controller). Each job is held by exactly one
    computer; the laptop's `RunSummary` carries `turn (another computer has it)` and the three skip lines; its
@@ -742,10 +839,11 @@ standing rule, and the desktop's by Quinn from the checklist). "Controller" and 
 | Q2: the catch-up, and faster than ~20 minutes | D15, §4.6 | peek every 60 s; catch up as soon as the refused jobs are released or expired |
 | Q7: the proof on two physical computers | §6.4 | laptop and desktop; real sleep; two Windows users only as a fallback |
 | Q10: the account holds the shared settings, in scope | D17, D18, D19, §4.8 | the `config/` split, whole-file transport, a login-only second wizard |
+| Q13: the first to sync after the upgrade wins | D18, D19 | as designed; provisional settings never count as a first sync |
 
-## 9. Quinn's answers (2026-09-25), and one new question
+## 9. Quinn's answers (2026-09-25)
 
-Quinn answered every open question on 2026-09-25, and the spec is written to each answer.
+Quinn answered every open question on 2026-09-25, Q13 included, and the spec is written to each answer.
 
 | Q | Question | Quinn's answer | Where it lands |
 |---|---|---|---|
@@ -761,19 +859,13 @@ Quinn answered every open question on 2026-09-25, and the spec is written to eac
 | Q10 | Hold the shared settings in the account? | Yes, in this stream: the profile never differs between computers | D17–D19, §4.8 |
 | Q11 | Pull event verdicts through the account? | Pull | D8, §2.8 |
 | Q12 | Fail open? | Open | D13 |
+| Q13 | Two computers set up separately first share settings: whose win? | The first to sync after the upgrade | D18, §4.8 |
 
-**Q13 (new). When two computers that were set up separately first share their settings, whose win?**
+**Q13 as designed.** Only a vault that ran on two computers before this ships meets it: each has its own
+`config/`, and neither has a base yet (D18). The first computer to sync after the upgrade provides the settings.
+The other keeps its differing files under `state/config-conflicts/`, with a line naming them, and
+`apply_approved_mappings` re-inserts every mapping a card made. A hand-typed difference survives only in the
+conflict file, for the student to copy back. Provisional settings (D19) never count as the first sync: a new
+computer's defaults, or the fresh answers of one that asked every question, never win over a working computer's.
 
-Only a vault that ran on two computers before this ships meets it: each computer has its own `config/`, and
-neither has a base yet (D18).
-
-*Recommend: the first computer to sync after the upgrade provides the settings.* Its text reaches the account
-first. The other computer keeps its differing files under `state/config-conflicts/`, with a line naming them, and
-`apply_approved_mappings` re-inserts every mapping a card made.
-
-- **What it buys:** no coordination is needed, and nothing a card made is lost.
-- **What it costs:** a hand-typed difference on the second computer survives only in the conflict file, for the
-  student to copy back.
-
-The alternative, asking the student to choose in the app, needs a screen for a case that only early two-computer
-users will ever meet.
+No new question is open.
