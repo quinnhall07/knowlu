@@ -513,6 +513,55 @@ mod d5_d7_tests {
         assert_eq!(keys, ["registrar:ua:202640-40001"]);
     }
 
+    /// Final review I1 (a): the Google "CS 100" class ends one minute later than Banner's, so the
+    /// signatures differ; a Google series with its instances, `event_type` and `last_seen`.
+    fn google_minute_off(today: Date) -> Series {
+        let mut google = fall().into_iter().find(|s| s.source_uid.ends_with("40001")).unwrap();
+        google.meets[0].end = google.meets[0].end.checked_add(jiff::SignedDuration::from_mins(1)).unwrap();
+        google.source_uid = "gcal-series:invented".into();
+        google.calendar = "google:invented".into();
+        google.event_type = Some("default".into());
+        google.last_seen = Some(today);
+        let (start, end) = (google.meets[0].start, google.meets[0].end);
+        google.instances = [date(2026, 8, 31), date(2026, 9, 2), date(2026, 9, 4), date(2026, 9, 7), date(2026, 9, 9)]
+            .into_iter().map(|day| Instance { date: day, start: Some(start), end: Some(end) }).collect();
+        google
+    }
+
+    fn proposed(file: &SeriesFile, set: &Commitments, today: Date) -> Vec<String> {
+        let template = crate::weekcal::WeekCalendar::new(&serde_yaml_ng::Mapping::new(), Vec::new());
+        cm::proposals(file, set, &codes(), &[], &template, &BTreeSet::new(), today, false)
+            .into_iter().filter(|p| !p.is_window()).map(|p| p.source_uid).collect()
+    }
+
+    /// I1 (a): a Google class for a course the registrar holds, one minute off, is never proposed,
+    /// whether the registrar holds it as a series in play or as a confirmed note.
+    #[test]
+    fn a_google_class_for_a_registrar_course_is_not_proposed() {
+        let today = date(2026, 9, 10);
+        let google = google_minute_off(today);
+        let mut alone = SeriesFile::default();
+        alone.calendars.insert("google:invented".into(), today);
+        alone.series.push(google.clone());
+        assert_eq!(proposed(&alone, &Commitments::default(), today), ["gcal-series:invented"], "no registrar data");
+
+        let mut both = alone.clone();
+        both.calendars.insert(CAL.into(), today);
+        both.series.extend(fall().into_iter().filter(|s| s.source_uid.ends_with("40001")));
+        both.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        assert_eq!(proposed(&both, &Commitments::default(), today), ["registrar:ua:202640-40001"]);
+
+        let reg = fall().into_iter().find(|s| s.source_uid.ends_with("40001")).unwrap();
+        let note = Commitment {
+            id: "cmt_invented02".into(), path: PathBuf::from("commitments/cs-100.md"), kind: "class".into(),
+            level: Level::Hard, title: reg.title.clone(), course: Some("cs-100".into()), meets: reg.meets.clone(),
+            where_: reg.where_.clone(), from: reg.first, until: reg.until, source_uid: Some(reg.source_uid.clone()),
+        };
+        let set = Commitments { confirmed: vec![note], ..Commitments::default() };
+        assert!(proposed(&alone, &set, today).is_empty(), "a confirmed registrar note holds the course");
+        assert!(proposed(&both, &set, today).is_empty());
+    }
+
     /// D5 + §5.4: a confirmed registrar note whose row left the term files an end card at the day
     /// before the fetch (R2-c's `last_instance`), and `registrar:` keys are watched (R2-g).
     #[test]

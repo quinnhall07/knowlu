@@ -213,3 +213,16 @@ Controller rulings at the pre-execution review of
    documented shape (b), on a hand-written provisional fixture; R0 must precede the app task
    (plan R4), which needs the call list and headers. If R0 finds a rows call with no per-meeting
    start and end dates, the controller stops for Quinn: D5, D7's ask gate and D8 read them.
+
+## Amendments (2026-09-26, final review)
+
+Controller rulings at the final whole-branch review (`final-review.md` in the plan's SDD ledger).
+Where a line above disagrees, this section wins.
+
+6. **The registrar holds a course's class and lab proposals** (I1, option a). D7's collapse by
+   signature is not enough: a Google class a minute off Banner's times would be a second hard note.
+   Once a course has a confirmed `class`/`lab` note keyed `registrar:`, or a current `registrar:`
+   `class`/`lab` series, no Google or ICS `class`/`lab` series of that course is proposed, on the
+   confirm screen or as a card, whatever its times. Accepted residual: a Google note the student
+   confirmed *before* the fetch stays beside the registrar's note; the overlapping busy time
+   subtracts nothing extra, and nothing proposes removing it.
