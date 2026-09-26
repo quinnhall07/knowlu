@@ -865,13 +865,26 @@
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
   // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
   // screen for this console session; Finish writes the planning-day note, so it never returns.
-  var weekSetup = { dismissed: false, open: false, dirty: false, reading: false, fetching: false };
+  var weekSetup = { dismissed: false, open: false, dirty: false, reading: false, fetching: false, finishing: false };
+
+  // R5 re-review: the one answer to "may Finish be pressed?" — nothing else is in flight: not the
+  // first calendar read, not a myBama fetch, not a Finish. Every path that re-enables Finish asks.
+  function finishMayRun() {
+    return !weekSetup.reading && !weekSetup.fetching && !weekSetup.finishing;
+  }
+
+  // A Finish in flight holds the myBama controls too, so no capture starts under it.
+  function setupFinishing(on) {
+    weekSetup.finishing = on;
+    EL("ws-reg").querySelectorAll("[data-reg-open], [data-reg-done]").forEach(function (b) { b.disabled = on; });
+    EL("ws-finish").disabled = !finishMayRun();
+  }
 
   // R5 review I1: a myBama fetch holds Finish and Not now until it and the reload settle. Finish
   // stays held past it while the first calendar read is still out (phase 2's final review I1).
   function setupBusy(on) {
     weekSetup.fetching = on;
-    EL("ws-finish").disabled = on || weekSetup.reading;
+    EL("ws-finish").disabled = !finishMayRun();
     EL("ws-later").disabled = on;
   }
 
@@ -924,7 +937,7 @@
     // window proposal would never be offered again.
     weekSetup.dirty = false;
     EL("ws-finish").disabled = true; weekSetup.reading = true;
-    var ready = function () { weekSetup.reading = false; if (!weekSetup.fetching) { EL("ws-finish").disabled = false; } };
+    var ready = function () { weekSetup.reading = false; if (finishMayRun()) { EL("ws-finish").disabled = false; } };
     invoke("commitment_proposals", {}).then(function (r) {
       var ps = (r && r.proposals) || [];
       var win = ps.filter(function (p) { return p.window; })[0];
@@ -941,7 +954,7 @@
 
   function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
 
-  function finishWeekSetup(btn) {
+  function finishWeekSetup() {
     var mine = [], notMine = [];
     document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (r) {
       var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer");
@@ -953,9 +966,9 @@
     var seq = windowSequence(EL("ws-window"));
     if (!seq) { showWindowError(EL("ws-window"), "Set the hours for at least one day"); return; }
     var payload = { mine: mine, not_mine: notMine, window: seq };
-    btn.disabled = true;
+    setupFinishing(true);
     confirmWeek(payload).then(function (env) {
-      btn.disabled = false;
+      setupFinishing(false);
       if (!env.ok) { showWindowError(EL("ws-window"), env.error); EL("ws-status").textContent = env.error; return; }
       closeWeekSetup();
       // Final review M4: a row --confirm skipped (no longer a current proposal) comes back as a
@@ -964,7 +977,7 @@
       if (skipped.length) {
         EL("delta").textContent = skipped.length + (skipped.length === 1 ? " row" : " rows") + " will come back as questions: " + skipped.join("; ");
       }
-    }).catch(function () { btn.disabled = false; });
+    }).catch(function () { setupFinishing(false); });
   }
 
   EL("week-setup").addEventListener("click", function (e) {
@@ -988,7 +1001,7 @@
     }
     if (e.target.closest("#ws-later")) { weekSetup.dismissed = true; closeWeekSetup(); return; }
     var fin = e.target.closest("#ws-finish");
-    if (fin) { finishWeekSetup(fin); }
+    if (fin) { finishWeekSetup(); }
   });
   bindWindowEditor(EL("ws-window"), function () { weekSetup.dirty = true; showWindowError(EL("ws-window"), null); });
 

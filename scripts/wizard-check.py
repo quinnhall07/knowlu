@@ -190,6 +190,8 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
         { kind: 'office-hours', level: 'optional', title: 'CS 100 Office Hours', course: 'cs-100', when: 'Thu 3–4pm', where: null,
           source_uid: 'gcal-series:oh', window: false, meets: [{ days: ['thu'], start: '15:00', end: '16:00' }] }]
         .concat(window.__REGISTRAR_DONE ? [ART] : []) }); }
+  if (cmd === 'commitments_confirm' && window.__HOLD_CONFIRM) { return new Promise(function (res) {
+      window.__RELEASE_CONFIRM = function () { window.__HOLD_CONFIRM = false; res({ ok: false, error: 'invented refusal', state: null, result: null }); }; }); }
   if (cmd === 'commitments_confirm') { return Promise.resolve({ ok: true, error: null, state: null,
       result: { created: 1, declined: 0, window: 'created', warnings: window.__CONFIRM_WARNINGS || [] } }); }
   if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
@@ -770,6 +772,24 @@ def check_registrar_schedule(page, errors, label) -> list:
     return bad
 
 
+def check_finish_pending(page, errors) -> list:
+    """R5 re-review: while a Finish is in flight the myBama controls are held, so no capture can
+    start under it; when the Finish fails, Finish and the controls come back together."""
+    bad = []
+    if not page.is_visible("#ws-reg [data-reg-open]"):
+        return ["Finish pending: the registrar button is not on the confirm screen"] + [f"page error: {e}" for e in errors]
+    page.click("#ws-reg [data-reg-open]"); page.wait_for_timeout(200)
+    page.click("#ws-finish"); page.wait_for_timeout(200)
+    if not page.is_disabled("#ws-reg [data-reg-done]"): bad.append("Finish pending: I'm signed in is live under a Finish in flight")
+    page.evaluate("document.querySelector('#ws-reg [data-reg-done]').click()"); page.wait_for_timeout(100)
+    if "capture_registrar" in names(page): bad.append("Finish pending: a capture started under a Finish in flight")
+    page.evaluate("window.__RELEASE_CONFIRM()"); page.wait_for_timeout(300)
+    if page.is_disabled("#ws-finish"): bad.append("Finish pending: Finish stayed disabled after the refusal")
+    if page.is_disabled("#ws-reg [data-reg-done]"): bad.append("Finish pending: I'm signed in stayed disabled after the refusal")
+    for e in errors: bad.append(f"Finish-pending page error: {e}")
+    return bad
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="knowlu-wizard-check-"))
     try:
@@ -819,6 +839,7 @@ def main() -> int:
                 reg.goto(url); reg.wait_for_timeout(600)
                 bad += check_registrar(reg, rerrors)
                 for flag, run in (("window.__HOLD_REG = true;", lambda p, e: check_registrar_hold(p, e)),
+                                  ("window.__HOLD_CONFIRM = true;", lambda p, e: check_finish_pending(p, e)),
                                   ("window.__SCHED_REG = true;", lambda p, e: check_registrar_schedule(p, e, True)),
                                   ("window.__NO_REG = true;", lambda p, e: check_registrar_schedule(p, e, False))):
                     page = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()

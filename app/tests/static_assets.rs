@@ -1855,3 +1855,23 @@ fn a_registrar_fetch_holds_the_confirm_screen_and_no_registrar_hides_the_button(
     assert!(css.contains(".reg[hidden] { display: none; }"), "M3: a flex class beats the UA's [hidden]");
     assert!(js.contains("class=\"row sched reg-row\"") && !js.contains("class=\"row sched reg\""), "M4: rows keep the row grid");
 }
+
+/// R5 re-review (fix round 1): one helper answers "may Finish be pressed?", every path that
+/// re-enables Finish asks it, and a Finish in flight holds the myBama controls.
+#[test]
+fn finish_is_re_enabled_only_through_one_helper() {
+    let js = read("console.js");
+    let may = js.split("function finishMayRun(").nth(1).unwrap().split("\n  }").next().unwrap();
+    for flag in ["weekSetup.reading", "weekSetup.fetching", "weekSetup.finishing"] {
+        assert!(may.contains(flag), "finishMayRun ignores {flag}");
+    }
+    let fin = js.split("function finishWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(!fin.contains("btn.disabled = false"), "Finish's settle never re-enables it unconditionally");
+    assert!(fin.matches("setupFinishing(false)").count() == 2 && fin.contains("setupFinishing(true)"), "both settle paths");
+    let held = js.split("function setupFinishing(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(held.contains("[data-reg-open], [data-reg-done]") && held.contains("!finishMayRun()"), "a Finish holds the myBama controls");
+    let busy = js.split("function setupBusy(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(busy.contains("!finishMayRun()"), "setupBusy asks the helper");
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("if (finishMayRun()) { EL(\"ws-finish\").disabled = false; }"), "the read's settle asks the helper");
+}
