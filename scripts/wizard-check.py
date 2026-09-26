@@ -18,6 +18,9 @@ confirm screen opens over the first-run view with class rows preset to *Mine*, N
 nothing, and Finish sends one `commitments_confirm` holding the expected keys and shows a skipped
 row's warning. Two more hold `commitment_proposals` open: Finish stays disabled and sends nothing
 until the read settles (either way), and a *Your day* edit made meanwhile is not overwritten.
+A last page presses the confirm screen's Get my class times from myBama (phase 3): the window
+opens, I'm signed in captures with the read model's view, the proposals are read again with the
+answers already given kept, and the registrar's row comes back marked "from myBama".
 
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
@@ -164,10 +167,13 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'state') { return Promise.resolve({ ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)),
       first_run: { running: true, current: 'coursework', steps: [] } }); }
   if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: true, commitments: [], office_hours: [],
-      uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [] } }); }
+      uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [] }, registrar_label: 'myBama' }); }
   if (cmd === 'commitment_proposals' && window.__HOLD) { return new Promise(function (res, rej) {
       window.__RELEASE = function (ok) { window.__HOLD = false;
         if (ok) { res(window.__TAURI__.core.invoke('commitment_proposals', {})); } else { rej(new Error('the held read failed')); } }; }); }
+  var ART = { kind: 'class', level: 'hard', title: 'ART 110', course: null, when: 'Mon 6–8:50pm',
+      where: 'Make-Believe Studio 4', source_uid: 'registrar:ua:202640-40006', window: false,
+      meets: [{ days: ['mon'], start: '18:00', end: '20:50' }] };
   if (cmd === 'commitment_proposals') { return Promise.resolve({ ok: true, error: null, warnings: [],
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }],
       proposals: [
@@ -178,10 +184,15 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
         { kind: 'club', level: 'soft', title: 'Chess Club', course: null, when: 'Wed 6–7pm', where: null,
           source_uid: 'gcal-series:chess', window: false, meets: [{ days: ['wed'], start: '18:00', end: '19:00' }] },
         { kind: 'office-hours', level: 'optional', title: 'CS 100 Office Hours', course: 'cs-100', when: 'Thu 3–4pm', where: null,
-          source_uid: 'gcal-series:oh', window: false, meets: [{ days: ['thu'], start: '15:00', end: '16:00' }] }] }); }
+          source_uid: 'gcal-series:oh', window: false, meets: [{ days: ['thu'], start: '15:00', end: '16:00' }] }]
+        .concat(window.__REGISTRAR_DONE ? [ART] : []) }); }
   if (cmd === 'commitments_confirm') { return Promise.resolve({ ok: true, error: null, state: null,
       result: { created: 1, declined: 0, window: 'created', warnings: window.__CONFIRM_WARNINGS || [] } }); }
   if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
+  if (cmd === 'open_registrar_window') { return Promise.resolve({ ok: true, error: null, opened: true }); }
+  if (cmd === 'capture_registrar') { window.__REGISTRAR_DONE = true; return Promise.resolve({ ok: true, error: null, closed: true, state: null,
+      result: { term: '202640', rows: 2, confirmed: 1, proposed: 1, dropped: { no_time: 0, midnight: 0 }, warnings: [] } }); }
+  if (cmd === 'close_registrar_window') { return Promise.resolve({ ok: true, error: null }); }
   return Promise.resolve({ ok: true, error: null });
 } } };
 """
@@ -671,6 +682,38 @@ def check_week_setup(page, errors, finish) -> list:
     return bad
 
 
+def check_registrar(page, errors) -> list:
+    """Phase 3 (spec D6, §2): on the confirm screen the button reads 'Get my class times from
+    myBama'; pressing it asks for the window and shows I'm signed in; pressing that captures with
+    the read model's view, re-reads the proposals, keeps the answers given, and marks the new
+    registrar row 'from myBama'. Nothing is typed."""
+    bad = []
+    if not page.is_visible("#week-setup"):
+        return [f"the confirm screen did not open (calls: {names(page)!r})"] + [f"page error: {e}" for e in errors]
+    opener = "#ws-reg [data-reg-open]"
+    if not page.is_visible(opener) or "Get my class times from myBama" not in page.inner_text(opener):
+        bad.append("the registrar button is not on the confirm screen")
+    page.click("#week-setup .wsrow[data-key='gcal-series:chess'] [data-answer-set=not]")
+    page.click(opener); page.wait_for_timeout(200)
+    if "open_registrar_window" not in names(page): bad.append("the button did not open the window")
+    if not page.is_visible("#ws-reg [data-reg-done]"): bad.append("I'm signed in did not appear")
+    if "Sign in to myBama" not in page.inner_text("#ws-reg"): bad.append("the sign-in instruction is missing")
+    page.click("#ws-reg [data-reg-done]"); page.wait_for_timeout(400)
+    sent = page.evaluate("window.__CALLS.filter(c => c[0] === 'capture_registrar').map(c => c[1])")
+    if sent != [{"view": "today"}]: bad.append(f"capture_registrar was sent {sent!r}")
+    if page.evaluate("window.__CALLS.filter(c => c[0] === 'commitment_proposals').length") < 2:
+        bad.append("the proposals were not read again after the fetch")
+    art = "#week-setup .wsrow[data-key='registrar:ua:202640-40006']"
+    if not page.query_selector(art) or "from myBama" not in page.inner_text(art): bad.append("the registrar row is not marked from myBama")
+    if page.get_attribute("#week-setup .wsrow[data-key='gcal-series:chess']", "data-answer") != "not":
+        bad.append("an answer given before the fetch was lost")
+    if "1 confirmed" not in page.inner_text("#ws-reg"): bad.append("the fetch's result is not said")
+    if page.evaluate("document.querySelectorAll('#week-setup input[type=text], #week-setup input[type=password]').length"):
+        bad.append("the confirm screen accepts typed text")
+    for e in errors: bad.append(f"registrar page error: {e}")
+    return bad
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="knowlu-wizard-check-"))
     try:
@@ -713,6 +756,12 @@ def main() -> int:
                     held.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE + "\nwindow.__HOLD = true;")
                     held.goto(url); held.wait_for_timeout(600)
                     bad += check_week_wait(held, herrors, succeed)
+                reg = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
+                rerrors = []
+                reg.on("pageerror", lambda e, sink=rerrors: sink.append(str(e)))
+                reg.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE)
+                reg.goto(url); reg.wait_for_timeout(600)
+                bad += check_registrar(reg, rerrors)
                 browser.close()
             for line in bad: print("FAIL:", line)
             print("ok" if not bad else f"{len(bad)} failure(s)")

@@ -1805,3 +1805,35 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }
+
+/// Phase 3 of the commitment model (spec D6, D8, §2): the registrar button on the confirm screen and
+/// at the top of Schedule, the sign-in steps, the marker, and nothing typed.
+#[test]
+fn the_registrar_button_is_on_the_confirm_screen_and_the_schedule_view() {
+    let html = read("index.html");
+    let classes = html.split("id=\"ws-classes\"").nth(1).unwrap().split("</div></div>").next().unwrap();
+    assert!(classes.contains("id=\"ws-reg\""), "D6: under Your classes");
+    let sched = html.split("<section id=\"main-schedule\" hidden>").nth(1).unwrap().split("</section>").next().unwrap();
+    assert!(sched.find("id=\"sched-reg\"").unwrap() < sched.find("id=\"sched-list\"").unwrap(), "D6: at the top of Schedule");
+    for host in ["ws-reg", "sched-reg"] {
+        let block = html.split(&format!("id=\"{host}\"")).nth(1).unwrap().split("</div>").next().unwrap();
+        for part in ["data-reg-open", "data-reg-done", "data-reg-cancel", "data-reg-say", "I'm signed in"] {
+            assert!(block.contains(part), "#{host} lacks {part}");
+        }
+        assert!(!block.contains("type=\"text\"") && !block.contains("type=\"password\""), "#{host}: nothing is typed in Knowlu");
+    }
+    let js = read("console.js");
+    for f in ["fromRegistrar", "registrarControls", "registrarIdle", "bindRegistrar", "renderRegistrar", "reloadSetupRows"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    assert!(js.contains("invoke(\"open_registrar_window\", {})"));
+    assert!(js.contains("invoke(\"capture_registrar\", { view: stateView() })"), "one-word argument, the read model's view");
+    assert!(js.contains("invoke(\"close_registrar_window\", {})"));
+    assert!(js.contains("p.source_uid.indexOf(\"registrar:\") === 0"), "R5-a: the marker by key prefix");
+    assert!(js.contains("\"Refresh from \"") && js.contains("\"Get my class times from \""), "R5-c");
+    assert!(js.contains("r.registrar_label"), "R4-g: the button only where the school has a registrar");
+    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows)") && js.contains("bindRegistrar(EL(\"sched-reg\"),"));
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("e.stopPropagation();"), "no click reaches the drawer or the deck underneath");
+    assert!(!js.contains("capture_registrar\", { view: current.view"), "Q10-a: never the page's own view");
+}
