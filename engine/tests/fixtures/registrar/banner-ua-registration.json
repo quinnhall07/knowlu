@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "totalCount": 6,
+  "data": [
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40001", "subject": "CS", "courseNumber": "100", "sequenceNumber": "001", "courseTitle": "Invented Computing", "scheduleTypeDescription": "Lecture",
+     "meetingsFaculty": [{"meetingTime": {"beginTime": "1200", "endTime": "1250", "monday": true, "tuesday": false, "wednesday": true, "thursday": false, "friday": true, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "INV", "buildingDescription": "Invented Hall", "room": "101"}}]},
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40002", "subject": "CS", "courseNumber": "100", "sequenceNumber": "L01", "courseTitle": "Invented Computing Lab", "scheduleTypeDescription": "Laboratory",
+     "meetingsFaculty": [{"meetingTime": {"beginTime": "1400", "endTime": "1550", "monday": false, "tuesday": false, "wednesday": false, "thursday": true, "friday": false, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "INV", "buildingDescription": "Invented Hall", "room": "B12"}}]},
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40003", "subject": "ENGL", "courseNumber": "101", "sequenceNumber": "002", "courseTitle": "Invented Writing", "scheduleTypeDescription": "Lecture",
+     "meetingsFaculty": [
+       {"meetingTime": {"beginTime": "0930", "endTime": "1045", "monday": false, "tuesday": true, "wednesday": false, "thursday": true, "friday": false, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "PRT", "buildingDescription": "Pretend Library", "room": "210"}},
+       {"meetingTime": {"beginTime": "0930", "endTime": "1045", "monday": false, "tuesday": true, "wednesday": false, "thursday": true, "friday": false, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "PRT", "buildingDescription": "Pretend Library", "room": "210"}}]},
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40004", "subject": "HIST", "courseNumber": "105", "sequenceNumber": "OL1", "courseTitle": "Invented History Online", "scheduleTypeDescription": "Online",
+     "meetingsFaculty": [{"meetingTime": {"beginTime": null, "endTime": null, "monday": false, "tuesday": false, "wednesday": false, "thursday": false, "friday": false, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": null, "buildingDescription": null, "room": null}}]},
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40005", "subject": "MUS", "courseNumber": "250", "sequenceNumber": "001", "courseTitle": "Invented Night Ensemble", "scheduleTypeDescription": "Lecture",
+     "meetingsFaculty": [{"meetingTime": {"beginTime": "2300", "endTime": "0030", "monday": false, "tuesday": false, "wednesday": false, "thursday": false, "friday": true, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "INV", "buildingDescription": "Invented Hall", "room": "300"}}]},
+    {"term": "202640", "termDesc": "Fall 2026", "courseReferenceNumber": "40006", "subject": "ART", "courseNumber": "110", "sequenceNumber": "001", "courseTitle": "Invented Drawing", "scheduleTypeDescription": "Studio",
+     "meetingsFaculty": [{"meetingTime": {"beginTime": "1800", "endTime": "2050", "monday": true, "tuesday": false, "wednesday": false, "thursday": false, "friday": false, "saturday": false, "sunday": false, "startDate": "08/19/2026", "endDate": "12/04/2026", "building": "STU", "buildingDescription": "Make-Believe Studio", "room": "4"}}]}
+  ]
+}
