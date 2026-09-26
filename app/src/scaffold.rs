@@ -442,7 +442,15 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         return Err("vhl_sections is set but vhl is not enabled — a plan bug, not a student's".to_string());
     }
     let mut s = String::new();
-    if let Some(u) = &p.ics_url { s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?)); }
+    // C3′, Task 11 (cloud design §9, Alabama SPII): a capability URL is a credential in all but
+    // name, and on a vault that has an account the one place it belongs is the account, encrypted,
+    // where `PUT /account/sources` already put it. The KEY stays, empty, so `ingest` still parses
+    // the file and so a reader can see the feed is elsewhere rather than missing.
+    if !p.account_id.is_empty() {
+        s.push_str("ics_url: ''\n");
+    } else if let Some(u) = &p.ics_url {
+        s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?));
+    }
     s.push_str(&format!("timezone: {}\n", yaml_scalar("timezone", &p.timezone)?));
     // R-OB-2 and R-C1-48: what the student confirmed, plus two fragments per enrolled course.
     let course_map = course_map_lines(p);
@@ -460,8 +468,15 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     // wizard value goes through: `personal` (the secret iCal address, C1's) and `google` (the
     // marker for the account's grant, C2's — §11a).
     let mut entries: Vec<String> = Vec::new();
-    if let Some(u) = &p.personal_calendar {
-        entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
+    if p.personal_calendar.is_some() {
+        if p.account_id.is_empty() {
+            let u = p.personal_calendar.as_deref().unwrap_or_default();
+            entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
+        } else {
+            // The same removal and the same argument; `cloud:personal` is C2's own routing
+            // (`cli.rs:241-250`) and resolves to `/ingest-calendar?name=personal`.
+            entries.push("  - name: personal\n    ics_url: 'cloud:personal'\n".to_string());
+        }
     }
     if p.google_calendar {
         entries.push("  - name: google\n    ics_url: 'cloud:google'\n".to_string());
@@ -531,6 +546,42 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
         }
     }
     Ok(s)
+}
+
+/// Task 11 review, I1 (`R-C3'-exec-40`): the account save `lms_link::finish` attempts at paste or
+/// capture time is a `note`, never an error, so a save that failed used to leave the feed in
+/// **neither** place — `ingest_yaml` above had already blanked the vault's own copy on the strength
+/// of an account this call never reached. `create_vault_in` calls this only after its own retry
+/// (under the session it has just moved onto the new profile) has ALSO failed, so the feed is written
+/// into the vault exactly as `ingest_yaml` would have written it for a vault with no account at all —
+/// patched into the file `create_vault` already wrote, rather than regenerated from the plan, because
+/// `create_vault_in` has no reason to keep the whole plan around just for this.
+///
+/// Refuses a `kind` this crate does not write, and a file that does not carry the blanked line this
+/// call exists to replace — both are a plan or a call-site bug, never a student's, so they fail
+/// loudly rather than silently doing nothing.
+pub fn restore_capability_url(vault: &Path, kind: &str, url: &str) -> Result<(), String> {
+    let path = vault.join("config").join("ingest.yaml");
+    let text = knowlu_engine::pystr::read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let patched = match kind {
+        "lms_ics" => {
+            let scalar = yaml_scalar("LMS feed URL", url)?;
+            if !text.contains("ics_url: ''\n") {
+                return Err(format!("{}: no blanked LMS feed line to restore", path.display()));
+            }
+            text.replacen("ics_url: ''\n", &format!("ics_url: {scalar}\n"), 1)
+        }
+        "calendar_ics" => {
+            let scalar = yaml_scalar("personal calendar address", url)?;
+            let blanked = "- name: personal\n    ics_url: 'cloud:personal'\n";
+            if !text.contains(blanked) {
+                return Err(format!("{}: no blanked personal-calendar line to restore", path.display()));
+            }
+            text.replacen(blanked, &format!("- name: personal\n    ics_url: {scalar}\n"), 1)
+        }
+        other => return Err(format!("{other}: not a capability url this restores")),
+    };
+    knowlu_engine::pystr::write_text(&path, &patched).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Decision 4: `scheduler: app` and `device:` from birth. `grace_minutes: 20` is the local

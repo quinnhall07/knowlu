@@ -81,7 +81,12 @@
   <h1>Knowlu</h1>
   <p class="lede" id="pick-lede"></p>
   <div id="pick-list"></div>
-  <div class="wiz-nav"><button class="b" id="pick-adopt">Use an existing vault…</button><button class="b pri y" id="pick-add">Create a new vault…</button></div>
+  <div class="wiz-nav"><button class="b" id="pick-adopt">Use an existing vault…</button><button class="b" id="pick-restore-backup" title="This restores from a local Backups folder on this device, never from your account — sign in instead to bring back your account&rsquo;s vault.">Restore from a backup folder…</button><button class="b pri y" id="pick-add">Create a new vault…</button></div>
+  <div class="wiz-nav" id="pick-restore-options" hidden>
+    <input type="text" id="pick-restore-name" placeholder="Knowlu">
+    <label><input type="checkbox" id="pick-restore-autostart" checked> Start Knowlu with Windows</label>
+    <button class="b pri y" id="pick-restore-go">Restore</button>
+  </div>
 </section>
 <section class="wiz" id="wizard" hidden>
   <div class="wiz-hd"><h1>Knowlu</h1><span class="n" id="wiz-step"></span></div>
@@ -157,6 +162,7 @@
   </div>
   <div class="wiz-panel" id="wiz-finish" hidden><h2>Ready</h2><p class="lede" id="wiz-summary"></p>
     <p class="meta">Your first look runs as soon as you finish, and today&rsquo;s page will be waiting.</p>
+    <p class="meta" id="wiz-restore-note"></p>
   </div>
   <div class="wiz-nav"><span class="crit" id="wiz-error"></span><button class="b" id="wiz-back">Back</button><button class="b pri y" id="wiz-next">Next</button></div>
 </section>
