@@ -12,8 +12,8 @@ the derivation (`import_id`), the one function that says whether a note is impor
 the alias map (`state/id-aliases.json`); `write.rs` gains `create_imported`, which the nine producers
 call instead of `create`. `sync::apply` builds one id index per run and finds every note by id, runs
 the alias pre-pass before its reconcile, and writes one file per id; `materialise` keeps one file per
-id on a restore. `rank --no-digest` leaves the digest to the `feeds` holder, and every desktop's `sync`
-pulls the account's event verdicts (the word only) through a new `GET /judge-event`.
+id on a restore. `rank --no-digest` leaves the digest to the `feeds` holder, and `judge`, right after its
+events pass, pulls the account's event verdicts (the word only) through a new `GET /judge-event`.
 
 **Tech Stack:** Rust 1.98 (`stable-x86_64-pc-windows-gnu`), one Cargo workspace (`engine/` =
 `knowlu-engine`), `sha1` (already linked for `ids::derived_id`), `serde_json`, `serde_yaml_ng`, `jiff`;
@@ -34,6 +34,14 @@ warnings (`oracle.rs` and `surface_oracle.rs` included; one test that needs a gi
 the whole `cloud/supabase` Deno suite with `judge-event`'s new files, `deno check` and `deno lint`
 passed. The app crate was not rebuilt (this plan changes no app file and no engine type the app
 constructs). Three plan defects found that way are fixed in this text.
+**Fix round 1 (2026-09-26):** the review `docs/reports/2026-09-26-two-desktop-1-ids-plan-review.md`
+(I1–I6, and the finding F-1) and the controller's rulings are folded in: a new Task 7b (I1 with F-1),
+Tasks 6, 7, 8 and 10 amended (I2, I3, I4 = S-8, I5 = S-9, I6, three advisories), and rulings R-TD1-3, -4,
+-5, -6, -9, -12 and -18 changed, R-TD1-19 and -20 added. Checked the same way, on a fresh scratch export
+of `3e6e13b`: each new test was first run against the round-0 code and seen failing for its stated
+reason, then passed with this text's code; the engine suite and the `judge-event` Deno tests passed.
+One defect found that way is fixed in this text: R-TD1-19's swap needs `verify_tail` to read each
+note's history by lineage too (Task 7, Step 9), or `rank` swaps the two files back.
 
 ## Global Constraints
 
@@ -120,13 +128,14 @@ Binding on every task. Where a line quotes `CLAUDE.md`, it is verbatim.
 | D3, §2.3 — `write::create_imported`, `WriteError::IdHeld`, the held set, dated keys | Task 1 (the write), Tasks 2–3 (each producer's line) |
 | D4, §2.4 — paths are not identity | Task 5 (step 6's `-N` name; test (ii)) |
 | D5 (a), §2.5 — reconcile by id; a foreign `create` for a held id writes no file | Task 5 |
+| D1 with D5 (a) — that foreign `create` never supplies a value for a note made here (review I1); a value a sync card withholds is no external edit (F-1) | Task 7b |
 | D5 (b) — moves and deletes by id (E5's move half) | Task 6 |
 | D5 (c) — one id, one file, every id gets one; restore's highest `rev` | Task 5 (`apply`), Task 8 (`materialise`) |
 | D5 (d) — a tombstone names a note, not a place (E5's tombstone half) | Task 6 |
-| D6, §2.6 — the alias pre-pass, `state/id-aliases.json`, `records_for`/`human_set`/`resolve_target` follow the alias | Task 4 (the map and its readers), Task 7 (the pre-pass in `apply`) |
+| D6, §2.6 — the alias pre-pass, `state/id-aliases.json`, `records_for`/`human_set`/`resolve_target` follow the alias | Task 4 (the map and its readers), Task 7 (the pre-pass in `apply`; an archived copy never absorbs a live one, S-9) |
 | D7, §2.7 — delete against edit (M5) | Task 6 (test (iii)) |
 | D8, §2.8 — proposed means named in any digest; `rank --no-digest` | Task 9 (with hand-offs H2, H3) |
-| D8, §2.8 — the event-verdict pull and its cursor | Task 10 |
+| D8, §2.8 — the event-verdict pull and its cursor | Task 10 (in `judge`, after the events pass: S-8) |
 | §5.4 row 30, E5 — **In** | Task 6 |
 | §5.4 row 40, M5 — **In** | Task 6 |
 | §5.4 row 11, N17 — **Out** | Nothing (the spec's ruling). |
@@ -134,11 +143,11 @@ Binding on every task. Where a line quotes `CLAUDE.md`, it is verbatim.
 | §5.3 — the first-day cap per account, unchanged | Nothing to build; Task 10's pull is what keeps a moved turn from re-judging. |
 | §5.6 — the commitment model's `cmt` notes | Not on this branch (no `cmt` kind here): the merge note in *Hand-off to the controller*, and spec defect S-1. |
 | §6.1 — `ids.rs` tests | Task 1 |
-| §6.1 (i) the I2 scenario | Task 2 |
+| §6.1 (i) the I2 scenario | Task 2; its next `rank` and exchange, Task 7b |
 | §6.1 (ii) two paths | Task 5 |
 | §6.1 (iii) delete against edit; (iv) E5 and I3 | Task 6 |
 | §6.1 (v) a pre-existing pair, one file and both files each side | Task 7 |
-| §6.1 (vi) a restore given two rows for one id | Task 8 |
+| §6.1 (vi) a restore given two rows for one id, on one page or two | Task 8 |
 | §6.1 — the verdict pull | Task 10 |
 | §6.1 — `eventemit` and `rank --no-digest`; `oracle.rs`, `surface_oracle.rs` unchanged | Task 9; every task (Global Constraint 3) |
 | §6.3 — `judge-event`'s new GET and its `handler_test.ts` | Task 10 |
@@ -150,7 +159,8 @@ Binding on every task. Where a line quotes `CLAUDE.md`, it is verbatim.
 ## Fidelity ledger
 
 Every sentence of §2 that asks for behaviour, and where it is carried. "Refined" means the spec is
-silent there and a Plan ruling decides it; nothing here departs from the spec.
+silent there and a Plan ruling decides it. Two rows depart from the signed spec, each by the
+controller's ruling on a review finding (S-8, S-9), and are marked **ruled**; nothing else departs.
 
 | Spec requirement | Task | Faithful? |
 |---|---|---|
@@ -163,18 +173,18 @@ silent there and a Plan ruling decides it; nothing here departs from the spec.
 | `create_imported(vault, rel, text, ctx, journal, held)` puts the id where `create` puts a minted one, journals the same record, refuses a held id as `IdHeld(<id>)`, logged `skipped (already held as <id>): <stem>` | 1, 2, 3 | yes; what each producer does after the line is **refined** by R-TD1-1 |
 | `held` is `ids::build_index`'s ids, built once per producer run and extended as it creates | 1 (`ids::held_ids`), 2, 3 | yes |
 | D4: paths keep today's naming; sync reconciles by id | 5 | yes |
-| D5 (a): step 4 finds the note by the foreign records' id or its alias; never a different id at the record's path; the path only for a note with no `id:`; `write_literals` and `live_sync_cards` use the local path; a foreign `create` for a held id writes no file | 5, 7 | yes; a note with no `id:` line is identified by its path in every step (R-TD1-2) |
+| D5 (a): step 4 finds the note by the foreign records' id or its alias; never a different id at the record's path; the path only for a note with no `id:`; `write_literals` and `live_sync_cards` use the local path; a foreign `create` for a held id writes no file | 5, 7, 7b | yes; a note with no `id:` line is identified by its path in every step (R-TD1-2); and that foreign `create`, never having reached the file, supplies no value to any reader of a note made here (R-TD1-18, review I1) |
 | D5 (b): a foreign `move` acts on the note holding the id, `Exists` rule kept; a foreign `delete` settles the note holding its id under `sync::ACTOR` unless it is in `archive/` | 6 | yes; a record with no id keeps today's path rule (R-TD1-15) |
 | D5 (c): skip a text whose id is held at another path (the spec's line); skip one whose `import_key` names an item held under another id; write a new id at its path, or at the next free `-N` name; restore: one file per id, highest `rev` wins | 5, 7, 8 | yes; the lines the spec does not word are R-TD1-3's |
 | D5 (d): a tombstone settles unless other desktops' records place a different id at `P` and none ever placed this note's id, ids compared as alias groups; the spec's line | 6 | yes; "place" and "other desktops" are defined by R-TD1-13 |
 | D6: groups from every `create` record (this page's included) and from a note only when its id has no `create`; lowest id wins; `state/id-aliases.json` generated, device-local, rebuilt by every apply | 4, 7 | yes; the file is rewritten only when the map changes (R-TD1-11) |
-| D6: step 4 groups foreign records under the winner; `records_for` returns the whole group; `human_set` reads through it; `resolve_target` answers an old id | 4, 7 | yes; records reach `reconcile::resolve` under the winner's id (R-TD1-10), and `detect_external` reads a group as one note (R-TD1-18) |
+| D6: step 4 groups foreign records under the winner; `records_for` returns the whole group; `human_set` reads through it; `resolve_target` answers an old id | 4, 7, 7b | yes; records reach `reconcile::resolve` under the winner's id (R-TD1-10), and `detect_external` reads each note's own history across its re-identifications (R-TD1-18) |
 | D6: a group found for the first time is reconciled in full against every other desktop's records for all its ids; the pre-pass runs on every sync | 7 | yes |
-| D6: both files here → the loser's fields reconciled into the winner, the loser settled through `write::delete`, never re-id'd; only the loser here → re-id'd by one `write_literals` of `id` under `sync::ACTOR` | 7 | yes; how the loser's fields are reconciled is **refined** by R-TD1-9 (spec defect S-2) |
+| D6: both files here → the loser's fields reconciled into the winner, the loser settled through `write::delete`, never re-id'd; only the loser here → re-id'd by one `write_literals` of `id` under `sync::ACTOR` | 7 | yes for two live files and for a lone loser; how the loser's fields are reconciled is **refined** by R-TD1-9 (spec defect S-2). **Ruled** (S-9, R-TD1-19): when one of the files is archived, the live one survives — re-identified to the winner if it is a loser, and an archived winner file takes its old id |
 | D7: delete beats a concurrent edit; archived on both, the edit on the archived copy, no card | 6 | yes (test (iii), both push orders) |
 | D8: a uid named in any digest note, `approvals/` or `archive/`, any status, is proposed | 9 | yes, through a new `eventemit::proposed_digest_uids` (R-TD1-7) |
 | D8: `rank --no-digest` (new; default unchanged) | 9 | yes (hand-offs H2, H3; R-TD1-8) |
-| D8: every desktop's `sync`, after its pull, reads `GET /judge-event?after=<judged_at>,<id>` (`answered` event rows; `item_id`, `verdict`, `judged_at`, `id`; 500 a page; ordered `(judged_at, id)`); a uid with no ledger line gets one through `record_verdict` with empty `why` and `strength` and the title from its roster, else `(untitled)`; never replaces a line; the cursor is a new `Cursor` field | 10 | yes; placement, lines and the title source are **refined** by R-TD1-4, R-TD1-5, R-TD1-6 |
+| D8: every desktop's `sync`, after its pull, reads `GET /judge-event?after=<judged_at>,<id>` (`answered` event rows; `item_id`, `verdict`, `judged_at`, `id`; 500 a page; ordered `(judged_at, id)`); a uid with no ledger line gets one through `record_verdict` with empty `why` and `strength` and the title from its roster, else `(untitled)`; never replaces a line; the cursor is a new `Cursor` field | 10 | the read, the line and the cursor field: yes; lines and the title source **refined** by R-TD1-5, R-TD1-6; the last row per uid in a page wins (review I6). **Ruled** (S-8, R-TD1-4): the pull runs in `judge`, after the events pass, not in `sync` |
 | §5.4 E5, M5 **In** | 6 | yes |
 
 ## Order and file ownership
@@ -188,12 +198,14 @@ silent there and a Plan ruling decides it; nothing here departs from the spec.
 | 5 | `apply` by id: reconcile and pulled texts | `engine/src/sync.rs`, `engine/src/write.rs` (`free_slot` visibility), `engine/tests/sync_contract.rs` | — | 2, 4 |
 | 6 | `apply` by id: moves, deletes and tombstones | `engine/src/sync.rs`, `engine/tests/sync_contract.rs` | — | 5 |
 | 7 | The alias pre-pass | `engine/src/sync.rs`, `engine/src/passes.rs`, `engine/tests/sync_contract.rs` | — | 6 |
-| 8 | Restore keeps one file per id | `engine/src/sync.rs`, `engine/tests/sync_contract.rs` | — | 7 |
+| 7b | Another desktop's `create`, and a withheld value, never supply a value here | `engine/src/journal.rs`, `engine/src/sync.rs`, `engine/src/passes.rs`, `engine/tests/sync_contract.rs` | — | 7 |
+| 8 | Restore keeps one file per id | `engine/src/sync.rs`, `engine/tests/sync_contract.rs` | — | 7b |
 | 9 | Event proposals across desktops: any digest proposes; `rank --no-digest` | `engine/src/eventemit.rs`, `engine/tests/rank_no_digest.rs` (new) | **H2** (`engine/src/cli.rs`), **H3** (`engine/src/main.rs`) | 3 |
-| 10 | The event-verdict pull | `cloud/supabase/functions/judge-event/{index.ts,handler.ts (new),handler_test.ts (new)}`, `engine/src/sync.rs`, `engine/tests/sync_contract.rs` | **H4** (`CLAUDE.md`) | 8, 9 |
+| 10 | The event-verdict pull | `cloud/supabase/functions/judge-event/{index.ts,handler.ts (new),handler_test.ts (new)}`, `engine/src/sync.rs`, `engine/src/enrich.rs`, `engine/tests/sync_contract.rs` | **H4** (`CLAUDE.md`) | 8, 9 |
 
-Strictly sequential: `sync.rs` is edited by Tasks 5–8 and 10, `sync_contract.rs` by Tasks 2, 5–8 and
-10, `ids.rs` by Tasks 1 and 4, `eventemit.rs` by Tasks 3 and 9. No two tasks run in parallel. Each ends
+Strictly sequential: `sync.rs` is edited by Tasks 5–7, 7b, 8 and 10, `sync_contract.rs` by Tasks 2, 5–7,
+7b, 8 and 10, `ids.rs` by Tasks 1 and 4, `journal.rs` by Tasks 4 and 7b, `passes.rs` by Tasks 7 and 7b,
+`enrich.rs` by Tasks 3 and 10, `eventemit.rs` by Tasks 3 and 9. No two tasks run in parallel. Each ends
 with a green workspace and one commit (two where a hand-off lands beside it: the controller's hand-off
 commit first, then the task's).
 
@@ -221,24 +233,34 @@ leaves open.
   - step 6, a new id beside a different note: `sync: <path> holds a different note here; <id> was written to <slot>`;
   - step 6, the alias joins it: `sync: <path> is <id>, the same item as <held id> held here as <local path>; the two are joined`;
   - a move whose old path holds another note: `sync: <from> is <other id>, not <id>; the move to <dest> is not applied here`;
-  - the pre-pass, both files here: `sync: <loser path> is <loser>, the same item as <winner> at <winner path>; merged into it and archived`;
+  - the pre-pass, both files here: `sync: <loser path> is <loser>, the same item as <winner> at <winner path>; its fields merged into it and archived`;
   - the pre-pass, only the loser here: `sync: <path> re-identified from <loser> to <winner>, the same item your other computer holds`;
+  - the pre-pass, the winner's file archived and a loser's live (R-TD1-19): `sync: <path> re-identified from <loser> to <winner>; the archived copy of the same item at <archived path> now carries <loser>`;
+  - the pre-pass, a re-identification that fails: `sync: <path> could not be re-identified (<cause>)`;
+  - a move made on a live copy, met by a copy archived here (R-TD1-20): `sync: <path> is archived here; the move to <dest> is not applied`;
   - the alias file unwritable: `sync: the alias record could not be saved (<cause>); the next sync rebuilds it`;
   - a restore given one id at two paths: `restore: <earlier path> and <path> are both <id>; the later row is kept`;
-  - the verdict pull: `event verdicts: <n> added from the account`, `event verdicts: more to come — the next sync continues`, `event verdicts: skipped (<cause>)`, `event verdicts: <uid> not recorded (<cause>)`, `event verdicts: the cursor could not be saved (<cause>)`.
+  - the verdict pull: `event verdicts: <n> added from the account`, `event verdicts: more to come — the next pull continues`, `event verdicts: skipped (<cause>)`, `event verdicts: skipped (a sync is running; the next pull continues)`, `event verdicts: left for the next slot`, `event verdicts: <uid> not recorded (<cause>)`, `event verdicts: the cursor could not be saved (<cause>)`.
   The spec's own two lines are used verbatim: `sync: <path> is <id>, already held here as <local path>`
   and `sync: <P> — the account settled a different note there; this one stays`.
-- **R-TD1-4 — where the verdict pull runs.** In `sync::run_lines_with`, after
-  `run_lines_with_client` returns, when the direction pulls and the pull was not offline — not inside
-  `run_lines_with_client`, whose loopback tests script an exact sequence of two requests (pull, push)
-  and would each meet a third. It is tested directly through the new `sync::pull_event_verdicts`.
-  `sync::Totals` gains `pub offline: bool` so the wrapper can tell. A failed verdict pull is a named line,
-  never an entry in `Totals::errors`: the sync itself succeeded, and the verdicts come at the next pull.
-- **R-TD1-5 — one page per sync.** One `GET` per sync run, as §2.8's cost line says; a full page (the
-  reply's `more`) prints the "more to come" line and the next sync continues from the cursor.
+- **R-TD1-4 — where the verdict pull runs (S-8, the controller's ruling on review I4).** In `judge`,
+  not `sync`: `enrich::run_lines_with`'s cloud arm calls `sync::pull_event_verdicts` right after the
+  events pass (`events::judge_roster`), when the vault has an enabled event source and a call's time is
+  left (the rule `pull_rules` keeps; else `event verdicts: left for the next slot`). Run in `sync`, the
+  slot's first step, the pull came before the pass, so the cursor had not passed the rows this
+  desktop's own pass had just written, and deleting such a line brought it back at the next pull instead
+  of forcing a re-judge. After the pass, every row this desktop judged is behind the cursor as soon as the
+  same run pulls it, and a line deleted later is re-judged by the next pass before that run's pull; its
+  fresher row then wins in the page (review I6). `pull_event_verdicts` rewrites the cursor file `sync`
+  owns, and the console's *Sync now* runs in-process beside a slot's `judge` child, so it takes `sync`'s
+  run lock itself (`RunLock`, `state/sync.lock`); a held lock is a named skip. A failed read is a named
+  line, never an error: `judge` always exits 0. **Plan 3** calls the same function from its path for a
+  desktop that did not hold `feeds` and so runs no `judge`.
+- **R-TD1-5 — one page per pull.** One `GET` per run, as §2.8's cost line says; a full page (the reply's
+  `more`) prints the "more to come" line and the next pull continues from the cursor.
 - **R-TD1-6 — the title of a pulled verdict** comes from the roster `rank` last wrote
   (`state/events.md`, read with `eventroster::read_roster`), else it is empty and `record_verdict`
-  writes `(untitled)`. `sync` never fetches a feed.
+  writes `(untitled)`. The pull never fetches a feed.
 - **R-TD1-7 — D8's "proposed" is a new function.** `eventemit::proposed_digest_uids` (every
   `events-digest-*.md` in `approvals/` and `archive/`, any status) is what `emit_digest` reads.
   `pending_digest_uids` and its tests are kept, because three unmerged branches carry both; one of its
@@ -252,15 +274,20 @@ leaves open.
   (every device) are the other side, both passed to `reconcile::resolve` under the winner's id; the
   result is applied and carded exactly as step 4 applies and cards. A field set only on the losing copy
   (on any computer) therefore reaches the winner file, and one set on both becomes one card. The pre-pass
-  runs this only for a loser held **outside** `archive/`: an archived loser is already settled.
+  runs this only for a loser held **outside** `archive/`: an archived loser is already settled. The card
+  the merge files joins `own_created`, the ids `live_sync_cards` knows as this desktop's own cards, so
+  step 4's full pass of the same new group keeps it as the re-proposal instead of filing a second card
+  for the same conflict (review I2).
 - **R-TD1-10 — records reach `reconcile::resolve` under the group's winner.** `journal::latest_by_field`
   keys on `(id, field)` and `resolve` collapses that map by field in key order, so records under two ids
   would pick "latest" by id, not by time. The rewrite is in memory only; the journal is never changed.
 - **R-TD1-11 — `state/id-aliases.json` is rewritten only when the rebuilt map differs from the file**
   (or the file is missing and the map is not empty), through a temp file and a rename like
   `save_seed_hashes`. A vault with no import doubles never gets the file.
-- **R-TD1-12 — a restore's undone row never enters the cursor.** When a later row for an id replaces an
-  earlier path, the earlier path leaves `RestoreState::written_notes`, so the first push after the
+- **R-TD1-12 — a restore's undone row never stays in the cursor.** When a later row for an id replaces
+  an earlier path, the earlier path leaves `RestoreState::written_notes`; and because `restore_all`
+  folds each page into the cursor as it goes, a path undone on a later page than the one that wrote it
+  is also taken out of `cursor.notes` after the page loop (review I3). So the first push after the
   restore sends no tombstone for it — a tombstone would archive the other desktop's live copy.
 - **R-TD1-13 — "places" and "other desktops" for D5 (d).** A journal record places id `I` at path `P`
   when its `id` is `I` and its `path` is `P`, or it is a `move` whose `new` is `P`. A record with no id
@@ -279,14 +306,54 @@ leaves open.
   byte for byte, id line included — the stronger claim D2 makes.
 - **R-TD1-17 — `write::free_slot` becomes `pub(crate)`** so step 6 names the next free `-N` path by the
   same rule `write::delete` uses.
-- **R-TD1-18 — `passes::detect_external` reads an alias group as one note.** D6 says records follow the
-  alias wherever they are read by id; `detect_external`'s field index (`load_index`) is one such reader,
-  and without this a re-identified note's first `rank` would journal a fabricated `quinn`/`external`
-  edit for every field its old-id history explains — a record that travels, settles the other desktop's
-  card unanswered and locks the field. While an alias group exists the index is rebuilt from the whole
-  journal under each group's winner (the id-keyed cache cannot know the groups), and a loser id's note
-  — an archived copy the pre-pass settled — is not compared. A vault with no import doubles is
-  unchanged.
+- **R-TD1-18 — a record that never reached a note never supplies its value** (widened by fix round 1:
+  review I1 and F-1, the controller's ruling). Every reader that takes "the latest record's value" as
+  what a note holds — `passes::detect_external`'s field index (`load_index`), `sync::apply`'s step 4
+  (`mine`, the upstream side of `reconcile::resolve`) and the pre-pass's `merge_into_winner` — follows
+  three rules, and a fabricated `quinn`/`external` edit (which travels, applies cleanly on the other
+  desktop, settles its card unanswered and locks the field under judge-once) or a silent loss to the
+  file-mtime stand-in (R1's) is what each prevents:
+  - **(a) Another desktop's `create` never supplies a value for a note this desktop made itself** —
+    when the note's history holds a `create` made here, whatever the two records' order. D1 makes two
+    desktops that import one item both `create` it, and D5 (a) journals the other one here without
+    writing its text. It still counts for a note that arrived as a pulled text (no `create` made here).
+    Carried by `journal::created_here` and `journal::without_foreign_creates` (Task 7b).
+  - **(b) A value a sync card withholds is not what the note is expected to hold** (F-1): in
+    `detect_external`, another desktop's `set` whose `new` the note does not hold never took effect
+    here — R1's own rule, which step 4 already keeps — so the value before it is expected (Task 7b).
+  - **(c) A note's history follows its re-identifications** (D6: records follow the alias). In
+    `detect_external` and in `verify_tail` — `rank`'s two passes that find a note by a record's id — a
+    record made before `sync` re-identified a note (an `id` set under `sync::ACTOR`) is read under the
+    id the note took; a record under an id no note here holds that the alias map names is read under its
+    group's winner; and an id a note here still holds keeps its own history — an archived copy's is not
+    the live one's. While an alias group exists `detect_external`'s index is rebuilt from the whole
+    journal this way (the id-keyed cache cannot know it), and a loser id's note — an archived copy the
+    pre-pass settled — is not compared (Task 7). Read by record id alone, R-TD1-19's swap looks to
+    `verify_tail` like two half-applied `id` writes, and it swaps the two files back. A vault with no
+    import doubles reads as before, but for (a) and (b).
+- **R-TD1-19 — an archived file never absorbs a live one** (S-9, the controller's ruling on review I5,
+  logged for Quinn). Before the upgrade a student who saw one item twice may have deleted one copy;
+  they meant "remove the duplicate", not "delete the item". So among a group's files on this desktop the
+  item lives on the **survivor**: the winner's own file if it is live, else the lowest live copy, else
+  (every copy here archived) the lowest held one. The winning id is still the lowest (determinism):
+  - a survivor that is not the winner is re-identified to it, as a lone loser is (D6);
+  - if the winner's own file is here, it is archived (else it would be the survivor), and it takes the
+    survivor's old id in the same pass — so no id is ever on two files, and the archived copy ends as a
+    settled loser, exactly as D6's both-files merge leaves one;
+  - every other live copy is merged into the winner file and archived (R-TD1-9); an archived copy is
+    only settled, never merged from or into.
+  `IdIndex::holder` answers the exact id first, then the group: a pulled `move` or `delete` for an id
+  this desktop holds in `archive/` acts on that archived copy (a `delete` then does nothing), never on
+  the group's live file — which also covers review I5's late `delete` of a duplicate made before the
+  upgrade. `detect_external` reads the two files' histories apart (R-TD1-18 (c)). Step 4 still reads a
+  group through `records_for`, as D6 says, so after such a swap the contender for a field both
+  desktops later change can come from the archived copy's history; the file-mtime stand-in then
+  decides, which is the pre-plan behaviour for that field.
+- **R-TD1-20 — a move made on a live copy never un-archives a copy archived here** (review advisory,
+  D7's rule for moves). A pulled `move` whose holder here is in `archive/` and whose own `from` is a
+  live path is not applied, named `sync: <path> is archived here; the move to <dest> is not applied`:
+  a delete beats a concurrent rename as it beats an edit. A move out of `archive/` (an un-archive made
+  on the other desktop) still applies.
 
 ## Interfaces this plan produces
 
@@ -306,10 +373,10 @@ Plans 2 and 3 consume these exact names. A task that changes one of them changes
 | `ids::canonical`, `ids::alias_group` | `pub fn canonical<'a>(aliases: &'a BTreeMap<String, String>, id: &'a str) -> &'a str`; `pub fn alias_group(aliases: &BTreeMap<String, String>, id: &str) -> BTreeSet<String>` | 4 |
 | `ids::import_ids_by_key`, `ids::aliases_from` | `pub fn import_ids_by_key(records: &[Record], notes: &[(PathBuf, Option<Mapping>)]) -> BTreeMap<ImportKey, BTreeSet<String>>`; `pub fn aliases_from(keys: &BTreeMap<ImportKey, BTreeSet<String>>) -> BTreeMap<String, String>` | 4 |
 | `Journal::set_aliases` | `pub fn set_aliases(&mut self, aliases: BTreeMap<String, String>)`; `records_for` and `human_set` now answer the whole alias group | 4 |
-| `sync::apply` | signature unchanged; step order after this plan: record pass → id index → alias map (Task 7) → moves and deletes by id → seed pre-pass → alias file settle → step 4 by group → step 6 by id | 5–7 |
+| `sync::apply` | signature unchanged; step order after this plan: record pass → id index → alias map (Task 7) → moves and deletes by id → seed pre-pass → alias file settle (a live copy survives, R-TD1-19) → step 4 by group → step 6 by id | 5–7, 7b |
+| `journal::created_here`, `journal::without_foreign_creates` | `pub fn created_here(records: &[Record], this_device: &str) -> BTreeSet<String>` (the ids of every `create` this desktop made); `pub fn without_foreign_creates(records: Vec<Record>, own: &BTreeSet<String>, this_device: &str) -> Vec<Record>` (drops another desktop's `create` for an id in `own`) — R-TD1-18 (a) | 7b |
 | `sync::Cursor::verdicts_after` | `#[serde(default)] pub verdicts_after: String` — `<judged_at>,<id>` of the last verdict row taken, empty for none. **Plan 2 adds `provisional_config` and `provisional_since` beside it.** | 10 |
-| `sync::Totals::offline` | `pub offline: bool` — the pull met a transport failure | 10 |
-| `sync::pull_event_verdicts` | `pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient) -> Vec<String>` | 10 |
+| `sync::pull_event_verdicts` | `pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient) -> Vec<String>` — one page; lines, never an error; **takes `sync`'s run lock itself** (a held lock is the named skip `event verdicts: skipped (a sync is running; the next pull continues)`), so a caller must not hold it: call it outside `sync::run_lines_with`. Plan 1 calls it from `judge`, after the events pass (R-TD1-4). **Plan 3 calls it from its non-holder path** — a desktop that did not hold `feeds` runs no `judge` — e.g. once `run_lines_with` has returned. | 10 |
 | `GET /judge-event` | `?after=<judged_at>,<id>` (absent: from the start) → `{"verdicts": [{"item_id", "verdict", "judged_at", "id"}], "more": bool}`, 500 a page, ordered `(judged_at, id)`; 400 `{"error": "after must be <judged_at>,<id>"}`; 401/402 from the entitlement; `POST` unchanged | 10 |
 | `cli::RankOptions`, `cli::run_opts`, `cli::run_with_opts` | `#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub struct RankOptions { pub no_digest: bool }`; `run_opts(vault, today_iso, runner, run_id, opts)`, `run_with_opts(vault, today_iso, runner, run_id, fetchers, opts)` | 9 (H2) |
 | `knowlu-engine rank --no-digest` | flag; default off. **Plan 3's `TurnPlan` passes it** on a computer that did not hold `feeds`. | 9 (H3) |
@@ -317,9 +384,10 @@ Plans 2 and 3 consume these exact names. A task that changes one of them changes
 
 What Plans 2 and 3 can rely on, beyond the names: D13's fail-open is safe because two desktops running
 every machine step converge (Tasks 2–8); a shared `config/` file has no `id:`, and step 6's id rules
-apply only to `ids::NOTE_FOLDERS` paths, so Plan 2's three-way settings check branches before them; the
-verdict pull runs in every `sync` that pulls, so Plan 3's catch-up (`sync → rank --no-digest`) gets the
-holder's verdicts with no step of its own.
+apply only to `ids::NOTE_FOLDERS` paths, so Plan 2's three-way settings check branches before them.
+The verdict pull runs in `judge`, after the events pass (S-8), not in `sync`: `sync::Totals` gains
+nothing, and **Plan 3's catch-up (`sync → rank --no-digest`) must call `sync::pull_event_verdicts`
+itself** to get the holder's verdicts on a desktop that runs no `judge`.
 
 ---
 
@@ -2354,7 +2422,7 @@ then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -
   record pass (`:1745-1811`: `moves` and a new `deletes`), the index build (moved up to just after the
   record pass, `:1812`), step 3a (`:1814-1840`), the seed pre-pass (`:1890-1897`), and step 6's
   tombstone arm (`:2210-2242`).
-- Modify: `engine/tests/sync_contract.rs` — four new tests.
+- Modify: `engine/tests/sync_contract.rs` — five new tests.
 
 **Interfaces:**
 - Consumes: Task 5's `IdIndex`, `note_has_no_id`; `write::move_note`, `write::delete`.
@@ -2484,6 +2552,40 @@ fn td1_iv_a_foreign_move_acts_on_the_id_not_on_the_old_path() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R-TD1-20 (D7 for a move; review advisory, fix round 1): the other desktop renamed x on its live copy
+/// while this desktop archived x. The move is not applied here — the delete wins, as it wins against an
+/// edit — and a move made OUT of `archive/` over there (an un-archive) still is.
+#[test]
+fn td1_iv_a_move_made_on_a_live_copy_never_brings_back_a_copy_archived_here() {
+    let dir = fixture_with_id("td1-iv-archived-move"); // task_0000000001 at tasks/cs-100-hw-01.md
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::delete(&dir, "tasks/cs-100-hw-01.md", &student, &mut journal).expect("archived here");
+    let moved = |from: &str, to: &str, ts: &str| {
+        let mut spec = knowlu_engine::journal::NewRecord::new("move", from, "quinn", "dashboard");
+        spec.id = Some("task_0000000001");
+        spec.old = serde_json::json!(from);
+        spec.new = serde_json::json!(to);
+        spec.ts = Some(ts.to_string());
+        spec.device = Some("OtherDesktop".to_string());
+        knowlu_engine::journal::make_record(spec).expect("a record")
+    };
+    let day = "2026-09-17".parse().unwrap();
+    let rename = moved("tasks/cs-100-hw-01.md", "tasks/renamed.md", "2026-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![rename], vec![]), &ctx, &mut journal, day);
+    assert!(dir.join("archive/cs-100-hw-01.md").exists() && !dir.join("tasks/renamed.md").exists(), "{report:?}");
+    assert_eq!(report.moved, 0, "{report:?}");
+    assert!(
+        report.warnings.contains(&"sync: archive/cs-100-hw-01.md is archived here; the move to tasks/renamed.md is not applied".to_string()),
+        "{:?}", report.warnings
+    );
+    let unarchive = moved("archive/cs-100-hw-01.md", "tasks/back.md", "2026-09-17T11:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![unarchive], vec![]), &ctx, &mut journal, day);
+    assert!(dir.join("tasks/back.md").exists() && !dir.join("archive/cs-100-hw-01.md").exists(), "an un-archive applies: {report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -2492,7 +2594,10 @@ Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\
 Expected: FAIL — (iii): B's copy stays live (A's `delete` record has no effect of its own yet, and A's
 tombstone names a path B does not have); the tombstone test: A's note is archived; the move test: `m`
 is not moved (nothing at the record's old path) and A's different note is. `td1_iv_a_note_deleted_by_hand…`
-passes already — it is the regression guard for the half of D5 (d) that must not change.
+passes already — it is the regression guard for the half of D5 (d) that must not change — and so does
+`td1_iv_a_move_made_on_a_live_copy…` (a move by path finds nothing at the old path): it is the guard for
+what Step 6's move by id must not do, and fails against Step 6 without its R-TD1-20 lines (the archived
+copy is moved back to `tasks/renamed.md`).
 
 - [ ] **Step 3: Two small helpers**
 
@@ -2581,6 +2686,13 @@ holding its id, wherever it is here — never on a different note at the record'
         // the same move itself).
         let Some(holder) = holder else { continue };
         if holder == dest {
+            continue;
+        }
+        // R-TD1-20 (D7 for a move): a move the other desktop made on its live copy never brings back a
+        // copy archived here — the delete wins, as it does against an edit. A move out of `archive/`
+        // (an un-archive over there) still applies.
+        if holder.starts_with("archive/") && !from.starts_with("archive/") {
+            report.warnings.push(format!("sync: {holder} is archived here; the move to {dest} is not applied"));
             continue;
         }
         match crate::write::move_note(vault, &holder, &dest, ctx, journal) {
@@ -2683,7 +2795,7 @@ and replace the tombstone arm's settle (`:2236-2241`, `if exact_case_exists(&fil
 - [ ] **Step 8: Run the sync suites, then the whole suite**
 
 Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract --test sync_replay`
-Expected: PASS — the four new tests and every existing one: `a_valid_pulled_move_relocates_the_note_and_counts_it`
+Expected: PASS — the five new tests and every existing one: `a_valid_pulled_move_relocates_the_note_and_counts_it`
 (its local note has no `id:`, R-TD1-2), `a_pulled_tombstone_settles_the_note_rather_than_unlinking_it`
 (its local note has no id, and the fixture's one `TestPC` record has none either), the O1 tests (a
 case-only rename's move still meets `Exists` at `move_note`, as before).
@@ -2702,7 +2814,8 @@ note at the record's old path; a foreign delete now settles the note
 holding its id; a tombstone settles the note at its path unless other
 desktops placed only a different id there. So a delete beats a concurrent
 edit on both desktops, whatever the push order, with the edit kept on the
-archived copy (review E5 and M5, both ruled In).
+archived copy (review E5 and M5, both ruled In); and a move made on a live
+copy never brings back a copy archived here.
 
 (the two trailers of Global Constraint 17)
 ```
@@ -2716,13 +2829,15 @@ then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -
 
 **Files:**
 - Modify: `engine/src/sync.rs` — step 4's body extracted into `settle_resolution`; three small helpers
-  (`took_no_effect`, `mtime_ts`, `under_id`) and `merge_into_winner`; in `apply`: the alias map after the
-  index, the file settle after the seed pre-pass, step 4 grouped by winner, step 6's import-key join;
+  (`took_no_effect`, `mtime_ts`, `under_id`) and `merge_into_winner`; in `apply`: `own_created` made
+  mutable, the alias map after the index, the file settle after the seed pre-pass (R-TD1-19), step 4
+  grouped by winner, step 6's import-key join; `IdIndex::holder` answers the exact id first;
   `IdIndex::exact`/`forget` lose their `#[allow(dead_code)]`.
-- Modify: `engine/src/passes.rs` — `load_index` (`:98-146`), `detect_external` (`:259-350`), and one test
-  (R-TD1-18).
-- Modify: `engine/tests/sync_contract.rs` — three helpers (`float_at`, `old_note`, `pulled_before`) and
-  two tests.
+- Modify: `engine/src/passes.rs` — a new private `Lineage` before `load_index`; `load_index` (`:98-146`,
+  split into `load_index` and `load_index_with`), `verify_tail` (`:184-243`), `detect_external`
+  (`:259-350`), and one test (R-TD1-18 (c)).
+- Modify: `engine/tests/sync_contract.rs` — four helpers (`float_at`, `old_note`, `pulled_before`,
+  `rank_passes`) and three tests.
 
 **Interfaces:**
 - Consumes: Task 4's `ids::import_ids_by_key`, `ids::aliases_from`, `ids::load_aliases`,
@@ -2732,7 +2847,7 @@ then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -
 ```rust
 #[allow(clippy::too_many_arguments)]
 fn settle_resolution(vault: &Path, file: &Path, path: &str, meta: &serde_yaml_ng::Mapping,
-    resolution: &crate::reconcile::Resolution, own_created: &std::collections::BTreeSet<String>,
+    resolution: &crate::reconcile::Resolution, own_created: &mut std::collections::BTreeSet<String>,
     ctx: &crate::write::WriteContext, journal: &mut Journal, ledger: &crate::ledger::JsonlLedger,
     today: jiff::civil::Date, report: &mut ApplyReport);
 fn took_no_effect(record: &Record, meta: &serde_yaml_ng::Mapping, this_device: &str) -> bool;
@@ -2740,10 +2855,15 @@ fn mtime_ts(file: &Path) -> String;
 fn under_id(records: &[Record], id: &str) -> Vec<Record>;
 #[allow(clippy::too_many_arguments)]
 fn merge_into_winner(vault: &Path, winner: &str, winner_rel: &str, loser: &str,
-    own_created: &std::collections::BTreeSet<String>, ctx: &crate::write::WriteContext,
-    journal: &mut Journal, ledger: &crate::ledger::JsonlLedger, today: jiff::civil::Date,
-    this_device: &str, report: &mut ApplyReport);
+    history: &std::collections::BTreeSet<String>, own_created: &mut std::collections::BTreeSet<String>,
+    ctx: &crate::write::WriteContext, journal: &mut Journal, ledger: &crate::ledger::JsonlLedger,
+    today: jiff::civil::Date, this_device: &str, report: &mut ApplyReport);
 ```
+
+and, private to `passes.rs`, `struct Lineage` with `fn build(vault: &Path, journal: &mut Journal) ->
+Lineage`, `fn id_of(&self, record: &Record) -> Option<String>` and `fn read(&self, records: Vec<Record>)
+-> Vec<Record>` (R-TD1-18 (c)); `fn load_index_with(vault: &Path, journal: &mut Journal, lineage:
+&Lineage) -> Index`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2775,6 +2895,23 @@ fn pulled_before(vault: &Path, from: &Path, id: &str, device: &str) {
         .expect("the create record");
     record.insert("device".to_string(), serde_json::json!(device));
     knowlu_engine::ledger::JsonlLedger::new(vault.join("state").join("journal")).append(&record).expect("appended verbatim");
+}
+
+/// The two passes `rank` runs first that read "the latest record's value" (`cli.rs:305-317`), on a vault
+/// marked migrated as the wizard marks one (`app/src/scaffold.rs:719-727`) — the mark kept to the journal
+/// alone, so no note text travels with it.
+fn rank_passes(vault: &Path, journal: &mut Journal) -> Vec<String> {
+    let marked = journal.read(None, None).iter().any(|r| r.get("actor").and_then(|v| v.as_str()) == Some("system:migration"));
+    if !marked {
+        let mut spec = knowlu_engine::journal::NewRecord::new("create", "archive/_migrated.md", "system:migration", "cli");
+        spec.id = Some("task_00000000fe");
+        spec.new = serde_json::json!({"title": "migrated", "status": "archived", "id": "task_00000000fe"});
+        journal.append(&mut knowlu_engine::journal::make_record(spec).expect("a record")).expect("the migration mark");
+    }
+    let ctx = knowlu_engine::write::WriteContext::new("agent:approvals", "local-runner");
+    let mut log = knowlu_engine::passes::verify_tail(vault, journal, &ctx, knowlu_engine::passes::VERIFY_TAIL_LIMIT);
+    log.extend(knowlu_engine::passes::detect_external(vault, journal, &ctx));
+    log
 }
 
 /// §6.1 (v), D6 (Q9): a pair made and pulled BEFORE the upgrade — x under two random ids at one path, each
@@ -2834,7 +2971,9 @@ fn td1_v_a_pair_made_before_the_upgrade_is_joined_on_the_lower_id_at_the_first_s
 /// §6.1 (v) with both files on each side (re-review N1): before this plan `apply` wrote the other
 /// desktop's text wherever its path was free, so each desktop holds both copies of x at two paths.
 /// The first sync after the upgrade leaves one live file per desktop: the loser's fields reconciled
-/// into the winner file, the loser archived and never re-identified, and no id on two files.
+/// into the winner file, the loser archived and never re-identified, and no id on two files. A field
+/// set on both sides is one card (review I2): the merge files it, and step 4's full pass of the same new
+/// group keeps it rather than filing a second.
 #[test]
 fn td1_v_n1_a_desktop_holding_both_files_merges_the_loser_into_the_winner_and_archives_it() {
     let (a, b) = (desk("v1-a"), desk("v1-b"));
@@ -2852,7 +2991,9 @@ fn td1_v_n1_a_desktop_holding_both_files_merges_the_loser_into_the_winner_and_ar
     jb.invalidate();
     let _ = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
     let _ = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
-    edit(&b, b_rel, &mut jb, &[("effort_hours", "4.0")]);
+    edit(&a, a_rel, &mut ja, &[("importance", "5")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    edit(&b, b_rel, &mut jb, &[("effort_hours", "4.0"), ("importance", "2")]);
 
     let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
     let ra = deliver(&a, &page, &mut ja);
@@ -2860,10 +3001,13 @@ fn td1_v_n1_a_desktop_holding_both_files_merges_the_loser_into_the_winner_and_ar
     let rb = deliver(&b, &page, &mut jb);
 
     assert!(
-        ra.warnings.contains(&format!("sync: {b_rel} is {loser}, the same item as {winner} at {a_rel}; merged into it and archived")),
+        ra.warnings.contains(&format!("sync: {b_rel} is {loser}, the same item as {winner} at {a_rel}; its fields merged into it and archived")),
         "{:?}", ra.warnings
     );
-    assert_eq!((ra.cards, rb.cards), (0, 0), "{ra:?} {rb:?}");
+    assert_eq!((ra.cards, rb.cards), (1, 0), "one card, on A, for the field set on both: {ra:?} {rb:?}");
+    assert_eq!(sync_cards(&a).len(), 1, "the merge and step 4's full pass file one card between them");
+    assert_eq!(int_at(&a, a_rel, "importance"), Some(5), "A's value is withheld until the student answers");
+    assert_eq!(int_at(&b, a_rel, "importance"), Some(2), "B keeps its later value");
     for (dir, who) in [(&a, "A"), (&b, "B")] {
         assert!(dir.join(a_rel).exists(), "{who}: the winner file stays live");
         assert!(!dir.join(b_rel).exists(), "{who}: the loser file is no longer live");
@@ -2879,13 +3023,64 @@ fn td1_v_n1_a_desktop_holding_both_files_merges_the_loser_into_the_winner_and_ar
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
 }
+
+/// S-9 (R-TD1-19, the controller's ruling on review I5): an archived file never absorbs a live one.
+/// Before the upgrade this desktop held x twice — two ids, two paths — and the student deleted one copy.
+/// Whichever of the two ids is the lower, the first sync after the upgrade leaves x live, on the live
+/// copy with its own state, under the lower id; the archived copy is settled under the other id, and no
+/// id is on two files. The other desktop's own delete of the duplicate, made before the upgrade and
+/// pulled only now, archives nothing; and the next `rank` reads the two files' histories apart.
+#[test]
+fn td1_s9_an_archived_copy_never_absorbs_the_live_one_whichever_id_is_lower() {
+    for live_is_lower in [true, false] {
+        let tag = if live_is_lower { "live-lower" } else { "archived-lower" };
+        let a = desk(&format!("s9-{tag}"));
+        let mut ja = Journal::new(&a);
+        let (live_rel, gone_rel, archived) = ("tasks/cs-100-hw-07.md", "tasks/comp-100-hw-07.md", "archive/comp-100-hw-07.md");
+        let (low, high) = ("task_00000000a1", "task_00000000b2");
+        let (live_id, gone_id) = if live_is_lower { (low, high) } else { (high, low) };
+        old_note(&a, &mut ja, live_rel, live_id);
+        old_note(&a, &mut ja, gone_rel, gone_id);
+        edit(&a, live_rel, &mut ja, &[("importance", "5")]);
+        let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        knowlu_engine::write::delete(&a, gone_rel, &student, &mut ja).expect("the student deletes the duplicate");
+        let mut spec = knowlu_engine::journal::NewRecord::new("delete", gone_rel, "quinn", "dashboard");
+        spec.id = Some(gone_id);
+        spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+        spec.device = Some("DeskB".to_string());
+        let late = knowlu_engine::journal::make_record(spec).expect("a record");
+
+        let r = deliver(&a, &pulled(vec![late], vec![]), &mut ja);
+
+        assert!(a.join(live_rel).exists(), "{tag}: x stays live: {r:?}");
+        assert_eq!(meta_id(&a, live_rel), low, "{tag}: under the lower id");
+        assert_eq!(int_at(&a, live_rel, "importance"), Some(5), "{tag}: with the live copy's own state");
+        assert_eq!(meta_id(&a, archived), high, "{tag}: the archived copy is settled under the other id");
+        assert_eq!(r.cards, 0, "{tag}: {r:?}");
+        assert_eq!(knowlu_engine::ids::load_aliases(&a).get(high).map(String::as_str), Some(low), "{tag}");
+        let mut seen = std::collections::BTreeSet::new();
+        for (path, meta) in knowlu_engine::ids::scan_notes(&a) {
+            if let Some(id) = meta.and_then(|m| knowlu_engine::yaml::get(&m, "id").and_then(knowlu_engine::yaml::text)) {
+                assert!(seen.insert(id.clone()), "{tag}: {id} is on two files ({})", path.display());
+            }
+        }
+        let log = rank_passes(&a, &mut ja);
+        assert!(log.iter().all(|l| !l.starts_with("external")), "{tag}: {log:?}");
+        let _ = std::fs::remove_dir_all(&a);
+    }
+}
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract -- td1_v`
+Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract -- td1_v td1_s9`
 Expected: FAIL — no alias exists: A and B keep two ids, B's `effort_hours` never reaches A (B's records
-name an id A does not hold), and in the N1 test both files stay live on both desktops.
+name an id A does not hold), in the N1 test both files stay live on both desktops, and in the S-9 test
+the archived-lower order keeps the live copy under the higher id. (Against a pre-pass that lets the
+archived winner absorb the live copy, both S-9 orders fail — archived-lower merges the live copy into
+the archived one, live-lower's late `delete` of the loser archives the live winner through its group —
+and against one that files the merge's card without adding it to `own_created`, the N1 test finds two
+cards on A.)
 
 - [ ] **Step 3: Extract step 4's apply-and-card half, and three helpers**
 
@@ -2906,27 +3101,42 @@ fn settle_resolution(
     path: &str,
     meta: &serde_yaml_ng::Mapping,
     resolution: &crate::reconcile::Resolution,
-    own_created: &std::collections::BTreeSet<String>,
+    own_created: &mut std::collections::BTreeSet<String>,
     ctx: &crate::write::WriteContext,
     journal: &mut Journal,
     ledger: &crate::ledger::JsonlLedger,
     today: jiff::civil::Date,
     report: &mut ApplyReport,
 ) {
-    // `:1988-2158`, moved here verbatim, with the two edits named below.
+    // `:1988-2158`, moved here verbatim, with the three edits named below.
 }
 ```
 
 The body is lines `:1988-2158` of `apply` exactly as they stand after Tasks 5 and 6, cut from the loop and
-pasted into this function, with two mechanical edits and no others: `crate::ids::read_meta(&file)`
-becomes `crate::ids::read_meta(file)`, and `&own_created` becomes `own_created`. Every `&path`/`path`
-stays as written (a `&str` now; `&path` coerces), as do `&file` in the `propose_amendment` call, `ledger`,
-`today`, `ctx`, `journal` and every `report.` field. Step 4's loop then ends with
-`settle_resolution(vault, &file, &path, &meta, &resolution, &own_created, ctx, journal, &ledger, today, &mut report);`.
-(Checked while writing this plan: the extraction compiles and every `sync_contract` test stays green.)
+pasted into this function, with three edits and no others: `crate::ids::read_meta(&file)` becomes
+`crate::ids::read_meta(file)`; `&own_created` becomes `own_created`; and the `propose_amendment` call's
+`Ok(_) => report.cards += 1,` arm becomes (review I2, R-TD1-9)
+
+```rust
+                    Ok(card) => {
+                        report.cards += 1;
+                        // R-TD1-9 (review I2): this desktop's own card from now on, so a later
+                        // resolution of the same note in this apply keeps it rather than filing a second.
+                        if let Some(id) = note_id_at(&card) {
+                            own_created.insert(id);
+                        }
+                    }
+```
+
+Every `&path`/`path` stays as written (a `&str` now; `&path` coerces), as do `&file` in the
+`propose_amendment` call, `ledger`, `today`, `ctx`, `journal` and every `report.` field. In `apply`,
+`let own_created` (`:1849-1858`) becomes `let mut own_created`, and step 4's loop ends with
+`settle_resolution(vault, &file, &path, &meta, &resolution, &mut own_created, ctx, journal, &ledger, today, &mut report);`.
 
 Replace the `never_took_effect` closure (`:1961-1968`) and the `mtime_ts` computation (`:1982-1985`) with
-calls to two new functions, and add a third, all after `note_id_at`:
+two new functions, and add a third, all after `note_id_at`; at their call sites in step 4,
+`&& !never_took_effect(r)` becomes `&& !took_no_effect(r, &meta, &this_device)` and the `resolve` call's
+`&mtime_ts` becomes `&mtime_ts(&file)` (Step 7 changes that call once more; nothing else does):
 
 ```rust
 /// R1 (re-review round 3): a `set` another desktop made whose `new` is not what the note holds for that
@@ -2964,7 +3174,7 @@ fn under_id(records: &[Record], id: &str) -> Vec<Record> {
 }
 ```
 
-Run the sync suites (`--test sync_contract --test sync_replay`): every test except the two new ones
+Run the sync suites (`--test sync_contract --test sync_replay`): every test except the three new ones
 passes — the extraction changes nothing.
 
 - [ ] **Step 4: Merge a loser file into its winner**
@@ -2973,17 +3183,19 @@ After `under_id`:
 
 ```rust
 /// D6 (re-review N1, R-TD1-9), both files of a group here: the loser file's history is reconciled into
-/// the winner file as though the loser's records were the other side — the winner's records (every
-/// device) are the winner file's own history, the loser's (every device) are the other side, both
-/// under the winner's id. A field set only on the losing copy, on any computer, reaches the winner; one
-/// set on both becomes one card, exactly as step 4 applies and cards. The caller then settles the loser.
+/// the winner file as though the loser's records were the other side — the winner file's own records
+/// (every device; `history` names the ids they sit under, R-TD1-19) are its upstream, the loser's
+/// (every device) are the other side, both under the winner's id. A field set only on the losing copy,
+/// on any computer, reaches the winner; one set on both becomes one card, exactly as step 4 applies and
+/// cards, and that card joins `own_created` (review I2). The caller then settles the loser.
 #[allow(clippy::too_many_arguments)]
 fn merge_into_winner(
     vault: &Path,
     winner: &str,
     winner_rel: &str,
     loser: &str,
-    own_created: &std::collections::BTreeSet<String>,
+    history: &std::collections::BTreeSet<String>,
+    own_created: &mut std::collections::BTreeSet<String>,
     ctx: &crate::write::WriteContext,
     journal: &mut Journal,
     ledger: &crate::ledger::JsonlLedger,
@@ -2995,10 +3207,11 @@ fn merge_into_winner(
     let Some(meta) = crate::ids::read_meta(&file) else { return };
     let all = journal.read(None, None);
     let under = |r: &Record, id: &str| r.get("id").and_then(Value::as_str) == Some(id);
+    let of_the_file = |r: &Record| r.get("id").and_then(Value::as_str).is_some_and(|id| history.contains(id));
     let not_an_echo = |r: &Record| r.get("actor").and_then(Value::as_str) != Some(ACTOR);
     let upstream: Vec<Record> = all
         .iter()
-        .filter(|r| under(r, winner) && not_an_echo(r) && !took_no_effect(r, &meta, this_device))
+        .filter(|r| of_the_file(r) && not_an_echo(r) && !took_no_effect(r, &meta, this_device))
         .cloned()
         .collect();
     let theirs: Vec<Record> = all.iter().filter(|r| under(r, loser) && not_an_echo(r)).cloned().collect();
@@ -3044,6 +3257,21 @@ Immediately after `let mut index = IdIndex::build(vault);` (placed by Task 6 aft
     index.aliases = aliases.clone();
 ```
 
+And `IdIndex::holder` (Task 5) answers the exact id first, then the group — so a pulled `move` or `delete`
+for an id this desktop holds in `archive/` acts on that archived copy, never on the group's live file
+(R-TD1-19; a lone copy, or the group's winner, is found exactly as before):
+
+```rust
+    /// The note holding `id` itself, else the note holding any id of its alias group, the group's
+    /// winner first (D5 (a), D6). The exact id first (R-TD1-19): a record about an archived copy acts
+    /// on that copy, never on the group's live file.
+    fn holder(&self, id: &str) -> Option<&String> {
+        self.by_id.get(id).or_else(|| self.by_id.get(crate::ids::canonical(&self.aliases, id))).or_else(|| {
+            crate::ids::alias_group(&self.aliases, id).iter().find_map(|g| self.by_id.get(g.as_str()))
+        })
+    }
+```
+
 - [ ] **Step 6: Settle the files of every group**
 
 Immediately after the seed pre-pass (after `if !replaced_paths.is_empty() { … }`'s enclosing block,
@@ -3051,47 +3279,76 @@ Immediately after the seed pre-pass (after `if !replaced_paths.is_empty() { … 
 
 ```rust
     // D6 (re-review N1): then the files. Before this plan `apply` wrote another desktop's text wherever
-    // its path was free, so this desktop can hold more than one file of a group.
+    // its path was free, so this desktop can hold more than one file of a group. R-TD1-19 (S-9): an
+    // archived file never absorbs a live one — the item lives on here as the survivor: the winner's own
+    // file if it is live, else the lowest live copy, else (every copy archived) the lowest held one.
     let winners: std::collections::BTreeSet<String> = aliases.values().cloned().collect();
     for winner in &winners {
         let group = crate::ids::alias_group(&aliases, winner);
-        let losers: Vec<String> = group.into_iter().filter(|id| id != winner).collect();
-        // Only a loser here: the lowest one takes the winner's id — the repair `ensure_ids` makes for a
-        // duplicate — by one `write_literals` of `id` under `sync::ACTOR` (journalled, never sent).
-        if index.exact(winner).is_none() {
-            let Some((loser, rel)) = losers.iter().find_map(|l| index.exact(l).map(|r| (l.clone(), r.clone()))) else {
+        let live = |id: &str| index.exact(id).is_some_and(|rel| !rel.starts_with("archive/"));
+        // `group` is ordered and the winner is its lowest id, so the first match is the lowest.
+        let Some(survivor) = group
+            .iter()
+            .find(|id| live(id.as_str()))
+            .or_else(|| group.iter().find(|id| index.exact(id.as_str()).is_some()))
+            .cloned()
+        else {
+            continue;
+        };
+        // The ids the winner file's own records sit under, for the merge below.
+        let mut history: std::collections::BTreeSet<String> = std::collections::BTreeSet::from([winner.clone()]);
+        if &survivor != winner {
+            // The survivor takes the winner's id — the repair `ensure_ids` makes for a duplicate — by one
+            // `write_literals` of `id` under `sync::ACTOR` (journalled, never sent). The winner's own file,
+            // if this desktop holds one, is archived (else it would be the survivor): it takes the
+            // survivor's old id in the same pass, so no id is ever on two files.
+            let rel = index.exact(&survivor).cloned().unwrap_or_default();
+            let archived = index.exact(winner).cloned();
+            if let Err(e) = crate::write::write_literals(vault, &rel, &[("id".to_string(), winner.clone())], ctx, journal, &Default::default()) {
+                report.warnings.push(format!("sync: {rel} could not be re-identified ({e})"));
                 continue;
-            };
-            match crate::write::write_literals(vault, &rel, &[("id".to_string(), winner.clone())], ctx, journal, &Default::default()) {
-                Ok(_) => {
-                    index.forget(&loser);
-                    index.place(winner, &rel);
+            }
+            index.forget(&survivor);
+            index.place(winner, &rel);
+            match &archived {
+                None => {
+                    history.insert(survivor.clone());
                     report.warnings.push(format!(
-                        "sync: {rel} re-identified from {loser} to {winner}, the same item your other computer holds"
+                        "sync: {rel} re-identified from {survivor} to {winner}, the same item your other computer holds"
                     ));
                 }
-                Err(e) => {
-                    report.warnings.push(format!("sync: {rel} could not be re-identified ({e})"));
-                    continue;
+                Some(archived) => {
+                    match crate::write::write_literals(vault, archived, &[("id".to_string(), survivor.clone())], ctx, journal, &Default::default()) {
+                        Ok(_) => index.place(&survivor, archived),
+                        Err(e) => report.warnings.push(format!("sync: {archived} could not be re-identified ({e})")),
+                    }
+                    history = std::collections::BTreeSet::from([survivor.clone()]);
+                    report.warnings.push(format!(
+                        "sync: {rel} re-identified from {survivor} to {winner}; the archived copy of the same item at {archived} now carries {survivor}"
+                    ));
                 }
             }
         }
-        // Both files here: every loser file still live is reconciled into the winner file and settled
-        // through `write::delete` — never re-identified, which would leave one id on two files for
-        // `ensure_ids` to split again at random. An archived loser is already settled.
+        // Every other copy still live here is reconciled into the winner file and settled through
+        // `write::delete` — never re-identified, which would leave one id on two files for `ensure_ids`
+        // to split again at random. An archived copy is only settled; with no live copy there is nothing
+        // to join.
         let Some(winner_rel) = index.exact(winner).cloned() else { continue };
-        for loser in &losers {
+        if winner_rel.starts_with("archive/") {
+            continue;
+        }
+        for loser in group.iter().filter(|id| *id != winner) {
             let Some(loser_rel) = index.exact(loser).cloned() else { continue };
             if loser_rel.starts_with("archive/") {
                 continue;
             }
-            merge_into_winner(vault, winner, &winner_rel, loser, &own_created, ctx, journal, &ledger, today, &this_device, &mut report);
+            merge_into_winner(vault, winner, &winner_rel, loser, &history, &mut own_created, ctx, journal, &ledger, today, &this_device, &mut report);
             match crate::write::delete(vault, &loser_rel, ctx, journal) {
                 Ok(dest) => {
                     report.moved += 1;
                     index.place(loser, &crate::ids::rel(vault, &dest));
                     report.warnings.push(format!(
-                        "sync: {loser_rel} is {loser}, the same item as {winner} at {winner_rel}; merged into it and archived"
+                        "sync: {loser_rel} is {loser}, the same item as {winner} at {winner_rel}; its fields merged into it and archived"
                     ));
                 }
                 Err(e) => report.warnings.push(format!("sync: {loser_rel} could not be settled ({e})")),
@@ -3137,8 +3394,8 @@ Immediately before step 4's `for (id, foreign) in &touched {`:
 ```
 
 In the loop, `mine` is already `journal.records_for(id, None)` filtered (the journal now answers the whole
-group). Replace the closure-based filter's `!never_took_effect(r)` with `!took_no_effect(r, &meta,
-&this_device)`, and the `resolve` call with (R-TD1-10):
+group, and Step 3 made its R1 filter `took_no_effect`). Replace the `resolve` call (as Step 3 left it)
+with (R-TD1-10):
 
 ```rust
         let resolution = crate::reconcile::resolve(
@@ -3175,22 +3432,28 @@ In step 6's live branch, immediately after Task 5's "text whose id is already he
                 }
 ```
 
-- [ ] **Step 9: `detect_external` reads a group as one note**
+- [ ] **Step 9: `detect_external` reads each note's own history (R-TD1-18 (c))**
 
 `passes::detect_external` (`passes.rs:259-350`) keys its field index by record id (`load_index`,
 `:98-146`). After the pre-pass re-identifies a note, its history sits under the old id, so the next
 `rank` would read every field that history explains as a `quinn`/`external` edit — a record that
 travels, settles the other desktop's card unanswered, and locks the field under judge-once. D6's "records
-follow the alias" reaches it too.
+follow the alias" reaches it too. But not the whole group blindly: an archived copy's history is its
+own, and read as the live file's it fabricates edits too — with every loser's records moved under the
+winner, the S-9 test's `rank` meets `external edit id on tasks/cs-100-hw-07.md` in both orders (the
+archived copy's `create` carries its own id, and is the later one). And `verify_tail` (`:184-243`),
+which finds a note by a record's id, reads R-TD1-19's swap as two half-applied `id` writes and swaps
+the two files back. So in both passes a record is read under the id of the note it is the history of:
+across `sync`'s own re-identifications, and, for an id no note here holds, under its group's winner.
 
 Write the failing test first, in `engine/src/passes.rs::mod tests` after
 `the_index_is_built_from_the_journal_and_kept_up_to_date`:
 
 ```rust
     /// Two-desktop design D6: a note the alias pre-pass re-identified keeps its history under the old
-    /// id. `detect_external` reads the group as one note, under the winner, so it journals no
-    /// `quinn`/`external` edit for a value that history explains — and an archived loser, already
-    /// settled by the pre-pass, is not compared at all.
+    /// id. `detect_external` reads it as the note's own, so it journals no `quinn`/`external` edit for a
+    /// value that history explains — and an archived loser, already settled by the pre-pass, is not
+    /// compared at all.
     #[test]
     fn detect_external_reads_an_alias_group_as_one_note() {
         let (vault, mut journal) = make_vault("alias-group");
@@ -3208,6 +3471,7 @@ Write the failing test first, in `engine/src/passes.rs::mod tests` after
         crate::write::write_literals(&vault, "tasks/a.md", &[("id".to_string(), winner.to_string())],
             &WriteContext::new(crate::sync::ACTOR, "local-runner"), &mut journal, &WriteOpts::default()).unwrap();
         // A second copy the pre-pass merged and archived under a third id of the group.
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
         crate::pystr::write_text(&vault.join("archive").join("copy.md"), "---\ntitle: A\nimportance: 1\nid: task_00000000c3\n---\n").unwrap();
         crate::ids::save_aliases(&vault, &BTreeMap::from([
             (loser.clone(), winner.to_string()),
@@ -3219,44 +3483,132 @@ Write the failing test first, in `engine/src/passes.rs::mod tests` after
     }
 ```
 
-(`scratch` makes only `tasks/`; add `std::fs::create_dir_all(vault.join("archive")).unwrap();` before
-the `write_text` of `archive/copy.md`.) Run
+Run
 `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --lib -- passes::tests::detect_external_reads`
 and see it FAIL: `external edit importance on tasks/a.md` and `external create archive/copy.md`.
 
-Then, in `load_index`: before the cache read (`:103`), add
-`let aliases = crate::ids::load_aliases(vault);` and make the cache read conditional —
-`if path.exists() && aliases.is_empty() {` — with this comment above it:
-`// Two-desktop design D6: with an alias group on file, the records of every id in a group are one note's
-// history. The cache is keyed by id and cannot know that, so while a group exists it is rebuilt from the
-// whole journal, under each group's winner (a vault with no import doubles never pays for this).`
-And replace `apply(&mut index, &records);` (`:141`) with:
+Then, in `engine/src/passes.rs`, after `lookback` (`:81-87`):
 
 ```rust
-    let records: Vec<Record> = if aliases.is_empty() {
-        records
-    } else {
+/// Two-desktop design D6 (plan 1, R-TD1-18 (c)): which id each journal record is read under — the id of
+/// the note it is the history of. `sync`'s alias pre-pass re-identifies notes (an `id` set under
+/// `sync::ACTOR`, from the old id to the new), so a record made before that is the history of the note
+/// that took the new id. A record under an id no note here holds that the alias map names is read under
+/// its group's winner; an id a note here still holds keeps its own history — an archived copy's is not
+/// the live one's. With no alias group on file every record is read under its own id.
+struct Lineage {
+    /// old id → `(ts, new id)` of each re-identification, oldest first.
+    renames: BTreeMap<String, Vec<(String, String)>>,
+    aliases: BTreeMap<String, String>,
+    held: std::collections::BTreeSet<String>,
+}
+
+impl Lineage {
+    fn build(vault: &Path, journal: &mut Journal) -> Lineage {
+        let aliases = crate::ids::load_aliases(vault);
+        let mut renames: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        let mut held = std::collections::BTreeSet::new();
+        if !aliases.is_empty() {
+            for r in journal.read(None, None) {
+                let rename = str_of(&r, "op").as_deref() == Some("set")
+                    && str_of(&r, "field").as_deref() == Some("id")
+                    && str_of(&r, "actor").as_deref() == Some(crate::sync::ACTOR);
+                if !rename {
+                    continue;
+                }
+                if let (Some(old), Some(Value::String(new)), Some(ts)) = (str_of(&r, "id"), r.get("new"), str_of(&r, "ts")) {
+                    renames.entry(old).or_default().push((ts, new.clone()));
+                }
+            }
+            for list in renames.values_mut() {
+                list.sort();
+            }
+            held = build_index(vault).into_keys().collect();
+        }
+        Lineage { renames, aliases, held }
+    }
+
+    /// The id `record` is read under.
+    fn id_of(&self, record: &Record) -> Option<String> {
+        let id = str_of(record, "id")?;
+        let ts = str_of(record, "ts").unwrap_or_default();
+        if let Some((_, new)) = self.renames.get(&id).and_then(|list| list.iter().find(|(at, _)| *at >= ts)) {
+            return Some(new.clone());
+        }
+        if !self.held.contains(&id) {
+            if let Some(winner) = self.aliases.get(&id) {
+                return Some(winner.clone());
+            }
+        }
+        Some(id)
+    }
+
+    /// `records`, each under the id it is read under. In memory only; the journal is never rewritten.
+    fn read(&self, records: Vec<Record>) -> Vec<Record> {
+        if self.aliases.is_empty() {
+            return records;
+        }
         records
             .into_iter()
             .map(|mut r| {
-                if let Some(winner) = r.get("id").and_then(Value::as_str).and_then(|id| aliases.get(id)).cloned() {
-                    r.insert("id".to_string(), Value::String(winner));
+                if let Some(id) = self.id_of(&r) {
+                    r.insert("id".to_string(), Value::String(id));
                 }
                 r
             })
             .collect()
-    };
+    }
+}
+```
+
+Replace `load_index`'s signature line (`:98`, its doc kept above it) with a wrapper and the renamed body:
+
+```rust
+pub fn load_index(vault: &Path, journal: &mut Journal) -> Index {
+    let lineage = Lineage::build(vault, journal);
+    load_index_with(vault, journal, &lineage)
+}
+
+/// [`load_index`] with the [`Lineage`] its caller has already built.
+fn load_index_with(vault: &Path, journal: &mut Journal, lineage: &Lineage) -> Index {
+```
+
+In its body, make the cache read conditional — `if path.exists() {` (`:103`) becomes
+`if path.exists() && lineage.aliases.is_empty() {` — with this comment above it:
+`// Two-desktop design D6: with an alias group on file, a note's history can sit under more than one id.
+// The cache is keyed by id and cannot know that, so while a group exists it is rebuilt from the whole
+// journal, each record under its note's id (a vault with no import doubles never pays for this).`
+And replace `apply(&mut index, &records);` (`:141`) with:
+
+```rust
+    let records = lineage.read(records);
     apply(&mut index, &records);
 ```
 
-In `detect_external`, after `let mut index = load_index(vault, journal);` (`:276`) add
-`let aliases = crate::ids::load_aliases(vault);`, and after the `if !is_id(&note_id) { continue; }` block
-(`:283-285`):
+In `verify_tail`, replace `let tail = &sets[sets.len().saturating_sub(limit)..];` and
+`let latest = latest_by_field(tail);` (`:199-201`, Python's `[-limit:]` comment kept above them) with:
 
 ```rust
-        // Two-desktop design D6: a loser id's note is a copy the alias pre-pass settled; its history is
-        // the winner's, compared on the winner's own note.
-        if aliases.contains_key(&note_id) {
+    // Two-desktop design D6 (R-TD1-18 (c)): each record under the id of the note it is the history of.
+    // Read by record id alone, the alias pre-pass's swap (R-TD1-19) looks like two half-applied `id`
+    // writes, and a pre-swap edit of one copy "heals" the other.
+    let tail = Lineage::build(vault, journal).read(sets[sets.len().saturating_sub(limit)..].to_vec());
+    let latest = latest_by_field(&tail);
+```
+
+In `detect_external`, replace `let mut index = load_index(vault, journal);` (`:276`) with:
+
+```rust
+    let lineage = Lineage::build(vault, journal);
+    let mut index = load_index_with(vault, journal, &lineage);
+```
+
+and after the `if !is_id(&note_id) { continue; }` block (`:283-285`) add:
+
+```rust
+        // Two-desktop design D6: a loser id's note is a copy the alias pre-pass settled; the item's
+        // history is compared on the winner's own note.
+        if lineage.aliases.contains_key(&note_id) {
             continue;
         }
 ```
@@ -3266,8 +3618,10 @@ Run the `passes::` tests: PASS, the new one included.
 - [ ] **Step 10: Run the sync suites, then the whole suite**
 
 Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract --test sync_replay`
-Expected: PASS — both `td1_v…` tests and every existing one (a vault with no import doubles builds an
-empty map, writes no alias file, and takes every path it took before).
+Expected: PASS — both `td1_v…` tests, both orders of `td1_s9…` (the `rank` at its end included: after
+the swap the live file reads the survivor's history, and the archived one's own) and every existing
+one (a vault with no import doubles builds an empty map, writes no alias file, and takes every path it
+took before).
 
 Then Global Constraint 19. Expected: PASS at 0 warnings.
 
@@ -3281,10 +3635,13 @@ feat(engine): the alias pre-pass joins one item held under two ids (two desktops
 Every sync builds the alias map from the journal's create records and
 saves it when it changes. A desktop holding only a loser re-identifies it
 to the lowest id; one holding both files merges the loser's history into
-the winner file and archives it. Foreign records are reconciled under the
-group's winner, a newly found group in full, so doubles made before this
-shipped are joined at the first sync after it. detect_external reads a
-group as one note, so a re-identification fabricates no external edit.
+the winner file and archives it, filing one card for a field set on both.
+An archived copy never absorbs a live one: the live copy survives under
+the lowest id, and an archived winner file takes its old id (S-9).
+Foreign records are reconciled under the group's winner, a newly found
+group in full, so doubles made before this shipped are joined at the
+first sync after it. detect_external reads each note's own history across
+its re-identifications, so none fabricates an external edit.
 
 (the two trailers of Global Constraint 17)
 ```
@@ -3294,19 +3651,437 @@ then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -
 
 ---
 
+### Task 7b: Another desktop's `create`, and a withheld value, never supply a value here (review I1, F-1; spec D1, D5 (a), §6.1 (i))
+
+The controller's ruling on review I1 and the finding F-1, one task: another desktop's `create` record
+never supplies a value for a note this desktop created itself — in `passes::detect_external`, in
+`sync::apply`'s `resolve`, and in the pre-pass's merge — and a value a sync card withholds is not what the
+note is expected to hold (R-TD1-18 (a), (b)). `verify_tail`, the one other reader of "the latest
+record's value", reads `set` records only and re-applies one only where the note still shows its `old`;
+a withheld `set`'s `old` is never the note's value (a note that still held it would have taken the
+`set` cleanly), so it needs nothing.
+
+**Files:**
+- Modify: `engine/src/journal.rs` — two new functions after `latest_by_field` (`:190`), and one test.
+- Modify: `engine/src/sync.rs` — step 4's `mine` and `merge_into_winner`'s upstream.
+- Modify: `engine/src/passes.rs` — `Lineage` (Task 7) learns the notes this desktop created; a new
+  `expected_here`; `detect_external`; one test.
+- Modify: `engine/tests/sync_contract.rs` — one helper (`state_after_i`) and three tests.
+
+**Interfaces:**
+- Consumes: Task 7's `Lineage`, `load_index_with`, `under_id`, `merge_into_winner` and `rank_passes`
+  (a test helper); `journal::latest_by_field`.
+- Produces: `journal::created_here`, `journal::without_foreign_creates` (*Interfaces this plan
+  produces*); private to `passes.rs`, `fn expected_here(history: &[Record], note_id: &str, field: &str,
+  current: &Value, this_device: &str) -> Value` and `Lineage::relabel` (Task 7's `read`, renamed).
+
+- [ ] **Step 1: Write the failing tests — the F-1 probe first**
+
+Append to `engine/tests/sync_contract.rs`:
+
+```rust
+/// Test (i)'s end state (Task 2), replayed: x on both desktops under one id, A's `importance` 5, B's
+/// later 2, A's revised title, and one exchange each way — so A holds B's 2 withheld behind one card.
+fn state_after_i(tag: &str) -> (PathBuf, PathBuf, Journal, Journal, Cursor, Cursor) {
+    let (a, b) = (desk(&format!("{tag}-a")), desk(&format!("{tag}-b")));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let rel = "tasks/cs-100-hw-07.md";
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    fetch(&b, &mut jb, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+    edit(&a, rel, &mut ja, &[("importance", "5")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    edit(&b, rel, &mut jb, &[("importance", "2")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07 (revised)")]);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+    (a, b, ja, jb, ca, cb)
+}
+
+/// Review F-1 (R-TD1-18 (b)), proved first: test (i) ends with B's `importance` 2 withheld on A behind
+/// a card. A's next `rank` must not read that withheld record as what A's note should hold: it would
+/// journal A's own 5 as a `quinn`/`external` edit, which travels, applies cleanly on B ("upstream never
+/// moved") and silently replaces the student's later 2 there, while A's card goes on offering a value
+/// neither desktop holds. So after `rank` on A and one more exchange, B still holds 2, A still 5, and
+/// the one card still offers 5 → 2.
+#[test]
+fn td1_i_the_next_rank_invents_no_edit_from_a_withheld_value_and_b_keeps_its_own() {
+    let (a, b, mut ja, mut jb, mut ca, _cb) = state_after_i("f1");
+    let rel = "tasks/cs-100-hw-07.md";
+    let log = rank_passes(&a, &mut ja);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    assert_eq!(int_at(&b, rel, "importance"), Some(2), "B keeps the student's later value; A's rank said {log:?}");
+    assert!(log.iter().all(|l| !l.starts_with("external")), "{log:?}");
+    assert_eq!(int_at(&a, rel, "importance"), Some(5));
+    let cards = sync_cards(&a);
+    assert_eq!(cards.len(), 1);
+    let offer = knowlu_engine::yaml::to_json(knowlu_engine::yaml::get(&cards[0], "changes").expect("changes"));
+    assert_eq!(offer["importance"], serde_json::json!({"from": 5, "to": 2}));
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+```
+
+Then the two I1 tests, after it:
+
+```rust
+/// Review I1 (a) (R-TD1-18 (a)): both desktops imported x, and each holds the other's `create` for it
+/// (D5 (a) journals it and writes no file). Test (ii)'s titles differ per desktop and B imported last,
+/// so without the rule A's `rank` read B's `create` as what A's note should hold and journalled A's own
+/// title as a `quinn`/`external` edit — which travels, applies on B and locks the field on both.
+#[test]
+fn td1_ii_rank_reads_no_edit_into_the_other_desktops_create_on_either_side() {
+    let (a, b) = (desk("ii-rank-a"), desk("ii-rank-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    fetch(&b, &mut jb, &[item("comp-100-hw-07", "COMP 100 HW 07")]);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    for (dir, journal, who) in [(&a, &mut ja, "A"), (&b, &mut jb, "B")] {
+        let log = rank_passes(dir, journal);
+        assert!(log.iter().all(|l| !l.starts_with("external")), "{who}: {log:?}");
+    }
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// Review I1 (b) (R-TD1-18 (a)): B's `create` for x reached A on an earlier page than B's edit, while A
+/// held its own judged value. It was then the latest record for `importance` in A's own history — a
+/// value A's note never held — so `reconcile::resolve` fell to the file-mtime stand-in, and one
+/// unrelated write on A let A's older value beat B's later edit with no card: R1's silent loss
+/// (`a_later_foreign_write_never_loses_to_an_unrelated_local_mtime_bump`), back for every item two
+/// desktops both import. Now B's later edit is one card on A.
+#[test]
+fn td1_i_a_later_edit_on_b_is_one_card_on_a_even_after_an_unrelated_write_there() {
+    let (a, b) = (desk("i-mtime-a"), desk("i-mtime-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let mut cb = Cursor::default();
+    let rel = "tasks/cs-100-hw-07.md";
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    edit(&a, rel, &mut ja, &[("importance", "4")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    fetch(&b, &mut jb, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja); // B's `create`, on an earlier page than B's edit
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    edit(&b, rel, &mut jb, &[("importance", "2")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    edit(&a, rel, &mut ja, &[("effort_hours", "3.0")]); // unrelated: A's file mtime passes B's edit
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let ra = deliver(&a, &page, &mut ja);
+    assert_eq!(ra.cards, 1, "B's later edit is offered, not silently lost: {ra:?}");
+    let cards = sync_cards(&a);
+    let offer = knowlu_engine::yaml::to_json(knowlu_engine::yaml::get(&cards[0], "changes").expect("changes"));
+    assert_eq!(offer["importance"], serde_json::json!({"from": 4, "to": 2}));
+    assert_eq!(int_at(&a, rel, "importance"), Some(4), "withheld until the student answers");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract -- td1_i_the_next_rank td1_ii_rank td1_i_a_later_edit`
+Expected: FAIL, all three. The F-1 probe: `B keeps the student's later value` — left `Some(5)`, right
+`Some(2)`, and A's `rank` logged `external edit importance on tasks/cs-100-hw-07.md`: B's value is
+silently replaced today. (ii): A logs `external edit title on tasks/cs-100-hw-07.md`. The mtime test:
+`ra.cards` is 0 — A's 4 won against the mtime stand-in, leaving only a supersede record.
+
+- [ ] **Step 3: The rule, in `journal.rs`**
+
+Write the test first, in `engine/src/journal.rs::mod tests`:
+
+```rust
+    /// R-TD1-18 (a): another desktop's `create` for an id this desktop created a note under is dropped;
+    /// one for an id with no `create` made here (a note that arrived as a pulled text) stays, and so
+    /// does every other record.
+    #[test]
+    fn without_foreign_creates_drops_only_another_desktops_create_of_a_note_made_here() {
+        let rec = |op: &str, id: &str, device: &str| {
+            let mut spec = NewRecord::new(op, "tasks/x.md", "agent:coursework", "local-runner");
+            spec.id = Some(id);
+            spec.device = Some(device.to_string());
+            if op == "set" {
+                spec.field = Some("importance");
+            }
+            make_record(spec).unwrap()
+        };
+        let records = vec![
+            rec("create", "task_00000000a1", "Here"),
+            rec("create", "task_00000000a1", "There"),
+            rec("set", "task_00000000a1", "There"),
+            rec("create", "task_00000000b2", "There"),
+        ];
+        let own = created_here(&records, "Here");
+        assert_eq!(own, std::collections::BTreeSet::from(["task_00000000a1".to_string()]));
+        let s = |r: &Record, k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let kept: Vec<(String, String, String)> =
+            without_foreign_creates(records, &own, "Here").iter().map(|r| (s(r, "op"), s(r, "id"), s(r, "device"))).collect();
+        let want = |op: &str, id: &str, device: &str| (op.to_string(), id.to_string(), device.to_string());
+        assert_eq!(kept, vec![want("create", "task_00000000a1", "Here"), want("set", "task_00000000a1", "There"), want("create", "task_00000000b2", "There")]);
+    }
+```
+
+Run `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --lib -- journal::tests::without_foreign_creates`:
+FAIL to compile (`created_here` and `without_foreign_creates` do not exist). Then, after
+`latest_by_field`:
+
+```rust
+/// Two-desktop design D1 with D5 (a) (plan 1, fix round 1: review I1; R-TD1-18 (a)): the ids of every
+/// `create` this desktop made among `records` — the notes it created itself. Read the records under the
+/// ids their notes hold first (`sync`'s `under_id`, `passes`'s `Lineage`), so a note the alias pre-pass
+/// re-identified still counts as made here.
+pub fn created_here(records: &[Record], this_device: &str) -> std::collections::BTreeSet<String> {
+    records
+        .iter()
+        .filter(|r| {
+            r.get("op").and_then(Value::as_str) == Some("create")
+                && r.get("device").and_then(Value::as_str) == Some(this_device)
+        })
+        .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// R-TD1-18 (a): `records` without another desktop's `create` for any id in `own` ([`created_here`]).
+/// D1 makes two desktops that import one item both `create` it, and D5 (a) journals the other one here
+/// without writing its text, so its values never reached this desktop's note — yet [`latest_by_field`]
+/// expands it into a value for every field, dated whenever the other desktop fetched. Every reader of
+/// "the latest record's value" drops it for a note made here, whatever the two records' order; for a
+/// note that arrived as a pulled text (no `create` made here) it is the note's own history and stays.
+pub fn without_foreign_creates(
+    records: Vec<Record>,
+    own: &std::collections::BTreeSet<String>,
+    this_device: &str,
+) -> Vec<Record> {
+    records
+        .into_iter()
+        .filter(|r| {
+            !(r.get("op").and_then(Value::as_str) == Some("create")
+                && r.get("device").and_then(Value::as_str) != Some(this_device)
+                && r.get("id").and_then(Value::as_str).is_some_and(|id| own.contains(id)))
+        })
+        .collect()
+}
+```
+
+Run the same filter: PASS.
+
+- [ ] **Step 4: `apply` and the merge read no other desktop's `create` of a note made here**
+
+In `engine/src/sync.rs`, step 4's `resolve` call (as Task 7's Step 7 left it) becomes:
+
+```rust
+        // R-TD1-18 (a) (review I1): another desktop's `create` for a note this desktop made itself never
+        // supplies the upstream value — D5 (a) journalled it without writing its text. Left in, it was the
+        // latest record for every field it carried, `resolve` fell to the file-mtime stand-in, and one
+        // unrelated local write let an older value beat the other desktop's later edit with no card.
+        let mine = under_id(&mine, id);
+        let own = crate::journal::created_here(&mine, &this_device);
+        let mine = crate::journal::without_foreign_creates(mine, &own, &this_device);
+        let resolution = crate::reconcile::resolve(
+            &meta,
+            &mine,
+            &under_id(foreign, id),
+            &mtime_ts(&file),
+            Some(id),
+            &path,
+            ctx.via.as_str(),
+        );
+```
+
+and in `merge_into_winner`, its `resolve` call becomes:
+
+```rust
+    // R-TD1-18 (a): the winner file's own history, without another desktop's `create` of it when it was
+    // made here.
+    let upstream = under_id(&upstream, winner);
+    let own = crate::journal::created_here(&upstream, this_device);
+    let upstream = crate::journal::without_foreign_creates(upstream, &own, this_device);
+    let resolution = crate::reconcile::resolve(
+        &meta,
+        &upstream,
+        &under_id(&theirs, winner),
+        &mtime_ts(&file),
+        Some(winner),
+        winner_rel,
+        ctx.via.as_str(),
+    );
+```
+
+Run the Step 2 filter: `td1_i_a_later_edit…` PASSES; the other two still FAIL (they are `rank`'s).
+
+- [ ] **Step 5: `detect_external` reads what took effect here**
+
+Write the test first, in `engine/src/passes.rs::mod tests` after `detect_external_reads_an_alias_group_as_one_note`
+— R-TD1-18's own test in the order it leaves out (review I1):
+
+```rust
+    /// R-TD1-18 (a), in the order the test above leaves out: the other desktop's `create` for the
+    /// winner is dated AFTER everything this desktop wrote. It never reached this note — D5 (a) journals
+    /// it and writes no text — so it supplies no value, whatever its date.
+    #[test]
+    fn detect_external_never_reads_another_desktops_create_of_a_note_made_here() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (vault, mut journal) = make_vault("theirs-later");
+        let loser = note_id(&vault, "tasks/a.md");
+        let winner = "task_0000000001";
+        write(&vault, "tasks/a.md", &[("importance".into(), Yaml::from(5))], &ctx(), &mut journal, &WriteOpts::default()).unwrap();
+        crate::write::write_literals(&vault, "tasks/a.md", &[("id".to_string(), winner.to_string())],
+            &WriteContext::new(crate::sync::ACTOR, "local-runner"), &mut journal, &WriteOpts::default()).unwrap();
+        // The other desktop's create for the winner, pulled only now, stamped after all of it.
+        let mut spec = NewRecord::new("create", "tasks/theirs.md", "agent:coursework.zybooks", "local-runner");
+        spec.id = Some(winner);
+        spec.new = serde_json::json!({"title": "A (theirs)", "progress": 0, "importance": 3, "id": winner});
+        spec.device = Some("DeskA".to_string());
+        journal.append(&mut make_record(spec).unwrap()).unwrap();
+        crate::ids::save_aliases(&vault, &BTreeMap::from([(loser.clone(), winner.to_string())])).unwrap();
+        let log = detect_external(&vault, &mut journal, &ctx());
+        assert!(log.iter().all(|l| !l.starts_with("external")), "{log:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+```
+
+Run `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --lib -- passes::tests::detect_external_never_reads`:
+FAIL — `external edit importance on tasks/a.md` and `external edit title on tasks/a.md`.
+
+Then, in `engine/src/passes.rs`:
+- `Lineage` gains two fields, after `held`:
+
+```rust
+    /// R-TD1-18 (a): this desktop's name, and the ids (as read) of every note it created itself.
+    this_device: String,
+    own: std::collections::BTreeSet<String>,
+```
+
+- `Lineage::build`'s last line, `Lineage { renames, aliases, held }`, becomes:
+
+```rust
+        let mut lineage = Lineage { renames, aliases, held, this_device: crate::journal::device_name(), own: Default::default() };
+        let all = lineage.relabel(journal.read(None, None));
+        lineage.own = crate::journal::created_here(&all, &lineage.this_device);
+        lineage
+```
+
+- `Lineage::read` is renamed `relabel` (its body and doc kept), and a new `read` follows it:
+
+```rust
+    /// `records` as this desktop reads a note's history: each under the id it is read under, and
+    /// without another desktop's `create` of a note made here (R-TD1-18 (a)).
+    fn read(&self, records: Vec<Record>) -> Vec<Record> {
+        crate::journal::without_foreign_creates(self.relabel(records), &self.own, &self.this_device)
+    }
+```
+
+- After `passes.rs`'s own `fn mtime_ts(path: &Path) -> String`:
+
+```rust
+/// R-TD1-18 (b) (plan 1, fix round 1: review F-1): the value this note is expected to hold for `field` —
+/// the latest record of it that took effect here, in `history` as [`Lineage::read`] reads the journal.
+/// A `set` another desktop made whose `new` the note does not hold never did: `sync::apply` withheld it
+/// behind a sync card (R1, re-review round 3, is the same rule in `apply`'s step 4). It is passed over,
+/// so the value before it is expected, and the student's unanswered card is never restated as their own
+/// external edit.
+fn expected_here(history: &[Record], note_id: &str, field: &str, current: &Value, this_device: &str) -> Value {
+    let took_effect: Vec<Record> = history
+        .iter()
+        .filter(|r| str_of(r, "id").as_deref() == Some(note_id))
+        .filter(|r| {
+            !(str_of(r, "op").as_deref() == Some("set")
+                && str_of(r, "field").as_deref() == Some(field)
+                && str_of(r, "device").as_deref() != Some(this_device)
+                && value_of(r, "new") != *current)
+        })
+        .cloned()
+        .collect();
+    latest_by_field(&took_effect)
+        .get(&(note_id.to_string(), field.to_string()))
+        .map(|r| value_of(r, "new"))
+        .unwrap_or(Value::Null)
+}
+```
+
+- In `detect_external`, after `let mut index = load_index_with(vault, journal, &lineage);` add
+  `let history = lineage.read(records);`, and in the field loop replace
+  `if current == prior { continue; }` with:
+
+```rust
+            if current == prior {
+                continue;
+            }
+            // R-TD1-18 (b) (review F-1): the value this note is expected to hold is the latest one that
+            // took effect here, so a value a sync card withholds is never restated as the student's own
+            // edit — which would travel, apply cleanly on the other desktop and replace its value there.
+            let expected = expected_here(&history, &note_id, &field, &current, &lineage.this_device);
+            if expected == current {
+                known.insert(field.clone(), current);
+                continue;
+            }
+```
+
+  and, below it, `spec.old = prior;` becomes `spec.old = expected;` — a real external edit's `old` is
+  the value the note held here, never a withheld one.
+
+Run the `passes::` tests: PASS, both new ones included (every earlier test's `old` is unchanged: with no
+withheld value, `expected` is `prior`).
+
+- [ ] **Step 6: Run the sync suites, then the whole suite**
+
+Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract --test sync_replay`
+Expected: PASS — the three new tests and every existing one. Then Global Constraint 19: PASS at 0
+warnings, `oracle.rs` and `surface_oracle.rs` included (their fixtures' journals hold one device's
+records, so nothing is dropped, and nothing is withheld).
+
+- [ ] **Step 7: Commit**
+
+Message file `.superpowers\sdd\msg-task-7b.txt`:
+
+```
+fix(engine): another desktop's create, and a withheld value, supply no value here (two desktops, D1/D5 a)
+
+Two desktops that import one item both create it, and D5 (a) journals
+the other desktop's create without writing its text. That record no
+longer supplies a value for a note made here - not to rank's
+detect_external, not to sync's resolve, not to the pre-pass merge - so
+the next rank fabricates no external edit and an unrelated local write
+no longer lets an older value beat the other desktop's later edit. And
+a value a sync card withholds is no longer read as the student's own
+edit, which travelled and replaced the other desktop's value (F-1).
+
+(the two trailers of Global Constraint 17)
+```
+
+`git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop add engine/src/journal.rs engine/src/sync.rs engine/src/passes.rs engine/tests/sync_contract.rs`
+then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -F C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\.superpowers\sdd\msg-task-7b.txt`
+
+---
+
 ### Task 8: Restore keeps one file per id (spec §2.5 (c), §6.1 (vi); D5)
 
 **Files:**
-- Modify: `engine/src/sync.rs` — `Touched` (`:1209-1283`: a new `undo`), `RestoreState` (`:1291-1303`: a
-  new `written_ids`), `materialise`'s live loop (`:1025-1071`).
-- Modify: `engine/tests/sync_contract.rs` — one test.
+- Modify: `engine/src/sync.rs` — `Touched` (`:1209-1283`: a new `undo`), `RestoreState` (`:1291-1303`:
+  new `written_ids` and `undone`), `materialise`'s live loop (`:1025-1071`), `restore_all`'s tail
+  (`:1398-1401`).
+- Modify: `engine/tests/sync_contract.rs` — two tests.
 
 **Interfaces:**
 - Consumes: `note_frontmatter_id` (`sync.rs:1608`), `restore_all` (`:1350`).
 - Produces (private): `Touched::undo(&mut self, path: &Path)`; `RestoreState::written_ids:
-  std::collections::BTreeMap<String, String>` (id → the path this restore wrote it at).
+  std::collections::BTreeMap<String, String>` (id → the path this restore wrote it at);
+  `RestoreState::undone: std::collections::BTreeSet<String>` (every path a later row undid, R-TD1-12).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `engine/tests/sync_contract.rs`:
 
@@ -3344,12 +4119,48 @@ fn td1_vi_a_restore_given_two_rows_for_one_id_writes_one_file_from_the_highest_r
     let _ = server.requests();
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+/// R-TD1-12 (review I3): the same two rows on two pages — the likely case at 500 rows a page, since the
+/// two rows' `rev`s are usually far apart. `restore_all` folds page 1 into the cursor before page 2
+/// undoes the earlier path, so the path is taken out of the cursor after the loop, and the first push
+/// still tombstones neither row.
+#[test]
+fn td1_vi_two_rows_for_one_id_on_two_pages_leave_no_tombstone_behind() {
+    let dest = desk("vi-two-pages");
+    let body = |title: &str| {
+        format!("---\ntitle: \"{title}\"\ncreated_by: zybooks\nsource_uid: \"zybooks:77\"\nid: task_d0fd865fb3\n---\n\nbody\n")
+    };
+    let first = pull_reply(vec![], vec![
+        serde_json::json!({"rev": 5, "device": "0123456789abcdef", "path": "tasks/cs-100-hw-07.md", "deleted": false, "body": body("CS 100 HW 07")}),
+    ], 5)
+    .replace("\"more\": false", "\"more\": true");
+    let second = pull_reply(vec![], vec![
+        serde_json::json!({"rev": 9, "device": "fedcba9876543210", "path": "tasks/comp-100-hw-07.md", "deleted": false, "body": body("COMP 100 HW 07")}),
+    ], 9);
+    let mut server = loopback(vec![(200, first), (200, second)]);
+    let cloud = cfg(&server.base);
+    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
+    let restored = sync::restore_all(&dest, &client, &[]).expect("the restore");
+    assert!(!dest.join("tasks").join("cs-100-hw-07.md").exists(), "the earlier row is not kept");
+    assert!(
+        restored.warnings.contains(&"restore: tasks/cs-100-hw-07.md and tasks/comp-100-hw-07.md are both task_d0fd865fb3; the later row is kept".to_string()),
+        "{:?}", restored.warnings
+    );
+    let cursor = sync::load_cursor(&dest);
+    assert!(!cursor.notes.contains_key("tasks/cs-100-hw-07.md"), "page 1 folded it in; the loop's end takes it out: {:?}", cursor.notes);
+    let (batch, _) = sync::build_push(&dest, &cursor, "acct-1", &mut Journal::new(&dest));
+    assert!(batch.notes.is_empty(), "no tombstone for either row: {:?}", batch.notes);
+    assert_eq!(server.requests().len(), 2, "two pages");
+    let _ = std::fs::remove_dir_all(&dest);
+}
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+- [ ] **Step 2: Run them to see them fail**
 
 Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract -- td1_vi`
-Expected: FAIL — both rows are written, one id on two files.
+Expected: FAIL — both rows are written, one id on two files. (Against Step 4 without its `undone` lines,
+the two-page test alone still fails: page 1's fold left `tasks/cs-100-hw-07.md` in the cursor, and the
+first push tombstones it.)
 
 - [ ] **Step 3: `Touched` can undo one path**
 
@@ -3379,6 +4190,9 @@ Add to `RestoreState` (`:1291-1303`), after `confirmed_records`:
     /// Two-desktop design D5 (c): the id of every live note this restore wrote, and where — so a later
     /// row for the same id replaces it rather than becoming a second file.
     written_ids: std::collections::BTreeMap<String, String>,
+    /// R-TD1-12 (review I3): every path a later row undid, and no row wrote again since — taken out of
+    /// the cursor after the page loop, since an earlier page's fold may already have put it there.
+    undone: std::collections::BTreeSet<String>,
 ```
 
 - [ ] **Step 4: `materialise` keeps one file per id**
@@ -3397,6 +4211,7 @@ In `materialise`'s live loop, after the foreign-sync-card refusal (`:1031-1038`)
                 if earlier != note.path {
                     state.touched.undo(&dest.join(&earlier));
                     state.written_notes.remove(&earlier);
+                    state.undone.insert(earlier.clone());
                     out.warnings.push(format!(
                         "restore: {earlier} and {} are both {id}; the later row is kept",
                         note.path
@@ -3412,16 +4227,30 @@ and in the write's `Ok(()) => { … }` arm (`:1055-1068`), after `state.pending_
                 if let Some(id) = &text_id {
                     state.written_ids.insert(id.clone(), note.path.clone());
                 }
+                // A path written again after an undo (another note's row) is live once more.
+                state.undone.remove(&note.path);
 ```
 
 (`Restored::notes` keeps counting writes performed; the undone one is not subtracted — nothing reads the
 count for anything but a sentence, and `empty` is unaffected because the later row was written.)
 
+In `restore_all`, after the loop, beside the tombstones' removal from the cursor (`:1398-1401`, the
+`for rel in &state.pending_tombstones { cursor.notes.remove(rel); }` loop), add:
+
+```rust
+    // R-TD1-12 (review I3): `fold_confirmed` ran after every page, so a path an earlier page wrote and a
+    // later page undid is already in the cursor. Taken out here, the first push sends no tombstone for
+    // it — which would archive the other desktop's live copy.
+    for rel in &state.undone {
+        cursor.notes.remove(rel);
+    }
+```
+
 - [ ] **Step 5: Run the sync suites, then the whole suite**
 
 Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract --test sync_replay`
-Expected: PASS — `td1_vi…` and every restore test in `sync_replay.rs` (their fixtures carry one path per
-id, and a seed overwritten by the account's copy at its own path is unchanged).
+Expected: PASS — both `td1_vi…` tests and every restore test in `sync_replay.rs` (their fixtures carry one
+path per id, and a seed overwritten by the account's copy at its own path is unchanged).
 
 Then Global Constraint 19. Expected: PASS at 0 warnings.
 
@@ -3435,8 +4264,9 @@ feat(engine): a restore keeps one file per id (two desktops, D5 c)
 When the account holds two text rows for one id - one item at two paths,
 the backstop case D4 accepts - a restore writes one file, from the later
 row, and puts the earlier path back as it was before the restore. The
-earlier path never enters the cursor, so the first push sends no
-tombstone that would archive the other desktop's live copy.
+earlier path leaves the cursor, even when an earlier page's fold had put
+it there, so the first push sends no tombstone that would archive the
+other desktop's live copy.
 
 (the two trailers of Global Constraint 17)
 ```
@@ -3722,19 +4552,23 @@ then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -
 **Files:**
 - Create: `cloud/supabase/functions/judge-event/handler.ts`, `cloud/supabase/functions/judge-event/handler_test.ts`.
 - Modify: `cloud/supabase/functions/judge-event/index.ts` (the whole file, 10 lines).
-- Modify: `engine/src/sync.rs` — `Cursor` (`:213-233`: a new field), `Totals` (`:2347-2361`: a new
-  field), `run_lines_with` (`:2520-2521`), `run_lines_with_client` (`:2588-2592`), and a new
-  `pull_event_verdicts` with a private `query_value`, after `pull` (`:886-890`).
+- Modify: `engine/src/sync.rs` — `Cursor` (`:213-233`: a new field), and a new `pull_event_verdicts`
+  with a private `query_value`, after `pull` (`:886-890`). `Totals`, `run_lines_with` and
+  `run_lines_with_client` are not touched: the pull is not `sync`'s (S-8, R-TD1-4).
+- Modify: `engine/src/enrich.rs` — `run_lines_with`'s cloud arm, after the events pass (`:423-430`), and
+  one test, `the_events_pass_runs_after_an_empty_enrichment_batch_and_the_verdict_reaches_the_ledger`
+  (`:1674-1737`).
 - Modify: `engine/tests/sync_contract.rs` — five tests.
 - Hand-off: **H4** (`CLAUDE.md`), applied by the controller at Step 9.
 
 **Interfaces:**
 - Consumes: `_shared/judge_handler.ts::judgeHandler` and `type Entitle`; `_shared/judge_db.ts::Db`;
   `_shared/judge_deps.ts::liveDeps`, `sharedDb`; `eventledger::{load_ledger, record_verdict,
-  VALID_VERDICTS}`; `eventroster::read_roster`; `cli::local_now`.
+  VALID_VERDICTS}`; `eventroster::read_roster`; `cli::local_now`; `sync::RunLock` (private, `:283-305`);
+  `cloudmodel::CALL_TIMEOUT`.
 - Produces: `GET /judge-event` (contract in *Interfaces this plan produces*), `export const VERDICT_PAGE = 500`,
   `export function parseAfter`, `export async function readVerdicts`, `export function judgeEventHandler(entitle, deps, db)`;
-  `sync::Cursor::verdicts_after`, `sync::Totals::offline`, `sync::pull_event_verdicts`.
+  `sync::Cursor::verdicts_after`, `sync::pull_event_verdicts` (Plan 3 calls it too).
 
 **No migration** (R-TD1-14): `judgments` already has RLS on with no policy (C2's rule: the service role
 is the only reader, and every query names the account — `_shared/judge_db_test.ts`'s scan walks every
@@ -3890,8 +4724,9 @@ Create `cloud/supabase/functions/judge-event/handler.ts`:
 // Two routes on one function. `POST` is the judgment, unchanged: the shared `judgeHandler`, origin
 // "events". `GET` is new (two-desktop design D8, §2.8): the account's own `answered` event verdicts
 // after a cursor — the verdict WORD only; `judgments.fields` keeps no reason by design (`fieldsOf`,
-// `_shared/judge_pipeline.ts`) — so every desktop's `sync` can fill its own event ledger, and a desktop
-// that newly holds the `feeds` turn judges only what no desktop has judged. `judgments` has RLS on and no
+// `_shared/judge_pipeline.ts`) — so every desktop can fill its own event ledger (the device pulls them
+// right after its events pass), and a desktop that newly holds the `feeds` turn judges only what no
+// desktop has judged. `judgments` has RLS on and no
 // policy: the service role is its one reader, and every select below names the account, which
 // `_shared/judge_db_test.ts`'s scan enforces.
 import { type Entitle, judgeHandler } from "../_shared/judge_handler.ts";
@@ -3997,8 +4832,8 @@ Replace `cloud/supabase/functions/judge-event/index.ts` whole with:
 //
 // `origin: "events"`, so a judgment made for the events pass is distinguishable in `judgments`
 // from one made for a task — which is what the eval's per-kind metrics and the correction-rate
-// dashboards key on. `GET` reads the account's event verdicts back for every desktop's sync
-// (two-desktop design D8; `handler.ts`).
+// dashboards key on. `GET` reads the account's event verdicts back for every desktop (two-desktop
+// design D8; `handler.ts`).
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { judgeEventHandler } from "./handler.ts";
@@ -4028,6 +4863,7 @@ const JUDGED_AT: &str = "2026-09-25T12:00:00.123456+00:00";
 const ROW_1: &str = "0f0e0d0c-0b0a-4908-8706-050403020101";
 const ROW_2: &str = "0f0e0d0c-0b0a-4908-8706-050403020102";
 const ROW_3: &str = "0f0e0d0c-0b0a-4908-8706-050403020103";
+const ROW_4: &str = "0f0e0d0c-0b0a-4908-8706-050403020104";
 
 fn verdicts_reply(rows: serde_json::Value, more: bool) -> (u16, String) {
     (200, knowlu_engine::ledger::dumps_value(&serde_json::json!({ "verdicts": rows, "more": more })))
@@ -4039,7 +4875,8 @@ fn ledger_text(dir: &Path) -> String {
 
 /// §6.1 and D8: a pulled verdict fills a missing ledger line with the word only — no `why`, no
 /// `strength` — titled from the roster `rank` last wrote, else `(untitled)`. A word the ledger does not
-/// know is skipped, and the cursor still passes it.
+/// know is skipped, and the cursor still passes it. Two rows for one uid in a page: the last one wins
+/// (review I6) — a verdict re-judged after its line was deleted supersedes the older one.
 #[test]
 fn td1_d8_a_pulled_verdict_fills_a_missing_line_with_the_word_only() {
     let dir = desk("d8-fill");
@@ -4053,6 +4890,7 @@ fn td1_d8_a_pulled_verdict_fills_a_missing_line_with_the_word_only() {
             {"item_id": "ics:fair", "verdict": "opportunity", "judged_at": JUDGED_AT, "id": ROW_1},
             {"item_id": "ics:quiet", "verdict": "drop", "judged_at": JUDGED_AT, "id": ROW_2},
             {"item_id": "ics:odd", "verdict": "maybe", "judged_at": JUDGED_AT, "id": ROW_3},
+            {"item_id": "ics:quiet", "verdict": "obligation", "judged_at": JUDGED_AT, "id": ROW_4},
         ]),
         false,
     )]);
@@ -4061,13 +4899,15 @@ fn td1_d8_a_pulled_verdict_fills_a_missing_line_with_the_word_only() {
     assert_eq!(lines, vec!["event verdicts: 2 added from the account".to_string()]);
     let ledger = knowlu_engine::eventledger::load_ledger(&dir, None);
     assert_eq!(ledger["ics:fair"].verdict.as_deref(), Some("opportunity"));
+    assert_eq!(ledger["ics:quiet"].verdict.as_deref(), Some("obligation"), "the last row for a uid wins");
     assert_eq!((ledger["ics:fair"].why.as_str(), ledger["ics:fair"].strength.as_str()), ("", ""), "no reason comes down");
     assert!(!ledger.contains_key("ics:odd"), "an unknown word is not a verdict");
     let text = ledger_text(&dir);
     assert!(text.contains("- ics:fair · Career Fair · verdict:opportunity · first seen "), "{text}");
-    assert!(text.contains("- ics:quiet · (untitled) · verdict:drop · first seen "), "{text}");
+    assert!(text.contains("- ics:quiet · (untitled) · verdict:obligation · first seen "), "{text}");
+    assert!(!text.contains("verdict:drop"), "one line per uid, the page's last: {text}");
     assert!(!text.contains("why:") && !text.contains("strength:"), "{text}");
-    assert_eq!(sync::load_cursor(&dir).verdicts_after, format!("{JUDGED_AT},{ROW_3}"));
+    assert_eq!(sync::load_cursor(&dir).verdicts_after, format!("{JUDGED_AT},{ROW_4}"));
     let sent = server.requests();
     assert!(sent[0].starts_with("GET /functions/v1/judge-event HTTP/1.1"), "from the start: {}", sent[0]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -4113,7 +4953,7 @@ fn td1_d8_the_cursor_pages_past_a_judged_at_tie_and_a_deleted_line_stays_deleted
         sync::pull_event_verdicts(&dir, &client),
         vec![
             "event verdicts: 2 added from the account".to_string(),
-            "event verdicts: more to come — the next sync continues".to_string(),
+            "event verdicts: more to come — the next pull continues".to_string(),
         ]
     );
     let path = dir.join("state").join("events-seen.md");
@@ -4146,26 +4986,30 @@ fn td1_d8_a_verdict_read_the_service_refuses_is_a_named_line() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// R-TD1-4: a pull that met a transport failure says so in `Totals`, so the wrapper skips the verdict
-/// read as it skips the push.
+/// R-TD1-4: the pull rewrites the cursor file `sync` owns, so while a sync holds `state/sync.lock` — the
+/// console's *Sync now*, in-process beside a slot's `judge` child — it reads nothing and says so, and the
+/// next pull continues from the same cursor.
 #[test]
-fn td1_d8_an_offline_pull_is_marked_offline() {
-    let dir = fixture("td1-offline");
-    let cloud = cfg("http://127.0.0.1:9/functions/v1");
-    let client = CloudClient::new(&cloud, "jwt-not-a-secret");
-    let (_, totals) = sync::run_lines_with_client(
-        &dir, sync::Direction::Pull, "cli", None, &client, &cloud, Vec::new(), sync::Totals::default(),
-    );
-    assert!(totals.offline, "{totals:?}");
+fn td1_d8_a_running_sync_holds_the_pull_back() {
+    let dir = desk("d8-locked");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(dir.join(sync::RUN_LOCK_FILE))
+        .expect("the lock file");
+    lock.try_lock().expect("this test holds the run lock");
+    let lines = sync::pull_event_verdicts(&dir, &CloudClient::new(&cfg("http://127.0.0.1:9/functions/v1"), "jwt-not-a-secret"));
+    assert_eq!(lines, vec!["event verdicts: skipped (a sync is running; the next pull continues)".to_string()]);
+    assert!(sync::load_cursor(&dir).verdicts_after.is_empty(), "nothing read, nothing moved");
+    drop(lock);
     let _ = std::fs::remove_dir_all(&dir);
 }
 ```
 
 Run: `cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --test sync_contract -- td1_d8`
-Expected: FAIL to compile — `sync::pull_event_verdicts`, `Cursor::verdicts_after` and `Totals::offline`
-do not exist.
+Expected: FAIL to compile — `sync::pull_event_verdicts` and `Cursor::verdicts_after` do not exist.
 
-- [ ] **Step 6: The cursor field, the offline flag, and the pull**
+- [ ] **Step 6: The cursor field and the pull**
 
 In `engine/src/sync.rs`, add to `Cursor` (`:213-233`), after `withheld_ids`:
 
@@ -4175,17 +5019,6 @@ In `engine/src/sync.rs`, add to `Cursor` (`:213-233`), after `withheld_ids`:
     /// cursor pulls from the start again, which restores a line the student deleted: §2.8's named cost.
     #[serde(default)] pub verdicts_after: String,
 ```
-
-Add to `Totals` (`:2347-2361`), after `more`:
-
-```rust
-    /// The pull met a transport failure (R-TD1-4): the wrapper then skips the verdict read, as the push
-    /// half already waits for the network.
-    pub offline: bool,
-```
-
-In `run_lines_with_client`'s pull `Err(e)` arm (`:2588-2592`), after `pull_offline = e.is_transport();`
-add `totals.offline = pull_offline;`.
 
 After `pull` (`:886-890`) add:
 
@@ -4207,13 +5040,25 @@ fn query_value(value: &str) -> String {
 /// its own ledger, `state/events-seen.md`, so a desktop that newly holds the `feeds` turn judges only
 /// what no desktop has judged, and every desktop shows the same *Coming up*.
 ///
+/// **Called after the events pass** (`enrich::run_lines_with`; S-8, R-TD1-4), never by `sync` itself, so
+/// the cursor passes the rows this desktop's own pass has just written and a line the student deletes
+/// later is re-judged, not restored. Plan 3 calls it from its path for a desktop that runs no `judge`.
+/// **Takes `sync`'s run lock**: it rewrites the cursor file `sync` owns, and *Sync now* runs in-process
+/// beside a slot's `judge` child; a held lock is a named skip. So a caller must not hold it.
+///
 /// **The word only.** `GET /judge-event` returns `item_id`, `verdict`, `judged_at` and `id`, never a
 /// reason; `eventledger::record_verdict` gets an empty `why` and `strength`, so the line omits both,
-/// and the title is the one `rank` last wrote in the roster, else `(untitled)` (R-TD1-6). **Never
-/// replaces a line**: a uid whose ledger already carries a verdict is passed over. **Never restores a
-/// deleted line**: the cursor has passed that verdict. The cursor moves over every row the page
-/// carried, taken or not. One page per sync (R-TD1-5). **Lines, never an error** (R-TD1-4).
+/// and the title is the one `rank` last wrote in the roster, else `(untitled)` (R-TD1-6). **The last row
+/// for a uid in a page wins** (review I6). **Never replaces a line**: a uid whose ledger already carries
+/// a verdict is passed over. **Never restores a deleted line**: the cursor has passed that verdict. The
+/// cursor moves over every row the page carried, taken or not. One page per pull (R-TD1-5). **Lines,
+/// never an error** (R-TD1-4).
 pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient) -> Vec<String> {
+    let _lock = match RunLock::try_acquire(vault) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return vec!["event verdicts: skipped (a sync is running; the next pull continues)".to_string()],
+        Err(e) => return vec![format!("event verdicts: skipped ({e})")],
+    };
     let mut lines = Vec::new();
     let mut cursor = load_cursor(vault);
     let path = match cursor.verdicts_after.rsplit_once(',') {
@@ -4228,15 +5073,9 @@ pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient
         }
     };
     let rows = reply.get("verdicts").and_then(Value::as_array).cloned().unwrap_or_default();
-    let ledger = crate::eventledger::load_ledger(vault, None);
-    let titles: std::collections::BTreeMap<String, String> =
-        crate::eventroster::read_roster(&vault.join("state").join("events.md"))
-            .into_iter()
-            .map(|event| (event.uid, event.title))
-            .collect();
-    let today = crate::cli::local_now(vault).date();
-    let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut added = 0usize;
+    // Review I6: the page first, then the writes — the last row for a uid wins, so a verdict re-judged
+    // after its line was deleted supersedes the older one on a desktop that pulls both.
+    let mut latest: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut last: Option<String> = None;
     for row in &rows {
         let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or_default();
@@ -4248,10 +5087,20 @@ pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient
         last = Some(format!("{judged_at},{id}"));
         // The ledger's own uid characters (`eventledger::sanitize_uid`), so the line reads back.
         let readable = !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || "_.:@+-".contains(c));
-        if !readable || !crate::eventledger::VALID_VERDICTS.contains(&verdict) {
-            continue;
+        if readable && crate::eventledger::VALID_VERDICTS.contains(&verdict) {
+            latest.insert(uid.to_string(), verdict.to_string());
         }
-        if ledger.get(uid).is_some_and(|entry| entry.verdict.is_some()) || !taken.insert(uid.to_string()) {
+    }
+    let ledger = crate::eventledger::load_ledger(vault, None);
+    let titles: std::collections::BTreeMap<String, String> =
+        crate::eventroster::read_roster(&vault.join("state").join("events.md"))
+            .into_iter()
+            .map(|event| (event.uid, event.title))
+            .collect();
+    let today = crate::cli::local_now(vault).date();
+    let mut added = 0usize;
+    for (uid, verdict) in &latest {
+        if ledger.get(uid).is_some_and(|entry| entry.verdict.is_some()) {
             continue;
         }
         let title = titles.get(uid).map(String::as_str).unwrap_or("");
@@ -4270,7 +5119,7 @@ pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient
         lines.push(format!("event verdicts: {added} added from the account"));
     }
     if reply.get("more").and_then(Value::as_bool).unwrap_or(false) {
-        lines.push("event verdicts: more to come — the next sync continues".to_string());
+        lines.push("event verdicts: more to come — the next pull continues".to_string());
     }
     lines
 }
@@ -4279,25 +5128,145 @@ pub fn pull_event_verdicts(vault: &Path, client: &crate::cloudmodel::CloudClient
 (`VALID_VERDICTS` is read, never listed here, so the fourth word another branch adds — `unsure`,
 `origin/j-judgment-quality` — is taken the day it merges.)
 
-In `run_lines_with`, replace its last two lines (`:2520-2521`) with:
+Run the `td1_d8` filter from Step 5. Expected: PASS, all five.
+
+- [ ] **Step 7: `judge` pulls after its events pass**
+
+In `engine/src/enrich.rs`, first the test: replace the whole of
+`the_events_pass_runs_after_an_empty_enrichment_batch_and_the_verdict_reaches_the_ledger` (`mod tests`)
+with:
 
 ```rust
-    let (mut lines, totals) = run_lines_with_client(vault, direction, via, run_id, &client, &cfg, lines, totals);
-    // Two-desktop design D8 (R-TD1-4): after its pull, the account's event verdicts, the word only —
-    // skipped when the pull could not reach the account, and never an error.
-    if direction.pulls() && !totals.offline {
-        lines.extend(pull_event_verdicts(vault, &client));
+    /// C2 Task 9 fix 1 (R-C2-E22 #7a): the pull phase this task added had no test — every other
+    /// `enrich::` test either takes the widened early return or runs against a `vault(tag)` with
+    /// no `config/events.yaml` at all. This one gives the vault one enabled event source and an
+    /// empty enrichment queue, and proves the whole chain end to end: the probe, the feed fetched
+    /// through the server-side proxy, the verdict recorded in the ledger, and the summary line
+    /// naming the pass — with no real socket, only a loopback listener answering in order.
+    ///
+    /// Two-desktop design D8 (S-8, R-TD1-4; review I4): the account's verdicts are pulled right after
+    /// the pass, so the row this desktop's own judgment has just written is behind the cursor at once.
+    /// The pass's own line is never replaced, and once the student deletes it the next pull does not
+    /// bring it back: the next pass re-judges it instead.
+    #[test]
+    fn the_events_pass_runs_after_an_empty_enrichment_batch_and_the_verdict_reaches_the_ledger() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("events-pull");
+        // Clear the fixture's one flagged task so the enrichment queue is empty — the events pass
+        // must still run because `config/events.yaml` below names an enabled source.
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        crate::pystr::write_text(
+            &v.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        ).unwrap();
+
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
+                   DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
+                   DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let events_reply = crate::ledger::dumps_value(&serde_json::json!({ "body": ics }));
+        let judge_reply = crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
+            "tier": 3
+        }));
+        let (at, row) = ("2026-09-25T12:00:00.123456+00:00", "0f0e0d0c-0b0a-4908-8706-050403020101");
+        let own_row = crate::ledger::dumps_value(&serde_json::json!({
+            "verdicts": [{ "item_id": "ics:engage:1", "verdict": "opportunity", "judged_at": at, "id": row }],
+            "more": false
+        }));
+        // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), the
+        // verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because its
+        // own batch is empty — then the verdict pull (`GET /judge-event`), answering with the row that
+        // judgment has just written, and, since Task 12, the rule pull's own `GET /judge-rules` at the
+        // end of the cloud arm, with nothing decided and nothing offered.
+        let (base, handle) = multi_reply_loopback(vec![
+            (200, "{}".to_string()),
+            (200, events_reply),
+            (200, judge_reply),
+            (200, own_row),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let config = |api_base: String| crate::cloudmodel::CloudConfig {
+            api_base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        let client = crate::cloudmodel::CloudClient::new(&config(base), "jwt-not-a-secret");
+        let log = v.join("_log");
+        let o = opts(&log);
+        let (code, lines) = run_lines_with(&v, &o, Some(&client));
+        assert_eq!(code, 0);
+        assert!(lines.iter().any(|l| l == "judge: nothing to enrich"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("events:")), "the pass must name itself: {lines:?}");
+        let ledger = crate::eventledger::load_ledger(&v, None);
+        assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
+        assert_eq!(ledger["ics:engage:1"].why, "matches interests", "the pass's own line: a pull never replaces it");
+        assert_eq!(crate::sync::load_cursor(&v).verdicts_after, format!("{at},{row}"), "the pull passed this desktop's own row");
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 5, "{requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
+        assert!(requests[3].starts_with("GET /functions/v1/judge-event HTTP/1.1"), "the pull, after the pass: {}", requests[3]);
+        assert!(requests[4].starts_with("GET /functions/v1/judge-rules"), "{}", requests[4]);
+
+        // The student deletes the line to force a re-judge (`eventledger.rs:46-47`). The next pull asks
+        // only for what follows this desktop's own row, so the line stays gone until the next pass.
+        let path = v.join("state").join("events-seen.md");
+        let kept: String = crate::pystr::read_text(&path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("- ics:engage:1 "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        crate::pystr::write_text(&path, &kept).unwrap();
+        let (base, handle) = multi_reply_loopback(vec![(
+            200,
+            crate::ledger::dumps_value(&serde_json::json!({ "verdicts": [], "more": false })),
+        )]);
+        let lines = crate::sync::pull_event_verdicts(&v, &crate::cloudmodel::CloudClient::new(&config(base), "jwt-not-a-secret"));
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(!crate::eventledger::load_ledger(&v, None).contains_key("ics:engage:1"), "the deleted line stays deleted");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert!(
+            requests[0].starts_with("GET /functions/v1/judge-event?after=2026-09-25T12%3A00%3A00.123456%2B00%3A00,0f0e0d0c-0b0a-4908-8706-050403020101 HTTP/1.1"),
+            "{}", requests[0]
+        );
+        let _ = std::fs::remove_dir_all(&v);
     }
-    finish(vault, lines, totals)
 ```
 
-(`run_lines_with_client` is untouched in its sequence: its tests script exactly a pull and a push.)
+Run
+`cargo test --manifest-path C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\Cargo.toml -p knowlu-engine -j 2 --lib -- enrich::tests::the_events_pass_runs_after`:
+FAIL — `the pull passed this desktop's own row`: `verdicts_after` is empty, since no pull follows the
+pass (the rule pull meets the verdicts reply, and the listener gives up on its fifth after five seconds).
 
-- [ ] **Step 7: Run the device tests**
+Then, in `run_lines_with`'s cloud arm, immediately after the events pass's
+`lines.extend(crate::events::judge_roster( … ));` (`:423-430`) and before the Gmail pull:
 
-Run the `td1_d8` filter from Step 5. Expected: PASS, all five. Then
-`--test sync_contract --test sync_replay --test entitlement_gate`: PASS (the gate test's `sync` stops
-before `run_lines_with`, and every `run_lines_with_client` test is unchanged).
+```rust
+            // Two-desktop design D8, placed by S-8's ruling (R-TD1-4): the account's event verdicts,
+            // pulled HERE, right after the events pass — never in `sync`, the slot's first step, whose
+            // pull came before the pass and so could not pass the rows this desktop's own pass had just
+            // written: a line the student deleted then came back at the next pull instead of being
+            // re-judged. Only with an event source (no source, no verdict to read), and only with a
+            // call's time left — the rule `pull_rules` keeps.
+            if any_feed {
+                let verdict_budget = opts.budget.saturating_sub(arm_started.elapsed());
+                if crate::cloudmodel::CALL_TIMEOUT > verdict_budget {
+                    lines.push("event verdicts: left for the next slot".to_string());
+                } else {
+                    lines.extend(crate::sync::pull_event_verdicts(vault, client));
+                }
+            }
+```
+
+Run the same filter: PASS. Then `--test sync_contract --test sync_replay --test entitlement_gate`: PASS
+(no `sync` path changed; the gate test's `judge` stops before the cloud arm).
 
 - [ ] **Step 8: Run the whole suite and the Deno gate**
 
@@ -4319,20 +5288,22 @@ The controller applies **H4** (`CLAUDE.md`) verbatim as its own commit. An imple
 Message file `.superpowers\sdd\msg-task-10.txt`:
 
 ```
-feat: every desktop's sync pulls the account's event verdicts (two desktops, D8)
+feat: judge pulls the account's event verdicts after its events pass (two desktops, D8)
 
 GET /judge-event (a new route on the existing function; POST unchanged)
 returns the account's answered event verdicts after a (judged_at, id)
 cursor: the word only, 500 a page, the account taken from the JWT alone.
-After its pull, sync appends a line for any uid its own ledger lacks - no
-reason, the title from its roster - never replacing a line and never
-restoring one the student deleted. A new holder of the feeds turn then
-judges only what no desktop has judged. No migration.
+Right after its events pass, judge appends a line for any uid its own
+ledger lacks - no reason, the title from its roster, the page's last row
+per uid - never replacing a line and never restoring one the student
+deleted, since the cursor passes this desktop's own rows at once (S-8).
+It takes sync's run lock around the cursor file. A new holder of the
+feeds turn then judges only what no desktop has judged. No migration.
 
 (the two trailers of Global Constraint 17)
 ```
 
-`git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop add cloud/supabase/functions/judge-event/index.ts cloud/supabase/functions/judge-event/handler.ts cloud/supabase/functions/judge-event/handler_test.ts engine/src/sync.rs engine/tests/sync_contract.rs`
+`git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop add cloud/supabase/functions/judge-event/index.ts cloud/supabase/functions/judge-event/handler.ts cloud/supabase/functions/judge-event/handler_test.ts engine/src/sync.rs engine/src/enrich.rs engine/tests/sync_contract.rs`
 then `git -C C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop commit -F C:\Users\danie\GitHub\knowlu\.claude\worktrees\two-desktop\.superpowers\sdd\msg-task-10.txt`
 
 ---
@@ -4349,7 +5320,7 @@ integration tests can pass.
 |---|---|
 | 2 | **H1** — `engine/src/ingest.rs::sync_tasks` mints import ids |
 | 9 | **H2** — `engine/src/cli.rs`: `RankOptions`, `run_opts`, `run_with_opts`, the digest skip; **H3** — `engine/src/main.rs`: `rank --no-digest` |
-| 10 | **H4** — `CLAUDE.md`: the three sentences this plan makes stale |
+| 10 | **H4** — `CLAUDE.md`: the four sentences this plan makes stale |
 
 `engine/src/lib.rs` needs nothing (no new module), nor do `Cargo.toml` and `Cargo.lock` (no new crate:
 `sha1` is already linked). `cloud/supabase/config.toml` needs nothing: `[functions.judge-event]` exists.
@@ -4566,9 +5537,12 @@ external key." (`CLAUDE.md:40-43`): append, inside the same bullet,
 > An imported note's `id:` is derived, not minted (two-desktop design D1–D3): `ids::import_id(kind,
 > vendor, key)` over `ids::import_key`'s closed producer list, written by `write::create_imported`, so
 > two computers importing one item create it under one id; every other note keeps a random
-> `ids::new_id`. The derivation is frozen once shipped. One item already under two ids is an alias group
-> (`state/id-aliases.json`, generated, never synced): the lowest id wins, and `Journal::records_for`,
-> `human_set`, `resolve_target` and `detect_external` read a group as one note.
+> `ids::new_id`. The derivation is frozen once shipped. The other computer's `create` for such a note
+> is journalled but never supplies a value for a note made here, and a value a sync card withholds is
+> never read as an external edit. One item already under two ids is an alias group
+> (`state/id-aliases.json`, generated, never synced): the lowest id wins, a live copy survives an
+> archived one, `Journal::records_for`, `human_set` and `resolve_target` read a group as one note, and
+> `detect_external` reads each note's own history across its re-identifications.
 
 **Edit 2** — *The engine's commands*, the `rank` line (`:55`):
 
@@ -4583,15 +5557,27 @@ external key." (`CLAUDE.md:40-43`): append, inside the same bullet,
 > **Applied by id** (two-desktop D5, D6): records, moves, deletes and tombstones find the local note by
 > its `id:` (or its alias group), never by a path that holds a different id; a pulled text whose id is
 > held here writes no second file, and one whose path holds a different note lands at the next free
-> `-N` name. After its pull, `sync` reads the account's event verdicts (`GET /judge-event`, the word
-> only, `Cursor::verdicts_after`) into `state/events-seen.md` for any uid with no line.
+> `-N` name.
+
+**Edit 4** — *The judgment service (C2)* bullet's last sentence (`:94-95`), "`engine/src/enrich.rs`'s
+`run_lines_with` hosts the four cloud pulls a judge step runs in one slot: the tier-3 judge pass, the
+events pass, the Gmail pull and the rule-decision pull.", becomes:
+
+> `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud pulls a judge step runs in one slot:
+> the tier-3 judge pass, the events pass, the event-verdict pull, the Gmail pull and the rule-decision
+> pull. The verdict pull (two-desktop D8) comes right after the events pass, so the cursor
+> (`Cursor::verdicts_after`) passes this desktop's own verdicts at once and a deleted ledger line is
+> re-judged, not restored: `sync::pull_event_verdicts` reads `GET /judge-event` (the word only) into
+> `state/events-seen.md` for any uid with no line, under `sync`'s run lock.
 
 The command-count sentence under *Knowlu (the app)* does not move: this plan adds no Tauri command.
 
 ## Spec problems found while planning, and how the plan handles them
 
-None changes a decision. Each is a place the signed spec is silent or under-specified; the plan decides
-it by a ruling above and says so, never by departing silently.
+S-1 to S-7 change no decision: each is a place the signed spec is silent or under-specified, and the
+plan decides it by a ruling above and says so, never by departing silently. S-8 and S-9 came from the
+plan's review (fix round 1) and change what the spec says; the controller ruled both, and S-9 is logged
+for Quinn.
 
 - **S-1 — §5.6 names a `cmt` arm of `import_key` without its vendor or key string.** D1 makes the
   derivation frozen once shipped, so the strings must be fixed before the commitment model and this
@@ -4609,38 +5595,67 @@ it by a ruling above and says so, never by departing silently.
   every existing test on `vault-s1` (which carries no ids) green.
 - **S-4 — D6 lists `records_for`, `human_set` and `resolve_target` as the readers that follow the alias,
   but not `passes::detect_external`,** whose id-keyed index would turn a re-identification into
-  fabricated `quinn`/`external` edits at the next `rank`. R-TD1-18 extends D6's own rule to it.
+  fabricated `quinn`/`external` edits at the next `rank`. R-TD1-18 extends D6's own rule to it. The
+  review found this understated (I1): the hazard comes from D1 too, not only D6 — two desktops that
+  import one item each journal the other's `create`, and D5 (a) writes no text for it, so every reader
+  of "the latest record's value" meets a value the note never held. R-TD1-18 (a) and Task 7b.
 - **S-5 (minor) — §2.3 says an `IdHeld` is "logged", not what each producer does next** (seen ledger,
   Gmail acknowledgement, the card's settlement). R-TD1-1.
-- **S-6 (minor) — §2.8's "the title from its own feed or roster":** `sync` never fetches a feed, so the
-  roster `rank` last wrote is the source (R-TD1-6); nothing is lost, since the title in a verdict line
-  is informational.
+- **S-6 (minor) — §2.8's "the title from its own feed or roster":** the pull never fetches a feed, so
+  the roster `rank` last wrote is the source (R-TD1-6); nothing is lost, since the title in a verdict
+  line is informational.
 - **S-7 (minor) — §2.5 (c) gives no line for a text written at a `-N` name, nor for the alias joining a
   text.** R-TD1-3 words both, with the other new lines.
+- **S-8 — §2.8 puts the verdict pull in `sync`, "after its pull"; placed there, "delete a line to force
+  a re-judge" fails for this desktop's own verdicts** (review I4). `sync` is the slot's first step and the
+  events pass runs later, in `judge`; so the cursor has not passed the rows this desktop's pass just
+  wrote, and a line the student deletes at noon comes back at the evening's pull, never re-judged.
+  §2.8's own promise ("the cursor has passed that verdict") holds only for a pulled line. **Ruled by the
+  controller:** the pull runs inside `judge`, right after the events pass, taking `sync`'s run lock
+  around the cursor file; a line deleted later is re-judged by the next pass before that run's pull, and
+  the page's last row per uid wins (I6). Plan 3 owns the pull for a desktop that does not hold `feeds`
+  (it runs no `judge`), calling `sync::pull_event_verdicts` — an interface this plan produces (R-TD1-4).
+- **S-9 — §2.6 is silent when one file of an alias group is in `archive/`** (review I5). The plan's first
+  reading let id order decide: an archived winner absorbed the live copy, and a late `delete` of a loser
+  archived the live winner through its group — about half the time the first sync after the upgrade
+  archived an item the student had only de-duplicated. **Ruled by the controller, logged for Quinn:** an
+  archived file never absorbs a live one. The item stays live on the live copy, with its own state; the
+  winning id is still the lowest, so the live copy is re-identified to it if needed, and an archived
+  winner file takes the live copy's old id (the plan's choice, so no id is on two files); the archived
+  copy is only settled. R-TD1-19; `td1_s9…` tests both id orders.
 
-Found outside the spec: **F-1** (*Hand-off to the controller*, item 5) — a withheld sync-card field may
-read as an external edit at the next `rank`, a suspected pre-existing C3′ defect this plan does not fix.
+Found outside the spec, while planning: **F-1** — a value a sync card withholds read as an external edit
+at the next `rank`, a pre-existing C3′ defect. The review confirmed it (the plan's own test (i) ends in
+exactly that state), and the controller ruled it into this plan with I1: R-TD1-18 (b), Task 7b.
 
 ## Self-review (2026-09-25, done while writing)
 
 - **Spec coverage.** Every §2 sentence that asks for behaviour has a row in the *Fidelity ledger* and a
-  task; every §6.1 bullet this plan owns has a named test ((i) Task 2, (ii) Task 5, (iii)–(iv) Task 6,
-  (v) Task 7, (vi) Task 8, the verdict pull Task 10, `eventemit` and `--no-digest` Task 9); §6.3's
-  `judge-event` GET has its `handler_test.ts`; §5.4's E5 and M5 are Task 6; N17 and M6 are named where
-  they go. D9–D19 are Plans 2 and 3 and are only referenced.
+  task; every §6.1 bullet this plan owns has a named test ((i) Task 2, and its next `rank` Task 7b, (ii)
+  Task 5, (iii)–(iv) Task 6, (v) Task 7, (vi) Task 8, the verdict pull Task 10, `eventemit` and
+  `--no-digest` Task 9); §6.3's `judge-event` GET has its `handler_test.ts`; §5.4's E5 and M5 are Task 6;
+  N17 and M6 are named where they go. D9–D19 are Plans 2 and 3 and are only referenced.
 - **Placeholders.** None: every test is written out, every implementation step is exact code or names
-  the exact function, lines and text to change (Task 7's one mechanical extraction names its lines and
-  its only two edits). "TBD" appears only inside two existing tests' own fixture text.
+  the exact function, lines and text to change (Task 7's one extraction names its lines and its only
+  three edits). "TBD" appears only inside two existing tests' own fixture text.
 - **Type consistency.** `create_imported`'s six parameters, `import_key`'s `Option<ImportKey>`,
-  `IdIndex`'s five methods (plus `vacate`), `settle_resolution`'s eleven parameters, the producers' new
-  `held` parameters, `RankOptions { no_digest }`, `Cursor::verdicts_after` and `Totals::offline` are
-  spelled the same in every task that uses them and in *Interfaces this plan produces* — and compiled
-  together (header, *Checked while writing*).
+  `IdIndex`'s five methods (plus `vacate`), `settle_resolution`'s eleven parameters (`own_created` now
+  `&mut`), `merge_into_winner`'s twelve, `Lineage`'s five fields, `journal::created_here` and
+  `without_foreign_creates`, the producers' new `held` parameters, `RankOptions { no_digest }` and
+  `Cursor::verdicts_after` are spelled the same in every task that uses them and in *Interfaces this plan
+  produces* — and compiled together (header, *Checked while writing*). `Totals::offline` is gone (fix
+  round 1): nothing in `sync` needs to tell an offline pull from another any more.
 - **Warnings.** `IdIndex::exact` and `forget` carry `#[allow(dead_code)]` from Task 5 until Task 7 uses
   them; `float_at` is added with its first use (Task 7), not before.
 - **Defects the scratch run found and this text fixes:** `float_at` defined a task before its first use
   (a dead-code warning at the end of Task 2); a sixth `write_rule_card(` call (`enrich.rs:2653`) missing
   from Task 3's list; a CRLF-blind assertion in Task 3's rewritten Gmail equivalence test.
+- **Fix round 1 (2026-09-26).** The review's I1–I6 and F-1, and three of its advisories, are in; the
+  rest are named in the fix-round commit. Task 7's Step 3 now names both of step 4's call-site changes
+  itself and Step 7 no longer repeats one; Step 9's `create_dir_all` is in the test's own code (both
+  review advisories). The fix round's own scratch run found one more defect, fixed here: R-TD1-19's
+  swap made `verify_tail` (which finds a note by a record's id) swap the two files back, so it reads by
+  the same lineage as `detect_external` (R-TD1-18 (c)).
 
 ## Hand-off to the controller
 
@@ -4657,19 +5672,24 @@ After Task 10's commit the branch carries Plan 1 whole. What is left is the cont
    malformed `after` answers 400; a `POST` still judges. Production parity gains one line: redeploy
    `judge-event` with the rest of C2's functions (`HANDOFF.md` §4's checklist).
 3. **`HANDOFF.md` §3**, batched with the next milestone push (CI minutes): the two-desktop stream's Plan 1
-   is code-complete on `two-desktop` (D1–D8, E5, M5 in; N17 out; M6 with Plan 3's D16), Plans 2 and 3 to
-   be written against *Interfaces this plan produces*.
-4. **What Plans 2 and 3 consume** is the table *Interfaces this plan produces*, verbatim.
-5. **Finding F-1, outside this plan and the spec (suspected, not verified).** `passes::detect_external`
-   (`passes.rs:259-350`) builds each note's expected values from the latest journal record per field.
-   When C3′'s `apply` withholds a foreign value behind a sync card, the foreign record is the latest one
-   while the note keeps this desktop's value, so the next `rank` would journal a fabricated
-   `quinn`/`external` edit restating the local value — a record that travels, applies cleanly on the
-   other desktop ("upstream never moved"), flips it back, and leaves this desktop's card offering a
-   value neither holds. Nothing in C3′'s suites runs `rank` between two syncs. Recommended: a probe test
-   (two desktops, a card, then `passes::detect_external` on the carded side) before the two-PC proof,
-   and a ruling on the fix (skip a field a live sync card withholds). R-TD1-18 covers only the alias half
-   of this, which D6 itself would otherwise cause.
+   is code-complete on `two-desktop` (D1–D8, E5, M5 in; N17 out; M6 with Plan 3's D16; S-8 and S-9 as
+   ruled, S-9 for Quinn), Plans 2 and 3 to be written against *Interfaces this plan produces*. Name
+   there, too, three behaviours a student can meet (review advisories; none is a defect by the spec):
+   - **D4 in steady state:** every pull of the other desktop's changed copy of an item held here at a
+     different path prints `sync: <path> is <id>, already held here as <local path>` — a recurring line
+     in the Runs view — and a body edit never crosses between the two paths (spec §7 accepts this).
+   - **An imported-past twin stays split:** an item archived on one desktop as already past and created
+     active on the other (a source new to only one of them) keeps one copy each, because each desktop's
+     holder check blocks the other's text.
+   - **Before Plan 3's busy guard**, *Sync now* still runs beside a slot's `judge`; the verdict pull takes
+     `sync`'s run lock, so the two never write the cursor at once (a held lock skips the pull, named).
+4. **What Plans 2 and 3 consume** is the table *Interfaces this plan produces*, verbatim — including,
+   from fix round 1: `sync::Totals` gains nothing (`offline` is gone), `sync::pull_event_verdicts` runs in
+   `judge` and takes `sync`'s run lock (Plan 3 calls it for a desktop that runs no `judge`), and
+   `journal::created_here` / `without_foreign_creates` are new.
+5. **Finding F-1** (found while planning) is fixed in this plan: the review confirmed it, the controller
+   ruled it in with I1, and Task 7b carries it (R-TD1-18 (b)); its probe test runs `rank` between two
+   syncs on test (i)'s end state, which nothing in C3′'s suites did.
 
 ### Overlaps with the unmerged branches
 
@@ -4680,8 +5700,8 @@ notes below are what a resolver must not lose.
 | Branch | Files it shares with this plan | What to keep in mind |
 |---|---|---|
 | `origin/p1-commitments`, `p2-commitments` (same file set) | `engine/src/{ids,write,approvals,coursework,enrich,eventemit,cli,main}.rs`, `CLAUDE.md` | **`ids.rs`**: adds kind `cmt`, `commitments/` to `NOTE_FOLDERS` and `ID_RE`, `kind_for`'s `commitment` arm — a textual merge beside Task 1's additions; then §5.6's `cmt` arm of `import_key` is owed (spec defect S-1, below). **`write.rs`**: `propose_amendment` gains a `judgment` parameter, which `sync.rs`'s own call (`:2151`, moved into `settle_resolution` by Task 7) must pass as `None`. **`eventemit.rs`**, **`approvals.rs`**: new code after `emit_digest` and in `transition_note`; Task 3's `create_imported` and `held` parameters must reach any new `write::create` of an imported note there. **`cli.rs`/`main.rs`**: H2/H3 against their `run`/`run_with`/`main` edits. **`enrich.rs`**: `write_gmail_card` and `pull_gmail` both change. |
-| `origin/j-followups` | `engine/src/{write,approvals,coursework,enrich,eventemit,cli}.rs`, `CLAUDE.md` | Adds `kind: event-check` cards (`eventemit.rs`, `created_by: events`, a `source_uid`): **not a §2.2 producer**, so `import_key` answers `None` and they keep random ids — two desktops can each file one until Plan 3's turn makes one computer the `feeds` holder. A later spec row, not this plan, would add them. `pending_digest_uids` and its tests are unchanged on both sides (R-TD1-7 kept them for this). |
-| `origin/j-judgment-quality` | `engine/src/{coursework,enrich,cli}.rs`, `CLAUDE.md`; also `_shared/judge_handler.ts` | Adds `unsure` to `eventledger::VALID_VERDICTS` and passes `accepts`/`timezone` through `judgeHandler`. Task 10's pull reads `VALID_VERDICTS`, so `unsure` verdicts are pulled the day it merges; `judge-event/handler.ts` wraps `judgeHandler` without touching it, so the POST keeps whatever `judge_handler.ts` becomes. |
+| `origin/j-followups` | `engine/src/{write,approvals,coursework,enrich,eventemit,cli}.rs`, `CLAUDE.md` | Adds `kind: event-check` cards (`eventemit.rs`, `created_by: events`, a `source_uid`): **not a §2.2 producer**, so `import_key` answers `None` and they keep random ids — two desktops can each file one until Plan 3's turn makes one computer the `feeds` holder. A later spec row, not this plan, would add them. `pending_digest_uids` and its tests are unchanged on both sides (R-TD1-7 kept them for this). It (and `p1-commitments`) also adds `jid:` to machine verdict lines and `record_answer`, a student's answer that supersedes `unsure`: after the merge, Task 10's pull should write through `record_judged_verdict` with the row's `id` as its `jid` (an id, never free text). A student's answer to an `unsure` stays on the desktop where it was given — the pull brings only the machine's word. |
+| `origin/j-judgment-quality` | `engine/src/{coursework,enrich,cli}.rs`, `CLAUDE.md`; also `_shared/judge_handler.ts` | Adds `unsure` to `eventledger::VALID_VERDICTS` and passes `accepts`/`timezone` through `judgeHandler`. Task 10's pull reads `VALID_VERDICTS`, so `unsure` verdicts are pulled the day it merges; `judge-event/handler.ts` wraps `judgeHandler` without touching it, so the POST keeps whatever `judge_handler.ts` becomes. Its `enrich.rs` hunks meet Task 10's call after the events pass. |
 | `jf-cloud` | `engine/src/{coursework,enrich}.rs`, `CLAUDE.md` | Its `coursework.rs` hunks are in `collect_cloud`/`fetch_*`/`main_with_fetchers`; its `enrich.rs` hunk is in `pull_gmail` — beside Task 3's outcome `match`. |
 | `j-events` | none of this plan's files (`eventledger.rs`, `cloudmodel.rs`, `migrations_test.ts` only) | — |
 | `fix-literal-dashes` (visible, not named in the brief) | `engine/src/{write,approvals,coursework}.rs` | Adds `WriteError::LineBreak` beside Task 1's `IdHeld` and a guard at the top of `write_literals`; both enums' `Display` arms merge side by side. |
@@ -4698,11 +5718,18 @@ controller's ruling**, in §2.2's own shape — the vendor is the `source_uid`'s
         // in import_key, before the `created_by` requirement:
         if kind == "cmt" {
             let uid = field("source_uid")?;
-            let vendor = uid.split(':').next().filter(|p| *p == "gcal-series" || *p == "registrar")?.to_string();
+            let vendor = uid
+                .split(':')
+                .next()
+                .filter(|p| *p == "gcal-series" || *p == "ics-series" || *p == "registrar")?
+                .to_string();
             return Some((kind, vendor, format!("commitment:{uid}")));
         }
 ```
 
 so `import_id("cmt", "gcal-series", "commitment:gcal-series:4k2q9x7m1abc")`, with a pinned reference value
-computed at merge. The commitment model's §2.5 already keeps the lowest id among duplicates, which is
-D6's rule.
+computed at merge. `ics-series:` is in the list (the review; the controller's ruling of fix round 1):
+under the commitment spec's R1 and R6, a series read from a direct ICS feed is imported on each desktop
+independently, exactly like `gcal-series:`. `card:<course-slug>` — a student's answer to a fallback
+card — is left out and keeps a random id; the review asks for a ruling on it at merge. The commitment
+model's §2.5 already keeps the lowest id among duplicates, which is D6's rule. It stays a merge-time item.
