@@ -15,6 +15,31 @@ use knowlu_engine::journal::Journal;
 use knowlu_engine::write::{self, WriteContext};
 use knowlu_engine::yamlemit::{safe_dump_block, Node};
 
+/// One request the registrar capture makes (phase 3, Plan ruling R4-b): `path` is under the
+/// registrar's `prefix`; `{term}` in `path` or `form` becomes the term code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Call {
+    pub method: &'static str,
+    pub path: &'static str,
+    pub form: Option<&'static str>,
+}
+
+/// A curated school's registrar (phase-3 spec D2). **Data, recorded by the R0 spike** — adding a
+/// school is adding one of these to its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registrar {
+    /// The engine's `--school` key (`knowlu_engine::registrar::SCHOOLS`).
+    pub school: &'static str,
+    /// What the student calls it; the button reads "Get my class times from <label>".
+    pub label: &'static str,
+    pub host: &'static str,
+    pub prefix: &'static str,
+    /// Where the sign-in window opens, under `prefix`.
+    pub start: &'static str,
+    /// In order; the last one's body is the schedule.
+    pub calls: &'static [Call],
+}
+
 /// What a **curated** school gets on top of being in the list: event feeds, a known LMS, and a
 /// sign-in URL the window can be pointed at. Keyed by IPEDS `UNITID`, which is the one identifier
 /// that is stable across years and unambiguous across the four "University of ——" in a state.
@@ -35,7 +60,14 @@ pub struct Curated {
     pub lms_host: &'static str,
     /// `blackboard` or `canvas`. With `lms_host`, it is enough to build every endpoint either LMS has.
     pub lms_kind: &'static str,
+    /// Phase 3: the registrar Knowlu can read, or `None` (every school but UA before the pilot).
+    pub registrar: Option<Registrar>,
 }
+
+/// R0's rows call for UA (spec D3 amendment), under the prefix.
+///
+/// PROVISIONAL until the R0 spike (spec D3): Banner 9's publicly documented registration-events call. R0 replaces this line — and, if the shape differs, `registrar::parse_banner` and its fixture — with what UA's signed-in session actually answers.
+const UA_ROWS_PATH: &str = "classRegistration/getRegistrationEvents?termFilter=";
 
 pub const CAMPUSES: [Curated; 2] = [
     Curated {
@@ -44,6 +76,17 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "The University of Alabama",
         lms_host: "ualearn.blackboard.com",
         lms_kind: "blackboard",
+        registrar: Some(Registrar {
+            school: "ua",
+            label: "myBama",
+            host: "bannerssb.ua.edu",
+            prefix: "/StudentRegistrationSsb/ssb/",
+            start: "registration",
+            calls: &[
+                Call { method: "POST", path: "term/search?mode=registration", form: Some("term={term}") },
+                Call { method: "GET", path: UA_ROWS_PATH, form: None },
+            ],
+        }),
     },
     Curated {
         unitid: "157085",
@@ -51,6 +94,7 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "University of Kentucky",
         lms_host: "uk.instructure.com",
         lms_kind: "canvas",
+        registrar: None,
     },
 ];
 

@@ -27,9 +27,13 @@ pub fn confirm_argv(vault: &Path, file: &Path, today: jiff::civil::Date) -> Vec<
 
 /// `commitments::overview` in-process: no fetch, no write.
 pub fn your_week_inner(cs: &ConsoleState) -> Value {
-    let Ok(_g) = cs.lock.lock() else { return json!({ "ok": false, "error": "console lock poisoned", "week": Value::Null }) };
+    let Ok(_g) = cs.lock.lock() else { return json!({ "ok": false, "error": "console lock poisoned", "week": Value::Null, "registrar_label": Value::Null }) };
     let today = crate::commands::now_in(cs).date();
-    json!({ "ok": true, "error": Value::Null, "week": knowlu_engine::commitments::overview(&cs.vault, today).to_json() })
+    json!({
+        "ok": true, "error": Value::Null, "week": knowlu_engine::commitments::overview(&cs.vault, today).to_json(),
+        // Phase 3, Plan ruling R4-g: the page shows the registrar button only when this is set.
+        "registrar_label": crate::registrar::school_of(&cs.vault).map(|r| r.label),
+    })
 }
 
 /// The today view under a proposed window (`surface::build_state_preview`), whole (Plan ruling

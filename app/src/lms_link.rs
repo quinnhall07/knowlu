@@ -147,7 +147,8 @@ pub fn sweep_stale_sessions_in(temp: &Path, take: &str, skip: Option<&str>, now:
 /// Session directories a crash left behind — the only thing that ever cleans up after a process that
 /// died with a sign-in window open (R-C1-40, I1c). Not this process's own, and only ones that have
 /// been sitting there for [`STALE_AFTER`]: another Knowlu, mid-capture, is not ours to delete.
-fn sweep_stale_sessions() {
+/// Also called by `registrar::open_registrar_window`.
+pub fn sweep_stale_sessions() {
     let mine = mine_prefix();
     sweep_stale_sessions_in(&std::env::temp_dir(), SESSION_PREFIX, Some(&mine), SystemTime::now(), STALE_AFTER);
 }
@@ -376,12 +377,13 @@ fn capture_failed(error: impl std::fmt::Display) -> Value {
     json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null, "stored": false })
 }
 
-/// **One agent, one shape, for both captures** (the calendar link, and Task 14b's course list).
+/// **One agent, one shape, for every capture** (the calendar link, the course list, and phase 3's
+/// registrar).
 /// Thirty seconds global, because a campus behind SSO is slow and a student is watching; no jar of
 /// its own, because the only cookies either capture sends are the ones the window hands it for that
 /// one call. `put_source_at` builds its own on purpose — it talks to our API, not to a campus, and
 /// it reads a status code rather than treating one as an error.
-fn session_agent() -> ureq::Agent {
+pub fn session_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .build()

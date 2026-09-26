@@ -58,6 +58,19 @@ fn your_week_reports_setup_on_the_vaults_first_day_only_and_writes_nothing() {
     assert!(!v.join("commitments").exists() && !v.join("state/calendar-series.json").exists());
 }
 
+/// Phase 3, R4-g: the page learns whether this school has a registrar button from `your_week`.
+#[test]
+fn your_week_names_the_registrar_only_at_a_school_that_has_one() {
+    let v = scratch("reglabel");
+    let cs = open(&v, "reglabel");
+    assert_eq!(your_week_inner(&cs)["registrar_label"], serde_json::Value::Null, "vault-full has no campus.yaml");
+    std::fs::write(v.join("config/campus.yaml"), "unitid: '100751'\n").unwrap();
+    assert_eq!(your_week_inner(&cs)["registrar_label"], "myBama");
+    std::fs::write(v.join("config/campus.yaml"), "unitid: '157085'\n").unwrap();
+    assert_eq!(your_week_inner(&cs)["registrar_label"], serde_json::Value::Null);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 #[test]
 fn preview_window_reports_moved_and_refuses_a_bad_window() {
     let v = scratch("preview");

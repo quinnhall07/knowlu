@@ -8,6 +8,7 @@ pub mod inference;
 pub mod lms_link;
 pub mod onboarding;
 pub mod profiles;
+pub mod registrar;
 pub mod report;
 pub mod scaffold;
 pub mod scheduler;
