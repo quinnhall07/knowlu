@@ -2069,6 +2069,19 @@ pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
 /// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
 /// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
 /// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
+/// Device-local and never synced (the push never looks under `state/`); it holds no bytes and
+/// exists only to be locked around [`refresh_series`]'s read-modify-write (final review I2).
+pub const SERIES_LOCK_FILE: &str = "state/calendar-series.lock";
+
+/// An exclusive hold on [`SERIES_LOCK_FILE`], blocking until it is free (std's `File::lock`,
+/// stable since 1.89). Released when the returned handle drops, or by the OS if the process dies.
+fn lock_series_file(vault: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(vault.join("state"))?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))?;
+    file.lock()?;
+    Ok(file)
+}
+
 fn write_series_file(vault: &Path, bytes: &str) -> std::io::Result<()> {
     write_state_file(vault, "calendar-series.json", bytes)
 }
@@ -2104,7 +2117,9 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 ///   to `ended` that day, with the day before as its last instance.
 ///
 /// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
-/// then rename). A file that could not be *read* (an I/O error, not a parse failure) is left
+/// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
+/// exclusively, so two processes refreshing at once each keep their calendars (final review I2);
+/// a lock that cannot be taken is one warning and the run goes on unguarded. A file that could not be *read* (an I/O error, not a parse failure) is left
 /// alone and not rewritten this run, with one warning; the returned data then holds only this
 /// run's fresh calendars. Warnings: the old file's, and a failed write's.
 pub fn refresh_series(
@@ -2112,6 +2127,15 @@ pub fn refresh_series(
     fresh: &[(String, Vec<Series>)],
     today: Date,
 ) -> (SeriesFile, Vec<String>) {
+    // Phase 3 final review I2: a run that may write holds the series lock from the read to the
+    // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
+    let (_lock, lock_warning) = match fresh.is_empty() {
+        true => (None, None),
+        false => match lock_series_file(vault) {
+            Ok(file) => (Some(file), None),
+            Err(err) => (None, Some(format!("series file: could not lock {SERIES_LOCK_FILE} ({})", err.kind()))),
+        },
+    };
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
         Loaded::Malformed(why) => (
@@ -2125,6 +2149,7 @@ pub fn refresh_series(
             false,
         ),
     };
+    warnings.extend(lock_warning);
     let feeds = crate::calfeed::calendar_entries(vault);
     let names: BTreeSet<&str> = feeds.iter().map(|(name, _)| name.as_str()).collect();
     let google = feeds.iter().any(|(_, url)| url == "cloud:google");
@@ -6933,6 +6958,33 @@ mod series_tests {
         assert_eq!(g.last_seen, Some(d0));
     }
 
+    /// Phase 3 final review I2: two refreshes at once (a slot's `rank` and a registrar run, say)
+    /// each keep their own calendar; the read-to-rename is under `state/calendar-series.lock`.
+    #[test]
+    fn two_concurrent_refreshes_both_keep_their_calendars() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("concurrent", &["clients"]);
+        for round in 0..40 {
+            let day = plus(d0, round);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                for cal in ["personal", "clients"] {
+                    let (v, barrier) = (&v, &barrier);
+                    s.spawn(move || {
+                        let one = ser(&format!("ics-series:{cal}"), cal, &[day]);
+                        barrier.wait();
+                        refresh_series(v, &[(cal.to_string(), vec![one])], day)
+                    });
+                }
+            });
+            let (file, warnings) = read_series_file(&v);
+            assert!(warnings.is_empty(), "round {round}: {warnings:?}");
+            assert_eq!(file.calendars.get("personal"), Some(&day), "round {round}");
+            assert_eq!(file.calendars.get("clients"), Some(&day), "round {round}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     #[test]
     fn an_ics_fetched_with_zero_series_is_fresh_and_ages_its_old_series() {
         let d0 = date(2026, 9, 21);
@@ -7226,11 +7278,13 @@ mod series_tests {
         let v = vault("atomic", &[]);
         refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
         let (file, _) = refresh_series(&v, &[("personal".into(), vec![ser("ics-series:b", "personal", &[d0])])], plus(d0, 1));
-        let names: Vec<String> = std::fs::read_dir(v.join("state"))
+        let mut names: Vec<String> = std::fs::read_dir(v.join("state"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["calendar-series.json".to_string()]);
+        names.sort();
+        // The empty lock file stays (final review I2); no temporary file does.
+        assert_eq!(names, vec!["calendar-series.json".to_string(), "calendar-series.lock".to_string()]);
         assert_eq!(read_series_file(&v), (file, Vec::new()));
     }
 }

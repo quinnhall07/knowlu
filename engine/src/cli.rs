@@ -3326,8 +3326,8 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let after = snapshot(&vault);
         assert_eq!(
             changed_paths(&before, &after),
-            vec!["state/calendar-series.json".to_string()],
-            "the commitments command must write nothing else under the vault"
+            vec!["state/calendar-series.json".to_string(), "state/calendar-series.lock".to_string()],
+            "the commitments command must write nothing else under the vault (the lock: final review I2)"
         );
         assert!(!vault.join("commitments").exists(), "R18: a proposal is never a note");
         assert!(md_names(&vault.join("approvals"), "commitment-check-").is_empty(), "no card either");
