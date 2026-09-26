@@ -791,8 +791,11 @@
   }
 
   // `after(env)` runs once a fetch has reached the engine: the confirm screen re-reads its rows;
-  // Schedule repaints (paint already ran its renderer when a state came back).
-  function bindRegistrar(host, after) {
+  // Schedule repaints (paint already ran its renderer when a state came back). `busy(on)`, if
+  // given, holds the host's screen from I'm signed in until the fetch and `after` settle, on every
+  // path (R5 review I1: a Finish mid-fetch wrote the rows from before the reload).
+  function bindRegistrar(host, after, busy) {
+    var setBusy = busy || function () {};
     host.addEventListener("click", function (e) {
       e.stopPropagation();
       var c = registrarControls(host);
@@ -801,18 +804,22 @@
           if (!r || !r.ok) { registrarIdle(host, r && r.error); return; }
           c.open.hidden = true; c.done.hidden = false; c.cancel.hidden = false;
           c.say.textContent = "Sign in to " + registrarLabel + " in the window Knowlu opened, then press I'm signed in.";
-        }).catch(function () { registrarIdle(host, ""); });
+        }).catch(function () { registrarIdle(host, "Knowlu couldn't open " + registrarLabel + "; try again."); });
       } else if (e.target.closest("[data-reg-done]")) {
-        c.done.disabled = true;
+        c.done.disabled = true; c.cancel.hidden = true; setBusy(true);
         c.say.textContent = "Reading your class schedule…";
         invoke("capture_registrar", { view: stateView() }).then(function (env) {
           c.done.disabled = false;
-          if (!env.ok) { if (env.closed) { registrarIdle(host, env.error); } else { c.say.textContent = env.error; } return; }
+          if (!env.ok) {
+            setBusy(false);
+            if (env.closed) { registrarIdle(host, env.error); } else { c.cancel.hidden = false; c.say.textContent = env.error; }
+            return;
+          }
           if (env.state) { current.pendingOrder = null; paint(env.state, true); }
           var r = env.result || {};
           registrarIdle(host, "Found " + r.rows + (r.rows === 1 ? " class" : " classes") + " in " + registrarLabel + ": " + r.confirmed + " confirmed, " + r.proposed + " to check.");
-          after(env);
-        }).catch(function () { registrarIdle(host, ""); });
+          return Promise.resolve(after(env)).then(function () { setBusy(false); }, function () { setBusy(false); });
+        }).catch(function () { setBusy(false); registrarIdle(host, "Knowlu couldn't read " + registrarLabel + "; try again."); });
       } else if (e.target.closest("[data-reg-cancel]")) {
         invoke("close_registrar_window", {}).catch(function () {});
         registrarIdle(host, "");
@@ -831,7 +838,7 @@
     open.classList.toggle("pri", !!(reg && reg.refresh));
     open.classList.toggle("y", !!(reg && reg.refresh));
     EL("sched-reg-rows").innerHTML = (w.registrar_proposals || []).map(function (p) {
-      return '<div class="row sched reg"><div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") +
+      return '<div class="row sched reg-row"><div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") +
         ' <span class="src">from ' + h(registrarLabel) + '</span></span></div><div class="acts"><button class="b" type="button" data-reg-add="' +
         h(p.source_uid) + '">Add</button></div></div>';
     }).join("");
@@ -858,7 +865,15 @@
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
   // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
   // screen for this console session; Finish writes the planning-day note, so it never returns.
-  var weekSetup = { dismissed: false, open: false, dirty: false };
+  var weekSetup = { dismissed: false, open: false, dirty: false, reading: false, fetching: false };
+
+  // R5 review I1: a myBama fetch holds Finish and Not now until it and the reload settle. Finish
+  // stays held past it while the first calendar read is still out (phase 2's final review I1).
+  function setupBusy(on) {
+    weekSetup.fetching = on;
+    EL("ws-finish").disabled = on || weekSetup.reading;
+    EL("ws-later").disabled = on;
+  }
 
   function checkWeekSetup() {
     if (weekSetup.dismissed || weekSetup.open) { return; }
@@ -908,8 +923,8 @@
     // before it would write the planning-day note from the placeholder hours, and the routine's
     // window proposal would never be offered again.
     weekSetup.dirty = false;
-    EL("ws-finish").disabled = true;
-    var ready = function () { EL("ws-finish").disabled = false; };
+    EL("ws-finish").disabled = true; weekSetup.reading = true;
+    var ready = function () { weekSetup.reading = false; if (!weekSetup.fetching) { EL("ws-finish").disabled = false; } };
     invoke("commitment_proposals", {}).then(function (r) {
       var ps = (r && r.proposals) || [];
       var win = ps.filter(function (p) { return p.window; })[0];
@@ -1603,7 +1618,7 @@
   bindDeck();   // #deck's node persists across renderDeck's innerHTML rewrites — bound once
   bindDecisionsView();
   bindScheduleView();
-  bindRegistrar(EL("ws-reg"), reloadSetupRows);
+  bindRegistrar(EL("ws-reg"), reloadSetupRows, setupBusy);
   bindRegistrar(EL("sched-reg"), function (env) { if (!env.state) { renderScheduleView(); } });
   // R5-c: Add confirms a registrar row at hard, as the office-hours Add confirms at optional.
   EL("sched-reg-rows").addEventListener("click", function (e) {

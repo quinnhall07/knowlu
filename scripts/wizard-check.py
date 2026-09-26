@@ -21,6 +21,8 @@ until the read settles (either way), and a *Your day* edit made meanwhile is not
 A last page presses the confirm screen's Get my class times from myBama (phase 3): the window
 opens, I'm signed in captures with the read model's view, the proposals are read again with the
 answers already given kept, and the registrar's row comes back marked "from myBama".
+Three more hold the capture open (Finish and Not now wait for it), open Schedule with a held term
+(Refresh, primary, Add at hard), and boot a school with no registrar (no button anywhere).
 
 Run:
     .wv\\Scripts\\python scripts/wizard-check.py
@@ -163,17 +165,19 @@ WEEK_FAKE = r"""
 window.__CALLS = [];
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
   window.__CALLS.push([cmd, args]);
-  if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
-  if (cmd === 'state') { return Promise.resolve({ ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)),
-      first_run: { running: true, current: 'coursework', steps: [] } }); }
-  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: true, commitments: [], office_hours: [],
-      uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [] }, registrar_label: 'myBama' }); }
-  if (cmd === 'commitment_proposals' && window.__HOLD) { return new Promise(function (res, rej) {
-      window.__RELEASE = function (ok) { window.__HOLD = false;
-        if (ok) { res(window.__TAURI__.core.invoke('commitment_proposals', {})); } else { rej(new Error('the held read failed')); } }; }); }
   var ART = { kind: 'class', level: 'hard', title: 'ART 110', course: null, when: 'Mon 6–8:50pm',
       where: 'Make-Believe Studio 4', source_uid: 'registrar:ua:202640-40006', window: false,
       meets: [{ days: ['mon'], start: '18:00', end: '20:50' }] };
+  if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
+  if (cmd === 'state') { return Promise.resolve({ ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)),
+      first_run: window.__SCHED_REG ? null : { running: true, current: 'coursework', steps: [] } }); }
+  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: !window.__SCHED_REG, commitments: [], office_hours: [],
+      uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [],
+      registrar: window.__SCHED_REG ? { school: 'ua', held: ['202640'], current: '202710', refresh: true } : null,
+      registrar_proposals: window.__SCHED_REG ? [ART] : [] }, registrar_label: window.__NO_REG ? null : 'myBama' }); }
+  if (cmd === 'commitment_proposals' && window.__HOLD) { return new Promise(function (res, rej) {
+      window.__RELEASE = function (ok) { window.__HOLD = false;
+        if (ok) { res(window.__TAURI__.core.invoke('commitment_proposals', {})); } else { rej(new Error('the held read failed')); } }; }); }
   if (cmd === 'commitment_proposals') { return Promise.resolve({ ok: true, error: null, warnings: [],
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }],
       proposals: [
@@ -190,6 +194,8 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       result: { created: 1, declined: 0, window: 'created', warnings: window.__CONFIRM_WARNINGS || [] } }); }
   if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
   if (cmd === 'open_registrar_window') { return Promise.resolve({ ok: true, error: null, opened: true }); }
+  if (cmd === 'capture_registrar' && window.__HOLD_REG) { return new Promise(function (res) {
+      window.__RELEASE_REG = function () { window.__HOLD_REG = false; res(window.__TAURI__.core.invoke('capture_registrar', { view: 'today' })); }; }); }
   if (cmd === 'capture_registrar') { window.__REGISTRAR_DONE = true; return Promise.resolve({ ok: true, error: null, closed: true, state: null,
       result: { term: '202640', rows: 2, confirmed: 1, proposed: 1, dropped: { no_time: 0, midnight: 0 }, warnings: [] } }); }
   if (cmd === 'close_registrar_window') { return Promise.resolve({ ok: true, error: null }); }
@@ -692,11 +698,12 @@ def check_registrar(page, errors) -> list:
         return [f"the confirm screen did not open (calls: {names(page)!r})"] + [f"page error: {e}" for e in errors]
     opener = "#ws-reg [data-reg-open]"
     if not page.is_visible(opener) or "Get my class times from myBama" not in page.inner_text(opener):
-        bad.append("the registrar button is not on the confirm screen")
+        return bad + ["the registrar button is not on the confirm screen"] + [f"registrar page error: {e}" for e in errors]
     page.click("#week-setup .wsrow[data-key='gcal-series:chess'] [data-answer-set=not]")
     page.click(opener); page.wait_for_timeout(200)
     if "open_registrar_window" not in names(page): bad.append("the button did not open the window")
-    if not page.is_visible("#ws-reg [data-reg-done]"): bad.append("I'm signed in did not appear")
+    if not page.is_visible("#ws-reg [data-reg-done]"):
+        return bad + ["I'm signed in did not appear"] + [f"registrar page error: {e}" for e in errors]
     if "Sign in to myBama" not in page.inner_text("#ws-reg"): bad.append("the sign-in instruction is missing")
     page.click("#ws-reg [data-reg-done]"); page.wait_for_timeout(400)
     sent = page.evaluate("window.__CALLS.filter(c => c[0] === 'capture_registrar').map(c => c[1])")
@@ -711,6 +718,55 @@ def check_registrar(page, errors) -> list:
     if page.evaluate("document.querySelectorAll('#week-setup input[type=text], #week-setup input[type=password]').length"):
         bad.append("the confirm screen accepts typed text")
     for e in errors: bad.append(f"registrar page error: {e}")
+    return bad
+
+
+def check_registrar_hold(page, errors) -> list:
+    """R5 review I1: while the capture (and the reload after it) runs, Finish and Not now are
+    disabled and a click on Finish sends nothing; once it settles both are live again."""
+    bad = []
+    if not page.is_visible("#ws-reg [data-reg-open]"):
+        return ["held fetch: the registrar button is not on the confirm screen"] + [f"page error: {e}" for e in errors]
+    page.click("#ws-reg [data-reg-open]"); page.wait_for_timeout(200)
+    page.click("#ws-reg [data-reg-done]"); page.wait_for_timeout(200)
+    for b in ("#ws-finish", "#ws-later"):
+        if not page.is_disabled(b): bad.append(f"held fetch: {b} is live while myBama is read")
+    if page.is_visible("#ws-reg [data-reg-cancel]"): bad.append("held fetch: Cancel is offered mid-capture")
+    page.evaluate("document.getElementById('ws-finish').click()"); page.wait_for_timeout(100)
+    if "commitments_confirm" in names(page): bad.append("held fetch: Finish wrote before the fetch settled")
+    page.evaluate("window.__RELEASE_REG()"); page.wait_for_timeout(400)
+    for b in ("#ws-finish", "#ws-later"):
+        if page.is_disabled(b): bad.append(f"held fetch: {b} stayed disabled after the fetch settled")
+    if "1 confirmed" not in page.inner_text("#ws-reg"): bad.append("held fetch: the result is not said")
+    for e in errors: bad.append(f"held fetch page error: {e}")
+    return bad
+
+
+def check_registrar_schedule(page, errors, label) -> list:
+    """R5 review M2, M3: on Schedule the button says Refresh once a term is held, in the primary
+    style when refresh is set; the registrar row is marked and Add confirms it at hard. With no
+    registrar label the section (and the confirm screen's button) is not there."""
+    bad = []
+    if not label:
+        if not page.is_visible("#week-setup"): bad.append("no registrar: the confirm screen did not open")
+        if page.is_visible("#ws-reg"): bad.append("no registrar: the confirm screen shows the registrar button")
+    page.evaluate("location.hash = '#schedule'"); page.wait_for_timeout(400)
+    if not label:
+        if page.is_visible("#sched-reg-sec"): bad.append("no registrar: Schedule shows the registrar section")
+        for e in errors: bad.append(f"no-registrar page error: {e}")
+        return bad
+    opener = "#sched-reg [data-reg-open]"
+    if not page.is_visible(opener):
+        return ["Schedule: the registrar button is not shown"] + [f"page error: {e}" for e in errors]
+    if page.inner_text(opener).strip() != "Refresh from myBama": bad.append(f"Schedule: the button reads {page.inner_text(opener)!r}")
+    if "pri" not in (page.get_attribute(opener, "class") or ""): bad.append("Schedule: refresh is set but the button is not primary")
+    row = "#sched-reg-rows .row"
+    if not page.query_selector(row) or "from myBama" not in page.inner_text(row): bad.append("Schedule: the registrar row is not marked")
+    else:
+        page.click(row + " [data-reg-add]"); page.wait_for_timeout(300)
+        sent = page.evaluate("window.__CALLS.filter(c => c[0] === 'commitments_confirm').map(c => c[1].confirm)")
+        if sent != [{"mine": [{"source_uid": "registrar:ua:202640-40006", "level": "hard"}]}]: bad.append(f"Schedule: Add sent {sent!r}")
+    for e in errors: bad.append(f"Schedule registrar page error: {e}")
     return bad
 
 
@@ -762,6 +818,15 @@ def main() -> int:
                 reg.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE)
                 reg.goto(url); reg.wait_for_timeout(600)
                 bad += check_registrar(reg, rerrors)
+                for flag, run in (("window.__HOLD_REG = true;", lambda p, e: check_registrar_hold(p, e)),
+                                  ("window.__SCHED_REG = true;", lambda p, e: check_registrar_schedule(p, e, True)),
+                                  ("window.__NO_REG = true;", lambda p, e: check_registrar_schedule(p, e, False))):
+                    page = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
+                    perrors = []
+                    page.on("pageerror", lambda e, sink=perrors: sink.append(str(e)))
+                    page.add_init_script("window.__STATE = " + STATE_FIXTURE.read_text(encoding="utf-8") + ";\n" + WEEK_FAKE + "\n" + flag)
+                    page.goto(url); page.wait_for_timeout(600)
+                    bad += run(page, perrors)
                 browser.close()
             for line in bad: print("FAIL:", line)
             print("ok" if not bad else f"{len(bad)} failure(s)")

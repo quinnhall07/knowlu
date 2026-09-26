@@ -1832,8 +1832,26 @@ fn the_registrar_button_is_on_the_confirm_screen_and_the_schedule_view() {
     assert!(js.contains("p.source_uid.indexOf(\"registrar:\") === 0"), "R5-a: the marker by key prefix");
     assert!(js.contains("\"Refresh from \"") && js.contains("\"Get my class times from \""), "R5-c");
     assert!(js.contains("r.registrar_label"), "R4-g: the button only where the school has a registrar");
-    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows)") && js.contains("bindRegistrar(EL(\"sched-reg\"),"));
+    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows, setupBusy)") && js.contains("bindRegistrar(EL(\"sched-reg\"),"));
     let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(bind.contains("e.stopPropagation();"), "no click reaches the drawer or the deck underneath");
     assert!(!js.contains("capture_registrar\", { view: current.view"), "Q10-a: never the page's own view");
+}
+
+/// R5 review I1, M3, M4: while a myBama fetch and the reload after it run, the confirm screen's
+/// Finish and Not now are disabled; a school without a registrar shows no button; the Schedule
+/// rows keep the row grid.
+#[test]
+fn a_registrar_fetch_holds_the_confirm_screen_and_no_registrar_hides_the_button() {
+    let js = read("console.js");
+    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows, setupBusy)"), "I1: the confirm screen's fetch is busy");
+    let busy = js.split("function setupBusy(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(busy.contains("EL(\"ws-finish\").disabled") && busy.contains("EL(\"ws-later\").disabled"), "I1: Finish and Not now wait");
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.matches("setBusy(false)").count() >= 3, "I1: every settle path clears the busy state");
+    assert!(bind.contains("c.cancel.hidden = true; setBusy(true);"), "M5: no Cancel mid-capture");
+    assert!(!bind.contains("registrarIdle(host, \"\"); });"), "M6: a rejected invoke says so");
+    let css = read("console.css");
+    assert!(css.contains(".reg[hidden] { display: none; }"), "M3: a flex class beats the UA's [hidden]");
+    assert!(js.contains("class=\"row sched reg-row\"") && !js.contains("class=\"row sched reg\""), "M4: rows keep the row grid");
 }
