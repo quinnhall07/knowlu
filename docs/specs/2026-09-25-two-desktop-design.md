@@ -61,7 +61,7 @@ What the code does today, read for this spec (all at `510a88c`):
 | **D16** | The first slot at Finish and *Run now* claim like any slot. *Sync now* never runs a machine step and never claims, and says Knowlu is busy while a slot, a catch-up or an update install holds `sch.running` (§5.4, M6). The quit push releases nothing; expiry does. | *Sync now* is transport only today (`commands.rs:303`), and the lease must not change that. | None beyond D13. |
 | **D17** | **The account holds the shared settings** (Quinn, Q10). `config/` splits by owner: the device-owned keys, **and every calendar entry that is not a `cloud:` marker**, move into a new, never-synced `config/device.yaml` by a text-only migration; every other `config/` file is shared. **A capability URL never enters a synced file** (C3′ Task 11's ruling; the privacy page's promise that calendar links are stored encrypted in the account), and the push guard refuses any shared file that would carry one. | The turn makes the holder's config decide what is fetched and how it is labelled, and Quinn ruled that the profile never differs between computers. | Two computers are not called working until this ships. |
 | **D18** | The six shared files travel through C3′'s sync as whole texts, one `sync_notes` row per path, with a three-way hash check against the last text synced, and a **conditional push**: the server stores a settings row only if its text is still the one the device last synced. A refused push, or both sides changed, is a conflict: the account's text wins and the local text is kept under `state/config-conflicts/`. After every pull that replaces a settings file, approved map cards are re-applied. The whole-file replacement is the **second recorded exception** to "never rewrite a vault file wholesale". | It reuses C3′'s transport and never parses or re-dumps a file; the compare-and-set means no change is ever lost silently. | A hand edit made on two computers at once keeps only one; the other is in the conflict file, named in a line. |
-| **D19** | A second computer's wizard asks, after sign-in, whether the account already holds **settings** (`config/ingest.yaml`); if it does, it skips every question the account answers and asks only for this computer's own logins. Settings written on a computer born into an account that already holds notes are **provisional**: never pushed until a pull replaces them or the student changes them. | Students bring only logins; a new computer's defaults or fresh answers must never override the settings a working computer built up. | A new wizard command, a provisional marker in the cursor, and a panel path the headless walk must cover. |
+| **D19** | A second computer's wizard asks, after sign-in, whether the account already holds **settings** (`config/ingest.yaml`); if it does, it skips every question the account answers and asks only for this computer's own logins. Settings written on a computer born into an account that already holds notes are **provisional**, a mark kept in the cursor: never pushed until the account's settings arrive by pull, the student edits a setting in the app, or seven days pass with no settings in the account. Automatic writes never end it. | Students bring only logins; a new computer's defaults or fresh answers must never override the settings a working computer built up. | A new wizard command, a provisional marker in the cursor, and a panel path the headless walk must cover. |
 
 ## 2. Deterministic ids for imported notes (D1–D8)
 
@@ -519,7 +519,9 @@ runner:
   of edit `write_mapping` makes. No file is parsed and re-dumped. A crash between the two steps leaves a duplicate
   that the readers' device-first rule makes harmless and the guard keeps local. Later additions, a login saved or
   a failed-save fallback, insert lines under their known parent in `device.yaml`.
-- **The wedge guard.** `build_push` never sends a shared file that carries any key D17 names device-owned, any
+- **The wedge guard.** `build_push` never sends a shared file that carries any key D17 names device-owned **at its
+  D17 position** (`coursework.<source>.enabled`, `.credential_target`, `.base_url`, the top-level `ics_url`, the
+  `local` runner's `device` and `scheduler`; `events.yaml`'s per-feed `enabled:` is a shared value), any
   `calendars:` entry whose `ics_url` is not a `cloud:` marker, or any `https://` or `webcal://` value outside
   `events.yaml`'s public campus feeds. The file stays local with the line `sync: config/<file> holds a
   computer-only value (<key>); it stays on this computer until it is moved`. A device value, or a capability URL,
@@ -537,13 +539,17 @@ through C3′'s `sync_notes`, one text row per path, beside the notes.
   pusher's next pull, finding its file equal to its base, would overwrite its change with no line. So a settings
   row is stored only if the account's text is still the one this device last synced:
   - **The row** is today's `{"path", "body"}` plus `"base"`, the SHA-256 of the text this device last synced for
-    that path (empty for none). `sync_rows.ts::checkNote` accepts `base` only on a shared path.
-  - **The handler** writes the batch's records and note rows as today, all or nothing. Then it passes each settings
-    row to a new SQL function, `save_config_row(p_account, p_path, p_body, p_device, p_base) returns boolean`, one
-    compare-and-set statement: `update … set body = p_body … where account_id = p_account and path = p_path and
+    that path (empty for none). `sync_rows.ts::checkNote` accepts `base` only on a shared path. **The hash
+    convention:** the base, `Cursor.notes` and `save_config_row` all hash the text as it travels (after `pystr`'s
+    line-ending translation); the seed hashes (`sync.rs:1085-1092`) are raw file bytes and are never used for
+    settings.
+  - **The handler** writes the batch's records and **note rows only** as today, all or nothing: a settings row never
+    goes through `saveNotes`' unconditional upsert. Then it passes each settings row to a new SQL function,
+    `save_config_row(p_account, p_path, p_body, p_device, p_base) returns boolean`, one compare-and-set statement:
+    `update … set body = p_body … where account_id = p_account and path = p_path and
     encode(sha256(convert_to(body, 'UTF8')), 'hex') = p_base`, or, with an empty base, `insert … on conflict do
-    nothing`. The function is revoked from `public, anon, authenticated`. Settings bytes count toward the ceiling
-    like any row.
+    nothing`. Like `fetch_turn`, it is plpgsql, not SECURITY DEFINER, and revoked from `public, anon,
+    authenticated`. Settings bytes count toward the ceiling like any row.
   - **The reply** gains `"config_refused": [<path>, …]`. For a refused path the device keeps its text and its
     base and prints `sync: config/<file> — another computer changed it first; yours waits for the next pull`.
     That pull then takes the conflict branch below, file and line included. No change is lost silently.
@@ -565,19 +571,31 @@ through C3′'s `sync_notes`, one text row per path, beside the notes.
   - **No base yet** (the first config sync after the upgrade) counts as "changed here": the account's text wins if
     the account has one, and the local text is kept unless byte-identical. So **the first computer to sync after the
     upgrade provides the settings**, as Quinn answered (Q13).
-- **Provisional settings, never published** (re-review R2-I2). A computer born into an account that already holds
-  notes (its restore brought one or more) marks its shared files **provisional**. The wizard records each one's
-  hash as it writes it, in `state/seed-hashes.json`, C3′'s precedent for telling an untouched wizard file from a
-  real one, and lists it in a new cursor field, `provisional_config`.
-  - `build_push` never sends a provisional file whose bytes still equal that hash, even after the pull reaches the
-    end (unlike E1's note seeds, which are released then).
-  - A pull that brings the account's text replaces it as "unchanged here", copying it to the conflict folder first
-    when it differs.
-  - A student's own edit makes it real and ends the mark.
+- **Provisional settings, never published by accident** (re-review R2-I2, R3-I1). A computer born into an account
+  that already holds notes (its restore brought one or more) marks its shared files **provisional**. The mark is
+  **state, never inferred from bytes**: two new cursor fields, `provisional_config` (the paths) and
+  `provisional_since` (this computer's own clock when the wizard set it). `build_push` never sends a path while it
+  is marked, even after the pull reaches the end (unlike E1's note seeds, which are released then). The mark ends
+  only by one of three events:
+  - **(a) The account's settings arrive by pull.** The account's text replaces the file, copied to the conflict
+    folder first when it differs, and the mark ends for every path.
+  - **(b) The student edits a setting in the app** (a console command that writes a shared setting, such as the
+    slot times or time zone on the Settings page). The mark ends for that file, which is pushed with an empty
+    base. A hand edit in a text editor is not an event: it stays provisional and, on (a), is kept in the conflict
+    folder.
+  - **(c) Seven days pass**, on this computer's own clock since `provisional_since`, in which every pull found
+    notes but no settings in the account. The computer then publishes its shared files as they stand, with empty
+    bases (`save_config_row` inserts only where no row exists), and prints `sync: no other computer has shared
+    settings for 7 days; this computer's settings are now the account's`. **Why seven days:** long enough for a
+    working computer that is asleep, away for a weekend or waiting for its daily update check to sync first;
+    short enough that a computer replacing a retired one does not spend a term without shared settings. The old
+    computer is then presumed gone, and "first to sync" (Q13) still governs if it returns: its differing files go
+    to its conflict folder.
+  - **Automatic writes never end the mark**: `apply_map_cards` on a portal holder, `apply_approved_mappings`, the
+    D17 migration, and the wizard's own writes change the file and keep it provisional.
   - So neither D19's skipped-panel defaults, nor the answers of a new computer that asked every question because
-    the account had notes but no settings yet (§4.8, D19), can override the settings a working computer holds.
-    When that computer syncs its settings, they replace the provisional ones, and the fresh answers are kept in
-    the conflict folder.
+    the account had notes but no settings yet (§4.8, D19), can override a working computer's settings; and if no
+    working computer ever returns, the new computer's settings become the account's after seven days.
 - **The second recorded exception.** Writing a pulled settings text over a local file replaces a vault file
   wholesale. CLAUDE.md's invariant "Never rewrite a vault file wholesale" has one recorded exception today, C3′'s
   seed pre-pass (`sync.rs:1890`); this is the second. **Hand-off for the plan:** edit CLAUDE.md to name both
@@ -610,9 +628,9 @@ commands go from 29 to 30.
   only logins.
 - **The account has notes but no settings yet.** The first computer is still on the old build, or has not synced
   since updating. The wizard asks every question, as for a first computer, and its answers are provisional (D18):
-  used here at once, never published, and replaced once the working computer's settings arrive. A student's own
-  later edit makes them real. *Recommended*, over publishing them: a fresh wizard's answers would otherwise beat
-  months of card-made mappings under "first to sync".
+  used here at once, never published, and replaced once the working computer's settings arrive. A Settings edit
+  in the app, or seven days with no settings in the account, makes them real (D18). *Recommended*, over publishing
+  them at once: a fresh wizard's answers would otherwise beat months of card-made mappings under "first to sync".
 - **An account with no vault** gets today's nine panels, and its answers are real from the start.
 
 ## 5. Interactions
@@ -697,8 +715,11 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
     conflict at the next pull.
   - `apply_approved_mappings` runs after every replacing pull, re-inserts a missing key from an `executed` card
     in `archive/`, and never changes a key the file holds.
-  - A provisional file is never pushed while its bytes equal its recorded hash, is replaced by the account's
-    text, and becomes real after a local edit.
+  - The provisional mark (R3-I1): a map card applied on a provisional computer changes its `ingest.yaml` and
+    publishes nothing; so do `apply_approved_mappings` and the migration; a pull bringing the account's settings
+    replaces the files and ends the mark; an edit through the app's Settings publishes that file; and with the
+    clock injected, seven days with no settings in the account publish every marked file, with empty bases and
+    the line, while a row stored meanwhile by another computer makes that insert a `config_refused`.
 - `eventemit`: a uid in an archived digest is never proposed again; `rank --no-digest` writes no digest; `oracle.rs`
   and `surface_oracle.rs` are unchanged.
 
@@ -865,7 +886,8 @@ Quinn answered every open question on 2026-09-25, Q13 included, and the spec is 
 `config/`, and neither has a base yet (D18). The first computer to sync after the upgrade provides the settings.
 The other keeps its differing files under `state/config-conflicts/`, with a line naming them, and
 `apply_approved_mappings` re-inserts every mapping a card made. A hand-typed difference survives only in the
-conflict file, for the student to copy back. Provisional settings (D19) never count as the first sync: a new
-computer's defaults, or the fresh answers of one that asked every question, never win over a working computer's.
+conflict file, for the student to copy back. Provisional settings (D19) do not count as a first sync until the
+student edits them in the app or seven days pass with no settings in the account (D18): a new computer's defaults,
+or the fresh answers of one that asked every question, never win over a working computer that is still syncing.
 
 No new question is open.
