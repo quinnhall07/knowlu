@@ -4,11 +4,12 @@
 //! `engine/tests/fixtures/registrar/banner-ua-registration.json`. Nothing here fetches: the app
 //! carries the bytes (spec D4).
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use jiff::civil::{Date, Time};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::commitments::{Meet, Rule, Series};
+use crate::commitments::{Meet, Rule, Series, SeriesFile};
 use crate::weekcal::DayKey;
 
 /// A school whose registrar Knowlu reads. Adding one is a code change (parent §10).
@@ -186,6 +187,92 @@ pub fn parse_banner(json: &Value, school: &str) -> Result<Parsed, String> {
     }
     out.series.sort_by(|a, b| a.source_uid.cmp(&b.source_uid));
     Ok(out)
+}
+
+/// What `commitments --registrar` did (spec §3's output).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Report {
+    pub term: String,
+    pub rows: usize,
+    pub confirmed: usize,
+    pub proposed: usize,
+    pub no_time: usize,
+    pub midnight: usize,
+    pub warnings: Vec<String>,
+}
+
+impl Report {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "term": self.term, "rows": self.rows, "confirmed": self.confirmed, "proposed": self.proposed,
+            "dropped": { "no_time": self.no_time, "midnight": self.midnight },
+            "warnings": self.warnings,
+        })
+    }
+}
+
+/// `commitments --registrar <file> --school <key>` (spec §3). Parses first: an unknown school, a
+/// file that is not JSON and a parse with no usable row are `Err` (exit 2) before anything is
+/// written. Then the term's calendar is merged under D5 ([`crate::commitments::refresh_series`]),
+/// and every kept row that names a vault course and is a current proposal is confirmed at `hard`
+/// through phase 2's `confirm`, under `ctx` (the student: `quinn` via `dashboard`; Plan rulings
+/// R3-b, R3-c). No network.
+pub fn run(
+    vault: &Path,
+    text: &str,
+    school_key: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Report, String> {
+    use crate::commitments as cm;
+    if school(school_key).is_none() {
+        return Err(format!("--school {school_key:?} is not a school Knowlu reads"));
+    }
+    let json: Value = serde_json::from_str(text).map_err(|e| format!("--registrar is not JSON ({e})"))?;
+    let parsed = parse_banner(&json, school_key)?;
+    let calendar = calendar_key(school_key, &parsed.term);
+    let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, parsed.series.clone())], today);
+    warnings.extend(parsed.warnings.iter().cloned());
+    let stored = cm::stored_proposals(vault, today);
+    let current: BTreeSet<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
+    let (mut mine, mut proposed) = (Vec::new(), 0);
+    for s in &parsed.series {
+        match cm::registrar_course(s, &stored.codes) {
+            Some(_) if current.contains(s.source_uid.as_str()) => mine.push((s.source_uid.clone(), "hard".to_string())),
+            Some(_) => {}
+            None => proposed += 1,
+        }
+    }
+    let input = cm::ConfirmInput { mine, not_mine: Vec::new(), window: None };
+    let done = cm::confirm(vault, &input, today, ctx, journal)?;
+    warnings.extend(done.warnings);
+    Ok(Report {
+        term: parsed.term,
+        rows: parsed.series.len(),
+        confirmed: done.created,
+        proposed,
+        no_time: parsed.no_time,
+        midnight: parsed.midnight,
+        warnings,
+    })
+}
+
+/// The *Schedule* view's registrar line (Plan ruling R3-d): the school and the terms the series
+/// file holds, the term [`term_for`] names today, and whether that one is missing. `null` when the
+/// file holds no registrar calendar.
+pub fn status(file: &SeriesFile, today: Date) -> Value {
+    let mut school_key: Option<String> = None;
+    let mut held: BTreeSet<String> = BTreeSet::new();
+    for calendar in file.calendars.keys() {
+        let Some((s, term)) = calendar.strip_prefix(CALENDAR_PREFIX).and_then(|r| r.split_once(':')) else { continue };
+        school_key.get_or_insert_with(|| s.to_string());
+        held.insert(term.to_string());
+    }
+    let Some(school_key) = school_key else { return Value::Null };
+    let current = term_for(&school_key, today);
+    let refresh = current.as_ref().is_some_and(|t| !held.contains(t));
+    json!({ "school": school_key, "held": held, "current": current, "refresh": refresh })
 }
 
 #[cfg(test)]
@@ -458,5 +545,76 @@ mod d5_d7_tests {
         assert!(cm::asks_wait_for_registrar(&file, date(2026, 8, 19)), "the term's first day still waits");
         assert!(!cm::asks_wait_for_registrar(&file, date(2026, 8, 20)), "the day after it does not");
         assert!(!cm::asks_wait_for_registrar(&file, date(2026, 12, 20)), "a term already over holds nothing");
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    //! Phase 3, `run` and `status`, on a scratch vault whose only course is CS 100. Invented data.
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+    use std::path::PathBuf;
+
+    fn vault(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-p3run-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::write(dir.join("config").join("ingest.yaml"), "timezone: America/Chicago\n").unwrap();
+        std::fs::write(dir.join("courses").join("cs-100.md"), "---\ntitle: \"CS 100 Invented Computing\"\ncode: \"CS 100\"\n---\n").unwrap();
+        dir
+    }
+
+    fn fetch(v: &Path, text: &str, day: Date) -> Result<Report, String> {
+        run(v, text, "ua", day, &WriteContext::new("quinn", "dashboard"), &mut Journal::new(v))
+    }
+
+    #[test]
+    fn matched_rows_are_confirmed_by_the_student_and_the_rest_proposed() {
+        let v = vault("r24");
+        let r = fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
+        assert_eq!((r.term.as_str(), r.rows, r.confirmed, r.proposed, r.no_time, r.midnight), ("202640", 4, 2, 2, 1, 1));
+        let lab = std::fs::read_to_string(v.join("commitments").join("cs-100-lab.md")).unwrap();
+        for line in ["kind: lab", "level: hard", "course: cs-100", "source_uid: registrar:ua:202640-40002", "until: 2026-12-04"] {
+            assert!(lab.contains(line), "{line} missing: {lab}");
+        }
+        assert!(lab.contains("Found in your school's class schedule."), "{lab}");
+        let journal: String = std::fs::read_dir(v.join("state").join("journal")).unwrap().flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+        assert!(journal.contains("\"actor\": \"quinn\"") && journal.contains("\"via\": \"dashboard\""), "{journal}");
+        assert!(!journal.contains("\"actor\": \"agent:commitments\""), "R3-c: the R24 writes are the student's (spec §3)");
+        let again = fetch(&v, super::tests::FIXTURE, date(2026, 9, 2)).unwrap();
+        assert_eq!((again.confirmed, again.warnings.iter().filter(|w| w.contains("not a current proposal")).count()), (0, 0));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_bad_school_or_file_writes_nothing() {
+        let v = vault("bad");
+        assert!(run(&v, super::tests::FIXTURE, "zz", date(2026, 9, 1), &WriteContext::new("quinn", "dashboard"), &mut Journal::new(&v)).is_err());
+        assert!(fetch(&v, "<html>sign in</html>", date(2026, 9, 1)).is_err());
+        assert!(fetch(&v, "[]", date(2026, 9, 1)).is_err());
+        assert!(!v.join("state").exists() && !v.join("commitments").exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_overview_names_the_term_and_the_registrar_proposals() {
+        let v = vault("overview");
+        fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
+        let o = crate::commitments::overview(&v, date(2026, 9, 1));
+        assert_eq!(o.registrar, serde_json::json!({ "school": "ua", "held": ["202640"], "current": "202640", "refresh": false }));
+        let keys: Vec<&str> = o.registrar_proposals.iter().map(|p| p["source_uid"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["registrar:ua:202640-40003", "registrar:ua:202640-40006"]);
+        // What `your_week` hands the page (R5 reads `week.registrar` and `week.registrar_proposals`).
+        let json = o.to_json();
+        assert_eq!((&json["registrar"], json["registrar_proposals"].as_array().map(Vec::len)), (&o.registrar, Some(2)));
+        assert_eq!(crate::commitments::overview(&v, date(2027, 1, 5)).registrar["refresh"], true);
+        let fresh = vault("none");
+        assert_eq!(crate::commitments::overview(&fresh, date(2026, 9, 1)).registrar, serde_json::Value::Null);
+        let _ = std::fs::remove_dir_all(&v);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 }

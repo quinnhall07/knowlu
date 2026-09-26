@@ -4656,6 +4656,10 @@ pub struct Overview {
     /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
     pub window: Vec<serde_json::Value>,
     pub uncovered_courses: Vec<UncoveredCourse>,
+    /// Phase 3 (Plan ruling R3-d): [`crate::registrar::status`], or `null`.
+    pub registrar: serde_json::Value,
+    /// The current registrar proposals (key `registrar:`), as [`proposal_value`].
+    pub registrar_proposals: Vec<serde_json::Value>,
     /// D3: the vault is on its first day and has no planning-day note.
     pub setup: bool,
     pub warnings: Vec<String>,
@@ -4668,6 +4672,8 @@ impl Overview {
             "office_hours": self.office_hours,
             "window": self.window,
             "uncovered_courses": self.uncovered_courses,
+            "registrar": self.registrar,
+            "registrar_proposals": self.registrar_proposals,
             "setup": self.setup,
             "warnings": self.warnings,
         })
@@ -4710,7 +4716,23 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         .collect();
     let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes);
     let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
-    Overview { commitments, office_hours, window, uncovered_courses, setup, warnings: stored.warnings }
+    let registrar = crate::registrar::status(&stored.file, today);
+    let registrar_proposals = stored
+        .proposals
+        .iter()
+        .filter(|p| p.source_uid.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .map(proposal_value)
+        .collect();
+    Overview {
+        commitments,
+        office_hours,
+        window,
+        uncovered_courses,
+        registrar,
+        registrar_proposals,
+        setup,
+        warnings: stored.warnings,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
