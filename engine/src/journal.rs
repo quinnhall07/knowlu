@@ -217,13 +217,17 @@ pub struct Journal {
     pub vault: PathBuf,
     pub ledger: JsonlLedger,
     cache: Option<Vec<Record>>,
+    /// Two-desktop design D6: `{loser: winner}`, read from `ids::ALIASES_FILE` at first use, or
+    /// installed by the `sync::apply` that has just rebuilt it (`set_aliases`). Not cleared by
+    /// `invalidate`, which is about the ledger's cache only.
+    aliases: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Journal {
     pub fn new(vault: impl Into<PathBuf>) -> Journal {
         let vault = vault.into();
         let ledger = JsonlLedger::new(vault.join("state").join("journal"));
-        Journal { vault, ledger, cache: None }
+        Journal { vault, ledger, cache: None, aliases: None }
     }
 
     pub fn warnings(&self) -> &[String] {
@@ -250,10 +254,25 @@ impl Journal {
         self.ledger.read(since, until)
     }
 
+    /// D6: install the alias map an `apply` has just rebuilt, with no re-read of the file.
+    pub fn set_aliases(&mut self, aliases: std::collections::BTreeMap<String, String>) {
+        self.aliases = Some(aliases);
+    }
+
+    /// D6: every id of `note_id`'s alias group (just `note_id` when it is in none).
+    fn group_of(&mut self, note_id: &str) -> std::collections::BTreeSet<String> {
+        let vault = self.vault.clone();
+        let aliases = self.aliases.get_or_insert_with(|| crate::ids::load_aliases(&vault));
+        crate::ids::alias_group(aliases, note_id)
+    }
+
+    /// Every record for `note_id` — and, with an alias group on file (two-desktop design D6), for every
+    /// id of its group, so a loser's history is the winner's. `human_set` reads through this.
     pub fn records_for(&mut self, note_id: &str, field: Option<&str>) -> Vec<Record> {
+        let group = self.group_of(note_id);
         self.read(None, None)
             .into_iter()
-            .filter(|r| str_of(r, "id").as_deref() == Some(note_id))
+            .filter(|r| str_of(r, "id").is_some_and(|id| group.contains(&id)))
             .filter(|r| match field {
                 None => true,
                 Some(f) => str_of(r, "field").as_deref() == Some(f),
@@ -443,6 +462,42 @@ mod tests {
         let mut rec = set_rec("id1", "due", "agent:ingest.blackboard", "2026-08-29T12:00:00.000Z");
         j.append(&mut rec).unwrap();
         assert!(j.human_set("id1", "due").is_none());
+    }
+
+    /// Two-desktop design D6: with an alias group on file, `records_for` answers every id of the
+    /// group, so the loser's history is the winner's too — and judge-once reads through the same map.
+    #[test]
+    fn records_for_and_human_set_follow_the_alias_file_to_the_whole_group() {
+        let v = vault();
+        crate::ids::save_aliases(
+            &v,
+            &std::collections::BTreeMap::from([("task_00000000b2".to_string(), "task_00000000a1".to_string())]),
+        )
+        .unwrap();
+        let mut j = Journal::new(&v);
+        let mut a = set_rec("task_00000000a1", "due", "agent:x", "2026-08-29T12:00:00.000Z");
+        let mut b = set_rec("task_00000000b2", "importance", "quinn", "2026-08-29T12:00:01.000Z");
+        let mut c = set_rec("task_00000000c3", "due", "quinn", "2026-08-29T12:00:02.000Z");
+        j.append(&mut a).unwrap();
+        j.append(&mut b).unwrap();
+        j.append(&mut c).unwrap();
+        let ids = |records: Vec<Record>| records.iter().map(|r| str_of(r, "id").unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids(j.records_for("task_00000000a1", None)), vec!["task_00000000a1", "task_00000000b2"]);
+        assert_eq!(ids(j.records_for("task_00000000b2", None)), vec!["task_00000000a1", "task_00000000b2"]);
+        assert_eq!(ids(j.records_for("task_00000000c3", None)), vec!["task_00000000c3"]);
+        assert!(j.human_set("task_00000000a1", "importance").is_some(), "set by the student under the loser id");
+    }
+
+    /// `set_aliases` installs the map an `apply` has just rebuilt, with no re-read of the file.
+    #[test]
+    fn set_aliases_replaces_the_map_the_journal_reads_through() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let mut b = set_rec("task_00000000b2", "due", "quinn", "2026-08-29T12:00:01.000Z");
+        j.append(&mut b).unwrap();
+        assert!(j.records_for("task_00000000a1", None).is_empty());
+        j.set_aliases(std::collections::BTreeMap::from([("task_00000000b2".to_string(), "task_00000000a1".to_string())]));
+        assert_eq!(j.records_for("task_00000000a1", None).len(), 1);
     }
 
     #[test]

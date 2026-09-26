@@ -152,6 +152,98 @@ pub fn held_ids(vault: &Path) -> BTreeSet<String> {
     build_index(vault).into_keys().collect()
 }
 
+/// Two-desktop design D6: `{loser id: winner id}` for every alias group — one imported item under
+/// two or more ids. Generated and device-local; never synced (`sync::build_push` reads only the note
+/// folders); rebuilt by every `sync::apply`. A lost file costs one more full reconcile, never a wrong
+/// write (re-review m2).
+pub const ALIASES_FILE: &str = "state/id-aliases.json";
+
+/// Missing or unreadable is `{}`, never an error: a vault with no doubles has no groups.
+pub fn load_aliases(vault: &Path) -> BTreeMap<String, String> {
+    pystr::read_text(&vault.join(ALIASES_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Through `ledger::dumps_value`, and a temp file renamed into place, as `sync`'s other generated
+/// files are written, so a crash never leaves half a file.
+pub fn save_aliases(vault: &Path, aliases: &BTreeMap<String, String>) -> Result<(), String> {
+    let path = vault.join(ALIASES_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let value = serde_json::to_value(aliases).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("tmp");
+    pystr::write_text(&tmp, &crate::ledger::dumps_value(&value)).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// The winner of `id`'s group, or `id` itself when it is in none.
+pub fn canonical<'a>(aliases: &'a BTreeMap<String, String>, id: &'a str) -> &'a str {
+    aliases.get(id).map(String::as_str).unwrap_or(id)
+}
+
+/// Every id of `id`'s group, the winner included; `{id}` when it is in none.
+pub fn alias_group(aliases: &BTreeMap<String, String>, id: &str) -> BTreeSet<String> {
+    let winner = canonical(aliases, id).to_string();
+    let mut group: BTreeSet<String> =
+        aliases.iter().filter(|(_, w)| **w == winner).map(|(loser, _)| loser.clone()).collect();
+    group.insert(winner);
+    group
+}
+
+/// D6's input: every import key, and the ids that name it. From every `create` record first — a
+/// `create` record's `new` is the whole frontmatter as minted (`write.rs:416-418`), immutable, so a
+/// later hand edit of `source_uid` or `created_by` never moves a note between keys — and from a note
+/// on disk only when its id has no `create` record (re-review m3).
+pub fn import_ids_by_key(
+    records: &[crate::ledger::Record],
+    notes: &[(PathBuf, Option<Mapping>)],
+) -> BTreeMap<ImportKey, BTreeSet<String>> {
+    let mut keys: BTreeMap<ImportKey, BTreeSet<String>> = BTreeMap::new();
+    let mut created: BTreeSet<String> = BTreeSet::new();
+    for record in records {
+        let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str).unwrap_or_default();
+        if field("op") != "create" || !is_id(field("id")) {
+            continue;
+        }
+        created.insert(field("id").to_string());
+        let minted = crate::yaml::from_json(record.get("new").unwrap_or(&serde_json::Value::Null));
+        let serde_yaml_ng::Value::Mapping(meta) = minted else { continue };
+        if let Some(key) = import_key(Path::new(field("path")), &meta) {
+            keys.entry(key).or_default().insert(field("id").to_string());
+        }
+    }
+    for (path, meta) in notes {
+        let Some(meta) = meta else { continue };
+        let Some(id) = crate::yaml::get(meta, "id").and_then(crate::yaml::text).filter(|id| is_id(id)) else {
+            continue;
+        };
+        if created.contains(&id) {
+            continue;
+        }
+        if let Some(key) = import_key(path, meta) {
+            keys.entry(key).or_default().insert(id);
+        }
+    }
+    keys
+}
+
+/// D6: a key with two or more ids is an alias group, and its lowest id as a string wins. Both desktops
+/// compute the same group and winner with no coordination and no knowledge of which id is derived.
+pub fn aliases_from(keys: &BTreeMap<ImportKey, BTreeSet<String>>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for ids in keys.values().filter(|ids| ids.len() > 1) {
+        let mut ids = ids.iter();
+        let Some(winner) = ids.next() else { continue };
+        for loser in ids {
+            out.insert(loser.clone(), winner.clone());
+        }
+    }
+    out
+}
+
 /// Frontmatter, or `None` for anything unreadable — a missing file, bad YAML, or a non-mapping.
 /// Never raises: the caller logs and moves on, which is the same rule ingest uses.
 pub fn read_meta(path: &Path) -> Option<Mapping> {
@@ -320,10 +412,18 @@ pub fn inside_vault(vault: &Path, path: &Path) -> Result<PathBuf, IdError> {
 pub fn resolve_target(vault: &Path, target: &str) -> Result<PathBuf, IdError> {
     if is_id(target) {
         let index = build_index(vault);
-        let path = index
-            .get(target)
-            .ok_or_else(|| IdError::UnknownId(target.to_string()))?;
-        return inside_vault(vault, path);
+        let path = match index.get(target) {
+            Some(path) => path.clone(),
+            None => {
+                let aliases = load_aliases(vault);
+                index
+                    .get(canonical(&aliases, target))
+                    .or_else(|| alias_group(&aliases, target).iter().find_map(|id| index.get(id)))
+                    .cloned()
+                    .ok_or_else(|| IdError::UnknownId(target.to_string()))?
+            }
+        };
+        return inside_vault(vault, &path);
     }
     let path = inside_vault(vault, &vault.join(target))?;
     if !path.is_file() {
@@ -468,6 +568,86 @@ mod tests {
             held_ids(&v).into_iter().collect::<Vec<_>>(),
             vec!["task_0123456789".to_string(), "task_abcdef0123".to_string()]
         );
+    }
+
+    fn create_record(id: &str, path: &str, new: serde_json::Value) -> crate::ledger::Record {
+        let mut spec = crate::journal::NewRecord::new("create", path, "agent:coursework.zybooks", "local-runner");
+        spec.id = Some(id);
+        spec.new = new;
+        spec.ts = Some("2026-09-20T10:00:00.000Z".to_string());
+        spec.device = Some("DeskA".to_string());
+        crate::journal::make_record(spec).unwrap()
+    }
+
+    /// §2.6 (re-review m3): `create` records key first, and a note on disk only when its id has no
+    /// `create` record — so a later hand edit of `source_uid` never moves a note between keys, and both
+    /// desktops read the same immutable input.
+    #[test]
+    fn import_ids_by_key_reads_create_records_first_and_notes_only_without_one() {
+        let v = vault();
+        let minted = serde_json::json!({"created_by": "zybooks", "source_uid": "zybooks:1", "id": "task_00000000b2"});
+        let records = vec![create_record("task_00000000b2", "tasks/x.md", minted)];
+        // The same note on disk, its source_uid since edited by hand: its create record still keys it.
+        note(&v, "tasks/x.md", "---\ncreated_by: zybooks\nsource_uid: \"zybooks:edited\"\nid: task_00000000b2\n---\n\nb\n");
+        // A note with no create record here (made before the upgrade, or a text written by a pull) keys from disk.
+        note(&v, "tasks/y.md", "---\ncreated_by: zybooks\nsource_uid: \"zybooks:1\"\nid: task_00000000a1\n---\n\nb\n");
+        let keys = import_ids_by_key(&records, &scan_notes(&v));
+        let item: ImportKey = ("task".into(), "zybooks".into(), "coursework:zybooks:1".into());
+        assert_eq!(
+            keys.get(&item).map(|ids| ids.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["task_00000000a1".to_string(), "task_00000000b2".to_string()])
+        );
+        let edited: ImportKey = ("task".into(), "zybooks".into(), "coursework:zybooks:edited".into());
+        assert!(!keys.contains_key(&edited), "a hand edit does not move a note between keys");
+    }
+
+    /// §2.6: two or more ids under one key are one alias group, and the lowest id (as a string; the
+    /// shared `kind_` prefix makes this compare the hex) wins — the same on every computer.
+    #[test]
+    fn aliases_from_maps_every_loser_to_the_lowest_id() {
+        let key = |k: &str| -> ImportKey { ("task".into(), "zybooks".into(), k.into()) };
+        let mut keys: BTreeMap<ImportKey, BTreeSet<String>> = BTreeMap::new();
+        keys.insert(
+            key("coursework:zybooks:1"),
+            BTreeSet::from(["task_00000000b2".to_string(), "task_00000000a1".to_string(), "task_00000000c3".to_string()]),
+        );
+        keys.insert(key("coursework:zybooks:2"), BTreeSet::from(["task_00000000d4".to_string()]));
+        let aliases = aliases_from(&keys);
+        assert_eq!(
+            aliases,
+            BTreeMap::from([
+                ("task_00000000b2".to_string(), "task_00000000a1".to_string()),
+                ("task_00000000c3".to_string(), "task_00000000a1".to_string()),
+            ])
+        );
+        assert_eq!(canonical(&aliases, "task_00000000c3"), "task_00000000a1");
+        assert_eq!(canonical(&aliases, "task_00000000d4"), "task_00000000d4");
+        let group = |id: &str| alias_group(&aliases, id).into_iter().collect::<Vec<_>>();
+        assert_eq!(group("task_00000000b2"), vec!["task_00000000a1", "task_00000000b2", "task_00000000c3"]);
+        assert_eq!(group("task_00000000d4"), vec!["task_00000000d4"]);
+    }
+
+    /// `state/id-aliases.json`: written through `ledger::dumps_value`; missing or unreadable is `{}`.
+    #[test]
+    fn the_alias_file_round_trips_and_a_missing_or_broken_one_is_empty() {
+        let v = vault();
+        assert!(load_aliases(&v).is_empty());
+        let map = BTreeMap::from([("task_00000000b2".to_string(), "task_00000000a1".to_string())]);
+        save_aliases(&v, &map).unwrap();
+        assert_eq!(load_aliases(&v), map);
+        assert_eq!(pystr::read_text(&v.join(ALIASES_FILE)).unwrap(), "{\"task_00000000b2\": \"task_00000000a1\"}");
+        pystr::write_text(&v.join(ALIASES_FILE), "not json").unwrap();
+        assert!(load_aliases(&v).is_empty());
+    }
+
+    /// Review M3: an issue's `target_id`, and anything else naming the old id, keeps working.
+    #[test]
+    fn resolve_target_answers_an_old_id_with_its_groups_note() {
+        let v = vault();
+        note(&v, "tasks/x.md", "---\nid: task_00000000a1\n---\n\nb\n");
+        save_aliases(&v, &BTreeMap::from([("task_00000000b2".to_string(), "task_00000000a1".to_string())])).unwrap();
+        assert_eq!(resolve_target(&v, "task_00000000b2").unwrap(), v.join("tasks").join("x.md"));
+        assert_eq!(resolve_target(&v, "task_00000000c3").unwrap_err(), IdError::UnknownId("task_00000000c3".into()));
     }
 
     #[test]
