@@ -347,7 +347,8 @@ three specific traps were probed and are all correctly handled:
 
 - an inline `---` inside frontmatter, where `split_frontmatter`'s un-anchored `text.split("---", 2)`
   disagrees with the writer's line-anchored `lines.index("---", 1)` — caught by the
-  `after_body != before_body` check;
+  `after_body != before_body` check (the Rust reader's un-anchored split was fixed on branch
+  `fix-literal-dashes`, first in efd10ea: it now closes only on a whole `---` line);
 - a leading blank line before the frontmatter — `apply_frontmatter_fields_to_text` raises
   `ValueError`, which `_UNREADABLE` catches;
 - `_as_date` on hostile input (`0`, `False`, `[1, 2]`, `{'a': 1}`, `2026-13-45`, `3.7`) — returns

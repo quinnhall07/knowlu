@@ -665,7 +665,8 @@ fn fixture_title_and_status(v: &Path) -> Option<(String, String)> {
 /// that would reach the note raw is refused by name with nothing written.
 #[test]
 fn a_title_with_dashes_or_a_line_break_never_breaks_the_note() {
-    for (n, title) in ["a---b", "--- x", "line one\nline two"].into_iter().enumerate() {
+    // `to_literal` escapes `\n`; it leaves U+2028 raw, and a note reads that back intact.
+    for (n, title) in ["a---b", "--- x", "line one\nline two", "pasted\u{2028}from a PDF"].into_iter().enumerate() {
         let v = scratch(&format!("dashes{n}"));
         let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-dashes{n}-data-{}", std::process::id())));
         let id = first_id(&cs);
@@ -680,8 +681,8 @@ fn a_title_with_dashes_or_a_line_break_never_breaks_the_note() {
         assert_eq!(env["ok"], true, "{title:?}: second edit: {env}");
         assert_eq!(fixture_title_and_status(&v), Some((title.to_string(), "done".to_string())), "{title:?}");
     }
-    // A raw line break (a verbatim field, or a separator `to_literal` leaves unescaped) is refused.
-    for (n, (field, value)) in [("due", "2026-10-01\n---"), ("title", "a\u{2028}b")].into_iter().enumerate() {
+    // A raw `\n` or `\r` in a verbatim field (passed through as the literal) is refused.
+    for (n, (field, value)) in [("due", "2026-10-01\n---"), ("due", "2026-10-01\r2026-10-02")].into_iter().enumerate() {
         let v = scratch(&format!("breaks{n}"));
         let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-breaks{n}-data-{}", std::process::id())));
         let id = first_id(&cs);

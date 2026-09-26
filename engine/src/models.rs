@@ -377,6 +377,17 @@ mod tests {
     }
 
     #[test]
+    fn a_closing_line_with_text_after_the_dashes_closes_nothing() {
+        // A contract change from the Python-era un-anchored split, pinned here: `---x` was read as
+        // the closing marker; now it is an ordinary line, so with no whole `---` line after it the
+        // note has no frontmatter.
+        let text = "---\ntitle: x\n---x\n\nbody\n";
+        let (meta, body) = split_frontmatter(text).unwrap();
+        assert!(meta.is_empty());
+        assert_eq!(body, text);
+    }
+
+    #[test]
     fn dashes_inside_a_frontmatter_line_are_not_a_delimiter() {
         // Only a whole `---` line closes the block. An un-anchored split cut the block at the
         // `---` inside the quoted title and failed on the unclosed quote.

@@ -2347,21 +2347,6 @@ mod tests {
         let meta = yaml("target: tasks/t.md\nchanges:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n");
         assert_eq!(apply(&v, &meta), Some("due: to is not a date the engine can read".to_string()));
         assert_eq!(std::fs::read(&path).unwrap(), before);
-
-        // The sharpest form: the note would still parse, so nothing warns, but effort, importance
-        // and progress would be gone and the task would keep ranking with default values.
-        let v = vault();
-        let path = with_task(
-            &v,
-            "t.md",
-            "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90",
-        );
-        let meta = yaml("target: tasks/t.md\nchanges:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n");
-        apply(&v, &meta);
-        let parsed = split_frontmatter(&read(&path)).unwrap().0;
-        assert_eq!(crate::yaml::opt_f64(crate::yaml::get(&parsed, "effort_hours"), -1.0), 6.0);
-        assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&parsed, "importance"), -1), 5);
-        assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&parsed, "progress"), -1), 90);
     }
 
     #[test]

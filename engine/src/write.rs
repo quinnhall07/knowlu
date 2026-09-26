@@ -238,8 +238,10 @@ pub fn write_literals(
 ) -> Result<WriteResult, WriteError> {
     // Every literal is one line, or nothing is written: surgery replaces exactly one line, so a
     // literal carrying a break would orphan its tail (and a tail of `---` would close the block).
-    // The wide boundary set is `pystr::splitlines`'s, the one every re-read of the note uses.
-    if let Some((name, _)) = literals.iter().find(|(_, l)| l.chars().any(pystr::is_line_boundary)) {
+    // Only `\n` and `\r` count: surgery splits on `\n` and `read_text` maps `\r` to `\n`. U+2028,
+    // U+2029 and U+0085 are not breaks to anything that re-reads a note, so they are written
+    // (refusing them would fail a whole coursework or enrich batch on an upstream title).
+    if let Some((name, _)) = literals.iter().find(|(_, l)| l.contains(['\n', '\r'])) {
         return Err(WriteError::LineBreak(name.clone()));
     }
     let path = resolve_target(vault, target)?;
@@ -1019,7 +1021,7 @@ mod tests {
 
     #[test]
     fn a_literal_carrying_a_line_break_is_refused_and_nothing_is_written() {
-        for raw in ["a\nb", "a\rb", "a\r\nb", "a\u{2028}b", "a\u{2029}b", "a\u{85}b", "\"a\n---\nb\""] {
+        for raw in ["a\nb", "a\rb", "a\r\nb", "\"a\n---\nb\"", "\"a\rb\""] {
             let v = vault();
             let path = seed(&v);
             let before = std::fs::read(&path).unwrap();
@@ -1031,6 +1033,35 @@ mod tests {
             assert!(err.to_string().contains("line break"), "{raw:?}: {err}");
             assert_eq!(std::fs::read(&path).unwrap(), before, "{raw:?}: the note must be untouched");
             assert!(j.read(None, None).is_empty(), "{raw:?}: no journal record for a refused write");
+        }
+    }
+
+    #[test]
+    fn an_invisible_separator_is_not_a_line_break_to_the_note_and_is_written() {
+        // Surgery splits on `\n` and `read_text` maps `\r` to `\n`; nothing that re-reads a note
+        // breaks on U+2028/U+2029/U+0085. Refusing them would fail a whole coursework or enrich
+        // batch on every run for as long as an upstream title (pasted from a PDF) carries one.
+        for (title, reads_back) in [
+            ("a\u{2028}b", "a\u{2028}b"),
+            ("a\u{2029}b", "a\u{2029}b"),
+            // NEL is folded to a space by the YAML reader — lossy, pre-existing, not a break.
+            ("a\u{85}b", "a b"),
+        ] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal), ("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(reads_back), "{title:?}");
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+            assert_eq!(j.read(None, None).len(), 2, "{title:?}");
+            // ...and the note still takes a second edit.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "active")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
         }
     }
 
