@@ -1,6 +1,6 @@
 # Two desktops on one account: design
 
-**Status: Quinn's answers of 2026-09-25 folded in (§9); for signature.** Written 2026-09-25 on branch
+**Status: SIGNED by Quinn 2026-09-25** ("Signed — write the plan"), with Quinn's answers of 2026-09-25 folded in (§9). Written 2026-09-25 on branch
 `two-desktop-spec` at main `510a88c`; revised three times the same day after the spec review and its re-reviews
 (`docs/reports/2026-09-25-two-desktop-spec-review.md`) and the controller's rulings. **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its *Amendment 2026-09-17* (ruling 2: the
 account is the source of truth and each desktop keeps a mirror; ruling 4 and C5: fetch on device). **Implements:**
