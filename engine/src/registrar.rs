@@ -564,6 +564,25 @@ mod d5_d7_tests {
         assert!(proposed(&both, &set, today).is_empty());
     }
 
+    /// Re-review m8: a registrar note from a past term (its `until` before today) holds nothing, so
+    /// Google's CS 100 class is proposed again.
+    #[test]
+    fn a_past_terms_registrar_note_leaves_a_google_class_proposed() {
+        let today = date(2026, 9, 10);
+        let mut file = SeriesFile::default();
+        file.calendars.insert("google:invented".into(), today);
+        file.series.push(google_minute_off(today, "40001"));
+        let reg = fall().into_iter().find(|s| s.source_uid.ends_with("40001")).unwrap();
+        let note = Commitment {
+            id: "cmt_invented03".into(), path: PathBuf::from("commitments/cs-100.md"), kind: "class".into(),
+            level: Level::Hard, title: reg.title.clone(), course: Some("cs-100".into()), meets: reg.meets.clone(),
+            where_: reg.where_.clone(), from: Some(date(2026, 1, 12)), until: Some(date(2026, 5, 1)),
+            source_uid: Some("registrar:ua:202610-40001".into()),
+        };
+        let set = Commitments { confirmed: vec![note], ..Commitments::default() };
+        assert_eq!(proposed(&file, &set, today), ["gcal-series:invented40001"]);
+    }
+
     /// I1, refined per kind: a registrar lecture holds the course's class proposals only. With
     /// Banner listing just the CS 100 lecture, Google's CS 100 lab is still proposed.
     #[test]

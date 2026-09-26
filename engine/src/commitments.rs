@@ -2066,9 +2066,6 @@ pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
     }
 }
 
-/// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
-/// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
-/// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
 /// Device-local and never synced (the push never looks under `state/`); it holds no bytes and
 /// exists only to be locked around [`refresh_series`]'s read-modify-write (final review I2).
 pub const SERIES_LOCK_FILE: &str = "state/calendar-series.lock";
@@ -2082,6 +2079,9 @@ fn lock_series_file(vault: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
+/// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
+/// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
 fn write_series_file(vault: &Path, bytes: &str) -> std::io::Result<()> {
     write_state_file(vault, "calendar-series.json", bytes)
 }
@@ -2374,8 +2374,8 @@ fn minutes(time: Time) -> i64 {
 /// note has its key (a confirmed note, a decline marker, the planning day), no confirmed note has
 /// its [`Signature`], and — when `for_cards` — it is not `office-hours` (R8; the screen lists
 /// them). A `class` or `lab` series from any calendar but the registrar is not proposed when the
-/// registrar holds that kind for that course (a confirmed `registrar:` note or a current
-/// `registrar:` series of the same kind and course), whatever its times (phase 3 final review I1,
+/// registrar holds that kind for that course (a confirmed `registrar:` note or a `registrar:`
+/// series of the same kind and course, either with no `until` or one not before `today`), whatever its times (phase 3 final review I1,
 /// option a, per kind).
 ///
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
@@ -2414,7 +2414,9 @@ pub fn proposals(
     let mut registrar_held: BTreeSet<(String, String)> = set
         .confirmed
         .iter()
+        // Re-review m8: only a note in play (no `until`, or not before today) holds its course.
         .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(registrar))
+        .filter(|n| n.until.is_none_or(|until| until >= today))
         .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
         .collect();
 
