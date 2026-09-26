@@ -379,7 +379,8 @@ mod d5_d7_tests {
     #[test]
     fn a_next_terms_fetch_leaves_this_term_alone() {
         let v = vault("twoterms");
-        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 11, 10));
+        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 10, 20));
+        // 26 days later: past `UNSEEN_DAYS`, so only the in-play rule keeps the fall term (R2 m1).
         let spring: Vec<Series> = fall().into_iter().map(|mut s| {
             s.source_uid = s.source_uid.replace("202640", "202710");
             s.calendar = "registrar:ua:202710".into();
