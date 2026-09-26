@@ -32,7 +32,7 @@ use crate::events::{DiscoveredEvent, EventsConfig};
 use crate::journal::Journal;
 use crate::models::split_frontmatter;
 use crate::pystr;
-use crate::write::{create, WriteContext};
+use crate::write::WriteContext;
 
 /// `strong` first, then `mild`, then anything unrated.
 fn strength_order(strength: &str) -> i64 {
@@ -322,7 +322,11 @@ pub fn emit_digest(
         body.join("\n")
     );
     let rel = format!("approvals/events-digest-{}.md", today.strftime("%Y-%m-%d"));
-    if create(vault, &rel, &note, ctx, journal, None).is_err() {
+    // Two-desktop design D2/D3: the digest takes `import_id(appr, events, events-digest:<today>)`, so a
+    // second digest the same day — after the first settled and freed the path — is `IdHeld` and not
+    // written, silently, as the path check above is (R-TD1-1).
+    let mut held = crate::ids::held_ids(vault);
+    if crate::write::create_imported(vault, &rel, &note, ctx, journal, &mut held).is_err() {
         return (None, 0);
     }
     // Digest first, ledger second — see the module docs for why the order is load-bearing.
@@ -589,6 +593,30 @@ mod tests {
         // lines, not just as a wrong return value.
         let seen = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
         assert_eq!(seen.matches("- a · proposed").count(), 1);
+    }
+
+    /// Two-desktop design D2/D3: the day's digest takes `import_id(appr, events,
+    /// events-digest:<proposed_at>)`, so two computers emitting on one day mint one id — and a second
+    /// digest the same day, after the first settled and freed its path, is `IdHeld` and not written.
+    /// "One digest a day" was only a path check; now it is true.
+    #[test]
+    fn the_days_digest_takes_its_import_id_and_a_second_one_that_day_is_refused() {
+        let vault = tmp("importid");
+        let events = [event_at("engage:1", 25, 8, Some("AI Club Kickoff"), "")];
+        let (path, count) = emit(&vault, &events, &ledger_of(vec![opp("engage:1", "strong")]), None);
+        assert_eq!(count, 1);
+        let path = path.unwrap();
+        let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "id")).as_deref(), Some("appr_07def97c80"));
+        // The student settles it the same day: it moves to archive/ and the path is free again.
+        fs::create_dir_all(vault.join("archive")).unwrap();
+        fs::rename(&path, vault.join("archive").join("events-digest-2026-08-20.md")).unwrap();
+        let later = [event_at("engage:2", 25, 8, Some("Robotics Night"), "")];
+        let (again, count) = emit(&vault, &later, &ledger_of(vec![opp("engage:2", "strong")]), None);
+        assert_eq!((again, count), (None, 0), "one digest a day, now by id");
+        assert!(!vault.join("approvals").join("events-digest-2026-08-20.md").exists());
+        let seen = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
+        assert!(!seen.contains("- engage:2 · proposed"), "nothing is marked proposed: {seen}");
     }
 
     // --- pending_digest_uids ------------------------------------------------------------

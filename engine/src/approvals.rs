@@ -22,8 +22,8 @@ use crate::journal::Journal;
 use crate::models::{coerce_datetime, split_frontmatter};
 use crate::pystr;
 use crate::write::{
-    append_body, create, delete, single_line_problem, write_literals, WriteContext, WriteError,
-    WriteOpts,
+    append_body, create_imported, delete, single_line_problem, write_literals, WriteContext,
+    WriteError, WriteOpts,
 };
 
 /// `WriteContext(actor="agent:approvals", via="cli")`.
@@ -1016,6 +1016,7 @@ fn calendar_note(
     entry: &Mapping,
     ctx: &WriteContext,
     journal: &mut Journal,
+    held: &mut BTreeSet<String>,
 ) -> Result<Option<String>, WriteError> {
     let uid = truthy_str(entry, "uid");
     let summary = truthy_str(entry, "summary");
@@ -1064,7 +1065,7 @@ fn calendar_note(
         end = stamp(crate::yaml::get(entry, "end")),
     );
     let rel = rel_path(vault, &target);
-    create(vault, &rel, &text, ctx, journal, None)?;
+    create_imported(vault, &rel, &text, ctx, journal, held)?;
     Ok(Some(stem_of(&target)))
 }
 
@@ -1105,6 +1106,7 @@ fn expand_digest(
     approve: bool,
     ctx: &WriteContext,
     journal: &mut Journal,
+    held: &mut Option<BTreeSet<String>>,
 ) -> Result<(i64, i64, Vec<String>), WriteError> {
     let name = name_of(path);
     let payload = match crate::yaml::get(meta, "events") {
@@ -1129,15 +1131,22 @@ fn expand_digest(
                 created += 1; // an earlier pass already wrote it; re-expansion is a no-op
                 continue;
             }
-            match calendar_note(vault, entry, ctx, journal)? {
-                None => {
+            match calendar_note(vault, entry, ctx, journal, held.get_or_insert_with(|| crate::ids::held_ids(vault))) {
+                Ok(None) => {
                     warnings.push(format!("{name}: bad payload entry for {uid}"));
                     continue;
                 }
-                Some(_) => {
+                Ok(Some(_)) => {
                     already.insert(uid);
                     created += 1;
                 }
+                // R-TD1-1: this event's calendar note is already here under its import id.
+                Err(WriteError::IdHeld(id)) => {
+                    warnings.push(format!("skipped (already held as {id}): {uid}"));
+                    already.insert(uid);
+                    created += 1;
+                }
+                Err(e) => return Err(e),
             }
         } else {
             record_declined(vault, &uid, today).map_err(|e| WriteError::Io(e.to_string()))?;
@@ -1171,6 +1180,7 @@ pub fn process_approvals(
         return result;
     }
     let mut oldest: Option<Date> = None;
+    let mut held: Option<BTreeSet<String>> = None;
 
     for path in sorted_md(&folder) {
         let name = name_of(&path);
@@ -1193,6 +1203,7 @@ pub fn process_approvals(
             journal,
             &mut result,
             &mut oldest,
+            &mut held,
         );
         if transition.is_err() {
             result.warnings.push(format!("transition failed: {name}"));
@@ -1264,6 +1275,7 @@ fn transition_note(
     journal: &mut Journal,
     result: &mut ApprovalsResult,
     oldest: &mut Option<Date>,
+    held: &mut Option<BTreeSet<String>>,
 ) -> Result<(), WriteError> {
     let name = name_of(path);
     let stem = stem_of(path);
@@ -1274,7 +1286,7 @@ fn transition_note(
     if status == "rejected" {
         if kind == "events-digest" {
             let (_, _, warnings) =
-                expand_digest(vault, path, meta, body, today, false, ctx, journal)?;
+                expand_digest(vault, path, meta, body, today, false, ctx, journal, held)?;
             result.warnings.extend(warnings);
         }
         if kind == "amend" && str_field(meta, "created_by") == crate::sync::ACTOR {
@@ -1331,7 +1343,7 @@ fn transition_note(
             if expires < today {
                 if kind == "events-digest" {
                     let (_, _, warnings) =
-                        expand_digest(vault, path, meta, body, today, false, ctx, journal)?;
+                        expand_digest(vault, path, meta, body, today, false, ctx, journal, held)?;
                     result.warnings.extend(warnings);
                 }
                 let literals = vec![("status".to_string(), "expired".to_string())];
@@ -1389,9 +1401,22 @@ fn transition_note(
         if kind == "calendar-event" {
             result.awaiting_calendar += 1;
         } else if kind == "task" {
-            let Some(slug) = materialize(vault, path, body, ctx, journal)? else {
-                result.warnings.push(format!("missing task payload: {name}"));
-                return Ok(());
+            let slug = match materialize(vault, path, body, ctx, journal, held.get_or_insert_with(|| crate::ids::held_ids(vault))) {
+                Ok(Some(slug)) => Some(slug),
+                Ok(None) => {
+                    result.warnings.push(format!("missing task payload: {name}"));
+                    return Ok(());
+                }
+                // R-TD1-1: the item's task is already here under its import id. The card is settled
+                // as if it had materialised, and the warning names the note that answers it.
+                Err(WriteError::IdHeld(id)) => {
+                    result.warnings.push(format!(
+                        "skipped (already held as {id}): {}",
+                        stem.strip_prefix("task-").unwrap_or(&stem)
+                    ));
+                    None
+                }
+                Err(e) => return Err(e),
             };
             let literals = vec![
                 ("status".to_string(), "executed".to_string()),
@@ -1399,7 +1424,7 @@ fn transition_note(
             ];
             write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
             delete(vault, &rel, ctx, journal)?;
-            result.executed.push(slug);
+            result.executed.extend(slug);
         } else if kind == "amend" {
             if let Some(reason) = apply_amendment(vault, meta, ctx, journal)? {
                 result.warnings.push(format!("{name}: {reason}"));
@@ -1430,7 +1455,7 @@ fn transition_note(
             result.executed.push(stem);
         } else if kind == "events-digest" {
             let (created, _, warnings) =
-                expand_digest(vault, path, meta, body, today, true, ctx, journal)?;
+                expand_digest(vault, path, meta, body, today, true, ctx, journal, held)?;
             result.warnings.extend(warnings);
             let literals = vec![
                 ("status".to_string(), "executed".to_string()),
@@ -1476,6 +1501,7 @@ fn materialize(
     body: &str,
     ctx: &WriteContext,
     journal: &mut Journal,
+    held: &mut BTreeSet<String>,
 ) -> Result<Option<String>, WriteError> {
     let Some(caps) = PAYLOAD_FENCE.captures(body) else { return Ok(None) };
     let tasks_dir = vault.join("tasks");
@@ -1495,11 +1521,13 @@ fn materialize(
         content.push('\n');
     }
     let rel = rel_path(vault, &target);
-    match create(vault, &rel, &content, ctx, journal, None) {
+    match create_imported(vault, &rel, &content, ctx, journal, held) {
         Ok(_) => Ok(Some(stem_of(&target))),
         // Python catches only `ValueError` here. `FileExistsError` and an I/O failure are
-        // `OSError`, and they propagate to the caller's `transition failed:`.
-        Err(err @ (WriteError::Io(_) | WriteError::Exists(_))) => Err(err),
+        // `OSError`, and they propagate to the caller's `transition failed:`. An `IdHeld` propagates
+        // too — without this arm it would fall into `Err(_) => Ok(None)` and read as "missing task
+        // payload".
+        Err(err @ (WriteError::Io(_) | WriteError::Exists(_) | WriteError::IdHeld(_))) => Err(err),
         Err(_) => Ok(None),
     }
 }
@@ -1909,6 +1937,32 @@ mod tests {
         assert!(archived.contains("status: executed"));
         assert!(archived.contains("executed_at: \"2026-08-20 12:00\""));
         assert!(!exists(&v, "approvals/task-study-group.md"));
+    }
+
+    /// Two-desktop design D2/D3: an approved card's task is the item's own note, so it takes the
+    /// item's import id — the id the same message's `tier: task` note would have carried.
+    #[test]
+    fn an_approved_task_card_materialises_under_the_items_import_id() {
+        let v = vault();
+        proposal(&v, "task-study-group.md", &PENDING.replace("status: pending", "status: approved"), &approved_task_body());
+        run(&v);
+        assert_eq!(field(&v.join("tasks").join("study-group.md"), "id"), "task_f224b42dd6");
+    }
+
+    /// R-TD1-1: when the item's task is already here under its import id (the other computer
+    /// materialised it and it synced), no second task is written; the card is stamped `executed` and
+    /// archived as if it had materialised, and a warning names the note that answers it.
+    #[test]
+    fn an_approved_task_card_whose_task_is_already_held_settles_without_a_second_note() {
+        let v = vault();
+        with_task(&v, "study-group-kickoff.md", "title: Study group kickoff\nid: task_f224b42dd6");
+        proposal(&v, "task-study-group.md", &PENDING.replace("status: pending", "status: approved"), &approved_task_body());
+        let result = run(&v);
+        assert_eq!(result.warnings, vec!["skipped (already held as task_f224b42dd6): study-group".to_string()]);
+        assert!(result.executed.is_empty(), "{:?}", result.executed);
+        assert!(!exists(&v, "tasks/study-group.md"), "no second note");
+        let archived = read(&v.join("archive").join("task-study-group.md"));
+        assert!(archived.contains("status: executed"), "{archived}");
     }
 
     #[test]
@@ -3383,12 +3437,13 @@ mod tests {
         );
         let ctx = default_ctx();
         let mut journal = Journal::new(&v);
-        let stem = calendar_note(&v, &entry, &ctx, &mut journal).unwrap().unwrap();
+        let stem = calendar_note(&v, &entry, &ctx, &mut journal, &mut std::collections::BTreeSet::new()).unwrap().unwrap();
         assert_eq!(stem, "calendar-event-ai-club-kickoff");
 
         let path = v.join("approvals").join(format!("{stem}.md"));
         let id = field(&path, "id");
         assert!(crate::ids::is_id(&id));
+        assert_eq!(id, "appr_c40ff1180e", "two-desktop D2: import_id(appr, events, calendar-event:engage:1)");
         assert_eq!(
             read(&path).replace(&id, "<ID>"),
             "---\n\
@@ -3410,11 +3465,11 @@ mod tests {
 
         // ...and a payload entry missing either half writes nothing at all.
         assert_eq!(
-            calendar_note(&v, &yaml("uid: \"x:1\"\n"), &ctx, &mut journal).unwrap(),
+            calendar_note(&v, &yaml("uid: \"x:1\"\n"), &ctx, &mut journal, &mut std::collections::BTreeSet::new()).unwrap(),
             None
         );
         assert_eq!(
-            calendar_note(&v, &yaml("summary: \"No uid\"\n"), &ctx, &mut journal).unwrap(),
+            calendar_note(&v, &yaml("summary: \"No uid\"\n"), &ctx, &mut journal, &mut std::collections::BTreeSet::new()).unwrap(),
             None
         );
     }

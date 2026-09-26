@@ -544,6 +544,7 @@ pub fn pull_gmail(
         run_id: opts.run_id.map(str::to_string),
     };
     let mut journal = Journal::new(vault);
+    let mut held: Option<std::collections::BTreeSet<String>> = None;
     let today = jiff::Zoned::now().date();
     let stamp = today.strftime("%Y-%m-%d").to_string();
     let mut lines: Vec<String> = Vec::new();
@@ -634,18 +635,31 @@ pub fn pull_gmail(
                         dropped += 1;
                         Ok(String::new())
                     }
-                    "task" => write_gmail_note(vault, item, &ctx, &mut journal)
-                        .map(|stem| {
+                    // Two-desktop design D2/D3. `held` is read on the first write this run makes.
+                    "task" => match write_gmail_note(vault, item, &ctx, &mut journal, held.get_or_insert_with(|| crate::ids::held_ids(vault))) {
+                        Ok(stem) => {
                             notes += 1;
-                            format!("created {stem}")
-                        })
-                        .inspect_err(|_| failed += 1),
-                    _ => write_gmail_card(vault, item, today, &ctx, &mut journal)
-                        .map(|stem| {
+                            Ok(format!("created {stem}"))
+                        }
+                        // R-TD1-1: already in the vault under its import id — acknowledged and
+                        // recorded seen below, like a written one, so the queue stops offering it.
+                        Err(crate::write::WriteError::IdHeld(id)) => Ok(format!("skipped (already held as {id})")),
+                        Err(e) => {
+                            failed += 1;
+                            Err(e.to_string())
+                        }
+                    },
+                    _ => match write_gmail_card(vault, item, today, &ctx, &mut journal, held.get_or_insert_with(|| crate::ids::held_ids(vault))) {
+                        Ok(stem) => {
                             cards += 1;
-                            format!("proposed {stem}")
-                        })
-                        .inspect_err(|_| failed += 1),
+                            Ok(format!("proposed {stem}"))
+                        }
+                        Err(crate::write::WriteError::IdHeld(id)) => Ok(format!("skipped (already held as {id})")),
+                        Err(e) => {
+                            failed += 1;
+                            Err(e.to_string())
+                        }
+                    },
                 },
             };
             match outcome {
@@ -725,17 +739,19 @@ fn gmail_item_shape_ok(item: &crate::cloudmodel::GmailItem) -> Result<(), String
     Ok(())
 }
 
-/// A `tier: task` message as a note. Through `write::create`, so the journal record comes first.
+/// A `tier: task` message as a note. Through `write::create_imported`, so the journal record comes
+/// first and two computers importing the same message mint the same id.
 fn write_gmail_note(
     vault: &Path,
     item: &crate::cloudmodel::GmailItem,
     ctx: &WriteContext,
     journal: &mut Journal,
-) -> Result<String, String> {
+    held: &mut std::collections::BTreeSet<String>,
+) -> Result<String, crate::write::WriteError> {
     let text = gmail_note_text(item);
     let stem = crate::ingest::slugify(&item.title);
     let tasks = vault.join("tasks");
-    std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&tasks).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
     let mut path = tasks.join(format!("{stem}.md"));
     let mut suffix = 2;
     while path.exists() {
@@ -743,9 +759,8 @@ fn write_gmail_note(
         suffix += 1;
     }
     let rel = crate::ids::rel(vault, &path);
-    crate::write::create(vault, &rel, &text, ctx, journal, None)
+    crate::write::create_imported(vault, &rel, &text, ctx, journal, held)
         .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
-        .map_err(|e| e.to_string())
 }
 
 /// The frontmatter one item becomes. Every free-text field goes through `write::to_literal`, so a
@@ -786,7 +801,8 @@ fn write_gmail_card(
     today: jiff::civil::Date,
     ctx: &WriteContext,
     journal: &mut Journal,
-) -> Result<String, String> {
+    held: &mut std::collections::BTreeSet<String>,
+) -> Result<String, crate::write::WriteError> {
     let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
     let stamp = today.strftime("%Y-%m-%d").to_string();
     let expires = today
@@ -805,7 +821,7 @@ fn write_gmail_card(
         gmail_note_text(item),
     );
     let approvals = vault.join("approvals");
-    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&approvals).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
     let mut path = approvals.join(format!("{stem}.md"));
     let mut suffix = 2;
     while path.exists() {
@@ -813,9 +829,8 @@ fn write_gmail_card(
         suffix += 1;
     }
     let rel = crate::ids::rel(vault, &path);
-    crate::write::create(vault, &rel, &text, ctx, journal, None)
+    crate::write::create_imported(vault, &rel, &text, ctx, journal, held)
         .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
-        .map_err(|e| e.to_string())
 }
 
 // -----------------------------------------------------------------------------------------
@@ -915,6 +930,7 @@ pub fn pull_rules(
         return lines;
     }
     let existing = existing_rule_ids(vault);
+    let mut held = crate::ids::held_ids(vault);
     let mut filed = 0usize;
     for proposal in &proposals {
         // A card is never minted twice for one proposal id — the id is in the card's frontmatter
@@ -922,10 +938,14 @@ pub fn pull_rules(
         if existing.contains(&proposal.id) {
             continue;
         }
-        match write_rule_card(vault, proposal, today, &ctx, &mut journal) {
+        match write_rule_card(vault, proposal, today, &ctx, &mut journal, &mut held) {
             Ok(stem) => {
                 filed += 1;
                 lines.push(format!("rules {}: proposed ({stem})", proposal.id));
+            }
+            // R-TD1-1: this rule's card is already held (another computer filed it and it synced).
+            Err(crate::write::WriteError::IdHeld(id)) => {
+                lines.push(format!("rules {}: skipped (already held as {id}): rule-{}", proposal.id, proposal.id))
             }
             Err(e) => lines.push(format!("rules {}: not written ({e})", proposal.id)),
         }
@@ -1001,7 +1021,8 @@ fn write_rule_card(
     today: jiff::civil::Date,
     ctx: &WriteContext,
     journal: &mut Journal,
-) -> Result<String, String> {
+    held: &mut std::collections::BTreeSet<String>,
+) -> Result<String, crate::write::WriteError> {
     let lit = |s: &str| write::to_literal(&Value::String(s.to_string()));
     let stamp = today.strftime("%Y-%m-%d").to_string();
     let expires = today
@@ -1031,12 +1052,11 @@ fn write_rule_card(
         lit(&proposal.value),
     );
     let approvals = vault.join("approvals");
-    std::fs::create_dir_all(&approvals).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&approvals).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
     let stem = format!("rule-{}", proposal.id);
     let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
-    crate::write::create(vault, &rel, &text, ctx, journal, None)
+    crate::write::create_imported(vault, &rel, &text, ctx, journal, held)
         .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1740,19 +1760,19 @@ mod tests {
     // -----------------------------------------------------------------------------------------
 
     /// An approved Gmail card must produce the SAME note a `tier: task` message produces, or there
-    /// are two note writers and one of them will drift.
-    ///
-    /// **Compared without `id:`** — `write::create` mints a fresh opaque id into the frontmatter of
-    /// every note it creates, so a byte-for-byte comparison would fail by construction. The id is
-    /// the one line that is *supposed* to differ; everything else is the contract.
+    /// are two note writers and one of them will drift. Two-desktop design D2 (R-TD1-16): the two are
+    /// one item, so each is written into its own vault (in one vault the second would be `IdHeld`)
+    /// and they are compared byte for byte — the id line included, because both take the item's
+    /// import id.
     #[test]
     fn an_approved_gmail_card_materialises_the_same_note_a_task_tier_would() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
-        let vault = vault("gmail-card");
-        // `vault(tag)` seeds one fixture task (`hw3.md`) for the enrichment-focused tests above;
-        // this test's own `find` below picks out "whichever task is not `direct`", so an empty
-        // `tasks/` is what it needs.
-        std::fs::remove_file(vault.join("tasks").join("hw3.md")).unwrap();
+        let direct_vault = vault("gmail-card-direct");
+        let card_vault = vault("gmail-card-approved");
+        for v in [&direct_vault, &card_vault] {
+            // `vault(tag)` seeds `hw3.md` for the enrichment tests above; this test reads `tasks/` whole.
+            std::fs::remove_file(v.join("tasks").join("hw3.md")).unwrap();
+        }
         let item = crate::cloudmodel::GmailItem {
             uid: "gmail:m1".into(), tier: "borderline".into(),
             title: "PH 106 problem set 4".into(), course: Some("ph-106".into()),
@@ -1760,33 +1780,111 @@ mod tests {
             why: "the email states a Friday deadline".into(), confidence: 0.86,
         };
         let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
-        let mut journal = Journal::new(&vault);
         let today = jiff::civil::date(2026, 9, 9);
 
-        let direct = write_gmail_note(&vault, &item, &ctx, &mut journal).expect("the note writes");
-        let card = write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("the card writes");
+        let mut direct_journal = Journal::new(&direct_vault);
+        let direct = write_gmail_note(&direct_vault, &item, &ctx, &mut direct_journal, &mut crate::ids::held_ids(&direct_vault))
+            .expect("the note writes");
+        let mut card_journal = Journal::new(&card_vault);
+        let card = write_gmail_card(&card_vault, &item, today, &ctx, &mut card_journal, &mut crate::ids::held_ids(&card_vault))
+            .expect("the card writes");
         // Approve it exactly as the deck would, then let `process_approvals` materialise it.
         let rel = format!("approvals/{card}.md");
         crate::write::write_literals(
-            &vault, &rel, &[("status".to_string(), "approved".to_string())],
-            &ctx, &mut journal, &WriteOpts::default(),
+            &card_vault, &rel, &[("status".to_string(), "approved".to_string())],
+            &ctx, &mut card_journal, &WriteOpts::default(),
         )
         .expect("approve");
         let _ = crate::approvals::process_approvals(
-            &vault, today, jiff::civil::date(2026, 9, 9).at(9, 0, 0, 0), &ctx, &mut journal,
+            &card_vault, today, jiff::civil::date(2026, 9, 9).at(9, 0, 0, 0), &ctx, &mut card_journal,
         );
 
-        let strip_id = |text: &str| {
-            text.lines().filter(|l| !l.starts_with("id:")).collect::<Vec<_>>().join("\n")
+        let from_tier = std::fs::read_to_string(direct_vault.join("tasks").join(format!("{direct}.md"))).unwrap();
+        let materialised = crate::approvals::sorted_md(&card_vault.join("tasks"));
+        assert_eq!(materialised.len(), 1, "the card produced one note: {materialised:?}");
+        let from_card = std::fs::read_to_string(&materialised[0]).unwrap();
+        assert_eq!(from_tier, from_card, "the same bytes, the id line included");
+        // `lines()`, not a `\n` search: `pystr::write_text` writes CRLF on Windows, as vaults are.
+        assert!(from_tier.lines().any(|l| l == "id: task_3bc4bec4a9"), "the item's import id (spec §2.1): {from_tier}");
+        let _ = std::fs::remove_dir_all(&direct_vault);
+        let _ = std::fs::remove_dir_all(&card_vault);
+    }
+
+    /// D2: a message's note and its card are one item but two notes; the kind keeps their ids apart.
+    #[test]
+    fn a_gmail_note_and_a_gmail_card_take_the_items_two_import_ids() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-ids");
+        let item = crate::cloudmodel::GmailItem {
+            uid: "gmail:m1".into(), tier: "task".into(),
+            title: "PH 106 problem set 4".into(), course: Some("ph-106".into()),
+            due: Some("2026-09-11".into()), effort_hours: Some(2.5), importance: Some(4),
+            why: "the email states a Friday deadline".into(), confidence: 0.86,
         };
-        let from_tier = std::fs::read_to_string(vault.join("tasks").join(format!("{direct}.md"))).unwrap();
-        let materialised = crate::approvals::sorted_md(&vault.join("tasks"))
-            .into_iter()
-            .find(|p| p.file_stem().map(|s| s != direct.as_str()).unwrap_or(false))
-            .expect("the card produced a note");
-        let from_card = std::fs::read_to_string(&materialised).unwrap();
-        assert_eq!(strip_id(&from_tier), strip_id(&from_card));
-        let _ = std::fs::remove_dir_all(&vault);
+        let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&v);
+        let mut held = crate::ids::held_ids(&v);
+        let note = write_gmail_note(&v, &item, &ctx, &mut journal, &mut held).expect("the note");
+        let card = write_gmail_card(&v, &item, jiff::civil::date(2026, 9, 9), &ctx, &mut journal, &mut held).expect("the card");
+        let id_of = |meta: &serde_yaml_ng::Mapping| crate::yaml::opt_text(crate::yaml::get(meta, "id"));
+        assert_eq!(id_of(&meta_of(&v, &format!("{note}.md"))).as_deref(), Some("task_3bc4bec4a9"));
+        assert_eq!(id_of(&meta_of_approval(&v, &format!("{card}.md"))).as_deref(), Some("appr_d6015090ac"));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// D2: a rule card takes `import_id(appr, rules, rule:<rule_id>)`.
+    #[test]
+    fn a_rule_card_takes_its_import_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("rules-importid");
+        let ctx = WriteContext { actor: RULES_ACTOR.into(), via: "local-runner".into(), run_id: None };
+        let mut journal = Journal::new(&v);
+        let proposal = crate::cloudmodel::RuleProposal {
+            id: 42, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
+            verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
+        };
+        let stem = write_rule_card(&v, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut crate::ids::held_ids(&v))
+            .expect("the card writes");
+        assert_eq!(stem, "rule-42");
+        let meta = meta_of_approval(&v, "rule-42.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "id")).as_deref(), Some("appr_23a359564f"));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// R-TD1-1: a message whose note is already here under its import id (the other computer wrote it
+    /// and it synced) is acknowledged and recorded seen, never written twice — otherwise the queue
+    /// would offer it again every slot.
+    #[test]
+    fn a_gmail_item_already_held_under_its_import_id_is_acknowledged_and_not_written() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-held");
+        std::fs::write(
+            v.join("tasks").join("from-the-other-computer.md"),
+            "---\ntitle: \"PH 106 problem set 4\"\nid: task_3bc4bec4a9\n---\n\nb\n",
+        )
+        .unwrap();
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let lines = pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        assert!(
+            lines.contains(&"gmail gmail:m1: task (skipped (already held as task_3bc4bec4a9))".to_string()),
+            "{lines:?}"
+        );
+        assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 0 proposed, 0 dropped as information", "{lines:?}");
+        assert!(!v.join("tasks").join("ph-106-problem-set-4.md").exists(), "never written twice");
+        assert!(crate::ingest::load_seen(&v).contains("gmail:m1"));
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 2, "one pull, then one ack flush: {requests:?}");
+        assert!(requests[1].contains("gmail:m1"), "the held item is acknowledged: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     /// The 15-a-day cap is the ENGINE's, and Gmail proposals go through the ordinary card path so
@@ -1804,7 +1902,7 @@ mod tests {
                 title: format!("Opportunity {n}"), course: None, due: None,
                 effort_hours: None, importance: None, why: "worth a look".into(), confidence: 0.8,
             };
-            write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("card");
+            write_gmail_card(&vault, &item, today, &ctx, &mut journal, &mut std::collections::BTreeSet::new()).expect("card");
         }
         let deferred = crate::approvals::defer_over_budget(&vault, today, 15, &ctx, &mut journal);
         assert_eq!(deferred.len(), 5, "the surplus is snoozed to tomorrow, never deleted");
@@ -2445,7 +2543,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &vault, &format!("approvals/{stem}.md"),
@@ -2499,7 +2597,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &vault, &format!("approvals/{stem}.md"),
@@ -2539,7 +2637,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &vault, &format!("approvals/{stem}.md"),
@@ -2576,7 +2674,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &vault, &format!("approvals/{stem}.md"),
@@ -2609,7 +2707,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&vault, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &vault, &format!("approvals/{stem}.md"),
@@ -2650,7 +2748,7 @@ mod tests {
             id: 41, kind: "task".into(), feature: "title_prefix".into(), value: "CS 100 Lab".into(),
             verdict: serde_json::json!({"importance": "2"}), proposed_at: "2026-09-11".into(),
         };
-        let stem = write_rule_card(&waiting, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal)
+        let stem = write_rule_card(&waiting, &proposal, jiff::civil::date(2026, 9, 11), &ctx, &mut journal, &mut std::collections::BTreeSet::new())
             .expect("the card writes");
         crate::write::write_literals(
             &waiting, &format!("approvals/{stem}.md"),
