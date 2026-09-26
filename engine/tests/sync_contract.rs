@@ -3002,3 +3002,156 @@ fn td1_a_foreign_record_never_reconciles_against_a_different_note_at_its_path() 
     assert_eq!(int_at(&dir, "tasks/cs-100-hw-01.md", "importance"), Some(2), "the other note is untouched");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §6.1 (iii), D7 (review M5): the student deletes x on A while B edits it. x sits at a different path
+/// on each desktop (D4), so only its id can find it. Whatever the push order, x ends archived on both
+/// desktops with B's edit on the archived copy, and no card: on B, A's `delete` record archives B's
+/// copy, edit and all (D5 (b)) — A's tombstone names A's path, which B does not have; on A, B's `set`
+/// finds the archived copy by id (D5 (a)), and B's live text cannot bring x back, its id being held in
+/// `archive/` (D5 (c)).
+#[test]
+fn td1_iii_a_delete_beats_a_concurrent_edit_in_either_order_and_nothing_is_lost() {
+    for a_first in [true, false] {
+        let tag = if a_first { "a-first" } else { "b-first" };
+        let (a, b) = (desk(&format!("iii-{tag}-a")), desk(&format!("iii-{tag}-b")));
+        let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+        let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+        let (a_rel, b_rel) = ("tasks/cs-100-hw-07.md", "tasks/comp-100-hw-07.md");
+        fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+        fetch(&b, &mut jb, &[item("comp-100-hw-07", "COMP 100 HW 07")]);
+        let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+        deliver(&b, &page, &mut jb);
+        let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+        deliver(&a, &page, &mut ja);
+
+        let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+        knowlu_engine::write::delete(&a, a_rel, &student, &mut ja).expect("the student deletes x on A");
+        edit(&b, b_rel, &mut jb, &[("importance", "5")]);
+        let a_page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+        let b_page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+        let (ra, rb) = if a_first {
+            let rb = deliver(&b, &a_page, &mut jb);
+            (deliver(&a, &b_page, &mut ja), rb)
+        } else {
+            let ra = deliver(&a, &b_page, &mut ja);
+            (ra, deliver(&b, &a_page, &mut jb))
+        };
+        assert_eq!((ra.cards, rb.cards), (0, 0), "{tag}: {ra:?} {rb:?}");
+        for (dir, rel, archived, who) in [(&a, a_rel, "archive/cs-100-hw-07.md", "A"), (&b, b_rel, "archive/comp-100-hw-07.md", "B")] {
+            assert!(!dir.join(rel).exists(), "{tag}: x is not live on {who}");
+            assert_eq!(int_at(dir, archived, "importance"), Some(5), "{tag}: {who}'s archived copy carries B's edit");
+        }
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+}
+
+/// §6.1 (iv), D5 (d) (review E5): a tombstone names a note, not a place. B settled ITS note at P — a
+/// different note from A's: other desktops' records place only B's id at P, never A's — so A's note
+/// at P stays, named in one line.
+#[test]
+fn td1_iv_a_tombstone_for_a_path_holding_a_different_id_leaves_the_note() {
+    let dir = fixture_with_id("td1-iv-tombstone"); // A's note: tasks/cs-100-hw-01.md, task_0000000001
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let theirs = foreign_create("task_00000000bb", "tasks/cs-100-hw-01.md", "2026-09-17T09:00:00.000Z", "DeskB");
+    let report = sync::apply(&dir, &pulled(vec![theirs], vec![
+        sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/cs-100-hw-01.md".into(), text: None },
+    ]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert!(dir.join("tasks").join("cs-100-hw-01.md").exists(), "A's note stays: {report:?}");
+    assert_eq!(report.moved, 0, "{report:?}");
+    assert!(
+        report.warnings.contains(&"sync: tasks/cs-100-hw-01.md — the account settled a different note there; this one stays".to_string()),
+        "{:?}", report.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §6.1 (iv), D5 (d)'s other half (the I3 case): a note created on B and deleted by hand on A — in
+/// Explorer, so no `delete` record exists — is still archived on B, because no other desktop's record
+/// places a different id at its path.
+#[test]
+fn td1_iv_a_note_deleted_by_hand_on_a_is_still_archived_on_b() {
+    let (a, b) = (desk("iv-hand-a"), desk("iv-hand-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let rel = "tasks/cs-100-hw-07.md";
+    fetch(&b, &mut jb, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    std::fs::remove_file(a.join(rel)).expect("deleted by hand in Explorer");
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!(r.moved, 1, "{r:?}");
+    assert!(!b.join(rel).exists() && b.join("archive").join("cs-100-hw-07.md").exists(), "archived on B");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// D5 (b), E5's move half: a foreign `move` acts on the note holding its id, wherever that is here —
+/// and never on a different note sitting at the record's old path.
+#[test]
+fn td1_iv_a_foreign_move_acts_on_the_id_not_on_the_old_path() {
+    let dir = fixture_with_id("td1-iv-move"); // task_0000000001 at tasks/cs-100-hw-01.md
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("mine-for-m.md"), "---\ntitle: \"M\"\nid: task_000000000e\n---\n\nm\n")
+        .expect("this desktop's copy of m, at a path of its own");
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let moved = |id: &str, from: &str, to: &str| {
+        let mut spec = knowlu_engine::journal::NewRecord::new("move", from, "quinn", "dashboard");
+        spec.id = Some(id);
+        spec.old = serde_json::json!(from);
+        spec.new = serde_json::json!(to);
+        spec.ts = Some("2026-09-17T10:00:00.000Z".to_string());
+        spec.device = Some("OtherDesktop".to_string());
+        knowlu_engine::journal::make_record(spec).expect("a record")
+    };
+    let report = sync::apply(&dir, &pulled(vec![
+        moved("task_000000000e", "tasks/theirs-for-m.md", "tasks/m-renamed.md"),
+        moved("task_00000000cc", "tasks/cs-100-hw-01.md", "tasks/elsewhere.md"),
+    ], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert!(dir.join("tasks/m-renamed.md").exists() && !dir.join("tasks/mine-for-m.md").exists(), "m moved by id: {report:?}");
+    assert!(dir.join("tasks/cs-100-hw-01.md").exists() && !dir.join("tasks/elsewhere.md").exists(), "the other note did not move");
+    assert_eq!(report.moved, 1, "{report:?}");
+    assert!(
+        report.warnings.contains(&"sync: tasks/cs-100-hw-01.md is task_0000000001, not task_00000000cc; the move to tasks/elsewhere.md is not applied here".to_string()),
+        "{:?}", report.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R-TD1-20 (D7 for a move; review advisory, fix round 1): the other desktop renamed x on its live copy
+/// while this desktop archived x. The move is not applied here — the delete wins, as it wins against an
+/// edit — and a move made OUT of `archive/` over there (an un-archive) still is.
+#[test]
+fn td1_iv_a_move_made_on_a_live_copy_never_brings_back_a_copy_archived_here() {
+    let dir = fixture_with_id("td1-iv-archived-move"); // task_0000000001 at tasks/cs-100-hw-01.md
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let student = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    knowlu_engine::write::delete(&dir, "tasks/cs-100-hw-01.md", &student, &mut journal).expect("archived here");
+    let moved = |from: &str, to: &str, ts: &str| {
+        let mut spec = knowlu_engine::journal::NewRecord::new("move", from, "quinn", "dashboard");
+        spec.id = Some("task_0000000001");
+        spec.old = serde_json::json!(from);
+        spec.new = serde_json::json!(to);
+        spec.ts = Some(ts.to_string());
+        spec.device = Some("OtherDesktop".to_string());
+        knowlu_engine::journal::make_record(spec).expect("a record")
+    };
+    let day = "2026-09-17".parse().unwrap();
+    let rename = moved("tasks/cs-100-hw-01.md", "tasks/renamed.md", "2026-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![rename], vec![]), &ctx, &mut journal, day);
+    assert!(dir.join("archive/cs-100-hw-01.md").exists() && !dir.join("tasks/renamed.md").exists(), "{report:?}");
+    assert_eq!(report.moved, 0, "{report:?}");
+    assert!(
+        report.warnings.contains(&"sync: archive/cs-100-hw-01.md is archived here; the move to tasks/renamed.md is not applied".to_string()),
+        "{:?}", report.warnings
+    );
+    let unarchive = moved("archive/cs-100-hw-01.md", "tasks/back.md", "2026-09-17T11:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![unarchive], vec![]), &ctx, &mut journal, day);
+    assert!(dir.join("tasks/back.md").exists() && !dir.join("archive/cs-100-hw-01.md").exists(), "an un-archive applies: {report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

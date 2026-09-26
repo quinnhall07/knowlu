@@ -1746,6 +1746,11 @@ impl IdIndex {
     fn forget(&mut self, id: &str) {
         self.by_id.remove(id);
     }
+
+    /// Every id placed at `rel` is forgotten — the seed pre-pass replaced that file wholesale.
+    fn vacate(&mut self, rel: &str) {
+        self.by_id.retain(|_, held| held != rel);
+    }
 }
 
 /// A readable note with no valid `id:` line: the one kind of note only its path identifies (D5 (a),
@@ -1754,6 +1759,14 @@ fn note_has_no_id(file: &Path) -> bool {
     crate::ids::read_meta(file).is_some_and(|meta| {
         !crate::yaml::get(&meta, "id").and_then(crate::yaml::text).is_some_and(|id| crate::ids::is_id(&id))
     })
+}
+
+/// A note's valid `id:`, read without writing anything; `None` for a missing, unreadable or
+/// unidentified note.
+fn note_id_at(file: &Path) -> Option<String> {
+    crate::ids::read_meta(file)
+        .and_then(|meta| crate::yaml::get(&meta, "id").and_then(crate::yaml::text))
+        .filter(|id| crate::ids::is_id(id))
 }
 
 /// Apply one pulled page to this vault.
@@ -1792,7 +1805,8 @@ pub fn apply(
     //    record made on 15 September lands in `state/journal/2026-09-15.jsonl` and not in today's.
     let ledger = crate::ledger::JsonlLedger::new(vault.join("state").join("journal"));
     let mut touched: std::collections::BTreeMap<String, Vec<Record>> = std::collections::BTreeMap::new();
-    let mut moves: Vec<(String, String)> = Vec::new();
+    let mut moves: Vec<(Option<String>, String, String)> = Vec::new();
+    let mut deletes: Vec<String> = Vec::new();
     for (_, record) in &page.records {
         let body = crate::ledger::dumps_value(&Value::Object(record.clone()));
         if known.contains(&sha256_hex(body.as_bytes())) {
@@ -1827,7 +1841,7 @@ pub fn apply(
         // was only journalled would leave the old file sitting where it was, and the renamed note's
         // text would arrive at the new path as a note this device had never seen — one note in two
         // places, which is the silent divergence this whole module exists to prevent.
-        let mut pending_move: Option<(String, String)> = None;
+        let mut pending_move: Option<(Option<String>, String, String)> = None;
         if record.get("op").and_then(Value::as_str) == Some("move") {
             let dest = record.get("new").and_then(Value::as_str).unwrap_or_default();
             if !is_note_path(vault, dest) {
@@ -1835,7 +1849,11 @@ pub fn apply(
                 report.warnings.push("sync: a pulled move named a destination outside the vault's notes".to_string());
                 continue;
             }
-            pending_move = Some((path.to_string(), dest.to_string()));
+            pending_move = Some((
+                record.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_string),
+                path.to_string(),
+                dest.to_string(),
+            ));
         }
         if let Err(e) = ledger.append(record) {
             report.warnings.push(format!("sync: a pulled record could not be journalled ({e})"));
@@ -1844,6 +1862,12 @@ pub fn apply(
         report.records += 1;
         if let Some(pair) = pending_move {
             moves.push(pair);
+        }
+        // D5 (b): a foreign `delete` settles the note holding its id (below, after the moves).
+        if record.get("op").and_then(Value::as_str) == Some("delete") {
+            if let Some(id) = record.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                deletes.push(id.to_string());
+            }
         }
         let id = record.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         if !id.is_empty() {
@@ -1861,19 +1885,56 @@ pub fn apply(
     }
     journal.invalidate();
 
+    // D5 (two-desktop design §2.5): which note holds each id here, read after the record pass and
+    // kept current below as this apply moves, settles, re-identifies and writes notes.
+    let mut index = IdIndex::build(vault);
+
     // 3a. **Perform the moves, after the whole record pass and before any reconcile.** After,
     //     because a move mid-loop would move a file out from under a later record's `path`; before,
     //     because the per-note pass below reads the note through `ids::read_meta` and has to find it
     //     where it now is. `write::move_note` journals this device's own `move` record under `ACTOR`
     //     beside the foreign one — which is right and is the same shape a tombstone takes below: the
     //     foreign record is the other desktop's history, and this one is what happened here.
-    for (from, dest) in moves {
-        if !vault.join(&from).exists() {
-            // Already where it should be (a re-pull, or this device made the same move itself).
+    //     Two-desktop design D5 (b): a foreign move acts on the note holding its id, wherever it is
+    //     here — never on a different note at the record's old path (E5).
+    for (id, from, dest) in moves {
+        let holder = match &id {
+            Some(id) => match index.holder(id) {
+                Some(rel) => Some(rel.clone()),
+                // R-TD1-2: a note at the old path with no `id:` line is identified by its path.
+                None if note_has_no_id(&vault.join(&from)) => Some(from.clone()),
+                None => {
+                    if let Some(other) = note_id_at(&vault.join(&from)) {
+                        report.warnings.push(format!(
+                            "sync: {from} is {other}, not {id}; the move to {dest} is not applied here"
+                        ));
+                    }
+                    None
+                }
+            },
+            // R-TD1-15: a move with no id keeps today's rule — the note at its old path.
+            None => vault.join(&from).exists().then(|| from.clone()),
+        };
+        // Nothing here to move, or it is already where it should be (a re-pull, or this device made
+        // the same move itself).
+        let Some(holder) = holder else { continue };
+        if holder == dest {
             continue;
         }
-        match crate::write::move_note(vault, &from, &dest, ctx, journal) {
-            Ok(_) => report.moved += 1,
+        // R-TD1-20 (D7 for a move): a move the other desktop made on its live copy never brings back a
+        // copy archived here — the delete wins, as it does against an edit. A move out of `archive/`
+        // (an un-archive over there) still applies.
+        if holder.starts_with("archive/") && !from.starts_with("archive/") {
+            report.warnings.push(format!("sync: {holder} is archived here; the move to {dest} is not applied"));
+            continue;
+        }
+        match crate::write::move_note(vault, &holder, &dest, ctx, journal) {
+            Ok(_) => {
+                report.moved += 1;
+                if let Some(held) = note_id_at(&vault.join(&dest)) {
+                    index.place(&held, &dest);
+                }
+            }
             // The destination is taken. Not a failure of the sync, and **not retried**: `Cursor`
             // carries no retry queue, so if the destination frees up later this device does not
             // notice. Pilot-acceptable and recorded as such (round-2 re-review, R4(b)): the record
@@ -1882,9 +1943,27 @@ pub fn apply(
             // a feature, not a one-line fix, and it needs two desktops independently choosing one
             // destination filename — a case this plan says has never been exercised even once.
             Err(crate::write::WriteError::Exists(_)) => {
-                report.warnings.push(format!("sync: {from} could not be renamed to {dest} — a note is already there"));
+                report.warnings.push(format!("sync: {holder} could not be renamed to {dest} — a note is already there"));
             }
-            Err(e) => report.warnings.push(format!("sync: {from} could not be renamed ({e})")),
+            Err(e) => report.warnings.push(format!("sync: {holder} could not be renamed ({e})")),
+        }
+    }
+    // D5 (b): a foreign `delete` settles the note holding its id — new: until now it had no effect of
+    // its own, and only its tombstone, by path, settled anything — unless that note is already in
+    // `archive/`. A delete with no id has no effect of its own (R-TD1-15); its tombstone carries it.
+    for id in deletes {
+        let Some(holder) = index.holder(&id).cloned() else { continue };
+        if holder.starts_with("archive/") {
+            continue;
+        }
+        match crate::write::delete(vault, &holder, ctx, journal) {
+            Ok(dest) => {
+                report.moved += 1;
+                if let Some(held) = note_id_at(&dest) {
+                    index.place(&held, &crate::ids::rel(vault, &dest));
+                }
+            }
+            Err(e) => report.warnings.push(format!("sync: {holder} could not be settled ({e})")),
         }
     }
     journal.invalidate();
@@ -1942,6 +2021,11 @@ pub fn apply(
                     report.notes_written += 1;
                     replaced_paths.insert(note.path.clone());
                     seed_hashes.remove(&note.path);
+                    // D5: the account's copy replaced the seed wholesale, so the seed's id is gone.
+                    index.vacate(&note.path);
+                    if let Some(id) = note_frontmatter_id(text).filter(|id| crate::ids::is_id(id)) {
+                        index.place(&id, &note.path);
+                    }
                 }
                 Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
             }
@@ -1950,10 +2034,6 @@ pub fn apply(
             let _ = save_seed_hashes(vault, &seed_hashes);
         }
     }
-
-    // D5 (two-desktop design §2.5): which note holds each id here, read after the record pass, the
-    // moves and the seed pre-pass, and kept current below as this apply writes notes.
-    let mut index = IdIndex::build(vault);
 
     // 4. Per note, with the roles reversed exactly as the table above says.
     for (id, foreign) in &touched {
@@ -2243,6 +2323,27 @@ pub fn apply(
     // cleared the old, case-colliding name out of the folder. Processing every tombstone first,
     // regardless of the order `page.notes` carries them in, is what makes the new note's
     // `create_new` land after the archive has already happened.
+    // D5 (d) (two-desktop design §2.5, R-TD1-13): which ids other desktops' records have placed at each
+    // path, as alias groups — read only when this page carries a tombstone.
+    let placed_elsewhere: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        if page.notes.iter().any(|n| n.text.is_none()) {
+            let mut placed: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+                std::collections::BTreeMap::new();
+            for r in journal.read(None, None) {
+                let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                if s("device") == this_device || s("id").is_empty() {
+                    continue;
+                }
+                let group = crate::ids::canonical(&index.aliases, &s("id")).to_string();
+                placed.entry(s("path")).or_default().insert(group.clone());
+                if s("op") == "move" && !s("new").is_empty() {
+                    placed.entry(s("new")).or_default().insert(group);
+                }
+            }
+            placed
+        } else {
+            std::collections::BTreeMap::new()
+        };
     let live_by_lower: std::collections::BTreeMap<String, &PulledNote> = page
         .notes
         .iter()
@@ -2296,8 +2397,26 @@ pub fn apply(
                     continue;
                 }
                 if exact_case_exists(&file) {
+                    // D5 (d): a tombstone names a note, not a place. When other desktops' records
+                    // place a different id at this path and none of them ever placed this note's
+                    // (alias groups compared), the tombstone is about another note and this one stays.
+                    let ours = note_id_at(&file);
+                    if let (Some(ours), Some(theirs)) = (&ours, placed_elsewhere.get(&note.path)) {
+                        if !theirs.contains(crate::ids::canonical(&index.aliases, ours)) {
+                            report.warnings.push(format!(
+                                "sync: {} — the account settled a different note there; this one stays",
+                                note.path
+                            ));
+                            continue;
+                        }
+                    }
                     match crate::write::delete(vault, &note.path, ctx, journal) {
-                        Ok(_) => report.moved += 1,
+                        Ok(dest) => {
+                            report.moved += 1;
+                            if let Some(ours) = &ours {
+                                index.place(ours, &crate::ids::rel(vault, &dest));
+                            }
+                        }
                         Err(e) => report.warnings.push(format!("sync: {} could not be settled ({e})", note.path)),
                     }
                 }
