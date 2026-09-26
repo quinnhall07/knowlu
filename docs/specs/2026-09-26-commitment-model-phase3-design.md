@@ -180,3 +180,36 @@ nothing unless the parse succeeds. **An empty parse is a failure, never an empty
 2. **The privacy wording** in §4 goes to the lawyer with P1.
 3. **Confirm R24 as written.** Registrar rows that match a course are confirmed without asking, at
    level `hard`.
+
+## Amendments (2026-09-26, plan review)
+
+Controller rulings at the pre-execution review of
+`docs/plans/2026-09-26-commitment-model-phase3-plan.md` (review:
+`…-phase3-plan-review.md`). Where a line above disagrees, this section wins.
+
+1. **One calendar key per registrar term** (plan problem 1, Plan ruling R2-a). §3's `calendar` is
+   `registrar:<school>:<term>` (`registrar:ua:202640`), not `registrar:ua`. D5's "a row missing
+   from a later fetch is a dropped course" applies only to a fetch of the **same term**: UA
+   students register for spring in November, and a spring fetch under one key would end every
+   fall class. The `source_uid` is unchanged (`registrar:ua:<term>-<crn>`). D5's "counts as
+   configured" holds while the term is in play (a series with an open `until`, or one less than
+   28 days past); after that the term ages out like a removed feed (R2-b).
+2. **A dropped course is dated the day before the fetch** (plan problem 2, R2-c). A registrar
+   series has no instances, so its `ended` entry records `last_instance` = the day before the
+   fetch that no longer returned it; the §5.4 end card proposes that date as the note's `until`.
+   Without it the card would propose the term's own end, equal to the note's, and none is filed.
+3. **Registrar series are left out of the instance map** (plan problem 3, R2-d).
+   `SeriesFile::instances_map` would make a series' actual instances the only busy time inside
+   its 28-day horizon, and a registrar series carries none. Left out, a confirmed registrar note
+   blocks time by its weekly `meets`.
+4. **R24 stays as written; change detection changes instead** (plan problem 4). §3's R24 notes
+   are written as `quinn` via `dashboard`, as are phase 2's confirm screen's. Commitment change
+   detection counts "the student set this field" only from a later `set` record by `quinn`; the
+   `create` record no longer counts (the fix lands on `p2-commitments` and is merged before plan
+   R1). So a note the student confirmed, here or on the confirm screen, still gets its §5.4
+   change and end cards, and a field they later edit by hand is still never proposed back. §6
+   item 3 is answered: R24 as written.
+5. **Task order** (§5). The plan's R1–R3 (this spec's R1–R2) proceed before R0 against Banner 9's
+   documented shape (b), on a hand-written provisional fixture; R0 must precede the app task
+   (plan R4), which needs the call list and headers. If R0 finds a rows call with no per-meeting
+   start and end dates, the controller stops for Quinn: D5, D7's ask gate and D8 read them.

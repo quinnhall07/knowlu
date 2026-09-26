@@ -32,8 +32,20 @@ GETs with `ureq`, hand the bytes to the engine through a temp file, and close an
 decisions D1–D8). Where it is silent, `docs/specs/2026-09-23-commitment-model-design.md` governs
 ("the parent": §2, §3.1–§3.5, §5.2–§5.4, §10 Phase 3), then
 `docs/specs/2026-09-24-commitment-model-phase2-design.md` ("phase 2"). Where this plan and the spec
-disagree, the spec wins and this plan is wrong, **except** the rulings listed under "Spec problems
-found while planning", which need Quinn's go at the first checkpoint and a spec amendment before R2.
+disagree, the spec wins and this plan is wrong. Spec problems 1–3 and the resolution of problem 4
+are now the spec's own "Amendments (2026-09-26, plan review)" section (controller rulings at the
+pre-execution review, `docs/plans/2026-09-26-commitment-model-phase3-plan-review.md`).
+
+**Preconditions before R1 (controller, not a subagent):**
+- **The p2 judge-once fix is merged into `p3-registrar`.** On `p2-commitments`, commitment change
+  detection counts "the student set this field" only from a later `set` record by `quinn`; the
+  `create` record no longer counts (a helper such as `journal::human_edited`, or a filtered
+  `commitments::is_human_set`). R3's R24 notes are written as `quinn` via `dashboard` (spec §3) and
+  rely on it: R3's `a_registrar_refetch_files_an_end_card_and_a_change_card_at_the_next_rank` fails
+  without it, and that failure is the pin. If the fix changes `detect_changes`' signature, R2's
+  `a_dropped_registrar_course_ends_its_confirmed_note` follows it.
+- **R0 is not needed before R1–R3** (see "Order and file ownership"): R1 writes the fixture in the
+  documented Banner 9 shape (b) as a provisional contract; R0 confirms or replaces it before R4.
 
 **Task numbering against the spec's §5.** Spec R0 = plan R0. Spec R1 = plan R1 (the parse) + R2
 (D5, D7). Spec R2 = plan R3. Spec R3 = plan R4. Spec R4 = plan R5. Spec R5 = plan R6, whose live
@@ -51,7 +63,8 @@ proof is a separate closing checklist that does not block the code.
    `surface-today-{s1,s1-migrated,full}.json` are byte-identical at the end of every task. None of
    their vaults holds a `registrar:` calendar, so no path this plan adds is reached by them.
    `engine/tests/fixtures/registrar/banner-ua-registration.json` is **new, hand-written and not
-   frozen**: R0 writes it, and only R0's findings may change it.
+   frozen**: R1 writes it in the documented shape (b) (provisional), and afterwards only R0's
+   findings may change it.
 5. **Journal first:** every note write goes through `write::create` / `write::write_literals`
    (here, only through phase 2's `commitments::confirm`); no note is parsed and re-dumped.
 6. **The app computes nothing:** `app/src/commands.rs`, `app/src/week.rs` and the new
@@ -66,7 +79,9 @@ proof is a separate closing checklist that does not block the code.
    password or the fetched bytes. The bytes live in one temp file for the length of one engine run.
 10. **Who writes:** the console's human edits stay `quinn` via `dashboard`
     (`commands::console_ctx()`; the engine's `--actor quinn --via dashboard`). The R24 notes are
-    written as `agent:commitments` via `dashboard` (Plan ruling R3-c, a spec deviation for Quinn).
+    written as `quinn` via `dashboard` too, as spec §3 says (Plan ruling R3-c, as amended at the
+    plan review): the student pressed the button. Their change and end cards still come because of
+    the p2 judge-once fix (see Preconditions).
 11. **Tauri command counts:** the console window's `generate_handler!` list (the second one in
     `app/src/main.rs`, in `run_console`) goes from **47 → 50** (`registrar::open_registrar_window`,
     `registrar::capture_registrar`, `registrar::close_registrar_window`); the vault-less window's
@@ -107,15 +122,15 @@ proof is a separate closing checklist that does not block the code.
 | §3 output keys, exit codes 0/2, nothing written on exit 2, no network | R3 |
 | §4 the privacy line; the temp file deleted; the series file local; only confirmed notes sync; Google's consent screen unchanged | R6 (R6-a), R4 (R4-e); nothing touches `sync` |
 | §5 R0–R5 | R0–R6 (see "Task numbering") |
-| §6 items 1–3 for Quinn | R0 (item 1), R6-a (item 2), "Spec problems" 4 (item 3) |
+| §6 items 1–3 for Quinn | R0 (item 1), R6-a (item 2), R3-c as amended: R24 as written, `quinn` via `dashboard` (item 3) |
 | CLAUDE.md's command list and counts, `app/README.md`, anatomy | R6 |
 
 ## Order and file ownership
 
 | Task | Unit | Files | Depends on |
 |---|---|---|---|
-| R0 | the spike (controller + Quinn) | `docs/specs/2026-09-26-commitment-model-phase3-design.md` (D3 amendment), `engine/tests/fixtures/registrar/banner-ua-registration.json` (new) | Quinn |
-| R1 | `registrar::parse_banner`, the school table, `term_for`, `looks_signed_out` | `engine/src/registrar.rs` (new), `engine/src/lib.rs` | R0 |
+| R0 | the spike (controller + Quinn) | `docs/specs/2026-09-26-commitment-model-phase3-design.md` (D3 amendment), `engine/tests/fixtures/registrar/banner-ua-registration.json` (confirmed, or replaced in R0's shape) | Quinn; runs any time before R4 |
+| R1 | `registrar::parse_banner`, the school table, `term_for`, `looks_signed_out`; the provisional fixture | `engine/tests/fixtures/registrar/banner-ua-registration.json` (new), `engine/src/registrar.rs` (new), `engine/src/lib.rs` | the p2 fix merged (Preconditions) |
 | R2 | D5 and D7: the series file, the classifier, precedence, the change watch, the ask gate | `engine/src/commitments.rs`, `engine/src/cli.rs`, `engine/src/registrar.rs` (tests) | R1 |
 | R3 | `registrar::run`, `commitments --registrar`, exit codes, the no-network pin, `Overview.registrar` | `engine/src/registrar.rs`, `engine/src/commitments.rs`, `engine/src/cli.rs`, `engine/src/main.rs`, `engine/tests/commitments_registrar.rs` (new) | R2 |
 | R4 | the app: the curated entry and three commands | `app/src/scaffold.rs`, `app/src/lms_link.rs`, `app/src/registrar.rs` (new), `app/src/lib.rs`, `app/src/week.rs`, `app/src/main.rs`, `app/tests/registrar.rs` (new) | R3; R0 (the call list) |
@@ -126,11 +141,29 @@ Strictly sequential: the engine's `registrar.rs` is edited by R1–R3, `commitme
 R3, `cli.rs` by R2 and R3. No two tasks run in parallel. Each task ends with a green run of its own
 filter and one commit.
 
+**R0 and R1–R3 (plan review).** R1–R3 proceed before R0 against Banner 9's documented shape (b):
+the engine never touches the network, and every Banner key it reads is in `parse_banner`, the
+fixture, and four test bodies that build or edit rows by key (R1's
+`where_is_cut_to_80_and_a_row_without_a_building_has_none`,
+`an_empty_parse_is_a_failure_never_an_empty_semester`,
+`another_term_or_a_repeated_crn_is_skipped_with_a_warning`; R3's
+`a_registrar_refetch_files_an_end_card_and_a_change_card_at_the_next_rank`). R4 needs R0 for
+`UA_ROWS_PATH`, the term-selection call, and R4-h's headers. What R0 can still change upstream:
+- **The same facts in another shape** (renamed keys, another envelope, times as `"09:30"`): R0
+  replaces the fixture and edits `parse_banner` and those four test bodies in one follow-up
+  commit; every expected value stays.
+- **The spring suffix** (R0 answer 3): `SCHOOLS`' `(1, "10")` and the `term_for` test change.
+- **Re-plan trigger — stop for Quinn:** the rows call carries no per-meeting `startDate`/`endDate`
+  (for example shape (a), one week of occurrences). Then `first`/`until` are unknown, and R2-b
+  (the term in play), R2-h (the ask gate) and R3-d (the refresh flag) have nothing to read. That
+  is not a `parse_banner`-only change.
+
 ## Plan rulings (collected; each is repeated in its task)
 
 - **R0-a** R0 is controller work with Quinn; it records shapes only, through CDP on a dev build.
-- **R1-a** all Banner shape knowledge lives in `registrar::parse_banner` and its fixture. R0's
-  findings change only that function, that fixture, and the curated row's call list (data).
+- **R1-a** all Banner shape knowledge lives in `registrar::parse_banner`, its fixture and four
+  test bodies (listed under "Order and file ownership"). R0's findings change those, the curated
+  row's call list (data) and the spring suffix, unless the re-plan trigger fires.
 - **R1-b** the file is a top-level array of rows or Banner's `{"data": [rows]}` envelope.
 - **R1-c** `where` is `buildingDescription` (else `building`) then `room`, one space, cut to 80.
 - **R1-d** a row's patterns become one `Meet` each, identical ones merged; `first` is the earliest
@@ -156,7 +189,8 @@ filter and one commit.
 - **R3-a** `--registrar` conflicts with `--confirm` and requires `--school`.
 - **R3-b** `mine` is the matched rows that are current proposals; `confirmed` counts the notes this
   run created; `proposed` counts kept rows with no course.
-- **R3-c** the R24 notes are written as `agent:commitments` via `dashboard`.
+- **R3-c** the R24 notes are written under the context the command is given: `quinn` via
+  `dashboard` (spec §3; amended at the plan review, see the Preconditions).
 - **R3-d** `Overview` gains `registrar` and `registrar_proposals`.
 - **R4-a** the registrar reuses `lms_link`'s sign-in window: its label, its session directory,
   `LmsSession`, the wipe and the sweep.
@@ -186,9 +220,12 @@ filter and one commit.
 **Who:** the controller, with Quinn signing in. **Not a subagent task** (memory: autonomous live
 proof; the controller runs every live step, and no subagent holds a session).
 **Files.** `docs/specs/2026-09-26-commitment-model-phase3-design.md` (a "D3 amendment (R0,
-<date>)" subsection under D3); `engine/tests/fixtures/registrar/banner-ua-registration.json` (new).
+<date>)" subsection under D3); `engine/tests/fixtures/registrar/banner-ua-registration.json`
+(R1's provisional file: confirmed as is, or replaced in R0's shape).
 **Output for later tasks:** the call list R4 copies into `scaffold.rs` (method, path under the
-prefix, form keys, extra headers), the row shape R1's `parse_banner` reads, and the fixture.
+prefix, form keys, extra headers), and the row shape `parse_banner` reads. **When R0 runs after
+R1–R3** and the shape differs, the controller dispatches one follow-up task under "Order and file
+ownership"'s rules before R4; if the re-plan trigger fires, it stops for Quinn.
 
 **Plan ruling R0-a:** R0 records **shapes only**: key names, JSON types and nesting, the request
 methods and paths, the query and form key names, the status codes and which headers were needed.
@@ -241,24 +278,26 @@ constraint 15; a shape is all the parser needs.
      `x-requested-with: XMLHttpRequest` (Plan ruling R4-h). Record the status and the body's shape,
      then drop the cookies. If Banner refuses (say, it wants `X-Synchronizer-Token`), record which
      header and where the page carries it. That is a change to R4's call list, and the controller
-     stops for Quinn before R4.
+     stops for Quinn before R4. Record too whether any call answers with a **redirect**: `ureq`
+     drops the `cookie` header on every redirect, same host included (`ureq-proto`'s
+     `redirect.rs`), so a redirecting call reads as "not signed in" and R4 must call its target.
 - [ ] **7. Write the D3 amendment.** Under D3: the call list as R4's `scaffold::Call` rows
   (`method`, `path` relative to `/StudentRegistrationSsb/ssb/` with `{term}` where the term goes,
   `form` with `{term}`), the rows call last; the rows call's shape as an indented key tree; the five
   answers. If the rows call is shape (a) (`getRegistrationEvents`), not (b), say so: then R1's
   `parse_banner` field list follows the recorded shape instead of the one in R1, and nothing else
   in this plan changes (Plan ruling R1-a).
-- [ ] **8. Write the fixture by hand,** in the recorded shape, with **invented** courses only.
-  `engine/tests/fixtures/registrar/banner-ua-registration.json`, LF, written with the Write tool.
-  If R0 confirms shape (b), the fixture is exactly the block below (R1's and R3's tests count its
-  rows); if the shape differs, the same six sections carry the same invented facts in R0's shape,
-  and R1's expected values below are unchanged.
+- [ ] **8. Check the fixture against the recorded shape.** R1 already wrote
+  `engine/tests/fixtures/registrar/banner-ua-registration.json` as the block below (shape (b),
+  invented). If R0 confirms shape (b), it stays byte for byte. If the shape differs, rewrite it by
+  hand with the Write tool (LF, **invented** courses only): the same six rows carry the same
+  invented facts in R0's shape, and every expected value in R1–R3 is unchanged.
 - [ ] **9. Clean up.** Close the sign-in window through CDP
   (`window.__TAURI__.core.invoke('close_lms_window', {})` on `main`), quit the copy, confirm that no
   `knowlu-lms-session-*` folder is left in `%TEMP%`, and remove the scratch profile, its vault, its
   credentials and its autostart entry (memory: live-proof profile cleanup). Unset
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
-- [ ] **10. Commit** (docs and fixture only): `git add docs/specs/2026-09-26-commitment-model-phase3-design.md engine/tests/fixtures/registrar/banner-ua-registration.json`;
+- [ ] **10. Commit** (docs, and the fixture only if step 8 rewrote it): `git add docs/specs/2026-09-26-commitment-model-phase3-design.md engine/tests/fixtures/registrar/banner-ua-registration.json`;
   message:
 
 ```
@@ -273,7 +312,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01TC1HP5oAv9SjrvrQzb6juF
 ```
 
-**The fixture (shape (b), invented).** Six rows: CS 100 lecture (MWF 12:00–12:50, the P16 test
+**The fixture (shape (b), invented; R1 Step 1 writes it).** Six rows: CS 100 lecture (MWF 12:00–12:50, the P16 test
 vault's course, and the same times as `cli.rs`'s `cs100_item`), CS 100 lab (Thu 14:00–15:50),
 ENGL 101 (Tue/Thu 09:30–10:45, its pattern repeated for a second instructor as Banner does), HIST
 105 online (no time), MUS 250 across midnight, ART 110 (no vault course anywhere in the tests).
@@ -310,9 +349,13 @@ time (`40004`), one dropped across midnight (`40005`); term `202640`; `first` 20
 ## R1 — `registrar::parse_banner`, the school table, `term_for`, `looks_signed_out` (spec §3 parse)
 
 **Files.**
+- `engine/tests/fixtures/registrar/banner-ua-registration.json` (new): R0's fixture block, verbatim
+  (shape (b), invented), written with the Write tool, LF. Provisional until R0 (constraint 4).
 - `engine/src/registrar.rs` (new): the module and its `#[cfg(test)] mod tests`.
 - `engine/src/lib.rs`: `pub mod registrar;` after `pub mod commitments;` (find the line with
   `grep -n "pub mod commitments" engine/src/lib.rs`).
+
+**Precondition:** the p2 judge-once fix is merged (see Preconditions at the top).
 
 **Interfaces.**
 - Consumes `commitments::{Series, Rule, Meet}` (`commitments.rs:75–79`, `934–940`, `946–969`; every
@@ -328,8 +371,9 @@ time (`40004`), one dropped across midnight (`40005`); term `202640`; `first` 20
     and `fn parse_banner(json: &serde_json::Value, school: &str) -> Result<Parsed, String>`.
 
 **Plan ruling R1-a: all knowledge of Banner's response shape lives in `parse_banner` and its
-fixture.** No other function in the engine or the app names a Banner key. R0's findings change only
-that function, the fixture and the curated row's call list (R4-b, which is data). *Why:* the spec
+fixture.** No other function in the engine or the app names a Banner key; four test bodies do
+(listed under "Order and file ownership"). R0's findings change those, the curated row's call list
+(R4-b, which is data) and the spring suffix, unless the re-plan trigger fires. *Why:* the spec
 builds on shape (b) before the spike has run; this keeps a different answer from R0 to one function.
 **Plan ruling R1-b:** the file is either a top-level array of rows or Banner's search-results
 envelope `{"data": [rows], ...}`; anything else is `Err`. *Why:* both are how Banner 9 returns row
@@ -354,7 +398,9 @@ checks spring. The rule is the engine's, so the app computes nothing (constraint
 object. *Why:* a Banner call from a session that is not signed in is redirected to the school's
 HTML sign-in page; the app must say "You're not signed in yet" and keep the window open (R4-d).
 
-- [ ] **Step 1 — failing tests.** Create `engine/src/registrar.rs` holding only the module doc line
+- [ ] **Step 1 — failing tests.** Write the fixture: R0's "The fixture (shape (b), invented)" JSON
+  block, verbatim, to `engine/tests/fixtures/registrar/banner-ua-registration.json` with the Write
+  tool (LF). Then create `engine/src/registrar.rs` holding only the module doc line
   `//! Phase 3 of the commitment model: the school registrar's schedule, parsed on the device.` and
   this test module; add `pub mod registrar;` to `lib.rs`.
 
@@ -411,6 +457,9 @@ mod tests {
         assert_eq!(engl.meets.len(), 1, "{:?}", engl.meets);
         assert_eq!(engl.meets[0].days, vec!["tue", "thu"]);
         assert_eq!(engl.where_.as_deref(), Some("Pretend Library 210"));
+        let mut v = fixture();
+        v["data"][0]["scheduleTypeDescription"] = json!("Collaborative Seminar");
+        assert_eq!(by_crn(&parse_banner(&v, "ua").unwrap(), "40001").title, "CS 100", "a word inside a word is not a lab");
     }
 
     #[test]
@@ -603,8 +652,10 @@ pub fn parse_banner(json: &Value, school: &str) -> Result<Parsed, String> {
             continue;
         };
         let name = format!("{subject} {number}");
-        let lab = text(row, "scheduleTypeDescription").is_some_and(|t| t.to_ascii_lowercase().contains("lab"))
-            || text(row, "scheduleType").is_some_and(|t| t.eq_ignore_ascii_case("LAB"));
+        // A whole word, so "Collaborative Seminar" is not a lab (plan review M2).
+        let lab = text(row, "scheduleTypeDescription").is_some_and(|t| {
+            t.split(|c: char| !c.is_ascii_alphabetic()).any(|w| w.eq_ignore_ascii_case("lab") || w.eq_ignore_ascii_case("laboratory"))
+        }) || text(row, "scheduleType").is_some_and(|t| t.eq_ignore_ascii_case("LAB"));
         let mut meets: Vec<Meet> = Vec::new();
         let (mut first, mut until, mut place_of, mut crosses) = (None::<Date>, None::<Date>, None, false);
         for mf in row.get("meetingsFaculty").and_then(Value::as_array).into_iter().flatten() {
@@ -680,7 +731,7 @@ pub fn parse_banner(json: &Value, school: &str) -> Result<Parsed, String> {
 - [ ] **Step 4 — run.** `cargo test -p knowlu-engine --lib -j 2 -- registrar::tests` (8 pass), then
   `cargo test -p knowlu-engine --lib -j 2` (all pass) and `git diff --exit-code eb10c1b -- engine/tests/fixtures ':!engine/tests/fixtures/registrar'`.
 
-- [ ] **Step 5 — commit.** `git add engine/src/registrar.rs engine/src/lib.rs`; message:
+- [ ] **Step 5 — commit.** `git add engine/tests/fixtures/registrar/banner-ua-registration.json engine/src/registrar.rs engine/src/lib.rs`; message:
 
 ```
 feat(engine): parse the registrar's Banner rows into series (phase 3, §3)
@@ -1008,7 +1059,9 @@ fn precedence(series: &Series) -> (u8, &str) {
 ```
 
   and `proposals`' inner `fn rank(s: &Series) -> ((bool, &str), &str)` (line 2351) becomes
-  `fn rank(s: &Series) -> ((u8, &str), &str)`.
+  `fn rank(s: &Series) -> ((u8, &str), &str)`. `proposals`' doc comment, which describes the old
+  order ("a `google:` calendar, then the lower calendar key"), gains "a `registrar:` calendar, then"
+  in front.
 
   **(c)** `instances_map` (line 1445): the chain `self.by_key().into_iter().filter_map(…)` gains
   `.filter(|(_, series)| !series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))` between
@@ -1161,11 +1214,11 @@ Claude-Session: https://claude.ai/code/session_01TC1HP5oAv9SjrvrQzb6juF
 - Produces `pub fn cli::commitments_registrar(vault: &Path, today_iso: Option<&str>, text: &str,
   school: &str, ctx: &WriteContext) -> Result<registrar::Report, String>`.
 - The command: `commitments --vault <v> [--today YYYY-MM-DD] --registrar <file> --school <key>
-  [--via dashboard]`. `--actor` is accepted and unused by `--registrar` (R3-c).
-- Consumes `commitments::{refresh_series, stored_proposals, confirm, ConfirmInput, CARD_ACTOR,
+  [--actor quinn] [--via dashboard]`; `--actor` and `--via` keep their defaults, `quinn` and
+  `dashboard`, and the R24 notes are written under them (R3-c).
+- Consumes `commitments::{refresh_series, stored_proposals, confirm, ConfirmInput,
   registrar_course, proposal_value}` (`stored_proposals` 4362, `ConfirmInput` 4379, `confirm` 4457,
-  `CARD_ACTOR` 2501, `proposal_value` 2740, all `pub`); `WriteContext::with_actor`
-  (`write.rs:142`).
+  `proposal_value` 2740, all `pub`); `WriteContext::new` (`write.rs:139`).
 
 **Plan ruling R3-a:** `--registrar` is declared `conflicts_with = "confirm"` and
 `requires = "school"`, so clap refuses either misuse with its own exit 2 before anything runs; an
@@ -1176,13 +1229,13 @@ confirmed, or closed by an existing note's signature, is left out silently. `con
 `confirm`'s `created` (0 on a repeat fetch); `proposed` counts the kept rows with no course.
 *Why:* R24 is idempotent, and `confirm` warns "not a current proposal" for every left-out key,
 which a repeat fetch would otherwise print for every class.
-**Plan ruling R3-c: the R24 notes are written as `agent:commitments` via `dashboard`**
-(`ctx.with_actor(commitments::CARD_ACTOR)`), where spec §3 says actor `quinn`. *Why:*
-`journal::human_set` (`journal.rs:271–282`) reads a `create` record by `quinn` as a human set of
-**every field it wrote**, and `detect_changes` never proposes a human-set field back. Written as
-`quinn`, a registrar note could never get the §5.4 change or end card the spec relies on (D5's
-dropped course). A card's settlement writes as `agent:commitments` for the same reason, although
-the student approved it. (Spec problem 4.)
+**Plan ruling R3-c (amended at the plan review): the R24 notes are written under the `ctx` the
+command is given, `quinn` via `dashboard`,** as spec §3 says: the student pressed the button, and
+phase 2's confirm screen writes the same way. *Why the cards still come:* `journal::human_set`
+(`journal.rs:271–282`) reads a `create` by `quinn` as a human set of every field it wrote, which
+would switch off the §5.4 change and end cards D5 relies on. The p2 judge-once fix (Preconditions)
+makes change detection count only a later `set` by `quinn`, so a create no longer locks a field.
+The plan's earlier answer, writing as `agent:commitments`, is withdrawn. (Spec problem 4.)
 **Plan ruling R3-d:** `Overview` gains `registrar` (`registrar::status`) and
 `registrar_proposals` (the current proposals whose key starts `registrar:`, as `proposal_value`).
 `status.refresh` is true when `term_for(school, today)` is a term the file does not hold. *Why:*
@@ -1217,7 +1270,7 @@ mod run_tests {
     }
 
     #[test]
-    fn matched_rows_are_confirmed_by_the_card_actor_and_the_rest_proposed() {
+    fn matched_rows_are_confirmed_by_the_student_and_the_rest_proposed() {
         let v = vault("r24");
         let r = fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
         assert_eq!((r.term.as_str(), r.rows, r.confirmed, r.proposed, r.no_time, r.midnight), ("202640", 4, 2, 2, 1, 1));
@@ -1228,8 +1281,8 @@ mod run_tests {
         assert!(lab.contains("Found in your school's class schedule."), "{lab}");
         let journal: String = std::fs::read_dir(v.join("state").join("journal")).unwrap().flatten()
             .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
-        assert!(journal.contains("\"actor\": \"agent:commitments\"") && journal.contains("\"via\": \"dashboard\""), "{journal}");
-        assert!(!journal.contains("\"actor\": \"quinn\""), "R3-c: no R24 write is the human's");
+        assert!(journal.contains("\"actor\": \"quinn\"") && journal.contains("\"via\": \"dashboard\""), "{journal}");
+        assert!(!journal.contains("\"actor\": \"agent:commitments\""), "R3-c: the R24 writes are the student's (spec §3)");
         let again = fetch(&v, super::tests::FIXTURE, date(2026, 9, 2)).unwrap();
         assert_eq!((again.confirmed, again.warnings.iter().filter(|w| w.contains("not a current proposal")).count()), (0, 0));
         let _ = std::fs::remove_dir_all(&v);
@@ -1253,6 +1306,9 @@ mod run_tests {
         assert_eq!(o.registrar, serde_json::json!({ "school": "ua", "held": ["202640"], "current": "202640", "refresh": false }));
         let keys: Vec<&str> = o.registrar_proposals.iter().map(|p| p["source_uid"].as_str().unwrap()).collect();
         assert_eq!(keys, ["registrar:ua:202640-40003", "registrar:ua:202640-40006"]);
+        // What `your_week` hands the page (R5 reads `week.registrar` and `week.registrar_proposals`).
+        let json = o.to_json();
+        assert_eq!((&json["registrar"], json["registrar_proposals"].as_array().map(Vec::len)), (&o.registrar, Some(2)));
         assert_eq!(crate::commitments::overview(&v, date(2027, 1, 5)).registrar["refresh"], true);
         let fresh = vault("none");
         assert_eq!(crate::commitments::overview(&fresh, date(2026, 9, 1)).registrar, serde_json::Value::Null);
@@ -1267,8 +1323,8 @@ mod run_tests {
 ```rust
     /// Phase-3 D5 end to end: a fetch confirms CS 100 and its lab (R24); the next fetch drops the
     /// lab and moves the lecture's room; the next `rank` files an end card for the lab (the day
-    /// before the fetch, R2-c) and a change card for the room (R2-g), because the notes were
-    /// written by the card actor (R3-c).
+    /// before the fetch, R2-c) and a change card for the room (R2-g). The notes were created by
+    /// `quinn` (R3-c); the cards come because the p2 judge-once fix counts only a later `set`.
     #[test]
     fn a_registrar_refetch_files_an_end_card_and_a_change_card_at_the_next_rank() {
         let vault = p16_vault("p3refetch");
@@ -1446,7 +1502,8 @@ impl Report {
 /// file that is not JSON and a parse with no usable row are `Err` (exit 2) before anything is
 /// written. Then the term's calendar is merged under D5 ([`crate::commitments::refresh_series`]),
 /// and every kept row that names a vault course and is a current proposal is confirmed at `hard`
-/// through phase 2's `confirm`, as `agent:commitments` (Plan rulings R3-b, R3-c). No network.
+/// through phase 2's `confirm`, under `ctx` (the student: `quinn` via `dashboard`; Plan rulings
+/// R3-b, R3-c). No network.
 pub fn run(
     vault: &Path,
     text: &str,
@@ -1475,7 +1532,7 @@ pub fn run(
         }
     }
     let input = cm::ConfirmInput { mine, not_mine: Vec::new(), window: None };
-    let done = cm::confirm(vault, &input, today, &ctx.with_actor(cm::CARD_ACTOR), journal)?;
+    let done = cm::confirm(vault, &input, today, ctx, journal)?;
     warnings.extend(done.warnings);
     Ok(Report {
         term: parsed.term,
@@ -1594,7 +1651,8 @@ pub fn commitments_registrar(
 ```
 
 - [ ] **Step 4 — run.** `cargo test -p knowlu-engine --lib -j 2 -- registrar:: cli::tests::a_registrar_refetch`
-  (all pass), `cargo test -p knowlu-engine --test commitments_registrar --test commitments_confirm -j 2`,
+  (all pass; if `a_registrar_refetch…` files neither card, the p2 judge-once fix is missing from
+  the branch: stop and report it, do not change the actor or the assertion), `cargo test -p knowlu-engine --test commitments_registrar --test commitments_confirm -j 2`,
   `cargo test -p knowlu-engine -j 2` (all pass, `cloud_contract.rs`'s
   `rank_cannot_reach_a_judgment_endpoint` among them), then the fixture byte check of R1 Step 4.
 
@@ -1604,8 +1662,8 @@ pub fn commitments_registrar(
 feat(engine): commitments --registrar confirms the matched classes (phase 3, §3, R24)
 
 The command parses the app's temp file, merges the term's series under D5, and
-confirms each row whose course is in the vault through phase 2's confirm, as
-agent:commitments so the notes stay watched for change and end cards. It prints
+confirms each row whose course is in the vault through phase 2's confirm, as the
+student (quinn via dashboard, spec §3). It prints
 {confirmed, dropped, proposed, rows, term, warnings}, exits 2 having written
 nothing on an unknown school or no usable row, and makes no network call.
 The overview names the registrar term and its proposals.
@@ -1798,7 +1856,7 @@ fn the_argv_carries_the_vault_the_file_the_school_today_and_the_consoles_via() {
 
 ```rust
 /// D4 + R4-e: the bytes go to a temp file under the profile's `tmp\`, the engine writes the
-/// notes as `agent:commitments` via `dashboard`, and the file is gone afterwards.
+/// notes as `quinn` via `dashboard`, and the file is gone afterwards.
 #[test]
 fn a_fetched_schedule_runs_through_the_engine_and_the_temp_file_is_gone() {
     let _engine = real_engine();
@@ -1874,6 +1932,7 @@ fn your_week_names_the_registrar_only_at_a_school_that_has_one() {
     assert_eq!(your_week_inner(&cs)["registrar_label"], "myBama");
     std::fs::write(v.join("config/campus.yaml"), "unitid: '157085'\n").unwrap();
     assert_eq!(your_week_inner(&cs)["registrar_label"], serde_json::Value::Null);
+    let _ = std::fs::remove_dir_all(&v);
 }
 ```
 
@@ -1993,7 +2052,8 @@ pub fn call_urls(reg: &Registrar, term: &str) -> Vec<(String, String, Option<Str
         .collect()
 }
 
-/// `--via dashboard`; the engine writes the R24 notes as `agent:commitments` (Plan ruling R3-c).
+/// `--via dashboard`, and `--actor` keeps the engine's default, `quinn`: the R24 notes are the
+/// student's (spec §3, Plan ruling R3-c), as `week::confirm_argv`'s are.
 pub fn registrar_argv(vault: &Path, file: &Path, school: &str, today: Date) -> Vec<String> {
     vec![
         "commitments".into(), "--vault".into(), vault.to_string_lossy().into_owned(),
@@ -2054,7 +2114,8 @@ fn failed(error: String, closed: bool) -> Value {
 /// Spec §2 step 2: the recorded calls, with the window's cookies for each call's host only
 /// (`cookie_url`). The cookies live on this stack: never written, logged or put in an error.
 fn capture(app: &tauri::AppHandle, cs: &ConsoleState, view: &str) -> Value {
-    let Some(reg) = school_of(&cs.vault) else { return failed(NO_REGISTRAR.into(), true) };
+    // The envelope says `closed`, so the window really is closed (plan review M1).
+    let Some(reg) = school_of(&cs.vault) else { lms_link::close_and_wipe(app); return failed(NO_REGISTRAR.into(), true) };
     let Some(w) = app.get_webview_window(lms_link::WINDOW) else {
         return failed(format!("the sign-in window is not open; press Get my class times from {} again", reg.label), true);
     };
@@ -2531,8 +2592,8 @@ decision, not a plan's. (Spec problem 8.)
     and the entry gains: "With `--registrar <file> --school ua` (phase 3) it fetches nothing either:
     it parses the registrar's JSON (`registrar::parse_banner`, the one place that knows Banner's
     shape), merges the term under `registrar:<school>:<term>` into `state/calendar-series.json`,
-    and confirms each row that matches a vault course at `hard` as `agent:commitments` via
-    `dashboard`. It prints `{confirmed, dropped, proposed, rows, term, warnings}` and exits 2 on an
+    and confirms each row that matches a vault course at `hard` as the student (`quinn` via
+    `dashboard`). It prints `{confirmed, dropped, proposed, rows, term, warnings}` and exits 2 on an
     unknown school or no usable row, having written nothing. The app's `registrar.rs` runs it from
     the school's own sign-in window; it is never a slot step."
   - The Tauri paragraph: "recounted <date> (commitment model phase 3)", the console **50**
@@ -2574,7 +2635,7 @@ decision, not a plan's. (Spec problem 8.)
      exits 0, and `git status --porcelain -- engine/tests/fixtures` prints nothing. That covers the
      eight Python references and `surface-today-{s1,s1-migrated,full}.json`; the one new fixture
      is `registrar/banner-ua-registration.json`, and `git log --format=%h -- engine/tests/fixtures/registrar`
-     names only R0's commit.
+     names only R1's commit and, if R0 rewrote the fixture, R0's.
   5. `powershell -File scripts/ci/eol-check.ps1` passes: every new file is LF.
   6. `git diff --name-only eb10c1b -- cloud app/src/scheduler.rs app/src/inference.rs engine/src/runtime.rs`
      prints nothing: no cloud change, no slot step, and the local runtime is not extended.
@@ -2611,7 +2672,7 @@ vault, which is then removed.
 - [ ] Quinn signs in (Okta, Okta Verify). The controller presses **I'm signed in** through the DOM.
 - [ ] The engine's report says `rows > 0`; the class rows that match the wizard's courses are notes
       in `commitments/` with `source_uid: registrar:ua:<term>-<crn>`, `level: hard`, written by
-      `agent:commitments` via `dashboard`; the others are rows marked "from myBama". Record counts
+      `quinn` via `dashboard`; the others are rows marked "from myBama". Record counts
       only, never titles or CRNs, in the proof note.
 - [ ] The sign-in window is gone and no `knowlu-lms-session-*` folder is left in `%TEMP%`;
       `<profile>\tmp\` is empty.
@@ -2644,7 +2705,7 @@ vault, which is then removed.
     `asks_wait_until_the_day_after_the_registrars_term_starts`,
     `asks_wait_for_the_registrars_term_to_start`.
   - R24, the output and idempotence:
-    `matched_rows_are_confirmed_by_the_card_actor_and_the_rest_proposed`,
+    `matched_rows_are_confirmed_by_the_student_and_the_rest_proposed`,
     `a_fetch_prints_the_report_and_writes_the_series_and_the_notes`.
   - Exit 2 writes nothing: `every_exit_2_writes_nothing`, `a_bad_school_or_file_writes_nothing`.
     No network: `registrar_makes_no_network_call`.
@@ -2693,9 +2754,9 @@ vault, which is then removed.
 
 ## Spec problems found while planning, and how they were settled
 
-Each is settled by a Plan ruling so the plan has no gap, but items 1–4 change what the spec says
-and need Quinn's go at the first checkpoint, then an "Amendments (plan)" section in the spec,
-before R2 starts. Items 5–8 fill silences.
+Each is settled by a Plan ruling so the plan has no gap. **Plan review (2026-09-26), controller
+rulings:** items 1–3 are accepted as written; item 4 is resolved differently (below). All four are
+now the spec's "Amendments (2026-09-26, plan review)" section. Items 5–8 fill silences.
 
 1. **One `registrar:ua` calendar would end the current term at the next term's fetch.** UA
    students register for spring in November; D5's "a row missing from a later fetch is a dropped
@@ -2710,11 +2771,13 @@ before R2 starts. Items 5–8 fill silences.
    notes block by `meets`.
 4. **§3's "actor `quinn` via `dashboard`" would switch off the change and end cards the spec relies
    on.** `journal::human_set` treats a `create` by `quinn` as a human set of every field written,
-   and `detect_changes` never proposes a human-set field back. Settled by R3-c: the R24 notes are
-   written as `agent:commitments` via `dashboard`, as a card's settlement is. **Related, outside
-   this plan:** phase 2's confirm screen writes its notes as `quinn` (Plan ruling Q3-a), so a class
-   confirmed on that screen never gets a §5.4 change or end card either. Quinn should rule whether
-   phase 2's confirm writes change actor too; this plan does not touch it.
+   and `detect_changes` never proposes a human-set field back. The plan first settled it by writing
+   the R24 notes as `agent:commitments`. **Controller ruling at the plan review:** that is
+   withdrawn. A fix on `p2-commitments` makes commitment change detection count "the student set
+   this field" only from a later `set` by `quinn`, never the `create`; it merges into
+   `p3-registrar` before R1. R24's notes and phase 2's confirm screen keep writing as `quinn` via
+   `dashboard`, as the spec says, and both get their change and end cards (R3-c as amended; the
+   pin is `a_registrar_refetch_files_an_end_card_and_a_change_card_at_the_next_rank`).
 5. **§5.4's change path runs only for calendars read in the same `rank`,** and a registrar is read
    only on a button press, so "a later fetch that differs files a change card" would not happen.
    Settled by R2-g: every registrar calendar in the file counts as fresh for change detection.
