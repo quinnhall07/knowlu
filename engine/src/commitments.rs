@@ -4746,6 +4746,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
                 "where": n.where_,
                 "from": date_json(n.from),
                 "until": date_json(n.until),
+                "source_uid": n.source_uid,
             })
         })
         .collect();

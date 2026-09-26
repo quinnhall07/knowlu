@@ -666,4 +666,17 @@ mod run_tests {
         let _ = std::fs::remove_dir_all(&v);
         let _ = std::fs::remove_dir_all(&fresh);
     }
+
+    /// Final review I3: the overview's confirmed rows carry their `source_uid`, so the confirm
+    /// screen can list what the registrar confirmed without computing anything.
+    #[test]
+    fn the_overviews_confirmed_rows_carry_their_source_uid() {
+        let v = vault("confirmedkeys");
+        fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
+        let o = crate::commitments::overview(&v, date(2026, 9, 1));
+        let mut keys: Vec<&str> = o.commitments.iter().filter_map(|c| c["source_uid"].as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["registrar:ua:202640-40001", "registrar:ua:202640-40002"]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
 }

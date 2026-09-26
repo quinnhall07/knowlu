@@ -589,6 +589,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .wsrow .b[aria-pressed="true"], .b.day[aria-pressed="true"] { background: var(--acc-dim); color: var(--t1); border-color: var(--acc); }
 .reg { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; padding: var(--s2) 0; }
 .reg[hidden] { display: none; }   /* the `.app[hidden]` lesson: a flex class beats the UA's [hidden] */
+.reg-added ul { margin: 0 0 var(--s2); padding-left: var(--s4); }   /* final review I3: what myBama confirmed */
 .src { color: var(--t3); font-size: 0.9em; }
 .ws-nav { display: flex; justify-content: flex-end; gap: var(--s3); margin-top: var(--s6); }
 .ask-time { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; margin-top: var(--s2); }

@@ -859,7 +859,19 @@
         row.querySelectorAll("[data-answer-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-answer-set") === k.answer)); });
         row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-level-set") === k.level)); });
       });
+      return invoke("your_week", {}).then(function (w) { paintRegistrarAdded(w && w.ok && w.week ? w.week.commitments : []); });
     }).catch(function () {});
+  }
+
+  // Final review I3: the confirm screen lists what myBama confirmed (spec §2 step 4) — your_week's
+  // confirmed rows keyed `registrar:`, as the engine built them: title, then days and times.
+  function paintRegistrarAdded(commitments) {
+    var added = (commitments || []).filter(function (c) { return c.source_uid && c.source_uid.indexOf("registrar:") === 0; });
+    var host = EL("ws-reg-added");
+    host.hidden = !added.length || !registrarLabel;
+    host.innerHTML = host.hidden ? "" : '<p class="hint">From ' + h(registrarLabel) + " — added</p><ul>" + added.map(function (c) {
+      return '<li><span class="a">' + h(c.title) + '</span> <span class="meta">' + h(c.when || "") + "</span></li>";
+    }).join("") + "</ul>";
   }
 
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says

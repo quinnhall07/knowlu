@@ -1875,3 +1875,19 @@ fn finish_is_re_enabled_only_through_one_helper() {
     let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(open.contains("if (finishMayRun()) { EL(\"ws-finish\").disabled = false; }"), "the read's settle asks the helper");
 }
+
+/// Phase 3 final review I3: after a fetch the confirm screen lists what myBama confirmed, from
+/// `your_week`'s rows keyed `registrar:` (the engine built them), each string escaped.
+#[test]
+fn the_confirm_screen_lists_what_mybama_confirmed() {
+    let html = read("index.html");
+    let classes = html.split("id=\"ws-classes\"").nth(1).unwrap().split("id=\"ws-class-rows\"").next().unwrap();
+    assert!(classes.contains("id=\"ws-reg-added\" hidden"), "under Your classes, hidden until a fetch");
+    let js = read("console.js");
+    let added = js.split("function paintRegistrarAdded(").nth(1).expect("paintRegistrarAdded").split("\n  function ").next().unwrap();
+    assert!(added.contains("c.source_uid.indexOf(\"registrar:\") === 0"), "only the registrar's confirmed rows");
+    assert!(added.contains("h(c.title)") && added.contains("h(c.when || \"\")") && added.contains("h(registrarLabel)"), "escaped");
+    assert!(added.contains("\" — added</p>"), "the heading: From myBama — added");
+    let reload = js.split("function reloadSetupRows(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(reload.contains("invoke(\"your_week\", {})") && reload.contains("paintRegistrarAdded("), "read after the fetch");
+}

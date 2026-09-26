@@ -171,7 +171,14 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
   if (cmd === 'state') { return Promise.resolve({ ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)),
       first_run: window.__SCHED_REG ? null : { running: true, current: 'coursework', steps: [] } }); }
-  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: !window.__SCHED_REG, commitments: [], office_hours: [],
+  // Final review I3: once a fetch has run, your_week holds the registrar's confirmed CS 100 (an
+  // invented title with markup, to prove it is escaped) beside a Google-keyed note it must not list.
+  var CONFIRMED = window.__REGISTRAR_DONE && !window.__SCHED_REG ? [
+    { id: 'cmt_a', kind: 'class', level: 'hard', title: 'CS 100 <i>Lecture</i>', course: 'cs-100', when: 'Mon/Wed/Fri 12–12:50pm',
+      where: 'Room 101', source_uid: 'registrar:ua:202640-40001', meets: [] },
+    { id: 'cmt_b', kind: 'club', level: 'soft', title: 'Chess Club', course: null, when: 'Wed 6–7pm',
+      where: null, source_uid: 'gcal-series:chess-old', meets: [] }] : [];
+  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: !window.__SCHED_REG, commitments: CONFIRMED, office_hours: [],
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [],
       registrar: window.__SCHED_REG ? { school: 'ua', held: ['202640'], current: '202710', refresh: true } : null,
       registrar_proposals: window.__SCHED_REG ? [ART] : [] }, registrar_label: window.__NO_REG ? null : 'myBama' }); }
@@ -717,6 +724,14 @@ def check_registrar(page, errors) -> list:
     if page.get_attribute("#week-setup .wsrow[data-key='gcal-series:chess']", "data-answer") != "not":
         bad.append("an answer given before the fetch was lost")
     if "1 confirmed" not in page.inner_text("#ws-reg"): bad.append("the fetch's result is not said")
+    # Final review I3: what myBama confirmed is listed, escaped, and only the registrar's rows.
+    if not page.is_visible("#ws-reg-added"): bad.append("what myBama confirmed is not listed")
+    else:
+        got = page.inner_text("#ws-reg-added")
+        for want in ("From myBama — added", "CS 100 <i>Lecture</i>", "Mon/Wed/Fri 12–12:50pm"):
+            if want not in got: bad.append(f"the confirmed list lacks {want!r}: {got!r}")
+        if "Chess Club" in got: bad.append("the confirmed list names a note the registrar did not confirm")
+        if page.query_selector("#ws-reg-added i"): bad.append("a confirmed title's markup was not escaped")
     if page.evaluate("document.querySelectorAll('#week-setup input[type=text], #week-setup input[type=password]').length"):
         bad.append("the confirm screen accepts typed text")
     for e in errors: bad.append(f"registrar page error: {e}")
