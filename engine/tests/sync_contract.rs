@@ -2023,13 +2023,13 @@ fn an_untouched_wizard_seed_loses_to_the_accounts_own_copy_at_the_same_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// N2's other half: a seed the student HAS edited since — its BYTES no longer match the hash
-/// `restore_into` recorded — is an ordinary conflict, handled exactly as today: the account's copy
-/// does NOT silently overwrite it, because a real change has already been made here. R1's own fix:
-/// this is a hash mismatch, not a journal-history check, so it also covers a hand-typed BODY edit,
-/// which the journal never records at all.
+/// N2's other half, with two-desktop design D5 (c): a seed the student HAS edited since — its BYTES no
+/// longer match the hash `restore_into` recorded — is never overwritten, because a real change has
+/// been made here. The account's copy is a different note (a different id), and every id gets one file:
+/// it lands at the next free name beside the seed, named in one line. Before D5 it was dropped with no
+/// line.
 #[test]
-fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
+fn a_seed_the_student_has_edited_is_never_overwritten_and_the_accounts_copy_lands_beside_it() {
     let dir = fixture_with_id("edited-seed-keeps-rule");
     let mut journal = Journal::new(&dir);
     let seed_ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
@@ -2037,8 +2037,6 @@ fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
     knowlu_engine::write::create(&dir, "courses/cs-200.md", seed_text, &seed_ctx, &mut journal, None)
         .expect("the wizard's own seed");
     seed_hash(&dir, "courses/cs-200.md");
-    // The student typed real content into the body — never journalled at all (`passes::detect_external`
-    // diffs frontmatter only), so this changes only the bytes, exactly R1's own scenario.
     knowlu_engine::pystr::write_text(
         &dir.join("courses").join("cs-200.md"),
         "---\nid: course_0000000002\n---\nExams: TBD, but I filled in the weights myself: 60/40\n",
@@ -2053,7 +2051,15 @@ fn a_seed_the_student_has_edited_keeps_todays_never_overwrite_rule() {
     let report = sync::apply(&dir, &pulled(vec![], vec![note]), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
     let now = knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-200.md")).expect("the note");
     assert!(now.contains("I filled in the weights myself"), "a hand-edited seed is not silently overwritten: {now:?}");
-    assert_eq!(report.notes_written, 0, "{report:?}");
+    assert_eq!(report.notes_written, 1, "{report:?}");
+    assert_eq!(
+        knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-200-2.md")).expect("the account's copy"),
+        "---\nid: course_00000000cd\n---\nExams 60%, labs 40%\n"
+    );
+    assert!(
+        report.warnings.contains(&"sync: courses/cs-200.md holds a different note here; course_00000000cd was written to courses/cs-200-2.md".to_string()),
+        "{:?}", report.warnings
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2096,24 +2102,19 @@ fn field_history_on_the_accounts_copy_does_not_stop_the_seed_replacement() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// R1's own probes, both in one test: a vault with NO `state/seed-hashes.json` — every vault but the
-/// ones this stream creates — behaves exactly as it did before round 2 ever touched `apply`. Neither
-/// a veteran desktop's hand-typed course (created once, then typed into by hand — no second record,
-/// since the body is never journalled) nor a console-created task (also one `create`) is overwritten
-/// by a foreign note arriving at the same path.
+/// R1's own probes with two-desktop design D5 (c): a vault with NO `state/seed-hashes.json` never has a
+/// veteran desktop's hand-typed course, or a console-created task, overwritten by a foreign note at the
+/// same path. Each foreign note is a different note (a different id), so it lands at the next free name.
 #[test]
-fn with_no_seed_hashes_file_apply_is_unchanged() {
+fn with_no_seed_hashes_file_a_foreign_copy_lands_beside_the_note_never_over_it() {
     let dir = fixture_with_id("no-seed-hashes-file");
     assert!(!dir.join(sync::SEED_HASHES_FILE).exists(), "this fixture never restored");
     let mut journal = Journal::new(&dir);
     let ctx = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
-    // The veteran desktop: one `create`, then a hand-typed body — the shape a real, long-lived note
-    // has always had, and exactly what round 2 confused for "untouched".
     knowlu_engine::write::create(&dir, "courses/cs-300.md", "---\nid: course_0000000003\n---\nExams: TBD\n", &ctx, &mut journal, None)
         .expect("created once");
     knowlu_engine::pystr::write_text(&dir.join("courses").join("cs-300.md"), "---\nid: course_0000000003\n---\nExams 60%, labs 40%, hand-typed from the syllabus\n")
         .expect("typed in by hand, never journalled");
-    // A console-created task: one `create`, nothing else.
     knowlu_engine::write::create(&dir, "tasks/my-own-task.md", "---\nid: task_0000000009\n---\nMine\n", &ctx, &mut journal, None)
         .expect("created in the console");
 
@@ -2123,15 +2124,12 @@ fn with_no_seed_hashes_file_apply_is_unchanged() {
         sync::PulledNote { device: "fedcba9876543210".into(), path: "tasks/my-own-task.md".into(), text: Some("---\nid: task_00000000ff\n---\nForeign task\n".into()) },
     ];
     let report = sync::apply(&dir, &pulled(vec![], notes), &apply_ctx, &mut journal, "2026-09-22".parse().unwrap());
-    assert!(
-        knowlu_engine::pystr::read_text(&dir.join("courses").join("cs-300.md")).expect("the note").contains("hand-typed"),
-        "the veteran desktop's hand-typed course is not overwritten"
-    );
-    assert!(
-        knowlu_engine::pystr::read_text(&dir.join("tasks").join("my-own-task.md")).expect("the note").contains("Mine"),
-        "the console-created task is not overwritten"
-    );
-    assert_eq!(report.notes_written, 0, "{report:?}");
+    let read = |rel: &str| knowlu_engine::pystr::read_text(&dir.join(rel)).expect(rel);
+    assert!(read("courses/cs-300.md").contains("hand-typed"), "the veteran desktop's hand-typed course is not overwritten");
+    assert!(read("tasks/my-own-task.md").contains("Mine"), "the console-created task is not overwritten");
+    assert_eq!(report.notes_written, 2, "{report:?}");
+    assert!(read("courses/cs-300-2.md").contains("Foreign copy"));
+    assert!(read("tasks/my-own-task-2.md").contains("Foreign task"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2950,4 +2948,57 @@ fn td1_i_one_item_fetched_on_two_desktops_is_one_note_and_a_both_sides_edit_is_o
     }
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
+}
+
+/// §6.1 (ii), D4 and D5: each computer's own course label puts x at a different path (§2.4). Each
+/// desktop keeps one file — the other's text is named and not written, its id being held here, and
+/// the other's `create` is journalled with no file — and a later edit travels by id to the other
+/// desktop's own path.
+#[test]
+fn td1_ii_one_item_at_two_paths_stays_one_file_each_side_and_an_edit_travels_by_id() {
+    let (a, b) = (desk("ii-a"), desk("ii-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let (a_rel, b_rel) = ("tasks/cs-100-hw-07.md", "tasks/comp-100-hw-07.md");
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    fetch(&b, &mut jb, &[item("comp-100-hw-07", "COMP 100 HW 07")]);
+
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let r = deliver(&a, &page, &mut ja);
+    assert_eq!(r.notes_written, 0, "{r:?}");
+    assert!(
+        r.warnings.contains(&format!("sync: {b_rel} is task_d0fd865fb3, already held here as {a_rel}")),
+        "{:?}", r.warnings
+    );
+    ja.invalidate();
+    assert!(
+        ja.records_for("task_d0fd865fb3", None).iter().any(|rec| rec.get("op").and_then(|v| v.as_str()) == Some("create")
+            && rec.get("device").and_then(|v| v.as_str()) == Some("DeskB")),
+        "B's create is journalled here"
+    );
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    deliver(&b, &page, &mut jb);
+    assert!(!a.join(b_rel).exists() && !b.join(a_rel).exists(), "one file each side");
+
+    edit(&a, a_rel, &mut ja, &[("importance", "5")]);
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!((r.applied, r.cards), (1, 0), "{r:?}");
+    assert_eq!(int_at(&b, b_rel, "importance"), Some(5), "the edit reached B's own path");
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// D5 (a): a foreign record reconciles against the note holding its id — never against a different
+/// note that happens to sit at the record's path here.
+#[test]
+fn td1_a_foreign_record_never_reconciles_against_a_different_note_at_its_path() {
+    let dir = fixture_with_id("td1-different-note"); // tasks/cs-100-hw-01.md is task_0000000001, importance 2
+    let mut journal = Journal::new(&dir);
+    let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+    let rec = foreign_set("task_00000000ff", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(2), serde_json::json!(5), "2026-09-17T10:00:00.000Z");
+    let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+    assert_eq!((report.records, report.applied, report.cards, report.superseded), (1, 0, 0, 0), "{report:?}");
+    assert_eq!(int_at(&dir, "tasks/cs-100-hw-01.md", "importance"), Some(2), "the other note is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
 }

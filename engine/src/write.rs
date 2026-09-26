@@ -474,7 +474,8 @@ fn create_minting(
     Ok(path)
 }
 
-fn free_slot(folder: &Path, name: &str) -> PathBuf {
+/// Also `sync::apply`'s rule for a pulled note whose path holds a different note (two-desktop D5 (c)).
+pub(crate) fn free_slot(folder: &Path, name: &str) -> PathBuf {
     let mut target = folder.join(name);
     let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = Path::new(name).extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();

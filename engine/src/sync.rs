@@ -1706,6 +1706,56 @@ fn changes_json(changes: &[(String, serde_yaml_ng::Value, serde_yaml_ng::Value)]
     Value::Object(out)
 }
 
+/// Two-desktop design D5: which note holds each id here, vault-relative — built once per `apply` and
+/// kept current as `apply` moves, settles, re-identifies and writes notes, so every step asks one map
+/// rather than re-scanning the folders. The first path wins, as `ids::build_index` rules. `aliases` is
+/// the alias map the pre-pass builds (empty until then), so `holder` finds a group by any of its ids.
+#[derive(Debug, Default)]
+struct IdIndex {
+    by_id: std::collections::BTreeMap<String, String>,
+    aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl IdIndex {
+    fn build(vault: &Path) -> IdIndex {
+        let by_id = crate::ids::build_index(vault)
+            .into_iter()
+            .map(|(id, path)| (id, crate::ids::rel(vault, &path)))
+            .collect();
+        IdIndex { by_id, aliases: std::collections::BTreeMap::new() }
+    }
+
+    /// The note holding exactly `id`.
+    #[allow(dead_code)]
+    fn exact(&self, id: &str) -> Option<&String> {
+        self.by_id.get(id)
+    }
+
+    /// The note holding `id` or any id of its alias group, the group's winner first (D5 (a), D6).
+    fn holder(&self, id: &str) -> Option<&String> {
+        self.by_id.get(crate::ids::canonical(&self.aliases, id)).or_else(|| {
+            crate::ids::alias_group(&self.aliases, id).iter().find_map(|g| self.by_id.get(g.as_str()))
+        })
+    }
+
+    fn place(&mut self, id: &str, rel: &str) {
+        self.by_id.insert(id.to_string(), rel.to_string());
+    }
+
+    #[allow(dead_code)]
+    fn forget(&mut self, id: &str) {
+        self.by_id.remove(id);
+    }
+}
+
+/// A readable note with no valid `id:` line: the one kind of note only its path identifies (D5 (a),
+/// R-TD1-2). A missing or unreadable file is not one.
+fn note_has_no_id(file: &Path) -> bool {
+    crate::ids::read_meta(file).is_some_and(|meta| {
+        !crate::yaml::get(&meta, "id").and_then(crate::yaml::text).is_some_and(|id| crate::ids::is_id(&id))
+    })
+}
+
 /// Apply one pulled page to this vault.
 ///
 /// **Order matters and is the argument.** Records are appended verbatim FIRST, because they are the
@@ -1901,15 +1951,27 @@ pub fn apply(
         }
     }
 
+    // D5 (two-desktop design §2.5): which note holds each id here, read after the record pass, the
+    // moves and the seed pre-pass, and kept current below as this apply writes notes.
+    let mut index = IdIndex::build(vault);
+
     // 4. Per note, with the roles reversed exactly as the table above says.
     for (id, foreign) in &touched {
         if foreign.is_empty() { continue; }
-        let path = foreign
+        let record_path = foreign
             .iter()
             .rev()
             .find_map(|r| r.get("path").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
+        // D5 (a) (two-desktop design §2.5): the note holding this id, wherever it is here — never a
+        // different note that happens to sit at the record's path. The record's path is consulted only
+        // for a note there with no `id:` line, which only its path identifies (R-TD1-2).
+        let path = match index.holder(id) {
+            Some(rel) => rel.clone(),
+            None if note_has_no_id(&vault.join(&record_path)) => record_path,
+            None => continue,
+        };
         // N2: this path was just replaced wholesale by the pre-pass above — reconciling the
         // account's own records (a different id than the seed's, in any case) against a file that no
         // longer holds the seed at all would merge fields the replacement already delivered in full,
@@ -2270,26 +2332,41 @@ pub fn apply(
                 // may already sit at it. `create_new` (review M6) closes the remaining
                 // check-then-write race: this can never overwrite a file that appears between the
                 // check above and this write, even one from a concurrent console `write` command.
+                // Two-desktop design D5 (c): a path held by a DIFFERENT note (another id) no longer
+                // drops the text; it takes the next free name, and a text whose id is held anywhere
+                // here is never written twice.
+                let text_id = note_frontmatter_id(text).filter(|id| crate::ids::is_id(id));
+                // D5 (c) (two-desktop design §2.5): one id, one file, and every id gets one.
+                let mut target = note.path.clone();
                 if exact_case_exists(&file) {
-                    continue;
-                }
-                // O1: a case-insensitive match that is NOT the exact spelling MIGHT be this
-                // device's own copy of the SAME note, cased differently — the other half of the
-                // rename pair above. Renaming this device's file keeps its own id and body
-                // untouched; any foreign `move` record for the note is journalled in the ordinary
-                // record pass above (and, on NTFS, fails there at its own case-insensitive
-                // `exists()` check — by design, see the moves pass — leaving the rename to land
-                // here instead). B3: only when the ids agree — otherwise this is a genuinely new,
-                // unrelated note that merely collides in spelling, and it falls through to the
-                // ordinary `create_new` below (which, because tombstones ran first, no longer
-                // collides with anything).
-                if let Some(existing) = case_insensitive_match(&file) {
+                    // The path is held. The same note — the same id, or a note here with no `id:` line,
+                    // which its path identifies (R-TD1-2) — keeps today's rule: never overwritten.
+                    let local_id = crate::ids::read_meta(&file)
+                        .and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text))
+                        .filter(|id| crate::ids::is_id(id));
+                    match (&text_id, &local_id) {
+                        (Some(theirs), Some(ours)) if theirs != ours => {
+                            // A different note holds this path: the text takes the next free name
+                            // (`write::free_slot`'s rule), unless its id is already held here.
+                            let folder = file.parent().unwrap_or(vault);
+                            let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            target = crate::ids::rel(vault, &crate::write::free_slot(folder, &name));
+                        }
+                        _ => continue,
+                    }
+                } else if let Some(existing) = case_insensitive_match(&file) {
+                    // O1 / B3, as before: this device's own copy of the same note, cased differently.
                     let local_id = crate::ids::read_meta(&existing)
                         .and_then(|m| crate::yaml::get(&m, "id").and_then(crate::yaml::text));
                     let live_id = note_frontmatter_id(text);
                     if local_id.is_some() && local_id == live_id {
                         match rename_case_only(&existing, &file) {
-                            Ok(()) => report.moved += 1,
+                            Ok(()) => {
+                                report.moved += 1;
+                                if let Some(id) = &text_id {
+                                    index.place(id, &note.path);
+                                }
+                            }
                             Err(e) => report.warnings.push(format!(
                                 "sync: {} could not be renamed to match the account's spelling ({e}); keeping the old spelling",
                                 note.path
@@ -2298,6 +2375,15 @@ pub fn apply(
                         continue;
                     }
                 }
+                // D5 (a) and (c): a text whose id is already held here — a foreign `create` for a held
+                // id, or one item at two paths (D4) — writes no second file.
+                if let Some(id) = &text_id {
+                    if let Some(local) = index.holder(id) {
+                        report.warnings.push(format!("sync: {} is {id}, already held here as {local}", note.path));
+                        continue;
+                    }
+                }
+                let file = vault.join(&target);
                 if let Some(parent) = file.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -2312,8 +2398,19 @@ pub fn apply(
                     .open(&file)
                     .and_then(|mut f| f.write_all(translated.as_bytes()));
                 match result {
-                    Ok(()) => report.notes_written += 1,
-                    Err(e) => report.warnings.push(format!("sync: {} could not be written ({e})", note.path)),
+                    Ok(()) => {
+                        report.notes_written += 1;
+                        if let Some(id) = &text_id {
+                            index.place(id, &target);
+                            if target != note.path {
+                                report.warnings.push(format!(
+                                    "sync: {} holds a different note here; {id} was written to {target}",
+                                    note.path
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => report.warnings.push(format!("sync: {target} could not be written ({e})")),
                 }
             }
         }
