@@ -4,7 +4,7 @@
 //! key for ingest dedup. The two never merge, and conflating them would make a vendor's identifier
 //! load-bearing for the journal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -72,6 +72,18 @@ pub fn new_id(kind: &str) -> String {
     format!("{kind}_{hex}")
 }
 
+/// Two-desktop design D1: the id of an imported note, derived from the item so that two computers
+/// importing one item mint one id. The same shape as every id (`kind_` + 10 lowercase hex, `ID_RE`)
+/// and `derived_id`'s SHA-1 and cut — an identity, not a security primitive. The first line of the
+/// hashed text separates this hash from `derived_id`'s and versions it. **Frozen once shipped**: a
+/// second derivation would re-open doubles between computers on different builds.
+pub fn import_id(kind: &str, vendor: &str, key: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(format!("knowlu/import-id/1\n{kind}\n{vendor}\n{key}").as_bytes());
+    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{kind}_{}", &hex[..10])
+}
+
 /// The note's kind, from its `type:` field, falling back to its folder.
 ///
 /// Note the asymmetry: `approval` and `issue` are abbreviated (`appr`, `iss`) but `info` is not.
@@ -91,6 +103,53 @@ pub fn kind_for(path: &Path, meta: Option<&Mapping>) -> String {
         return "course".to_string();
     }
     "task".to_string()
+}
+
+/// D2: the `created_by:` words whose notes an automatic step creates because an outside item exists —
+/// the notes two desktops create independently. A closed list: a person, the console, an agent's
+/// judgment and every other word keep `new_id`.
+pub const IMPORT_VENDORS: [&str; 7] = ["zybooks", "vhl", "blackboard", "gmail", "events", "coursework", "rules"];
+
+/// `(kind, vendor, key)` — the three inputs of [`import_id`].
+pub type ImportKey = (String, String, String);
+
+/// D2: whether a note is imported, and under which key — the one function that answers it (§2.2).
+///
+/// Only kinds `task` and `appr` ([`kind_for`], so the prefix is the one `create` would have minted),
+/// only a `created_by:` in [`IMPORT_VENDORS`], and the key is the producer's word, a colon, and the
+/// note's `source_uid:` or, where a producer has none, its own key. Every input is frontmatter the
+/// producer writes from the item itself; none is per-desktop. The map card's and the digest's keys
+/// carry their date, because each is re-proposed into a free path and must not take the old card's id.
+pub fn import_key(path: &Path, meta: &Mapping) -> Option<ImportKey> {
+    let kind = kind_for(path, Some(meta));
+    if kind != "task" && kind != "appr" {
+        return None;
+    }
+    let field = |name: &str| crate::yaml::get(meta, name).and_then(crate::yaml::text).filter(|v| !v.is_empty());
+    let vendor = field("created_by")?;
+    if !IMPORT_VENDORS.contains(&vendor.as_str()) {
+        return None;
+    }
+    let card = field("kind");
+    let (word, rest) = match (vendor.as_str(), kind.as_str(), card.as_deref()) {
+        ("zybooks" | "vhl", "task", _) => ("coursework", field("source_uid")?),
+        ("blackboard", "task", _) => ("lms", field("source_uid")?),
+        ("gmail", "task" | "appr", _) => ("gmail", field("source_uid")?),
+        ("events", "appr", Some("calendar-event")) => ("calendar-event", field("source_uid")?),
+        ("events", "appr", Some("events-digest")) => ("events-digest", field("proposed_at")?),
+        ("coursework", "appr", Some("coursework-map")) => {
+            ("map", format!("{}:{}:{}", field("source")?, field("map_key")?, field("first_proposed_at")?))
+        }
+        ("rules", "appr", Some("rule")) => ("rule", field("rule_id")?),
+        _ => return None,
+    };
+    Some((kind, vendor, format!("{word}:{rest}")))
+}
+
+/// D3's `held`: every id this vault already holds — [`build_index`]'s keys, read once per producer
+/// run and extended by `write::create_imported` as the run creates.
+pub fn held_ids(vault: &Path) -> BTreeSet<String> {
+    build_index(vault).into_keys().collect()
 }
 
 /// Frontmatter, or `None` for anything unreadable — a missing file, bad YAML, or a non-mapping.
@@ -306,6 +365,109 @@ mod tests {
         assert_eq!(derived_id("appr", "approvals/amend-ph-106-due.md"), "appr_531b68d643");
         // Backslashes are normalised before hashing, so Windows and POSIX agree on the id.
         assert_eq!(derived_id("task", r"tasks\cs-100-hw-01.md"), "task_3d9521e0b7");
+    }
+
+    /// Two-desktop design §2.1: the four reference values, computed outside Rust (Python's `hashlib`
+    /// and `sha1sum`). Frozen once shipped (D1): a different digest here would re-open doubles between
+    /// two computers on different builds.
+    #[test]
+    fn import_id_reproduces_the_spec_reference_values() {
+        assert_eq!(import_id("task", "zybooks", "coursework:zybooks:1839992"), "task_18734fe8b7");
+        assert_eq!(
+            import_id("task", "blackboard", "lms:_blackboard.platform.gradebook2.GradableItem-_4732722_1"),
+            "task_d8891a504b"
+        );
+        assert_eq!(import_id("task", "gmail", "gmail:gmail:m1"), "task_3bc4bec4a9");
+        assert_eq!(import_id("appr", "events", "events-digest:2026-09-25"), "appr_40ab7c3a10");
+        assert!(is_id(&import_id("task", "vhl", "coursework:vhl:1")), "the shape of every id (ID_RE)");
+    }
+
+    fn key_of(rel: &str, frontmatter: &str) -> Option<ImportKey> {
+        import_key(Path::new(rel), &crate::yaml::mapping_of(frontmatter))
+    }
+
+    fn want(kind: &str, vendor: &str, key: &str) -> Option<ImportKey> {
+        Some((kind.to_string(), vendor.to_string(), key.to_string()))
+    }
+
+    /// §2.2: one row per producer, each key prefixed by its producer's word, so no two producers can
+    /// share a key (review M14).
+    #[test]
+    fn import_key_names_each_producer_by_its_own_word() {
+        assert_eq!(
+            key_of("tasks/cs-100-hw-01.md", "created_by: zybooks\nsource_uid: \"zybooks:1839992\""),
+            want("task", "zybooks", "coursework:zybooks:1839992")
+        );
+        assert_eq!(
+            key_of("archive/gn-103-hw.md", "created_by: vhl\nsource_uid: \"vhl:1:2026-08-28\"\nstatus: archived"),
+            want("task", "vhl", "coursework:vhl:1:2026-08-28")
+        );
+        assert_eq!(
+            key_of("tasks/cs-100-quiz.md", "created_by: blackboard\nsource_uid: \"_blackboard.platform.gradebook2.GradableItem-_4732722_1\""),
+            want("task", "blackboard", "lms:_blackboard.platform.gradebook2.GradableItem-_4732722_1")
+        );
+        assert_eq!(
+            key_of("tasks/ps-4.md", "created_by: gmail\nsource_uid: \"gmail:m1\""),
+            want("task", "gmail", "gmail:gmail:m1")
+        );
+        assert_eq!(
+            key_of("approvals/task-ps-4.md", "type: approval\nkind: task\ncreated_by: gmail\nsource_uid: \"gmail:m1\""),
+            want("appr", "gmail", "gmail:gmail:m1"),
+            "a Gmail card and its task are two notes: the kind keeps them apart"
+        );
+        assert_eq!(
+            key_of("approvals/calendar-event-fair.md", "type: approval\nkind: calendar-event\ncreated_by: events\nsource_uid: \"engage:1\""),
+            want("appr", "events", "calendar-event:engage:1")
+        );
+        assert_eq!(
+            key_of("approvals/events-digest-2026-09-25.md", "type: approval\nkind: events-digest\nproposed_at: 2026-09-25\ncreated_by: events"),
+            want("appr", "events", "events-digest:2026-09-25")
+        );
+        assert_eq!(
+            key_of(
+                "approvals/map-zybooks-uahcs100fall2026.md",
+                "type: approval\nkind: coursework-map\nfirst_proposed_at: 2026-09-10\ncreated_by: coursework\nsource: \"zybooks\"\nmap_key: \"UAHCS100Fall2026\""
+            ),
+            want("appr", "coursework", "map:zybooks:UAHCS100Fall2026:2026-09-10")
+        );
+        assert_eq!(
+            key_of("approvals/rule-42.md", "type: approval\nkind: rule\ncreated_by: rules\nrule_id: 42"),
+            want("appr", "rules", "rule:42")
+        );
+    }
+
+    /// §2.2: never for a person, the console, an agent or any other word; never for a kind other
+    /// than `task` and `appr`; never for a row whose own key field is missing.
+    #[test]
+    fn import_key_is_none_for_everything_a_person_or_a_judgment_makes() {
+        for who in ["quinn", "dashboard", "agent:knowlu.enrich", "agent:coursework.zybooks", "claude", "commitments"] {
+            assert_eq!(key_of("tasks/x.md", &format!("created_by: {who}\nsource_uid: \"zybooks:1\"")), None, "{who}");
+        }
+        assert_eq!(key_of("tasks/x.md", "source_uid: \"zybooks:1\""), None, "no created_by");
+        assert_eq!(key_of("courses/cs-100.md", "created_by: zybooks\nsource_uid: \"zybooks:1\""), None, "kind course");
+        assert_eq!(key_of("issues/x.md", "type: issue\ncreated_by: gmail\nsource_uid: \"gmail:m1\""), None, "kind iss");
+        assert_eq!(key_of("info/x.md", "type: info\ncreated_by: events\nsource_uid: \"engage:1\""), None, "kind info");
+        assert_eq!(key_of("tasks/x.md", "created_by: zybooks"), None, "a coursework task with no source_uid");
+        assert_eq!(
+            key_of("approvals/amend-x.md", "type: approval\nkind: amend\ncreated_by: events\nsource_uid: \"engage:1\""),
+            None,
+            "an events card that is no producer's"
+        );
+        assert_eq!(key_of("approvals/events-digest-x.md", "type: approval\nkind: events-digest\ncreated_by: events"), None, "a digest with no proposed_at");
+        assert_eq!(key_of("tasks/x.md", "created_by: events\nsource_uid: \"engage:1\""), None, "a task is never an events note");
+    }
+
+    /// D3's `held`: every valid id in the six note folders, `build_index`'s keys.
+    #[test]
+    fn held_ids_is_every_valid_id_in_the_note_folders() {
+        let v = vault();
+        note(&v, "tasks/a.md", "---\nid: task_0123456789\n---\n\nb\n");
+        note(&v, "archive/b.md", "---\nid: task_abcdef0123\n---\n\nb\n");
+        note(&v, "tasks/c.md", "---\nid: not-an-id\n---\n\nb\n");
+        assert_eq!(
+            held_ids(&v).into_iter().collect::<Vec<_>>(),
+            vec!["task_0123456789".to_string(), "task_abcdef0123".to_string()]
+        );
     }
 
     #[test]

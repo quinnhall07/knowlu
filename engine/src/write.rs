@@ -34,6 +34,9 @@ pub enum WriteError {
     NoFrontmatter(String),
     AppendLine(&'static str),
     Exists(String),
+    /// Two-desktop design D3: the import id this note would take is already held in the vault — the
+    /// item's note is here already. Refused before anything is journalled or written.
+    IdHeld(String),
     Id(IdError),
     Ingest(IngestError),
     Provenance(ProvenanceError),
@@ -46,6 +49,7 @@ impl std::fmt::Display for WriteError {
             WriteError::NoFrontmatter(p) => write!(f, "{p} has no readable frontmatter"),
             WriteError::AppendLine(why) => write!(f, "append line {why}"),
             WriteError::Exists(p) => write!(f, "{p} exists"),
+            WriteError::IdHeld(id) => write!(f, "already held as {id}"),
             WriteError::Id(e) => write!(f, "{e}"),
             WriteError::Ingest(e) => write!(f, "{e}"),
             WriteError::Provenance(e) => write!(f, "{e}"),
@@ -384,6 +388,35 @@ pub fn create(
     journal: &mut Journal,
     evidence: Option<&serde_json::Value>,
 ) -> Result<PathBuf, WriteError> {
+    create_minting(vault, rel_path, text, ctx, journal, evidence, None)
+}
+
+/// Two-desktop design D3: [`create`] for a note an automatic step makes because an outside item
+/// exists. With an `ids::import_key` the note takes `ids::import_id` exactly where `create` would
+/// have put a minted id, and the journal record keeps its shape — only the id's value differs.
+/// Without one it is `create`. An id already in `held` (the vault's ids, `ids::held_ids`, read once
+/// per producer run) is refused as [`WriteError::IdHeld`]; a created id joins `held`. Every producer
+/// dedups by `source_uid` first, so this is the belt.
+pub fn create_imported(
+    vault: &Path,
+    rel_path: &str,
+    text: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    held: &mut std::collections::BTreeSet<String>,
+) -> Result<PathBuf, WriteError> {
+    create_minting(vault, rel_path, text, ctx, journal, None, Some(held))
+}
+
+fn create_minting(
+    vault: &Path,
+    rel_path: &str,
+    text: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    evidence: Option<&serde_json::Value>,
+    mut held: Option<&mut std::collections::BTreeSet<String>>,
+) -> Result<PathBuf, WriteError> {
     let path = crate::ids::inside_vault(vault, &vault.join(rel_path))?;
     if path.exists() {
         return Err(WriteError::Exists(rel_path.to_string()));
@@ -399,7 +432,13 @@ pub fn create(
     let note_id = match existing {
         Some(id) if is_id(&id) => id,
         _ => {
-            let minted = new_id(&kind_for(&path, Some(&meta)));
+            // D1-D3: an imported note's id is derived from the item, so two computers mint the same
+            // one; every other note's is random, as ever.
+            let imported = if held.is_some() { crate::ids::import_key(&path, &meta) } else { None };
+            let minted = match imported {
+                Some((kind, vendor, key)) => crate::ids::import_id(&kind, &vendor, &key),
+                None => new_id(&kind_for(&path, Some(&meta))),
+            };
             text = apply_frontmatter_fields_to_text(
                 &text,
                 &[("id".to_string(), minted.clone())],
@@ -409,6 +448,10 @@ pub fn create(
             minted
         }
     };
+    // D3: one id, one note. Checked before the journal, so a refusal leaves no trace.
+    if held.as_deref().is_some_and(|held| held.contains(&note_id)) {
+        return Err(WriteError::IdHeld(note_id));
+    }
     // Never mint a note the write path cannot later edit.
     guard_block_style(&text)?;
 
@@ -425,6 +468,9 @@ pub fn create(
         std::fs::create_dir_all(parent).map_err(|e| WriteError::Io(e.to_string()))?;
     }
     pystr::write_text(&path, &text).map_err(|e| WriteError::Io(e.to_string()))?;
+    if let Some(held) = held.as_deref_mut() {
+        held.insert(note_id);
+    }
     Ok(path)
 }
 
@@ -1117,6 +1163,89 @@ mod tests {
         assert!(matches!(
             create(&v, "tasks/b.md", "no frontmatter\n", &ctx, &mut j, None),
             Err(WriteError::NoFrontmatter(_))
+        ));
+    }
+
+    // -- create_imported (two-desktop design D3) ------------------------------
+
+    const IMPORTED: &str = "---\ntitle: \"CS 100 HW 01\"\nstatus: active\ncreated_by: zybooks\nsource_uid: \"zybooks:1839992\"\n---\n\nbody\n";
+
+    /// D3: the import id goes exactly where `create` puts a minted one, and the journal record has the
+    /// same shape — only the id's value differs.
+    #[test]
+    fn create_imported_puts_the_import_id_where_create_puts_a_minted_one() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("agent:coursework.zybooks", "local-runner");
+        let mut held = std::collections::BTreeSet::new();
+        let imported = create_imported(&v, "tasks/imported.md", IMPORTED, &ctx, &mut j, &mut held).unwrap();
+        let minted = create(&v, "tasks/minted.md", IMPORTED, &ctx, &mut j, None).unwrap();
+
+        assert_eq!(get_str(&read_meta(&imported).unwrap(), "id").as_deref(), Some("task_18734fe8b7"));
+        let lines = |p: &Path| pystr::read_text(p).unwrap().lines().map(str::to_string).collect::<Vec<_>>();
+        let without_id = |p: &Path| lines(p).into_iter().filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>();
+        assert_eq!(without_id(&imported), without_id(&minted), "the same text but for the id's value");
+        let at = |p: &Path| lines(p).iter().position(|l| l.starts_with("id: "));
+        assert_eq!(at(&imported), at(&minted), "the id line sits where create puts it");
+
+        let records = j.read(None, None);
+        assert_eq!(records.len(), 2);
+        let keys = |r: &crate::ledger::Record| r.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&records[0]), keys(&records[1]), "the same record shape");
+        assert_eq!(records[0].get("op").and_then(|x| x.as_str()), Some("create"));
+        assert_eq!(records[0].get("id").and_then(|x| x.as_str()), Some("task_18734fe8b7"));
+        assert_eq!(records[0]["new"]["id"], serde_json::json!("task_18734fe8b7"), "the record carries the note as minted");
+        assert!(held.contains("task_18734fe8b7"), "held grows as the run creates");
+    }
+
+    /// D3: an id the vault already holds is refused before anything is journalled or written.
+    #[test]
+    fn create_imported_refuses_an_id_the_vault_already_holds() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("agent:coursework.zybooks", "local-runner");
+        let mut held = std::collections::BTreeSet::from(["task_18734fe8b7".to_string()]);
+        let err = create_imported(&v, "tasks/again.md", IMPORTED, &ctx, &mut j, &mut held).unwrap_err();
+        assert_eq!(err, WriteError::IdHeld("task_18734fe8b7".to_string()));
+        assert_eq!(err.to_string(), "already held as task_18734fe8b7");
+        assert!(!v.join("tasks").join("again.md").exists(), "no file");
+        assert!(j.read(None, None).is_empty(), "no record");
+    }
+
+    /// D3: with no import key it is `create` — a random id — and a taken path is still `Exists`,
+    /// checked first, exactly as `create` checks it.
+    #[test]
+    fn create_imported_without_a_key_mints_like_create_and_checks_the_path_first() {
+        let v = vault();
+        seed(&v);
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("quinn", "dashboard");
+        let mut held = std::collections::BTreeSet::new();
+        let mine = "---\ntitle: \"Mine\"\ncreated_by: quinn\n---\n\nb\n";
+        let a = create_imported(&v, "tasks/a1.md", mine, &ctx, &mut j, &mut held).unwrap();
+        let b = create_imported(&v, "tasks/a2.md", mine, &ctx, &mut j, &mut held).unwrap();
+        let id = |p: &Path| get_str(&read_meta(p).unwrap(), "id").unwrap();
+        assert!(is_id(&id(&a)) && is_id(&id(&b)));
+        assert_ne!(id(&a), id(&b), "random, as new_id mints");
+        assert!(matches!(
+            create_imported(&v, "tasks/a.md", IMPORTED, &ctx, &mut j, &mut held),
+            Err(WriteError::Exists(_))
+        ));
+    }
+
+    /// An id the text already carries is kept, as `create` keeps it — and still refused when held.
+    #[test]
+    fn create_imported_keeps_an_id_the_text_carries_and_still_checks_it() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("agent:coursework.zybooks", "local-runner");
+        let mut held = std::collections::BTreeSet::new();
+        let text = IMPORTED.replace("status: active\n", "status: active\nid: task_0000000abc\n");
+        let p = create_imported(&v, "tasks/carried.md", &text, &ctx, &mut j, &mut held).unwrap();
+        assert_eq!(get_str(&read_meta(&p).unwrap(), "id").as_deref(), Some("task_0000000abc"));
+        assert!(matches!(
+            create_imported(&v, "tasks/carried-2.md", &text, &ctx, &mut j, &mut held),
+            Err(WriteError::IdHeld(_))
         ));
     }
 
