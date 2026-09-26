@@ -221,9 +221,10 @@ Where a line above disagrees, this section wins.
 
 6. **The registrar holds a course's class and lab proposals** (I1, option a). D7's collapse by
    signature is not enough: a Google class a minute off Banner's times would be a second hard note.
-   Once a course has a confirmed `class`/`lab` note keyed `registrar:`, or a current `registrar:`
-   `class`/`lab` series, no Google or ICS `class`/`lab` series of that course is proposed, on the
-   confirm screen or as a card, whatever its times. Accepted residual: a Google note the student
+   The collapse is per kind: once a course has a confirmed `class` note keyed `registrar:`, or a
+   current `registrar:` `class` series, no Google or ICS `class` series of that course is proposed,
+   on the confirm screen or as a card, whatever its times; a registrar `lab` does the same for
+   Google or ICS `lab` series. A Google lab stays offered when Banner lists only the lecture. Accepted residual: a Google note the student
    confirmed *before* the fetch stays beside the registrar's note; the overlapping busy time
    subtracts nothing extra, and nothing proposes removing it.
 7. **The parent's privacy line on the registrar is superseded** (final review m6). The parent

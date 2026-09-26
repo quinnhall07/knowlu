@@ -2373,9 +2373,10 @@ fn minutes(time: Time) -> i64 {
 /// not in `held` (keys a change card's `change.source_uid` carries, P12's `successor_keys`), no
 /// note has its key (a confirmed note, a decline marker, the planning day), no confirmed note has
 /// its [`Signature`], and — when `for_cards` — it is not `office-hours` (R8; the screen lists
-/// them). A `class` or `lab` series from any calendar but the registrar is not proposed for a
-/// course the registrar holds (a confirmed `registrar:` note or a current `registrar:` series of
-/// that course), whatever its times (phase 3 final review I1, option a).
+/// them). A `class` or `lab` series from any calendar but the registrar is not proposed when the
+/// registrar holds that kind for that course (a confirmed `registrar:` note or a current
+/// `registrar:` series of the same kind and course), whatever its times (phase 3 final review I1,
+/// option a, per kind).
 ///
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
 /// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
@@ -2404,16 +2405,17 @@ pub fn proposals(
         .chain(set.declined.iter().map(String::as_str))
         .collect();
     let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
-    // Final review I1 (a): a course the registrar holds — a confirmed `registrar:` class or lab
-    // note, or a `registrar:` class or lab series not yet past its `until` — gets no class or lab
-    // proposal from any other calendar, whatever its times (the registrar is the authority, D7).
+    // Final review I1 (a), per kind: a `(kind, course)` the registrar holds — a confirmed
+    // `registrar:` class or lab note, or a `registrar:` class or lab series not yet past its
+    // `until` — gets no proposal of that kind for that course from any other calendar, whatever
+    // its times (D7). A registrar lecture leaves a Google lab of the same course proposed.
     let registrar = |uid: &str| uid.starts_with(crate::registrar::CALENDAR_PREFIX);
     let class_like = |kind: &str| kind == "class" || kind == "lab";
-    let mut registrar_courses: BTreeSet<String> = set
+    let mut registrar_held: BTreeSet<(String, String)> = set
         .confirmed
         .iter()
         .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(registrar))
-        .filter_map(|n| n.course.as_deref().map(|c| course_key(c, codes)))
+        .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
         .collect();
 
     // Each candidate carries its signature and its title-only signature: a confirmed note with no
@@ -2429,7 +2431,7 @@ pub fn proposals(
             Some(Class::Routine { wake, bed }) => routines.push((key, series, wake, bed)),
             Some(Class::Kind { kind, course }) => {
                 if registrar(&series.calendar) && class_like(&kind) {
-                    registrar_courses.extend(course.as_deref().map(|c| course_key(c, codes)));
+                    registrar_held.extend(course.as_deref().map(|c| (kind.clone(), course_key(c, codes))));
                 }
                 let sig = signature(&kind, course.as_deref(), &series.title, &series.meets, codes);
                 let by_title = signature(&kind, None, &series.title, &series.meets, codes);
@@ -2453,7 +2455,7 @@ pub fn proposals(
         }
         let held_by_registrar = !registrar(&series.calendar)
             && class_like(&kind)
-            && course.as_deref().is_some_and(|c| registrar_courses.contains(&course_key(c, codes)));
+            && course.as_deref().is_some_and(|c| registrar_held.contains(&(kind.clone(), course_key(c, codes))));
         if held_by_registrar {
             continue;
         }

@@ -517,10 +517,10 @@ mod d5_d7_tests {
 
     /// Final review I1 (a): the Google "CS 100" class ends one minute later than Banner's, so the
     /// signatures differ; a Google series with its instances, `event_type` and `last_seen`.
-    fn google_minute_off(today: Date) -> Series {
-        let mut google = fall().into_iter().find(|s| s.source_uid.ends_with("40001")).unwrap();
+    fn google_minute_off(today: Date, crn: &str) -> Series {
+        let mut google = fall().into_iter().find(|s| s.source_uid.ends_with(crn)).unwrap();
         google.meets[0].end = google.meets[0].end.checked_add(jiff::SignedDuration::from_mins(1)).unwrap();
-        google.source_uid = "gcal-series:invented".into();
+        google.source_uid = format!("gcal-series:invented{crn}");
         google.calendar = "google:invented".into();
         google.event_type = Some("default".into());
         google.last_seen = Some(today);
@@ -541,11 +541,11 @@ mod d5_d7_tests {
     #[test]
     fn a_google_class_for_a_registrar_course_is_not_proposed() {
         let today = date(2026, 9, 10);
-        let google = google_minute_off(today);
+        let google = google_minute_off(today, "40001");
         let mut alone = SeriesFile::default();
         alone.calendars.insert("google:invented".into(), today);
         alone.series.push(google.clone());
-        assert_eq!(proposed(&alone, &Commitments::default(), today), ["gcal-series:invented"], "no registrar data");
+        assert_eq!(proposed(&alone, &Commitments::default(), today), ["gcal-series:invented40001"], "no registrar data");
 
         let mut both = alone.clone();
         both.calendars.insert(CAL.into(), today);
@@ -562,6 +562,22 @@ mod d5_d7_tests {
         let set = Commitments { confirmed: vec![note], ..Commitments::default() };
         assert!(proposed(&alone, &set, today).is_empty(), "a confirmed registrar note holds the course");
         assert!(proposed(&both, &set, today).is_empty());
+    }
+
+    /// I1, refined per kind: a registrar lecture holds the course's class proposals only. With
+    /// Banner listing just the CS 100 lecture, Google's CS 100 lab is still proposed.
+    #[test]
+    fn a_registrar_lecture_leaves_a_google_lab_proposed() {
+        let today = date(2026, 9, 10);
+        let mut file = SeriesFile::default();
+        file.calendars.insert("google:invented".into(), today);
+        file.calendars.insert(CAL.into(), today);
+        file.series.push(google_minute_off(today, "40002"));
+        file.series.extend(fall().into_iter().filter(|s| s.source_uid.ends_with("40001")));
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        let lab = file.series.iter().find(|s| s.calendar == "google:invented").unwrap();
+        assert!(matches!(cm::classify(lab, &codes(), &[]), Some(Class::Kind { ref kind, .. }) if kind == "lab"), "the Google row is a lab");
+        assert_eq!(proposed(&file, &Commitments::default(), today), ["gcal-series:invented40002", "registrar:ua:202640-40001"]);
     }
 
     /// D5 + §5.4: a confirmed registrar note whose row left the term files an end card at the day
