@@ -272,7 +272,7 @@ shell needs the engine it takes it as a path dependency — `knowlu-engine = { p
 | `src/updates.rs` | `update_offer` (**never mid-run**) and `stage_note` (its other half: what a run is holding back is not "up to date"), `record_check` (a failed check is quiet) and `note_error`/`clear_action_error` (the last ACTION's outcome, in its own field, which `record_check` never touches), `hold_for_install`/`InstallHold`, `begin_check`/`CheckGuard` (**single flight** — a second check is refused, not queued), `already_staged` (a version already on disk is not downloaded again), `stage_bytes` (temp-then-rename), `check_and_stage`/`install_staged` and their `_blocking` twins. The plugin verifies the minisign signature **inside `Update::download`**, so only verified bytes are ever staged |
 | `assets/` | files compiled into the exe with `include_str!`: `scaffold/{planning.yaml,week_template.yaml,gitignore.txt}` and `campus/{none.yaml,university-of-alabama.yaml}`. Adding a campus is adding a file |
 | `binaries/` | **git-ignored build output**: the staged engine sidecar, `knowlu-engine-<target triple>.exe`. `build.rs` drops a zero-byte placeholder here when it is absent; `scripts\release.ps1` puts the real engine here and refuses to bundle anything under 1 MiB |
-| `src/state.rs` | `ConsoleState` — vault, settings, data dir, session id, and the live `sync`/`backup`/`last_write`/`pending_edits` fields the topline reads — plus `Settings` (profile id, backup dir, autostart, quit timestamp), `quit_flush`, and `app_data_root()`/`app_data_root_in()`: `%LOCALAPPDATA%\knowlu`, with `settings.json`, `seen.txt` and `logs\` under `profiles\<profile_id>\` |
+| `src/state.rs` | `ConsoleState` — vault, settings, data dir, session id, and the live `sync`/`backup`/`last_write`/`pending_edits` fields the topline reads — plus `Settings` (profile id, backup dir, autostart, quit timestamp), `quit_flush`, and `app_data_root()`/`app_data_root_in()`: `%LOCALAPPDATA%\knowlu`, with `settings.json`, `seen.txt` and `logs\` under `profiles\<profile_id>\`. There is no `src/sync.rs` in this crate — the sync logic is `engine/src/sync.rs`'s; this file only holds the `Mutex<knowlu_engine::sync::SyncStatus>` the topline reads and the `run_sync` wrapper that calls into it under `vault_io`. |
 | `src/scheduler.rs` | the tick/housekeeping threads, `RunGuard`, `engine_exe()` (`KNOWLU_ENGINE_EXE` resolution), `mode()`/`device_ok()` (`scheduler: app` gating), `ics_state`/`has_ics_url`, `slot_argv` (coursework → ingest → judge → rank), `run_slot`/`run_slot_inner`, and `lock` — every mutex in the crate is taken through it |
 | `tauri.conf.json` | one 1280×860 window titled `Knowlu` (`minWidth: 820`), `productName: "Knowlu"`, `identifier: "com.knowlu.desktop"` (permanent, see above), `frontendDist: static`; and the bundle — `targets: ["nsis"]`, `externalBin: ["binaries/knowlu-engine"]`, `webviewInstallMode: embedBootstrapper`, `windows.nsis.installMode: "currentUser"` (**load-bearing**: `updates::install_staged`'s reasoning about the staged bundle depends on the exe living in the user's own profile), `windows.signCommand` → `scripts\sign.ps1`, `createUpdaterArtifacts: true` (one decision with `plugins.updater`, see *Releasing*); and `plugins.updater` — the release endpoint and the minisign **public** key (id `C2EC981122E1D2DF`). The private half is never in this repo: `release.ps1` reads it from Credential Manager for one build |
 | `capabilities/default.json` | `core:default`, `window-state:default`, `autostart:default`, `clipboard-manager:allow-write-text` — and **no updater permission** (R-P4a-30): the app drives the updater from Rust, where no capability applies, and `updater:default` would hand the page `allow-install` / `allow-download-and-install`, letting a page script bypass the mid-run gate and the install hold. The folder picker is `rfd` called from an app command, not a plugin, so it needs no permission here either |
@@ -283,8 +283,9 @@ shell needs the engine it takes it as a path dependency — `knowlu-engine = { p
 `scripts/scratch-vault.ps1` (repo root) copies a vault's data folders (`tasks`, `approvals`,
 `archive`, `courses`, `issues`, `info`, `state`, `config`, `profile`) from the main checkout into
 `%LOCALAPPDATA%\knowlu\scratch\<stamp>`, turns that copy into its own local-only git repo (no
-remote — the console's history writes never touch the real vault's remote), and prints the launch
-line. `-Source` is required — this repository holds no vault of its own:
+remote — a dev convenience for diffing what one run changed, unrelated to the account sync C3′ added;
+nothing in the product itself touches git any more), and prints the launch line. `-Source` is
+required — this repository holds no vault of its own:
 
 ```powershell
 scripts\scratch-vault.ps1 -Source <path to a vault>
@@ -293,7 +294,7 @@ target\release\knowlu.exe --vault "<the printed scratch path>"
 
 **Develop and demo against a scratch copy, never the live vault, until Task 17's go-live
 checklist (`docs/procedures/knowlu-go-live.md`) is run after cutover's G2** (Knowlu spec §2) — the
-console writes notes, drives `git`, and now also runs scheduled slots inside the vault it's
+console writes notes, syncs them to the account, and runs scheduled slots inside the vault it's
 pointed at.
 
 **Every `--vault` launch registers a profile, and nothing removes one yet.** So a few scratch

@@ -14,8 +14,8 @@
 //! guard test in each crate keeps it that way.
 //!
 //! It is safe on every current call site because none of them wants a console: all of them either
-//! capture the child's output through pipes or discard it, and `history.rs` additionally sets
-//! `GIT_TERMINAL_PROMPT=0` so git can never wait on input it has no window to receive.
+//! capture the child's output through pipes or discard it. (`history.rs`, which also set
+//! `GIT_TERMINAL_PROMPT=0` for its git children, left with git in C3′ Task 10.)
 
 /// `CREATE_NO_WINDOW`, from `processthreadsapi.h`. Spelled out rather than pulled from
 /// `windows-sys`: the engine's dependency budget should not grow by a crate for one constant that

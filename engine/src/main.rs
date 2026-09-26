@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use knowlu_engine::info::{self, InfoCommand};
 use knowlu_engine::issues::{self, IssueCommand};
 use knowlu_engine::write::{self, WriteCommand};
-use knowlu_engine::{cli, coursework, enrich, ingest, journal, runs};
+use knowlu_engine::{cli, coursework, enrich, entitle, ingest, journal, runs, sync};
 
 #[derive(Parser)]
 #[command(name = "knowlu-engine", version, about = "Deterministic personal operations engine")]
@@ -136,6 +136,26 @@ enum Command {
         /// path here still exits 0.
         #[arg(long, default_value_t = enrich::DEFAULT_LIMIT, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
         limit: usize,
+    },
+    /// Send this device's new journal records and changed note text to the account, and apply what
+    /// another desktop of the same account wrote.
+    ///
+    /// Always exits 0: no account, no session, no entitlement and no network are all normal
+    /// outcomes (cloud design §5.5 as amended 2026-09-17), and a non-zero exit here would put the
+    /// app's scheduler into retry backoff and paint the tray amber for a student on a train.
+    Sync {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// pull | push | both. The slot runs `both`; the console's Sync now runs `both`; the two
+        /// halves are separable for a smoke test and for a restore that must not push.
+        #[arg(long, default_value = "both", value_parser = ["pull", "push", "both"])]
+        direction: String,
+        /// Without these the run's writes journal as `via: cli, run_id: null` — indistinguishable
+        /// from someone typing the command by hand.
+        #[arg(long, default_value = "cli", value_parser = journal::VIAS)]
+        via: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     /// Run records. Ports `python -m engine.runs`.
     Runs {
@@ -305,8 +325,78 @@ enum RunsCommand {
     Status,
 }
 
+/// Which commands the entitlement gate stands in front of — ruling 3 of the cloud design's
+/// amendment of 2026-09-17: *"The engine refuses to run a slot without a valid entitlement past the
+/// 72-hour grace the app already caches."*
+///
+/// **The four cloud steps, and deliberately not the others.** `surface` is what the console reads
+/// on every poll and `write` is what the console's own edits go through: gating either would freeze
+/// the window rather than the subscription, which is not what ruling 3 is for. `runs`, `info`,
+/// `issues` and `coursework-discover` are the same argument.
+///
+/// **`rank` is not here, and that is precondition P5.** Ruling 3's own reason — *"an orphaned binary
+/// ranks a hand-made folder and nothing else"* — is satisfied by gating the four steps that fill the
+/// folder; §5.1, which the amendment does not mark, promises that past the grace "the slots keep
+/// ranking" and the page never blanks. If Quinn rules the other way, `Command::Rank { vault, .. }`
+/// joins the pattern below and §5.1 is amended in the same commit. That is the whole of answer (b).
+fn gated_vault(command: &Command) -> Option<&PathBuf> {
+    match command {
+        Command::Coursework { vault, .. }
+        | Command::Ingest { vault, .. }
+        | Command::Judge { vault, .. }
+        | Command::Sync { vault, .. } => Some(vault),
+        _ => None,
+    }
+}
+
+/// The subcommand's own word, as the student sees it on the Runs view. Only the gated four need one,
+/// and the catch-all is unreachable from the call site above — it exists so this function stays total
+/// rather than panicking on a command the gate will never be asked about.
+fn name_of(command: &Command) -> &'static str {
+    match command {
+        Command::Coursework { .. } => "coursework",
+        Command::Ingest { .. } => "ingest",
+        Command::Judge { .. } => "judge",
+        Command::Sync { .. } => "sync",
+        _ => "step",
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A refusal is a named line at exit 0, never a failure: a non-zero exit sets
+    // `RunSummary.engine_ok = false`, which is retry backoff and an amber tray twice a day for a
+    // student whose card simply expired — and retrying fixes nothing here.
+    //
+    // **The line is composed here, and here only** (review I3; fix round 1, M2 makes it literally
+    // one `let` rather than one `format!` echoed in a second place). `entitle::gate` answers the
+    // reason; the command's own word is this file's to supply, because this file is the only place
+    // that knows which subcommand was typed. The result reads exactly like the two skips the app
+    // already prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student
+    // meets one sentence shape whichever step stopped.
+    if let Some(vault) = gated_vault(&cli.command) {
+        if let Some(reason) = entitle::gate(vault) {
+            let line = format!("{} ({reason})", name_of(&cli.command));
+            // Carry-forward from Task 7's review: `sync` is the one gated step with a status file
+            // of its own (`state/sync-status.json`), and the gate stopping it here means
+            // `sync.rs` never runs to move that file. Without this, the console would keep
+            // showing whatever a sync run left behind before the subscription lapsed. Fix round 1,
+            // M2: `record_gated_skip` takes this same composed `line`, never a second copy of it.
+            if matches!(cli.command, Command::Sync { .. }) {
+                if let Err(e) = sync::record_gated_skip(vault, &line) {
+                    eprintln!("knowlu-engine: sync status could not be saved ({e})");
+                }
+            }
+            // Fix round 1, M3: the skip is written to `state/runner-log.md`, as `coursework::main`'s
+            // own routine skips are, with a routine `ok` status, because a skip is not a failure.
+            // (Task 8 re-review N2: that log is NOT the console's Runs view, which is built from run
+            // records; there the gated step still shows its exit code, 0. The sync line shows
+            // `sync`'s own skip, through `record_gated_skip` above.)
+            let _ = cli::append_run_log(vault, "local", "ok", &line, None);
+            println!("{line}");
+            return ExitCode::SUCCESS;
+        }
+    }
     match cli.command {
         Command::Rank { vault, today, runner, run_id } => {
             match cli::run(&vault, today.as_deref(), &runner, run_id.as_deref()) {
@@ -360,6 +450,20 @@ fn main() -> ExitCode {
             let _ = enrich::run(
                 &vault, &via, run_id.as_deref(), runtime.as_ref(), model.as_ref(), log_dir.as_ref(), limit,
             );
+            ExitCode::SUCCESS
+        }
+        Command::Sync { vault, direction, via, run_id } => {
+            // Always SUCCESS: `sync::run_lines` only ever returns 0, and this arm says so out loud
+            // rather than mapping a code that cannot occur.
+            let (_, lines) = sync::run_lines(
+                &vault,
+                sync::Direction::parse(&direction).unwrap_or(sync::Direction::Both),
+                &via,
+                run_id.as_deref(),
+            );
+            for line in lines {
+                println!("{line}");
+            }
             ExitCode::SUCCESS
         }
         Command::Runs { vault, command } => match command {

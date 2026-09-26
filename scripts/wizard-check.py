@@ -90,6 +90,11 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'create_vault') {
     return Promise.resolve({ ok: true, error: null, profile: { id: 'p1', name: args.name, vault: 'C:\\Users\\Ada\\Knowlu\\' + args.name } }); }
   if (cmd === 'account_status') { return Promise.resolve({ ok: true, needs_account: false }); }
+  // M3 (fix round 1): the picker's *Restore from a backup folder…* — never called by the nine-panel
+  // wizard flow `check()` drives, so adding these three costs it nothing.
+  if (cmd === 'pick_folder') { return Promise.resolve({ ok: true, error: null, path: 'C:\\Users\\Ada\\Backups\\p1\\vault' }); }
+  if (cmd === 'restore_vault') { return Promise.resolve({ ok: true, error: null, profile: { id: 'p9', name: args.name, vault: 'C:\\Users\\Ada\\Knowlu\\' + args.name } }); }
+  if (cmd === 'open_profile') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'get_settings') { return Promise.resolve({ ok: true, settings: { profile_id: 'p1', backup_dir: null, autostart: true, quit_at: null } }); }
   if (cmd === 'settings_context') { return Promise.resolve({ ok: true, vault: 'C:\\v', version: '0.1.0', profile_name: 'Ada' }); }
   if (cmd === 'set_settings') { return Promise.resolve({ ok: true, settings: { profile_id: 'p1', backup_dir: 'C:\\b', autostart: true, quit_at: null } }); }
@@ -392,6 +397,33 @@ def check(page) -> list:
     return bad
 
 
+def check_picker_restore(page) -> list:
+    """M3 (fix round 1): the picker's *Restore from a backup folder…* asks for a name and an
+    autostart choice rather than assuming them — the same defaults the nine-panel wizard's own name
+    and autostart panels use ("Knowlu"; the checkbox on). Runs on a fresh page via `window.KNOWLU_SHOTS`
+    (S13's own seam), so it needs none of `check()`'s wizard state."""
+    bad = []
+    page.evaluate("window.KNOWLU_SHOTS.renderPicker({ profiles: [] })")
+    page.wait_for_timeout(100)
+    if page.is_hidden("#picker"): bad.append("the picker did not render")
+    if not page.is_hidden("#pick-restore-options"): bad.append("the restore options row is visible before a folder is chosen")
+    page.click("#pick-restore-backup"); page.wait_for_timeout(150)
+    if "pick_folder" not in names(page): bad.append("pick_folder was not invoked")
+    if page.is_hidden("#pick-restore-options"): bad.append("the restore options row did not appear once a folder was chosen")
+    if page.input_value("#pick-restore-name") != "Knowlu": bad.append("the name field did not default to Knowlu")
+    if not page.is_checked("#pick-restore-autostart"): bad.append("autostart did not default to checked")
+    page.fill("#pick-restore-name", "Spring 2027")
+    page.uncheck("#pick-restore-autostart")
+    page.click("#pick-restore-go"); page.wait_for_timeout(150)
+    rv = first_args(page, "restore_vault") or {}
+    if rv.get("name") != "Spring 2027": bad.append(f"restore_vault got name {rv.get('name')!r}, not the typed one")
+    if (rv.get("plan") or {}).get("autostart") is not False: bad.append("restore_vault did not carry the unchecked autostart")
+    if "open_profile" not in names(page): bad.append("open_profile was not invoked after a successful restore")
+    if (first_args(page, "open_profile") or {}).get("id") != "p9":
+        bad.append("open_profile was not called with the restored profile's id")
+    return bad
+
+
 def state_polls(page) -> int:
     return page.evaluate("window.__CALLS.filter(c => c[0] === 'state').length")
 
@@ -544,6 +576,13 @@ def main() -> int:
                 page.add_init_script(FAKE)
                 page.goto(url); page.wait_for_timeout(400)
                 bad = check(page)
+                # M3 (fix round 1): a second, fresh page/context — the picker's own restore link
+                # needs none of the wizard's own state, and a fresh page is what makes that true
+                # rather than merely assumed.
+                page2 = browser.new_context(viewport={"width": 1280, "height": 900}).new_page()
+                page2.add_init_script(FAKE)
+                page2.goto(url); page2.wait_for_timeout(400)
+                bad += check_picker_restore(page2)
                 console = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
                 errors = []
                 console.on("pageerror", lambda e: errors.append(str(e)))

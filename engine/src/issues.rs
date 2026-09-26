@@ -438,7 +438,8 @@ mod tests {
         // `device_name()`. Rust tests share one process and run in parallel, so this holds the
         // same crate-wide lock every `KNOWLU_DEVICE` setter takes (`journal::DEVICE_ENV_MUTEX`)
         // across that internal read and the comparison below — reading `device_name()` again,
-        // unguarded, could observe a `history.rs` test mid-`set_var`/`remove_var`.
+        // unguarded, could observe a test that sets `KNOWLU_DEVICE` mid-`set_var`/`remove_var`
+        // (`history.rs`'s did, until C3′ removed it; the lock stays for the next one).
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let vault = make_vault("snapshot");
         let task_id = field(&meta_of(&vault.join("tasks/a.md")), "id");

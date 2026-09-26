@@ -246,7 +246,38 @@ fn a_402_from_sources_is_a_sentence_and_not_a_dead_end() {
     });
     let out = put_source_at(&format!("http://127.0.0.1:{port}/functions/v1"), "t", "lms_ics", "https://lms.example.invalid/a.ics");
     handle.join().expect("server thread");
-    assert!(out.unwrap_err().contains("finish subscribing"));
+    let err = out.unwrap_err();
+    assert!(err.contains("finish subscribing"));
+    // Task 11 re-review N2 (R-C3′-exec-41): nothing ever moves a link the vault kept into the account
+    // later, so the sentence may not promise it; it says what the other refusal already says.
+    assert!(!err.contains("until it reaches your account"), "a promise nothing keeps: {err}");
+    assert!(err.contains("keeps it on this machine if it still can't"), "{err}");
+}
+
+/// Task 11 re-review N1 (R-C3′-exec-41): the paste or capture says whether the account now holds the
+/// link — `stored` — so Finish retries only a feed that did not land. And only a link that passed
+/// validation is ever sent: a rejected one never reaches the account at all.
+#[test]
+fn the_paste_says_whether_the_account_holds_the_link_and_never_sends_a_rejected_one() {
+    use knowlu::lms_link::finish_with;
+    let url = "https://lms.example.invalid/feed/a.ics";
+    let ics = |_: &str| Ok("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:MATH 125 Homework 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".to_string());
+    let sent = std::cell::RefCell::new(Vec::<(String, String)>::new());
+    let saves = |kind: &str, u: &str| { sent.borrow_mut().push((kind.to_string(), u.to_string())); Ok(()) };
+    let out = finish_with("lms_ics", url, &ics, &saves);
+    assert_eq!((out["ok"].clone(), out["stored"].clone(), out["note"].clone()), (true.into(), true.into(), serde_json::Value::Null), "{out}");
+    assert_eq!(sent.borrow().as_slice(), &[("lms_ics".to_string(), url.to_string())]);
+
+    let refuses = |_: &str, _: &str| Err("we could not save your calendar link to your account yet (503)".to_string());
+    let out = finish_with("lms_ics", url, &ics, &refuses);
+    assert_eq!((out["ok"].clone(), out["stored"].clone()), (true.into(), false.into()), "validated, not stored: {out}");
+    assert!(out["note"].as_str().unwrap_or_default().contains("503"), "{out}");
+
+    sent.borrow_mut().clear();
+    let unreachable = |_: &str| Err("no route".to_string());
+    let out = finish_with("lms_ics", url, &unreachable, &saves);
+    assert_eq!((out["ok"].clone(), out["stored"].clone()), (false.into(), false.into()), "{out}");
+    assert!(sent.borrow().is_empty(), "a link that failed validation must never be sent to the account: {:?}", sent.borrow());
 }
 
 /// Spec §11a and the standing rule. Two promises, asserted against the source because there is no

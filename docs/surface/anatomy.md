@@ -101,22 +101,21 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   is dead but the local one keeps refreshing" from health. CLAUDE.md treats a missing cloud line as
   a symptom; dropping the name makes that symptom invisible. The mockup's `synced 09:12` dropped
   it — that was a regression, not a simplification.
-- **The sync/backup/scheduler line (Knowlu plan 1, Task 15) rides under the topline, on
-  `state.topline.{sync,backup,auto_sync,startup_missed,engine_newer,last_slot,scheduler}`.**
-  Unlike every other field this document names, **these are not written by the engine's
-  `surface::topline`** — `app/src/commands.rs`'s `build_state_value` copies `topline.sync` /
-  `topline.backup` / `topline.auto_sync` / `topline.startup_missed` / `topline.engine_newer`
-  straight from `ConsoleState`'s cached `HistoryStatus` (`src/history.rs`) and `BackupStatus`
-  (`src/backup.rs`), and `attach_scheduler` copies `topline.last_slot` / `topline.scheduler` from
-  the running `Scheduler` on every poll (spec §3.1: "nothing in `commands.rs` computes" — this is
-  copying, not computing). A fixture built before Task 10/12 simply lacks these keys; the page
-  (`renderSyncLine`, §4.7) must render correctly on their absence, not just their presence.
-- **`engine_newer`** compares `CONSOLE_BUILD` (this exe's own build SHA) against the vault's git
-  HEAD (`ConsoleState.head_sha`, refreshed by `refresh_head` — never on a `state` poll, which has
-  no business spawning `git`). `Some(c) != Some(h)` only; a missing build or a non-git vault never
-  reads as a false alarm.
+- **The sync/backup/scheduler line (Knowlu plan 1, Task 15; rebuilt on the account, C3′ Task 7) rides
+  under the topline, on `state.topline.{sync,backup,startup_missed,last_slot,scheduler}`.** Unlike
+  every other field this document names, **these are not written by the engine's `surface::topline`**
+  — `app/src/commands.rs`'s `build_state_value` copies `topline.sync` / `topline.backup` /
+  `topline.startup_missed` straight from `ConsoleState`'s cached `knowlu_engine::sync::SyncStatus`
+  (`cs.sync`, filled by `state::run_sync` and by the slot's own `sync` step through
+  `state/sync-status.json`) and `BackupStatus` (`src/backup.rs`), and `attach_scheduler` copies
+  `topline.last_slot` / `topline.scheduler` from the running `Scheduler` on every poll (spec §3.1:
+  "nothing in `commands.rs` computes" — this is copying, not computing). **`topline.auto_sync`,
+  `topline.engine_newer` and `topline.vault_head` are gone** (C3′ Task 10, hand-off H9b): they
+  compared the vault's git HEAD against this build and reported whether auto-sync was on, and a vault
+  has not been a git repository since git left the product. The console's own build stays —
+  `topline.console_build` — the diagnostics blob and the issue report both still name it.
 - **`startup_missed`** is the scheduler's count of slots that were due while the app was not
-  running (Task 12) — the console's own answer to "was I asleep for a run."
+  running (Task 12 [of plan 1]) — the console's own answer to "was I asleep for a run."
 - **Left out:** a weather line (parent design `:214`, never built, never re-requested).
 
 ### 3.2 The delta line
@@ -436,10 +435,15 @@ element's own `data-kind` attribute, never guessed from the view.
 (alphanumeric, `_-:`, ≤ 64 chars); anything else is a `FreeText` error the command surfaces, not a
 silently-truncated title. So an export is shareable without redaction.
 
-**Opt-in to git, not automatic.** `state/events-ui/` is git-ignored by default; only
-`config/planning.yaml`'s `commit_ui_events: true` makes `history`'s `run_sync` stage it
-(`git add -f`, since it's ignored). **Never read by the engine** — `tests/uievents_isolation.rs`
-proves it — determinism is untouched.
+**The opt-in is inert.** `state/events-ui/` is still git-ignored by default, and
+`config/planning.yaml`'s `commit_ui_events: true` still parses (`engine::uievents::commit_opt_in`
+reads it), but nothing calls that function any more: the git-staging code it fed
+(`history::run_sync`'s `git add -f`) left with git itself (C3′ Task 10). The flag is dead
+configuration, not a lie the page tells — no test asserts a behaviour for it, and setting it in a
+vault today changes nothing. **Never read by the engine's ranking path either way** —
+`tests/uievents_isolation.rs` proves it — determinism is untouched. (Found during Task 12's close;
+`commit_opt_in`'s removal is recorded in this report's production-needs list rather than done here,
+since it is a code change to a file outside this task's docs scope.)
 
 ### 4.7 Sync, backup, the scheduler
 
@@ -447,19 +451,24 @@ The line under the topline (`renderSyncLine`, §3.1) states health in words the 
 supplies — nothing here is computed client-side; the severity class (`calm` / `amber` / `crit`)
 rides with the string. Read top to bottom, first match per group wins:
 
-**Repo/sync (`state.topline.sync`, checked in this order):**
-- no `is_repo` → `local history` (calm) — the vault isn't a git checkout at all.
-- `conflicted` non-empty → **`conflict — auto-sync stopped`** (crit) — per-note detail (which
-  notes) goes in the element's `title` attribute, never the visible text; the copy is verbatim,
-  never pluralised or reworded for one conflict vs several.
-- `last_error` set → the first line of it (amber).
-- no `has_remote` → `no remote — local history` (calm).
-- `ahead > 0` → **`N commit pending push`** / **`N commits pending push`** (amber, singular at 1),
-  with `" (auto-sync off)"` appended when `topline.auto_sync === false`. **`sync.ahead` counts
-  COMMITS**, not edits — it is `rev-list --count HEAD...origin/main`, and one commit can carry
-  twenty edits. The plan's original `N edits pending push` named a number the app has never had
-  (**R-F1**, re-ruling R-T15a).
-- otherwise → `synced` (calm).
+**Sync (`state.topline.sync`, an `engine::sync::SyncStatus`, checked in this order):**
+- `last_error` set, else `skipped` set → the engine's word, mapped through the page's `SYNC_SAYS`
+  (C3′'s final fix wave, R-C3′-exec-39/-43; `app/tests/static_assets.rs` reads every such word out of
+  `engine/src/cloudmodel.rs` and `sync.rs` and fails if the table lacks one):
+  - `no session` / `signed out` → `signed out — sign in to sync` (amber);
+  - `no entitlement` → `can't confirm your subscription — changes stay on this computer` (amber; a
+    paying student more than 72 h offline lands here too, so it never says "inactive");
+  - `offline: the account could not be reached` → `offline — changes stay on this computer` (amber);
+  - `no account`, `another sync is running` → `sync skipped — <word>` (calm, ordinary states);
+  - any other word → its own first line (amber for an error, calm after `sync skipped — ` for a skip).
+  *Sync now*'s refusal toast says the same words. The diagnostics blob and the issue report keep the
+  engine's raw word.
+- else `at` set (a sync has completed) → `in step with your account` (calm).
+- otherwise (no sync has ever run) → `not synced yet` (calm).
+
+There is no `conflicted`, `ahead`, `is_repo` or `has_remote` any more (C3′ Task 10, git left the
+product): a conflicting write is a `kind: amend` card in the deck, not a merge state on the topline,
+and there is nothing here to be "ahead" of.
 
 **Backup (`state.topline.backup`):** `last_error`'s first line prefixed `backup: ` (amber), else
 `behind_days >= 1` → **`backup N days behind`** (amber, singular/plural handled), else `last_ok`

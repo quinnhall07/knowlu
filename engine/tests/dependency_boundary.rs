@@ -51,6 +51,40 @@ fn tls_is_rustls_never_openssl() {
     }
 }
 
+/// The one hash the account vault needs, and the crates that are not coming back.
+///
+/// **What left, and why.** Until Quinn's amendment of 2026-09-17 this engine sealed every journal
+/// record and every note with AES-256-GCM under a key that lived only in Credential Manager, and
+/// named `ring` and `base64` for it. Ruling 2 reversed that: the account holds the student's tasks
+/// and notes readable by the service, so there is no envelope, no IV, no key and no recovery code.
+/// **`base64` leaves with them.**
+///
+/// **What stays, and why it is `ring` and not `sha2`.** A content hash is still needed — it is what
+/// makes a retried push idempotent and what lets the server check a row against its own body — and
+/// `ring::digest::SHA256` costs **nothing**: `ring` is already compiled into this binary through
+/// `ureq` to `rustls`, so keeping the direct edge adds no crate, no version and nothing to audit.
+/// `sha2` would: `knowlu-engine`'s own dependency graph has none (the workspace's `sha2 0.10.9` is
+/// the APP's own direct edge, `app/Cargo.toml:69`, for `inference.rs`'s runtime digest check — and
+/// this scan reads only `engine/Cargo.toml` and the workspace root), so adding it pulls `digest 0.10`,
+/// `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` in beside the
+/// engine's existing `sha1 0.11`, which resolves `digest 0.11` and `cpufeatures 0.3` — two majors of
+/// two crates, into the binary CI holds under 6 MiB. `sha1` itself stays and is a different thing
+/// again: it is `ids::derived_id`, a note-identity contract with every vault that exists.
+#[test]
+fn the_content_hash_is_rings_and_the_envelope_is_not_coming_back() {
+    assert!(MANIFEST.contains("ring = \"0.17\""), "engine/Cargo.toml must keep ring for the sync content hash");
+    for (name, manifest) in MANIFESTS {
+        for gone in ["base64 = ", "sha2", "aes-gcm", "chacha20", "rust-crypto", "sodiumoxide", "hkdf"] {
+            assert!(
+                !manifest.contains(gone),
+                "`{gone}` must not appear in {name}: the account's copy is plain text (cloud design, \
+                 amendment 2026-09-17, ruling 2). There is nothing to encrypt, and the one hash this \
+                 crate needs is `ring`'s, which it already links for TLS."
+            );
+        }
+    }
+}
+
 /// The release profile is a shipping requirement, not an optimisation.
 ///
 /// The product plan section 5.2 targets a sub-50 MB app with 1-5 MB budgeted for the compiled
@@ -94,5 +128,18 @@ fn no_cloud_sdk_enters_the_engine() {
                  every request body is assembled in `cloudmodel.rs` where one test can see it."
             );
         }
+    }
+}
+
+/// The module itself, scanned. A manifest check alone would pass on the day the code still held a
+/// hand-rolled key schedule; this is the sentence that would have to be argued with.
+#[test]
+fn the_sync_module_holds_no_key_and_no_envelope() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("sync.rs"),
+    )
+    .expect("engine/src/sync.rs");
+    for gone in ["SyncKey", "recovery", "Recovery", "seal(", "fn open(", "IndexKey", "HKDF", "hkdf", "aead", "CROCKFORD"] {
+        assert!(!src.contains(gone), "engine/src/sync.rs still names {gone}");
     }
 }
