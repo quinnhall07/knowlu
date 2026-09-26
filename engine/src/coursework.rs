@@ -312,6 +312,9 @@ pub fn sync_coursework(
     let mut log: Vec<String> = Vec::new();
     let mut known = existing_by_uid(vault);
     let mut seen = load_seen(vault);
+    // Two-desktop design D3: every id this vault already holds, read once for this run and extended
+    // by `write::create_imported` as it mints — an imported note never takes an id a note has here.
+    let mut held = crate::ids::held_ids(vault);
     // R-C1c-6: judged per SOURCE, not per vault. A source group is the pair `(item.created_by,
     // item.course)` — every item one zyBooks book or one VHL section yields shares its group. A
     // group is new iff NONE of the current fetch's items in it has a uid this vault already knows
@@ -525,8 +528,18 @@ pub fn sync_coursework(
                 .replace("{uid}", &json_quoted(&item.uid))
                 .replace("{body}", &item.body);
             let target = crate::ids::rel(vault, &path);
-            crate::write::create(vault, &target, &text, &item_ctx, journal, None)
-                .map_err(|err| SourceError::Failed(format!("{err}")))?;
+            match crate::write::create_imported(vault, &target, &text, &item_ctx, journal, &mut held) {
+                Ok(_) => {}
+                // R-TD1-1: the item's note is already here under its import id. Named, not written,
+                // and the uid recorded as seen — as a note found by `source_uid` would be.
+                Err(crate::write::WriteError::IdHeld(id)) => {
+                    log.push(format!("skipped (already held as {id}): {stem}"));
+                    record_seen(vault, &item.uid, &item.title, &stamp)
+                        .map_err(|err| SourceError::Failed(format!("{err}")))?;
+                    continue;
+                }
+                Err(err) => return Err(SourceError::Failed(format!("{err}"))),
+            }
             log.push(format!("archived (imported-past) {stem}"));
             known.insert(item.uid.clone(), path);
             record_seen(vault, &item.uid, &item.title, &stamp)
@@ -570,8 +583,18 @@ pub fn sync_coursework(
             .replace("{uid}", &json_quoted(&item.uid))
             .replace("{body}", &item.body);
         let target = crate::ids::rel(vault, &path);
-        crate::write::create(vault, &target, &text, &item_ctx, journal, None)
-            .map_err(|err| SourceError::Failed(format!("{err}")))?;
+        match crate::write::create_imported(vault, &target, &text, &item_ctx, journal, &mut held) {
+            Ok(_) => {}
+            // R-TD1-1: the item's note is already here under its import id. Named, not written,
+            // and the uid recorded as seen — as a note found by `source_uid` would be.
+            Err(crate::write::WriteError::IdHeld(id)) => {
+                log.push(format!("skipped (already held as {id}): {stem}"));
+                record_seen(vault, &item.uid, &item.title, &stamp)
+                    .map_err(|err| SourceError::Failed(format!("{err}")))?;
+                continue;
+            }
+            Err(err) => return Err(SourceError::Failed(format!("{err}"))),
+        }
         log.push(format!("created {stem}"));
         known.insert(item.uid.clone(), path);
         record_seen(vault, &item.uid, &item.title, &stamp)
@@ -1020,11 +1043,12 @@ fn propose_map_cards(
         return;
     }
     let mut journal = Journal::new(vault);
+    let mut held = crate::ids::held_ids(vault);
     for proposal in proposals {
         if asked.contains(&(proposal.source.clone(), proposal.key.clone())) {
             continue;
         }
-        match write_map_card(vault, proposal, today, &card_ctx, &mut journal) {
+        match write_map_card(vault, proposal, today, &card_ctx, &mut journal, &mut held) {
             Ok(path) => {
                 let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 warnings.push(format!("{}: not mapped; proposed ({stem})", proposal.source));
@@ -1038,6 +1062,14 @@ fn propose_map_cards(
                 "{}: proposal not written (a card already exists at this key's filename; {} may \
                  collide with another key after slugifying)",
                 proposal.source, proposal.key
+            )),
+            // R-TD1-1: this card is already held (its key carries the day, so only a card made today
+            // on another computer can be).
+            Err(crate::write::WriteError::IdHeld(id)) => warnings.push(format!(
+                "{}: skipped (already held as {id}): map-{}-{}",
+                proposal.source,
+                proposal.source,
+                crate::ingest::slugify(&proposal.key)
             )),
             Err(e) => warnings.push(format!("{}: proposal not written ({e})", proposal.source)),
         }
@@ -1068,12 +1100,16 @@ pub fn collect_cloud(
 /// must not mint a second card for it. The stem carries the key, so the guard is the filename.
 /// That guard sees only `approvals/`, which is why `asked_map_keys` (below) is the real one and
 /// this is defence in depth: a **rejected** card is in `archive/` and this check cannot see it.
+///
+/// Two-desktop design D2: the card takes `import_id(appr, coursework,
+/// map:<source>:<map_key>:<first_proposed_at>)`; `held` is the run's `ids::held_ids`.
 pub fn write_map_card(
     vault: &Path,
     proposal: &MapProposal,
     today: Date,
     ctx: &WriteContext,
     journal: &mut Journal,
+    held: &mut std::collections::BTreeSet<String>,
 ) -> Result<PathBuf, crate::write::WriteError> {
     let lit = |s: &str| crate::write::to_literal(&Yaml::String(s.to_string()));
     let stamp = today.strftime("%Y-%m-%d").to_string();
@@ -1110,7 +1146,7 @@ pub fn write_map_card(
     // duplicate — the same guard `find_pending_amendment` gives an amend card.
     let stem = format!("map-{}-{}", proposal.source, crate::ingest::slugify(&proposal.key));
     let rel = crate::ids::rel(vault, &approvals.join(format!("{stem}.md")));
-    crate::write::create(vault, &rel, &text, ctx, journal, None)
+    crate::write::create_imported(vault, &rel, &text, ctx, journal, held)
 }
 
 /// Every `(source, map_key)` a card has already asked about and whose card has not yet expired —
@@ -1985,6 +2021,81 @@ mod tests {
     /// there is no `first_run` flag left to force it, the vault's own emptiness is what does it.
     fn sync_first(items: &[Assignment], vault: &Path, dry_run: bool) -> Vec<String> {
         sync(items, vault, dry_run)
+    }
+
+    // --- two-desktop design D1–D3: the import id ------------------------------------------------
+
+    /// Two computers fetching one book create the one item under one id (D1), whatever path each
+    /// computer's own course label gives it (D4).
+    #[test]
+    fn two_vaults_fetching_one_item_mint_the_same_id() {
+        let a = vault_with("importid-a");
+        let b = vault_with("importid-b");
+        sync(&[plain()], &a, false);
+        let mut elsewhere = plain();
+        elsewhere.slug = "comp-100-hw-01".to_string();
+        sync(&[elsewhere], &b, false);
+        let id_a = field(&meta_of(&a.join("tasks").join("cs-100-hw-01.md")), "id");
+        let id_b = field(&meta_of(&b.join("tasks").join("comp-100-hw-01.md")), "id");
+        assert_eq!(id_a, "task_0a4d052724", "import_id(task, zybooks, coursework:zybooks:1)");
+        assert_eq!(id_a, id_b);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// The archived twin (a new source's past item) is the same item, so it takes the same import id.
+    #[test]
+    fn an_item_archived_as_imported_past_carries_its_import_id() {
+        let vault = vault_with("importid-past");
+        let log = sync_first(&past_and_future(), &vault, false);
+        assert!(log.iter().any(|l| l == "archived (imported-past) cs-100-hw-01"), "{log:?}");
+        let id = field(&meta_of(&vault.join("archive").join("cs-100-hw-01.md")), "id");
+        assert_eq!(id, crate::ids::import_id("task", "zybooks", "coursework:zybooks:p1"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// D3's belt (R-TD1-1): a note carrying the item's import id but not its `source_uid` (so dedup
+    /// cannot find it) makes the create `IdHeld`. The line names it, nothing is written, and the uid
+    /// is recorded as seen, as a note found by `source_uid` would be.
+    #[test]
+    fn an_import_id_the_vault_already_holds_is_skipped_and_named() {
+        let vault = vault_with("importid-held");
+        std::fs::write(
+            vault.join("tasks").join("renamed-by-hand.md"),
+            "---\ntitle: \"CS 100 HW 01\"\nid: task_0a4d052724\n---\n\nb\n",
+        )
+        .unwrap();
+        let log = sync(&[plain()], &vault, false);
+        assert_eq!(log, vec!["skipped (already held as task_0a4d052724): cs-100-hw-01".to_string()]);
+        assert!(!vault.join("tasks").join("cs-100-hw-01.md").exists());
+        assert!(load_seen(&vault).contains("zybooks:1"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// §2.2: the map card's key carries the day it was first proposed, so a card re-proposed after the
+    /// old one expired (into a free `approvals/` path, the old card in `archive/`) is a new card with a
+    /// new id — never `IdHeld` for ever.
+    #[test]
+    fn a_map_card_takes_its_import_id_and_a_re_proposal_takes_another() {
+        let vault = scratch_vault("importid-map");
+        let ctx = crate::write::WriteContext::new(MAP_ACTOR, "local-runner");
+        let mut journal = Journal::new(&vault);
+        let p = MapProposal {
+            source: "zybooks".into(),
+            key: "UAHCS100Fall2026".into(),
+            label: "CS 100".into(),
+            suggested_course: None,
+        };
+        let mut held = crate::ids::held_ids(&vault);
+        let first = write_map_card(&vault, &p, date(2026, 9, 10), &ctx, &mut journal, &mut held).unwrap();
+        assert_eq!(field(&meta_of(&first), "id"), "appr_56e758875a");
+        std::fs::rename(&first, vault.join("archive").join(first.file_name().unwrap())).unwrap();
+        let again = write_map_card(&vault, &p, date(2026, 10, 11), &ctx, &mut journal, &mut held).unwrap();
+        assert_eq!(
+            field(&meta_of(&again), "id"),
+            crate::ids::import_id("appr", "coursework", "map:zybooks:UAHCS100Fall2026:2026-10-11")
+        );
+        let _ = std::fs::remove_dir_all(&vault);
     }
 
     fn past_and_future() -> [Assignment; 3] {
@@ -4058,6 +4169,7 @@ mod tests {
             jiff::civil::date(2026, 9, 9),
             &ctx,
             &mut journal,
+            &mut std::collections::BTreeSet::new(),
         )
         .expect("the card writes");
         let card = std::fs::read_to_string(&path).unwrap();
@@ -4086,8 +4198,8 @@ mod tests {
             suggested_course: None,
         };
         let today = jiff::civil::date(2026, 9, 9);
-        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_ok());
-        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal).is_err());
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal, &mut std::collections::BTreeSet::new()).is_ok());
+        assert!(write_map_card(&vault, &p, today, &ctx, &mut journal, &mut std::collections::BTreeSet::new()).is_err());
         assert_eq!(crate::approvals::sorted_md(&vault.join("approvals")).len(), 1);
         let _ = std::fs::remove_dir_all(&vault);
     }
@@ -4107,7 +4219,7 @@ mod tests {
             label: "UACS100Fall2026".into(),
             suggested_course: Some("cs-100".into()),
         };
-        let path = write_map_card(&vault, &p, today, &ctx, &mut journal).unwrap();
+        let path = write_map_card(&vault, &p, today, &ctx, &mut journal, &mut std::collections::BTreeSet::new()).unwrap();
         let rel = crate::ids::rel(&vault, &path);
 
         // The student says no, and `process_approvals` settles the card into `archive/`.
@@ -4157,6 +4269,7 @@ mod tests {
             jiff::civil::date(2026, 9, 9),
             &ctx,
             &mut journal,
+            &mut std::collections::BTreeSet::new(),
         )
         .unwrap();
         let rel = crate::ids::rel(&vault, &path);
@@ -4266,6 +4379,7 @@ mod tests {
             jiff::civil::date(2026, 9, 9),
             &ctx,
             &mut journal,
+            &mut std::collections::BTreeSet::new(),
         )
         .unwrap();
         let rel = crate::ids::rel(&vault, &card_path);
@@ -4358,6 +4472,7 @@ mod tests {
             jiff::civil::date(2026, 9, 9),
             &ctx,
             &mut journal,
+            &mut std::collections::BTreeSet::new(),
         )
         .unwrap();
         let rel = crate::ids::rel(&vault, &path);
@@ -4404,7 +4519,7 @@ mod tests {
             label: "UACS100Fall2026".into(),
             suggested_course: Some("cs-100".into()),
         };
-        let path = write_map_card(&vault, &approved, today, &ctx, &mut setup_journal).unwrap();
+        let path = write_map_card(&vault, &approved, today, &ctx, &mut setup_journal, &mut std::collections::BTreeSet::new()).unwrap();
         let rel = crate::ids::rel(&vault, &path);
         crate::write::write_literals(
             &vault,

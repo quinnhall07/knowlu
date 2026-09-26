@@ -2833,3 +2833,121 @@ fn a_sync_card_is_dated_by_the_vaults_own_day_not_the_utc_one() {
     assert_eq!(line("first_proposed_at"), Some(local_day.to_string()), "and ages from it: {text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Two desktops on one account, plan 1 (two-desktop design §6.1): import ids, apply by id, aliases.
+// ---------------------------------------------------------------------------
+
+/// An empty vault on a temp path, for the tests whose notes a producer makes.
+fn desk(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-td1-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for folder in ["tasks", "archive", "approvals", "courses", "state"] {
+        std::fs::create_dir_all(dir.join(folder)).expect("mkdir");
+    }
+    dir
+}
+
+/// One zyBooks item as the fetch hands it to `coursework::sync_coursework`. `slug` is the part of its
+/// path each computer's own course label decides (§2.4); the item itself is `zybooks:77` on both.
+fn item(slug: &str, title: &str) -> knowlu_engine::coursework::Assignment {
+    knowlu_engine::coursework::Assignment {
+        uid: "zybooks:77".to_string(),
+        slug: slug.to_string(),
+        title: title.to_string(),
+        due: jiff::civil::date(2026, 10, 9).at(23, 59, 0, 0),
+        course: Some("cs-100".to_string()),
+        effort_hours: 2.0,
+        effort_confidence: "low".to_string(),
+        effort_source: "inferred".to_string(),
+        importance: 3,
+        importance_reason: "reason".to_string(),
+        progress: 0,
+        created_by: "zybooks".to_string(),
+        body: "body".to_string(),
+    }
+}
+
+/// One desktop's `coursework` step: the producer itself, dated before the item is due so it is
+/// created rather than archived.
+fn fetch(vault: &Path, journal: &mut Journal, items: &[knowlu_engine::coursework::Assignment]) -> Vec<String> {
+    let ctx = knowlu_engine::write::WriteContext::new("agent:coursework", "local-runner");
+    knowlu_engine::coursework::sync_coursework(items, vault, Some("2026-09-22".parse().unwrap()), false, Some(&ctx), Some(journal))
+        .expect("the coursework sync")
+}
+
+/// The student's own edit, through the console's `write` path.
+fn edit(vault: &Path, rel: &str, journal: &mut Journal, fields: &[(&str, &str)]) {
+    let me = knowlu_engine::write::WriteContext::new("quinn", "dashboard");
+    let literals: Vec<(String, String)> = fields.iter().map(|(f, v)| (f.to_string(), v.to_string())).collect();
+    knowlu_engine::write::write_literals(vault, rel, &literals, &me, journal, &Default::default()).expect("a hand edit");
+}
+
+fn meta_id(vault: &Path, rel: &str) -> String {
+    let meta = knowlu_engine::ids::read_meta(&vault.join(rel)).expect("the note");
+    knowlu_engine::yaml::get(&meta, "id").and_then(knowlu_engine::yaml::text).unwrap_or_default()
+}
+
+fn int_at(vault: &Path, rel: &str, field: &str) -> Option<i64> {
+    let meta = knowlu_engine::ids::read_meta(&vault.join(rel))?;
+    knowlu_engine::yaml::get(&meta, field).and_then(knowlu_engine::yaml::i64_of)
+}
+
+/// Every live sync amend card in `approvals/`, frontmatter only, sorted by path.
+fn sync_cards(vault: &Path) -> Vec<serde_yaml_ng::Mapping> {
+    let Ok(entries) = std::fs::read_dir(vault.join("approvals")) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| knowlu_engine::ids::read_meta(&p))
+        .filter(|m| knowlu_engine::yaml::get(m, "created_by").and_then(knowlu_engine::yaml::text).as_deref() == Some(sync::ACTOR))
+        .collect()
+}
+
+/// §6.1 (i), the review's I2 scenario end to end. Two desktops fetch item x and exchange; the student
+/// sets `importance` 5 on A and then 2 on B; A's next `coursework` run updates an unrelated field (its
+/// title). Before this plan x lived under two ids, A's own `importance` record never reached `mine`, and
+/// the file-mtime stand-in let A's older 5 win with no card: the desktops disagreed for good. With one
+/// id the later write (B's 2) is offered on A as ONE card, B keeps its 2, and each side holds one note.
+#[test]
+fn td1_i_one_item_fetched_on_two_desktops_is_one_note_and_a_both_sides_edit_is_one_card() {
+    let (a, b) = (desk("i-a"), desk("i-b"));
+    let (mut ja, mut jb) = (Journal::new(&a), Journal::new(&b));
+    let (mut ca, mut cb) = (Cursor::default(), Cursor::default());
+    let rel = "tasks/cs-100-hw-07.md";
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    fetch(&b, &mut jb, &[item("cs-100-hw-07", "CS 100 HW 07")]);
+    assert_eq!(meta_id(&a, rel), "task_d0fd865fb3", "import_id(task, zybooks, coursework:zybooks:77)");
+    assert_eq!(meta_id(&b, rel), "task_d0fd865fb3", "D1: the same item, the same id, on both");
+
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let r = deliver(&b, &page, &mut jb);
+    assert_eq!(r.notes_written, 0, "a foreign create for an id held here writes no file: {r:?}");
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    deliver(&a, &page, &mut ja);
+
+    edit(&a, rel, &mut ja, &[("importance", "5")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    edit(&b, rel, &mut jb, &[("importance", "2")]);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    fetch(&a, &mut ja, &[item("cs-100-hw-07", "CS 100 HW 07 (revised)")]);
+
+    let page = transfer(&a, &mut ca, &mut ja, "DeskA", "DeskB");
+    let rb = deliver(&b, &page, &mut jb);
+    let page = transfer(&b, &mut cb, &mut jb, "DeskB", "DeskA");
+    let ra = deliver(&a, &page, &mut ja);
+
+    assert_eq!((ra.cards, rb.cards), (1, 0), "one card, on the desktop whose value lost: {ra:?} {rb:?}");
+    let cards = sync_cards(&a);
+    assert_eq!(cards.len(), 1);
+    let offer = knowlu_engine::yaml::to_json(knowlu_engine::yaml::get(&cards[0], "changes").expect("changes"));
+    assert_eq!(offer["importance"], serde_json::json!({"from": 5, "to": 2}));
+    assert_eq!(int_at(&b, rel, "importance"), Some(2), "B keeps its later value");
+    assert_eq!(int_at(&a, rel, "importance"), Some(5), "A's is withheld until the student answers");
+    for dir in [&a, &b] {
+        assert_eq!(std::fs::read_dir(dir.join("tasks")).expect("tasks").count(), 1, "one note per desktop");
+    }
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
