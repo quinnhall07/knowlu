@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, judge_plan, judge_state_in, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, LiveSlot, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, judge_state_in, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, LiveSlot, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -97,21 +97,24 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
     assert!(!has_ics_url(&v));
     // No judge args: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
+    // `sync` is always first (C3′, cloud design §5.5 as amended): the pull half has to land before
+    // `rank` orders the day, and the push half carries everything written since the last sync.
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "rank"]);
-    assert_eq!(argv[0].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
-    assert_eq!(argv[1].1, vec!["rank", "--vault", v.to_string_lossy().as_ref(), "--runner", "local"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "rank"]);
+    assert_eq!(argv[0].1, vec!["sync", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(argv[1].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(argv[2].1, vec!["rank", "--vault", v.to_string_lossy().as_ref(), "--runner", "local"]);
 
     let cfg = v.join("config").join("ingest.yaml");
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     assert!(has_ics_url(&v));
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
-    assert_eq!(argv[1].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
+    assert_eq!(argv[2].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert!(argv.iter().all(|(e, _)| e == exe));
 
-    // With judge args: FOUR steps, and judge sits BEFORE rank so the day's ranking sees what it
+    // With judge args: FIVE steps, and judge sits BEFORE rank so the day's ranking sees what it
     // just wrote. `--via local-runner`, the same value coursework and ingest pass — journal::VIAS
     // does not grow for this.
     let ja = JudgeArgs {
@@ -120,8 +123,8 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
         log_dir: PathBuf::from(r"C:\data\judgments"),
     };
     let argv = slot_argv(&v, exe, &JudgePlan::Local(ja));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "judge", "rank"]);
-    assert_eq!(argv[2].1, vec![
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "judge", "rank"]);
+    assert_eq!(argv[3].1, vec![
         "judge".to_string(), "--vault".to_string(), v.to_string_lossy().to_string(),
         "--via".to_string(), "local-runner".to_string(),
         "--runtime".to_string(), r"C:\rt\llama-cli.exe".to_string(),
@@ -162,7 +165,45 @@ fn a_cloud_vault_runs_ingest_with_no_ics_url() {
     .unwrap();
 
     let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
-    assert_eq!(names(&argv), vec!["coursework", "ingest", "rank"]);
+    assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
+}
+
+/// C3′ Task 11, verifying hand-off H8c from the outside: the superseded plan was going to add a
+/// fourth `IcsState` for exactly this, and C2's own A-2 fix (`ingest_included`) made it unnecessary.
+/// A vault carrying `ics_url: ''` and no account at all leaves `ingest` out, same as always; the
+/// moment `config/cloud.yaml` exists, the feed lives in the account and the step runs regardless of
+/// the vault's own (now-empty) url.
+#[test]
+fn a_cloud_vault_runs_ingest_with_no_url_in_the_vault_at_all() {
+    let v = scratch("cloud-ingest");
+    std::fs::write(v.join("config").join("ingest.yaml"), "timezone: America/Chicago\nics_url: ''\n").expect("ingest.yaml");
+    assert_eq!(ics_state(&v), IcsState::NoUrl);
+    assert!(!ingest_included(&v), "with no account and no url the step is left out, as it always was");
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'https://x.example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/p/session'\naccount_id: 'acct-1'\n",
+    ).expect("cloud.yaml");
+    assert!(ingest_included(&v), "an account is a feed, wherever the URL lives");
+    let steps = slot_argv(&v, Path::new("knowlu-engine.exe"), &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    assert_eq!(steps[0].1[0], "sync", "sync runs first");
+    assert_eq!(steps.iter().filter(|(_, a)| a[0] == "ingest").count(), 1, "{steps:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The plan's own case for hand-off H8a: `sync` is the slot's first step, always, and it displaces
+/// nothing that was there before. One row in the Runs view, not two, because `run_slot_inner` names
+/// a step by `args[0]` and two rows both reading `sync` would say less than one row does.
+#[test]
+fn sync_is_the_slots_first_step() {
+    let v = scratch("sync-first");
+    let exe = Path::new("knowlu-engine.exe");
+    let steps = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    assert_eq!(steps[0].1[0], "sync", "{steps:?}");
+    assert_eq!(steps[1].1[0], "coursework", "and nothing was displaced");
+    assert!(steps.iter().any(|(_, a)| a[0] == "rank"), "{steps:?}");
+    // One row in the Runs view, not two: `run_slot_inner` names a step by `args[0]`.
+    assert_eq!(steps.iter().filter(|(_, a)| a[0] == "sync").count(), 1);
+    let _ = std::fs::remove_dir_all(&v);
 }
 
 /// D7: no runtime and no model are NORMAL. The step is recorded with code 0 and a name that says
@@ -556,11 +597,11 @@ fn log_retention_keeps_the_newest_slot_logs_and_leaves_everything_else_alone() {
 }
 
 /// F10 (console spec §8 push on close, Knowlu spec §4 back up on quit): the Quit arm flushes
-/// synchronously under a 10 s cap. This scratch vault has no remote, so there is nothing to push —
+/// synchronously under a 10 s cap. This scratch vault has no account, so there is nothing to push —
 /// `synced: false`, and that is not an error — and a backup folder is set, so the mirror is
 /// written. `then` runs on the caller's thread before the scope joins; in production it writes the
-/// quit log and ends the process, which is why a worker still stuck in git can never hold the
-/// click past the cap.
+/// quit log and ends the process, which is why a worker still stuck in a slow push can never hold
+/// the click past the cap.
 #[test]
 fn quit_flush_backs_up_and_reports_within_the_cap() {
     let v = scratch("quitflush");
@@ -575,6 +616,81 @@ fn quit_flush_backs_up_and_reports_within_the_cap() {
     let profile = cs.settings.lock().unwrap().profile_id.clone();
     assert!(bdir.join(&profile).join("vault").join("tasks").is_dir(), "the mirror exists");
     let _ = std::fs::remove_dir_all(&bdir);
+}
+
+/// Fix round 1, review M4: a configured-but-signed-out vault is a named SKIP inside
+/// `run_lines_with` (`totals.errors` empty, `totals.skipped` set) — before this fix `q.synced` read
+/// only `errors.is_empty()`, so a quit that pushed nothing at all still reported `synced: true`.
+/// `QuitFlush`'s own contract is "this completed, never this was attempted".
+///
+/// **Reads Credential Manager, and the exemption is the same one `sync_contract.rs`'s own
+/// `a_vault_with_an_account_and_no_session_says_exactly_that` already records**: this only READS a
+/// target (`knowlu/c3-fix1-no-such-profile/session`) that nothing in this product ever writes, so
+/// there is no `CredWriteW`/`CredReadW` race on the SAME target to serialise against — the file's
+/// own `CREDMAN_LOCK` is for tests that WRITE a credential, which this one does not.
+#[test]
+fn m4_quit_flush_reports_a_skip_as_a_skip_never_synced() {
+    let v = scratch("quitflush-skip");
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        "api_base: 'http://127.0.0.1:9/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/c3-fix1-no-such-profile/session'\naccount_id: 'acct-1'\n",
+    )
+    .unwrap();
+    let cs = open(&v, "quitflush-skip");
+    let q = quit_flush(&cs, Duration::from_secs(10), |_| {});
+    assert!(!q.synced, "a signed-out quit must not report synced: true: {q:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Fix round 1, review I4: the slot's own `sync` step is a CHILD PROCESS — `run_slot_inner` records
+/// only its exit code, and the lines it printed went to a log file, never to `cs.sync` — so the
+/// only way the page ever sees what a slot's sync did is by reading back the status file that
+/// child would have written. The `cmd` stand-in engine below writes no such file (it does not know
+/// sync exists), so this test writes one itself, exactly as a real engine's `sync` subcommand
+/// would, and checks that `run_slot_inner`'s own `state::refresh_sync` call is what moves it into
+/// `cs.sync`, not `ConsoleState::open` (which ran first, before the file existed).
+#[test]
+fn a_slot_run_leaves_cs_sync_filled_from_the_status_file() {
+    let v = scratch("sync-status-fill");
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    let cs = open(&v, "sync-status-fill");
+    assert_eq!(
+        *cs.sync.lock().unwrap(),
+        knowlu_engine::sync::SyncStatus::default(),
+        "no status file exists yet, so `open` left the ordinary default"
+    );
+
+    let status = knowlu_engine::sync::SyncStatus {
+        ok: true,
+        at: Some("2026-09-23T07:00:00.000Z".to_string()),
+        lines: vec!["sync: 2 record(s) and 0 note(s) down; 2 applied, 0 card(s), 0 refused".to_string()],
+        last_error: None,
+        skipped: None,
+    };
+    let status_path = v.join(knowlu_engine::sync::STATUS_FILE);
+    std::fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+    std::fs::write(&status_path, knowlu_engine::ledger::dumps_value(&serde_json::to_value(&status).unwrap())).unwrap();
+
+    let sch = Scheduler::default();
+    let fake_local_appdata = std::env::temp_dir().join(format!("qo-console-sched-localappdata-syncfill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    std::fs::create_dir_all(&fake_local_appdata).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake_local_appdata.as_os_str()),
+    ]);
+    let _summary = run_slot_inner(&cs, &sch, None, false);
+    assert_eq!(
+        *cs.sync.lock().unwrap(),
+        status,
+        "run_slot_inner's own refresh_sync should have picked up the file the child would have written"
+    );
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    let _ = std::fs::remove_dir_all(&v);
 }
 
 #[test]
@@ -742,8 +858,9 @@ fn a_malformed_api_base_names_the_session_step_instead_of_silence() {
 }
 
 /// R-C1c-13: the slot refreshes the account session before its first cloud step — the entitlement
-/// refresh right after it is itself one such step, and every child process after that (coursework,
-/// ingest, judge) authenticates with the same session. A one-hour token is routinely down to single
+/// refresh right after it is itself one such step, and every child process after that (sync,
+/// coursework, ingest, judge) authenticates with the same session. Since the C3′ merge this also
+/// pins that the refresh precedes the `sync` child, the first to spend the token. A one-hour token is routinely down to single
 /// digits by a noon or 6pm slot, and the app's only other refresh point (`valid_access_token_at`'s own
 /// 120-second margin) is reached only at the slot's END, by telemetry — too late for anything earlier
 /// in the same slot. A session with ten minutes left, under this pre-flight's 45-minute floor, and an
@@ -792,6 +909,22 @@ fn a_near_expiry_session_is_refreshed_before_any_engine_step_and_a_failure_is_na
     let coursework_at = named.iter().position(|n| n == "coursework")
         .unwrap_or_else(|| panic!("no coursework step: {named:?}"));
     assert!(session_at < coursework_at, "the session is refreshed before any engine step: {named:?}");
+    // The C3′ merge: `slot_argv` puts `sync` first, ahead of coursework, and the engine's `sync`
+    // spends this same token on `/sync-pull` and `/sync-push` — so the one session refresh a slot
+    // makes has to come before `sync` too, or a second-day slot syncs on a stale token and reads
+    // "signed out". This vault's slot runs `sync` (it is unconditional in `slot_argv`).
+    let sync_at = named.iter().position(|n| n == "sync")
+        .unwrap_or_else(|| panic!("no sync step: {named:?}"));
+    assert!(
+        session_at < sync_at,
+        "the session is refreshed before the sync step, because the engine's sync spends the token: {named:?}"
+    );
+    assert!(sync_at < coursework_at, "sync is the slot's first engine step: {named:?}");
+    assert_eq!(
+        named.iter().filter(|n| n.starts_with("session")).count(),
+        1,
+        "exactly one session refresh per slot — never one per step: {named:?}"
+    );
     assert_eq!(s.steps[session_at].1, 0, "a network refusing the refresh is not a failed slot");
     assert!(s.engine_ok, "a failed session refresh must never paint the tray amber: {:?}", s.steps);
     // R-C1c-final-3: the runner log gets the sanitized line, never the service's failure reason.

@@ -162,6 +162,28 @@ fn the_log_tail_is_the_last_lines_of_the_newest_logs_and_is_scrubbed() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Fix round 1, review M4. `last_error` alone leaves a lapsed subscription or a signed-out machine
+/// invisible in an issue report — a skip carries no `last_error`, so a support report from exactly
+/// the student who most needs help (their copy has not reached the account in weeks) said nothing
+/// about sync at all.
+#[test]
+fn preview_text_names_a_skipped_sync_as_well_as_a_failed_one() {
+    let vault = PathBuf::from("../engine/tests/fixtures/vault-full");
+    let data = std::env::temp_dir().join(format!("knowlu-report-preview-skip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(vault, data.clone());
+    *cs.sync.lock().unwrap() = knowlu_engine::sync::SyncStatus {
+        ok: false,
+        at: Some(knowlu_engine::journal::now_ts(None)),
+        lines: vec![],
+        last_error: None,
+        skipped: Some("no entitlement".to_string()),
+    };
+    let text = preview_text(&cs, "today");
+    assert!(text.contains("sync skipped: no entitlement"), "a lapsed subscription must reach the issue report: {text}");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// I2, fix round 1: the cloud refuses a `body` over 8,192 characters
 /// (`cloud/supabase/functions/issues/handler.ts`), and 200 real log lines routinely add up to more
 /// than that on a busy install. `preview_text` has to fit under that cap on its own, leaving room

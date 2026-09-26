@@ -6,6 +6,28 @@
 
 use std::path::Path;
 
+/// Fix round 1, review I2. The scan must stop at the file's real `#[cfg(test)] mod …` boundary,
+/// never at an earlier BARE MENTION of the words `#[cfg(test)]` inside a doc comment —
+/// `app/src/account.rs`'s own header names the attribute in prose, which hid 1,417 of its 1,467
+/// lines from this scan before this fix.
+fn non_test_code(text: &str) -> &str {
+    text.split("\n#[cfg(test)]\nmod ").next().unwrap_or(text)
+}
+
+#[test]
+fn the_scan_is_not_fooled_by_a_doc_comment_naming_cfg_test() {
+    // A doc comment that merely NAMES `#[cfg(test)]` in prose (exactly `account.rs`'s shape) must
+    // not be mistaken for the real test-module boundary and hide a real, unguarded spawn after it.
+    let text = "//! The scan below stops at the first #[cfg(test)] mention, in prose only.\n\
+                 fn oops() { std::process::Command::new(\"notepad\"); }\n\
+                 \n\
+                 #[cfg(test)]\n\
+                 mod tests {\n    fn t() {}\n}\n";
+    let code = non_test_code(text);
+    assert!(code.contains("Command::new(\"notepad\")"), "a real spawn after a doc-comment mention of #[cfg(test)] must still be scanned");
+    assert!(!code.contains("mod tests"), "the real test module stays excluded");
+}
+
 #[test]
 fn every_non_test_spawn_suppresses_its_console_window() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -19,7 +41,7 @@ fn every_non_test_spawn_suppresses_its_console_window() {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        let code = non_test_code(&text);
         let spawns = code.matches("Command::new").count();
         let guarded = code.matches(".no_console()").count();
         assert!(

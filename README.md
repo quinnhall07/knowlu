@@ -11,7 +11,7 @@ window. Windows, Rust + Tauri.
 ```
 Cargo.toml        the workspace: members engine + app, one Cargo.lock, one target/, one release profile
 engine/           knowlu-engine — the deterministic engine and its CLI (rank, ingest, coursework, judge,
-                  surface, write, info, issues, runs); no GUI dependency, ever
+                  sync, surface, write, info, issues, runs); no GUI dependency, ever
 engine/tests/     integration tests and the frozen fixtures (bytes, never re-encoded)
 app/              knowlu — the Tauri desktop app; links the engine as a library and runs
                   knowlu-engine.exe as a sibling process for scheduled slots

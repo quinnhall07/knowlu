@@ -494,6 +494,11 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    taught the same lesson three times (`.app[hidden]`, `.drawer[hidden]`, `.wiz-row[hidden]`): the
    day someone gives `.wiz-nav button` a `display`, a hidden Back comes back. (Review M8.) */
 .wiz-nav button.b[hidden] { display: none; }
+/* M3 (fix round 1): the SAME lesson a fourth time — `#pick-restore-options` is a `.wiz-nav` too (it
+   wants the same right-aligned row of controls the picker's own nav uses), and `.wiz-nav`'s
+   `display: flex` beats `[hidden]`'s UA default exactly like `.wiz-row` and `.set-row` did, so the
+   name field and the Restore button stayed on screen before a backup folder was ever chosen. */
+.wiz-nav[hidden] { display: none; }
 /* …and the same lesson, live rather than pre-emptive: `.set-row` IS `display: flex` (line 470) and
    the sheet has no `.set-row[hidden]` rule, so the overlay's new `#up-code-row` would show through
    its own `hidden` attribute without this. */
