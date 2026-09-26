@@ -25,6 +25,14 @@ fn open(v: &Path, name: &str) -> ConsoleState {
     ConsoleState::open(v.to_path_buf(), std::env::temp_dir().join(format!("qo-registrar-data-{name}-{}", std::process::id())))
 }
 
+/// Removes the scratch vault and its data directory however the test ends (R4 review M4).
+struct Gone(Vec<PathBuf>);
+impl Drop for Gone {
+    fn drop(&mut self) {
+        for p in &self.0 { let _ = std::fs::remove_dir_all(p); }
+    }
+}
+
 /// `KNOWLU_ENGINE_EXE` is process-wide; this file's own lock, `week.rs`'s shape.
 static ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -99,6 +107,7 @@ fn a_fetched_schedule_runs_through_the_engine_and_the_temp_file_is_gone() {
     let _engine = real_engine();
     let v = scratch("run");
     let cs = open(&v, "run");
+    let _gone = Gone(vec![v.clone(), cs.data_dir.clone()]);
     cs.set_test_today(Some("2026-09-01".parse().unwrap()));
     let env = run_file(&cs, "today", "ua", FIXTURE.as_bytes(), "2026-09-01".parse().unwrap());
     assert_eq!(env["ok"], true, "{env}");
@@ -108,7 +117,6 @@ fn a_fetched_schedule_runs_through_the_engine_and_the_temp_file_is_gone() {
     assert!(v.join("commitments/cs-100-lab.md").is_file());
     let tmp = cs.data_dir.join("tmp");
     assert_eq!(std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0), 0, "the temp file is deleted");
-    let _ = std::fs::remove_dir_all(&v);
 }
 
 #[test]
@@ -116,12 +124,48 @@ fn a_parse_failure_is_named_writes_nothing_and_the_temp_file_is_gone_too() {
     let _engine = real_engine();
     let v = scratch("fail");
     let cs = open(&v, "fail");
+    let _gone = Gone(vec![v.clone(), cs.data_dir.clone()]);
     let env = run_file(&cs, "today", "ua", b"{\"data\": []}", "2026-09-01".parse().unwrap());
     assert_eq!(env["ok"], false, "{env}");
     assert!(env["error"].as_str().unwrap().contains("no class with meeting times"), "{env}");
     assert!(!v.join("commitments").exists() && !v.join("state/calendar-series.json").exists());
     assert_eq!(std::fs::read_dir(cs.data_dir.join("tmp")).map(|d| d.count()).unwrap_or(0), 0);
-    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// R4 review M2: a crash mid-run leaves a schedule file in `tmp\`; opening the window again sweeps
+/// the stale ones, and only `registrar-*.json`.
+#[test]
+fn a_stale_schedule_file_is_swept_and_nothing_else_is() {
+    use std::time::{Duration, SystemTime};
+    let dir = std::env::temp_dir().join(format!("qo-registrar-sweep-{}", std::process::id()));
+    let _gone = Gone(vec![dir.clone()]);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["registrar-1-20260901T000000Z.json", "confirm-1.json", "registrar-notes.txt"] {
+        std::fs::write(dir.join(name), "{}").unwrap();
+    }
+    let hour = Duration::from_secs(3600);
+    assert_eq!(knowlu::registrar::sweep_stale_files_in(&dir, SystemTime::now(), hour), 0, "a fresh file is a run in progress");
+    assert_eq!(knowlu::registrar::sweep_stale_files_in(&dir, SystemTime::now() + 2 * hour, hour), 1);
+    assert!(!dir.join("registrar-1-20260901T000000Z.json").exists());
+    assert!(dir.join("confirm-1.json").exists() && dir.join("registrar-notes.txt").exists());
+    assert_eq!(knowlu::registrar::sweep_stale_files_in(&dir.join("absent"), SystemTime::now(), hour), 0);
+}
+
+/// R4 review M1: a failed request is named by its kind in fixed words; ureq's own text (which can
+/// carry the URL) never reaches the page.
+#[test]
+fn a_failed_request_is_named_in_fixed_words() {
+    use knowlu::registrar::fetch_error;
+    assert_eq!(fetch_error("myBama", &ureq::Error::StatusCode(500)), "myBama answered with an error");
+    assert_eq!(fetch_error("myBama", &ureq::Error::HostNotFound), "couldn't reach myBama");
+    assert_eq!(fetch_error("myBama", &ureq::Error::ConnectionFailed), "couldn't reach myBama");
+    assert_eq!(fetch_error("myBama", &ureq::Error::BodyStalled), "myBama took too long");
+    assert_eq!(fetch_error("myBama", &ureq::Error::BadUri("https://x.invalid/?a=secret".into())), "couldn't reach myBama");
+    let src = std::fs::read_to_string("src/registrar.rs").unwrap();
+    assert!(!src.contains("({e})"), "no error's own text is formatted into an envelope");
+    let open = src.split("pub fn open_registrar_window").nth(1).unwrap();
+    assert!(open.contains("sweep_stale_files_in("), "the window's opening sweeps the stale schedule files");
 }
 
 /// D1 and constraint 9, read from the source: the registrar opens `lms_link`'s window and no

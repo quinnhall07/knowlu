@@ -19,7 +19,7 @@ const SESSION_PREFIX: &str = "knowlu-lms-session-";
 /// How long a leftover session directory has to have been sitting in the temp folder before the
 /// sweep takes it. An hour, because a second Knowlu part-way through its own capture is not ours to
 /// delete and a student can spend a long time on a campus SSO page.
-const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+pub const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// WebView2's browser process exits asynchronously and keeps the profile open for a moment after the
 /// window is gone, so the first `remove_dir_all` usually loses. Twelve tries at 250 ms is three
