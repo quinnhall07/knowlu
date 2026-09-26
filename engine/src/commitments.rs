@@ -3437,7 +3437,9 @@ fn text_value(text: Option<&str>) -> Value {
 ///   kind (`class` or `lab`) and course, with different `meets`, first meeting on or after the old
 ///   series' last day, not answered (a note or marker has its key) and not already a confirmed
 ///   note's signature → one change: `meets`, `where` (when set and different) and `source_uid` =
-///   the new key. Twins (one meeting under two keys) share a signature, so one is chosen — the
+///   the new key, less a `meets` or `where` the student set by hand (judge-once, below; the card
+///   still moves `source_uid`, the external key). Twins (one meeting under two keys) share a
+///   signature, so one is chosen — the
 ///   earliest `first`, then [`precedence`], then the key — and one change is made.
 ///
 /// A note whose `until` is before `today` is finished and not watched. `was` holds the note's
@@ -3445,8 +3447,8 @@ fn text_value(text: Option<&str>) -> Value {
 ///
 /// **Judge-once, per field (final-fix-report m3):** a field the journal shows the student set by
 /// hand on the note — a later `set` by `quinn` (`journal::human_edited`; the note's `create`, even
-/// the confirm screen's by `quinn`, is not one) — is never proposed back, on the `changed` or the
-/// `ended` path. A field the settlement itself wrote
+/// the confirm screen's by `quinn`, is not one) — is never proposed back, on the `changed`, `ended`
+/// or `succeeded` path. A field the settlement itself wrote
 /// (`agent:commitments`, not `quinn`) is not a human set and is still watched, so a series whose
 /// calendar end moves still gets a card. Every other field of the same note is still watched, so a
 /// human-set `where` beside a calendar `meets` change still proposes `meets` alone.
@@ -3492,6 +3494,10 @@ pub fn detect_changes(
             continue;
         }
         let sig = note.signature(codes);
+        // Judge-once on the succeeded path too: a field the student set is never proposed back;
+        // `source_uid` is the external key, not a student field, so it still moves (R22).
+        let human_meets = is_human_set(journal, &note.id, "meets");
+        let human_where = is_human_set(journal, &note.id, "where");
         let successor = |old_last: Option<Date>| -> Option<Change> {
             let old_last = old_last?;
             let course = course_key(note.course.as_deref()?, codes);
@@ -3512,10 +3518,12 @@ pub fn detect_changes(
                 })?;
             let mut change = Mapping::new();
             let mut was = Mapping::new();
-            change.insert("meets".into(), to_value(meets_json(&next.series.meets)));
-            was.insert("meets".into(), to_value(meets_json(&note.meets)));
+            if !human_meets {
+                change.insert("meets".into(), to_value(meets_json(&next.series.meets)));
+                was.insert("meets".into(), to_value(meets_json(&note.meets)));
+            }
             if let Some(place) = next.series.where_.as_deref().filter(|w| !w.trim().is_empty()) {
-                if note.where_.as_deref().map(str::trim) != Some(place.trim()) {
+                if note.where_.as_deref().map(str::trim) != Some(place.trim()) && !human_where {
                     change.insert("where".into(), Value::String(place.trim().to_string()));
                     was.insert("where".into(), text_value(note.where_.as_deref()));
                 }
@@ -9369,6 +9377,44 @@ mod change_tests {
         assert_eq!(
             js(&changes[0].was),
             json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]})
+        );
+    }
+
+    #[test]
+    fn a_split_never_proposes_back_a_human_set_meets() {
+        // R22 with judge-once: the student set `meets` by hand, then the class split to new
+        // times. The card still moves `source_uid` (the external key, R22) and carries the room,
+        // but never the student's field.
+        let v = vault("judge-once-split-meets");
+        let mut journal = Journal::new(v.as_path());
+        let n = note(OLD);
+        quinn_set(&mut journal, &n.id, "meets", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let (changes, warnings) =
+            detect_on_with_journal(&split_file(), &set, &[GOOGLE, "personal"], TODAY, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(js(&changes[0].change), json!({"where": "Room 2", "source_uid": NEW}));
+        assert_eq!(js(&changes[0].was), json!({"where": "Room 101", "source_uid": OLD}));
+    }
+
+    #[test]
+    fn a_split_never_proposes_back_a_human_set_where() {
+        let v = vault("judge-once-split-where");
+        let mut journal = Journal::new(v.as_path());
+        let n = note(OLD);
+        quinn_set(&mut journal, &n.id, "where", "2026-09-20T12:00:00.000Z");
+        let set = set_of(vec![n]);
+        let (changes, _) =
+            detect_on_with_journal(&split_file(), &set, &[GOOGLE, "personal"], TODAY, &mut journal);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            js(&changes[0].change),
+            json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}], "source_uid": NEW})
+        );
+        assert_eq!(
+            js(&changes[0].was),
+            json!({"meets": [{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}], "source_uid": OLD})
         );
     }
 
