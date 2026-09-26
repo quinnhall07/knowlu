@@ -831,7 +831,10 @@ fn commitment_passes(
     let (codes, code_warnings) = cm::Codes::load(vault);
     warnings.extend(cm::code_warnings_hit(code_warnings, &file));
     let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
-    let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
+    let mut fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
+    // Phase 3 (Plan ruling R2-g): a registrar term is read only on a button press, and the file
+    // always holds that read, so its notes are watched on every run.
+    fresh_keys.extend(file.calendars.keys().filter(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX)).cloned());
     let watched = match read_failed {
         true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
         false => file.clone(),
@@ -855,9 +858,10 @@ fn commitment_passes(
     warnings.extend(card_warnings);
     // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
     // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make
-    // every course look uncovered.
+    // every course look uncovered, and while a registrar term has not begun (phase-3 D7, Plan
+    // ruling R2-h).
     let mut asks = 0;
-    if !read_failed {
+    if !read_failed && !cm::asks_wait_for_registrar(&file, today) {
         let ask_budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
         let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, today, ask_budget, ctx, journal);
         asks = n;
@@ -2776,6 +2780,24 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         rank_p16(&vault, p16_day(1), Vec::new());
         assert_eq!(md_names(&vault.join("approvals"), "commitment-ask-"), ["commitment-ask-when-does-cs-100-intro-to-computing-meet.md"]);
         assert!(page(&vault).contains("**Approvals: 1 pending**"), "{}", page(&vault));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Phase-3 D7 (Plan ruling R2-h): a vault holding a registrar term that has not started yet
+    /// files no ask card; the day after the term starts, the ask comes as before. ART 110 is a
+    /// registrar row with no vault course, so CS 100 stays uncovered and only the gate holds it.
+    #[test]
+    fn asks_wait_for_the_registrars_term_to_start() {
+        let vault = p16_vault("p3gate");
+        let text = include_str!("../tests/fixtures/registrar/banner-ua-registration.json");
+        let parsed = crate::registrar::parse_banner(&serde_json::from_str(text).unwrap(), "ua").unwrap();
+        let mut art = parsed.series.into_iter().find(|s| s.source_uid.ends_with("40006")).unwrap();
+        art.first = Some(Date::constant(2026, 9, 14));
+        crate::commitments::refresh_series(&vault, &[(art.calendar.clone(), vec![art])], P16_MONDAY);
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert!(md_names(&vault.join("approvals"), "commitment-ask-").is_empty(), "the term starts on 09-14");
+        rank_p16(&vault, Date::constant(2026, 9, 15), Vec::new());
+        assert_eq!(md_names(&vault.join("approvals"), "commitment-ask-"), ["commitment-ask-when-does-cs-100-intro-to-computing-meet.md"]);
         let _ = std::fs::remove_dir_all(&vault);
     }
 

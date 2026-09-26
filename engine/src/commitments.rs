@@ -1268,10 +1268,27 @@ fn section_kind(
     None
 }
 
+/// The course a registrar series names (Plan ruling R2-e): the code table's slug for its title's
+/// leading code, or `None` when the vault has no such course.
+pub fn registrar_course(series: &Series, codes: &Codes) -> Option<String> {
+    class_course(&series.title, &codes.table).map(|(slug, _)| slug)
+}
+
+/// A registrar series' class, without the classifier (spec §3: the registrar is the authority):
+/// `lab` when R1 titled it `"… Lab"`, else `class`.
+pub fn registrar_class(series: &Series, codes: &Codes) -> Class {
+    let kind = if series.title.ends_with(" Lab") { "lab" } else { "class" };
+    Class::Kind { kind: kind.to_string(), course: registrar_course(series, codes) }
+}
+
 /// Pure: no clock, no network, no model (`rank` never calls a model — Knowlu spec decision 11;
 /// this is the same discipline one layer up). Eligibility first (§3.4's bullets), then rules 0–6
 /// in order, first match wins, on the title trimmed of surrounding punctuation (C5).
 pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<Class> {
+    // Phase 3 (Plan ruling R2-e): a registrar row carries no instances and needs no eligibility.
+    if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
+        return Some(registrar_class(series, codes));
+    }
     if !eligible(series) {
         return None;
     }
@@ -1411,10 +1428,18 @@ pub struct SeriesFile {
     pub series: Vec<Series>,
 }
 
-/// The one precedence between two records of one key (I2): a `google:` calendar first, then the
-/// lower calendar key. Smaller wins.
-fn precedence(series: &Series) -> (bool, &str) {
-    (!series.calendar.starts_with("google:"), series.calendar.as_str())
+/// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
+/// `registrar:` calendar first, then a `google:` one, then any other; then the lower calendar key.
+/// Smaller wins (Plan ruling R2-f).
+fn precedence(series: &Series) -> (u8, &str) {
+    let tier = if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
+        0
+    } else if series.calendar.starts_with("google:") {
+        1
+    } else {
+        2
+    };
+    (tier, series.calendar.as_str())
 }
 
 impl SeriesFile {
@@ -1441,10 +1466,13 @@ impl SeriesFile {
     /// date) gets the horizon with **no** instances (fix round 1, M1; R21: inside the fresh
     /// horizon only the actual instances subtract, and that read found none). It stops blocking
     /// time at once; the record itself, with its old instances, stays in the file until it ages
-    /// into `ended` (§3.3), so P12 can still name its last instance.
+    /// into `ended` (§3.3), so P12 can still name its last instance. A registrar series carries
+    /// no instances and is left out, so its notes are busy by their weekly `meets` (phase 3,
+    /// Plan ruling R2-d).
     pub fn instances_map(&self) -> BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)> {
         self.by_key()
             .into_iter()
+            .filter(|(_, series)| !series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
             .filter_map(|(key, series)| {
                 let read = self.calendars.get(&series.calendar).copied().or(series.last_seen)?;
                 let stale = series.last_seen.is_none_or(|seen| seen < read);
@@ -2071,6 +2099,9 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 /// - An `ended` entry goes 28 days after `dropped`, or at once when its key is held again.
 /// - A record with no `last_seen` (the engine never writes one; only a hand-edited file) counts
 ///   as unseen for 14 days already, so a fresh read that does not return it ages it out at once.
+/// - A `registrar:` calendar (phase 3, D5) is configured while its term is in play (a series with
+///   an open `until` or one under 28 days past); a row its own fresh fetch no longer returns moves
+///   to `ended` that day, with the day before as its last instance.
 ///
 /// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
 /// then rename). A file that could not be *read* (an I/O error, not a parse failure) is left
@@ -2097,9 +2128,24 @@ pub fn refresh_series(
     let feeds = crate::calfeed::calendar_entries(vault);
     let names: BTreeSet<&str> = feeds.iter().map(|(name, _)| name.as_str()).collect();
     let google = feeds.iter().any(|(_, url)| url == "cloud:google");
-    let configured = |calendar: &str| match calendar.starts_with("google:") {
-        true => google,
-        false => names.contains(calendar),
+    // Phase 3 (Plan rulings R2-a, R2-b): a registrar calendar is one term, read only when the
+    // student fetches it. It counts as configured while it holds a series whose `until` is open or
+    // less than 28 days past; then it ages like a removed feed.
+    let registrar = |calendar: &str| calendar.starts_with(crate::registrar::CALENDAR_PREFIX);
+    let in_play: BTreeSet<String> = old
+        .series
+        .iter()
+        .filter(|s| registrar(&s.calendar) && s.until.is_none_or(|u| days_since(u, today) < ENDED_DAYS))
+        .map(|s| s.calendar.clone())
+        .collect();
+    let configured = |calendar: &str| {
+        if registrar(calendar) {
+            in_play.contains(calendar)
+        } else if calendar.starts_with("google:") {
+            google
+        } else {
+            names.contains(calendar)
+        }
     };
     let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
 
@@ -2122,6 +2168,9 @@ pub fn refresh_series(
     for held in old.series {
         match returned.get(held.calendar.as_str()) {
             Some(keys) if keys.contains(held.source_uid.as_str()) => {}
+            // D5 (Plan ruling R2-c): a registrar fetch is the whole term's truth; a row it no
+            // longer returns is a dropped course, at once.
+            Some(_) if registrar(&held.calendar) => aged_out.push(held),
             Some(_) if recent(held.last_seen) => series.push(held),
             Some(_) => aged_out.push(held),
             None if configured(&held.calendar) => series.push(held),
@@ -2149,7 +2198,12 @@ pub fn refresh_series(
         let entry = Ended {
             calendar: gone.calendar.clone(),
             dropped: today,
-            last_instance: gone.instances.iter().map(|i| i.date).max(),
+            // A registrar series has no instances: the day before the fetch that dropped it is the
+            // last day the registrar named it (Plan ruling R2-c).
+            last_instance: match registrar(&gone.calendar) {
+                true => Some(add_days(today, -1)),
+                false => gone.instances.iter().map(|i| i.date).max(),
+            },
             until: gone.until,
         };
         ended.insert(gone.source_uid, entry);
@@ -2299,8 +2353,8 @@ fn minutes(time: Time) -> i64 {
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
 /// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
 /// signature. Candidates are grouped by signature and one proposal is made per group, from the
-/// record [`SeriesFile::by_key`]'s precedence prefers (a `google:` calendar, then the lower
-/// calendar key; then the lower key). A key answered or held closes its signature, so a declined,
+/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a `google:`
+/// calendar, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
 /// confirmed or held twin suppresses the other.
 ///
 /// Routines feed the one window proposal (decision 3, [`window_proposal`]), never a commitment.
@@ -2348,7 +2402,7 @@ pub fn proposals(
         }
     }
 
-    fn rank(s: &Series) -> ((bool, &str), &str) {
+    fn rank(s: &Series) -> ((u8, &str), &str) {
         (precedence(s), s.source_uid.as_str())
     }
     let mut chosen: BTreeMap<Signature, (&Series, String, Option<String>)> = BTreeMap::new();
@@ -3166,6 +3220,19 @@ pub fn emit_asks(
     (filed, count, warnings)
 }
 
+/// Phase-3 D7 (Plan ruling R2-h): while the vault holds a registrar term that has not begun, the
+/// per-course asks wait for it. True while the earliest `first` among registrar series whose
+/// `until` is open or not yet past is `today` or later: asks resume the day after the term starts.
+pub fn asks_wait_for_registrar(file: &SeriesFile, today: Date) -> bool {
+    file.series
+        .iter()
+        .filter(|s| s.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .filter(|s| s.until.is_none_or(|u| u >= today))
+        .filter_map(|s| s.first)
+        .min()
+        .is_some_and(|start| today <= start)
+}
+
 /// What settling an approved `commitment-ask` card decided (phase-2 spec §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskSettled {
@@ -3360,8 +3427,9 @@ pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), S
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
-/// The key prefixes a calendar series carries (R6); only notes keyed so are watched for changes.
-const SERIES_KEY_PREFIXES: [&str; 2] = ["gcal-series:", "ics-series:"];
+/// The key prefixes a calendar or registrar series carries (R6, phase-3 R2-g); only notes keyed so
+/// are watched for changes.
+const SERIES_KEY_PREFIXES: [&str; 3] = ["gcal-series:", "ics-series:", "registrar:"];
 
 /// A `meets` list as the set of `(DAY_KEYS index, start, end)` triples — the comparison §3.5's
 /// signature makes, so neither entry order nor day order is a change.
@@ -3418,8 +3486,9 @@ fn text_value(text: Option<&str>) -> Value {
 }
 
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
-/// `gcal-series:`/`ics-series:`, over [`SeriesFile::by_key`] and `file.ended`. `fresh` is the set
-/// of calendar keys read fresh and complete this run. Returns `(changes, warnings)`, in note order.
+/// `gcal-series:`, `ics-series:` or `registrar:`, over [`SeriesFile::by_key`] and `file.ended`.
+/// `fresh` is the set of calendar keys read fresh and complete this run. Returns
+/// `(changes, warnings)`, in note order.
 ///
 /// - **changed** — the note's record is live on a calendar in `fresh` and differs in `meets`, in
 ///   a non-empty `where`, or in `until` (a `None` `until` is never proposed). An `until` that ends
@@ -3923,6 +3992,8 @@ fn create_confirmed_as(
             "Found as a weekly series on your Google Calendar.\n"
         } else if key.starts_with("card:") {
             "You told Knowlu when this class meets.\n"
+        } else if key.starts_with(crate::registrar::CALENDAR_PREFIX) {
+            "Found in your school's class schedule.\n"
         } else {
             "Found as a weekly series on your calendar.\n"
         };

@@ -303,3 +303,159 @@ mod tests {
         assert!(!looks_signed_out(" [] "));
     }
 }
+
+#[cfg(test)]
+mod d5_d7_tests {
+    //! Phase 3, D5 and D7 in `commitments.rs`, driven with R1's parse of the invented fixture.
+    use super::*;
+    use crate::commitments::{self as cm, Class, Codes, Commitment, Commitments, Instance, Level, SeriesFile};
+    use jiff::civil::date;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    const CAL: &str = "registrar:ua:202640";
+
+    fn fall() -> Vec<Series> {
+        parse_banner(&serde_json::from_str(super::tests::FIXTURE).unwrap(), "ua").unwrap().series
+    }
+
+    fn without(crn: &str) -> Vec<Series> {
+        fall().into_iter().filter(|s| !s.source_uid.ends_with(crn)).collect()
+    }
+
+    fn codes() -> Codes {
+        Codes { table: [("CS100".to_string(), "cs-100".to_string())].into_iter().collect(), names: BTreeMap::new() }
+    }
+
+    /// A scratch vault with only a timezone in `config/ingest.yaml`: no feed is configured.
+    fn vault(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-p3-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(dir.join("config").join("ingest.yaml"), "timezone: America/Chicago\n").unwrap();
+        dir
+    }
+
+    fn keys(file: &SeriesFile) -> Vec<&str> {
+        file.series.iter().map(|s| s.source_uid.as_str()).collect()
+    }
+
+    #[test]
+    fn the_registrar_arm_takes_kind_from_the_title_and_course_from_the_code_table() {
+        let f = fall();
+        let class = |uid: &str| cm::classify(f.iter().find(|s| s.source_uid.ends_with(uid)).unwrap(), &codes(), &[]);
+        assert_eq!(class("40001"), Some(Class::Kind { kind: "class".into(), course: Some("cs-100".into()) }));
+        assert_eq!(class("40002"), Some(Class::Kind { kind: "lab".into(), course: Some("cs-100".into()) }));
+        assert_eq!(class("40006"), Some(Class::Kind { kind: "class".into(), course: None }));
+    }
+
+    #[test]
+    fn a_registrar_calendar_stays_configured_while_its_term_is_in_play() {
+        let v = vault("inplay");
+        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 8, 20));
+        // Two months on, another calendar's fresh read rewrites the file: the term stays whole.
+        let (file, _) = cm::refresh_series(&v, &[("personal".to_string(), Vec::new())], date(2026, 10, 20));
+        assert_eq!(keys(&file).len(), 4, "{:?}", keys(&file));
+        assert_eq!(file.calendars.get(CAL), Some(&date(2026, 8, 20)));
+        // 28 days past the term's end (2026-12-04), it ages out like a removed feed: never `ended`.
+        let (file, _) = cm::refresh_series(&v, &[("personal".to_string(), Vec::new())], date(2027, 1, 1));
+        assert!(keys(&file).is_empty(), "{:?}", keys(&file));
+        assert!(file.ended.is_empty() && !file.calendars.contains_key(CAL));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_row_missing_from_a_fresh_fetch_of_its_term_ends_that_day() {
+        let v = vault("dropped");
+        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 8, 20));
+        let (file, _) = cm::refresh_series(&v, &[(CAL.to_string(), without("40002"))], date(2026, 9, 10));
+        assert_eq!(keys(&file).len(), 3);
+        let gone = file.ended.get("registrar:ua:202640-40002").expect("the dropped lab is in ended");
+        assert_eq!((gone.calendar.as_str(), gone.dropped), (CAL, date(2026, 9, 10)));
+        assert_eq!((gone.last_instance, gone.until), (Some(date(2026, 9, 9)), Some(date(2026, 12, 4))));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_next_terms_fetch_leaves_this_term_alone() {
+        let v = vault("twoterms");
+        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 11, 10));
+        let spring: Vec<Series> = fall().into_iter().map(|mut s| {
+            s.source_uid = s.source_uid.replace("202640", "202710");
+            s.calendar = "registrar:ua:202710".into();
+            s
+        }).collect();
+        let (file, _) = cm::refresh_series(&v, &[("registrar:ua:202710".to_string(), spring)], date(2026, 11, 15));
+        assert_eq!(keys(&file).len(), 8, "{:?}", keys(&file));
+        assert!(file.ended.is_empty(), "{:?}", file.ended);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_registrar_series_blocks_by_its_meets_not_by_instances() {
+        let mut file = SeriesFile::default();
+        file.calendars.insert(CAL.into(), date(2026, 9, 1));
+        file.series = fall();
+        assert!(file.instances_map().keys().all(|k| !k.starts_with(CALENDAR_PREFIX)), "{:?}", file.instances_map().keys());
+    }
+    /// D7: the registrar's CS 100 and a Google series with the same signature are one proposal,
+    /// and it is the registrar's.
+    #[test]
+    fn a_registrar_series_outranks_its_google_twin() {
+        let today = date(2026, 9, 1);
+        let reg = fall().into_iter().find(|s| s.source_uid.ends_with("40001")).unwrap();
+        let mut google = reg.clone();
+        google.source_uid = "gcal-series:invented".into();
+        google.calendar = "google:invented".into();
+        google.event_type = Some("default".into());
+        google.last_seen = Some(today);
+        google.instances = [31, 2, 4, 7, 9, 11].iter().map(|d| {
+            let day = if *d == 31 { date(2026, 8, 31) } else { date(2026, 9, *d) };
+            Instance { date: day, start: Some(reg.meets[0].start), end: Some(reg.meets[0].end) }
+        }).collect();
+        let mut file = SeriesFile::default();
+        for (cal, s) in [(CAL, reg), ("google:invented", google)] {
+            file.calendars.insert(cal.into(), today);
+            file.series.push(s);
+        }
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        let template = crate::weekcal::WeekCalendar::new(&serde_yaml_ng::Mapping::new(), Vec::new());
+        let got = cm::proposals(&file, &Commitments::default(), &codes(), &[], &template, &BTreeSet::new(), today, false);
+        let keys: Vec<&str> = got.iter().filter(|p| !p.is_window()).map(|p| p.source_uid.as_str()).collect();
+        assert_eq!(keys, ["registrar:ua:202640-40001"]);
+    }
+
+    /// D5 + §5.4: a confirmed registrar note whose row left the term files an end card at the day
+    /// before the fetch (R2-c's `last_instance`), and `registrar:` keys are watched (R2-g).
+    #[test]
+    fn a_dropped_registrar_course_ends_its_confirmed_note() {
+        let v = vault("endcard");
+        cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 8, 20));
+        let (file, _) = cm::refresh_series(&v, &[(CAL.to_string(), without("40002"))], date(2026, 9, 10));
+        let lab = fall().into_iter().find(|s| s.source_uid.ends_with("40002")).unwrap();
+        let note = Commitment {
+            id: "cmt_invented01".into(), path: PathBuf::from("commitments/cs-100-lab.md"), kind: "lab".into(),
+            level: Level::Hard, title: lab.title.clone(), course: Some("cs-100".into()), meets: lab.meets.clone(),
+            where_: lab.where_.clone(), from: lab.first, until: lab.until, source_uid: Some(lab.source_uid.clone()),
+        };
+        let set = Commitments { confirmed: vec![note], ..Commitments::default() };
+        let mut journal = crate::journal::Journal::new(&v);
+        let fresh: BTreeSet<String> = [CAL.to_string()].into_iter().collect();
+        let (changes, warnings) = cm::detect_changes(&file, &set, &codes(), &[], &fresh, date(2026, 9, 10), &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].change.get("until").and_then(|u| u.as_str()), Some("2026-09-09"));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn asks_wait_until_the_day_after_the_registrars_term_starts() {
+        let mut file = SeriesFile::default();
+        assert!(!cm::asks_wait_for_registrar(&file, date(2026, 8, 1)), "no registrar, no wait");
+        file.series = fall();
+        assert!(cm::asks_wait_for_registrar(&file, date(2026, 8, 1)));
+        assert!(cm::asks_wait_for_registrar(&file, date(2026, 8, 19)), "the term's first day still waits");
+        assert!(!cm::asks_wait_for_registrar(&file, date(2026, 8, 20)), "the day after it does not");
+        assert!(!cm::asks_wait_for_registrar(&file, date(2026, 12, 20)), "a term already over holds nothing");
+    }
+}
