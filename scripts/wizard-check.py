@@ -638,6 +638,7 @@ def check_week_wait(page, errors, succeed) -> list:
     if not page.is_visible("#week-setup"):
         return [f"the held confirm screen did not open (calls: {names(page)!r})"] + [f"page error: {e}" for e in errors]
     if not page.is_disabled("#ws-finish"): bad.append("Finish is live while the calendar read is pending")
+    if not page.is_disabled("#ws-later"): bad.append("m1: Not now is live while the calendar read is pending")
     page.evaluate("document.getElementById('ws-finish').click()"); page.wait_for_timeout(200)
     if "commitments_confirm" in names(page): bad.append("a Finish during the calendar read sent a write")
     page.evaluate("""(() => { const i = document.querySelector('#ws-window .wrow[data-day=mon] [data-part=start]');
@@ -646,6 +647,7 @@ def check_week_wait(page, errors, succeed) -> list:
     kept = page.evaluate("document.querySelector('#ws-window .wrow[data-day=mon] [data-part=start]').value")
     if kept != "06:45": bad.append(f"an edit made during the read was overwritten (Mon start {kept!r})")
     if page.is_disabled("#ws-finish"): bad.append(f"Finish stayed disabled after the read {'succeeded' if succeed else 'failed'}")
+    if page.is_disabled("#ws-later"): bad.append(f"m1: Not now stayed disabled after the read {'succeeded' if succeed else 'failed'}")
     if succeed and not page.query_selector("#week-setup .wsrow[data-key='gcal-series:cs100']"): bad.append("the held proposals never painted")
     for e in errors: bad.append(f"held confirm-screen page error: {e}")
     return bad
@@ -688,6 +690,7 @@ def check_week_setup(page, errors, finish) -> list:
             if c.get("not_mine") != []: bad.append(f"Finish declined {c.get('not_mine')!r}; blank rows must stay blank")
             if c.get("window") != WINDOW_SENT: bad.append(f"Finish sent the window {c.get('window')!r}")
         if page.is_visible("#week-setup"): bad.append("Finish did not close the screen")
+        if "close_registrar_window" not in names(page): bad.append("m2: Finish left the school window open")
         if "not a current proposal" not in page.inner_text("#delta"): bad.append("Finish did not show the skipped row's warning")
     else:
         page.click("#ws-later"); page.wait_for_timeout(300)
@@ -796,11 +799,16 @@ def check_finish_pending(page, errors) -> list:
     page.click("#ws-reg [data-reg-open]"); page.wait_for_timeout(200)
     page.click("#ws-finish"); page.wait_for_timeout(200)
     if not page.is_disabled("#ws-reg [data-reg-done]"): bad.append("Finish pending: I'm signed in is live under a Finish in flight")
+    if not page.is_disabled("#ws-later"): bad.append("Finish pending: m1: Not now is live under a Finish in flight")
     page.evaluate("document.querySelector('#ws-reg [data-reg-done]').click()"); page.wait_for_timeout(100)
     if "capture_registrar" in names(page): bad.append("Finish pending: a capture started under a Finish in flight")
     page.evaluate("window.__RELEASE_CONFIRM()"); page.wait_for_timeout(300)
     if page.is_disabled("#ws-finish"): bad.append("Finish pending: Finish stayed disabled after the refusal")
     if page.is_disabled("#ws-reg [data-reg-done]"): bad.append("Finish pending: I'm signed in stayed disabled after the refusal")
+    if page.is_disabled("#ws-later"): bad.append("Finish pending: m1: Not now stayed disabled after the refusal")
+    # m2: the school window was opened above; Not now closes it with the screen.
+    page.click("#ws-later"); page.wait_for_timeout(200)
+    if "close_registrar_window" not in names(page): bad.append("Finish pending: m2: Not now left the school window open")
     for e in errors: bad.append(f"Finish-pending page error: {e}")
     return bad
 

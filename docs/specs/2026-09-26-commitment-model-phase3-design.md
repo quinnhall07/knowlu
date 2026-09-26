@@ -226,3 +226,8 @@ Where a line above disagrees, this section wins.
    confirm screen or as a card, whatever its times. Accepted residual: a Google note the student
    confirmed *before* the fetch stays beside the registrar's note; the overlapping busy time
    subtracts nothing extra, and nothing proposes removing it.
+7. **The parent's privacy line on the registrar is superseded** (final review m6). The parent
+   spec's §9 line "the login stays in Credential Manager on the device" predates §11 Q1's ruling
+   and contradicts it: no myBama login is stored anywhere. The student signs in in the school's own
+   window, the session is thrown away when that window closes, and the fetch runs on the device.
+   Only rows that become confirmed notes sync. The parent's line is read as this one.

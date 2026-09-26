@@ -890,6 +890,7 @@
     weekSetup.finishing = on;
     EL("ws-reg").querySelectorAll("[data-reg-open], [data-reg-done]").forEach(function (b) { b.disabled = on; });
     EL("ws-finish").disabled = !finishMayRun();
+    EL("ws-later").disabled = !finishMayRun();   // final review m1: Not now waits as Finish does
   }
 
   // R5 review I1: a myBama fetch holds Finish and Not now until it and the reload settle. Finish
@@ -897,7 +898,7 @@
   function setupBusy(on) {
     weekSetup.fetching = on;
     EL("ws-finish").disabled = !finishMayRun();
-    EL("ws-later").disabled = on;
+    EL("ws-later").disabled = !finishMayRun();
   }
 
   function checkWeekSetup() {
@@ -949,7 +950,8 @@
     // window proposal would never be offered again.
     weekSetup.dirty = false;
     EL("ws-finish").disabled = true; weekSetup.reading = true;
-    var ready = function () { weekSetup.reading = false; if (finishMayRun()) { EL("ws-finish").disabled = false; } };
+    EL("ws-later").disabled = true;   // final review m1
+    var ready = function () { weekSetup.reading = false; EL("ws-later").disabled = !finishMayRun(); if (finishMayRun()) { EL("ws-finish").disabled = false; } };
     invoke("commitment_proposals", {}).then(function (r) {
       var ps = (r && r.proposals) || [];
       var win = ps.filter(function (p) { return p.window; })[0];
@@ -964,7 +966,11 @@
     }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; }).then(ready);
   }
 
-  function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
+  // Final review m2: the school's window goes with the screen (its controls do), wiped as on Cancel.
+  function closeWeekSetup() {
+    weekSetup.open = false; EL("week-setup").hidden = true;
+    invoke("close_registrar_window", {}).catch(function () {});
+  }
 
   function finishWeekSetup() {
     var mine = [], notMine = [];
@@ -1011,7 +1017,7 @@
       row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b === l)); });
       return;
     }
-    if (e.target.closest("#ws-later")) { weekSetup.dismissed = true; closeWeekSetup(); return; }
+    if (e.target.closest("#ws-later")) { if (finishMayRun()) { weekSetup.dismissed = true; closeWeekSetup(); } return; }
     var fin = e.target.closest("#ws-finish");
     if (fin) { finishWeekSetup(); }
   });

@@ -241,7 +241,9 @@ pub fn run(
         match cm::registrar_course(s, &stored.codes) {
             Some(_) if current.contains(s.source_uid.as_str()) => mine.push((s.source_uid.clone(), "hard".to_string())),
             Some(_) => {}
-            None => proposed += 1,
+            // Final review m5: "to check" is a row the student can still answer, not one declined.
+            None if current.contains(s.source_uid.as_str()) => proposed += 1,
+            None => {}
         }
     }
     let input = cm::ConfirmInput { mine, not_mine: Vec::new(), window: None };
@@ -665,6 +667,21 @@ mod run_tests {
         assert_eq!(crate::commitments::overview(&fresh, date(2026, 9, 1)).registrar, serde_json::Value::Null);
         let _ = std::fs::remove_dir_all(&v);
         let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// Final review m5: "n to check" counts only the course-less rows that are still current
+    /// proposals; one the student declined is not asked about again.
+    #[test]
+    fn to_check_counts_only_current_proposals() {
+        let v = vault("tocheck");
+        fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
+        let input = crate::commitments::ConfirmInput {
+            mine: Vec::new(), not_mine: vec!["registrar:ua:202640-40006".into()], window: None,
+        };
+        crate::commitments::confirm(&v, &input, date(2026, 9, 1), &WriteContext::new("quinn", "dashboard"), &mut Journal::new(&v)).unwrap();
+        let again = fetch(&v, super::tests::FIXTURE, date(2026, 9, 2)).unwrap();
+        assert_eq!((again.confirmed, again.proposed), (0, 1));
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     /// Final review I3: the overview's confirmed rows carry their `source_uid`, so the confirm

@@ -1891,3 +1891,18 @@ fn the_confirm_screen_lists_what_mybama_confirmed() {
     let reload = js.split("function reloadSetupRows(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(reload.contains("invoke(\"your_week\", {})") && reload.contains("paintRegistrarAdded("), "read after the fetch");
 }
+
+/// Phase 3 final review m1, m2: Not now is gated as Finish is (the first calendar read, a myBama
+/// fetch, a Finish), and closing the confirm screen closes the school's window.
+#[test]
+fn not_now_waits_as_finish_does_and_closing_the_screen_closes_the_school_window() {
+    let js = read("console.js");
+    for f in ["setupFinishing", "setupBusy"] {
+        let body = js.split(&format!("function {f}(")).nth(1).unwrap().split("\n  }").next().unwrap();
+        assert!(body.contains("EL(\"ws-later\").disabled = !finishMayRun();"), "m1: {f} gates Not now by the helper");
+    }
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("EL(\"ws-later\").disabled = true;"), "m1: Not now waits for the first read");
+    let close = js.split("function closeWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(close.contains("invoke(\"close_registrar_window\", {})"), "m2: the school window goes with the screen");
+}
