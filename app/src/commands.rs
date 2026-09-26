@@ -29,20 +29,15 @@ fn build_state_value(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let now = now_in(cs);
     let state = knowlu_engine::surface::build_state(&cs.vault, view, now.date(), &now, cs.seen_at().as_deref());
     let mut v = serde_json::to_value(&state).map_err(|e| e.to_string())?;
-    // The shell adds its own build, and the vault's git HEAD (cached by `refresh_head`, never
-    // read here — a `git` spawn has no business on a `state` poll), so the page can say "the
-    // rank engine has moved past this console" (spec §15 Q1). `Some(c) != Some(h)` only — a
-    // missing build or a non-git vault must never read as a false alarm (Task 11 decision).
-    let head = cs.head_sha.lock().map_err(|_| "lock")?.clone();
+    // `vault_head` and `engine_newer` went with git (C3′, Task 10): they compared the VAULT's git
+    // HEAD against this build, and a vault has not been a git repository since §4.1. The console's
+    // own build stays — the diagnostics blob and the issue report both name it.
     v["topline"]["console_build"] = json!(CONSOLE_BUILD);
-    v["topline"]["vault_head"] = json!(head);
-    v["topline"]["engine_newer"] = json!(matches!((CONSOLE_BUILD, head.as_deref()), (Some(c), Some(h)) if c != h));
     v["topline"]["seen_at"] = json!(cs.seen_at());
-    // Sync/backup/auto-sync/startup-missed come from the caches Task 10's commands fill —
+    // Sync/backup/startup-missed come from the caches Task 10's commands fill —
     // copied here verbatim, never recomputed (spec §3.1: nothing in `commands.rs` computes).
-    v["topline"]["sync"] = serde_json::to_value(&*cs.history.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
+    v["topline"]["sync"] = serde_json::to_value(&*cs.sync.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
     v["topline"]["backup"] = serde_json::to_value(&*cs.backup.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())?;
-    v["topline"]["auto_sync"] = json!(cs.auto_sync.load(std::sync::atomic::Ordering::SeqCst));
     v["topline"]["startup_missed"] = json!(cs.startup_missed.load(std::sync::atomic::Ordering::SeqCst));
     Ok(v)
 }
@@ -184,10 +179,11 @@ pub fn executor_ctx() -> WriteContext {
 fn mutate(cs: &ConsoleState, view: &str, f: impl FnOnce(&mut Journal) -> Result<(), String>) -> Result<Value, String> {
     // `vault_io` FIRST, then `cs.lock` — always that order, never the reverse (console spec §8/§9;
     // see `ConsoleState::vault_io`). A write is single-line surgery on a note this call has just
-    // read; `history::sync` rewrites the working tree wholesale. Serialising the two here means a
-    // housekeeping sync, a scheduler slot's pull/push and the `sync` command all queue against
-    // every write, while `cs.lock` alone still guards the read polls so a `state` poll never waits
-    // behind a git fetch.
+    // read; the engine's `sync` can write a pulled note or file an amend card under it. Serialising
+    // the two here means the `sync` command's own in-process call and every write queue against
+    // each other (the slot's own sync step is a CHILD PROCESS and takes no `vault_io` at all — see
+    // `ConsoleState::vault_io`, review M1), while `cs.lock` alone still guards the read polls so a
+    // `state` poll never waits behind a sync's own network call.
     let _io = cs.vault_io.lock().map_err(|_| "vault lock poisoned".to_string())?;
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     let mut journal = Journal::new(&cs.vault);
@@ -345,14 +341,14 @@ pub fn resolve_issue_inner(cs: &ConsoleState, view: &str, id: &str, resolution: 
     mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
 }
 
-/// Runs `history::sync` OUTSIDE `cs.lock` — git and file I/O can take seconds and must not block
-/// a concurrent `state` poll — then takes the lock only to rebuild `state`. `ok` is
-/// `last_error.is_none()`, not whether anything actually changed.
+/// Runs the engine's sync OUTSIDE `cs.lock` — a pull can take seconds and must not block a
+/// concurrent `state` poll — then takes the lock only to rebuild `state`. `ok` is
+/// `last_error.is_none()`, not whether anything actually moved.
 pub fn sync_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     let out = crate::state::run_sync(cs);
     let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
     let state = build_state_value(cs, view)?;
-    Ok(json!({ "ok": out.status.last_error.is_none(), "error": out.status.last_error, "state": state }))
+    Ok(json!({ "ok": out.last_error.is_none(), "error": out.last_error, "state": state }))
 }
 
 /// Runs `backup::tick` OUTSIDE `cs.lock` for the same reason as `sync_inner`. A missing backup
@@ -360,11 +356,12 @@ pub fn sync_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
 /// the tick itself fails against comes back `Ok` with `last_error` set.
 pub fn backup_now_inner(cs: &ConsoleState, view: &str) -> Result<Value, String> {
     // F11 (console spec §8/§9): a backup walks and copies the WHOLE working tree, which is exactly
-    // what `history::sync` rewrites under it — mirror a tree mid-rebase and the copy is a mixture
-    // of two commits. `vault_io` FIRST and scoped to the engine call, then `cs.lock` for the state
-    // rebuild: the one ordering, never the reverse (see `ConsoleState::vault_io`). Poison-tolerant
-    // like `run_sync`'s own hold — a backup is a read, and a writer that panicked elsewhere must
-    // not turn every later backup into an error the user cannot clear without restarting.
+    // what the engine's `sync` can write under it — mirror a tree mid-pull and the copy is a
+    // mixture of two states. `vault_io` FIRST and scoped to the engine call, then `cs.lock` for the
+    // state rebuild: the one ordering, never the reverse (see `ConsoleState::vault_io`).
+    // Poison-tolerant like `run_sync`'s own hold — a backup is a read, and a writer that panicked
+    // elsewhere must not turn every later backup into an error the user cannot clear without
+    // restarting.
     let r = {
         let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
         crate::state::run_backup(cs, jiff::Timestamp::now())
@@ -416,11 +413,11 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
 
 // Every MUTATING command carries `(async)` (final fix wave, B2). These are synchronous functions,
 // and Tauri 2 runs a plain `#[tauri::command]` on the webview's own thread — so a write that waits
-// on `vault_io` behind a git fetch, or on `process_approvals`, freezes the window itself. `(async)`
-// moves them onto Tauri's pool instead; the page's `invoke(...).then(...)` shape is unchanged, and
-// so are the `*_inner` functions the tests call. The four read commands (`state`, `note`,
-// `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take only `cs.lock`,
-// they never wait on git, and keeping them there keeps a poll cheap.
+// on `vault_io` behind a sync's own network call, or on `process_approvals`, freezes the window
+// itself. `(async)` moves them onto Tauri's pool instead; the page's `invoke(...).then(...)` shape
+// is unchanged, and so are the `*_inner` functions the tests call. The four read commands
+// (`state`, `note`, `mark_seen`, `ui_event`) and `get_settings` stay on the main thread: they take
+// only `cs.lock`, they never wait on the network, and keeping them there keeps a poll cheap.
 #[tauri::command] pub fn state(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { state_envelope(&cs, &sch, &view) }
 
 /// The whole of what `state` answers, `Scheduler` and all, without Tauri's `State` wrappers — so a

@@ -230,6 +230,31 @@ fn a_corrupt_settings_file_reports_an_error_and_falls_back_to_defaults() {
     assert!(s.backup_dir.is_none() && s.autostart && s.quit_at.is_none());
 }
 
+/// Fix round 1, review M4. `last_error` alone leaves a lapsed subscription or a signed-out machine
+/// invisible in a support report — a skip carries no `last_error`, and `HistoryStatus` (Task 10's
+/// predecessor) had no skip state to have missed in the first place.
+#[test]
+fn diagnostics_text_names_a_skipped_sync_as_well_as_a_failed_one() {
+    use knowlu::{state::ConsoleState, tray::diagnostics_text};
+    let v = scratch("diag-skip");
+    // Final review M3: a PID-keyed folder a reused PID would find again (`cea59a9`'s pattern) —
+    // start clean and leave nothing behind.
+    let data = std::env::temp_dir().join(format!("qo-diag-skip-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(v.clone(), data.clone());
+    *cs.sync.lock().unwrap() = knowlu_engine::sync::SyncStatus {
+        ok: false,
+        at: Some(knowlu_engine::journal::now_ts(None)),
+        lines: vec![],
+        last_error: None,
+        skipped: Some("no entitlement".to_string()),
+    };
+    let t = diagnostics_text(&cs);
+    assert!(t.contains("sync skipped: no entitlement"), "a lapsed subscription must be visible in the diagnostics blob: {t}");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 #[test]
 fn diagnostics_text_carries_no_note_title() {
     use knowlu::{state::ConsoleState, tray::diagnostics_text};
@@ -421,7 +446,7 @@ fn issue_flag_needs_a_category_and_snapshots_the_object_and_info_closes() {
 }
 
 #[test]
-fn sync_on_a_non_repo_vault_is_calm_and_backup_needs_a_folder() {
+fn sync_on_a_vault_with_no_account_is_calm_and_backup_needs_a_folder() {
     let v = scratch("sync");
     // Both folders are keyed by PID, and a persistent machine (the self-hosted CI runner, a dev
     // laptop) reuses PIDs: a folder left by an earlier run already holds a `backup_dir` in its
@@ -433,7 +458,10 @@ fn sync_on_a_non_repo_vault_is_calm_and_backup_needs_a_folder() {
     let cs = ConsoleState::open(v.clone(), data.clone());
     let env = sync_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], true);
-    assert_eq!(env["state"]["topline"]["sync"]["is_repo"], false);
+    // C3', Task 10: `topline.sync` is the engine's `SyncStatus`, not the old git-shaped
+    // `HistoryStatus` — a vault with no `config/cloud.yaml` is a calm, named skip, never an error.
+    assert_eq!(env["state"]["topline"]["sync"]["skipped"], "no account");
+    assert!(env["state"]["topline"]["sync"]["last_error"].is_null());
     let env = backup_now_inner(&cs, "today").unwrap();
     assert_eq!(env["ok"], false); assert!(env["error"].as_str().unwrap().contains("backup folder"));
     let mut patch = serde_json::Map::new(); patch.insert("backup_dir".into(), json!(bk.to_string_lossy()));
@@ -494,35 +522,40 @@ fn ui_events_land_ids_only_and_refuse_text() {
     assert_eq!(text.lines().count(), 1); assert!(text.contains(&cs.session) && !text.contains("Exam"));
 }
 
+// C3', Task 10: `vault_head` and `engine_newer` left with git (H9b) — they compared the vault's git
+// HEAD against this build, and a vault has not been a git repository since cloud design §4.1. The
+// two tests that exercised them (`engine_newer_compares_the_console_build_with_the_vaults_head_and_
+// is_false_without_a_repo`, `engine_newer_is_true_only_when_a_present_head_differs_from_the_console_
+// build`) go with them — `state::refresh_head` and `ConsoleState::head_sha` no longer exist.
+
+/// The topline's `sync` key is the engine's own `SyncStatus`, copied through verbatim rather than
+/// assembled field by field in `commands.rs` (console spec §3.1: nothing here computes) — every
+/// field `SyncStatus` carries round-trips exactly, including one this test sets by hand so the
+/// assertion is not just "whatever a scratch vault happens to produce" (the case the sync test above
+/// already covers).
 #[test]
-fn engine_newer_compares_the_console_build_with_the_vaults_head_and_is_false_without_a_repo() {
-    let v = scratch("head");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-head-data-{}", std::process::id())));
-    knowlu::state::refresh_head(&cs);
+fn topline_sync_is_the_engines_sync_status_verbatim() {
+    let v = scratch("sync-verbatim");
+    // Final review M3: start clean and leave nothing behind (`cea59a9`'s pattern).
+    let data = std::env::temp_dir().join(format!("qo-sync-verbatim-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(v.clone(), data.clone());
+    let status = knowlu_engine::sync::SyncStatus {
+        ok: true,
+        at: Some("2026-09-24T07:00:00.000Z".to_string()),
+        lines: vec!["sync: 1 record(s) and 0 note(s) down; 1 applied, 0 card(s), 0 refused".to_string()],
+        last_error: None,
+        skipped: None,
+    };
+    *cs.sync.lock().unwrap() = status.clone();
     let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], false, "a non-git scratch vault has no head: never a false alarm");
-    assert!(s["state"]["topline"]["vault_head"].is_null());
-}
-
-#[test]
-fn engine_newer_is_true_only_when_a_present_head_differs_from_the_console_build() {
-    // `refresh_head` alone can't exercise the true branch (a scratch vault has no `.git`, so the
-    // cached head is always `None`) — inject the head directly, `head_sha` being `pub`. `build.rs`
-    // always sets `KNOWLU_BUILD_SHA` (to a real short SHA, or "unknown" outside a checkout), so
-    // `CONSOLE_BUILD` is `Some` in every cargo build; assert that rather than assuming it.
-    let v = scratch("head-diff");
-    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-head-diff-data-{}", std::process::id())));
-    let build = knowlu::commands::CONSOLE_BUILD;
-    assert!(build.is_some(), "build.rs always sets KNOWLU_BUILD_SHA");
-
-    *cs.head_sha.lock().unwrap() = Some("deadbee".into());
-    let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], true, "a present head that differs from the console build must be flagged");
-    assert_eq!(s["state"]["topline"]["vault_head"], "deadbee");
-
-    *cs.head_sha.lock().unwrap() = Some(build.unwrap().to_string());
-    let s = state_inner(&cs, "today").unwrap();
-    assert_eq!(s["state"]["topline"]["engine_newer"], false, "a head equal to the console build is not newer");
+    let expected = serde_json::to_value(&status).unwrap();
+    assert_eq!(s["state"]["topline"]["sync"], expected, "the wire value must be exactly SyncStatus's own serialisation");
+    assert!(s["state"]["topline"].get("vault_head").is_none(), "vault_head left with git");
+    assert!(s["state"]["topline"].get("engine_newer").is_none(), "engine_newer left with git");
+    assert!(s["state"]["topline"].get("auto_sync").is_none(), "auto_sync left with git");
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 // The brief's `first_id` reads `state["must_do"]["groups"][0]["rows"][0]["id"]` — the first
@@ -537,11 +570,11 @@ fn first_id(cs: &ConsoleState) -> String {
     text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().trim().to_string()
 }
 
-/// B1 (console spec §8/§9): a console write and `history::sync` must never interleave — a sync
-/// rewrites the working tree wholesale while a write is single-line surgery on a note it has just
-/// read. `ConsoleState::vault_io` is the one lock both take; `run_sync` holds it for the whole of
-/// the engine call, so holding it here from a test thread stands in for a sync in flight and the
-/// write has to wait for it.
+/// B1 (console spec §8/§9): a console write and the engine's `sync::run_lines_with` must never
+/// interleave — a pull can write a note it has never seen or file an amend card while a write is
+/// single-line surgery on a note it has just read. `ConsoleState::vault_io` is the one lock both
+/// take; `run_sync` holds it for the whole of the engine call, so holding it here from a test
+/// thread stands in for a sync in flight and the write has to wait for it.
 #[test]
 fn a_write_waits_for_the_vault_lock_a_sync_would_be_holding() {
     use std::sync::Arc;

@@ -144,3 +144,7 @@ verify_jwt = false
 verify_jwt = false
 [functions.judge-rules]
 verify_jwt = false
+[functions.sync-push]
+verify_jwt = false
+[functions.sync-pull]
+verify_jwt = false

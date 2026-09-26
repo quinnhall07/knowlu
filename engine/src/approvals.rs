@@ -1206,6 +1206,51 @@ pub fn process_approvals(
     result
 }
 
+/// A rejected SYNC card re-asserts this device's value (R-C3′-exec-20, Task 6b).
+///
+/// A sync card (`created_by: agent:knowlu.sync`) offers another desktop's later value over this
+/// device's own, which sync withheld. Rejecting it means "keep mine" — but nothing on this device
+/// changes, so without a record nothing travels, and the other desktop, which won the field at its
+/// own end and has no card, keeps its value: A and B diverge for good, with the student's explicit
+/// choice lost. So for each field the card names, one journal-only `set` goes out through
+/// `write::reassert` — `old` the card's `to`, `new` the note's current value, a fresh `ts`, this
+/// context's actor — and the other desktop takes it cleanly or, if it has moved on, files a card of
+/// its own.
+///
+/// **A field is skipped when the note no longer holds the card's `from` for it** — compared exactly
+/// as `apply_amendment`'s own from-check compares: a later local edit is already travelling as its
+/// own record, and re-asserting over it would restate the wrong thing. A judge-once card is never
+/// passed here: rejecting one tells no other device anything. A card whose target has gone, or whose
+/// `changes` or target frontmatter no longer parse, re-asserts nothing — the rejection itself still
+/// settles the card.
+fn reassert_rejected_sync_card(
+    vault: &Path,
+    meta: &Mapping,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<(), WriteError> {
+    let Some(target) = resolve_amend_target(vault, crate::yaml::get(meta, "target")) else { return Ok(()) };
+    if !target.is_file() {
+        return Ok(());
+    }
+    let Ok((changes, _)) = changes_and_appends(meta) else { return Ok(()) };
+    let Ok(text) = pystr::read_text(&target) else { return Ok(()) };
+    let Ok((current, _)) = split_frontmatter(&text) else { return Ok(()) };
+    let target_rel = rel_path(vault, &target);
+    for (key, spec) in changes {
+        let name = key_text(key);
+        if !AMENDABLE_FIELDS.contains(&name.as_str()) {
+            continue;
+        }
+        let Some(to) = spec_get(spec, "to") else { continue };
+        if comparable(&name, spec_get(spec, "from")) != comparable(&name, crate::yaml::get(&current, &name)) {
+            continue;
+        }
+        crate::write::reassert(vault, &target_rel, &name, &crate::yaml::to_json(to), ctx, journal)?;
+    }
+    Ok(())
+}
+
 /// One note's state transition. `Err` stands in for Python's `except (OSError, ValueError,
 /// yaml.YAMLError)`, and every early `return Ok(())` is one of the original's `continue`s.
 #[allow(clippy::too_many_arguments)]
@@ -1241,6 +1286,9 @@ fn transition_note(
         } else if kind == COMMITMENT_ASK {
             // Phase-2 spec §5: the card:<slug> marker first, then the generic archive.
             crate::commitments::settle_ask_rejected(vault, meta, ctx, journal)?;
+        }
+        if kind == "amend" && str_field(meta, "created_by") == crate::sync::ACTOR {
+            reassert_rejected_sync_card(vault, meta, ctx, journal)?;
         }
         delete(vault, &rel, ctx, journal)?;
         result.rejected.push(stem);
