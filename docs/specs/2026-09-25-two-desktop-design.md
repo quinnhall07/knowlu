@@ -1,12 +1,12 @@
 # Two desktops on one account: design
 
-**Status: Draft for Quinn's review.** Written 2026-09-25 on branch `two-desktop-spec` at main `510a88c`; revised
-the same day after the spec review (`docs/reports/2026-09-25-two-desktop-spec-review.md`) and the controller's
-rulings on it. **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its *Amendment 2026-09-17* (ruling 2: the
+**Status: Quinn's answers of 2026-09-25 folded in (§9); for signature.** Written 2026-09-25 on branch
+`two-desktop-spec` at main `510a88c`; revised twice the same day after the spec review and its re-review
+(`docs/reports/2026-09-25-two-desktop-spec-review.md`) and the controller's rulings. **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its *Amendment 2026-09-17* (ruling 2: the
 account is the source of truth and each desktop keeps a mirror; ruling 4 and C5: fetch on device). **Implements:**
 Quinn's decision of 2026-09-24 on the C3′ whole-branch review's I2, "BOTH": deterministic ids for imported notes
-as the backstop, and a device fetch turn. It does not relitigate that decision. Where a detail was open, it is
-decided here with a recommendation and listed for Quinn in §9.
+as the backstop, and a device fetch turn. It does not relitigate that decision. Every detail that was open is
+decided; §9 records Quinn's answers and the one new question.
 
 ## 0. Where this comes from
 
@@ -47,19 +47,21 @@ What the code does today, read for this spec (all at `510a88c`):
 | **D2** | It covers the nine producers of §2.2, identified by `ids::import_key` over a closed vendor list, with every key prefixed by its producer. Hand-made and judgment notes keep random ids. | These are the notes an automatic step creates because an outside item exists: the ones two desktops create independently. | A producer left out keeps doubling in the backstop case; a hand-made note wrongly keyed would merge two different notes. |
 | **D3** | Producers create through a new `write::create_imported`, which puts the import id where `create` would have minted one and refuses an id the vault already holds. | One path; the journal record and the frontmatter keep today's shape; only the id's value changes. | A key that repeats legitimately (a re-proposal) would be refused, so every re-proposable key carries its date. |
 | **D4** | Paths keep today's naming and are **not** identity. Sync reconciles by id. | A path depends on per-desktop config and on collision order; fixing that costs readable names and still leaves the config. | The account can hold two text rows for one note in the rare backstop case; a restore keeps one. |
-| **D5** | `apply` and restore work **by id**: records, moves and deletes find the local note by its id (or its alias, D6), never by a path that holds a different id; a pulled text whose id is already held elsewhere is not written; a tombstone settles the note at its path unless other desktops placed a different id there and never this one. | It is what makes "sync merges it" true when paths differ, and it closes E5 without regressing a hand delete. | One id index per apply. Without it, a path difference becomes a second file and ids diverge again. |
-| **D6** | One imported item under two ids is joined by an **alias pre-pass** before step 4: the lower id wins, both desktops group records under it, and `Journal::records_for` follows the alias on both. The desktop holding the higher id then re-ids its note, which only tidies the id line. | It arises from doubles made before this ships and from the mixed-version rollout; a total order needs no coordination, and the journal already holds every `create` it needs. | Without it, a field set only on one copy before convergence would never reach the other: the silent divergence I2 named. |
+| **D5** | `apply` and restore work **by id**: records, moves and deletes find the local note by its id (or its alias, D6), never by a path that holds a different id; a pulled text whose id is already held elsewhere is not written; a tombstone settles the note at its path unless other desktops placed a different id there and never this one (ids compared as alias groups). | It is what makes "sync merges it" true when paths differ, and it closes E5 without regressing a hand delete. | One id index per apply. Without it, a path difference becomes a second file and ids diverge again. |
+| **D6** | One imported item under two ids is joined by an **alias pre-pass** before step 4: the lower id wins, both desktops group records under it, and `Journal::records_for` follows the alias on both. A desktop holding both files merges the loser into the winner and archives it; one holding only the loser re-ids it. | It arises from doubles made before this ships and from the mixed-version rollout; a total order needs no coordination, and the journal already holds every `create` it needs. | Without it, a field set only on one copy before convergence would never reach the other: the silent divergence I2 named. |
 | **D7** | A delete beats a concurrent edit (M5): the note is archived on both desktops and the edit lands on the archived copy. | Falls out of D5; nothing is lost. | A student who edits on one desktop what they deleted on the other finds it in Archive (§9 Q4). |
-| **D8** | Event proposals and verdicts hold across desktops: a uid named in any events-digest note is already proposed; `rank --no-digest` (new) runs on a desktop that did not hold `feeds`; and every desktop's `sync` pulls the account's event verdicts, verdict and strength only, from `judgments` into its own ledger. | The event ledger `state/events-seen.md` is device-local. Without this, a moved turn re-proposes and re-judges, and a desktop that never holds `feeds` shows no *Coming up* events. | Pulled lines carry no reason, so a digest line for one shows none (§9 Q11). |
+| **D8** | Event proposals and verdicts hold across desktops: a uid named in any events-digest note is already proposed; `rank --no-digest` (new) runs on a desktop that did not hold `feeds`; and every desktop's `sync` pulls the account's event verdicts, the verdict word only, from `judgments` into its own ledger. | The event ledger `state/events-seen.md` is device-local. Without this, a moved turn re-proposes and re-judges, and a desktop that never holds `feeds` shows no *Coming up* events. | Pulled lines carry no reason, so a digest line for one shows none (§9 Q11). |
 | **D9** | The account keeps a registry of computers: `devices(account_id, device, name, logins, first_seen, last_seen)`, written only by `/turn`, pruned daily by `pg_cron` 90 days after last seen. | The token is the one sync already sends; the name is already in every journal record; `logins` is what makes the turn useful. | Two Windows users on one PC share `COMPUTERNAME` and so one token (§3.2). |
 | **D10** | The privacy page gains the words of §3.3. `PRIVACY_VERSION` moves only if 2026-09-24 was published before they land. | Precedent: R-C3′-exec-41's N4/N5 folded into an unpublished version. | A consent log that names the wrong version. |
 | **D11** | The turn is **one lease per job**: `feeds` (ingest and judge) and one per portal (`zybooks`, `vhl`), claimed together in one single-statement compare-and-set on the server's `now()`, for 20 minutes, renewed before each machine step, released after the holder's trailing push. | Portal logins never leave a computer, so a computer without one cannot fetch it. In the common case one computer gets every job, which is Quinn's single holder. | If Quinn wants one lease (§9 Q1), a computer with no logins can win the turn and leave coursework unfetched for that slot. |
 | **D12** | Holder: `sync → turn → coursework → ingest → judge → rank → sync (push) → release`. The others: `sync → turn → rank --no-digest`, recording the named skips of §4.3 at exit 0. | The results reach the account as soon as the holder is done, not at its next slot. | Without the trailing push, the others see the fetch two slots late. |
 | **D13** | **Fail open**: a claim the service cannot answer (a 400 included) runs the machine steps as today, named `turn (unavailable: …; running anyway)`. | D1–D6 make a double run safe, and failing closed would stop all fetching during a lease outage. | While the lease is unavailable, judgments may be charged twice (§9 Q12). |
-| **D14** | A holder that sleeps mid-slot loses the turn when its lease lapses. On waking, a refused renewal, or an unanswered one after the holder's own monotonic time since its last grant passes that grant's `seconds_left`, skips its remaining machine steps as `(skipped: the turn passed to another computer)`. | The server's clock decides; the device measures only its own elapsed time, never compares clocks. | The step in flight may be killed at `CHILD_TIMEOUT` on resume (an amber tray until the retry); D1–D6 absorb the overlap. |
-| **D15** | A desktop that was refused a turn runs one **catch-up** `sync → rank` when the holder's lease ends, looking at most three times and never later than 60 minutes after its slot. | Otherwise "the others get the results through sync" means at their next slot, up to 18 hours later. | One extra pull per refused slot. |
-| **D16** | The first slot at Finish and *Run now* claim like any slot. *Sync now* never runs a machine step and never claims, and answers "a slot is running" during a slot (§5.4, M6). The quit push releases nothing; expiry does. | *Sync now* is transport only today (`commands.rs:303`), and the lease must not change that. | None beyond D13. |
-| **D17** | `config/` is split by owner. In this stream every desktop applies approved coursework-map cards to its own config at every slot, and a restoring wizard writes the account's calendar entries. Account-level config held by the account is a recommended companion stream (§9 Q10). | The turn makes the holder's config decide what is fetched and how it is labelled; these two fixes cover what the student approves after onboarding. | A mapping typed differently in two wizards still flips a title when the turn moves, until the companion lands. |
+| **D14** | A holder that sleeps mid-slot loses the turn when its lease lapses. On waking, a refused renewal, or an unanswered one after the holder's own elapsed time since its last grant (the larger of `Instant` and wall-clock elapsed) passes that grant's `seconds_left`, skips its remaining machine steps as `(skipped: the turn passed to another computer)`. | The server's clock decides; the device measures only its own elapsed time, never compares clocks, and the wall clock counts a sleep `Instant` may not. | The step in flight may be killed at `CHILD_TIMEOUT` on resume (an amber tray until the retry); D1–D6 absorb the overlap. |
+| **D15** | A desktop refused a turn **peeks every 60 seconds** from its slot's end and runs one **catch-up** `sync → rank` as soon as every refused job is released or expired, never later than 60 minutes after its slot began (Quinn, Q2). | The holder releases right after its trailing push, so the others have its results about a minute after it finishes. | Up to ~60 peeks per refused slot, each a cheap `/turn` call with nothing to claim or release. |
+| **D16** | The first slot at Finish and *Run now* claim like any slot. *Sync now* never runs a machine step and never claims, and says Knowlu is busy while a slot, a catch-up or an update install holds `sch.running` (§5.4, M6). The quit push releases nothing; expiry does. | *Sync now* is transport only today (`commands.rs:303`), and the lease must not change that. | None beyond D13. |
+| **D17** | **The account holds the shared settings** (Quinn, Q10). `config/` splits by owner: the device-owned keys move into a new, never-synced `config/device.yaml`, by a text-only migration, and every other `config/` file is shared. | The turn makes the holder's config decide what is fetched and how it is labelled, and Quinn ruled that the profile never differs between computers. | Two computers are not called working until this ships. |
+| **D18** | The six shared files travel through C3′'s sync as whole texts, one `sync_notes` row per path, with a three-way hash check against the last text synced: an unchanged local file takes the account's text; a changed one pushes; both changed means the account's text wins and the local text is kept under `state/config-conflicts/`. | It reuses C3′'s transport and never parses or re-dumps a file; a whole-file copy is not a re-dump. | A hand edit made on two computers at once keeps only one; the other is in the conflict file, named in a line. |
+| **D19** | A second computer's wizard asks, after sign-in, whether the account already holds a vault; if it does, it skips every question the account answers and asks only for this computer's own logins. | Students bring only logins (the login-only onboarding direction). | A new wizard command, and a panel path the headless walk must cover. |
 
 ## 2. Deterministic ids for imported notes (D1–D8)
 
@@ -152,7 +154,8 @@ before step 4, and follows these rules:
   and for one id under two paths the row with the **highest** `rev` wins, E2's rule (`sync.rs:1062-1067`).
 - **(d) A tombstone names a note, not a place** (E5's tombstone half). A pulled tombstone for `P` settles the
   local note at `P` as today, **unless** other desktops' records place a different id at `P` and none of them
-  ever placed this note's id there. That tombstone is about another note, and this one stays:
+  ever placed this note's id there, with ids compared as alias groups (§2.6), so an I2 double `a ≡ b` counts as
+  one note (re-review m1). That tombstone is about another note, and this one stays:
   `sync: <P> — the account settled a different note there; this one stays`. "Other desktops' records" are
   journal records whose `device` is not this computer's name (§3.2's caveat applies). So a note created on B
   and deleted by hand in Explorer on A, with no `delete` record, is still archived on B.
@@ -166,9 +169,11 @@ The upgrade re-ids nothing by itself, and on one desktop an old random-id note n
 find it by `source_uid`). Two ids for one item arise across desktops: I2's doubles made before this ships, and
 the rollout, where an old build mints a random id for an item an updated desktop mints deterministically.
 
-- **The pre-pass.** Before step 4, beside the N2 seed pre-pass, `apply` builds `import_key → ids` from the vault's
-  notes and from every `create` record in the journal, this page's included. A `create` record's `new` is the
-  whole frontmatter (`write.rs:416-418`), so `import_key` reads it as it reads a note. A key with two or more ids
+- **The pre-pass.** Before step 4, beside the N2 seed pre-pass, `apply` builds `import_key → ids` from every
+  `create` record in the journal, this page's included, and from a note only when its id has no `create` record
+  (re-review m3: a `create` record's `new` is the whole frontmatter as minted, `write.rs:416-418`, so a later hand
+  edit of `source_uid` or `created_by` never moves a note between keys, and both desktops read the same immutable
+  input). A key with two or more ids
   is an **alias group**, and its lowest id (as strings; the shared `kind_` prefix makes this compare the hex) is
   the winner. Both desktops compute the same group and winner, with no coordination and no knowledge of which id
   is deterministic. The map is saved as `state/id-aliases.json`: generated, device-local, never synced, rebuilt by
@@ -182,10 +187,17 @@ the rollout, where an old build mints a random id for an item an updated desktop
   (`issues.rs:217`) and anything else naming the old id keep working (review M3).
 - **A group found for the first time is reconciled in full**, against every other desktop's records for all of
   its ids, not only this page's. `sync` runs the pre-pass on every run, pulled rows or not, so doubles made before
-  this ships are found at the first sync after the upgrade. This is §9 Q9's mechanism.
-- **Then the id line is tidied.** The desktop whose note carries a losing id re-ids it to the winner by one
-  `write_literals` of `id` under `sync::ACTOR` (journalled, never sent): the repair `ids::ensure_ids` makes for a
-  duplicate, through `write`. File, body and path stay, and nothing changes that the alias had not joined.
+  this ships are found at the first sync after the upgrade (Q9's mechanism). The full reconcile is idempotent:
+  converged fields file no card and any supersede record it appends is harmless, so a lost `state/id-aliases.json`
+  costs one more full pass, never a wrong write (re-review m2).
+- **Then the files are settled** (re-review N1). Before the upgrade, `apply` wrote the other desktop's text
+  wherever its path was free (`sync.rs:2301-2317`), so a desktop can hold **both** files of a group.
+  - **Both files here:** the loser file's fields are reconciled into the winner file (the full reconcile above: a
+    field set only on the loser reaches the winner, or becomes one card), and the loser file is settled through
+    `write::delete` under `sync::ACTOR`. It is never re-id'd, which would leave one id on two files for
+    `ensure_ids` (`ids.rs:171-188`) to split again at random.
+  - **Only the loser here:** it is re-id'd to the winner by one `write_literals` of `id` under `sync::ACTOR`
+    (journalled, never sent), the repair `ensure_ids` makes for a duplicate, through `write`.
 - **Rollout.** An old build has no pre-pass. The updated desktop joins the group at once; the old one converges
   when it updates (the updater checks daily), and shows the item twice until then, exactly as today.
 
@@ -209,12 +221,14 @@ desktop that never holds `feeds` would show no events at all.
 - **Only the `feeds` holder emits.** `rank --no-digest` (new; the default is unchanged, so `oracle.rs` and the
   frozen references are untouched) runs on a desktop that did not hold `feeds` this slot (§4.3).
 - **Verdicts travel through the account, without text.** The server already holds each event verdict: a
-  `judgments` row, `kind = 'event'`, whose `fields` keep `verdict` and `strength` and, by design, no `why`
-  (`fieldsOf`, `_shared/judge_pipeline.ts:77-78`). Every desktop's `sync` step, after its pull, calls
-  `GET /judge-event?after=<cursor>` (a new route on the existing function) for the account's `answered` event rows
-  judged after its cursor (`item_id`, `verdict`, `strength`, `title_prefix`, `judged_at`, 500 a page). For a uid
-  with no ledger line it appends one through `eventledger::record_verdict` with an empty `why` (legal: it is then
-  omitted) and the title prefix, or `(untitled)`. The cursor is a new, device-local `Cursor` field.
+  `judgments` row, `kind = 'event'`, whose `fields` keep `verdict` and, by design, no `why` (`fieldsOf`,
+  `_shared/judge_pipeline.ts:77-78`); an event judgment has no `strength` (`judge_validate.ts:121-128`). Every
+  desktop's `sync` step, after its pull, calls `GET /judge-event?after=<judged_at>,<id>` (a new route on the
+  existing function) for the account's `answered` event rows after that pair (`item_id`, `verdict`, `judged_at`,
+  `id`; 500 a page, ordered by `(judged_at, id)` so ties at a page boundary are never skipped). For a uid with no
+  ledger line it appends one through `eventledger::record_verdict` with an empty `why` and empty `strength` (both
+  then omitted) and the title from its own feed or roster, else `(untitled)`: no text comes down. The cursor is a
+  new, device-local `Cursor` field (re-review m4).
   - **It buys:** a new `feeds` holder judges only what no desktop has judged, so the account's 80-a-day
     `DAILY_CAP.event` (`_shared/judge_caps.ts:39`) is never spent twice on one event, and every desktop shows the
     same *Coming up*.
@@ -222,7 +236,8 @@ desktop that never holds `feeds` would show no events at all.
     "Delete a line to force a re-judge" (`eventledger.rs:46-47`) still works: the cursor has passed that verdict,
     so the pull never restores the line, and this desktop re-judges when it next holds `feeds`. A pulled verdict
     never replaces a line the ledger has.
-  - **It costs:** one GET per slot, and a digest line for a pulled verdict shows no reason (§9 Q11).
+  - **It costs:** one GET per slot, and a digest line for a pulled verdict shows no reason (§9 Q11). A lost cursor,
+    or a fresh desktop, pulls from the start and so restores lines a student had deleted on it.
 
 ## 3. The device registry (D9, D10)
 
@@ -262,8 +277,8 @@ select cron.schedule('knowlu-devices-prune', '47 4 * * *',
 
 `COMPUTERNAME` is per machine. Two Windows users on one PC and one account share a token, so both get the turn
 and D1–D6 merge the double run. They also share the journal's `device`, which C3′ reads as "this device"
-(`sync.rs:1961-1968`, `reconcile.rs:55-57`), so this is a C3′ limit too (review M6). Rare, accepted; §6.4
-works around it.
+(`sync.rs:1961-1968`, `reconcile.rs:55-57`), so this is a C3′ limit too (review M6). Rare and accepted; the
+proof runs on two physical computers (§6.4), and only its fallback route needs `KNOWLU_DEVICE` to avoid it.
 
 ### 3.3 The privacy page (D10)
 
@@ -272,12 +287,15 @@ raise, also carries the name Windows gives the computer it was made on, so that 
 apart."* becomes:
 
 > Each change in the journal, and each issue you raise, also carries the name Windows gives the computer it was
-> made on. Your account also keeps a list of the computers you use Knowlu on: each one's Windows name, when it was
-> first and last seen, and which of your coursework sites it holds a login for, never the login itself. Knowlu
-> uses that list so that your computers take turns fetching your coursework, school calendar and email and having
-> them judged, instead of each doing the same work. Each computer still reads your event and calendar feeds for
-> itself when it plans your day. A computer leaves the list 90 days after it was last seen, and deleting your
-> account deletes the list.
+> made on. Your account also keeps your settings, so that every computer plans your day the same way: your time
+> zone, your school, which course each coursework book or section belongs to, your calendars, the campus event
+> feeds you follow, when your day refreshes, and your weekly planning template. What belongs to one computer
+> stays on it: which logins it holds and where Windows keeps them. Your account also keeps a list of the computers you use Knowlu on: each one's Windows name, when it
+> was first and last seen, and which of your coursework sites it holds a login for, never the login itself.
+> Knowlu uses that list so that your computers take turns fetching your coursework, school calendar and email and
+> having them judged, instead of each doing the same work. Each computer still reads your event and calendar
+> feeds for itself when it plans your day. A computer leaves the list 90 days after it was last seen, and
+> deleting your account deletes the list and your settings.
 
 In *Your coursework logins* (`:40`), after "there is no column in our database for one", add:
 
@@ -286,7 +304,8 @@ In *Your coursework logins* (`:40`), after "there is no column in our database f
 
 The *Export* bullet (`:103`) adds "and the list of your computers". `engine/tests/site.rs` pins all three, in the
 shape of `the_review_amendments_i2_i3_and_i4_are_on_the_page`. Each clause holds under per-job turns, under D13
-(a purpose, "so that", not a promise), and beside `rank`'s own feed reads (the fourth sentence).
+(a purpose, "so that", not a promise), beside `rank`'s own feed reads, and under D17's split (the settings
+sentence names exactly the shared files of §4.8; `sync_notes` rows are already purged with the account).
 
 **`PRIVACY_VERSION`** (`app/src/account.rs:25`, `2026-09-24`): if that version is still unpublished when this
 merges, the words fold into it, as R-C3′-exec-41 did for N4 and N5; otherwise the constant moves to the new
@@ -367,8 +386,7 @@ The device side is `app/src/turn.rs` (new; no Tauri command), authenticating thr
    release. The push is what lets the others take the results at their next pull instead of two slots later.
 4. **A computer holding nothing:** `rank --no-digest`, and the catch-up of §4.6.
 
-A computer that does not run `coursework` this slot still applies approved map cards to its own config first
-(§4.8).
+Every computer runs `coursework` against the same shared config (§4.8), whichever holds the turn.
 
 The exact steps recorded, every one at exit 0 (so never retry backoff and never an amber tray):
 
@@ -411,64 +429,111 @@ A lid closed mid-slot freezes the children. The lease lapses 20 minutes after th
 
 - **The renewal** is the same claim statement: granted if nobody took the job meanwhile, refused otherwise. On
   resume the network is often still coming up, so a renewal the service **cannot answer** counts as granted only
-  while the elapsed time since the last grant, on a local `std::time::Instant` taken when it arrived, is under
-  that grant's `seconds_left`; past that it counts as refused. One local duration against one the server gave:
-  no clocks compared.
+  while this computer's elapsed time since the last grant is under that grant's `seconds_left`; past that it
+  counts as refused. The elapsed time is the **larger** of two local deltas taken when the grant arrived: a
+  `std::time::Instant` (on Windows `QueryPerformanceCounter`, which may not advance through a real sleep) and
+  `SystemTime` (the wall clock, which does). Neither is compared with the server's clock: one local duration
+  against one the server gave. A wall clock that jumps forward can only make the holder yield early, which is
+  safe because D1–D6 cover a double run; one that jumps back is outvoted by `Instant` (re-review N3).
 - **A refusal** skips the remaining steps for the lost jobs as `(skipped: the turn passed to another computer)`.
   `rank` still runs, with `--no-digest` if `feeds` was lost. The trailing push still runs, since it carries what
   the sleeper wrote, and the release touches only rows the sleeper still holds.
 - **The step in flight** is timed on the app's own `Instant` (`CHILD_TIMEOUT`, `scheduler.rs:28`, `:561-569`).
-  After a suspension, or a sleep that `Instant` counts, it is killed on resume as `-2`, which sets
+  If `Instant` counts the sleep past `CHILD_TIMEOUT`, the step is killed on resume as `-2`, which sets
   `engine_ok = false` (`:821-823`): an amber tray and retry backoff. The retry is a new slot that claims afresh,
-  records the skip lines and turns the tray green. Whether `Instant` counts a real Windows sleep is unverified;
-  `pssuspend` (§6.4) stops the app too, which makes the kill certain. What the killed step wrote, D1–D6 merge.
+  records the skip lines and turns the tray green. If `Instant` does not count it, the step simply finishes.
+  Which one Windows does is what §6.4's real sleep records. What the step wrote, D1–D6 merge.
 
-### 4.6 The catch-up (D15)
+### 4.6 The catch-up (D15; Quinn, Q2)
 
-A computer refused any job it asked for records the largest refused `seconds_left`, and the scheduler's tick runs
-a **catch-up** 60 seconds after it: a peek, waiting again while a refused job is still held (at most three looks,
-never past 60 minutes after the slot began), then the session pre-flight, `sync` both ways and `rank --no-digest`,
-recorded as their own `RunSummary` with `reason: "catch-up"`. It never claims, so it can never become a second
-fetch, and a slot that starts first supersedes it.
+A computer refused any job it asked for **peeks every 60 seconds** from its slot's end (`/turn` with empty
+`claim` and `release`). As soon as every job it was refused is released or expired, it runs a **catch-up**: the
+session pre-flight, `sync` both ways and `rank --no-digest`, recorded as their own `RunSummary` with
+`reason: "catch-up"`. The ceiling is 60 minutes after the slot began. The holder releases right after its
+trailing push (§4.3), so the others have its results about a minute after it finishes, not after the lease
+length. The cost is up to ~60 peeks per refused slot, each a cheap call that claims and releases nothing. A
+catch-up never claims, so it can never become a second fetch. The catch-up run itself holds `sch.running` like a
+slot (re-review m5); the peeks before it do not, so *Sync now* stays usable while it waits. A slot that starts
+first supersedes it.
 
 ### 4.7 The first slot, *Run now*, *Sync now*, quit (D16)
 
 - **The first slot at Finish** and ***Run now*** claim like any slot. On a restored computer a refusal costs
   nothing: the restored day is the account's, and the catch-up brings the holder's run.
 - ***Sync now*** stays transport only (`commands::sync_inner` → `state::run_sync` → `sync`): no machine step, no
-  claim. A test pins it.
+  claim. While `sch.running` is held (a slot, a catch-up, or the update-install hold, `scheduler.rs:86-88`) it
+  answers "Knowlu is busy; try again in a minute". A test pins both.
 - **Quit.** `state::quit_flush` pushes as today and releases nothing; the lease lapses within 20 minutes.
 
-### 4.8 Whose config the holder uses (D17)
+### 4.8 The account holds the shared settings (D17–D19; Quinn, Q10)
 
-Under a moving turn the holder's `config/ingest.yaml` decides which books it fetches (`coursework.rs:664-675`) and
-each title's label (`zybooks.rs:296`), which the update branch rewrites whenever it differs (`:424-429`). An
-approved mapping reaches only the config of the computer running `coursework` (`apply_map_cards`, `:1170`), so
-another computer skips that book whenever it wins and files a second card once the first card's 30 days lapse.
-The C3′ review's I2 named this, and a restored desktop whose `calendars:` lacks `- name: personal`.
+**Why.** Under a moving turn the holder's `config/ingest.yaml` decides which books it fetches
+(`coursework.rs:664-675`) and each title's label (`zybooks.rs:296`, rewritten whenever it differs, `:424-429`); an
+approved mapping reached only the config of the computer running `coursework` (`apply_map_cards`, `:1170`); a
+restored desktop lacked `- name: personal`. Quinn ruled (Q10) that the profile never differs between computers,
+so the account holds it, in this stream: two computers are not called working until it ships.
 
-| Owner | Values in `config/` |
+**D17: the split.**
+
+| File | Owner |
 |---|---|
-| **the account** (one value for every computer) | `course_map`; each coursework source's `courses:`/`sections:` mappings, and the labels derived from them; `timezone`; the `calendars:` entries that name account-held feeds (`cloud:personal`, `cloud:google`); `events.yaml`'s sources; `campus.yaml`; `planning.yaml`, `week_template.yaml` |
-| **the computer** | each source's `credential_target` and `enabled` (C5 §7 keeps both device-side); `runners.yaml`'s `device:` and `scheduler:`; `cloud.yaml`, whose `session_credential_target` names the profile id; a vault-held `ics_url` fallback |
+| `config/ingest.yaml`, less three device keys | **shared**: `timezone`, `course_map`, each coursework source's `courses:`/`sections:` mappings (so every label), and `calendars:` (account-held feeds, `cloud:personal`, `cloud:google`) |
+| `config/runners.yaml`, less two device keys | **shared**: the slot `times`, `tz` and `grace_minutes` |
+| `config/events.yaml`, `campus.yaml`, `planning.yaml`, `week_template.yaml` | **shared**, whole |
+| `config/device.yaml` (new) | **this computer**: each source's `enabled` and `credential_target` (C5 §7 keeps both device-side), a vault-held `ics_url` fallback, and the `local` runner's `device:` and `scheduler:` |
+| `config/cloud.yaml` | **this computer**: its `session_credential_target` names the profile id |
 
-**This stream's two fixes**, the smallest that make every holder fetch and label what the student approves:
+- **Readers** (`load_coursework_config`, `ingest`'s `ics_url`, `runs::runner_settings` and so `device_ok` and
+  `mode`) take a device key from `config/device.yaml` first, and from its old place only when `device.yaml` lacks
+  it, so a vault not yet migrated keeps working.
+- **The migration**, `config::move_device_keys` (new, engine), runs at the start of every `sync` until done; the
+  wizard births a split vault. Each device-owned line in a shared file is appended to `config/device.yaml`
+  (created on first use) and deleted from the shared file: line-level text edits, the kind `write_mapping` makes.
+  No file is parsed and re-dumped. It is idempotent: a key already in `device.yaml` is only deleted.
+- **The wedge guard.** `build_push` never sends a shared file that still holds a device-owned key; it stays local,
+  named in a line, until the migration has run. A device value never reaches the account, even if the migration
+  fails.
 
-- **Approved map cards apply everywhere.** A new `coursework::apply_approved_mappings(vault)` inserts the mapping
-  of every approved `coursework-map` card, in `approvals/` or `archive/`, that this config lacks: `write_mapping`'s
-  text insertion, idempotent, config only (archiving the card stays with `apply_map_cards`). `coursework` calls it
-  first; on a computer not running `coursework`, the slot calls it in-process under `vault_io`. Cost: one read of
-  `approvals/` and `archive/` per slot.
-- **A restoring wizard writes the account's calendars.** At Finish, a cloud vault's `calendars:` gets
-  `cloud:personal` when the account holds a `calendar_ics` source (`GET /account/sources`, a new device helper)
-  and `cloud:google` when `account::google_connected` says so, whether or not this wizard pasted one.
+**D18: the transport.** The six shared paths are a compiled-in list, `sync::SHARED_CONFIG` (new), and travel
+through C3′'s `sync_notes`, one text row per path, beside the notes.
 
-**What stays per computer until a companion stream:** a value typed differently in two wizards (a course code, a
-label, a timezone). That book is fetched only where config maps it, and its title flips when the turn moves between
-labels. The backstop stays honest: D1 keys on `source_uid`, never config, so a flip changes one note's `title` and
-never makes a second note. The full answer, account-level config held by the account and written into `config/`
-by text insertion (ruling 3 already names `config/` parameters as cloud data), is a stream of its own, recommended
-as a **companion finished before any student is told two desktops work** (§9 Q10).
+- **Server.** A migration widens `sync_notes`' path check to accept exactly those six paths besides the note
+  folders, and `_shared/sync_rows.ts` the same; `is_note_path` gains the list. Nothing else changes: the rows are
+  the account's data under C3′'s RLS, ceiling, purge and export.
+- **Push.** `build_push` sends a shared file whose hash differs from the cursor's (`Cursor.notes` records the last
+  text sent per path, and now also the last received). A shared file is never tombstoned: a missing one comes
+  back with the next pull, never deleted everywhere.
+- **Pull: a three-way check** against the base, the cursor's hash for that path. A shared file has no `id:`, so
+  §2.5's rules never touch it; this check replaces them.
+  - The local file equals the base, or is missing: write the account's text verbatim (a whole-file copy of
+    another computer's file, never a re-dump) and record it as the base.
+  - The local file changed and the account's text equals the base: nothing to take; the push sends local.
+  - Both changed, a **conflict**: the account's text wins, the local text is copied to
+    `state/config-conflicts/<file>-<ts>.yaml`, and a line says `sync: config/<file> — another computer's
+    settings won; yours are in state/config-conflicts/<name>`.
+  - **No base yet** (the first config sync after the upgrade) counts as "changed here": the account's text wins if
+    the account has one, and the local text is kept unless byte-identical. So the first computer to sync after
+    the upgrade provides the settings (§9 Q13).
+- **Restore.** `restore_into` records the shared files as seeds (`state/seed-hashes.json`), as it does notes, so
+  the account's settings replace the defaults the second wizard wrote, and E1's hold-back keeps an untouched seed
+  from being pushed before the pull reaches the end.
+- **Why not a field-level account store.** It needs a server schema per setting, and a device writer that maps
+  every field to a text insertion or re-dumps YAML (forbidden). Whole-file text reuses C3′ as it stands. Its cost,
+  last-writer-wins on a conflict, is rare: config changes at the wizard, by a map card, or by hand.
+
+**`apply_approved_mappings` keeps one job** (re-review N2 and m6). A card applied on the holder now reaches every
+computer as text, so the function no longer runs every slot. It runs only after a conflict replaced this
+computer's text, and re-inserts the mapping of every card that is `approved` in `approvals/`, or `approved` or
+`executed` in `archive/` (as `apply_map_cards` leaves it, `coursework.rs:1215-1222`), that the winning text lacks.
+A mapping made from a card is never lost to a race, and one a student removes by hand stays removed.
+
+**D19: the second computer's wizard.** After sign-in, a new wizard-window command,
+`onboarding::account_vault_exists` (one `/sync-pull` call: any note means yes; the window's commands go from 29
+to 30), asks whether the account already holds a vault. If it does, the wizard skips every panel whose answer is
+shared or account-held (subscribe when already active, school, the LMS capture, calendars, coursework mapping
+rows, Gmail, slots and time zone) and asks only for this computer's own portal logins, listing the sources the
+account's config sets up. Finish births a split vault with default shared files, and the restore replaces them
+(D18). The student brings only logins. An account with no vault gets today's nine panels.
 
 ## 5. Interactions
 
@@ -496,7 +561,7 @@ what is new while it holds `feeds`, and D8's verdict pull keeps a moved turn fro
 | 11, N17: a late, older third-desktop write settles a card under a false warning | **Out** | Reconcile's ordering across three desktops, which ids and the lease do not touch; the lease only makes it rarer. Its recipe (R-C3′-exec-19) stands for a later stream. |
 | 30, E5: a foreign `move` does not check the note's id at the old path; tombstones lack the same check | **In** | D5 (b) and (d). Once paths may differ, a path-keyed move or tombstone can hit a different note. |
 | 40, M5: delete against edit resolves by push order | **In** | D7. By id, the delete wins on both desktops and the edit is kept on the archived copy. |
-| 41, M6: *Sync now* beside a slot's later child | **In, narrowly** | Widened by one case (review M13): a *Sync now* `apply` beside a producer child can put one deterministic id in two local files, which `ensure_ids` (`cli.rs:314`, `ids.rs:171-188`) re-ids at random and D6 does not merge. So this stream takes the review's cheap guard: *Sync now* answers "a slot is running" while `sch.running`. |
+| 41, M6: *Sync now* beside a slot's later child | **In, narrowly** | Widened by one case (review M13): a *Sync now* `apply` beside a producer child can put one deterministic id in two local files, which `ensure_ids` (`cli.rs:314`, `ids.rs:171-188`) re-ids at random and D6 does not merge. So this stream takes the review's cheap guard: *Sync now* says Knowlu is busy while `sch.running` is held (§4.7). |
 
 ### 5.5 C5, the relay fetch
 
@@ -535,11 +600,15 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
     created on B and deleted by hand on A (no record) is archived on B;
   - (v) a pre-existing pair under two random ids, created and pulled **before** the upgrade, is joined at the
     first sync after it: the lower id on both, a field set only on the losing copy ends **equal on both**, and
-    a field set on both becomes one card;
+    a field set on both becomes one card; the same with **both files on each side** (N1): one file per desktop
+    afterwards, the loser archived, no id on two files;
   - (vi) a restore given two rows for one id writes one file, from the highest `rev`.
-- The verdict pull: a pulled verdict fills a missing ledger line with no `why`, never overwrites one, and a line
-  the student deleted is not put back.
-- `apply_approved_mappings`: an approved card in `archive/` maps a book in this config, once.
+- The verdict pull: a pulled verdict fills a missing ledger line with no `why` and no `strength`, never overwrites
+  one, pages past a `judged_at` tie, and a line the student deleted is not put back.
+- Shared config (D17, D18): the migration moves exactly the device keys, twice is a no-op, and a shared file
+  holding a device key is never pushed; the three-way pull takes, keeps, or on a conflict keeps the account's
+  text and copies the local one to `state/config-conflicts/`; after a conflict `apply_approved_mappings`
+  re-inserts a card's mapping from an `executed` card in `archive/`, and never runs otherwise.
 - `eventemit`: a uid in an archived digest is never proposed again; `rank --no-digest` writes no digest; `oracle.rs`
   and `surface_oracle.rs` are unchanged.
 
@@ -547,22 +616,27 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
 
 - The exact lines of §4.3, and the order session < `sync` < `turn` < `coursework` < `ingest` < `judge` < `rank` <
   `sync (push)` < release.
-- An unanswered renewal is granted inside the last grant's `seconds_left` of local `Instant` time and refused past
-  it; a refused renewal skips the rest.
-- The catch-up is scheduled, peeks, never claims, and a slot supersedes it.
+- With the clock injected (N3): an unanswered renewal is granted while the larger of the `Instant` and wall-clock
+  deltas is under the last grant's `seconds_left`, and refused past it, including when only the wall clock moved;
+  a refused renewal skips the rest.
+- The catch-up peeks every 60 s, runs as soon as every refused job is released or expired, stops at 60 minutes,
+  never claims, holds `sch.running` only while it runs, and a slot supersedes it.
 - `turn.rs` against a loopback server: full grant, partial grant, refusal, 400, 402, 5xx, 404 and transport.
-- *Sync now* runs no machine step, makes no `/turn` call, and answers "a slot is running" during a slot.
+- *Sync now* runs no machine step, makes no `/turn` call, and says Knowlu is busy while `sch.running` is held.
+- The wizard (`scripts/wizard-check.py`): with `account_vault_exists` answering yes, the walk goes from sign-in
+  to the logins panel to Finish.
 
 ### 6.3 Cloud: the migration and RLS guards
 
 - `turn/handler_test.ts`: validation, the account taken from the JWT only, and the reply shape.
-- `judge-event`'s new GET: only this account's `answered` event rows after the cursor, `verdict`, `strength`,
-  `title_prefix` and `judged_at` only, paged at 500; a POST judges exactly as before.
+- `judge-event`'s new GET: only this account's `answered` event rows after `(judged_at, id)`, carrying `item_id`,
+  `verdict`, `judged_at` and `id` only, 500 a page; a POST judges exactly as before.
+- `sync-push`/`sync_rows.ts`: the six shared config paths are accepted, and every other `config/` path is refused.
 - The `account` function: `devices` and `fetch_turns` are in the purge list and `devices` is in the export, each
   pinned by a test.
 - `migrations_test.ts`:
   - the function pin moves from **28 to 29** (`fetch_turn`), with its comment; the prune is plain SQL in
-    `cron.schedule`, so it adds no function;
+    `cron.schedule`, so it adds no function; the widened `sync_notes` path check is pinned to the six paths;
   - `fetch_turn` is revoked from `public, anon, authenticated`, and the `knowlu-devices-prune` job exists;
   - the view pin stays 5.
 - **The RLS guard is widened first.** It reads only C2's `20260911*` files (`ours()`, `:8`) and matches only
@@ -578,50 +652,57 @@ Its registrar fetch becomes a portal job and its Google series pull rides `feeds
 **The gate.** No student or release note is told that two desktops work until this passes on staging (HANDOFF §4's
 production-parity row already waits on it).
 
-**Two Windows users on one machine are acceptable.** Everything this design keeps per computer is per Windows
-user: `%LOCALAPPDATA%\knowlu\`, the vault under `%USERPROFILE%\Knowlu\` (journal, sync cursor, event ledger),
-Credential Manager, and the scheduler with its tray (the single-instance plugin is per session). The one
-per-machine input, `COMPUTERNAME`, is replaced by a per-user `KNOWLU_DEVICE`, which `journal::device_name()` reads
-first, so the two users are two tokens as two machines would be (one negative check without it shows §3.2's
-limit). The stand-ins: clock skew does not matter, since only the server's clock decides (I1's clamp has its own
-proof); step 4's 503 stub replaces a partition; suspending the holder's whole app (Sysinternals `pssuspend`) is
-the same silence to the server as a lid close.
+**Two physical computers** (Quinn, Q7): Quinn's laptop, where the controller runs, and Quinn's desktop PC, one
+staging account on both.
 
-**The procedure.**
+- **The laptop** runs a dev build copy, driven by the controller through the autonomous-proof harness: WebView2
+  remote debugging, DOM only, never synthetic input.
+- **The desktop** runs a candidate build Quinn installs: a `scripts\release.ps1 -DryRun` bundle of the candidate
+  commit (the shipping path, unsigned, publishing nothing), recommended over a loose dev build copy because it
+  proves the installer too. It is pointed at staging **without a secret**: `KNOWLU_API_BASE` and
+  `KNOWLU_ANON_KEY` (`app/src/account.rs:15-18`, 40-46) are set as user environment variables before first launch,
+  and both values are public (staging's functions URL and its anon key). The candidate's version sorts above the
+  published release, so the updater never replaces it.
+- **Quinn operates the desktop** from a short checklist the controller gives at proof time (sign in; *Run now*;
+  sleep it; edit or delete a named note; *Sync now*; remove the profile afterwards). This is recommended over a
+  second Claude Code session on the desktop: no second harness, and a person doing what a student does. The
+  controller verifies from read-only staging reads (`devices`, `fetch_turns`, `sync_notes`, `judgments`) and from
+  the laptop's page and files.
+- **Real sleep replaces `pssuspend`.** Quinn sleeps whichever computer holds the turn. In practice that is the
+  desktop, made the holder by pressing *Run now* there first, because sleeping the laptop stops the controller.
+  Clock skew between the two is now real, and harmless: only the server's clock decides.
+- **The fallback**, only if one computer cannot take part: two Windows users on one machine, each with a
+  per-user `KNOWLU_DEVICE` set before its wizard runs (otherwise `device_ok` refuses every slot; §3.2), and
+  `pssuspend` for the sleep. It is not the gate.
 
-- Creating a second Windows user on Quinn's machine is **Quinn's to approve**, and Quinn signs it in once: a
-  Windows password the controller never holds.
-- Each user's `KNOWLU_DEVICE` is set **before its wizard runs**; otherwise `runners.yaml`'s `device:` names
-  `COMPUTERNAME` and `device_ok` refuses every slot (`scheduler.rs:456-461`, `:618-620`).
-- Step 5's "previous release" is a dev build of that release's commit pointed at staging (the published build
-  talks to production).
-- Both users stay signed in by fast user switching; the controller drives each app through its own WebView2
-  remote-debugging port, DOM only (the autonomous-proof harness).
+**What it must show** (staging; the laptop's scratch profile removed afterwards by the controller, per the
+standing rule, and the desktop's by Quinn from the checklist). "Controller" and "Quinn" say who does each step.
 
-**What it must show** (staging, one account; both scratch profiles removed afterwards, per the standing rule):
-
-1. Both computers in `devices`, with their names and `logins`, read back by the controller.
-2. *Run now* on both within seconds. Each job is held by exactly one computer. The other's `RunSummary` carries
-   `turn (another computer has it)` and the three skip lines, and its catch-up brings the holder's notes within
-   about 20 minutes.
+0. **Onboarding (D19).** The laptop onboards first (controller). On the desktop, after sign-in, the wizard asks
+   only for that computer's portal logins (Quinn), and Finish restores the laptop's notes **and** settings: the
+   desktop's shared `config/` files equal the laptop's, and its `config/device.yaml` holds only its own keys.
+1. Both computers in `devices`, with their names and `logins` (controller).
+2. *Run now* on the desktop, then on the laptop within seconds (Quinn, controller). Each job is held by exactly one
+   computer; the laptop's `RunSummary` carries `turn (another computer has it)` and the three skip lines; its
+   catch-up runs about a minute after the desktop releases (D15).
 3. A new event on the staging test feed appears once on both computers, with the same id and path, no second
-   file, and one `judgments` row for it.
-4. **Fail open.** With `/turn` deployed as a 503 stub for this step, and restored afterwards, both computers
-   fetch, and the new item still ends as one note with one id on both.
-5. **Mixed versions.** One user on the previous release and one on the candidate. A doubled item is joined on the
-   lower id, with a field set only on one copy equal on both and at most one card: first on the candidate, then
-   on both once the old one updates.
-6. **Sleep.** The holder's whole app is suspended mid-`coursework` for more than 20 minutes, and the other
-   computer takes the jobs on its next *Run now*. Once resumed, the holder records `coursework` with code `-2`
-   (killed at `CHILD_TIMEOUT`), then `ingest` and `judge` as `(skipped: the turn passed to another computer)`,
-   and its tray turns amber. Its retry slot records `turn (another computer has it)` and the skip lines, and
-   the tray returns to green (§4.5).
-7. **Delete against edit.** A note deleted on one computer and edited on the other ends archived on both, with the
-   edit on the archived copy.
-8. **Sync now** on the computer that does not hold the turn runs no machine step, and `/turn`'s log shows no call
-   from it.
-9. **Config and events.** A map card approved on the computer without the turn maps the book in both configs by
-   the next slot, and both computers' pages show the same *Coming up* events.
+   file, and one `judgments` row for it (controller).
+4. **Fail open.** With `/turn` deployed as a 503 stub for this step, and restored afterwards (controller), both
+   computers fetch, and the new item still ends as one note with one id on both.
+5. **Mixed versions.** The laptop switches to a dev build of the previous release's commit, still on staging
+   (controller). A doubled item is joined on the lower id, a field set only on one copy ends equal on both, and at
+   most one card is filed: on the desktop at once, on both once the laptop is back on the candidate.
+6. **Sleep.** Quinn presses *Run now* on the desktop and sleeps it within seconds; `fetch_turns` shows the desktop
+   held the jobs (controller). After more than 20 minutes the laptop's *Run now* takes them. Quinn wakes the
+   desktop: its renewal is refused, or counts as refused under §4.5's larger-delta rule, and `ingest` and `judge`
+   read `(skipped: the turn passed to another computer)`. The step in flight either finishes, or is killed as `-2`
+   with an amber tray that the retry slot turns green; the proof records which, and so answers whether `Instant`
+   counts a Windows sleep.
+7. **Delete against edit.** Before either syncs, Quinn deletes a named note on the desktop and the controller edits
+   it on the laptop: it ends archived on both, with the edit on the archived copy.
+8. **Sync now** on the computer without the turn runs no machine step, and `/turn`'s log shows no call from it.
+9. **Settings and events.** A map card Quinn approves on the desktop maps the book in the laptop's config by its
+   next sync (D18), and both pages show the same *Coming up* events (D8).
 
 ## 7. Out of scope
 
@@ -630,7 +711,7 @@ the same silence to the server as a lid close.
 - **Moving the device-local ledgers into the account.** `state/ingest-seen.md` stays local: notes are never
   unlinked, so a moved turn finds every earlier item by `source_uid`. `state/events-seen.md` stays local, filled
   by D8's verdict pull.
-- **Account-level config held by the account** (§4.8): the recommended companion stream (§9 Q10).
+- **A field-level settings store** (§4.8, D18 weighs it): whole-file text is this stream's transport.
 - **Note bodies** stay last-writer-wins per path (the review's row 19). A Backups restore of an account vault (M4)
   is not addressed. An agent-against-agent field conflict in the rare backstop case still files a card.
 - **A Settings list of computers, a *Remove this computer* action, and a head start** for the last holder (§9).
@@ -640,7 +721,7 @@ the same silence to the server as a lid close.
 
 | Quinn's words (2026-09-24) | Carried by | Faithful? |
 |---|---|---|
-| "Is there a way we can do 1 AND make it so that we can track devices and try each one, one at a time?" DECISION: BOTH. | D1–D8 and D9–D17 | yes |
+| "Is there a way we can do 1 AND make it so that we can track devices and try each one, one at a time?" DECISION: BOTH. | D1–D8 and D9–D19 | yes |
 | "(1) Deterministic ids for imported notes, derived from (vendor, source uid)," | D1, D2 | yes, with the kind added (so a Gmail card and its task stay two notes), the key prefixed by its producer, and a producer key where a note has no `source_uid` |
 | "so every computer creates the same note" | D1, D3 | yes |
 | "and sync merges it." | D5, D6 | yes, by id and, for an item already under two ids, by the alias pre-pass; paths are not made deterministic (D4) |
@@ -649,50 +730,50 @@ the same silence to the server as a lid close.
 | "(by the existing device token;" | D9 | yes: `sync::device_token` |
 | "named by the Windows name, which the privacy page now discloses)." | D9, D10 | yes; the page also discloses the list itself (§3.3) |
 | "At slot time a computer claims a short lease (~20 min) from the account." | D11 | **refined**: one 20-minute lease per job, claimed together at slot time. One computer holds them all in the common case (§9 Q1) |
-| "The holder runs coursework, ingest and judge;" | D11, D12, D17 | yes, per job held; every computer's config carries the mappings the student approved, so any holder fetches them |
+| "The holder runs coursework, ingest and judge;" | D11, D12, D17, D18 | yes, per job held, and against the account's shared settings, so any holder fetches and labels alike |
 | "others skip those steps as named lines" | D12 | yes: §4.3's lines, at exit 0 |
-| "and get the results through sync." | D12, D15 | yes: the holder's trailing push and the others' catch-up |
+| "and get the results through sync." | D12, D15 | yes: the holder's trailing push, and the others' catch-up about a minute after it |
 | "An expired lease passes the turn to the next slot on any computer." | D11, D14 | yes: a compare-and-set on expiry, and no computer holds a reserved turn |
 
-## 9. Quinn's open questions
+**Quinn's answers of 2026-09-25**, where they change a decision:
 
-Each has a recommendation, and the draft is written to it.
+| Answer | Carried by | Change |
+|---|---|---|
+| Q2: the catch-up, and faster than ~20 minutes | D15, §4.6 | peek every 60 s; catch up as soon as the refused jobs are released or expired |
+| Q7: the proof on two physical computers | §6.4 | laptop and desktop; real sleep; two Windows users only as a fallback |
+| Q10: the account holds the shared settings, in scope | D17, D18, D19, §4.8 | the `config/` split, whole-file transport, a login-only second wizard |
 
-- **Q1. One lease per job, or one lease?** *Recommend per job (D11).* With one lease, a computer without a portal
-  login can win and leave that portal unfetched for the slot. With the logins split (zyBooks here, VHL there), no
-  slot ever fetches both. In the common case the two designs behave identically.
-- **Q2. Keep the catch-up (D15) in this stream?** *Recommend yes.* Without it, a student at the computer that
-  lost the race sees the fetch only at its next slot, up to 18 hours later.
-- **Q3. A head start for the last holder?** A computer that did not hold the turn last slot would wait 60 seconds
-  before claiming. That keeps the turn on one computer and spares portal re-logins. *Recommend not now.* D8 makes
-  a moving turn cheap, and the run records will show how often it moves.
-- **Q4. Delete against edit (D7): archive quietly, or also file a "restore this?" card?** *Recommend archive
-  quietly.* Nothing is lost and the note is in Archive.
-- **Q5. Enforce the lease on the server?** *Recommend advisory now*, because desktops on the old build must keep
-  working through the rollout. Enforce it for coursework when C5's `/relay` lands (§5.5).
-- **Q6. The privacy words (D10).** Two parts. If a new version is needed, does a new data category, the list of
-  computers, need a re-ask screen? *Recommend no screen.* The list adds each computer's login presence and dates,
-  not a new fact about the machine, and the version is recorded at the next sign-in. And the page prints a
-  retention promise: a computer leaves the list **90 days** after it was last seen, kept true for idle and lapsed
-  accounts by the daily prune (§3.1). *Recommend 90 days*, a semester's gap with room to spare.
-- **Q7. The proof on two Windows users on one machine (§6.4) as the release gate?** *Recommend yes*, with the
-  procedure §6.4 lists (Quinn approves and signs in the second Windows user), plus one confirmation run on a
-  second physical computer if one is at hand (not a gate).
-- **Q8. A read-only *Your computers* list in Settings?** *Recommend after the pilot.* The export already carries
-  the list.
-- **Q9. Join doubles made before this ships (D6), or leave them?** *Recommend join*, by the alias pre-pass, which
-  finds them at the first sync after the upgrade. The affected vaults are test profiles and any early two-desktop
-  user, and leaving them keeps I2's silent divergence alive for those notes.
-- **Q10. Config under a moving turn (D17, §4.8).** Hold account-level config (course map, source mappings,
-  labels, timezone, account-held calendars, event sources) in the account now, as a companion stream, or accept
-  per-desktop config, with approved map cards applied everywhere and the calendar fix, until C5 or later?
-  *Recommend the companion, finished before any student is told two desktops work.* This stream's two fixes cover
-  what the student approves after onboarding. A value typed differently in two wizards still flips a title
-  whenever the turn moves, and that is visible.
-- **Q11. Event verdicts (D8, §2.8).** Should every desktop pull the account's verdicts, verdict and strength only
-  and never text, from `judgments`? Or should verdicts stay device-local, accepting that a moved turn re-judges
-  within the 80-a-day cap and that a desktop that never holds `feeds` shows no *Coming up* events? *Recommend the
-  pull.* It stores nothing new on the server; its one cost is a digest line with no reason.
-- **Q12. Fail open (D13).** While `/turn` cannot answer, every computer fetches and judges, so judgments can be
-  charged twice, bounded by the daily caps. *Recommend open*, because closing would stop all fetching on every
-  computer of the account for the length of an outage.
+## 9. Quinn's answers (2026-09-25), and one new question
+
+Quinn answered every open question on 2026-09-25, and the spec is written to each answer.
+
+| Q | Question | Quinn's answer | Where it lands |
+|---|---|---|---|
+| Q1 | One lease per job, or one lease? | Per job, as written | D11 |
+| Q2 | Keep the catch-up? | Yes, and faster: peek every 60 s, catch up once the refused jobs are released | D15, §4.6 |
+| Q3 | A head start for the last holder? | Not now | §7 |
+| Q4 | Delete against edit: archive quietly, or a card? | Archive quietly | D7 |
+| Q5 | Enforce the lease on the server? | Advisory now; enforced for coursework at C5's `/relay` | §5.5 |
+| Q6 | A re-ask screen for the privacy change; the 90-day figure? | No screen; 90 days | D10, §3.1, §3.3 |
+| Q7 | The proof on two Windows users on one machine? | No: on two physical computers, the laptop and the desktop | §6.4 |
+| Q8 | A *Your computers* list in Settings? | After the pilot | §7 |
+| Q9 | Join doubles made before this ships? | Join | D6, §2.6 |
+| Q10 | Hold the shared settings in the account? | Yes, in this stream: the profile never differs between computers | D17–D19, §4.8 |
+| Q11 | Pull event verdicts through the account? | Pull | D8, §2.8 |
+| Q12 | Fail open? | Open | D13 |
+
+**Q13 (new). When two computers that were set up separately first share their settings, whose win?**
+
+Only a vault that ran on two computers before this ships meets it: each computer has its own `config/`, and
+neither has a base yet (D18).
+
+*Recommend: the first computer to sync after the upgrade provides the settings.* Its text reaches the account
+first. The other computer keeps its differing files under `state/config-conflicts/`, with a line naming them, and
+`apply_approved_mappings` re-inserts every mapping a card made.
+
+- **What it buys:** no coordination is needed, and nothing a card made is lost.
+- **What it costs:** a hand-typed difference on the second computer survives only in the conflict file, for the
+  student to copy back.
+
+The alternative, asking the student to choose in the app, needs a screen for a case that only early two-computer
+users will ever meet.
