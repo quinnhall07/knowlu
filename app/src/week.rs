@@ -93,13 +93,39 @@ pub fn commitments_confirm_inner(cs: &ConsoleState, view: &str, confirm: &Value)
     json!({ "ok": ok, "error": error, "result": result, "state": state })
 }
 
-/// Writes the input and runs the child under `vault_io` (Plan ruling Q9-a).
+/// What a confirm answers while a sync holds [`knowlu_engine::sync::RUN_LOCK_FILE`].
+const SYNC_RUNNING: &str = "a sync is running; try again in a moment";
+
+/// Writes the input and runs the child under `vault_io` AND the sync run lock (Plan ruling Q9-a;
+/// W1 P1P2-important). The child writes `commitments/` notes, a synced folder, and no sync may
+/// rewrite the tree under it. `vault_io` keeps out *Sync now* and the quit push, which run in this
+/// process. The slot's `sync` step is a child process that never takes `vault_io`; only
+/// `state/sync.lock` keeps it out. So the confirm takes that lock too, in the same order *Sync now*
+/// does (`vault_io`, then the lock). If a sync already holds it, the confirm refuses by name and
+/// runs nothing. Otherwise it holds the lock until the child exits, and a slot's sync that starts
+/// meanwhile takes its named skip, `sync (skipped: another sync is running)`.
 fn run_confirm(cs: &ConsoleState, dir: &Path, file: &Path, confirm: &Value, today: jiff::civil::Date) -> Result<std::process::Output, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(file, serde_json::to_vec(confirm).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let exe = crate::scheduler::engine_exe()?;
     let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
+    let _sync = hold_sync_lock(&cs.vault)?;
     std::process::Command::new(exe).no_console().args(confirm_argv(&cs.vault, file, today)).output().map_err(|e| e.to_string())
+}
+
+/// The exclusive OS lock `sync::RunLock::try_acquire` takes, on the same file, without waiting.
+/// It is released when the returned `File` is dropped.
+fn hold_sync_lock(vault: &Path) -> Result<std::fs::File, String> {
+    let path = vault.join(knowlu_engine::sync::RUN_LOCK_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let lock = std::fs::OpenOptions::new().create(true).write(true).open(&path).map_err(|e| e.to_string())?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(SYNC_RUNNING.to_string()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command(async)] pub fn commitment_proposals(cs: State<'_, ConsoleState>) -> Value { commitment_proposals_inner(&cs) }
