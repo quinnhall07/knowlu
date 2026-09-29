@@ -47,12 +47,25 @@ secondary sources (the original pages could not be fetched); re-check before quo
 ## How it is enforced
 
 - `.claude/settings.json`: default model `claude-opus-5-5` (pinned so a new Opus release does not change
-  the default silently), `effortLevel: medium`, `maxEffortLevel: xhigh` (no accidental `max`).
-- `.claude/agents/`: `explorer` (Haiku, low, read-only), `mechanical` (Sonnet, low), `reviewer` (Opus,
-  high, read-only), `contract-engineer` (Opus, xhigh).
+  the default silently), `effortLevel: medium`, `maxEffortLevel: xhigh` (no accidental `max`). Permissions
+  deny edits to `engine/tests/fixtures/**` (rule 2, deterministically) and a hand-run `cargo tauri build`
+  (unsupported per CLAUDE.md), and allow the read-only git and routine cargo commands.
+- `.claude/agents/`: nine roles, listed with the routing rubric for undefined roles in `CLAUDE.md`
+  ("Model and effort"), which loads every session. Each `description:` says when to use it and when not.
 
 Claude Code has no automatic task-based routing and hooks cannot change the model, so routing to a
 subagent is Claude's choice from each `description:`, and the session default is the only hard setting.
+Naming the agent in the prompt is the reliable way to force it.
+
+## Suggestions not yet done
+
+- Add a `PreToolUse` hook that blocks writes to the contract list from any agent other than the ones
+  allowed, if the descriptions prove too soft in practice.
+- Keep `CLAUDE.md` lean: it loads every session, and it is already long. Move stable reference material
+  into `docs/` and link it.
+- `/clear` between unrelated tasks instead of carrying a long context; use `/compact` mid-task.
+- Log which subagent handled each task for a week (a line in the commit message or session notes) to see
+  whether delegation is happening, then tune descriptions.
 
 ## To verify locally (not checked in the cloud session)
 
@@ -60,5 +73,9 @@ subagent is Claude's choice from each `description:`, and the session default is
 - Whether `availableModels` with `enforceAvailableModels: true` from project settings blocks `fable`; if it
   is managed-settings only, leave it out. `deniedModels` is managed-settings only.
 - The subagent `effort:` frontmatter field is honoured on your Claude Code version.
+- The permission rules take effect: an edit under `engine/tests/fixtures/**` is refused. The deny also
+  blocks the one legitimate case, regenerating `surface-today-*.json` (console spec 4.6); do that from a
+  shell (`cargo test` with the oracle's regenerate flow), not through an edit tool, in a commit that
+  says why.
 - Then run the same two or three real tasks (for example a `sync` change and a `surface` view) on Opus 5.5
   medium and Sonnet 5.5 medium and compare tokens, turns and test-gate passes. Revise the tiers from that.

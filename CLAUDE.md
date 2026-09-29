@@ -162,10 +162,43 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 
 ## Model and effort
 
-Default session is Opus 5.5 at `medium`; contract-critical engine work (write, journal, yamlemit, sync,
-entitle, frozen fixtures) goes to the `contract-engineer` subagent at `xhigh`; mechanical edits to
-`mechanical`; read-only search to `explorer`; pre-push review to `reviewer`. Config in `.claude/`,
-rationale and open checks in `docs/notes/2026-09-29-model-and-effort-hierarchy.md`.
+The session default is Opus 5.5 at `medium` (`.claude/settings.json`; effort is capped at `xhigh`). The
+main session does everyday work itself and delegates a separable piece to a subagent in `.claude/agents/`
+when that is cheaper or safer. Rationale, sources and open checks:
+`docs/notes/2026-09-29-model-and-effort-hierarchy.md`.
+
+| Agent | Model, effort | Use for |
+|---|---|---|
+| `explorer` | Haiku, low | read-only search and triage, before editing |
+| `mechanical` | Sonnet, low | fully specified edits: renames, docs, CI, warning cleanup |
+| `test-writer` | Sonnet, medium | the failing test for behavior already specified |
+| `console-ui` | Sonnet, medium | `app/static`, `site/`, screenshot scripts |
+| `planner` | Opus, high | specs, plans, trade-offs; writes `docs/` only |
+| `debugger` | Opus, high | root-cause first, then the minimal fix |
+| `cloud-engineer` | Opus, high | `cloud/`: auth, billing, entitlement, sync storage, judgment service |
+| `reviewer` | Opus, high | pre-push review of the diff; never edits |
+| `contract-engineer` | Opus, xhigh | the contract list below |
+
+**The contract list** (a silent bug corrupts a vault, leaks a credential or breaks the updater):
+`engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
+`app/src/{credentials,account,updates}.rs`, the oracle/sync/entitlement tests, `engine/tests/fixtures/**`.
+Cheaper agents never edit these.
+
+**Roles with no agent: choose by these questions, in order.**
+1. Could a silent error corrupt vault bytes, leak a credential or student data, move money, or break a
+   signed release? Opus, `xhigh` on the contract list, `high` elsewhere. Plan first if the design is open.
+2. Is there an unresolved design choice, or does it span more than about three files? Opus, `high`;
+   write the plan before the code.
+3. Is it fully specified and checked by the compiler or an existing test? Sonnet, `low` or `medium`.
+4. Is it read-only? Haiku, `low`.
+5. Small or tightly coupled to the current conversation? Do it in the main session; a subagent costs
+   more than it saves.
+
+Rules for any delegation: subagents do not see this conversation, so give them the goal, the files and
+the constraints (frozen references, contract list, LF endings). Anything a cheaper agent changed under
+`engine/`, `app/` or `cloud/` goes through `reviewer` before it is pushed. Two failed attempts means go
+up one effort level or one tier, never straight to `max`; Fable and `max` are Quinn's call. If no agent
+fits, use the closest one rather than inventing a role, and say which rule above chose it.
 
 ## Toolchain and conventions
 

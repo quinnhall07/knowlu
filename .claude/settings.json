@@ -1,5 +1,21 @@
 {
   "model": "claude-opus-5-5",
   "effortLevel": "medium",
-  "maxEffortLevel": "xhigh"
+  "maxEffortLevel": "xhigh",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)"
+    ],
+    "deny": [
+      "Edit(engine/tests/fixtures/**)",
+      "Write(engine/tests/fixtures/**)",
+      "Bash(cargo tauri build:*)"
+    ]
+  }
 }
