@@ -1,7 +1,6 @@
 # Knowlu — Claude working rules
 
-Knowlu is a desktop app for students that answers one question every morning: **what should I work
-on today, and in what order?** Rust + Tauri, Windows, desktop-only. This repository is the product:
+Knowlu is a desktop app for students that answers one question: **what's next?** (`VISION.md`) Rust + Tauri, Windows, desktop-only. This repository is the product:
 `engine/` (`knowlu-engine`) and `app/` (`knowlu`) in one Cargo workspace, plus `cloud/` (Supabase).
 Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 

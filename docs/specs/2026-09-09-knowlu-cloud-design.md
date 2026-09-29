@@ -540,3 +540,37 @@ required).
 "Mobile port timing" and "Sync" rows are amended in the same commit; `HANDOFF.md` §2–§4 record the
 new stream order and close the parity question. Plans: `docs/plans/2026-09-14-c3-sync-plan.md` is
 superseded by a C3′ plan written from this amendment, and C5 gets its own spec section and plan.
+
+## Amendment 2026-09-29 — "What's next?": the product vision refocused (Quinn's rulings of 2026-09-29) — **for Quinn's signature**
+
+Written from a vision interview with Quinn on 2026-09-29; `VISION.md` was rewritten from it the same
+day and states the result. As with the earlier amendments, the body of this spec is not rewritten;
+this section is the correction of record, and plans argue from it once it is signed.
+
+1. **Desktop only, reaffirmed.** Ruling 1 of 2026-09-17 stands unchanged: Windows desktop, no web or
+   mobile app, nothing building toward either.
+2. **Nudges.** VISION's "toasts only for time-critical-and-at-the-desk" becomes: at most two nudges a
+   day, each for a real risk (a deadline at risk at the current pace, a task repeatedly avoided), with
+   quiet hours and a one-click snooze.
+3. **Who started a change decides how it lands.** The student asked → act at once with undo. Knowlu
+   noticed → propose and wait, showing who it came from and a summary of the context. An
+   authoritative source changed → apply and list it. Anything another person can see stays a
+   proposal. Knowlu never invents a due date.
+4. **The calendar.** Knowlu's own in-app calendar is the complete picture. Later, Knowlu writes a
+   dedicated "Knowlu" calendar inside the student's Google or Outlook account and never edits their
+   other calendars. Until that piece is specced, the commitment model's Q3 (Google Calendar stays
+   `calendar.readonly`) and C9 (no write-back) stand.
+5. **Syllabi are uploaded by the student**, at onboarding and each term: class meetings, exam dates,
+   grade weights and scale, everything confirmed by the student. This amends the commitment model's
+   Q2 ("login-only… typing is a last resort") to "sign-ins and syllabi"; typing stays the last resort.
+6. **Audience:** undergraduates first; graduate students are served by the same product.
+7. **Grades and GPA** join the product: per-course rings, a term GPA with an uncertainty band, a
+   projected cumulative GPA on request; read from the LMS grade page and homework platforms on the
+   device and from the syllabus; deterministic maths; never in telemetry; hideable.
+8. **The assistant and quick capture** join the product: fixed flows on the smallest model each
+   passes its evaluation with, preview cards for every assistant change, planning advice and short
+   study tips but never the work itself; a global hotkey that captures a task at once and asks for
+   what is missing later. VISION commitment 3 (the AI never writes what the student sends) is
+   unchanged.
+9. **The MVP** is the founder's quinn-ops feature set plus grades from Blackboard; everything else is
+   phased after it (`VISION.md`, "Build order").
