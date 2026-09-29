@@ -143,3 +143,23 @@ Deno.test("main() on a valid fixture prints a JSON report and exits 0", async ()
     },
   );
 });
+
+// F7 (engine follow-ups plan, item (b)): the device now reports id-bearing label rows through
+// `/telemetry`. A static pin on the query text, the way `app/tests/telemetry.rs` pins `ACTIONS`:
+// an abstention is no calibration point, an approval is no correction, an email label never reaches
+// the cross-account aggregate (Gmail Limited Use), and a correction marks only its own account's
+// judgment wrong.
+Deno.test("the calibration query excludes unsure verdicts, approved decisions and email labels, and joins on the account", async () => {
+  const sql = (await Deno.readTextFile(fromFileUrl(new URL("./calibration_query.sql", import.meta.url))))
+    .replace(/\s+/g, " ");
+  for (
+    const clause of [
+      "and coalesce(j.fields ->> 'verdict', '') <> 'unsure'",
+      "and c.account_id = j.account_id",
+      "and not (c.field in ('verdict','decision') and c.judgment_kind = 'email')",
+      "and not (c.field = 'decision' and c.theirs = 'approved')",
+    ]
+  ) {
+    assert(sql.includes(clause), `calibration_query.sql lacks: ${clause}`);
+  }
+});

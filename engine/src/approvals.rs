@@ -15,7 +15,7 @@ use jiff::civil::{Date, DateTime};
 use regex::Regex;
 use serde_yaml_ng::{Mapping, Value};
 
-use crate::eventledger::record_declined;
+use crate::eventledger::{record_answer, record_declined, VerdictError};
 use crate::ids::resolve_lenient;
 use crate::ingest::{apply_frontmatter_fields_to_text, slugify};
 use crate::journal::Journal;
@@ -1276,6 +1276,8 @@ fn transition_note(
             let (_, _, warnings) =
                 expand_digest(vault, path, meta, body, today, false, ctx, journal)?;
             result.warnings.extend(warnings);
+        } else if kind == "event-check" {
+            settle_event_check(vault, meta, "drop", today, journal)?;
         }
         if kind == "amend" && str_field(meta, "created_by") == crate::sync::ACTOR {
             reassert_rejected_sync_card(vault, meta, ctx, journal)?;
@@ -1439,6 +1441,17 @@ fn transition_note(
             write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
             delete(vault, &rel, ctx, journal)?;
             result.executed.push(format!("{stem} ({created} events)"));
+        } else if kind == "event-check" {
+            // F3: the student's "yes, this applies to me". Ledger first, so a failed answer leaves
+            // the card `approved` for the next run rather than archived with nothing written.
+            settle_event_check(vault, meta, "obligation", today, journal)?;
+            let literals = vec![
+                ("status".to_string(), "executed".to_string()),
+                ("executed_at".to_string(), stamped),
+            ];
+            write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+            delete(vault, &rel, ctx, journal)?;
+            result.executed.push(stem);
         } else if kind == "coursework-map" {
             // C2 (§11a, R-OB-1): a mapping from an unmapped zyBook or VHL section to a course.
             // `rank` does not apply it — the next `coursework` step does, before it fetches, so a
@@ -1458,6 +1471,60 @@ fn transition_note(
     }
 
     result.warnings.push(format!("unknown status: {name}"));
+    Ok(())
+}
+
+/// Write the student's answer to a `kind: event-check` card into the event ledger (F3):
+/// `obligation` for an approved card, `drop` for a rejected one.
+///
+/// One [`record_answer`] line per uid in the card's `events:` (falling back to `[source_uid]`).
+/// `by` is the actor of the journal's human `status` set on the card, or `"unknown"` when there is
+/// none (a card edited by hand outside the console). The primary (`source_uid`) carries the card's
+/// `judgment_id`; every other uid carries its own ledger entry's, or none. Each uid's title is its
+/// own ledger entry's, so a series card's `· +N more` title is never copied onto every instance;
+/// the card's title is only the fallback. An I/O failure is `WriteError::Io`, which leaves the card
+/// where it is for the next run; answering twice is harmless (`load_ledger` reads the same state).
+fn settle_event_check(
+    vault: &Path,
+    meta: &Mapping,
+    verdict: &str,
+    today: Date,
+    journal: &mut Journal,
+) -> Result<(), WriteError> {
+    let source = truthy_str(meta, "source_uid");
+    let mut uids = crate::eventemit::card_event_uids(meta);
+    if uids.is_empty() && !source.is_empty() {
+        uids.push(source.clone());
+    }
+    let card_id = truthy_str(meta, "id");
+    let by = if card_id.is_empty() { None } else { journal.human_set(&card_id, "status") }
+        .and_then(|record| record.get("actor").and_then(|a| a.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let card_jid = truthy_str(meta, "judgment_id");
+    let card_title = truthy_str(meta, "title");
+    let ledger = crate::eventledger::load_ledger(vault, None);
+    for uid in &uids {
+        let entry = ledger.get(uid);
+        let jid = if *uid == source {
+            card_jid.clone()
+        } else {
+            entry.map(|e| e.judgment_id.clone()).unwrap_or_default()
+        };
+        let title = entry
+            .map(|e| e.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| card_title.clone());
+        let jid = Some(jid.as_str()).filter(|j| !j.is_empty());
+        let recorded = match record_answer(vault, uid, &title, today, verdict, &by, jid) {
+            // A hand-edited, malformed `judgment_id` must not strand the card forever: the answer
+            // matters more than the trace back to its judgment.
+            Err(VerdictError::BadField("jid")) => {
+                record_answer(vault, uid, &title, today, verdict, &by, None)
+            }
+            other => other,
+        };
+        recorded.map_err(|e| WriteError::Io(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -3428,5 +3495,268 @@ mod tests {
         );
         assert_eq!(checked.iter().cloned().collect::<Vec<_>>(), vec!["ics:evt-1", "ics:evt-2"]);
         assert_eq!(unchecked.iter().cloned().collect::<Vec<_>>(), vec!["ics:evt-3"]);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The event-check card (F3): approve → obligation, reject → drop, by the student
+    // -----------------------------------------------------------------------------------------
+
+    mod event_check {
+        use super::*;
+        use crate::eventledger::{load_ledger, record_judged_verdict};
+        use crate::events::{DiscoveredEvent, EventsConfig};
+
+        const J: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        const J2: &str = "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d";
+        const WHY: &str = "the listing does not say who it is for";
+
+        /// A 7–9pm event on `(month, day)` of 2026.
+        fn event(uid: &str, title: &str, day: i8) -> DiscoveredEvent {
+            DiscoveredEvent {
+                uid: uid.to_string(),
+                title: title.to_string(),
+                start: Some(Date::constant(2026, 8, day).at(19, 0, 0, 0)),
+                end: Some(Date::constant(2026, 8, day).at(21, 0, 0, 0)),
+                source: "campus".into(),
+                ..Default::default()
+            }
+            .normalized()
+        }
+
+        fn unsure(vault: &Path, uid: &str, title: &str, jid: Option<&str>) {
+            record_judged_verdict(vault, uid, title, TODAY, "unsure", WHY, jid).unwrap();
+        }
+
+        /// The card F2's emitter files for `events`, from the ledger as it stands.
+        fn file_card(vault: &Path, events: &[DiscoveredEvent]) -> PathBuf {
+            let ledger = load_ledger(vault, None);
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(vault);
+            let (paths, count) = crate::eventemit::emit_event_checks(
+                vault,
+                events,
+                &ledger,
+                &EventsConfig::default(),
+                TODAY,
+                15,
+                &ctx,
+                &mut journal,
+            );
+            assert_eq!(count, 1, "{paths:?}");
+            paths[0].clone()
+        }
+
+        /// What `decide_inner` does (`app/src/commands.rs`): the status under the console's
+        /// context, then `process_approvals` in-process under the default one.
+        fn decide(vault: &Path, card: &Path, status: &str) -> ApprovalsResult {
+            let rel = rel_path(vault, card);
+            let console = WriteContext::new("quinn", "dashboard");
+            let mut journal = Journal::new(vault);
+            let literals = vec![("status".to_string(), status.to_string())];
+            write_literals(vault, &rel, &literals, &console, &mut journal, &WriteOpts::default())
+                .unwrap();
+            let ctx = default_ctx();
+            process_approvals(vault, TODAY, now(), &ctx, &mut journal)
+        }
+
+        fn seen(vault: &Path) -> String {
+            pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap_or_default()
+        }
+
+        /// The ledger's human-answer lines, in file order.
+        fn answer_lines(vault: &Path) -> Vec<String> {
+            pystr::splitlines(&seen(vault))
+                .into_iter()
+                .filter(|l| l.contains(" · by:"))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn archived(vault: &Path, card: &Path) -> PathBuf {
+            vault.join("archive").join(card.file_name().unwrap())
+        }
+
+        #[test]
+        fn approving_an_event_check_records_obligation_by_the_human_and_archives() {
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            let before = load_ledger(&v, None);
+            assert!(crate::eventroster::relevant_events(std::slice::from_ref(&fair), &before).is_empty());
+
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let entry = &load_ledger(&v, None)["ics:fair-1"];
+            assert_eq!(entry.verdict.as_deref(), Some("obligation"));
+            assert_eq!(entry.answered_by, "quinn");
+            assert_eq!(entry.judgment_id, J);
+
+            assert!(!card.exists());
+            let archived = archived(&v, &card);
+            assert_eq!(field(&archived, "status"), "executed");
+            assert!(!field(&archived, "executed_at").is_empty());
+            assert_eq!(result.executed, vec![card.file_stem().unwrap().to_string_lossy().to_string()]);
+            let after = load_ledger(&v, None);
+            let relevant = crate::eventroster::relevant_events(std::slice::from_ref(&fair), &after);
+            assert_eq!(relevant.len(), 1);
+            assert_eq!(relevant[0].uid, "ics:fair-1");
+        }
+
+        #[test]
+        fn rejecting_an_event_check_records_drop() {
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+
+            let result = decide(&v, &card, "rejected");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let entry = &load_ledger(&v, None)["ics:fair-1"];
+            assert_eq!(entry.verdict.as_deref(), Some("drop"));
+            assert_eq!(entry.answered_by, "quinn");
+            assert_eq!(entry.judgment_id, J);
+            assert!(!card.exists());
+            assert_eq!(field(&archived(&v, &card), "status"), "rejected");
+            let after = load_ledger(&v, None);
+            assert!(crate::eventroster::relevant_events(std::slice::from_ref(&fair), &after).is_empty());
+        }
+
+        #[test]
+        fn every_instance_on_a_series_card_is_answered() {
+            let v = vault();
+            unsure(&v, "lx:5:1", "Weekly club", Some(J));
+            unsure(&v, "lx:5:2", "Weekly club (week 2)", Some(J2));
+            // `lx:5:3` has no ledger line at all: its answer falls back to the card's title.
+            let text = format!(
+                "---\ntype: approval\nkind: event-check\n\
+                 title: \"Weekly club · Mon 24 Aug 7–9pm · +2 more\"\nstatus: pending\n\
+                 source_uid: \"lx:5:1\"\nseries_uid: \"lx:5\"\n\
+                 events:\n- \"lx:5:1\"\n- \"lx:5:2\"\n- \"lx:5:3\"\n\
+                 judgment_id: {J}\njudgment_kind: event\n\
+                 proposed_at: 2026-08-20\nfirst_proposed_at: 2026-08-20\nexpires: 2026-08-24\n\
+                 snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+            );
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(&v);
+            let rel = "approvals/event-check-weekly-club-2026-08-24.md";
+            create(&v, rel, &text, &ctx, &mut journal, None).unwrap();
+
+            let result = decide(&v, &v.join(rel), "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(
+                answer_lines(&v),
+                vec![
+                    format!("- lx:5:1 · Weekly club · verdict:obligation · by:quinn · jid:{J} · answered 2026-08-20"),
+                    format!("- lx:5:2 · Weekly club (week 2) · verdict:obligation · by:quinn · jid:{J2} · answered 2026-08-20"),
+                    "- lx:5:3 · Weekly club - Mon 24 Aug 7–9pm - +2 more · verdict:obligation · by:quinn · answered 2026-08-20".to_string(),
+                ]
+            );
+            let ledger = load_ledger(&v, None);
+            for uid in ["lx:5:1", "lx:5:2", "lx:5:3"] {
+                assert_eq!(ledger[uid].verdict.as_deref(), Some("obligation"), "{uid}");
+                assert_eq!(ledger[uid].answered_by, "quinn", "{uid}");
+            }
+            assert_eq!(ledger["lx:5:3"].judgment_id, "");
+        }
+
+        #[test]
+        fn an_expired_or_snoozed_event_check_writes_nothing_to_the_ledger() {
+            // Expired: the card's `expires` (the event's day) is behind us.
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            let before = seen(&v);
+            let result = run_at(&v, Date::constant(2026, 8, 26), now());
+            assert_eq!(result.expired.len(), 1, "{result:?}");
+            assert_eq!(field(&archived(&v, &card), "status"), "expired");
+            assert_eq!(seen(&v), before);
+            assert_eq!(load_ledger(&v, None)["ics:fair-1"].verdict.as_deref(), Some("unsure"));
+
+            // Snoozed: nothing happens until it wakes.
+            let v = vault();
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            let rel = rel_path(&v, &card);
+            let console = WriteContext::new("quinn", "dashboard");
+            let mut journal = Journal::new(&v);
+            let literals = vec![
+                ("status".to_string(), "snoozed".to_string()),
+                ("snooze_until".to_string(), "2026-08-23".to_string()),
+            ];
+            write_literals(&v, &rel, &literals, &console, &mut journal, &WriteOpts::default()).unwrap();
+            let before = seen(&v);
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert!(card.exists());
+            assert_eq!(field(&card, "status"), "snoozed");
+            assert_eq!(seen(&v), before);
+        }
+
+        #[test]
+        fn a_ledger_write_failure_leaves_the_card_for_the_next_run() {
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            let seen_path = v.join("state").join("events-seen.md");
+            std::fs::remove_file(&seen_path).unwrap();
+            std::fs::create_dir_all(&seen_path).unwrap();
+
+            let result = decide(&v, &card, "approved");
+            let name = card.file_name().unwrap().to_string_lossy().to_string();
+            assert_eq!(result.warnings, vec![format!("transition failed: {name}")]);
+            assert!(card.exists());
+            assert_eq!(field(&card, "status"), "approved");
+            assert!(result.executed.is_empty());
+
+            // The next run, with the ledger writable again, settles it.
+            std::fs::remove_dir_all(&seen_path).unwrap();
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert!(!card.exists());
+            assert_eq!(load_ledger(&v, None)["ics:fair-1"].answered_by, "quinn");
+        }
+
+        #[test]
+        fn settling_twice_is_idempotent() {
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            let meta = front(&card);
+            let mut journal = Journal::new(&v);
+            settle_event_check(&v, &meta, "obligation", TODAY, &mut journal).unwrap();
+            let once = load_ledger(&v, None);
+            settle_event_check(&v, &meta, "obligation", TODAY, &mut journal).unwrap();
+            let twice = load_ledger(&v, None);
+            assert_eq!(once, twice);
+            assert_eq!(twice["ics:fair-1"].verdict.as_deref(), Some("obligation"));
+            let events = std::slice::from_ref(&fair);
+            assert_eq!(
+                crate::eventroster::relevant_events(events, &once),
+                crate::eventroster::relevant_events(events, &twice)
+            );
+        }
+
+        #[test]
+        fn a_card_with_no_journaled_human_decision_records_by_unknown() {
+            let v = vault();
+            let fair = event("ics:fair-1", "Career fair", 25);
+            unsure(&v, "ics:fair-1", "Career fair", Some(J));
+            let card = file_card(&v, std::slice::from_ref(&fair));
+            // Approved by a hand edit outside the console: no journal record says who.
+            let text = read(&card).replace("status: pending", "status: approved");
+            pystr::write_text(&card, &text).unwrap();
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let entry = &load_ledger(&v, None)["ics:fair-1"];
+            assert_eq!(entry.verdict.as_deref(), Some("obligation"));
+            assert_eq!(entry.answered_by, "unknown");
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
     }
 }

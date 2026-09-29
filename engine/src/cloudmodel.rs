@@ -30,11 +30,40 @@
 
 use std::cell::Cell;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::judge::{self, ModelError};
+
+/// The same shape `eventledger::JID_SAFE` requires: lowercase hex, five groups, no separator a
+/// ledger line or a flow mapping could ever misread. Nothing but this shape is ever accepted —
+/// `dumps_value`, `write_literals` and `eventledger::write_verdict_line` all write the id
+/// unquoted, so a stray `"` or ` · ` in it would corrupt the line it lands on.
+static JUDGMENT_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+});
+
+/// F4: the reply's own `judgment_id`, whenever the service wrote a `judgments` row for this call
+/// (`judge_pipeline.ts`'s `id === null ? {} : { judgment_id: id }`). `None` for an absent field,
+/// a non-string value, or anything that is not a lowercase UUID — an old server that never sends
+/// the field, and a malformed one, read exactly alike: nothing to carry forward.
+pub fn judgment_id_of(reply: &Value) -> Option<String> {
+    reply
+        .get("judgment_id")
+        .and_then(Value::as_str)
+        .filter(|s| is_judgment_id(s))
+        .map(str::to_string)
+}
+
+/// F8: the one shape check for a `judgment_id`, wherever it was read from — a reply
+/// ([`judgment_id_of`]) or a card's frontmatter (`enrich::report_labels`), which a hand edit can
+/// leave malformed.
+pub fn is_judgment_id(s: &str) -> bool {
+    JUDGMENT_ID.is_match(s)
+}
 
 /// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
 /// completion. Spelled again here rather than borrowed, because C4 removes `runtime.rs` and this
@@ -431,6 +460,7 @@ impl judge::Model for CloudModel<'_> {
         if let Some(tier) = reply.get("tier").and_then(Value::as_u64) {
             v.tier = tier.min(3) as u8;
         }
+        v.judgment_id = judgment_id_of(&reply);
         Ok(v)
     }
 }
@@ -483,12 +513,18 @@ impl judge::EventModel for CloudModel<'_> {
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
         let reply = self.call("/judge-event", &event_request(item))?;
         let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
+        // Read once and carried into every `Ok` arm below: `judge_pipeline.ts` writes a
+        // `judgments` row — and so a `judgment_id` — for the rescued-`unsure` replies exactly as
+        // it does for an honest verdict (lines 233 and 271), so the id is not conditional on
+        // which arm below is taken.
+        let judgment_id = judgment_id_of(&reply);
         match self.verdict_of(&reply) {
             Ok(verdict) => Ok(judge::EventVerdict {
                 verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
                 why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
                 confidence: verdict.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
                 tier,
+                judgment_id,
             }),
             // A spent cap answers every remaining item identically and must stay retryable
             // tomorrow — never recorded as if the event itself had been considered.
@@ -509,6 +545,7 @@ impl judge::EventModel for CloudModel<'_> {
                 why: judge::one_line(&reason, 140),
                 confidence: 0.0,
                 tier,
+                judgment_id,
             }),
         }
     }
@@ -526,6 +563,12 @@ pub struct GmailItem {
     pub importance: Option<i64>,
     pub why: String,
     pub confidence: f64,
+    /// F6b: `gmail-read`'s row itself (not `payload`) carries `judgment_id` — the `judgments` row
+    /// the service wrote for this message, whenever it wrote one — parsed with F4's
+    /// [`judgment_id_of`]. Under the Limited Use ruling (global constraint 14) this id stays in
+    /// the vault only: `enrich.rs` stamps it onto the note or card it writes, and the device never
+    /// reports it, so it is never cross-account material.
+    pub judgment_id: Option<String>,
 }
 
 /// The body of `POST /judge-email`. Used by the eval harness's parity check and by §13's
@@ -647,6 +690,9 @@ pub fn pull_gmail_queue(
             importance: p.get("importance").and_then(Value::as_i64).map(|i| i.clamp(1, 5)),
             why: judge::one_line(&text("why").unwrap_or_default(), 140),
             confidence: p.get("confidence").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
+            // F6b: the row's own `judgment_id`, not `payload`'s — same door `judge`/`judge_event`
+            // already use, so a malformed or absent id reads exactly like an old server's reply.
+            judgment_id: judgment_id_of(row),
         });
     }
     Ok(GmailPull { items: out, more, deferred })
@@ -706,6 +752,26 @@ pub fn pull_rule_proposals(client: &CloudClient) -> Result<Vec<RuleProposal>, Cl
 
 pub fn decide_rule(client: &CloudClient, id: i64, decision: &str) -> Result<(), CloudError> {
     client.post("/judge-rules", &json!({ "id": id, "decision": decision })).map(|_| ())
+}
+
+/// F8: what `/telemetry` said about one batch of label rows. `unowned` (the judgment is not this
+/// account's, or not of the kind claimed) and `refused` (a verdict row that labels nothing) are
+/// F7's optional counts, present only when the batch held a label row: an absent count reads as 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LabelsSent {
+    pub saved: usize,
+    pub unowned: usize,
+    pub refused: usize,
+}
+
+/// F8: POST label rows (`enrich::report_labels` builds them) to `/telemetry`, the endpoint the app
+/// already sends class (b) corrections to — `{"events": [], "corrections": rows}`. The service
+/// authenticates, deduplicates on `corrections_once` and refuses free text, so a resend after a
+/// lost reply lands on the same rows.
+pub fn post_labels(client: &CloudClient, rows: &[Value]) -> Result<LabelsSent, CloudError> {
+    let reply = client.post("/telemetry", &json!({ "events": [], "corrections": rows }))?;
+    let count = |key: &str| reply.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+    Ok(LabelsSent { saved: count("corrections"), unowned: count("unowned"), refused: count("refused") })
 }
 
 /// The account's LMS calendar feed, fetched by the service (cloud design §3.1). **Transport, not

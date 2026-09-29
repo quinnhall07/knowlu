@@ -1447,7 +1447,7 @@ fn sync_never_settles_or_archives_a_proposal_it_did_not_file() {
         knowlu_engine::write::propose_amendment(
             &dir, &file, &meta,
             &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-            &judge, &mut journal, None, today,
+            &judge, &mut journal, None, today, None,
         ).expect("a judge-once proposal");
         let rec = if converge {
             foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z")
@@ -2327,7 +2327,7 @@ fn rejecting_a_judge_once_card_writes_no_re_assert_record() {
     let card = knowlu_engine::write::propose_amendment(
         &dir, &file, &meta,
         &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-        &judge, &mut journal, None, today,
+        &judge, &mut journal, None, today, None,
     ).expect("a judge-once proposal");
     let card_rel = knowlu_engine::ids::rel(&dir, &card);
     let count = |journal: &mut Journal| journal.read(None, None).iter()

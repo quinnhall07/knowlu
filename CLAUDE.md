@@ -94,8 +94,10 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
   for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
   move server-side) — never for judgment, so `rank` never calls a model still holds.
-  `engine/src/enrich.rs`'s `run_lines_with` hosts the four cloud pulls a judge step runs in one slot:
-  the tier-3 judge pass, the events pass, the Gmail pull and the rule-decision pull.
+  `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud passes a judge step runs in one slot:
+  the tier-3 judge pass, the events pass, the Gmail pull, the rule-decision pull and the label
+  report (F8: card answers and rejections, keyed by `judgment_id`, to `/telemetry`; never an
+  `email`-kind decision).
   The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
   a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
   `completion::propose_done`, matched to exactly one active task by title.

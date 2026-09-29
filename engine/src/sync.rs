@@ -2148,7 +2148,7 @@ pub fn apply(
                 }
             }
             if !changes.is_empty() && keep.is_none() {
-                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today) {
+                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None) {
                     // One card, however many fields it carries — the fifteen-a-day cap the deck
                     // already applies counts cards, and so does this.
                     Ok(_) => report.cards += 1,

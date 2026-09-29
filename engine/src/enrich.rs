@@ -257,6 +257,16 @@ pub fn enrich_with(
         let mut inputs = serde_yaml_ng::Mapping::new();
         inputs.insert("source_uid".into(), Value::String(item.source_uid.clone()));
         inputs.insert("title_seen".into(), Value::String(item.title.clone()));
+        // F5(b): the service's own judgment id, whenever this verdict carried one (tier 2 or
+        // tier 3, `judge::Verdict::judgment_id`). Both keys or neither — `judgment_kind` names
+        // the note kind this pass always writes (`task`), so a later cross-account join
+        // (`calibration_query.sql`'s `c.judgment_id = j.id`) can tell a task judgment from an
+        // event or email one without re-deriving it from the note path. Absent on every tier-1
+        // verdict and on every reply from an older server, which is byte-identical to today.
+        if let Some(jid) = &outcome.verdict().judgment_id {
+            inputs.insert("judgment_id".into(), Value::String(jid.clone()));
+            inputs.insert("judgment_kind".into(), Value::String("task".into()));
+        }
         let write_opts = WriteOpts { judged: true, evidence: None, propose: true, inputs: Some(&inputs) };
         match write::write_literals(vault, &item.rel_path, &literals, &ctx, &mut journal, &write_opts) {
             Ok(res) => {
@@ -363,7 +373,7 @@ pub fn run_lines_with(
     let google = google_calendar_linked(vault);
     // R-C2-E15, widened by fix 1 (R-C2-E22 #1), again by Task 11 (R-C2-E38) and again by Task 12
     // (R-C2-E46): the probe is a network round trip, and it must not fire when there is nothing to
-    // judge or send in ANY of the four passes — reusing `pending`'s own predicate, `judge_roster`'s
+    // judge or send in ANY of the passes — reusing `pending`'s own predicate, `judge_roster`'s
     // own enabled-source predicate, `google_calendar_linked`, and `rule_decisions_waiting` (an
     // answered `kind: rule` card not yet sent) here, rather than a second scanning routine for any
     // of them, is what lets a job that runs twice a day forever skip both the call and, on a
@@ -371,7 +381,14 @@ pub fn run_lines_with(
     // queue behind it would otherwise risk. `enrich_with` below re-derives the pending list; that
     // second read is the accepted cost of leaving `enrich_with`'s own signature — and every test
     // that calls it directly — untouched.
-    if pending(vault).0.is_empty() && !any_feed && !google && !rule_decisions_waiting(vault) {
+    // F8 widens it once more: `labels_waiting` (a decision on a judged card not yet reported) is
+    // the fifth pass's own predicate, last so the cheaper four short-circuit it.
+    if pending(vault).0.is_empty()
+        && !any_feed
+        && !google
+        && !rule_decisions_waiting(vault)
+        && !labels_waiting(vault)
+    {
         return enrich_with(vault, opts, Ok(&model));
     }
     // A session or entitlement problem answers every item identically, so the FIRST call decides
@@ -450,6 +467,13 @@ pub fn run_lines_with(
             let rules_budget = opts.budget.saturating_sub(arm_started.elapsed());
             lines.extend(pull_rules(vault, client, opts, rules_budget));
 
+            // F8 — the label report. Runs last, after `pull_rules`, on whatever of `opts.budget`
+            // the four passes above have left: it sends the student's answers on judged cards
+            // (event-check verdicts, rejected judged proposals — never an `email` one) to
+            // `/telemetry`, keyed by `judgment_id`, and stamps each card `reported_at`.
+            let labels_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(report_labels(vault, client, opts, labels_budget));
+
             if let Some(reason) = model.fatal() {
                 lines.push(format!(
                     "judge: the service answered {reason}, so the rest of the batch was not sent"
@@ -520,10 +544,15 @@ pub const PULL_ROUNDS: usize = 3;
 /// The template a `tier: task` message becomes. `needs_enrichment: false` because the service has
 /// already judged effort and importance — flagging it would send it straight back for a second
 /// judgment of the same thing.
+///
+/// `{judgment_lines}` is `judgment_id: <id>\njudgment_kind: email\n` when the item carried a
+/// `judgment_id` (F6b), or empty otherwise — both keys or neither, right after `source_uid` and
+/// before `needs_enrichment`. Under the Limited Use ruling (global constraint 14) the id stays in
+/// the vault only, for a later per-user join; the device never reports it.
 const GMAIL_NOTE: &str = "---\ntitle: {title}\ncourse: {course}\ndomain: school\ndue: {due}\n\
 effort_hours: {effort_hours}\neffort_confidence: low\neffort_source: inferred\n\
 importance: {importance}\nimportance_reason: {why}\nstatus: active\nprogress: 0\n\
-created_by: gmail\nsource_uid: {uid}\nneeds_enrichment: false\n---\n\n{body}\n";
+created_by: gmail\nsource_uid: {uid}\n{judgment_lines}needs_enrichment: false\n---\n\n{body}\n";
 
 /// Pull the service's queued Gmail judgments and write them, then acknowledge them.
 ///
@@ -807,7 +836,10 @@ fn propose_gmail_completion(
         detail,
     };
     let ctx = ctx.with_actor(crate::completion::ACTOR);
-    match crate::completion::propose_done(vault, task, &evidence, today, &ctx, journal, false) {
+    // F6b: the service's own judgment id for this message, when it wrote one — the id stays in
+    // the vault only (Global Constraint 14); the device never reports an `email`-kind judgment.
+    let judgment = item.judgment_id.as_deref().map(|id| (id, "email"));
+    match crate::completion::propose_done(vault, task, &evidence, today, &ctx, journal, false, judgment) {
         Ok(crate::completion::Outcome::Proposed(_)) => {
             Ok(Some(task.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()))
         }
@@ -873,6 +905,11 @@ fn gmail_note_text(item: &crate::cloudmodel::GmailItem) -> String {
     let effort = write::to_literal(&Value::Number(serde_yaml_ng::Number::from(
         item.effort_hours.unwrap_or(1.0),
     )));
+    // F6b: both keys or neither — a UUID from `judgment_id_of` never needs YAML quoting.
+    let judgment_lines = match item.judgment_id.as_deref() {
+        Some(id) => format!("judgment_id: {id}\njudgment_kind: email\n"),
+        None => String::new(),
+    };
     GMAIL_NOTE
         .replace("{title}", &lit(&item.title))
         .replace("{course}", &course)
@@ -881,6 +918,7 @@ fn gmail_note_text(item: &crate::cloudmodel::GmailItem) -> String {
         .replace("{importance}", &item.importance.unwrap_or(3).to_string())
         .replace("{why}", &lit(&item.why))
         .replace("{uid}", &lit(&item.uid))
+        .replace("{judgment_lines}", &judgment_lines)
         .replace("{body}", &format!("From email. {}", item.why))
 }
 
@@ -905,10 +943,16 @@ fn write_gmail_card(
         .strftime("%Y-%m-%d")
         .to_string();
     let stem = format!("task-{}", crate::ingest::slugify(&item.title));
+    // F6b: right after `created_by`, before `source_uid` — the same placement an amend card from
+    // a judged write gives `judgment_id`/`judgment_kind` (F5), both keys or neither.
+    let judgment_lines = match item.judgment_id.as_deref() {
+        Some(id) => format!("judgment_id: {id}\njudgment_kind: email\n"),
+        None => String::new(),
+    };
     let text = format!(
         "---\ntype: approval\nkind: task\ntitle: {}\nstatus: pending\nproposed_at: {stamp}\n\
          first_proposed_at: {stamp}\nexpires: {expires}\nsnooze_until: null\ncreated_by: gmail\n\
-         source_uid: {}\n---\n\n{}\n\n```task\n{}```\n",
+         {judgment_lines}source_uid: {}\n---\n\n{}\n\n```task\n{}```\n",
         lit(&item.title),
         lit(&item.uid),
         item.why,
@@ -1087,6 +1131,186 @@ fn rule_decisions_waiting(vault: &Path) -> bool {
     !decided_rule_cards(vault).is_empty()
 }
 
+// -----------------------------------------------------------------------------------------
+// F8: the device reports the student's decisions on judged cards, keyed by `judgment_id`.
+// -----------------------------------------------------------------------------------------
+
+/// The agent actor for the `reported_at` stamp. Its own name, so the journal says which loop wrote
+/// it; `agent:` prefix, so `provenance::is_agent` reads it as an agent.
+pub const LABELS_ACTOR: &str = "agent:knowlu.labels";
+
+/// At most this many rows per `POST /telemetry` (F7 caps a batch at 500, and its ownership lookup
+/// puts every id in one URL; 100 ids is about 3.7 KB).
+pub const LABEL_BATCH: usize = 100;
+
+/// The handler's own `ISO_TIMESTAMP`. `journal::now_ts` always matches it; a hand-edited journal
+/// might not, and one row the service refuses would 400 the whole batch every slot forever. Shape
+/// alone is not enough — `2026-13-40T25:61:00Z` matches this regex — so the filter that uses it
+/// also requires `jiff::Timestamp::from_str` to succeed, or the same row would 400 the batch on
+/// every later slot forever (rows sort by `ts`, so a bad one always rides in the first batch).
+static LABEL_TS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$").unwrap()
+});
+
+/// One card ready to report: its vault-relative path (for the stamp) and its row.
+struct LabelCard {
+    rel: String,
+    ts: String,
+    item_id: String,
+    row: serde_json::Value,
+}
+
+/// Every card whose decision is waiting to be reported, in `(ts, item_id)` order.
+///
+/// A card qualifies when it is in `approvals/` or `archive/`, is `type: approval`, has no
+/// `reported_at`, carries a well-formed `judgment_id` and a `judgment_kind` of `task` or `event`,
+/// and the journal holds the student's own `status` set on it (`Journal::human_set`, whose `ts` is
+/// the row's `ts`):
+/// - `kind: event-check`, `executed` (approved) or `rejected`: a `verdict` row, `unsure` →
+///   `obligation` / `drop`, `judgment_kind: event` only;
+/// - any other kind, `rejected`: a `decision` row, `proposed` → `rejected`.
+///
+/// **Never an `email` card (global constraint 14, Gmail Limited Use):** a Gmail task or completion
+/// card is skipped here, so it is never a row, never stamped and never "waiting". An approved
+/// non-event card is not sent either: a judgment the student accepted stays right by absence.
+///
+/// The frontmatter test runs before the journal is read, and the text is checked for
+/// `judgment_id` before it is parsed, so a vault with nothing to report pays one directory read
+/// per folder and never loads the journal.
+fn labels_to_report(vault: &Path) -> Vec<LabelCard> {
+    let mut journal: Option<Journal> = None;
+    let mut out = Vec::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = crate::pystr::read_text(&path) else { continue };
+            if !text.contains("judgment_id") {
+                continue;
+            }
+            let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+            let field = |key: &str| crate::yaml::opt_text(crate::yaml::get(&meta, key)).unwrap_or_default();
+            if field("type") != "approval" || !field("reported_at").is_empty() {
+                continue;
+            }
+            let (jid, jkind, kind, status) =
+                (field("judgment_id"), field("judgment_kind"), field("kind"), field("status"));
+            if !crate::cloudmodel::is_judgment_id(&jid) {
+                continue;
+            }
+            let (label, ours, theirs) = match (kind.as_str(), status.as_str(), jkind.as_str()) {
+                ("event-check", "executed", "event") => ("verdict", "unsure", "obligation"),
+                ("event-check", "rejected", "event") => ("verdict", "unsure", "drop"),
+                ("event-check", _, _) => continue,
+                (_, "rejected", "task" | "event") => ("decision", "proposed", "rejected"),
+                // Everything else, and every `email` card whatever its status.
+                _ => continue,
+            };
+            let item_id = field("id");
+            if !crate::ids::is_id(&item_id) {
+                continue;
+            }
+            let journal = journal.get_or_insert_with(|| Journal::new(vault));
+            let Some(ts) = journal
+                .human_set(&item_id, "status")
+                .and_then(|r| r.get("ts").and_then(|t| t.as_str()).map(str::to_string))
+                .filter(|ts| LABEL_TS_RE.is_match(ts) && ts.parse::<jiff::Timestamp>().is_ok())
+            else {
+                continue;
+            };
+            let row = serde_json::json!({
+                "ts": ts, "item_id": item_id, "field": label, "ours": ours, "theirs": theirs,
+                "kind": "approval", "judgment_id": jid, "judgment_kind": jkind,
+            });
+            out.push(LabelCard { rel: crate::ids::rel(vault, &path), ts, item_id, row });
+        }
+    }
+    out.sort_by(|a, b| (&a.ts, &a.item_id).cmp(&(&b.ts, &b.item_id)));
+    out
+}
+
+/// F8: whether a decision is waiting to be reported — the same scan [`report_labels`] makes, so
+/// `run_lines_with`'s early return and the pass agree on what "waiting" means. An `email` card is
+/// never waiting.
+pub fn labels_waiting(vault: &Path) -> bool {
+    !labels_to_report(vault).is_empty()
+}
+
+/// F8, the fifth pass of the cloud arm: report the student's answers on judged cards to
+/// `/telemetry`, as label rows carrying the card's `judgment_id`, so `calibration_query.sql`'s
+/// `c.judgment_id = j.id` join finds them with no heuristic (plan section (b)).
+///
+/// **Idempotent through `reported_at`.** On a 200 every card in the batch is stamped
+/// `reported_at: "<UTC ISO>"` through `write_literals`, as [`LABELS_ACTOR`] under `opts.via`, and is
+/// never read as waiting again. A 200 whose `unowned` count is above zero still stamps the whole
+/// batch — the service has answered for those rows and would drop a resend again — and says so.
+/// Any other outcome (a 400 from a handler older than F7, a 5xx, no network) is one line
+/// `labels: not sent (…)`, stamps nothing, and the rest is left for the next slot; a resend lands
+/// on the same `corrections_once` key. Batches of at most [`LABEL_BATCH`] rows, in `(ts, item_id)`
+/// order, each checked against `budget` before its request exactly as [`pull_rules`] checks its own.
+pub fn report_labels(
+    vault: &Path,
+    client: &crate::cloudmodel::CloudClient,
+    opts: &Options<'_>,
+    budget: std::time::Duration,
+) -> Vec<String> {
+    let cards = labels_to_report(vault);
+    let mut lines = Vec::new();
+    if cards.is_empty() {
+        return lines;
+    }
+    let ctx = WriteContext {
+        actor: LABELS_ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let started = std::time::Instant::now();
+    let mut total = crate::cloudmodel::LabelsSent::default();
+    let mut sent = 0usize;
+    for (i, batch) in cards.chunks(LABEL_BATCH).enumerate() {
+        if started.elapsed() + crate::cloudmodel::CALL_TIMEOUT > budget {
+            lines.push(format!("labels: {} decision(s) left for the next slot", cards.len() - i * LABEL_BATCH));
+            break;
+        }
+        let rows: Vec<serde_json::Value> = batch.iter().map(|c| c.row.clone()).collect();
+        match crate::cloudmodel::post_labels(client, &rows) {
+            Ok(reply) => {
+                let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+                let stamp = format!("\"{}\"", now.strftime("%Y-%m-%dT%H:%M:%SZ"));
+                for card in batch {
+                    // Best effort: a stamp that fails leaves the card waiting, and its resend lands
+                    // on the same `corrections_once` row.
+                    let _ = crate::write::write_literals(
+                        vault,
+                        &card.rel,
+                        &[("reported_at".to_string(), stamp.clone())],
+                        &ctx,
+                        &mut journal,
+                        &WriteOpts::default(),
+                    );
+                }
+                sent += batch.len();
+                total.unowned += reply.unowned;
+                total.refused += reply.refused;
+            }
+            Err(e) => {
+                lines.push(format!("labels: not sent ({e})"));
+                break;
+            }
+        }
+    }
+    if sent > 0 {
+        let mut line = format!("labels: sent {sent}");
+        if total.unowned > 0 {
+            line.push_str(&format!(", {} not accepted (judgment not on this account)", total.unowned));
+        }
+        if total.refused > 0 {
+            line.push_str(&format!(", {} refused (labels nothing)", total.refused));
+        }
+        lines.insert(0, line);
+    }
+    lines
+}
+
 /// Every `rule_id` already filed — `approvals/` for the live ones and `archive/` for the settled,
 /// because a card that was decided last week must not be re-offered this week.
 fn existing_rule_ids(vault: &Path) -> std::collections::BTreeSet<i64> {
@@ -1194,6 +1418,7 @@ mod tests {
             importance_reason: Some("Homework is 20% of CS 100.".to_string()),
             confidence: 0.9,
             tier: 3,
+            ..Default::default()
         })
     }
     fn opts<'a>(log: &'a Path) -> Options<'a> {
@@ -1309,6 +1534,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// F5(b): a verdict carrying the service's `judgment_id` (tier 2 or tier 3, over the cloud)
+    /// stamps `judgment_id` and `judgment_kind: task` into the `judgment:` block's `inputs`,
+    /// alongside the two `enrich` already wrote — sorted, since `judgment_literal` sorts keys.
+    #[test]
+    fn a_cloud_judgment_with_an_id_stamps_it_into_the_judgment_block() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("with-jid");
+        let log = v.join("_log");
+        let m = Fixed(crate::judge::Verdict {
+            course: Some("cs-100".to_string()),
+            effort_hours: Some(2.5),
+            importance: Some(4),
+            importance_reason: Some("Homework is 20% of CS 100.".to_string()),
+            confidence: 0.9,
+            tier: 3,
+            judgment_id: Some("3fa85f64-5717-4562-b3fc-2c963f66afa6".to_string()),
+        });
+        let (code, _) = enrich_with(&v, &opts(&log), Ok(&m));
+        assert_eq!(code, 0);
+
+        let meta = meta_of(&v, "hw3.md");
+        let Some(serde_yaml_ng::Value::Mapping(j)) = crate::yaml::get(&meta, "judgment") else { panic!("no judgment") };
+        let Some(serde_yaml_ng::Value::Mapping(inputs)) = crate::yaml::get(j, "inputs") else { panic!("no inputs") };
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "judgment_id")).as_deref(), Some("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "judgment_kind")).as_deref(), Some("task"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "source_uid")).as_deref(), Some("blackboard:_884411_1"));
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(inputs, "title_seen")).as_deref(), Some("CS-100 Homework 3"));
+
+        // Sorted keys, one line (`inputs`'s `judgment_id` sorts before `judgment_kind`, which
+        // sorts before `source_uid`) — the exact literal `write` renders onto the note.
+        let text = crate::pystr::read_text(&v.join("tasks").join("hw3.md")).unwrap();
+        assert!(crate::provenance::guard_block_style(&text).is_ok(), "must stay a single-line flow mapping");
+        let line = text.lines().find(|l| l.starts_with("judgment:")).unwrap();
+        assert!(
+            line.contains("inputs: {judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6, judgment_kind: task, source_uid: 'blackboard:_884411_1', title_seen: CS-100 Homework 3}"),
+            "{line}"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F5(b): the byte-contract half — a verdict with **no** id (every tier-1-only verdict, and
+    /// every reply from a server that never sends the field, `judgment_id: None` from
+    /// `..Default::default()`) must write the exact `judgment:` line this pass wrote before F5
+    /// existed: same four keys in `inputs`... no, same TWO keys (`source_uid`, `title_seen`), no
+    /// `judgment_id`, no `judgment_kind`. `at` is the run's own wall clock, spliced from the same
+    /// write rather than pinned, so every other byte is still compared literally.
+    #[test]
+    fn a_judgment_without_an_id_writes_the_block_exactly_as_before() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("no-jid");
+        let log = v.join("_log");
+        let m = answered(); // judgment_id: None, via `..Default::default()`
+        let (code, _) = enrich_with(&v, &opts(&log), Ok(&m));
+        assert_eq!(code, 0);
+
+        let meta = meta_of(&v, "hw3.md");
+        let Some(serde_yaml_ng::Value::Mapping(j)) = crate::yaml::get(&meta, "judgment") else { panic!("no judgment") };
+        let at = crate::yaml::opt_text(crate::yaml::get(j, "at")).unwrap();
+
+        let text = crate::pystr::read_text(&v.join("tasks").join("hw3.md")).unwrap();
+        let line = text.lines().find(|l| l.starts_with("judgment:")).unwrap();
+        let expected = format!(
+            "judgment: {{actor: 'agent:knowlu.enrich', at: '{at}', \
+             fields: [course, effort_confidence, effort_hours, importance, importance_reason], \
+             inputs: {{source_uid: 'blackboard:_884411_1', title_seen: CS-100 Homework 3}}, \
+             run_id: 'local-2026-09-07T18:00:00Z'}}"
+        );
+        assert_eq!(line, expected);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     /// m1 (Task 7 fix round 1): production's actual starting shape. `ingest::NOTE_TEMPLATE` seeds
     /// every freshly ingested task at `effort_confidence: low` (`src/ingest.rs:495`), which is
     /// this module's own answer for that field too — so on a REAL vault, F4 swallows it and the
@@ -1414,7 +1710,8 @@ mod tests {
                 *n += 1;
                 if *n == 1 { return Err(crate::judge::ModelError::Failed("llama-cli: broken pipe".into())); }
                 Ok(crate::judge::Verdict { course: None, effort_hours: Some(1.5), importance: Some(3),
-                    importance_reason: Some("No weights given, so 3.".into()), confidence: 0.8, tier: 3 })
+                    importance_reason: Some("No weights given, so 3.".into()), confidence: 0.8, tier: 3,
+                    ..Default::default() })
             }
         }
         let m = Flaky(std::sync::Mutex::new(0));
@@ -1802,9 +2099,24 @@ mod tests {
             "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
         ).unwrap();
 
-        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
-                   DTSTART:20260829T230000Z\r\nDTEND:20260830T000000Z\r\n\
-                   DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        // F10 fix round 0: `judge_roster` now runs `eventfilter::prefilter_events` before judging
+        // (the same call `rank` makes), and this pass's `today` is the real clock
+        // (`jiff::Zoned::now().date()`, `enrich.rs:437`) — a date baked in at write time drifts out
+        // of the 90-day roster window as real time passes and the event is correctly dropped
+        // unjudged, exactly as `rank` would drop it. So the fixture's date is computed relative to
+        // `now`, a few days out, rather than hard-coded.
+        let start_date = jiff::Zoned::now()
+            .date()
+            .checked_add(jiff::Span::new().days(3))
+            .expect("date add");
+        let end_date = start_date.checked_add(jiff::Span::new().days(1)).expect("date add");
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:engage:1\r\nSUMMARY:AI Club\r\n\
+             DTSTART:{}T230000Z\r\nDTEND:{}T000000Z\r\n\
+             DESCRIPTION:Come learn ML.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            start_date.strftime("%Y%m%d"),
+            end_date.strftime("%Y%m%d"),
+        );
         let events_reply = crate::ledger::dumps_value(&serde_json::json!({ "body": ics }));
         let judge_reply = crate::ledger::dumps_value(&serde_json::json!({
             "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
@@ -1868,6 +2180,7 @@ mod tests {
             title: "PH 106 problem set 4".into(), course: Some("ph-106".into()),
             due: Some("2026-09-11".into()), effort_hours: Some(2.5), importance: Some(4),
             why: "the email states a Friday deadline".into(), confidence: 0.86,
+            judgment_id: None,
         };
         let ctx = WriteContext { actor: GMAIL_ACTOR.into(), via: "local-runner".into(), run_id: None };
         let mut journal = Journal::new(&vault);
@@ -1913,6 +2226,7 @@ mod tests {
                 uid: format!("gmail:m{n}"), tier: "opportunity".into(),
                 title: format!("Opportunity {n}"), course: None, due: None,
                 effort_hours: None, importance: None, why: "worth a look".into(), confidence: 0.8,
+                judgment_id: None,
             };
             write_gmail_card(&vault, &item, today, &ctx, &mut journal).expect("card");
         }
@@ -1994,6 +2308,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// F6b: a `tier: task` row whose reply carries a `judgment_id` (alongside `uid`/`tier`, not
+    /// inside `payload` — `gmail-read`'s own shape) stamps `judgment_id:` and
+    /// `judgment_kind: email` into the note's frontmatter. Under the Limited Use ruling (global
+    /// constraint 14) the id stays in the vault only; the device never reports it.
+    #[test]
+    fn a_pulled_task_note_carries_the_email_judgment_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-task-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","judgment_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let meta = meta_of(&v, "ph-106-problem-set-4.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+        handle.join().expect("the listener thread did not panic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: an item with no `judgment_id` (the common case: an old server, or a reply the service
+    /// never wrote a `judgments` row for) writes the exact bytes this note had before this field
+    /// existed — no `judgment_id`/`judgment_kind` line anywhere.
+    #[test]
+    fn an_item_without_one_writes_todays_bytes() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-task-no-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m1","tier":"task","payload":{"title":"PH 106 problem set 4","course":"ph-106","due":"2026-09-11","effort_hours":2.5,"importance":4,"why":"the email states a Friday deadline","confidence":0.86}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let text = crate::pystr::read_text(&v.join("tasks").join("ph-106-problem-set-4.md")).unwrap();
+        assert!(!text.contains("judgment_id"), "{text}");
+        assert!(!text.contains("judgment_kind"), "{text}");
+        let meta = meta_of(&v, "ph-106-problem-set-4.md");
+        let id = crate::yaml::opt_text(crate::yaml::get(&meta, "id")).expect("write::create mints an id");
+        let expected = format!(
+            "---\ntitle: \"PH 106 problem set 4\"\ncourse: \"ph-106\"\ndomain: school\n\
+             due: 2026-09-11\neffort_hours: 2.5\neffort_confidence: low\neffort_source: inferred\n\
+             importance: 4\nimportance_reason: \"the email states a Friday deadline\"\n\
+             status: active\nprogress: 0\ncreated_by: gmail\nsource_uid: \"gmail:m1\"\n\
+             needs_enrichment: false\nid: {id}\n---\n\nFrom email. the email states a Friday \
+             deadline\n"
+        );
+        assert_eq!(text, expected);
+        handle.join().expect("the listener thread did not panic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     /// `borderline` (and, by the same code path, `event` and `opportunity`) becomes a `kind: task`
     /// approval card, never a note directly — the student decides, not the pull.
     #[test]
@@ -2023,6 +2405,46 @@ mod tests {
 
         let requests = handle.join().expect("the listener thread did not panic");
         assert_eq!(requests.len(), 2, "{requests:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: the three middle tiers build a `kind: task` approval card, not a note. When the row
+    /// carries a `judgment_id` the card gets it too, right after `created_by` — the same placement
+    /// F5 gives an amend card from a judged write.
+    #[test]
+    fn a_pulled_card_carries_it() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-card-judgment");
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(
+                r#"[{"uid":"gmail:m2","tier":"borderline","judgment_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","payload":{"title":"CS midterm review session","course":"cs-100","due":null,"effort_hours":1.0,"importance":3,"why":"might be worth attending","confidence":0.6}}]"#,
+                false,
+            ),
+            gmail_reply("[]", false),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        pull_gmail(&v, &client, &opts(&log), BATCH_BUDGET);
+
+        let meta = meta_of_approval(&v, "task-cs-midterm-review-session.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&meta, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+
+        let text =
+            crate::pystr::read_text(&v.join("approvals").join("task-cs-midterm-review-session.md")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let created_by_at = lines.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines[created_by_at + 2], "judgment_kind: email");
+        assert_eq!(lines[created_by_at + 3], "source_uid: \"gmail:m2\"");
+
+        handle.join().expect("the listener thread did not panic");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -2929,6 +3351,50 @@ mod tests {
         assert_eq!(lines.last().unwrap(), "gmail: 0 task(s), 1 proposed, 0 dropped as information", "{lines:?}");
         let requests = handle.join().expect("the listener thread did not panic");
         assert!(requests[1].contains("gmail:r1"), "the receipt must be acknowledged: {}", requests[1]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F6b: a `tier: completion` row's `judgment_id` reaches the completion card
+    /// (`completion::propose_done`'s `judgment` parameter), right after `created_by` — same
+    /// placement as the task-tier card (F6b) and an amend card from a judged write (F5). Under the
+    /// Limited Use ruling (global constraint 14) the id stays in the vault only.
+    #[test]
+    fn a_gmail_completion_card_carries_the_email_judgment_id() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-completion-judgment");
+        let item = serde_json::json!({
+            "uid": "gmail:r1", "tier": "completion",
+            "judgment_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "payload": {"title": "cs-100  homework 3", "course": null, "due": null,
+                        "effort_hours": null, "importance": null,
+                        "why": "Blackboard submission receipt", "confidence": 1},
+        });
+        let (base, handle) = gmail_loopback(vec![
+            gmail_reply(&format!("[{item}]"), false),
+            gmail_reply("[]", false),
+        ]);
+        let lines = pull_gmail(&v, &client_for(base), &opts(&v.join("_log")), BATCH_BUDGET);
+
+        assert_eq!(approvals_in(&v), vec!["amend-hw3-done.md".to_string()], "{lines:?}");
+        let card = meta_of_approval(&v, "amend-hw3-done.md");
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&card, "judgment_id")).as_deref(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert_eq!(
+            crate::yaml::opt_text(crate::yaml::get(&card, "judgment_kind")).as_deref(),
+            Some("email")
+        );
+
+        let text = crate::pystr::read_text(&v.join("approvals").join("amend-hw3-done.md")).unwrap();
+        let lines_of: Vec<&str> = text.lines().collect();
+        let created_by_at = lines_of.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines_of[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines_of[created_by_at + 2], "judgment_kind: email");
+        assert_eq!(lines_of[created_by_at + 3], "changes:");
+
+        assert!(crate::approvals::validate_amendment(&v, &card).is_ok());
+        handle.join().expect("the listener thread did not panic");
         let _ = std::fs::remove_dir_all(&v);
     }
 

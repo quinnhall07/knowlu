@@ -187,11 +187,28 @@ export function isDecorationByDistinctValues(distinctCount: number): boolean {
 export const AUROC_USABLE_MIN = 0.80;
 export const AUROC_COSMETIC_MAX = 0.70;
 /** Below this many examples in EITHER class, the point estimate is treated as too noisy to grade
- * at all (`verdict: "undefined"`) rather than graded and possibly wrong. This is the harness's own
- * floor, not a number from the brief or the background note — chosen loose enough that a synthetic
- * test with a few dozen rows still gets a real answer, and named here so it is one line to change,
- * not a magic number buried in `aurocForWrong`. */
-export const MIN_CLASS_N = 10;
+ * at all (`verdict: "undefined"`) rather than graded and possibly wrong.
+ *
+ * The judgment-quality plan's T6 (`docs/plans/2026-09-22-judgment-quality-plan.md:263`) says, of
+ * CALIBRATION BINS: "A bin under about thirty items is decoration: at three-quarters accuracy its
+ * standard error is near nine points." That sentence is about bins, not about AUROC class sizes
+ * (review M-6) — the thirty is borrowed from it as a round number, not applied because T6 names
+ * AUROC. The reason thirty is also the right floor for an AUROC class is the Hanley-McNeil standard
+ * error of AUROC, at AUROC 0.75 with equal classes:
+ *
+ *   | per class | SE    | 95% half-width |
+ *   |-----------|-------|-----------------|
+ *   | 10        | 0.112 | ±0.22           |
+ *   | 30        | 0.063 | ±0.12           |
+ *   | 50        | 0.049 | ±0.10           |
+ *
+ * At 10 per class the interval covers both the cosmetic (<0.70) and usable (>=0.80) bands entirely
+ * — a grade would be noise with a label on it. Even at 30 per class the interval still spans both
+ * bands, which is why this floor does not make B2's verdict automatic (changing that is T5/T7's
+ * business, not this constant's) — it only makes the reported `ci95` narrow enough that a reader
+ * (Quinn, looking at the report) can see which band the number leans toward. Named here so it is
+ * one line to change, not a magic number buried in `aurocForWrong`. */
+export const MIN_CLASS_N = 30;
 
 /** Mann-Whitney U, rescaled to AUROC: P(score of a random positive > score of a random negative),
  * ties splitting 0.5 (Hanley & McNeil's rank-sum identity — this is the standard closed form, not
