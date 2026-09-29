@@ -57,6 +57,8 @@ pub mod eventemit;
 pub mod coursework;
 pub mod zybooks;
 pub mod vhl;
+// Stream J T8 — completion detection, tier 1: a vendor's own 100% becomes a `status: done` amend.
+pub mod completion;
 // Wave 7 — runs landed early because coursework::main needs it; info and issues are the two
 // note constructors that needed yamlemit's block style (Task 15).
 pub mod runs;
@@ -79,6 +81,10 @@ pub mod cli;
 // The read model for the desktop console (plan 2026-09-02): read-only, computed from the vault
 // `cli` already knows how to load, never written to it.
 pub mod surface;
+
+// The commitment model (spec 2026-09-23): the notes in `commitments/`, read into plain data for
+// `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.
+pub mod commitments;
 
 // The console's write path (Knowlu plan 1): interaction events only, through the same
 // `JsonlLedger` seam as the journal. Never read by the engine.

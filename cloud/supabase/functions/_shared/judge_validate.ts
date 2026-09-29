@@ -7,6 +7,11 @@ export const CONFIDENCE_FLOOR = 0.6;
 export const MAX_REASON_CHARS = 140;
 
 export type Kind = "task" | "event" | "email";
+
+/** The wire shape of a resolved `due`: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`. Shared with
+ * `judge_due.ts` (stream J Task T4) so the resolver's absolute-date passthrough and this
+ * function's final check can never drift apart — one pattern, not two copies of it. */
+export const ABSOLUTE_DUE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/;
 /** Why an answer did not become a verdict. A CLOSED set — `judgments.cause` checks it. */
 export type Cause = "below floor" | "incomplete" | "model failed" | "refused" | "truncated";
 
@@ -16,10 +21,13 @@ export interface Validated {
   cause?: Cause;
 }
 
-/** The three words `eventledger::VALID_VERDICTS` will accept. */
-export const EVENT_VERDICTS = ["obligation", "opportunity", "drop"] as const;
-/** The five email tiers of cloud design §5.3. */
-export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information"] as const;
+/** The four words `eventledger::VALID_VERDICTS` will accept (CHECKPOINT J-1, ruled 2026-09-22:
+ * `unsure` added, additive — a vault contract, never a rename). */
+export const EVENT_VERDICTS = ["obligation", "opportunity", "drop", "unsure"] as const;
+/** The five email tiers of cloud design §5.3, and stream J Task T9's sixth: `completion`, "this
+ * email confirms the student already submitted or finished a specific piece of work". Its `title`
+ * is the work's name, which the device matches against its own task titles. */
+export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information", "completion"] as const;
 
 // Added for `cloud/eval/schema.ts` (C2 Task 13): this file had no item-field or labelled-field
 // lists before — nothing here validated `request.item`'s shape, only the model's answer — so
@@ -124,7 +132,14 @@ export function validate(
     if (!(EVENT_VERDICTS as readonly string[]).includes(verdict) || why === "") {
       return { ok: false, cause: "incomplete" };
     }
-    if (confidence < CONFIDENCE_FLOOR) return { ok: false, cause: "below floor" };
+    // `unsure` IS the model's honest answer to "I can't tell from this text" — gating it behind
+    // the SAME confidence floor that forces a guess among obligation/opportunity/drop in the first
+    // place would just reintroduce defect B for the one answer meant to close it: the floor exists
+    // to keep a shaky obligation/opportunity/drop guess out of the ledger, not to punish an event
+    // that honestly declined to guess. Every other verdict still clears the floor as before.
+    if (verdict !== "unsure" && confidence < CONFIDENCE_FLOOR) {
+      return { ok: false, cause: "below floor" };
+    }
     return { ok: true, verdict: { verdict, why, confidence: clamp(confidence, 0, 1) } };
   }
 
@@ -133,6 +148,11 @@ export function validate(
   if (!(EMAIL_TIERS as readonly string[]).includes(tier) || why === "") {
     return { ok: false, cause: "incomplete" };
   }
+  const title = oneLine(typeof answer.title === "string" ? answer.title : "", 200);
+  // T9: a completion names the work it completes, or the device has nothing to match — and a
+  // promoted rule never carries a title (`fieldsOf` drops it), so this is also what sends a
+  // title-less rule answer on to the model rather than queueing an unmatchable completion.
+  if (tier === "completion" && title === "") return { ok: false, cause: "incomplete" };
   if (confidence < CONFIDENCE_FLOOR) return { ok: false, cause: "below floor" };
   const known = Array.isArray(seed.known_courses) ? seed.known_courses as string[] : [];
   const course = typeof answer.course === "string" && known.includes(answer.course) ? answer.course : null;
@@ -143,11 +163,14 @@ export function validate(
     verdict: {
       tier,
       why,
-      title: oneLine(typeof answer.title === "string" ? answer.title : "", 200),
+      title,
       course,
-      due: typeof answer.due === "string" && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(answer.due)
-        ? answer.due
-        : null,
+      // T4: the model no longer resolves a relative phrase itself, so by the time an answer
+      // reaches this function its `due` is either already the wire shape (`judge_due.ts` resolved
+      // it, or the email stated an absolute date the model copied verbatim) or something that
+      // failed to resolve — and an unresolved phrase is exactly as untrustworthy here as it always
+      // was, so it is still dropped to `null` rather than written into a vault.
+      due: typeof answer.due === "string" && ABSOLUTE_DUE_RE.test(answer.due) ? answer.due : null,
       effort_hours: effort === null ? null : clamp(effort, 0.25, 40),
       importance: importance === null ? null : clamp(Math.round(importance), 1, 5),
       confidence: clamp(confidence, 0, 1),

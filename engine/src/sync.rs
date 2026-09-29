@@ -441,6 +441,13 @@ fn note_paths_and_unreadable(vault: &Path) -> (Vec<String>, std::collections::BT
 /// What an approved card DOES to its target — `apply_amendment`'s write of the new value onto the
 /// task — is a record carrying the TASK's `id`, and travels like any other edit: that is how the
 /// other desktop converges.
+///
+/// **Commitment cards too** (commitment-model spec §10 phase 1s, R20): every card whose `kind` is
+/// in [`crate::commitments::LOCAL_CARD_KINDS`] is a local card here, found by the same two reads
+/// ([`local_card_note`] on disk, the kind of a `create` record's `new` in the journal). Its `create`
+/// is under `agent:commitments`, not [`ACTOR`], so path 2 closes by id in the records loop, like
+/// path 4. What its settlement writes — the confirmed note, the decline marker — carries its own
+/// id under `commitments/` and travels.
 #[derive(Debug, Default)]
 struct SyncCards {
     ids: std::collections::BTreeSet<String>,
@@ -448,15 +455,15 @@ struct SyncCards {
 }
 
 impl SyncCards {
-    /// From the notes on disk (every `approvals/` and `archive/` note whose frontmatter says
-    /// `created_by: agent:knowlu.sync` — a read, never a re-dump) and from this vault's journal
-    /// (every `create` under [`ACTOR`], or of a note whose frontmatter says so), then every path any
+    /// From the notes on disk (every `approvals/` and `archive/` note [`local_card_note`] accepts
+    /// — a read, never a re-dump) and from this vault's journal (every `create` under [`ACTOR`], or
+    /// of a note whose frontmatter says so or whose `kind` is a local card kind), then every path any
     /// journalled record ever gave one of those ids: its `path`, and a move's or settle's `old`/`new`.
     fn find(vault: &Path, on_disk: &[String], journal: &mut Journal) -> SyncCards {
         let mut cards = SyncCards::default();
         for rel in on_disk.iter().filter(|r| r.starts_with("approvals/") || r.starts_with("archive/")) {
             let Ok(text) = crate::pystr::read_text(&vault.join(rel)) else { continue };
-            if let Some(id) = sync_card_note(&text) {
+            if let Some(id) = local_card_note(&text) {
                 cards.paths.insert(rel.clone());
                 if let Some(id) = id {
                     cards.ids.insert(id);
@@ -466,9 +473,12 @@ impl SyncCards {
         let records = journal.read(None, None);
         let str_of = |r: &Record, k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         for record in &records {
-            let by_sync = str_of(record, "actor") == ACTOR
-                || record.get("new").and_then(|n| n.get("created_by")).and_then(Value::as_str) == Some(ACTOR);
-            if str_of(record, "op") == "create" && by_sync && !str_of(record, "id").is_empty() {
+            let new_str = |k: &str| record.get("new").and_then(|n| n.get(k)).and_then(Value::as_str);
+            let by_sync = str_of(record, "actor") == ACTOR || new_str("created_by") == Some(ACTOR);
+            // Phase 1s: a card of a local kind, whoever filed it — `agent:commitments` also writes
+            // the confirmed notes, which sync, so its kind is the key (see `local_card_note`).
+            let by_kind = new_str("kind").is_some_and(|k| crate::commitments::LOCAL_CARD_KINDS.contains(&k));
+            if str_of(record, "op") == "create" && (by_sync || by_kind) && !str_of(record, "id").is_empty() {
                 cards.ids.insert(str_of(record, "id"));
             }
         }
@@ -492,19 +502,28 @@ impl SyncCards {
     }
 }
 
-/// `Some(the card's id, if it has one)` when `text` is a note whose frontmatter says
-/// `created_by: agent:knowlu.sync` — a sync amend card. A plain substring test first, so the
-/// frontmatter of a note that never mentions the actor is never parsed; then a real read of the
-/// frontmatter, so a body line that merely mentions it is not mistaken for one.
-fn sync_card_note(text: &str) -> Option<Option<String>> {
-    if !text.contains(ACTOR) {
+/// `Some(the card's id, if it has one)` when `text` is a **local card**: a note whose frontmatter
+/// says `created_by: agent:knowlu.sync` (a sync amend card), **or** whose `kind` is one of
+/// [`crate::commitments::LOCAL_CARD_KINDS`] (commitment-model spec §10 phase 1s, R20). The second
+/// key is the kind because a `commitment-check` card is written by `agent:commitments`, the same
+/// actor as the confirmed notes that must sync — no actor test can separate them. The list is
+/// named, never copied, so a kind added to it is local here with no edit.
+///
+/// A plain substring test first, so the frontmatter of a note that mentions neither is never
+/// parsed; then a real read of the frontmatter, so a body line that merely mentions one is not
+/// mistaken for a card.
+fn local_card_note(text: &str) -> Option<Option<String>> {
+    if !text.contains(ACTOR) && !text.contains("kind: commitment-") {
         return None;
     }
     let (meta, _) = crate::models::split_frontmatter(text).ok()?;
-    if crate::yaml::get(&meta, "created_by").and_then(crate::yaml::text).as_deref() != Some(ACTOR) {
+    let field = |key: &str| crate::yaml::get(&meta, key).and_then(crate::yaml::text);
+    let by_actor = field("created_by").as_deref() == Some(ACTOR);
+    let by_kind = field("kind").is_some_and(|k| crate::commitments::LOCAL_CARD_KINDS.contains(&k.as_str()));
+    if !by_actor && !by_kind {
         return None;
     }
-    Some(crate::yaml::get(&meta, "id").and_then(crate::yaml::text))
+    Some(field("id"))
 }
 
 /// **I5 (fix round 1), Task 6's own parked finding F1, closed here.** Whichever pull applies a row —
@@ -517,11 +536,13 @@ fn record_is_foreign_actor(record: &Record) -> bool {
 }
 
 /// See [`record_is_foreign_actor`]: the note-side half of the same shared refusal. A note that IS
-/// one of the account's own sync amend cards ([`sync_card_note`]) can only ever be answered on the
+/// one of the account's own sync amend cards ([`local_card_note`]) can only ever be answered on the
 /// device that filed it (probes N18, N19, `ACTOR`'s own doc) — materialising or applying one here
-/// would hand this device a question that is not its own, and one sync will never settle.
+/// would hand this device a question that is not its own, and one sync will never settle. Since
+/// phase 1s the same holds for a card of a `commitments::LOCAL_CARD_KINDS` kind: none is ever
+/// pushed, so one arriving is malformed or from a build that predates the rule.
 fn note_is_foreign_sync_card(text: &str) -> bool {
-    sync_card_note(text).is_some()
+    local_card_note(text).is_some()
 }
 
 /// What one push carries. `warnings` are lines the run prints; they are never sent.
@@ -691,9 +712,10 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
             batch.warnings.push(format!("sync: {rel} could not be read; it stays on this machine"));
             continue;
         };
-        // The same rule for a sync card outside `approvals/` and `archive/`, where `SyncCards` does
-        // not look — none should exist, and none leaves if one does.
-        if sync_card_note(&text).is_some() {
+        // The same rule for a local card (a sync card, or a card of a local commitment kind)
+        // outside `approvals/` and `archive/`, where `SyncCards` does not look — none should exist,
+        // and none leaves if one does.
+        if local_card_note(&text).is_some() {
             next.notes.remove(rel);
             continue;
         }
@@ -2148,7 +2170,7 @@ pub fn apply(
                 }
             }
             if !changes.is_empty() && keep.is_none() {
-                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today) {
+                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None) {
                     // One card, however many fields it carries — the fifteen-a-day cap the deck
                     // already applies counts cards, and so does this.
                     Ok(_) => report.cards += 1,
@@ -2672,5 +2694,165 @@ mod tests {
         // the cause. What matters is that the two are different functions and the step prints the
         // first — `run_lines_with` is where that is asserted (Task 7).
         assert!(!e.label().contains("Users"));
+    }
+
+    // ---- Phase 1s (commitment-model spec §10): a local card is local by actor OR by kind ----
+
+    #[test]
+    fn local_card_note_matches_by_actor_or_kind_not_by_a_body_line() {
+        let sync_card = format!("---\nid: apr_0123456789\ntype: approval\nkind: amend\ncreated_by: {ACTOR}\n---\n\nBody.\n");
+        assert_eq!(local_card_note(&sync_card), Some(Some("apr_0123456789".to_string())));
+        for kind in crate::commitments::LOCAL_CARD_KINDS {
+            let card = format!("---\nid: apr_0123456789\ntype: approval\nkind: {kind}\nstatus: pending\ncreated_by: agent:commitments\n---\n\nBody.\n");
+            assert_eq!(local_card_note(&card), Some(Some("apr_0123456789".to_string())), "{kind}");
+            let no_id = format!("---\ntype: approval\nkind: {kind}\n---\n\nBody.\n");
+            assert_eq!(local_card_note(&no_id), Some(None), "{kind} with no id");
+            // A body line is not frontmatter.
+            let task = format!("---\nid: task_0123456789\ntype: task\n---\n\nkind: {kind}\ncreated_by: {ACTOR}\n");
+            assert_eq!(local_card_note(&task), None, "{kind} in a body line");
+        }
+        // The confirmed note shares the cards' actor and must sync; so must a marker.
+        let confirmed = "---\nid: cmt_0123456789\ntype: commitment\nkind: class\nstatus: confirmed\ncreated_by: agent:commitments\n---\n\nMine.\n";
+        assert_eq!(local_card_note(confirmed), None);
+        let marker = "---\nid: cmt_0123456789\ntype: commitment\nstatus: declined\nsource_uid: \"gcal-series:x\"\n---\n";
+        assert_eq!(local_card_note(marker), None);
+        // The pre-test's prefix is not the rule: a kind outside the list is not a local card.
+        let other = "---\nid: apr_0123456789\ntype: approval\nkind: commitment-other\n---\n";
+        assert_eq!(local_card_note(other), None);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-sync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn front_str(path: &Path, key: &str) -> String {
+        let text = crate::pystr::read_text(path).unwrap();
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        crate::yaml::get(&meta, key).and_then(crate::yaml::text).unwrap_or_default()
+    }
+
+    fn md_in(vault: &Path, folder: &str) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(vault.join(folder))
+            .map(|d| d.flatten().map(|e| format!("{folder}/{}", e.file_name().to_string_lossy())).collect())
+            .unwrap_or_default();
+        out.retain(|p| p.ends_with(".md"));
+        out.sort();
+        out
+    }
+
+    /// A card of a kind with no settlement arm yet (phase 2 adds `commitment-ask`'s) is settled
+    /// here through the same two writes the arm makes: the stamp, then `write::delete`.
+    fn settle_by_hand(vault: &Path, cards: &[PathBuf], from: &str, stamp: &[(&str, &str)], journal: &mut Journal) {
+        let ctx = crate::approvals::default_ctx();
+        for card in cards.iter().filter(|c| c.exists() && front_str(c, "status") == from) {
+            let rel = crate::ids::rel(vault, card);
+            let literals: Vec<(String, String)> = stamp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            crate::write::write_literals(vault, &rel, &literals, &ctx, journal, &crate::write::WriteOpts::default()).unwrap();
+            crate::write::delete(vault, &rel, &ctx, journal).unwrap();
+        }
+    }
+
+    /// Spec §10 gate 2. For each kind in `LOCAL_CARD_KINDS`: a pending card, an approved-and-settled
+    /// card, a rejected card (its marker) and a withdrawn card, each filed through `file_card`.
+    #[test]
+    fn build_push_sends_no_local_card_nor_any_record_about_one() {
+        use crate::commitments::{self, Field, LOCAL_CARD_KINDS};
+        use crate::write::{write_literals, WriteContext, WriteOpts};
+        let today = jiff::civil::Date::constant(2026, 8, 20);
+        let now = jiff::civil::DateTime::constant(2026, 8, 20, 12, 0, 0, 0);
+        let v = scratch("local-cards");
+        let runner = WriteContext::new("agent:rank", "cli");
+        let console = WriteContext::new("student", "dashboard");
+        let mut journal = Journal::new(&v);
+        // Every card an invented weekly club on its own day, so no approval meets another's signature.
+        let mut days = crate::planning::DAY_KEYS.iter().cycle();
+        let mut file = |journal: &mut Journal, kind: &str, stage: &str| -> PathBuf {
+            let title = format!("Invented {stage} club");
+            let commitment = serde_json::json!({
+                "kind": "club", "level": "soft", "title": title, "course": null,
+                "meets": [{"days": [days.next().unwrap()], "start": "18:00", "end": "19:00"}],
+                "where": null, "from": null, "until": null,
+            });
+            let fields = vec![
+                ("source_uid", Field::Scalar(crate::yamlemit::Node::text(&format!("gcal-series:{kind}-{stage}")))),
+                ("commitment", Field::Flow(commitment)),
+            ];
+            commitments::file_card(&v, kind, fields, &title, "An invented card.\n", today, &runner, journal).unwrap()
+        };
+
+        // Withdrawn: the calendar was read and no card's key is on it any more.
+        let withdrawn: Vec<PathBuf> = LOCAL_CARD_KINDS.iter().map(|k| file(&mut journal, *k, "withdrawn")).collect();
+        let mut series = commitments::SeriesFile::default();
+        series.calendars.insert("google:invented".to_string(), today);
+        let done = crate::approvals::withdraw_stale(&v, &series, &commitments::load(&v), today, &runner, &mut journal);
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        settle_by_hand(&v, &withdrawn, "pending", &[("status", "superseded")], &mut journal);
+
+        // Approved, rejected and pending, answered as the console answers, then settled by the deck.
+        let mut answered = Vec::new();
+        for kind in LOCAL_CARD_KINDS {
+            for (stage, answer) in [("approved", Some("approved")), ("rejected", Some("rejected")), ("pending", None)] {
+                let card = file(&mut journal, kind, stage);
+                if let Some(answer) = answer {
+                    let literals = vec![("status".to_string(), answer.to_string())];
+                    let rel = crate::ids::rel(&v, &card);
+                    write_literals(&v, &rel, &literals, &console, &mut journal, &WriteOpts::default()).unwrap();
+                }
+                answered.push(card);
+            }
+        }
+        crate::approvals::process_approvals(&v, today, now, &crate::approvals::default_ctx(), &mut journal);
+        settle_by_hand(&v, &answered, "approved", &[("status", "executed"), ("executed_at", "\"2026-08-20 12:00\"")], &mut journal);
+
+        // The vault is what the scenario says, read from disk and not from the code under test.
+        let pending: Vec<String> = md_in(&v, "approvals");
+        assert_eq!(pending.len(), LOCAL_CARD_KINDS.len(), "one pending card per kind: {pending:?}");
+        let archived: Vec<String> = md_in(&v, "archive");
+        assert_eq!(archived.len(), 3 * LOCAL_CARD_KINDS.len(), "{archived:?}");
+        let cards: Vec<String> = pending.iter().chain(&archived).cloned().collect();
+        let mut card_paths: std::collections::BTreeSet<String> = cards.iter().cloned().collect();
+        for card in &cards {
+            let name = card.split_once('/').unwrap().1;
+            card_paths.insert(format!("approvals/{name}"));
+            card_paths.insert(format!("archive/{name}"));
+        }
+        let card_ids: std::collections::BTreeSet<String> = cards.iter().map(|c| front_str(&v.join(c), "id")).collect();
+        assert!(card_ids.iter().all(|id| !id.is_empty()) && card_ids.len() == cards.len(), "{card_ids:?}");
+        let kept = md_in(&v, "commitments");
+        let status_of = |p: &String| front_str(&v.join(p), "status");
+        assert!(kept.iter().any(|p| status_of(p) == "confirmed"), "a confirmed note: {kept:?}");
+        assert!(kept.iter().any(|p| status_of(p) == "declined"), "a decline marker: {kept:?}");
+
+        let (batch, _) = build_push(&v, &Cursor::default(), "acct-1", &mut journal);
+        assert!(batch.records.len() < PAGE && batch.notes.len() < PAGE, "one page holds it all");
+        for row in &batch.notes {
+            let path = row["path"].as_str().unwrap_or_default();
+            assert!(!card_paths.contains(path), "a card was sent: {path}");
+        }
+        let bodies: Vec<Value> = batch
+            .records
+            .iter()
+            .map(|r| serde_json::from_str(r["body"].as_str().unwrap()).unwrap())
+            .collect();
+        for body in &bodies {
+            let id = body["id"].as_str().unwrap_or_default();
+            assert!(!card_ids.contains(id), "a record about card {id} was sent: {body}");
+            for key in ["path", "old", "new"] {
+                let path = body[key].as_str().unwrap_or_default();
+                assert!(!card_paths.contains(path), "a record naming {path} was sent: {body}");
+            }
+        }
+        // What the settlements wrote does travel: each note, and its `create` record.
+        for note in &kept {
+            assert!(batch.notes.iter().any(|n| n["path"] == note.as_str()), "{note} was not sent");
+            assert!(
+                bodies.iter().any(|b| b["op"] == "create" && b["path"] == note.as_str()),
+                "{note}'s create was not sent"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&v);
     }
 }

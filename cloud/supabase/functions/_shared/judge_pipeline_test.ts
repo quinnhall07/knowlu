@@ -166,6 +166,70 @@ Deno.test("an email's subject and body reach no judgment row — only its sender
   assertEquals(log.rows[0].fields.source, "registrar@example.edu");
 });
 
+// T4: the model now answers `due` with the phrase as written, and the pipeline — not the model —
+// resolves it against the email's own Date line before `validate` ever sees it. This is the one
+// test that exercises the wiring in `judge_pipeline.ts` itself (`judge_due_test.ts` covers the
+// resolver's own logic exhaustively); RED before `judge_pipeline.ts` called `resolveDue` was: the
+// verdict's `due` came back as the literal string "Friday", which is not `ABSOLUTE_DUE_RE`-shaped,
+// so `validate` would have dropped it to `null` — the wiring is what turns a correct extraction
+// into a correct verdict instead of a silently discarded one.
+Deno.test("a relative due phrase from the model is resolved against the email's Date line before validate sees it", async () => {
+  const item = {
+    message_id: "gmail:9f31c",
+    from: "registrar@example.edu",
+    subject: "Re: your schedule",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500", // a Monday; "Friday" is 2026-09-18.
+    text: "Please confirm by Friday.",
+  };
+  const verdict = {
+    tier: "task",
+    title: "Confirm schedule",
+    course: null,
+    due: "Friday", // the model's extraction, not a resolved date.
+    effort_hours: 0.5,
+    importance: 3,
+    why: "the message asks for a reply by Friday",
+    confidence: 0.9,
+  };
+  const log = new Sink();
+  const reply = await judge("acct-1", { kind: "email", item, heuristics_seed: { known_courses: ["cs-100"] } }, {
+    ...deps(new ScriptedModel([verdict]), log, new Caps()),
+    row: { ...ROW, kind: "email", prompt_version: "email-3", grammar_version: "email-1" },
+  });
+  assertEquals(reply.verdict?.due, "2026-09-18");
+  assertEquals(log.rows[0].fields.due, "2026-09-18");
+});
+
+// T4, the failure side of the same wiring: a phrase the resolver cannot place on one calendar day
+// must reach `validate` as `null`, not as the literal phrase (which would otherwise fail
+// `ABSOLUTE_DUE_RE` and still end up `null` today — but only by accident of that regex, not by the
+// resolver's own design; this pins the intended path, not just the accidental outcome).
+Deno.test("an unresolvable due phrase from the model becomes null, never a guess, before validate sees it", async () => {
+  const item = {
+    message_id: "gmail:1a2b3",
+    from: "registrar@example.edu",
+    subject: "Reminder",
+    date: "Mon, 14 Sep 2026 09:00:00 -0500",
+    text: "Please respond soon.",
+  };
+  const verdict = {
+    tier: "borderline",
+    title: "Respond to registrar",
+    course: null,
+    due: "soon",
+    effort_hours: null,
+    importance: null,
+    why: "vague timing, needs a human",
+    confidence: 0.9,
+  };
+  const log = new Sink();
+  const reply = await judge("acct-1", { kind: "email", item, heuristics_seed: {} }, {
+    ...deps(new ScriptedModel([verdict]), log, new Caps()),
+    row: { ...ROW, kind: "email", prompt_version: "email-3", grammar_version: "email-1" },
+  });
+  assertEquals(reply.verdict?.due, null);
+});
+
 Deno.test("fieldsOf merges the verdict first and the feature map last", () => {
   // C2 final review S-6: a promotion feature can never be overwritten by a verdict field of the
   // same name. `promote_rules` subtracts the feature keys from `fields` to build a rule's verdict,
@@ -282,4 +346,82 @@ Deno.test("the prompt hash is stable across accounts with different planner slic
     deps(new ScriptedModel([ANSWER]), b, new Caps()),
   );
   assertEquals(a.rows[0].prompt_hash, b.rows[0].prompt_hash);
+});
+
+// Final review item 2: the capability gate for `unsure`. A pre-T1 engine rejects the fourth word
+// (its VALID_VERDICTS has three) and re-asks — and pays — every slot, so a request that does not
+// declare `accepts: ["unsure"]` gets exactly the pre-T1 shape instead: no verdict, `below floor`.
+const EVENT_ITEM = { uid: "engage:1", title: "AI Club Kickoff", start: "2026-08-29T18:00", end: "2026-08-29T19:30" };
+const UNSURE = { verdict: "unsure", why: "the text does not say who it is for", confidence: 0.3 };
+
+Deno.test("an event request that does not declare accepts unsure never sees unsure", async () => {
+  for (const accepts of [undefined, [], ["completion"]]) {
+    const log = new Sink();
+    const reply = await judge(
+      "acct-1",
+      { kind: "event", item: EVENT_ITEM, heuristics_seed: {}, ...(accepts === undefined ? {} : { accepts }) },
+      deps(new ScriptedModel([UNSURE]), log, new Caps()),
+    );
+    assertEquals(reply.verdict, null, `accepts ${JSON.stringify(accepts)}`);
+    assertEquals(reply.outcome, "low confidence");
+    assertEquals(reply.cause, "below floor");
+    assertEquals(reply.tier, 3);
+    assertEquals(reply.judgment_id, "judgment-1");
+  }
+});
+
+Deno.test("an event request that declares accepts unsure gets unsure as a verdict", async () => {
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {}, accepts: ["unsure"] },
+    deps(new ScriptedModel([UNSURE]), new Sink(), new Caps()),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.verdict?.verdict, "unsure");
+});
+
+Deno.test("an undeclared event request still gets the three old words untouched", async () => {
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([{ verdict: "drop", why: "a club social", confidence: 0.9 }]), new Sink(), new Caps()),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.verdict?.verdict, "drop");
+});
+
+// Due-fix (2026-09-23): the request's `timezone` (the vault's own, sent by the device) reaches the
+// resolver, so a relative phrase resolves against the email's LOCAL date. The Date header here is
+// stamped in UTC, as server-sent mail often is: 04:30 UTC Friday is 23:30 CDT Thursday, so the
+// student's "tomorrow" is Friday the 18th -- the UTC calendar would have said the 19th.
+Deno.test("the request's timezone reaches the due resolver, so 'tomorrow' is the student's next local day", async () => {
+  const item = {
+    message_id: "gmail:7e0d1",
+    from: "instructor@example.edu",
+    subject: "Lab writeup",
+    date: "Fri, 18 Sep 2026 04:30:00 +0000",
+    text: "Submit the writeup by tomorrow.",
+  };
+  const verdict = {
+    tier: "task",
+    title: "Submit lab writeup",
+    course: null,
+    due: "tomorrow",
+    effort_hours: 1,
+    importance: 3,
+    why: "the message sets a deadline",
+    confidence: 0.9,
+  };
+  const row = { ...ROW, kind: "email" as const, prompt_version: "email-3", grammar_version: "email-1" };
+  const zoned = await judge("acct-1", { kind: "email", item, heuristics_seed: {}, timezone: "America/Chicago" }, {
+    ...deps(new ScriptedModel([verdict]), new Sink(), new Caps()),
+    row,
+  });
+  assertEquals(zoned.verdict?.due, "2026-09-18");
+  // No timezone on the request: the Date header's own offset (UTC here) is the only clock left.
+  const bare = await judge("acct-1", { kind: "email", item, heuristics_seed: {} }, {
+    ...deps(new ScriptedModel([verdict]), new Sink(), new Caps()),
+    row,
+  });
+  assertEquals(bare.verdict?.due, "2026-09-19");
 });

@@ -332,6 +332,444 @@ pub fn emit_digest(
     (Some(path), chosen.len())
 }
 
+// ---------------------------------------------------------------------------------------------
+// The event-check card (F2)
+// ---------------------------------------------------------------------------------------------
+
+//
+// An event the judgment could only call `unsure` becomes one question to the student: "Does this
+// apply to you?". The card rides the ordinary approvals machinery (cap, snooze, expiry, the
+// console's Approve/Reject); `approvals::process_approvals` turns the click into a human-answer
+// line in the event ledger (F3). Everything here is deterministic and makes no request: it runs
+// inside `rank`, which never calls a model.
+//
+// **Never ask twice.** A uid already named as a card's `source_uid` or listed in a card's
+// `events:`, and a `proposed` ledger line, each close that instance's question for good. A series
+// is closed while one of its cards is live in `approvals/` and for good once the student answered
+// one (archived `executed` or `rejected`). A card closed without an answer (expired, or deleted
+// from the app) is not an answer (controller ruling G1): the series' next unanswered instance may
+// be asked. Closing the question does not drop the answer: [`inherit_series_answers`] carries a
+// settled series card's answer to the series' later instances.
+
+/// The most `kind: event-check` cards first proposed on any one day. They cost real attention and
+/// must not crowd task and amend cards out of the day's approval budget.
+pub const EVENT_CHECKS_PER_DAY: i64 = 3;
+
+/// The most instances one series card lists.
+const SERIES_LIST_CAP: usize = 20;
+
+const EVENT_CHECK: &str = "event-check";
+
+const WHY_PARAGRAPH: &str = "**Does this apply to you?** Knowlu could not tell from the event's \
+own listing whether it is meant for you.";
+
+const CLOSING: &str = "Approve if it applies to you: it joins Coming up as something you're \
+expected at. Reject and it's dropped. Either way you won't be asked again.";
+
+/// A settled series card's answer: `verdict` is `obligation` (the card was executed) or `drop`
+/// (rejected); `by` is who answered it, read from the ledger's answer line for `source_uid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesAnswer {
+    pub verdict: String,
+    pub by: String,
+    pub source_uid: String,
+}
+
+/// `Thu 1 Oct`.
+fn day_label(day: Date) -> String {
+    format!("{} {} {}", day.strftime("%a"), day.day(), day.strftime("%b"))
+}
+
+/// `10am`, `10:30`, `7pm` — a 12-hour clock, minutes only when non-zero.
+pub(crate) fn clock(time: Time, with_meridiem: bool) -> String {
+    let hour = match time.hour() % 12 {
+        0 => 12,
+        h => h,
+    };
+    let mut out = if time.minute() == 0 {
+        hour.to_string()
+    } else {
+        format!("{hour}:{:02}", time.minute())
+    };
+    if with_meridiem {
+        out.push_str(if time.hour() < 12 { "am" } else { "pm" });
+    }
+    out
+}
+
+/// The date-and-time half of [`what_and_when`]: `Thu 1 Oct 10am–3pm`, `Thu 1 Oct` (all day), or
+/// `Thu 1 Oct – Sat 3 Oct` (several days).
+fn when_label(event: &DiscoveredEvent) -> String {
+    let (start, end) = (event.start(), event.end());
+    let midnight = Time::midnight();
+    // An end at midnight belongs to the day before it: an all-day event and a 10pm–12am event
+    // both end "on" the day they started.
+    let last_day = if end.time() == midnight && end.date() > start.date() {
+        end.date().yesterday().unwrap_or(start.date())
+    } else {
+        end.date().max(start.date())
+    };
+    if last_day > start.date() {
+        return format!("{} – {}", day_label(start.date()), day_label(last_day));
+    }
+    let day = day_label(start.date());
+    if start.time() == midnight && end.time() == midnight {
+        return day; // all day
+    }
+    if end <= start {
+        return format!("{day} {}", clock(start.time(), true));
+    }
+    let split_by_noon = (start.hour() < 12) != (end.hour() < 12);
+    format!(
+        "{day} {}\u{2013}{}",
+        clock(start.time(), split_by_noon),
+        clock(end.time(), true)
+    )
+}
+
+/// `{title≤60} · {Ddd} {d} {Mon} {range}` — the card's title, from structured fields only.
+///
+/// The range is a 12-hour clock with minutes only when non-zero; the end always carries am/pm and
+/// the start only when it is on the other side of noon: `10am–3pm`, `7–9pm`, `10:30–11:15am`,
+/// `11am–12pm`, `12–1pm` (the dash is U+2013). An all-day event has no range, and an event over
+/// several days reads `Thu 1 Oct – Sat 3 Oct`. A series card appends ` · +N more` itself.
+pub fn what_and_when(event: &DiscoveredEvent) -> String {
+    let title = crate::judge::one_line(&event.title, 60);
+    let title = title.trim_end();
+    let title = if title.is_empty() { "(untitled)" } else { title };
+    format!("{title} · {}", when_label(event))
+}
+
+/// `(meta, file name)` of every `kind: event-check` approval in `folder`, in file-name order.
+fn event_check_cards(vault: &Path, folder: &str) -> Vec<(serde_yaml_ng::Mapping, String)> {
+    let mut out = Vec::new();
+    let dir = vault.join(folder);
+    if !dir.is_dir() {
+        return out;
+    }
+    for path in crate::approvals::sorted_md(&dir) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_CHECK {
+            continue;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        out.push((meta, name));
+    }
+    out
+}
+
+fn card_text(meta: &serde_yaml_ng::Mapping, key: &str) -> String {
+    let raw = crate::yaml::opt_text(crate::yaml::get(meta, key)).unwrap_or_default();
+    pystr::strip(&raw).to_string()
+}
+
+/// The uids a card's `events:` lists; empty when the key is missing or not a list.
+pub(crate) fn card_event_uids(meta: &serde_yaml_ng::Mapping) -> Vec<String> {
+    match crate::yaml::get(meta, "events") {
+        Some(serde_yaml_ng::Value::Sequence(items)) => items
+            .iter()
+            .filter_map(crate::yaml::text)
+            .map(|uid| pystr::strip(&uid).to_string())
+            .filter(|uid| !uid.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every series whose `event-check` card was answered, keyed by `series_uid`.
+///
+/// Reads `archive/` only: an `executed` card answers `obligation`, a `rejected` one `drop`, and an
+/// `expired` (unanswered) card answers nothing. `by` is the `answered_by` of the ledger entry for
+/// the card's `source_uid`, or `"unknown"`. Two settled cards for one series cannot arise (the
+/// emitter never asks about a series twice); if a hand edit makes one, the lowest file name wins.
+pub fn settled_series(vault: &Path) -> BTreeMap<String, SeriesAnswer> {
+    let mut settled: BTreeMap<String, SeriesAnswer> = BTreeMap::new();
+    let mut ledger: Option<BTreeMap<String, LedgerEntry>> = None;
+    for (meta, _) in event_check_cards(vault, "archive") {
+        let verdict = match card_text(&meta, "status").as_str() {
+            "executed" => "obligation",
+            "rejected" => "drop",
+            _ => continue,
+        };
+        let series = card_text(&meta, "series_uid");
+        if series.is_empty() || settled.contains_key(&series) {
+            continue;
+        }
+        let source_uid = card_text(&meta, "source_uid");
+        let ledger = ledger.get_or_insert_with(|| crate::eventledger::load_ledger(vault, None));
+        let by = ledger
+            .get(&source_uid)
+            .map(|e| e.answered_by.clone())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        settled.insert(series, SeriesAnswer { verdict: verdict.to_string(), by, source_uid });
+    }
+    settled
+}
+
+/// Give a settled series' answer to each of its instances that is `unsure` or unjudged and
+/// unanswered, writing one human-answer line per instance and updating `ledger` exactly as
+/// `load_ledger` would read the new line. Returns `(lines written, warnings)`.
+///
+/// An instance with a confident machine verdict keeps it, and a series whose card expired
+/// unanswered gives nothing. The line carries the instance's own `jid`, since it settles that
+/// instance's own judgment. A write failure is a warning and the next run retries.
+pub fn inherit_series_answers(
+    vault: &Path,
+    events: &[DiscoveredEvent],
+    ledger: &mut BTreeMap<String, LedgerEntry>,
+    today: Date,
+) -> (usize, Vec<String>) {
+    let mut written = 0;
+    let mut warnings = Vec::new();
+    let settled = settled_series(vault);
+    if settled.is_empty() {
+        return (written, warnings);
+    }
+    let mut ordered: Vec<&DiscoveredEvent> = events.iter().collect();
+    ordered.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
+    for event in ordered {
+        let Some(answer) = settled.get(&event.series_uid) else { continue };
+        let current = ledger.get(&event.uid).cloned().unwrap_or_else(|| LedgerEntry::new(&event.uid));
+        if !matches!(current.verdict.as_deref(), None | Some("unsure")) || !current.answered_by.is_empty() {
+            continue;
+        }
+        let jid = Some(current.judgment_id.as_str()).filter(|j| !j.is_empty());
+        let recorded = crate::eventledger::record_answer(
+            vault,
+            &event.uid,
+            &event.title,
+            today,
+            &answer.verdict,
+            &answer.by,
+            jid,
+        );
+        if let Err(err) = recorded {
+            warnings.push(format!("series answer not recorded for {} ({err})", event.uid));
+            continue;
+        }
+        let mut entry = current;
+        if entry.verdict.is_none() {
+            // A first verdict line: `load_ledger` reads its title too.
+            entry.title = crate::eventledger::clean_title(&event.title);
+        }
+        entry.verdict = Some(answer.verdict.clone());
+        entry.answered_by = answer.by.clone();
+        ledger.insert(event.uid.clone(), entry);
+        written += 1;
+    }
+    (written, warnings)
+}
+
+/// Does this event qualify for an `event-check` question today? See [`emit_event_checks`].
+fn needs_check(
+    event: &DiscoveredEvent,
+    ledger: &BTreeMap<String, LedgerEntry>,
+    first_day: Date,
+    last_day: Date,
+    asked_uids: &BTreeSet<String>,
+    asked_series: &BTreeSet<String>,
+) -> bool {
+    let Some(entry) = ledger.get(&event.uid) else { return false };
+    if entry.verdict.as_deref() != Some("unsure")
+        || !entry.answered_by.is_empty()
+        || entry.declined
+        || entry.proposed
+    {
+        return false;
+    }
+    let day = event.start().date();
+    if day < first_day || day > last_day {
+        return false;
+    }
+    !asked_uids.contains(&event.uid) && !asked_series.contains(&event.series_uid)
+}
+
+/// A lowercase `[a-z0-9-]` form of `title`, at most 40 characters.
+fn card_slug(title: &str) -> String {
+    let slug: String = crate::ingest::slugify(title).chars().take(40).collect();
+    slug.trim_end_matches('-').to_string()
+}
+
+/// The card's body: the question (the paragraph the console shows as the card's `why`), the
+/// facts, the other instances of a series, what each answer does, and the buttons.
+fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String {
+    let mut facts = vec![when_label(primary)];
+    for extra in [&primary.location, &primary.organizer] {
+        let extra = crate::judge::one_line(extra, 120);
+        if !extra.is_empty() {
+            facts.push(extra);
+        }
+    }
+    let mut lines = vec![WHY_PARAGRAPH.to_string(), String::new(), facts.join(" · ")];
+    let url = crate::judge::one_line(&primary.url, 500);
+    if !url.is_empty() {
+        lines.push(url);
+    }
+    if !others.is_empty() {
+        let days: Vec<String> = others.iter().map(|e| when_label(e)).collect();
+        lines.push(format!("Also on: {}", days.join(", ")));
+    }
+    lines.extend([String::new(), CLOSING.to_string(), String::new(), BUTTONS.to_string(), String::new()]);
+    lines.join("\n")
+}
+
+/// Write one card for `primary` and the rest of its series, `others`. `Err` is a create that
+/// failed.
+fn write_check(
+    vault: &Path,
+    primary: &DiscoveredEvent,
+    others: &[&DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<PathBuf, crate::write::WriteError> {
+    use crate::yamlemit::Node;
+    let mut title = what_and_when(primary);
+    if !others.is_empty() {
+        title.push_str(&format!(" · +{} more", others.len()));
+    }
+    let jid = ledger.get(&primary.uid).map(|e| e.judgment_id.clone()).unwrap_or_default();
+    let mut pairs = vec![
+        ("type", Node::text("approval")),
+        ("kind", Node::text(EVENT_CHECK)),
+        ("title", Node::text(&title)),
+        ("status", Node::text("pending")),
+        ("source_uid", Node::text(&primary.uid)),
+        ("series_uid", Node::text(&primary.series_uid)),
+        (
+            "events",
+            Node::Seq(
+                std::iter::once(primary)
+                    .chain(others.iter().copied())
+                    .map(|e| Node::text(&e.uid))
+                    .collect(),
+            ),
+        ),
+    ];
+    if !jid.is_empty() {
+        pairs.push(("judgment_id", Node::text(&jid)));
+        pairs.push(("judgment_kind", Node::text("event")));
+    }
+    pairs.extend([
+        // Two distinct dates, never an anchor — see the ruling in `src/yamlemit.rs`.
+        ("proposed_at", Node::Date(today)),
+        ("first_proposed_at", Node::Date(today)),
+        ("expires", Node::Date(primary.start().date())),
+        ("snooze_until", Node::Null),
+        // The literal the digest and `calendar_note` write; the journal's actor is the ctx's.
+        ("created_by", Node::text("events")),
+    ]);
+    let front = Node::Map(pairs.into_iter().map(|(k, v)| (Node::text(k), v)).collect());
+    let text = format!(
+        "---\n{}---\n\n{}",
+        crate::yamlemit::safe_dump_block(&front),
+        check_body(primary, others)
+    );
+
+    let folder = vault.join("approvals");
+    std::fs::create_dir_all(&folder).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
+    let stem = format!(
+        "event-check-{}-{}",
+        card_slug(&primary.title),
+        primary.start().date().strftime("%Y-%m-%d")
+    );
+    let mut name = format!("{stem}.md");
+    let mut suffix = 2;
+    while folder.join(&name).exists() {
+        name = format!("{stem}-{suffix}.md");
+        suffix += 1;
+    }
+    create(vault, &format!("approvals/{name}"), &text, ctx, journal, None)
+}
+
+/// File the "Does this apply to you?" cards for today. Returns `(paths, count)`.
+///
+/// An event qualifies when its ledger verdict is `unsure`, nobody answered it, it is neither
+/// declined nor proposed, it starts within `[today, today + propose_horizon_days]`, its uid is no
+/// approval's `source_uid` and on no `event-check` card's `events:`, and its series has neither a
+/// live `event-check` card in `approvals/` nor an answered (`executed`/`rejected`) one in
+/// `archive/`. An expired or deleted card does not close its series (ruling G1). Qualifying instances of one series share one card: the soonest is its primary, and the
+/// card lists up to 20 of them. Cards are filed in `(primary start, primary uid)` order, at most
+/// `min(budget, 3 − event-check cards first proposed today)` of them, so there is never overflow
+/// for `defer_over_budget` to snooze. After each card, every instance it lists gets a `proposed`
+/// ledger line: the second guard against a re-ask. A failed create stops the run of cards.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_event_checks(
+    vault: &Path,
+    events: &[DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    config: &EventsConfig,
+    today: Date,
+    budget: i64,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> (Vec<PathBuf>, usize) {
+    let mut filed: Vec<PathBuf> = Vec::new();
+    let mut asked_series: BTreeSet<String> = BTreeSet::new();
+    let mut listed_uids: BTreeSet<String> = BTreeSet::new();
+    let mut first_proposed_today: i64 = 0;
+    for folder in ["approvals", "archive"] {
+        for (meta, _) in event_check_cards(vault, folder) {
+            // A live card, or one the student answered, closes its series. One closed without an
+            // answer (expired, or deleted from the app) closes only the instances it listed.
+            let answered = matches!(card_text(&meta, "status").as_str(), "executed" | "rejected");
+            let series = card_text(&meta, "series_uid");
+            if !series.is_empty() && (folder == "approvals" || answered) {
+                asked_series.insert(series);
+            }
+            listed_uids.extend(card_event_uids(&meta));
+            if crate::approvals::as_date(crate::yaml::get(&meta, "first_proposed_at")) == Some(today) {
+                first_proposed_today += 1;
+            }
+        }
+    }
+    let allowance = budget.min(EVENT_CHECKS_PER_DAY - first_proposed_today).max(0) as usize;
+    if allowance == 0 {
+        return (filed, 0);
+    }
+    let mut asked_uids = crate::approvals::existing_source_uids(vault);
+    asked_uids.extend(listed_uids);
+    let last_day = today
+        .checked_add(Span::new().try_days(config.propose_horizon_days).unwrap_or_default())
+        .unwrap_or(today);
+
+    let mut qualifying: Vec<&DiscoveredEvent> = events
+        .iter()
+        .filter(|e| needs_check(e, ledger, today, last_day, &asked_uids, &asked_series))
+        .collect();
+    qualifying.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
+    qualifying.dedup_by(|a, b| a.uid == b.uid);
+    // Grouped in (start, uid) order, so each group's first member is its primary and the groups
+    // themselves come out in (primary start, primary uid) order.
+    let mut groups: Vec<(&DiscoveredEvent, Vec<&DiscoveredEvent>)> = Vec::new();
+    for event in qualifying {
+        match groups.iter_mut().find(|(primary, _)| primary.series_uid == event.series_uid) {
+            Some((_, others)) => {
+                if others.len() + 1 < SERIES_LIST_CAP {
+                    others.push(event);
+                }
+            }
+            None => groups.push((event, Vec::new())),
+        }
+    }
+
+    for (primary, others) in groups.iter().take(allowance) {
+        let Ok(path) = write_check(vault, primary, others, ledger, today, ctx, journal) else {
+            break;
+        };
+        // Card first, ledger second, as the digest does.
+        for event in std::iter::once(primary).chain(others.iter()) {
+            let _ = record_proposed(vault, &event.uid, today);
+        }
+        filed.push(path);
+    }
+    let count = filed.len();
+    (filed, count)
+}
+
 #[cfg(test)]
 mod tests {
     //! Direct port of `tests/test_event_emission.py` — all 24 tests, same names.
@@ -735,5 +1173,646 @@ mod tests {
         let (path, emitted) = emit(&vault, &events, &ledger, Some(0));
         assert!(path.is_none());
         assert_eq!(emitted, 0);
+    }
+
+    // --- the event-check card (F2) ------------------------------------------------------
+
+    mod event_checks {
+        use super::*;
+        use crate::eventledger::{record_answer, record_judged_verdict};
+        use jiff::civil::DateTime;
+        use serde_yaml_ng::{Mapping, Value};
+
+        /// A Monday; 2026-10-01 is the Thursday after it.
+        const DAY: Date = Date::constant(2026, 9, 28);
+        const JID_A: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        const JID_B: &str = "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d";
+        const WHY: &str = "the listing does not say who it is for";
+
+        fn at(y: i16, m: i8, d: i8, h: i8, mi: i8) -> DateTime {
+            date(y, m, d).at(h, mi, 0, 0)
+        }
+
+        fn span(uid: &str, title: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+            DiscoveredEvent {
+                uid: uid.to_string(),
+                title: title.to_string(),
+                start: Some(start),
+                end: Some(end),
+                source: "campus".into(),
+                ..Default::default()
+            }
+            .normalized()
+        }
+
+        /// A same-day event on `(month, day)` from `h:mi` to `eh:emi`.
+        fn on(uid: &str, title: &str, m: i8, d: i8, h: i8, mi: i8, eh: i8, emi: i8) -> DiscoveredEvent {
+            span(uid, title, at(2026, m, d, h, mi), at(2026, m, d, eh, emi))
+        }
+
+        fn in_series(mut event: DiscoveredEvent, series: &str) -> DiscoveredEvent {
+            event.series_uid = series.to_string();
+            event
+        }
+
+        fn vault(name: &str) -> PathBuf {
+            tmp(&format!("check-{name}"))
+        }
+
+        fn unsure(vault: &Path, uid: &str, title: &str, jid: Option<&str>) {
+            record_judged_verdict(vault, uid, title, DAY, "unsure", WHY, jid).unwrap();
+        }
+
+        fn check_on(
+            vault: &Path,
+            events: &[DiscoveredEvent],
+            ledger: &BTreeMap<String, LedgerEntry>,
+            today: Date,
+            budget: i64,
+        ) -> (Vec<PathBuf>, usize) {
+            let mut journal = Journal::new(vault);
+            let ctx = WriteContext::new("agent:events", "cli");
+            emit_event_checks(vault, events, ledger, &config(), today, budget, &ctx, &mut journal)
+        }
+
+        fn check(vault: &Path, events: &[DiscoveredEvent], budget: i64) -> (Vec<PathBuf>, usize) {
+            let ledger = load_ledger(vault, None);
+            check_on(vault, events, &ledger, DAY, budget)
+        }
+
+        fn cards(vault: &Path, folder: &str) -> Vec<PathBuf> {
+            crate::approvals::sorted_md(&vault.join(folder))
+                .into_iter()
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("event-check-"))
+                })
+                .collect()
+        }
+
+        fn note(path: &Path) -> (Mapping, String) {
+            split_frontmatter(&pystr::read_text(path).unwrap()).unwrap()
+        }
+
+        fn field(meta: &Mapping, key: &str) -> Option<String> {
+            crate::yaml::get(meta, key).and_then(crate::yaml::text)
+        }
+
+        fn date_field(meta: &Mapping, key: &str) -> Option<Date> {
+            crate::approvals::as_date(crate::yaml::get(meta, key))
+        }
+
+        fn event_uids(meta: &Mapping) -> Vec<String> {
+            match crate::yaml::get(meta, "events") {
+                Some(Value::Sequence(items)) => {
+                    items.iter().filter_map(crate::yaml::text).collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+
+        fn seen(vault: &Path) -> String {
+            pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap_or_default()
+        }
+
+        /// A card written by hand into `folder`, as a settled or live card would sit there.
+        fn hand_card(vault: &Path, folder: &str, name: &str, status: &str, source: &str, series: &str) {
+            fs::create_dir_all(vault.join(folder)).unwrap();
+            let text = format!(
+                "---\ntype: approval\nkind: event-check\ntitle: \"Earlier card\"\nstatus: {status}\n\
+                 source_uid: \"{source}\"\nseries_uid: \"{series}\"\nevents:\n- \"{source}\"\n\
+                 proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\nexpires: 2026-09-24\n\
+                 snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+            );
+            pystr::write_text(&vault.join(folder).join(name), &text).unwrap();
+        }
+
+        #[test]
+        fn what_and_when_formats_every_shape() {
+            let cases = [
+                (on("a", "Career fair", 10, 1, 10, 0, 15, 0), "Career fair · Thu 1 Oct 10am–3pm"),
+                (on("b", "Film night", 10, 1, 19, 0, 21, 0), "Film night · Thu 1 Oct 7–9pm"),
+                (on("c", "Office hours", 10, 1, 10, 30, 11, 15), "Office hours · Thu 1 Oct 10:30–11:15am"),
+                (on("d", "Brunch", 10, 1, 11, 0, 12, 0), "Brunch · Thu 1 Oct 11am–12pm"),
+                (on("e", "Lunch talk", 10, 1, 12, 0, 13, 0), "Lunch talk · Thu 1 Oct 12–1pm"),
+                (on("f", "Late lab", 10, 1, 9, 5, 12, 30), "Late lab · Thu 1 Oct 9:05am–12:30pm"),
+                (
+                    span("g", "Open day", at(2026, 10, 1, 0, 0), at(2026, 10, 2, 0, 0)),
+                    "Open day · Thu 1 Oct",
+                ),
+                (
+                    span("h", "Retreat", at(2026, 10, 1, 0, 0), at(2026, 10, 4, 0, 0)),
+                    "Retreat · Thu 1 Oct – Sat 3 Oct",
+                ),
+                (
+                    span("i", "Hackathon", at(2026, 10, 1, 18, 0), at(2026, 10, 3, 12, 0)),
+                    "Hackathon · Thu 1 Oct – Sat 3 Oct",
+                ),
+            ];
+            for (event, expected) in cases {
+                assert_eq!(what_and_when(&event), expected, "{}", event.uid);
+            }
+            // The title is clipped to 60 characters; the date is never clipped.
+            let long = on("j", &"x".repeat(80), 10, 1, 19, 0, 21, 0);
+            assert_eq!(what_and_when(&long), format!("{} · Thu 1 Oct 7–9pm", "x".repeat(60)));
+        }
+
+        #[test]
+        fn an_unsure_event_in_the_horizon_files_one_event_check_card() {
+            let vault = vault("one");
+            let fair = on("ics:fair-1", "Career fair", 10, 1, 10, 0, 15, 0);
+            unsure(&vault, "ics:fair-1", "Career fair", Some(JID_A));
+            let (paths, count) = check(&vault, std::slice::from_ref(&fair), 15);
+            assert_eq!(count, 1);
+            assert_eq!(paths, vec![vault.join("approvals").join("event-check-career-fair-2026-10-01.md")]);
+
+            let (meta, body) = note(&paths[0]);
+            assert_eq!(field(&meta, "type").as_deref(), Some("approval"));
+            assert_eq!(field(&meta, "kind").as_deref(), Some("event-check"));
+            assert_eq!(field(&meta, "title").as_deref(), Some("Career fair · Thu 1 Oct 10am–3pm"));
+            assert_eq!(field(&meta, "status").as_deref(), Some("pending"));
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("ics:fair-1"));
+            assert_eq!(field(&meta, "series_uid").as_deref(), Some("ics:fair-1"));
+            assert_eq!(event_uids(&meta), vec!["ics:fair-1".to_string()]);
+            assert_eq!(field(&meta, "judgment_id").as_deref(), Some(JID_A));
+            assert_eq!(field(&meta, "judgment_kind").as_deref(), Some("event"));
+            assert_eq!(date_field(&meta, "proposed_at"), Some(DAY));
+            assert_eq!(date_field(&meta, "first_proposed_at"), Some(DAY));
+            assert_eq!(date_field(&meta, "expires"), Some(date(2026, 10, 1)));
+            assert!(matches!(crate::yaml::get(&meta, "snooze_until"), Some(Value::Null)));
+            let first = body.split("\n\n").map(str::trim).find(|p| !p.is_empty()).unwrap();
+            assert_eq!(
+                first,
+                "**Does this apply to you?** Knowlu could not tell from the event's own listing \
+                 whether it is meant for you."
+            );
+            assert!(body.contains("Either way you won't be asked again."), "{body}");
+            assert!(body.contains(BUTTONS), "{body}");
+            let id = field(&meta, "id").unwrap_or_default();
+            assert!(crate::ids::ID_RE.is_match(&id), "id was {id:?}");
+
+            let creates = journal_creates(&vault);
+            assert_eq!(creates, vec![(
+                "approvals/event-check-career-fair-2026-10-01.md".to_string(),
+                "agent:events".to_string()
+            )]);
+            // The second guard against a re-ask.
+            assert!(load_ledger(&vault, None)["ics:fair-1"].proposed);
+        }
+
+        /// `(path, actor)` of every `create` record in the journal.
+        fn journal_creates(vault: &Path) -> Vec<(String, String)> {
+            let mut out = Vec::new();
+            let dir = vault.join("state").join("journal");
+            let Ok(entries) = fs::read_dir(&dir) else { return out };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let text = pystr::read_text(&entry.path()).unwrap();
+                for line in pystr::splitlines(&text) {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let rec: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if rec.get("op").and_then(|o| o.as_str()) == Some("create") {
+                        out.push((
+                            rec["path"].as_str().unwrap_or("").to_string(),
+                            rec["actor"].as_str().unwrap_or("").to_string(),
+                        ));
+                    }
+                }
+            }
+            out.sort();
+            out
+        }
+
+        #[test]
+        fn a_second_run_files_nothing() {
+            let vault = vault("second");
+            let fair = on("ics:fair-1", "Career fair", 10, 1, 10, 0, 15, 0);
+            unsure(&vault, "ics:fair-1", "Career fair", Some(JID_A));
+            assert_eq!(check(&vault, std::slice::from_ref(&fair), 15).1, 1);
+            let (paths, count) = check(&vault, std::slice::from_ref(&fair), 15);
+            assert!(paths.is_empty());
+            assert_eq!(count, 0);
+            assert_eq!(cards(&vault, "approvals").len(), 1);
+            assert_eq!(seen(&vault).matches("- ics:fair-1 · proposed").count(), 1);
+            // A new day does not reopen the question either.
+            let ledger = load_ledger(&vault, None);
+            let next = DAY.tomorrow().unwrap();
+            assert_eq!(check_on(&vault, std::slice::from_ref(&fair), &ledger, next, 15).1, 0);
+        }
+
+        #[test]
+        fn nothing_is_asked_after_a_card_is_answered_or_while_one_is_live() {
+            let vault = vault("archived");
+            // No `proposed` marker for any of these: only the cards stand between them and a
+            // second question. (An expired series card closes only its own instances: see
+            // `an_expired_or_unanswered_series_card_lets_a_later_instance_be_asked`.)
+            let events = [
+                on("ics:a", "Asked and rejected", 10, 1, 10, 0, 11, 0),
+                on("ics:b", "Asked and expired", 10, 1, 12, 0, 13, 0),
+                in_series(on("lx:8:3", "Executed series", 10, 2, 12, 0, 13, 0), "lx:8"),
+                in_series(on("lx:7:2", "Live series card", 10, 3, 10, 0, 11, 0), "lx:7"),
+                on("ics:d", "Never asked", 10, 4, 10, 0, 11, 0),
+            ];
+            for e in &events {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            hand_card(&vault, "archive", "event-check-a.md", "rejected", "ics:a", "ics:a");
+            hand_card(&vault, "archive", "event-check-b.md", "expired", "ics:b", "ics:b");
+            hand_card(&vault, "archive", "event-check-eight.md", "executed", "lx:8:1", "lx:8");
+            hand_card(&vault, "approvals", "event-check-seven.md", "pending", "lx:7:1", "lx:7");
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 1, "{paths:?}");
+            let (meta, _) = note(&paths[0]);
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("ics:d"));
+        }
+
+        #[test]
+        fn confident_answered_declined_or_proposed_events_are_never_asked() {
+            let vault = vault("never");
+            let uids = ["opp", "obl", "drop", "answered", "declined", "proposed", "unjudged"];
+            let events: Vec<DiscoveredEvent> = uids
+                .iter()
+                .enumerate()
+                .map(|(i, uid)| on(uid, uid, 10, 1, 8 + i as i8, 0, 9 + i as i8, 0))
+                .collect();
+            let entry = |uid: &str, verdict: &str| LedgerEntry {
+                uid: uid.to_string(),
+                verdict: Some(verdict.to_string()),
+                ..Default::default()
+            };
+            let ledger = ledger_of(vec![
+                entry("opp", "opportunity"),
+                entry("obl", "obligation"),
+                entry("drop", "drop"),
+                LedgerEntry { answered_by: "quinn".into(), ..entry("answered", "unsure") },
+                LedgerEntry { declined: true, ..entry("declined", "unsure") },
+                LedgerEntry { proposed: true, ..entry("proposed", "unsure") },
+            ]);
+            let (paths, count) = check_on(&vault, &events, &ledger, DAY, 15);
+            assert!(paths.is_empty());
+            assert_eq!(count, 0);
+            assert!(!vault.join("approvals").exists());
+        }
+
+        #[test]
+        fn events_past_or_beyond_the_horizon_are_not_asked() {
+            let vault = vault("horizon");
+            let events = [
+                on("yesterday", "Yesterday", 9, 27, 10, 0, 11, 0),
+                on("today", "Today", 9, 28, 8, 0, 9, 0),
+                on("edge", "Edge", 10, 12, 10, 0, 11, 0), // today + 14
+                on("beyond", "Beyond", 10, 13, 10, 0, 11, 0), // today + 15
+            ];
+            for e in &events {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 2);
+            let asked: Vec<String> =
+                paths.iter().filter_map(|p| field(&note(p).0, "source_uid")).collect();
+            assert_eq!(asked, vec!["today".to_string(), "edge".to_string()]);
+        }
+
+        #[test]
+        fn a_series_gets_one_card_listing_its_unsure_instances() {
+            let vault = vault("series");
+            let days = [(9, 29), (10, 2), (10, 6), (10, 9)];
+            let events: Vec<DiscoveredEvent> = days
+                .iter()
+                .enumerate()
+                .map(|(i, (m, d))| {
+                    in_series(
+                        on(&format!("lx:77:{}", i + 1), "Weekly meeting", *m, *d, 19, 0, 21, 0),
+                        "lx:77",
+                    )
+                })
+                .collect();
+            // Fed out of order: the primary is the soonest, not the first listed.
+            let mut shuffled = events.clone();
+            shuffled.reverse();
+            for e in &events {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            let (paths, count) = check(&vault, &shuffled, 15);
+            assert_eq!(count, 1);
+            assert_eq!(paths, vec![vault.join("approvals").join("event-check-weekly-meeting-2026-09-29.md")]);
+            let (meta, body) = note(&paths[0]);
+            assert_eq!(
+                field(&meta, "title").as_deref(),
+                Some("Weekly meeting · Tue 29 Sep 7–9pm · +3 more")
+            );
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("lx:77:1"));
+            assert_eq!(field(&meta, "series_uid").as_deref(), Some("lx:77"));
+            assert_eq!(event_uids(&meta), vec!["lx:77:1", "lx:77:2", "lx:77:3", "lx:77:4"]);
+            assert!(body.contains("Also on: "), "{body}");
+            let ledger = load_ledger(&vault, None);
+            for e in &events {
+                assert!(ledger[&e.uid].proposed, "{}", e.uid);
+            }
+        }
+
+        fn five(vault: &Path, first_day: i8) -> Vec<DiscoveredEvent> {
+            let events: Vec<DiscoveredEvent> = (0..5)
+                .map(|i| {
+                    let uid = format!("ics:d{first_day}-{i}");
+                    on(&uid, &format!("Talk {first_day} {i}"), 10, first_day + i as i8, 18, 0, 19, 0)
+                })
+                .collect();
+            for e in &events {
+                unsure(vault, &e.uid, &e.title, None);
+            }
+            events
+        }
+
+        #[test]
+        fn the_emitter_respects_the_budget_and_the_daily_ceiling() {
+            let vault = vault("ceiling");
+            let events = five(&vault, 1);
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 3);
+            let asked: Vec<String> =
+                paths.iter().filter_map(|p| field(&note(p).0, "source_uid")).collect();
+            assert_eq!(asked, vec!["ics:d1-0", "ics:d1-1", "ics:d1-2"]);
+            assert_eq!(check(&vault, &events, 15).1, 0, "the same day's second call");
+
+            let small = self::vault("ceiling-budget");
+            let events = five(&small, 1);
+            assert_eq!(check(&small, &events, 1).1, 1);
+            assert_eq!(check(&small, &events, 0).1, 0);
+            assert_eq!(check(&small, &events, -4).1, 0);
+        }
+
+        #[test]
+        fn a_card_without_a_ledger_jid_omits_both_judgment_keys() {
+            let vault = vault("nojid");
+            let fair = on("ics:fair-1", "Career fair", 10, 1, 10, 0, 15, 0);
+            unsure(&vault, "ics:fair-1", "Career fair", None);
+            let (paths, _) = check(&vault, std::slice::from_ref(&fair), 15);
+            let text = pystr::read_text(&paths[0]).unwrap();
+            assert!(!text.contains("judgment_id"), "{text}");
+            assert!(!text.contains("judgment_kind"), "{text}");
+        }
+
+        #[test]
+        fn the_daily_ceiling_counts_first_proposed_at_not_proposed_at() {
+            let vault = vault("firstproposed");
+            let events = five(&vault, 1);
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 3);
+            // `defer_over_budget` moves `proposed_at` to tomorrow and leaves `first_proposed_at`.
+            let tomorrow = DAY.tomorrow().unwrap();
+            let rel = crate::ids::rel(&vault, &paths[0]);
+            let mut journal = Journal::new(&vault);
+            crate::write::write_literals(
+                &vault,
+                &rel,
+                &[
+                    ("status".to_string(), "snoozed".to_string()),
+                    ("snooze_until".to_string(), tomorrow.to_string()),
+                    ("proposed_at".to_string(), tomorrow.to_string()),
+                ],
+                &WriteContext::new("agent:rank", "cli"),
+                &mut journal,
+                &crate::write::WriteOpts::default(),
+            )
+            .unwrap();
+            let mut all = events.clone();
+            all.extend(five(&vault, 8));
+            assert_eq!(check(&vault, &all, 15).1, 0, "the deferred card still counts today");
+            let ledger = load_ledger(&vault, None);
+            assert_eq!(check_on(&vault, &all, &ledger, tomorrow, 15).1, 3, "tomorrow is a full 3");
+        }
+
+        #[test]
+        fn the_card_says_created_by_events_and_the_journal_says_agent_events() {
+            let vault = vault("createdby");
+            let fair = on("ics:fair-1", "Career fair", 10, 1, 10, 0, 15, 0);
+            unsure(&vault, "ics:fair-1", "Career fair", Some(JID_A));
+            let (paths, _) = check(&vault, std::slice::from_ref(&fair), 15);
+            assert_eq!(field(&note(&paths[0]).0, "created_by").as_deref(), Some("events"));
+            let actors: Vec<String> = journal_creates(&vault).into_iter().map(|c| c.1).collect();
+            assert_eq!(actors, vec!["agent:events".to_string()]);
+        }
+
+        // --- series inheritance ------------------------------------------------------------
+
+        fn weekly(n: usize) -> DiscoveredEvent {
+            let day = 22 + 7 * (n as i8 - 1); // lx:77:1 on 22 Sep, :2 on 29 Sep, ...
+            let (m, d) = if day > 30 { (10, day - 30) } else { (9, day) };
+            in_series(on(&format!("lx:77:{n}"), "Weekly meeting", m, d, 19, 0, 21, 0), "lx:77")
+        }
+
+        fn inherit(vault: &Path, events: &[DiscoveredEvent], ledger: &mut BTreeMap<String, LedgerEntry>) -> (usize, Vec<String>) {
+            inherit_series_answers(vault, events, ledger, DAY)
+        }
+
+        #[test]
+        fn a_later_instance_of_an_answered_series_inherits_the_answer() {
+            for (status, verdict) in [("executed", "obligation"), ("rejected", "drop")] {
+                let vault = vault(&format!("inherit-{status}"));
+                let (first, later) = (weekly(1), weekly(2));
+                unsure(&vault, &first.uid, &first.title, Some(JID_A));
+                record_answer(&vault, &first.uid, &first.title, DAY, verdict, "quinn", Some(JID_A)).unwrap();
+                unsure(&vault, &later.uid, &later.title, Some(JID_B));
+                hand_card(&vault, "archive", "event-check-weekly.md", status, &first.uid, "lx:77");
+
+                let settled = settled_series(&vault);
+                assert_eq!(
+                    settled.get("lx:77"),
+                    Some(&SeriesAnswer {
+                        verdict: verdict.to_string(),
+                        by: "quinn".to_string(),
+                        source_uid: first.uid.clone(),
+                    })
+                );
+                let mut ledger = load_ledger(&vault, None);
+                let (count, warnings) = inherit(&vault, &[first.clone(), later.clone()], &mut ledger);
+                assert_eq!((count, warnings), (1, Vec::<String>::new()));
+                let entry = &ledger[&later.uid];
+                assert_eq!(entry.verdict.as_deref(), Some(verdict));
+                assert_eq!(entry.answered_by, "quinn");
+                assert_eq!(entry.judgment_id, JID_B, "the instance's own judgment");
+                assert!(seen(&vault).contains(&format!(
+                    "- lx:77:2 · Weekly meeting · verdict:{verdict} · by:quinn · jid:{JID_B} · answered 2026-09-28"
+                )));
+                assert_eq!(load_ledger(&vault, None)[&later.uid], *entry, "in memory as on disk");
+            }
+        }
+
+        #[test]
+        fn a_series_whose_answer_line_is_missing_is_answered_by_unknown() {
+            let vault = vault("inherit-unknown");
+            hand_card(&vault, "archive", "event-check-weekly.md", "rejected", "lx:77:1", "lx:77");
+            assert_eq!(settled_series(&vault)["lx:77"].by, "unknown");
+        }
+
+        #[test]
+        fn an_unjudged_instance_of_a_settled_series_inherits_too() {
+            let vault = vault("inherit-unjudged");
+            let (first, later) = (weekly(1), weekly(3));
+            unsure(&vault, &first.uid, &first.title, Some(JID_A));
+            record_answer(&vault, &first.uid, &first.title, DAY, "obligation", "quinn", None).unwrap();
+            hand_card(&vault, "archive", "event-check-weekly.md", "executed", &first.uid, "lx:77");
+            let mut ledger = load_ledger(&vault, None);
+            assert!(!ledger.contains_key(&later.uid));
+            let (count, _) = inherit(&vault, std::slice::from_ref(&later), &mut ledger);
+            assert_eq!(count, 1);
+            assert!(seen(&vault).contains("- lx:77:3 · Weekly meeting · verdict:obligation · by:quinn · answered 2026-09-28"));
+            assert_eq!(ledger[&later.uid].verdict.as_deref(), Some("obligation"));
+            assert_eq!(load_ledger(&vault, None)[&later.uid], ledger[&later.uid]);
+        }
+
+        #[test]
+        fn a_confident_instance_or_an_expired_series_card_inherits_nothing() {
+            let vault = vault("inherit-none");
+            let (first, later) = (weekly(1), weekly(2));
+            record_verdict(&vault, &later.uid, &later.title, DAY, "opportunity", "", "", "").unwrap();
+            hand_card(&vault, "archive", "event-check-weekly.md", "executed", &first.uid, "lx:77");
+            let before = seen(&vault);
+            let mut ledger = load_ledger(&vault, None);
+            assert_eq!(inherit(&vault, std::slice::from_ref(&later), &mut ledger).0, 0);
+            assert_eq!(ledger[&later.uid].verdict.as_deref(), Some("opportunity"));
+            assert_eq!(seen(&vault), before);
+
+            let expired = self::vault("inherit-expired");
+            unsure(&expired, &later.uid, &later.title, None);
+            hand_card(&expired, "archive", "event-check-weekly.md", "expired", &first.uid, "lx:77");
+            assert!(settled_series(&expired).is_empty());
+            let before = seen(&expired);
+            let mut ledger = load_ledger(&expired, None);
+            assert_eq!(inherit(&expired, std::slice::from_ref(&later), &mut ledger).0, 0);
+            assert_eq!(ledger[&later.uid].verdict.as_deref(), Some("unsure"));
+            assert_eq!(seen(&expired), before);
+        }
+
+        #[test]
+        fn inheriting_twice_writes_one_line() {
+            let vault = vault("inherit-twice");
+            let (first, later) = (weekly(1), weekly(2));
+            unsure(&vault, &later.uid, &later.title, None);
+            hand_card(&vault, "archive", "event-check-weekly.md", "executed", &first.uid, "lx:77");
+            let mut ledger = load_ledger(&vault, None);
+            assert_eq!(inherit(&vault, std::slice::from_ref(&later), &mut ledger).0, 1);
+            let mut reloaded = load_ledger(&vault, None);
+            assert_eq!(inherit(&vault, std::slice::from_ref(&later), &mut reloaded).0, 0);
+            assert_eq!(inherit(&vault, std::slice::from_ref(&later), &mut ledger).0, 0, "in memory too");
+            assert_eq!(seen(&vault).matches("- lx:77:2 · Weekly meeting · verdict:obligation").count(), 1);
+        }
+
+        // --- a card closed without an answer (controller ruling G1) -------------------------
+
+        /// `process_approvals` on `today`, as `rank` (or the app's `decide`) runs it.
+        fn settle_on(vault: &Path, today: Date) -> crate::approvals::ApprovalsResult {
+            let ctx = crate::approvals::default_ctx();
+            let mut journal = Journal::new(vault);
+            process_approvals_at(vault, today, &ctx, &mut journal)
+        }
+
+        fn process_approvals_at(
+            vault: &Path,
+            today: Date,
+            ctx: &WriteContext,
+            journal: &mut Journal,
+        ) -> crate::approvals::ApprovalsResult {
+            crate::approvals::process_approvals(vault, today, today.at(12, 0, 0, 0), ctx, journal)
+        }
+
+        #[test]
+        fn an_expired_or_unanswered_series_card_lets_a_later_instance_be_asked() {
+            let vault = vault("g1-expired");
+            let events = [
+                in_series(on("lx:9:1", "Weekly lab", 10, 1, 19, 0, 21, 0), "lx:9"),
+                in_series(on("lx:9:1b", "Weekly lab", 10, 5, 19, 0, 21, 0), "lx:9"),
+                in_series(on("lx:9:2", "Weekly lab", 10, 15, 19, 0, 21, 0), "lx:9"),
+            ];
+            for e in &events {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            // 28 Sep: the first card lists the two instances inside the horizon.
+            let (first, _) = check(&vault, &events, 15);
+            assert_eq!(event_uids(&note(&first[0]).0), vec!["lx:9:1", "lx:9:1b"]);
+            // 2 Oct: nobody answered, and the card expires with its soonest instance.
+            assert_eq!(settle_on(&vault, date(2026, 10, 2)).expired.len(), 1);
+            assert_eq!(cards(&vault, "archive").len(), 1);
+
+            // 3 Oct: an expiry is not an answer. The series is asked again about its next
+            // instance, but never about one the expired card already listed.
+            let ledger = load_ledger(&vault, None);
+            let (paths, count) = check_on(&vault, &events, &ledger, date(2026, 10, 3), 15);
+            assert_eq!(count, 1, "{paths:?}");
+            let (meta, _) = note(&paths[0]);
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("lx:9:2"));
+            assert_eq!(field(&meta, "series_uid").as_deref(), Some("lx:9"));
+            assert_eq!(event_uids(&meta), vec!["lx:9:2"]);
+            assert_eq!(date_field(&meta, "first_proposed_at"), Some(date(2026, 10, 3)));
+            // The live card closes the series again, and the same instance is never asked twice.
+            let ledger = load_ledger(&vault, None);
+            assert_eq!(check_on(&vault, &events, &ledger, date(2026, 10, 3), 15).1, 0);
+            assert_eq!(check_on(&vault, &events, &ledger, date(2026, 10, 4), 15).1, 0);
+        }
+
+        #[test]
+        fn a_card_deleted_unanswered_reopens_its_series_but_never_its_listed_instances() {
+            let vault = vault("g1-deleted");
+            // `write::delete` from the app archives a card with its status left `pending`. No
+            // `proposed` markers here: the card's own `events:` list is what keeps its instances
+            // from being asked twice.
+            fs::create_dir_all(vault.join("archive")).unwrap();
+            let text = "---\ntype: approval\nkind: event-check\ntitle: \"Earlier card\"\n\
+                        status: pending\nsource_uid: \"lx:6:1\"\nseries_uid: \"lx:6\"\n\
+                        events:\n- \"lx:6:1\"\n- \"lx:6:2\"\n\
+                        proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\n\
+                        expires: 2026-09-29\nsnooze_until: null\ncreated_by: events\n---\n\nbody\n";
+            pystr::write_text(&vault.join("archive").join("event-check-six.md"), text).unwrap();
+            let events = [
+                in_series(on("lx:6:2", "Reading group", 10, 2, 17, 0, 18, 0), "lx:6"),
+                in_series(on("lx:6:3", "Reading group", 10, 3, 17, 0, 18, 0), "lx:6"),
+            ];
+            for e in &events {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 1, "{paths:?}");
+            let (meta, _) = note(&paths[0]);
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("lx:6:3"));
+            assert_eq!(event_uids(&meta), vec!["lx:6:3"]);
+        }
+
+        #[test]
+        fn an_answered_series_card_is_never_re_asked_and_later_instances_inherit() {
+            let vault = vault("g1-answered");
+            let events = [
+                in_series(on("lx:8:1", "Weekly lab", 10, 1, 19, 0, 21, 0), "lx:8"),
+                in_series(on("lx:8:2", "Weekly lab", 10, 15, 19, 0, 21, 0), "lx:8"),
+            ];
+            unsure(&vault, "lx:8:1", "Weekly lab", Some(JID_A));
+            unsure(&vault, "lx:8:2", "Weekly lab", Some(JID_B));
+            let (paths, _) = check(&vault, &events, 15);
+            assert_eq!(event_uids(&note(&paths[0]).0), vec!["lx:8:1"]);
+            // The student approves it in the console; the same pass settles it (F3).
+            let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
+            let mut journal = Journal::new(&vault);
+            let console = WriteContext::new("quinn", "dashboard");
+            let literals = vec![("status".to_string(), "approved".to_string())];
+            crate::write::write_literals(&vault, &rel, &literals, &console, &mut journal, &Default::default())
+                .unwrap();
+            let ctx = crate::approvals::default_ctx();
+            let settled = process_approvals_at(&vault, DAY, &ctx, &mut journal);
+            assert_eq!(settled.executed.len(), 1, "{settled:?}");
+
+            // 3 Oct: the later instance is in the horizon. Even before inheritance runs, the
+            // answered series is closed.
+            let today = date(2026, 10, 3);
+            let mut ledger = load_ledger(&vault, None);
+            assert_eq!(check_on(&vault, &events, &ledger, today, 15).1, 0);
+            let (inherited, warnings) = inherit_series_answers(&vault, &events, &mut ledger, today);
+            assert_eq!((inherited, warnings), (1, Vec::<String>::new()));
+            assert_eq!(ledger["lx:8:2"].verdict.as_deref(), Some("obligation"));
+            assert_eq!(ledger["lx:8:2"].answered_by, "quinn");
+            assert_eq!(check_on(&vault, &events, &ledger, today, 15).1, 0);
+            assert_eq!(cards(&vault, "approvals").len(), 0);
+        }
     }
 }

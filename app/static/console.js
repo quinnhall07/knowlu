@@ -8,8 +8,8 @@
   var EL = function (id) { return document.getElementById(id); };
   var h = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
   var fmtH = function (x) { return (Math.round(x * 10) / 10).toFixed(1) + "h"; };
-  // Task 13: the twelve fields `set_fields` accepts (app/src/commands.rs's EDITABLE) — the page
-  // and the write path must agree on the list, since only these get a data-field span.
+  // Task 13: the drawer's twelve editable fields — every one `set_fields` accepts but `kind` and
+  // `level`, which it takes only on a commitment, from the Schedule view (commands.rs's EDITABLE).
   var EDITABLE = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence"];
   var editing = null;
 
@@ -42,6 +42,7 @@
       var v = a.getAttribute("data-view"), c = map[v];
       a.classList.toggle("on", v === current.view);
       var ct = a.querySelector(".ct");
+      if (c === undefined) { ct.textContent = ""; return; }   // Schedule carries no count
       if (v === "runs") { ct.textContent = c.count ? c.count + " warn" : "ok"; }
       else if (c.hours) { ct.innerHTML = h(c.count) + "<small>" + h(fmtH(c.hours)) + "</small>"; }   // every count carries its hours
       else { ct.textContent = c.count; }
@@ -295,8 +296,10 @@
     // so it can never disagree with the engine's own idea of "today" across a timezone.
     var tomorrow = state.ahead.buckets[1].date;
     d.cards.slice(0, 1).forEach(function (c) {
+      // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
+      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">Approve</button>';
       deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + "</div>" +
-        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts"><button class="b pri y" data-verdict="approved">Approve</button><button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
+        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
     if (newCard && prevId && newCard.getAttribute("data-id") === prevId) {
@@ -475,6 +478,7 @@
     var tomorrow = state.ahead.buckets[1].date;
     preserveAcross(host, ".flagpop", function () {
       host.innerHTML = d.cards.map(function (c) {
+        if (c.kind === "commitment-ask") { return askRow(c, tomorrow); }
         var changes = "";
         if (c.changes && typeof c.changes === "object" && !Array.isArray(c.changes)) {
           changes = '<div class="changes">' + Object.keys(c.changes).map(function (k) {
@@ -495,6 +499,44 @@
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
       }).join("") + (d.empty_text && !d.cards.length ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     });
+  }
+
+  // Phase 2 (spec §5): a `commitment-ask` card is answered here. Day toggles, a start and an end
+  // picker, "add another time", Save times (answer_card), No set times (reject), Snooze. The
+  // engine validates the answer; an invalid one comes back as its message, shown on the card.
+  function askTimeRow() {
+    return '<div class="ask-time">' + DAYS.map(function (d) {
+      return '<button class="b day" type="button" data-ask-day="' + d + '" aria-pressed="false">' + DAY_NAMES[d] + "</button>";
+    }).join("") + '<input type="time" data-part="start" aria-label="start"><input type="time" data-part="end" aria-label="end"></div>';
+  }
+  function askRow(c, tomorrow) {
+    return '<div class="row dec ask" data-id="' + h(c.id) + '" data-kind="approval">' +
+      '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
+      '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(c.age_days + "d old") + "</span>" +
+      '<div class="why">' + h(c.why) + '</div><div class="ask-times">' + askTimeRow() + "</div>" +
+      '<button class="lnk" type="button" data-ask-more>add another time</button><div class="ask-err" hidden></div></div>' +
+      '<div class="acts"><button class="b pri y" type="button" data-ask-save>Save times</button>' +
+      '<button class="b n" data-verdict="rejected">No set times</button>' +
+      '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
+  }
+  function answerAsk(row) {
+    var id = row.getAttribute("data-id"), meets = [];
+    row.querySelectorAll(".ask-time").forEach(function (t) {
+      var days = [];
+      t.querySelectorAll('[data-ask-day][aria-pressed="true"]').forEach(function (b) { days.push(b.getAttribute("data-ask-day")); });
+      var s = t.querySelector('[data-part="start"]').value, e = t.querySelector('[data-part="end"]').value;
+      if (days.length || s || e) { meets.push({ days: days, start: s, end: e }); }
+    });
+    row.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+    return invoke("answer_card", { view: stateView(), id: id, meets: meets }).then(function (env) {
+      ev("decision_made", id, "approval", null);
+      applyEnvelope(env, function (m) {
+        // A refusal with no state repaints nothing: this same row takes the answer again.
+        row.querySelectorAll("button").forEach(function (b) { b.disabled = false; });
+        var fresh = EL("dec-list").querySelector('.row.dec[data-id="' + id.replace(/"/g, "") + '"] .ask-err');
+        if (fresh) { fresh.textContent = m; fresh.hidden = false; } else { showRefusal(null, m, id); }
+      });
+    }).catch(function () { row.querySelectorAll("button").forEach(function (b) { b.disabled = false; }); });
   }
 
   // Plan 2 Task 2 (S2 §6.2 B11, F9): open info items as a list with the close action the rail
@@ -535,14 +577,320 @@
   }
   function resolveIssue(id, text, btn) {
     if (btn) { btn.disabled = true; }
-    return invoke("resolve_issue", { view: current.view, id: id, resolution: text }).then(function (env) {
+    return invoke("resolve_issue", { view: stateView(), id: id, resolution: text }).then(function (env) {
       if (!applyEnvelope(env, function (m) { if (btn) { btn.disabled = false; } showRefusal(null, m, id); })) { return; }
     }).catch(function () { if (btn) { btn.disabled = false; } });
   }
 
+  // ---- Phase 2 of the commitment model (spec §4, D6–D8): the Schedule view ("Your week"), the
+  // window editor and the moved line. Rows come from `your_week` (the engine's
+  // `commitments::overview`). A kind or level goes through `set_fields`; the window and an
+  // office-hours Add go through `commitments_confirm`. Nothing here computes a time: the flow
+  // sequence is string assembly from the pickers, and the engine validates it.
+  var DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  var DAY_NAMES = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+  var KIND_NAMES = [["class", "Class"], ["lab", "Lab"], ["work", "Work"], ["club", "Club"], ["meeting", "Meeting"], ["office-hours", "Office hours"]];
+  var LEVELS = [["hard", "Must keep"], ["soft", "Usually"], ["optional", "Optional"]];
+  var PREVIEW_MS = 400;
+  var previewTimer = null;
+  var windowDirty = false;   // Q10 review M5: unsaved picker edits survive a refresh
+
+  // Q10-a: `schedule` is the page's view, not the read model's — the state it paints is today's.
+  function stateView() { return current.view === "schedule" ? "today" : current.view; }
+
+  // D7: the today view says what moved, when the read model carries it (§6.4).
+  function renderMoved(state) {
+    var m = state.moved, el = EL("moved");
+    el.hidden = !m;
+    el.textContent = m ? m.text : "";
+  }
+
+  function levelButtons(level) {
+    return '<span class="lvl" role="group" aria-label="How much it binds">' + LEVELS.map(function (l) {
+      return '<button class="b" type="button" data-level-set="' + l[0] + '" aria-pressed="' + (l[0] === level) + '">' + h(l[1]) + "</button>";
+    }).join("") + "</span>";
+  }
+
+  // One row per weekday, Mon to Sun, each a start and an end picker; `byDay` is {mon: {start, end}}.
+  function windowEditorHtml(byDay) {
+    return DAYS.map(function (d) {
+      var w = byDay[d] || {};
+      return '<div class="wrow" data-day="' + d + '"><span class="wday">' + DAY_NAMES[d] + "</span>" +
+        '<input type="time" data-part="start" aria-label="' + DAY_NAMES[d] + ' start" value="' + h(w.start || "") + '">' +
+        '<input type="time" data-part="end" aria-label="' + DAY_NAMES[d] + ' end" value="' + h(w.end || "") + '">' +
+        (d === "mon" ? '<button class="lnk" type="button" data-same-as-monday>same as Monday for Tue&ndash;Fri</button>' : "") +
+        '<span class="werr" data-werr="' + d + '"></span></div>';
+    }).join("");
+  }
+
+  // The flow sequence from the pickers. Days with the same start and end share one entry; a day
+  // with an empty picker is left out, so it keeps week_template.yaml's hours. Null when every
+  // row is blank: no window is sent (Plan ruling Q4-b).
+  function windowSequence(host) {
+    var groups = [], byKey = {};
+    DAYS.forEach(function (d) {
+      var row = host.querySelector('.wrow[data-day="' + d + '"]'); if (!row) { return; }
+      var s = row.querySelector('[data-part="start"]').value, e = row.querySelector('[data-part="end"]').value;
+      if (!s || !e) { return; }
+      var k = s + "-" + e;
+      if (!byKey[k]) { byKey[k] = { days: [], start: s, end: e }; groups.push(byKey[k]); }
+      byKey[k].days.push(d);
+    });
+    if (!groups.length) { return null; }
+    return "[" + groups.map(function (g) { return "{days: [" + g.days.join(", ") + '], start: "' + g.start + '", end: "' + g.end + '"}'; }).join(", ") + "]";
+  }
+
+  // The engine's own message, under the row it names ("planning day fri: …"), else under Monday.
+  function showWindowError(host, message) {
+    host.querySelectorAll("[data-werr]").forEach(function (e) { e.textContent = ""; });
+    if (!message) { return; }
+    var m = /planning day (\w+)/.exec(message);
+    var slot = (m && host.querySelector('[data-werr="' + m[1] + '"]')) || host.querySelector('[data-werr="mon"]');
+    if (slot) { slot.textContent = message; }
+  }
+
+  function bindWindowEditor(host, onEdit) {
+    host.addEventListener("click", function (e) {
+      if (!e.target.closest("[data-same-as-monday]")) { return; }
+      var mon = host.querySelector('.wrow[data-day="mon"]');
+      ["tue", "wed", "thu", "fri"].forEach(function (d) {
+        var row = host.querySelector('.wrow[data-day="' + d + '"]');
+        row.querySelector('[data-part="start"]').value = mon.querySelector('[data-part="start"]').value;
+        row.querySelector('[data-part="end"]').value = mon.querySelector('[data-part="end"]').value;
+      });
+      onEdit();
+    });
+    host.addEventListener("input", onEdit);
+  }
+
+  function schedulePreview() {
+    if (previewTimer) { clearTimeout(previewTimer); }
+    previewTimer = setTimeout(runPreview, PREVIEW_MS);
+  }
+
+  // §4: beside the editor, the preview's moved line (or "No change to today's plan") and the
+  // first five items of the previewed day, in order.
+  function runPreview() {
+    var host = EL("sched-window"), seq = windowSequence(host);
+    if (!seq) { EL("sched-moved").textContent = "No change to today's plan"; EL("sched-items").innerHTML = ""; return; }
+    invoke("preview_window", { window: seq }).then(function (r) {
+      if (!r.ok) { showWindowError(host, r.error); return; }
+      showWindowError(host, null);
+      var s = r.state, items = [];
+      EL("sched-moved").textContent = s.moved ? s.moved.text : "No change to today's plan";
+      s.the_day.blocks.forEach(function (b) { b.takes.forEach(function (t) { items.push(t.title); }); });
+      EL("sched-items").innerHTML = items.slice(0, 5).map(function (t) { return "<li>" + h(t) + "</li>"; }).join("");
+    }).catch(function () {});
+  }
+
+  // The view's renderer (VIEW_RENDERERS.schedule). Its data is `your_week`, not the state `paint`
+  // passes it. The editor is rebuilt only while nobody is typing in it.
+  function renderScheduleView() {
+    return invoke("your_week", {}).then(function (r) {
+      if (!r || !r.ok || !r.week) { EL("sched-n").textContent = (r && r.error) || ""; return; }
+      var w = r.week;
+      EL("sched-n").textContent = w.commitments.length + (w.commitments.length === 1 ? " commitment" : " commitments");
+      EL("sched-list").innerHTML = w.commitments.map(function (c) {
+        var known = KIND_NAMES.some(function (k) { return k[0] === c.kind; });
+        var kinds = (known ? "" : '<option value="' + h(c.kind) + '" selected>' + h(c.kind) + "</option>") + KIND_NAMES.map(function (k) {
+          return '<option value="' + k[0] + '"' + (k[0] === c.kind ? " selected" : "") + ">" + h(k[1]) + "</option>";
+        }).join("");
+        return '<div class="row sched" data-id="' + h(c.id) + '" data-kind="commitment"><div class="ttl"><span class="a">' + h(c.title) +
+          '</span><span class="meta">' + h(c.when || "") + (c.where ? " · " + h(c.where) : "") + "</span></div>" +
+          '<div class="acts"><select data-kind-set aria-label="Kind">' + kinds + "</select>" + levelButtons(c.level) + "</div></div>";
+      }).join("") + w.uncovered_courses.map(function (u) {
+        return '<div class="row sched uncovered"><div class="ttl"><span class="a">' + h(u.title) + '</span><span class="meta">Knowlu will ask when it meets</span></div></div>';
+      }).join("") + (w.commitments.length || w.uncovered_courses.length ? "" : '<div class="empty">Nothing confirmed yet.</div>');
+      EL("sched-oh").innerHTML = w.office_hours.map(function (p) {
+        return '<div class="row sched oh"><div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") +
+          '</span></div><div class="acts"><button class="b" type="button" data-oh-add="' + h(p.source_uid) + '">Add</button></div></div>';
+      }).join("") || '<div class="empty">No office hours found on your calendar.</div>';
+      var host = EL("sched-window"), byDay = {};
+      w.window.forEach(function (d) { byDay[d.day] = d; });
+      if (!windowDirty && !host.contains(document.activeElement)) { host.innerHTML = windowEditorHtml(byDay); }
+      schedulePreview();
+      watchSeen();   // Q10 review M4: the rows arrive after paint's own watchSeen()
+    }).catch(function () {});
+  }
+
+  // No explicit renderScheduleView() here: applyEnvelope paints, and paint already runs the
+  // Schedule view's renderer (review finding 9 — one your_week round trip per click, not two).
+  function saveCommitment(id, fields) {
+    return invoke("set_fields", { view: stateView(), id: id, fields: fields }).then(function (env) {
+      applyEnvelope(env, function (msg) { showRefusal(null, msg, id); });
+    }).catch(function () {});
+  }
+
+  // Every `commitments_confirm` goes through here: the Schedule view's Save and Add, and Q11's
+  // Finish. A returned state paints like any write's.
+  function confirmWeek(payload) {
+    return invoke("commitments_confirm", { view: stateView(), confirm: payload }).then(function (env) {
+      if (env.state) { current.pendingOrder = null; paint(env.state, true); }
+      return env;
+    });
+  }
+
+  function bindScheduleView() {
+    var list = EL("sched-list");
+    list.addEventListener("click", function (e) {
+      // Q10 review I1: no click in a Schedule row reaches the document handler. It would open
+      // the note drawer, whose Delete… and free field edits are the remove control D8 withholds.
+      if (e.target.closest(".row.sched")) { e.stopPropagation(); }
+      var b = e.target.closest("[data-level-set]"); if (!b) { return; }
+      saveCommitment(b.closest(".row.sched").getAttribute("data-id"), { level: b.getAttribute("data-level-set") });
+    });
+    list.addEventListener("change", function (e) {
+      var sel = e.target.closest("[data-kind-set]"); if (!sel) { return; }
+      saveCommitment(sel.closest(".row.sched").getAttribute("data-id"), { kind: sel.value });
+    });
+    EL("sched-oh").addEventListener("click", function (e) {
+      var b = e.target.closest("[data-oh-add]"); if (!b) { return; }
+      b.disabled = true;
+      // §4: office hours default to optional (§2.2).
+      // Q10 review M1: a refusal says so; M2: a painted state already re-ran this view's renderer.
+      confirmWeek({ mine: [{ source_uid: b.getAttribute("data-oh-add"), level: "optional" }] }).then(function (env) {
+        if (!env.ok) { b.disabled = false; showRefusal(null, "refused: " + env.error); }
+        if (!env.state) { return renderScheduleView(); }
+      }).catch(function () { b.disabled = false; });
+    });
+    bindWindowEditor(EL("sched-window"), function () {
+      windowDirty = true; EL("sched-say").textContent = "";   // Q10 review M5, M6
+      schedulePreview();
+    });
+    EL("sched-save").addEventListener("click", function () {
+      var host = EL("sched-window"), seq = windowSequence(host);
+      if (!seq) { EL("sched-say").textContent = "Nothing to save"; return; }   // Q10 review M6
+      confirmWeek({ window: seq }).then(function (env) {
+        if (!env.ok) { showWindowError(host, env.error); return; }
+        windowDirty = false;
+        showWindowError(host, null);
+        EL("sched-say").textContent = env.result && env.result.window === "unchanged" ? "No change" : "Saved";
+        if (!env.state) { renderScheduleView(); }   // Q10 review M2: else paint already did
+      }).catch(function () {});
+    });
+  }
+
+  // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
+  // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
+  // screen for this console session; Finish writes the planning-day note, so it never returns.
+  var weekSetup = { dismissed: false, open: false, dirty: false };
+
+  function checkWeekSetup() {
+    if (weekSetup.dismissed || weekSetup.open) { return; }
+    invoke("your_week", {}).then(function (r) {
+      if (r && r.ok && r.week && r.week.setup && !weekSetup.dismissed) { openWeekSetup(r.week); }
+    }).catch(function () {});
+  }
+
+  // One row: title, the §5.2 label, `where` in small type; Mine / Not mine; the level control,
+  // shown by CSS only on a Mine row. Nothing typed.
+  function setupRow(p) {
+    var preset = { class: 1, lab: 1, work: 1 }[p.kind] ? "mine" : "";
+    return '<div class="wsrow" data-key="' + h(p.source_uid) + '" data-answer="' + preset + '" data-level="' + h(p.level) + '">' +
+      '<div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") + "</span>" +
+      (p.where ? "<small>" + h(p.where) + "</small>" : "") + "</div>" +
+      '<div class="acts"><button class="b" type="button" data-answer-set="mine" aria-pressed="' + (preset === "mine") + '">Mine</button>' +
+      '<button class="b" type="button" data-answer-set="not" aria-pressed="false">Not mine</button>' + levelButtons(p.level) + "</div></div>";
+  }
+
+  function paintSetupRows(ps, uncovered) {
+    var classes = ps.filter(function (p) { return !p.window && (p.kind === "class" || p.kind === "lab"); });
+    var office = ps.filter(function (p) { return !p.window && p.kind === "office-hours"; });
+    var rest = ps.filter(function (p) { return !p.window && classes.indexOf(p) === -1 && office.indexOf(p) === -1; });
+    EL("ws-class-rows").innerHTML = classes.map(setupRow).join("") + uncovered.map(function (u) {
+      return '<div class="wsrow uncovered"><div class="ttl"><span class="a">' + h(u.title) + '</span><span class="meta">no class times found; Knowlu will ask this week</span></div></div>';
+    }).join("");
+    EL("ws-week-rows").innerHTML = rest.map(setupRow).join("");
+    EL("ws-oh-rows").innerHTML = office.map(setupRow).join("");
+    EL("ws-classes").hidden = !classes.length && !uncovered.length;
+    EL("ws-week").hidden = !rest.length;
+    EL("ws-oh").hidden = !office.length;
+  }
+
+  function openWeekSetup(week) {
+    weekSetup.open = true;
+    EL("week-setup").hidden = false;
+    EL("ws-status").textContent = "Reading your calendar…";
+    var byDay = {};
+    DAYS.forEach(function (d) { byDay[d] = { start: "08:00", end: "22:00" }; });
+    EL("ws-window").innerHTML = windowEditorHtml(byDay);
+    paintSetupRows([], week.uncovered_courses || []);
+    // Final review I1: Finish waits for the calendar read to settle, succeeded or failed. A Finish
+    // before it would write the planning-day note from the placeholder hours, and the routine's
+    // window proposal would never be offered again.
+    weekSetup.dirty = false;
+    EL("ws-finish").disabled = true;
+    var ready = function () { EL("ws-finish").disabled = false; };
+    invoke("commitment_proposals", {}).then(function (r) {
+      var ps = (r && r.proposals) || [];
+      var win = ps.filter(function (p) { return p.window; })[0];
+      // An edit the student made while waiting is theirs: the proposal does not overwrite it.
+      if (win && !weekSetup.dirty) {
+        byDay = {};
+        win.meets.forEach(function (m) { m.days.forEach(function (d) { byDay[d] = { start: m.start, end: m.end }; }); });
+        EL("ws-window").innerHTML = windowEditorHtml(byDay);
+      }
+      paintSetupRows(ps, (r && r.uncovered_courses) || week.uncovered_courses || []);
+      EL("ws-status").textContent = ps.some(function (p) { return !p.window; }) ? "Knowlu found these on your calendar. Mark each one." : "Knowlu found nothing repeating on your calendar. Set your day below.";
+    }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; }).then(ready);
+  }
+
+  function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
+
+  function finishWeekSetup(btn) {
+    var mine = [], notMine = [];
+    document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (r) {
+      var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer");
+      if (a === "mine") { mine.push({ source_uid: key, level: r.getAttribute("data-level") }); }
+      else if (a === "not") { notMine.push(key); }
+    });
+    // Review finding 2: D3 says Finish always writes the planning-day note, so the screen never
+    // returns. An all-blank Your day would write none, so Finish asks for one day first.
+    var seq = windowSequence(EL("ws-window"));
+    if (!seq) { showWindowError(EL("ws-window"), "Set the hours for at least one day"); return; }
+    var payload = { mine: mine, not_mine: notMine, window: seq };
+    btn.disabled = true;
+    confirmWeek(payload).then(function (env) {
+      btn.disabled = false;
+      if (!env.ok) { showWindowError(EL("ws-window"), env.error); EL("ws-status").textContent = env.error; return; }
+      closeWeekSetup();
+      // Final review M4: a row --confirm skipped (no longer a current proposal) comes back as a
+      // question; say so on the notice line until the next paint, rather than close in silence.
+      var skipped = (env.result && env.result.warnings) || [];
+      if (skipped.length) {
+        EL("delta").textContent = skipped.length + (skipped.length === 1 ? " row" : " rows") + " will come back as questions: " + skipped.join("; ");
+      }
+    }).catch(function () { btn.disabled = false; });
+  }
+
+  EL("week-setup").addEventListener("click", function (e) {
+    // Q10's care: no click on this screen reaches the document handler (its drawer and its .b
+    // branch belong to the console underneath).
+    e.stopPropagation();
+    var row = e.target.closest(".wsrow[data-key]");
+    var a = e.target.closest("[data-answer-set]");
+    if (a && row) {
+      // Q11-c: a second press on the pressed button returns the row to unanswered.
+      var v = a.getAttribute("data-answer-set"), next = row.getAttribute("data-answer") === v ? "" : v;
+      row.setAttribute("data-answer", next);
+      row.querySelectorAll("[data-answer-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-answer-set") === next)); });
+      return;
+    }
+    var l = e.target.closest("[data-level-set]");
+    if (l && row) {
+      row.setAttribute("data-level", l.getAttribute("data-level-set"));
+      row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b === l)); });
+      return;
+    }
+    if (e.target.closest("#ws-later")) { weekSetup.dismissed = true; closeWeekSetup(); return; }
+    var fin = e.target.closest("#ws-finish");
+    if (fin) { finishWeekSetup(fin); }
+  });
+  bindWindowEditor(EL("ws-window"), function () { weekSetup.dirty = true; showWindowError(EL("ws-window"), null); });
+
   // Dispatch table from view name to its main-body renderer. Every nav view is built now
   // (Task 3 finishes Issues) — the not-built placeholder is gone (R-P2-3).
-  var VIEW_RENDERERS = { runs: renderRunsView, decisions: renderDecisionsView, "good-to-know": renderGoodToKnowView, issues: renderIssuesView };
+  var VIEW_RENDERERS = { runs: renderRunsView, decisions: renderDecisionsView, "good-to-know": renderGoodToKnowView, issues: renderIssuesView, schedule: renderScheduleView };
 
   function renderRuns(state) {
     var r = state.runs_panel, html = "";
@@ -560,7 +908,8 @@
     // verdict/meter (not order-bearing) always paint. current.state stays the *displayed*
     // order's state while held — the new state lives only in pendingOrder — so orderOf(current.state)
     // keeps comparing against what is actually on screen.
-    var reordered = current.state && !force && orderOf(current.state) !== orderOf(state);
+    // Q10 review M3: the Schedule view shows no order-bearing list, so it never takes the hold.
+    var reordered = current.view !== "schedule" && current.state && !force && orderOf(current.state) !== orderOf(state);
     // Fix (final review B): pendingOrder must reflect THIS state before renderDelta runs below —
     // a later poll that returns the order to what is displayed (reordered false) has to clear a
     // stale pendingOrder from an earlier held poll, or the button stays and "refresh order"
@@ -572,7 +921,8 @@
     EL("main-today").hidden = current.view !== "today"; EL("main-list").hidden = !listViews[current.view]; EL("main-runs").hidden = current.view !== "runs"; EL("main-decisions").hidden = current.view !== "decisions";
     EL("main-gtk").hidden = current.view !== "good-to-know";
     EL("main-issues").hidden = current.view !== "issues";
-    if (current.view === "today") { renderVerdict(state); renderMeter(state); }
+    EL("main-schedule").hidden = current.view !== "schedule";
+    if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); }
     if (reordered) { watchSeen(); return; }   // hold only renderMustDo/renderRecommended or renderList below
     current.state = state; current.revision = state.revision;
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
@@ -593,7 +943,7 @@
     // after a route never takes the hold path (orderOf(null) would never match orderOf(state)).
     // R-P2-3 (rider): the not-built placeholder is gone, so an unrecognised hash must not reach
     // a view with no renderer and no toggle to hide it — fall back to "today" instead (one line).
-    current.view = (view && { today: 1, overdue: 1, week: 1, later: 1, all: 1, decisions: 1, "good-to-know": 1, issues: 1, runs: 1 }[view]) ? view : "today"; current.pendingOrder = null; current.revision = null; current.state = null;
+    current.view = (view && { today: 1, overdue: 1, week: 1, later: 1, all: 1, decisions: 1, "good-to-know": 1, issues: 1, runs: 1, schedule: 1 }[view]) ? view : "today"; current.pendingOrder = null; current.revision = null; current.state = null;
     ev("view_opened", null, "view", null);
     return poll();
   }
@@ -705,7 +1055,7 @@
   }
 
   function poll() {
-    return invoke("state", { view: current.view }).then(function (env) {
+    return invoke("state", { view: stateView() }).then(function (env) {
       // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
       // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
       // path, so there is no failed state to wait for. The paint below still runs, hidden while the
@@ -850,7 +1200,7 @@
   }
 
   function commitEdit(id, fields, el, field) {
-    return invoke("set_fields", { view: current.view, id: id, fields: fields }).then(function (env) { if (env.ok) { ev("edit_committed", id, field, null); } return applyEnvelope(env, function (msg) { showRefusal(el, msg, id, field); }); });
+    return invoke("set_fields", { view: stateView(), id: id, fields: fields }).then(function (env) { if (env.ok) { ev("edit_committed", id, field, null); } return applyEnvelope(env, function (msg) { showRefusal(el, msg, id, field); }); });
   }
 
   function cancelEdit() { if (editing) { var e = editing; e.el.innerHTML = e.oldHTML; editing = null; ev("edit_cancelled", e.id, e.field, null); } }
@@ -967,12 +1317,12 @@
 
   function submitNewTask(row) {
     var f = new FormData(row), fields = { title: f.get("title"), course: f.get("course") || null, due: f.get("due") || null, effort_hours: Number(f.get("effort_hours") || 1) };
-    invoke("create_task", { view: current.view, fields: fields }).then(function (env) { applyEnvelope(env, function (m) { showRefusal(row, m); }); });
+    invoke("create_task", { view: stateView(), fields: fields }).then(function (env) { applyEnvelope(env, function (m) { showRefusal(row, m); }); });
   }
 
   function confirmDelete(id, title) {
     if (!window.confirm("Archive \"" + title + "\"? Nothing is deleted — it moves to archive/ and shows in CLOSED THIS WEEK.")) { return; }
-    invoke("delete_note", { view: current.view, id: id }).then(function (env) { if (applyEnvelope(env)) { EL("drawer").hidden = true; } });
+    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { EL("drawer").hidden = true; } });
   }
 
   // ----- the deck: approve/reject/snooze (Knowlu plan 1, Task 14). One click commits — the
@@ -996,7 +1346,7 @@
       card.querySelectorAll("button[data-verdict]").forEach(function (b) { b.disabled = true; });
       var noteInput = card.querySelector(".nb input, .dnote"); if (noteInput) { noteInput.disabled = true; }
     }
-    return invoke("decide", { view: current.view, id: id, verdict: verdict, note: note, snoozeUntil: snoozeUntil || null }).then(function (env) {
+    return invoke("decide", { view: stateView(), id: id, verdict: verdict, note: note, snoozeUntil: snoozeUntil || null }).then(function (env) {
       ev(verdict === "snoozed" ? "decision_deferred" : "decision_made", id, "approval", null);
       if (!applyEnvelope(env, function (m) {
         if (card) {
@@ -1013,6 +1363,7 @@
   function bindDeck() {
     var deck = EL("deck");
     deck.addEventListener("click", function (e) {
+      if (e.target.closest("[data-answer-in]")) { location.hash = "#decisions"; return; }
       var b = e.target.closest("button[data-verdict]"); if (!b) { return; }
       var card = b.closest(".card");
       if (card.dataset.busy) { return; }   // a decide is already in flight for this card
@@ -1031,6 +1382,13 @@
       // which would open the drawer (the input, a gap) or take its .b branch and emit
       // why_expanded with the literal "task" kind on an approval.
       if (e.target.closest(".row.dec .acts")) { e.stopPropagation(); }
+      // Phase 2: the ask form's own controls live in .ttl and must not open the drawer either.
+      if (e.target.closest(".row.dec.ask .ttl")) { e.stopPropagation(); }
+      var day = e.target.closest("[data-ask-day]");
+      if (day) { day.setAttribute("aria-pressed", String(day.getAttribute("aria-pressed") !== "true")); return; }
+      if (e.target.closest("[data-ask-more]")) { e.target.closest(".row.dec").querySelector(".ask-times").insertAdjacentHTML("beforeend", askTimeRow()); return; }
+      var save = e.target.closest("[data-ask-save]");
+      if (save) { answerAsk(save.closest(".row.dec")); return; }
       var b = e.target.closest("button[data-verdict]"); if (!b) { return; }
       var row = b.closest(".row.dec"); if (!row) { return; }
       decideCard(row.getAttribute("data-id"), b.getAttribute("data-verdict"), b.getAttribute("data-snooze") || null, EL("dec-list"));
@@ -1093,7 +1451,7 @@
     // (final fix wave, C3).
     var host = pop.closest("[data-kind]");
     var kind = host ? host.getAttribute("data-kind") : null;
-    invoke("open_issue", { view: current.view, target: targetId, categories: cats, text: pop.querySelector("textarea").value }).then(function (env) {
+    invoke("open_issue", { view: stateView(), target: targetId, categories: cats, text: pop.querySelector("textarea").value }).then(function (env) {
       if (applyEnvelope(env, function (m) { showRefusal(pop, m); })) { ev("issue_opened", targetId, kind, null); pop.remove(); }
     });
   }
@@ -1103,7 +1461,7 @@
   // call (no btn) keeps working unchanged.
   function closeInfoItem(id, btn) {
     if (btn) { btn.disabled = true; }
-    return invoke("close_info", { view: current.view, id: id }).then(function (env) {
+    return invoke("close_info", { view: stateView(), id: id }).then(function (env) {
       // Final fix wave A7: showRefusal's first argument is unread; the id is what carries the
       // title prefix and re-finds the row (applyEnvelope has already repainted, so the button's
       // old .row is detached by now).
@@ -1121,8 +1479,8 @@
     var closeBtn = e.target.closest("[data-close-info]"); if (closeBtn) { closeInfoItem(closeBtn.getAttribute("data-close-info")); return; }
     // Task 15: manual sync/backup from the topline — both return the fresh state like every
     // other mutating command (spec's envelope shape), so applyEnvelope repaints it the same way.
-    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: current.view }).then(function (env) { applyEnvelope(env, syncRefusal); ev("sync_run", null, null, null); }).catch(function () {}); return; }
-    var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: current.view }).then(applyEnvelope).catch(function () {}); return; }
+    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: stateView() }).then(function (env) { applyEnvelope(env, syncRefusal); ev("sync_run", null, null, null); }).catch(function () {}); return; }
+    var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
     // Plan 4a Task 8: *Restart to update*. A refusal (a slot started between the offer and the
     // click, or the install failed) comes back in the envelope and is shown, never retried.
@@ -1155,6 +1513,7 @@
   });
   bindDeck();   // #deck's node persists across renderDeck's innerHTML rewrites — bound once
   bindDecisionsView();
+  bindScheduleView();
   bindGoodToKnowView();
   bindIssuesView();
 
@@ -1265,7 +1624,7 @@
       }).catch(function () {});
       return;
     }
-    if (e.target.closest("#set-backup-now")) { invoke("backup_now", { view: current.view }).then(applyEnvelope).catch(function () {}); return; }
+    if (e.target.closest("#set-backup-now")) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     if (e.target.closest("#set-diag-copy")) {
       invoke("copy_diagnostics", {}).then(function (r) { EL("set-diag-note").textContent = r.ok ? "copied" : r.error; }).catch(function () {});
       return;
@@ -1315,7 +1674,7 @@
     EL("report").hidden = false;
     EL("report-note").textContent = "";
     EL("report-text").value = "Loading…";
-    invoke("report_preview", { view: current.view }).then(function (r) {
+    invoke("report_preview", { view: stateView() }).then(function (r) {
       EL("report-text").value = r.ok ? r.text : ("could not build the report: " + r.error);
     }).catch(function () { EL("report-text").value = "could not build the report"; });
   }
@@ -1525,6 +1884,8 @@
     window.addEventListener("blur", endOfLook);
     document.addEventListener("visibilitychange", function () { if (document.hidden) { endOfLook(); } });
     route(location.hash.slice(1));
+    // Phase 2 (D1, D3, Q11-d): on the vault's first day the confirm screen opens, once a launch.
+    checkWeekSetup();
     // Plan 4a Task 8: one check at launch. The housekeeping thread repeats it once a day; a
     // failure is quiet on both paths — until the release host exists, unreachable IS the answer.
     checkForUpdates();

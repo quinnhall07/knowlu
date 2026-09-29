@@ -38,7 +38,7 @@ record something that was already tried and rejected.
 
 ## 2. The page set
 
-Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
+Nine pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
 
 | Page | The question it answers |
 |---|---|
@@ -50,12 +50,16 @@ Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main colum
 | **Grades** | Projected term GPA vs 3.75, per-course standing, needed-on-remainder |
 | **Issues** | Flagged judgments, cleared in one sitting |
 | **Health** | Runs, sync, ingest and source status |
+| **Schedule** | What is my week made of, and which hours do I plan in? (§3.15) |
 
 **Left out:** separate `Overdue` / `This week` / `Later` destinations. They are *filters inside
 Work*. The mockup's nav implied three pages; three pages that differ only by a date predicate is
 three places to maintain one list.
 
-**Three panels that are not pages** (Knowlu plan 4a). None of them is a view: a view name reaches
+A nav view may be a page view, not a read-model view, as long as it polls `state` as `today`
+(`stateView()`): *Schedule* is the one.
+
+**Four panels that are not pages** (Knowlu plan 4a; the confirm screen, commitment model phase 2). None of them is a view: a view name reaches
 `surface::View::parse` on every poll and would be refused (R-P4a-4), so none has a hash, none is in
 the nav, and none is an observed region. Each is markup in the same document, put up and taken down
 by one function.
@@ -65,6 +69,7 @@ by one function.
 | **Picker** | one row per registered profile — name over vault path, with *Open* — and two buttons, *Use an existing vault…* (adopts a folder) and *Create a new vault…* (the wizard) | a launch with no `--vault` and more than one profile registered; or `--pick`, which is the settings overlay's *Switch profile…* |
 | **Wizard** | seven panels in order — Welcome, Your vault, Backup folder, Your LMS calendar, Coursework logins, Slots and campus, Finish. Back is always allowed and **nothing is written until *Finish*** except the Credential Manager entries, which are written when the credentials panel is left | a launch with no `--vault` and no profile registered; or the picker's *Create a new vault…* |
 | **Settings** | seven rows over the live page — profile name, vault path, backup folder, start with Windows, updates, local judgment, diagnostics | the topline gear, or *Settings* in the tray (which `eval`s `window.KNOWLU_OPEN_SETTINGS`) |
+| **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
 
 The picker and the wizard replace the whole document and run in a **vault-less window** — no
 `ConsoleState`, no tray, no scheduler, no autostart registration, because none of those has a vault
@@ -141,6 +146,8 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   lede cites (must-do hours, capacity hours).
 - **Prose, generated from real numbers.** Never a fixed string; never a number that disagrees with
   the meter below it.
+- **The moved line.** The today view prints `moved.text` under the headline (`#moved`, spec D7);
+  hidden when `moved` is absent (§3.7).
 
 ### 3.4 The capacity meter — the signature element
 
@@ -209,6 +216,27 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **Partial takes show both figures** — `2.0h (of 6.0h left)`.
 - **Recurring commitments render as commitments, not calendar blocks.** They consume budget; a
   block does not. Rendering them identically would double-count.
+- **Commitment blocks (`commitments/`, spec §6.2).** The gap walk runs over
+  `WeekCalendar::template_only_blocks(day)` — the week template's classes alone, never the confirmed
+  commitment notes — so a confirmed club is never drawn as a generic "class" gap. Each commitment
+  span active that day (`spans_on(day)`) is then added as its own block: `kind: "class"` for a
+  `class`/`lab` note, `"busy"` otherwise, `label` the note's own title. A span is **clamped to
+  `window(day)`** (the planning day's window, §6.3, or the template's `day_start`/`day_end` with no
+  planning-day note) and dropped entirely when wholly outside it. A `busy` block built from the
+  day's Google events is dropped when its start and end exactly match a commitment block's
+  **unclamped** span, so a class that is both a confirmed commitment and a Google event draws once,
+  titled from the commitment. **Google events themselves are never clamped to the planning window —
+  only commitment blocks are** (carried forward from the P17 review): an event straddling or
+  outside the window still draws at its own time.
+- **`moved` (spec §6.4).** When a confirmed `planning-day` note's window differs from the window the
+  day started with (`state/plan.json`, written by `rank` the first time each day the window is
+  read), the today view reports what changed: how many scheduled items moved to a later or earlier
+  part of the day (morning/afternoon/evening) and how many no longer fit. It is computed **live** —
+  every `surface` read re-designates the day under both windows and diffs the result by task slug —
+  so an edit to the window shows its effect at once, not just at the next `rank`. `moved` is omitted
+  from the JSON entirely (no key, not `null`) when nothing changed, when there is no confirmed
+  planning-day note, or on any view but today. The today view prints `moved.text` under the
+  headline (`#moved`, spec D7).
 
 ### 3.8 Left-rail nav
 
@@ -241,6 +269,36 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **Fires `decision_made` for `approved`/`rejected`, `decision_deferred` for `snoozed`** (§4.6) —
   ids only, as soon as the `invoke` round trip resolves, **before** the envelope's `ok` is
   checked; a refused decide still logs the attempt.
+- **`kind: event-check` — "Does this apply to you?"** `rank` files one for an event the judgment
+  could only call `unsure` (at most 3 a day, inside the 15). The deck renders it like any other card.
+  **Approve** writes a human answer `verdict:obligation` to `state/events-seen.md` for every uid on
+  the card, so the event joins Coming up; **Reject** writes `verdict:drop`. Either line carries
+  `by:` (the actor of the journal's human `status` set, else `unknown`) and the instance's own
+  `jid:`, and it is written by `process_approvals` in the same `decide` call: the card leaves the
+  deck on the click, and the event joins Coming up at the next `rank`. A settled answer carries to
+  the series' later instances: the next `rank`
+  gives each unanswered instance the same answer, and the series is never asked about again. A card
+  that expires or is deleted unanswered is not an answer: it writes nothing, its own instances are
+  never asked again, and the series' next instance may be.
+- **`kind: commitment-check` — "Is this part of your week? Knowlu found it repeating on your
+  calendar."** `rank` classifies repeating calendar events (`commitments.rs`) into proposals — a
+  class, a lab, work, a club, a meeting, or the day's wake-to-bed window — and files up to 5 a day
+  as cards, charged to the day's 15-approval budget (they count against the 15, not on top of it).
+  The deck renders these like any other card. **Approve** writes a confirmed note in `commitments/`
+  (or the `planning-day` note, for the window card); **Reject** writes an anonymous decline marker
+  holding only the source's opaque key, and marks every twin of the same underlying series (a
+  Google/ICS duplicate) declined too, so it is never re-asked from either side. A calendar change to
+  an already-confirmed commitment (a new meeting time, a new room, a new end date) files the same
+  card kind with a `target` note and a `change`/`was` pair instead of a fresh `commitment:` mapping;
+  approving it amends the note, rejecting it leaves the note as it is — either way the question is
+  never asked again. These cards, their series data (`state/calendar-series.json`) and the
+  proposals themselves never leave the device (`commitments::LOCAL_CARD_KINDS`): only what the
+  student confirms or declines becomes a note, and only a note syncs.
+- **`kind: commitment-ask` — answered in the Decisions view.** A course with no class row gets a
+  card asking when it meets. The deck shows **Answer…** for it (never Approve), which opens the
+  Decisions view; there the card is a form — day toggles, start/end time pickers, *add another
+  time*, **Save times** (→ `answer_card`, which writes `answer_meets` and approves the card in one
+  call) and **No set times** (→ reject).
 
 ### 3.10 AHEAD
 
@@ -308,6 +366,22 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **The warnings block concatenates two sources, in order: `runs_panel.warnings` then the
   page-wide `state.warnings`** (Task 1's warnings channel) — a run-specific warning and a
   general one render in the same block rather than needing two.
+
+### 3.15 SCHEDULE ("Your week")
+
+- **Answers:** what is my week made of, and which hours do I plan in?
+- **Reached by:** the nav link *Schedule* (view id `schedule`). It is a **page view**, not a
+  read-model view: it polls the read model as `today` (`stateView()`), because `schedule` would be
+  refused by `surface::View::parse` (R-P4a-4).
+- **Computed by:** `your_week` → `commitments::overview` (in-process; no fetch, no write).
+- **Each commitment is a row** with its kind select and level control, both written through
+  `set_fields` (as `commitments::check_console_edit` allows). *Office hours* have **Add** (a
+  one-row `commitments_confirm`, level optional). A course with
+  no class row reads "Knowlu will ask when it meets".
+- **The window editor** (*Your day*) previews an edit through `preview_window` after 400 ms: the
+  preview's `moved.text`, or "No change to today's plan", and the first five items of the
+  previewed day.
+- **Left out:** a remove control (spec D8).
 
 ---
 

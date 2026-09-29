@@ -1745,6 +1745,8 @@ and fetches nothing: a loopback listener sees no connection.
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ```
 
+Plan ruling (final review): Q4-c's "one line changed" holds for editing an existing planning-day note; creating one writes the whole note.
+
 ---
 
 ## Q5 — `commitments::overview` (D3, §4)

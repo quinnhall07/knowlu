@@ -13,6 +13,7 @@
 import type { JudgeModel } from "./judge_anthropic.ts";
 import { ModelRefused } from "./judge_anthropic.ts";
 import { type CapStore, DAILY_CAP, MONTHLY_CEILING_USD } from "./judge_caps.ts";
+import { resolveDue } from "./judge_due.ts";
 import type { JudgmentRow, JudgmentSink } from "./judge_log.ts";
 import type { ModelRow } from "./judge_models.ts";
 import { buildPrompt, promptHash } from "./judge_prompts.ts";
@@ -29,6 +30,14 @@ export interface JudgeRequest {
   kind: Kind;
   item: Record<string, unknown>;
   heuristics_seed: Record<string, unknown>;
+  /** What the caller's engine can take beyond the original vocabulary. Today one word matters:
+   * `"unsure"` on an event request (final review item 2, see `gateUnsure`). */
+  accepts?: readonly string[];
+  /** The student's timezone, an IANA name: the vault's own `config/ingest.yaml` `timezone`, sent
+   * by the device. Read only by the email `due` resolver, so a relative phrase resolves against
+   * the email's local date (`judge_due.ts`'s module doc); absent, the Date header's own offset is
+   * the only clock. Never part of the prompt. */
+  timezone?: string;
 }
 
 export interface JudgeReply {
@@ -90,6 +99,28 @@ function itemId(item: Record<string, unknown>): string {
 }
 
 export async function judge(
+  accountId: string,
+  req: JudgeRequest,
+  deps: PipelineDeps,
+): Promise<JudgeReply> {
+  return gateUnsure(req, await judgeUngated(accountId, req, deps));
+}
+
+/**
+ * Final review item 2: the capability gate for event-3's fourth verdict word. An engine from
+ * before stream J's T1 rejects `unsure` (its `VALID_VERDICTS` has three words), treats the reply as
+ * a failure and asks — and pays — again every slot. So a request that does not declare
+ * `accepts: ["unsure"]` receives exactly the pre-T1 shape instead: no verdict, `low confidence`,
+ * `below floor` — today's behaviour for that device, never worse. The `judgments` row keeps what
+ * the model actually said; only the reply to the old device is reshaped.
+ */
+function gateUnsure(req: JudgeRequest, reply: JudgeReply): JudgeReply {
+  if (req.kind !== "event" || reply.verdict?.verdict !== "unsure") return reply;
+  if (Array.isArray(req.accepts) && req.accepts.includes("unsure")) return reply;
+  return { ...reply, verdict: null, outcome: "low confidence", cause: "below floor" };
+}
+
+async function judgeUngated(
   accountId: string,
   req: JudgeRequest,
   deps: PipelineDeps,
@@ -212,7 +243,18 @@ export async function judge(
   // monthly budget is only as honest as this line.
   await deps.caps.recordTokens(accountId, req.kind, answer.inputTokens, answer.outputTokens);
 
-  const checked = validate(req.kind, answer.json, req.heuristics_seed);
+  // T4: the model answers `due` with the deadline phrase as written (or an absolute date only
+  // when the email itself stated one) — this is the one place between the model and `validate`
+  // where a phrase like "Friday" becomes a calendar date, resolved against the email's own Date
+  // line (`req.item.date`), on the student's clock (`req.timezone`), rather than guessed by the model. `resolveDue` itself is where a phrase
+  // that names a span rather than one day (e.g. "next week") is refused to `null` — see
+  // `judge_due.ts`. Task and event answers have no `due` field (`judge_prompts.ts`'s
+  // `TASK_SCHEMA`/`EVENT_SCHEMA`), so this only ever touches email.
+  const resolved = req.kind === "email"
+    ? { ...answer.json, due: resolveDue(typeof answer.json.due === "string" ? answer.json.due : null, String(req.item.date ?? ""), req.timezone) }
+    : answer.json;
+
+  const checked = validate(req.kind, resolved, req.heuristics_seed);
   if (!checked.ok || checked.verdict === undefined) {
     const cause = checked.cause ?? "incomplete";
     const id = await deps.log.write({

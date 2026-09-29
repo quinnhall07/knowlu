@@ -136,6 +136,33 @@ Deno.test("a note's path is checked, not trusted", async () => {
   assert(sql.includes("path !~ "), "and a path that can climb out is refused by its own check");
 });
 
+/** Commitment-model spec §10 phase 1s: the path check that is live once `commitments/` syncs. Read
+ * by name — it is not stamped in C3's day, so `migrations()` never sees it, and 000300's assertion
+ * above keeps pinning that file's own (superseded) six-folder check. */
+const COMMITMENTS_PATH_CHECK = "20260926000100_sync_note_path_check_commitments.sql";
+
+Deno.test("the live note-path check names the seven note folders, commitments/ among them", async () => {
+  const sql = await Deno.readTextFile(new URL(COMMITMENTS_PATH_CHECK, DIR));
+  assert(sql.includes("drop constraint sync_notes_path_check,"), "it replaces the one constraint, in place");
+  assert(sql.includes("add constraint sync_notes_path_check check ("), "and re-declares it under the same name");
+  assert(
+    sql.includes("path ~ '^(tasks|approvals|archive|courses|issues|info|commitments)/[A-Za-z0-9._ /-]+\\.md$'"),
+    "the seven folders in `ids::NOTE_FOLDERS` order, with 000400's unbounded class",
+  );
+  assert(
+    sql.includes("char_length(regexp_replace(path, '^[a-z]+/', '')) between 4 and 303"),
+    "and 000400's separate length check (Postgres caps a bound repetition at 255)",
+  );
+  assert(!sql.includes("{1,300}"), "no bound repetition over DUPMAX");
+  // It is the latest `*sync_note_path_check*.sql` — the one the engine's tripwire reads.
+  const names: string[] = [];
+  for await (const e of Deno.readDir(DIR)) {
+    if (e.isFile && e.name.includes("sync_note_path_check") && e.name.endsWith(".sql")) names.push(e.name);
+  }
+  names.sort();
+  assertEquals(names.at(-1), COMMITMENTS_PATH_CHECK);
+});
+
 Deno.test("retention never deletes a record a human wrote, and the SERVER is what decides that", async () => {
   // P3's answer (Quinn, 2026-09-17), and the half that is a correctness property rather than a
   // storage one: `journal::human_set` is what judge-once reads, and it reads records. A `sync_prune`

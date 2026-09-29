@@ -35,8 +35,11 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 ## Engine invariants
 
 - A vault is markdown + YAML frontmatter (`tasks/`, `approvals/`, `archive/`, `courses/`, `info/`,
-  `issues/`, `config/`), the single source of truth. `state/` is generated; `today.md` is rewritten
-  every run. The engine is **deterministic**: same input, same order.
+  `issues/`, `config/`, `commitments/`), the single source of truth. `state/` is generated;
+  `today.md` is rewritten every run. The engine is **deterministic**: same input, same order.
+  `commitments/` holds confirmed clock-time commitments (a class, a shift, a club), decline
+  markers and the one `planning-day` note (the day's wake-to-bed window) — a student's `propose`d
+  and undecided candidates never live here, only what they confirmed or declined.
 - **`rank` never calls a model** (Knowlu spec decision 11). Judgment is the separate `judge`
   command, which writes fields into notes before `rank` reads them; `src/judge.rs` is pure and the
   model process lives behind a trait in `src/runtime.rs`, so nothing under `cli.rs` can reach one.
@@ -48,11 +51,19 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
   `propose` it files a `kind: amend` approval instead. `judgment:` is a single-line flow mapping.
 - Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted. `proposed_at`
   is the day a proposal charges; `first_proposed_at` is set once and drives every age.
+- Commitment proposals and `state/calendar-series.json` never leave the device: a card of a kind in
+  `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; both are filed, and
+  no proposal card is filed on the vault's first day — the vault-local date of its earliest journal
+  record, `commitments::vault_day`) is local by kind. `sync` (P21) keeps those cards, every record
+  about one and the series file off the wire — only a **confirmed** note in `commitments/` or a
+  decline marker syncs — and `commitments.rs`'s tripwires (`sync_keeps_every_local_card_kind_local`,
+  `the_servers_note_path_rules_name_every_note_folder`) fail if that ever stops holding.
 - All JSON the crate writes goes through `ledger::dumps_value` (Python `json.dumps` separators), so
   a new line and an old line carrying the same data are the same bytes.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
   byte-identical, never renamed.
-- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`); `provenance::is_agent` is a
+- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`, completion detection as
+  `agent:knowlu.completion`, commitment cards as `agent:commitments`); `provenance::is_agent` is a
   `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
 
 ## Command and app contracts
@@ -61,8 +72,11 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 
 - `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no runtime, model,
   account, session, entitlement or network is a named outcome, never a failure. An empty coursework
-  parse is a failure, never an empty semester. `surface` and `coursework-discover` never write.
-  Judgment logs never enter the vault.
+  parse is a failure, never an empty semester. `surface` (`--window` included) and
+  `coursework-discover` never write. `commitments` without `--confirm` always exits 0 and writes only
+  the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
+  `write`, journal first, and exits 2 having written nothing on bad input. Judgment logs never enter
+  the vault.
 - **The engine gates itself:** `coursework`, `ingest`, `judge` and `sync` do not run past the 72-hour
   entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
   `surface` and `write` are never gated.

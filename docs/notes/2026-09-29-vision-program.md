@@ -20,7 +20,7 @@ What parity still needs, most noticeable first:
 | P1 | **Class schedule and capacity** — no class times and a fixed 08:00–18:00 day, so every capacity number is wrong for a new student | the commitment model (PRs #14, #16; another session's program) |
 | P2 | **Grades** (not in quinn-ops; the MVP adds it) | **M1** (`m1-grades`, spec `docs/specs/2026-09-29-grades-design.md`) |
 | P3 | **Gmail can't be connected in the app**, and production holds none of C2 | C4's settings row + HANDOFF §4's production-parity checklist |
-| P4 | **Events** — required events never become tasks; events can't be accepted or declined; feeds exist for Alabama only | event judging v2 (the direction note's piece 2) and the `unsure` card (PR #12) |
+| P4 | **Events** — required events never become tasks; events can't be accepted or declined; feeds exist for Alabama only | event judging v2 (the direction note's piece 2) and the `unsure` card (PR #12, merged) |
 | P5 | **Task body and profile editing** — the drawer body is read-only; interests and preferences need a text editor | **M2** (small; a set-body command through `write` and the drawer) |
 | P6 | Smaller: a producer for Good to know items, conflict flags, opportunity proposals expiring after 14 days, the dropped-event audit list | M2, or cut on Quinn's word |
 
@@ -32,7 +32,7 @@ card per event), phone access to `today.md`, the Obsidian layer.
 
 | Phase | Stream | Status |
 |---|---|---|
-| 1 | The commitment model | in flight (another session; PRs #14, #16) |
+| 1 | The commitment model | phases 1 and 2 merged (PRs #14, #16); phase 3 on `p3-registrar` |
 | 2 | The main page: domain strip, free time, all clear, today's schedule | spec after the commitment model lands (free time needs it) |
 | 3 | Syllabus upload → grade weights, GPA and band, exam prep | spec after M1 (it replaces M1's "points so far") |
 | 4 | Quick capture (hotkey, box, dictation) | spec |
