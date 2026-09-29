@@ -137,8 +137,13 @@ calls failed carries `"error": "<status or reason>"` and empty arrays; the engin
   gets `write::write` with **only the fields whose values differ**, so an unchanged gradebook writes
   no journal record and syncs nothing. Actor `agent:knowlu.grades` (an agent actor, so
   `provenance::is_agent` holds); via as given (`local-runner` from the slot, `dashboard` from Refresh).
-  A student edit to a grade note is respected by judge-once like any other field: the agent never
-  re-sets a field the journal shows the student set.
+  **Judge-once is explicit here, not inherited:** `write`'s own guard covers only the kinds
+  `provenance::judged_fields_for` names (`task`, `appr`), so `grades::apply` drops, before every
+  write, each field for which `Journal::human_set(id, field)` answers — the agent never re-sets a
+  field the student set. (Known, inherited: `human_set` and `console_ctx()` still match the literal
+  actor `"quinn"`, a rule-1 bug that predates this stream; the fix changes both together and is not
+  this stream's.) `write::create` keeps a caller-chosen `id:` only when `ids::is_id` accepts it, so
+  the `grade_` id pattern (Task 1) must land before any grade note is created.
 - **`state/grades.json`** (generated, device-local): `fetched_at`, the host, and per course the counts
   matched / skipped / failed. It is the strip's "updated 2 h ago". It is rewritten on every run and
   never synced.

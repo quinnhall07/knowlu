@@ -84,14 +84,21 @@ count is named), `engine/tests/sync_contract.rs`, `cloud/supabase/functions/_sha
    - **a second identical run writes no journal record and changes no byte**;
    - `bundle-changed.json` (a score posted, a title changed, a column gone) writes only those fields,
      and the gone column gets `status: removed`;
-   - a student-set field (journal shows a non-agent actor) is never re-set;
+   - every created note's `id:` equals `ids::derived_id("grade", <its path>)` (a silent re-mint by
+     `write::create` fails this);
+   - a student-set field — written with a `console_ctx()`-style actor, which is what
+     `Journal::human_set` recognises — is never re-set: `apply` filters by `human_set` before writing;
+   - the gate test arrays in `engine/tests/entitlement_gate.rs` (the two lists of gated commands)
+     gain `grades` (the spawn test passes `--input`), and `main.rs`'s "gated four" comment and
+     `entitle.rs`'s module doc name five;
    - an unmatched course and a course with `"error"` are named in stdout and change nothing;
    - `state/grades.json` holds `fetched_at`, the host and the per-course counts, through
      `ledger::dumps_value`;
    - a missing or unparseable `--input` exits 1; every other outcome exits 0;
    - past the entitlement grace the command prints `grades (skipped: …)` at exit 0 and writes nothing
      (`entitlement_gate.rs`'s pattern).
-2. Code: `grades::apply(vault, &bundle, &ctx, &mut journal) -> Report` using `write::create` for new
+2. Code (Task 1 finding: `pystr::write_text` makes no parent directories, so `apply` creates
+   `grades/` itself before the first create): `grades::apply(vault, &bundle, &ctx, &mut journal) -> Report` using `write::create` for new
    notes and `write::write` with only the changed fields; `Command::Grades { vault, input, via,
    run_id }` in `main.rs`, added to `gated_vault` and `name_of`; the run-log line through
    `cli::append_run_log`.
@@ -131,7 +138,8 @@ count is named), `engine/tests/sync_contract.rs`, `cloud/supabase/functions/_sha
 2. Code: the pure functions; then the window half (`open_visible`, `refresh_hidden`, the 45-second
    settle, the cookie handover exactly as `lms_link::capture_courses`, one `ureq` agent with a
    30-second timeout); the five commands (`grades_status`, `grades_connect`, `grades_refresh`,
-   `grades_forget`, `grades_set_host`). `grades_refresh` runs the capture and then the engine's
+   `grades_forget`, `grades_set_host`), each `#[tauri::command(async)]` — a synchronous command that
+   builds and waits on a window blocks the main thread on Windows. `grades_refresh` runs the capture and then the engine's
    `grades` step as a child process with `--via dashboard`, holding no vault lock across it.
 3. **Accept:** workspace green; `docs/reference/app.md`'s command counts **recounted by script** over
    both `generate_handler!` lists and corrected in the same commit.
@@ -175,6 +183,18 @@ count is named), `engine/tests/sync_contract.rs`, `cloud/supabase/functions/_sha
 2. Code: the two sentences, the version to `2026-09-29`, HANDOFF's stream table and §4 row (the
    lawyer-packet delta; C4's re-consent screen still owed before a second account).
 3. **Accept:** workspace green.
+
+**Task 1 findings carried here.** `app/src/scaffold.rs::build_into` lists the folders a new vault is
+born with; Task 5 adds `grades` there (with its test). `app/src/report.rs::vault_shape` counts
+folders for the issue report and its payload may be a server contract, so it is **left alone** in this
+stream and named in the PR. **Rollout:** the `20260929000100` migration must be applied before any
+release that writes `grades/` ships — the server refuses a whole push if one path is refused.
+**Merging with `p1-commitments`:** besides text conflicts in `ids.rs`, `backup.rs`, `sync_rows.ts`,
+`sync_rows_test.ts` and the agreement test, two of p1's tests pin facts this branch changes — its
+`migrations_sync_test.ts` expects its own `20260926000100` to be the newest path check, and
+`backup_folders_has_ten_entries_with_commitments_before_state` expects ten entries. The second
+merger updates both: the newest check is `20260929000100`, and the backup array has eleven entries
+(`…info, commitments, grades, state, config, profile`).
 
 ## Task 9 — whole-branch review and the PR
 
