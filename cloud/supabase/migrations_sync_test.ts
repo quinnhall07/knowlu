@@ -176,32 +176,100 @@ Deno.test("the account purge names every table C3′ leaves, and no table it dro
  * `commitments/`, which the commitment model's branch adds on its own). */
 const GRADES_PATH_CHECK = "20260929000100_sync_note_path_check_grades.sql";
 
-/** The LIVE note-path check: every migration in this lineage drops and re-adds
- * `sync_notes_path_check`, and migrations apply in name order, so the lexically latest
- * `*sync_note_path_check*.sql` is the one Postgres enforces — the same file the engine's
- * `is_note_path_and_the_servers_regex_agree` reads. Found by that name across every day, because a
- * later stream widens it; nothing outside the lineage is read (R-X-8). */
-async function latestPathCheck(): Promise<{ name: string; sql: string }> {
-  const names: string[] = [];
-  for await (const e of Deno.readDir(DIR)) {
-    if (e.isFile && e.name.includes("sync_note_path_check") && e.name.endsWith(".sql")) names.push(e.name);
-  }
-  names.sort();
-  const name = names.at(-1);
-  assert(name, "expected at least one *sync_note_path_check*.sql");
-  return { name: name!, sql: await Deno.readTextFile(new URL(name!, DIR)) };
-}
-
-Deno.test("the live note-path check is the grades migration, and its folder group is NOTE_PATH_RE's exactly", async () => {
-  const { name, sql } = await latestPathCheck();
-  assertEquals(name, GRADES_PATH_CHECK);
-  const code = sql
+/** `sql` with every `--` comment removed, so a header that quotes an older check is never read as code. */
+function sqlCode(sql: string): string {
+  return sql
     .split("\n")
     .map((line) => {
       const at = line.indexOf("--");
       return at === -1 ? line : line.slice(0, at);
     })
     .join("\n");
+}
+
+/** Every `*.sql` in the directory, whatever its day. Only the live path check reads this: a migration
+ * that re-adds `sync_notes_path_check` is in this lineage whatever it is called, so it cannot be
+ * left out by a day or name filter. C3′'s own tests above keep to `migrations()` (R-X-8). */
+async function allMigrations(): Promise<{ name: string; sql: string }[]> {
+  const out: { name: string; sql: string }[] = [];
+  for await (const e of Deno.readDir(DIR)) {
+    if (e.isFile && e.name.endsWith(".sql")) out.push({ name: e.name, sql: await Deno.readTextFile(new URL(e.name, DIR)) });
+  }
+  return out;
+}
+
+/** The LIVE note-path check: of `files`, the latest in name order whose code (comments stripped)
+ * re-adds `sync_notes_path_check`. Migrations apply in name order, so the last one to re-add the
+ * constraint is the one Postgres enforces, whatever the file is called (W1 M1T1-important). It is
+ * the same rule as the engine's `live_path_check` in `is_note_path_and_the_servers_regex_agree`. */
+function livePathCheck(files: { name: string; sql: string }[]): { name: string; sql: string } {
+  // `\b` keeps the climb-out siblings (`sync_notes_path_check1`, `…2`) out.
+  const adds = /\badd\s+constraint\s+sync_notes_path_check\b/i;
+  let live: { name: string; sql: string } | undefined;
+  for (const m of files) {
+    if (adds.test(sqlCode(m.sql)) && (live === undefined || m.name > live.name)) live = m;
+  }
+  assert(live, "expected at least one migration that adds sync_notes_path_check");
+  return live!;
+}
+
+async function latestPathCheck(): Promise<{ name: string; sql: string }> {
+  return livePathCheck(await allMigrations());
+}
+
+/** Later migrations held in memory only; no migration file is ever written. Two-desktop's planned
+ * settings migration, re-stamped after M1's as D10 says and still carrying its planned group:
+ * it redefines `sync_notes_path_check` under a name that says nothing about paths, and it lacks
+ * `grades`. */
+const LATER_SETTINGS = {
+  name: "20991231000100_shared_settings.sql",
+  sql: String.raw`alter table public.sync_notes
+  drop constraint sync_notes_path_check,
+  add constraint sync_notes_path_check check (
+    (
+      path ~ '^(tasks|approvals|archive|courses|issues|info|commitments)/[A-Za-z0-9._ /-]+\.md$'
+      and char_length(regexp_replace(path, '^[a-z]+/', '')) between 4 and 303
+    )
+    or path in ('config/campus.yaml', 'config/events.yaml')
+  );
+`,
+};
+/** A later migration that re-adds a climb-out sibling (`sync_notes_path_check1`), not the folder check. */
+const LATER_SIBLING = {
+  name: "20991231000200_sync_notes_climb_out.sql",
+  sql: String.raw`alter table public.sync_notes
+  drop constraint sync_notes_path_check1,
+  add constraint sync_notes_path_check1 check (path !~ '(^|/)\.\.(/|$)');
+`,
+};
+/** A later migration whose NAME matches the old filter, but which names the constraint only in a comment. */
+const LATER_COMMENT_ONLY = {
+  name: "20991231000300_sync_note_path_check_note.sql",
+  sql: String.raw`-- Nothing here touches the folder check; an example only:
+-- alter table public.sync_notes add constraint sync_notes_path_check check (path ~ '^(tasks)/x\.md$');
+select 1;
+`,
+};
+
+Deno.test("the live note-path check is chosen by what a migration declares, not by its file name", async () => {
+  // W1 M1T1-important: the exact-group pin below guards the union rule (D10) only if it reads the
+  // migration Postgres enforces. Picking by file name lets a later migration that redefines
+  // `sync_notes_path_check` under another name (two-desktop's `…_shared_settings.sql`) go unread
+  // while it narrows the live check.
+  const live = livePathCheck([...(await allMigrations()), LATER_SETTINGS, LATER_SIBLING, LATER_COMMENT_ONLY]);
+  assertEquals(live.name, LATER_SETTINGS.name, "the last migration that adds sync_notes_path_check is the live one");
+  const folderChecks = regexLiteralsIn(live.sql).filter((l) => l.startsWith("^("));
+  assertEquals(folderChecks.length, 1, `exactly one folder-group regex in ${live.name}`);
+  const group = folderChecks[0].slice(2, folderChecks[0].indexOf(")"));
+  const serverGroup = NOTE_PATH_RE.source.slice(2, NOTE_PATH_RE.source.indexOf(")"));
+  assert(group !== serverGroup, "and the guard refuses it: its group is not NOTE_PATH_RE's");
+  assert(!group.split("|").includes("grades"), `the narrowed group lacks grades: ${group}`);
+});
+
+Deno.test("the live note-path check is the grades migration, and its folder group is NOTE_PATH_RE's exactly", async () => {
+  const { name, sql } = await latestPathCheck();
+  assertEquals(name, GRADES_PATH_CHECK);
+  const code = sqlCode(sql);
   assert(code.includes("drop constraint sync_notes_path_check,"), "it replaces the one constraint, in place");
   assert(code.includes("add constraint sync_notes_path_check check ("), "and re-declares it under the same name");
 
