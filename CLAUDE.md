@@ -160,6 +160,13 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
 
+## Model and effort
+
+Default session is Opus 5.5 at `medium`; contract-critical engine work (write, journal, yamlemit, sync,
+entitle, frozen fixtures) goes to the `contract-engineer` subagent at `xhigh`; mechanical edits to
+`mechanical`; read-only search to `explorer`; pre-push review to `reviewer`. Config in `.claude/`,
+rationale and open checks in `docs/notes/2026-09-29-model-and-effort-hierarchy.md`.
+
 ## Toolchain and conventions
 
 - `cargo build --workspace` and `cargo test --workspace` from the root. **0 warnings is part of
