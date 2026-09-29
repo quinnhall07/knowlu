@@ -248,6 +248,29 @@ impl JsonlLedger {
         found.sort();
         found.into_iter().map(|(_, p)| p).collect()
     }
+
+    /// The UTC date named by the earliest day file, or `None` when there is none. A file whose
+    /// stem is not a date is skipped. `commitments::vault_day`'s fallback when no `ts` parses.
+    pub fn first_day(&self) -> Option<jiff::civil::Date> {
+        self.day_files()
+            .iter()
+            .filter_map(|p| p.file_stem()?.to_str()?.parse::<jiff::civil::Date>().ok())
+            .min()
+    }
+
+    /// The smallest `ts` among the records of the earliest day file, or `None` when there is no
+    /// file or no record in it carries a `ts`. A line that is not JSON is skipped. The earliest
+    /// record of the whole ledger is in that file, because a file is named by its records' UTC
+    /// date. `commitments::vault_day` counts the vault's days from this record's local date
+    /// (phase-2 spec D2 as amended). It lives here because only this module names ledger files.
+    pub fn first_ts(&self) -> Option<String> {
+        let first = self.day_files().into_iter().next()?;
+        let text = fs::read_to_string(first).ok()?;
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            .filter_map(|v| v.get("ts").and_then(Value::as_str).map(str::to_string))
+            .min()
+    }
 }
 
 fn file_name(path: &Path) -> String {
@@ -826,5 +849,33 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "these modules name a ledger file directly: {offenders:?}");
+    }
+
+    #[test]
+    fn first_day_is_the_earliest_day_file_by_name() {
+        let tmp = TempDir::new();
+        let root = tmp.join("journal");
+        assert_eq!(JsonlLedger::new(&root).first_day(), None, "no folder is no day");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("2026-09-25.jsonl"), "").unwrap();
+        fs::write(root.join("2026-09-24.jsonl"), "").unwrap();
+        fs::write(root.join("notes.jsonl"), "").unwrap();
+        fs::write(root.join("2026-09-01.txt"), "").unwrap();
+        assert_eq!(JsonlLedger::new(&root).first_day(), Some(jiff::civil::date(2026, 9, 24)));
+    }
+
+    #[test]
+    fn first_ts_is_the_smallest_ts_in_the_earliest_day_file() {
+        let tmp = TempDir::new();
+        let root = tmp.join("journal");
+        assert_eq!(JsonlLedger::new(&root).first_ts(), None);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("2026-09-23.jsonl"),
+            "{\"ts\": \"2026-09-23T23:10:00.000Z\"}\n{\"ts\": \"2026-09-23T22:30:00.000Z\"}\nnot json\n",
+        )
+        .unwrap();
+        fs::write(root.join("2026-09-24.jsonl"), "{\"ts\": \"2026-09-24T01:00:00.000Z\"}\n").unwrap();
+        assert_eq!(JsonlLedger::new(&root).first_ts().as_deref(), Some("2026-09-23T22:30:00.000Z"));
     }
 }

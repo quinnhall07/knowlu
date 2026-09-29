@@ -399,7 +399,10 @@ fn the_good_to_know_and_issues_views_are_real_and_every_observed_row_names_its_k
     assert!(js.contains("if (e.target.closest(\".row.iss .acts\")) { e.stopPropagation(); }"), "the Issues .acts must not reach the document handler");
     // A7: showRefusal(el, message, id, field) never reads `el`; the id is what prefixes the toast
     // with the note's title and re-finds the row after applyEnvelope's repaint.
-    assert_eq!(js.matches("showRefusal(null, m, id)").count(), 2, "resolveIssue and closeInfoItem both pass the id");
+    // Final review M2: counted by pattern, so renaming a callback's message parameter (Q10's
+    // `msg`) cannot hide a caller from the pin.
+    let refusals = regex::Regex::new(r"showRefusal\(null, \w+, id\)").unwrap();
+    assert_eq!(refusals.find_iter(&js).count(), 4, "resolveIssue, closeInfoItem, saveCommitment and answerAsk (phase 2) all pass the id");
     assert!(!js.contains("showRefusal(btn.closest(\".row\")"), "a detached row element says nothing");
 }
 
@@ -1620,6 +1623,93 @@ fn the_privacy_version_constant_is_the_published_pages_date() {
     assert!(account_entry.contains("the Google account id that identifies it"), "{account_entry}");
     assert!(account_entry.contains("your name") && account_entry.contains("a link to your profile picture"),
         "the Your account entry must agree with the Google paragraph: {account_entry}");
+}
+
+/// Phase 2 of the commitment model (spec D6, D7, D8, §4): the Schedule view headed "Your week",
+/// the window editor with its 400 ms preview, the today view's moved line, and `schedule` never
+/// reaching the read model as a view name.
+#[test]
+fn the_schedule_view_the_window_editor_and_the_moved_line_are_there() {
+    let html = read("index.html");
+    assert!(html.contains("<a href=\"#schedule\" data-view=\"schedule\"><span class=\"dot\"></span>Schedule<span class=\"ct\"></span></a>"), "D6: a Schedule link");
+    assert!(html.contains("<section id=\"main-schedule\" hidden>") && html.contains("<h2>Your week</h2>"), "D6: headed Your week");
+    for id in ["sched-list", "sched-oh", "sched-window", "sched-save", "sched-say", "sched-moved", "sched-items", "moved"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "missing #{id}");
+    }
+    let js = read("console.js");
+    assert!(js.contains("schedule: renderScheduleView"), "in VIEW_RENDERERS");
+    for f in ["stateView", "renderMoved", "renderScheduleView", "windowEditorHtml", "windowSequence", "bindWindowEditor", "runPreview", "confirmWeek", "bindScheduleView"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    assert!(js.contains("var PREVIEW_MS = 400;") && js.contains("setTimeout(runPreview, PREVIEW_MS)"), "§4: the preview is debounced 400 ms");
+    assert!(js.contains("invoke(\"preview_window\", { window: seq })"));
+    assert!(js.contains("\"No change to today's plan\""));
+    assert!(js.contains("items.slice(0, 5)"), "§4: the first five items of the previewed day");
+    assert!(js.contains("el.textContent = m ? m.text : \"\";"), "D7: the today view prints moved.text");
+    assert!(js.contains("data-same-as-monday"), "§4: the same-as-Monday shortcut");
+    assert!(js.contains("invoke(\"commitments_confirm\", { view: stateView(), confirm: payload })"));
+    // Q10-a: `schedule` never reaches `surface::View::parse`. ui_event is the one call that names
+    // the page's own view.
+    assert_eq!(js.matches("view: current.view").count(), 1, "only ui_event sends current.view");
+    assert!(js.contains("{ action: action, view: current.view,"), "…and it is ui_event");
+    assert!(js.contains("runs: 1, schedule: 1 }"), "route() accepts schedule");
+    assert!(!js.contains("data-remove"), "D8: no remove control in phase 2");
+    // Q10 review I1: no click inside a Schedule row reaches the document handler, which would
+    // open the note drawer (Delete…, free field edits) on a commitment — D8 again.
+    let bind = js.split("function bindScheduleView()").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("if (e.target.closest(\".row.sched\")) { e.stopPropagation(); }"), "the whole row stays in this view");
+    assert!(!bind.contains(".row.sched .acts"), "not only its controls");
+    // Q10 review M3: the Schedule view never takes the reorder hold (must-do is not on screen).
+    assert!(js.contains("var reordered = current.view !== \"schedule\" && "), "schedule is never held");
+    let css = read("console.css");
+    assert!(css.contains(".row.sched { grid-template-columns: minmax(0,1fr) auto; }"), "a Schedule row restates its tracks");
+    assert!(css.contains(".moved[hidden] { display: none; }"));
+}
+
+/// Phase 2 of the commitment model (spec D1, D3, §2, §5): the confirm screen over the first-run
+/// view — no typed text anywhere in it — and the commitment-ask card's form in the Decisions view,
+/// with the deck sending that card there.
+#[test]
+fn the_confirm_screen_and_the_ask_form_are_there() {
+    let html = read("index.html");
+    let start = html.find("<section class=\"week-setup\" id=\"week-setup\" hidden").expect("#week-setup");
+    let screen = &html[start..start + html[start..].find("</section>").unwrap()];
+    assert!(html.find("id=\"week-setup\"").unwrap() > html.find("<div class=\"app\">").unwrap() && html.find("id=\"week-setup\"").unwrap() < html.find("id=\"picker\"").unwrap(), "outside .app, so the first-run view does not hide it");
+    for id in ["ws-status", "ws-classes", "ws-class-rows", "ws-week", "ws-week-rows", "ws-oh", "ws-oh-rows", "ws-window", "ws-later", "ws-finish"] {
+        assert!(screen.contains(&format!("id=\"{id}\"")), "missing #{id}");
+    }
+    assert!(screen.contains("When do your classes meet?") && screen.contains("Reading your calendar"));
+    assert!(screen.contains("Rows you leave blank will come back as questions over the next few days."));
+    assert!(!screen.contains("type=\"text\"") && !screen.contains("<textarea"), "constraint 8: nothing typed");
+    let js = read("console.js");
+    for f in ["checkWeekSetup", "openWeekSetup", "setupRow", "finishWeekSetup", "closeWeekSetup", "askRow", "askTimeRow", "answerAsk"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    let row = js.split("function setupRow(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(!row.contains("type=\"text\""), "a setup row takes no typing");
+    assert!(row.contains("{ class: 1, lab: 1, work: 1 }[p.kind] ? \"mine\" : \"\""), "§2: class, lab and work start at Mine");
+    assert!(js.contains("invoke(\"commitment_proposals\", {})") && js.contains("invoke(\"your_week\", {})"));
+    assert!(js.contains("weekSetup.dismissed = true"), "D3: Not now hides it for the session");
+    assert!(js.contains("no class times found; Knowlu will ask this week"));
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("if (c.kind === \"commitment-ask\") { return askRow(c, tomorrow); }"), "§5: the per-kind branch");
+    let ask = js.split("function askRow(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    for piece in ["data-ask-save", "Save times", "No set times", "data-verdict=\"rejected\"", "data-verdict=\"snoozed\"", "data-ask-more", "add another time"] {
+        assert!(ask.contains(piece), "the ask form lacks {piece}");
+    }
+    assert!(js.contains("function askTimeRow()") && js.contains("data-ask-day"));
+    assert!(js.contains("invoke(\"answer_card\", { view: stateView(), id: id, meets: meets })"));
+    assert!(js.contains("data-answer-in"), "Q11-b: the deck sends an ask to Decisions");
+    assert!(read("console.css").contains(".week-setup[hidden] { display: none; }"));
+    // Final review I1: Finish waits for commitment_proposals to settle, and picker edits made
+    // during the wait survive the window proposal's arrival.
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("EL(\"ws-finish\").disabled = true;") && open.matches("EL(\"ws-finish\").disabled = false;").count() == 1, "Finish is held until the read settles");
+    assert!(open.contains("if (win && !weekSetup.dirty)"), "an edit made while waiting is kept");
+    assert!(js.contains("weekSetup.dirty = true;"), "the editor marks the screen dirty");
+    // Final review M4: skipped rows are said, not swallowed.
+    let fin = js.split("function finishWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(fin.contains("env.result.warnings") && fin.contains("EL(\"delta\").textContent"), "Finish shows the skipped rows");
 }
 
 /// C3' Task 9, Step 5: Finish now restores the account's own copy of the vault (H11a) before it ever

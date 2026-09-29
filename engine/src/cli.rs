@@ -796,7 +796,8 @@ fn normalise_stash(
 /// `process_approvals`, so this run's settlements are in it); `withdraw_stale` — skipped when the
 /// series file could not be read, as is the **ended** rule, because a bad read is never "gone";
 /// `detect_changes`; `successor_keys`; `proposals`; `emit_checks`, with the budget recounted here
-/// after the events pass took its share. Pure of clocks, networks and models: the stash was filled
+/// after the events pass took its share; `emit_asks` (skipped on a bad series read), with what the
+/// check cards left. Pure of clocks, networks and models: the stash was filled
 /// by the calendar closure and everything here is deterministic. Every warning is pushed onto
 /// `warnings`.
 fn commitment_passes(
@@ -841,15 +842,33 @@ fn commitment_passes(
     let held = cm::successor_keys(vault);
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, true);
+    // Phase-2 spec §5 (Plan ruling Q7-c): an ask whose course now has a class proposal, a class
+    // note or a marker is withdrawn before either emitter runs.
+    let asks_out = crate::approvals::withdraw_asks(vault, &proposals, &set, ctx, journal);
+    withdrawn_pending += asks_out.pending;
+    warnings.extend(asks_out.warnings);
+    // Phase-2 spec D2 (Plan ruling Q1-b): on the vault's first day the confirm screen asks, so no
+    // proposal or window card is filed. Change cards cannot exist yet, and pass through unchanged.
+    let asked: &[cm::Proposal] = if cm::vault_day(vault, today) == 1 { &[] } else { &proposals };
     let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
-    let (_, filed, card_warnings) = cm::emit_checks(vault, &proposals, &changes, today, budget, ctx, journal);
+    let (_, filed, card_warnings) = cm::emit_checks(vault, asked, &changes, today, budget, ctx, journal);
     warnings.extend(card_warnings);
-    CommitmentPasses { filed: filed as i64, withdrawn_pending, set }
+    // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
+    // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make
+    // every course look uncovered.
+    let mut asks = 0;
+    if !read_failed {
+        let ask_budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
+        let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, today, ask_budget, ctx, journal);
+        asks = n;
+        warnings.extend(ask_warnings);
+    }
+    CommitmentPasses { filed: (filed + asks) as i64, withdrawn_pending, set }
 }
 
 /// What [`commitment_passes`] hands back to `run_with`.
 struct CommitmentPasses {
-    /// Cards filed this run (added to the pending line).
+    /// Cards filed this run, checks and asks (added to the pending line).
     filed: i64,
     /// Cards withdrawn this run that `process_approvals` had counted pending (taken back out).
     withdrawn_pending: i64,
@@ -866,6 +885,8 @@ struct CommitmentPasses {
 /// them raised. Never a note, a card or a journal record.
 pub struct CommitmentsReport {
     pub proposals: Vec<crate::commitments::Proposal>,
+    /// Phase-2 spec §2: the courses with neither a class proposal nor a confirmed class note.
+    pub uncovered: Vec<crate::commitments::UncoveredCourse>,
     pub warnings: Vec<String>,
 }
 
@@ -879,25 +900,9 @@ fn hm(time: Time) -> String {
 /// would put in a card's `commitment:` mapping, plus the `source_uid` the app answers back with
 /// (§5.1: "the app passes keys, levels and the window ... re-derives each proposal from the
 /// series file by its `source_uid`"). Not a byte contract — no frozen fixture pins this shape.
+/// Delegates to `commitments::proposal_value` (phase 2 adds `when`).
 pub fn proposal_json(p: &crate::commitments::Proposal) -> serde_json::Value {
-    serde_json::json!({
-        "kind": p.kind,
-        "level": p.level.as_str(),
-        "title": p.title,
-        "course": p.course,
-        "meets": p.meets.iter().map(|m| serde_json::json!({
-            "days": m.days,
-            "start": hm(m.start),
-            "end": hm(m.end),
-        })).collect::<Vec<_>>(),
-        "where": p.where_,
-        "from": p.from.map(|d| d.to_string()),
-        "until": p.until.map(|d| d.to_string()),
-        "source_uid": p.source_uid,
-        // M3 (fix round 1): explicit, so the phase-2 screen can group the window row under "Your
-        // day" without knowing `commitments::WINDOW_PREFIX`.
-        "window": p.is_window(),
-    })
+    crate::commitments::proposal_value(p)
 }
 
 /// One proposal, one line, for a human running `commitments` without `--json`.
@@ -1019,7 +1024,26 @@ pub fn commitments_report_with(
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
-    CommitmentsReport { proposals, warnings }
+    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
+    CommitmentsReport { proposals, uncovered, warnings }
+}
+
+/// Phase-2 spec §3: `commitments --confirm`. Parses the input, pins `today` (the vault's zone
+/// when none is given) and runs `commitments::confirm` under `ctx`. It fetches nothing: no
+/// calendar fetcher is built and `config/cloud.yaml` is not read. `Err` is the exit-2 message.
+pub fn commitments_confirm(
+    vault: &Path,
+    today_iso: Option<&str>,
+    input: &str,
+    ctx: &WriteContext,
+) -> Result<crate::commitments::ConfirmReport, String> {
+    let input = crate::commitments::parse_confirm(input)?;
+    let today = match today_iso {
+        Some(iso) => Date::strptime("%Y-%m-%d", iso).map_err(|_| format!("bad --today {iso:?}"))?,
+        None => Timestamp::now().to_zoned(vault_zone(vault)).date(),
+    };
+    let mut journal = Journal::new(vault);
+    crate::commitments::confirm(vault, &input, today, ctx, &mut journal)
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -2584,7 +2608,26 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         write("tasks/essay.md", "---\ntitle: Invented essay\ndue: 2026-10-30\neffort_hours: 2\nimportance: 3\n---\n");
         write("courses/cs-100.md", "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n");
         seed_migrated(&vault);
+        // Q1-c: P16_MONDAY is the vault's day 2, so checks are filed and asks (day 3+) are not.
+        seed_journal_day(&vault, "2026-09-06");
         vault
+    }
+
+    /// One journal record stamped noon UTC on `day` (Q1-c): the vault's first day for
+    /// `commitments::vault_day`. A pinned-`ts` `create` record, the shape `commitment_note` already
+    /// appends; `verify_tail` only replays `set` records, so it is inert.
+    fn seed_journal_day(vault: &Path, day: &str) {
+        let mut spec = crate::journal::NewRecord::new("create", "archive/_migrated.md", "system:migration", "cli");
+        spec.ts = Some(format!("{day}T12:00:00.000Z"));
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
+    }
+
+    /// The student already said CS 100 has no set meeting times (a `card:cs-100` marker), so a
+    /// P16 test about check cards sees no ask (phase-2 spec §5).
+    fn decline_cs100_ask(vault: &Path) {
+        let ctx = WriteContext::new("quinn", "dashboard");
+        crate::commitments::create_marker(vault, &crate::commitments::ask_key("cs-100"), &ctx, &mut Journal::new(vault)).unwrap();
     }
 
     fn p16_day(offset: i64) -> Date {
@@ -2654,7 +2697,7 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let mut spec = crate::journal::NewRecord::new("create", &rel_path, crate::commitments::CARD_ACTOR, "cli");
         spec.id = Some(&id);
         spec.new = whole;
-        spec.ts = Some("2026-09-01T00:00:00.000Z".into());
+        spec.ts = Some("2026-09-06T12:00:00.000Z".into());
         let mut rec = crate::journal::make_record(spec).unwrap();
         Journal::new(vault).append(&mut rec).unwrap();
     }
@@ -2709,9 +2752,40 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Phase-2 D2: on the vault's first day `rank` files no proposal card, because the confirm
+    /// screen is asking at the same moment. From day 2 it files them as before.
+    #[test]
+    fn no_commitment_check_is_filed_on_the_vaults_first_day() {
+        let vault = p16_vault("p2day1");
+        // `p16_vault`'s journal starts 2026-09-06 (Q1-c): that date is day 1.
+        rank_p16(&vault, Date::constant(2026, 9, 6), vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(checks(&vault, "approvals").is_empty(), "{:?}", checks(&vault, "approvals"));
+        assert!(vault.join("state").join("calendar-series.json").is_file(), "the series file still refreshes");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert_eq!(checks(&vault, "approvals").len(), 1, "day 2 files the class card");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Phase-2 spec §5: from the vault's day 3, a course with no class gets one ask card, counted
+    /// into the pending line like a check card.
+    #[test]
+    fn rank_files_an_ask_for_a_course_with_no_class_from_day_three() {
+        let vault = p16_vault("p2ask");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(md_names(&vault.join("approvals"), "commitment-ask-").is_empty(), "P16_MONDAY is day 2");
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert_eq!(md_names(&vault.join("approvals"), "commitment-ask-"), ["commitment-ask-when-does-cs-100-intro-to-computing-meet.md"]);
+        assert!(page(&vault).contains("**Approvals: 1 pending**"), "{}", page(&vault));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn commitment_checks_take_only_what_the_events_pass_left() {
         let vault = p16_vault("p16budget");
+        // This test ranks on 2026-08-26, before `p16_vault`'s Q1-c seed (2026-09-06): without an
+        // earlier record the vault's day-1 gate (Q1-b) would eat the class card this test is
+        // about. Antedate the journal so 2026-08-26 is day 2.
+        seed_journal_day(&vault, "2026-08-25");
         pystr::write_text(
             &vault.join("config").join("events.yaml"),
             "sources:\n  - name: campus\n    type: ics\n    url: unreachable://x\n    enabled: true\n",
@@ -2768,6 +2842,7 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
     #[test]
     fn rank_withdraws_a_card_whose_series_left_the_file() {
         let vault = p16_vault("p16withdraw");
+        decline_cs100_ask(&vault);
         rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
         let filed = checks(&vault, "approvals");
         assert_eq!(filed.len(), 1);
@@ -3287,6 +3362,23 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
              for one: {:?}",
             report.proposals
         );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Phase-2 spec §2: the command names each course with no class row. `p16_vault` has
+    /// `courses/cs-100.md`: with no feed it is uncovered; once CS 100's series is proposed, it is not.
+    #[test]
+    fn commitments_command_reports_courses_with_no_class_row() {
+        let vault = p16_vault("p2uncovered");
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert_eq!(report.uncovered.len(), 1, "{:?}", report.uncovered);
+        assert_eq!(report.uncovered[0].slug, "cs-100");
+        assert_eq!(report.uncovered[0].title, "CS 100 Intro to Computing");
+        let stash: SeriesStash = RefCell::new([("cloud:google".to_string(), google_entry(vec![cs100_item()]))].into_iter().collect());
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+        assert!(report.uncovered.is_empty(), "{:?}", report.uncovered);
         let _ = std::fs::remove_dir_all(&vault);
     }
 

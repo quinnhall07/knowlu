@@ -841,6 +841,86 @@ impl Codes {
     }
 }
 
+/// A course with neither a class proposal nor a confirmed class note (phase-2 spec §2): the
+/// confirm screen lists it, and from the vault's day 3 a `commitment-ask` card asks when it meets.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UncoveredCourse {
+    pub slug: String,
+    pub title: String,
+}
+
+/// Every active course note (`status:` absent or `active`, Plan ruling Q2-c), as `(slug, title)`
+/// in slug order. The slug is read as `code_table` reads it: the `slug:` field, else the file
+/// stem. The title is the `title:` field, else `name:`, else the slug.
+fn active_courses(vault: &Path) -> Vec<(String, String)> {
+    let dir = vault.join("courses");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+        if !path.is_file() || !name.ends_with(".md") {
+            continue;
+        }
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        let status = field_text(&meta, "status").unwrap_or_default();
+        if !status.trim().is_empty() && status.trim() != "active" {
+            continue;
+        }
+        let stem = name.trim_end_matches(".md").to_string();
+        let slug = field_text(&meta, "slug").filter(|s| !s.is_empty()).unwrap_or(stem);
+        let title = field_text(&meta, "title")
+            .or_else(|| field_text(&meta, "name"))
+            .map(|t| single_line(&t).trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| slug.clone());
+        out.push((slug, title));
+    }
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// Phase-2 spec §2 and parent §5.3: every active course (`active_courses`, slug order) that has no
+/// class proposal in `proposals` and no confirmed `class` note. Courses are compared the way the
+/// §3.5 signature compares them, by slug or code (`course_key`). A class note with no `course:`
+/// covers the course whose code leads its title (Plan ruling Q2-c). A lab or office hours covers
+/// nothing.
+pub fn uncovered_courses(vault: &Path, set: &Commitments, proposals: &[Proposal], codes: &Codes) -> Vec<UncoveredCourse> {
+    let mut covered = covered_course_keys(set, codes);
+    for p in proposals.iter().filter(|p| p.kind == "class") {
+        if let Some(course) = p.course.as_deref() {
+            covered.insert(course_key(course, codes));
+        }
+    }
+    active_courses(vault)
+        .into_iter()
+        .filter(|(slug, _)| !covered.contains(&course_key(slug, codes)))
+        .map(|(slug, title)| UncoveredCourse { slug, title })
+        .collect()
+}
+
+/// Every course a confirmed `class` note covers, as `course_key`s: its `course:`, or, with none,
+/// the code that leads its title (Plan ruling Q2-c). The one rule `uncovered_courses` and Q7's
+/// ask settlement and withdrawal share (review finding 3).
+fn covered_course_keys(set: &Commitments, codes: &Codes) -> BTreeSet<String> {
+    let mut covered = BTreeSet::new();
+    for note in set.confirmed.iter().filter(|n| n.kind == "class") {
+        match note.course.as_deref() {
+            Some(course) => {
+                covered.insert(course_key(course, codes));
+            }
+            None => {
+                if let Some(code) = to_code_exempt(&note.title, &BTreeSet::new()) {
+                    covered.insert(course_key(&code, codes));
+                }
+            }
+        }
+    }
+    covered
+}
+
 /// One instance of a series (§3.2.1): `start`/`end` are `None` together for an all-day event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instance {
@@ -1393,6 +1473,24 @@ fn add_days(date: Date, days: i64) -> Date {
 /// Whole days from `from` to `to` (negative when `to` is earlier).
 fn days_since(from: Date, to: Date) -> i64 {
     from.until(to).map(|span| i64::from(span.get_days())).unwrap_or(0)
+}
+
+/// The vault's day number on `today` (phase-2 spec D2 as amended, parent §5.3's day 3). Day 1 is
+/// the **vault-local date of the earliest journal record** (`cli::vault_zone`); the next date is
+/// day 2, and so on. A vault with no journal is on day 1, and so is a pinned `today` before that
+/// date. When no record's `ts` parses, the earliest file's name (a UTC date) stands in
+/// (Plan ruling Q1-a).
+pub fn vault_day(vault: &Path, today: Date) -> i64 {
+    let ledger = crate::journal::Journal::new(vault).ledger;
+    let first = ledger
+        .first_ts()
+        .and_then(|ts| ts.parse::<jiff::Timestamp>().ok())
+        .map(|ts| ts.to_zoned(crate::cli::vault_zone(vault)).date())
+        .or_else(|| ledger.first_day());
+    match first {
+        None => 1,
+        Some(first) => (days_since(first, today) + 1).max(1),
+    }
 }
 
 /// At most `max` characters (code points, never a split one), trailing space trimmed.
@@ -2636,6 +2734,25 @@ fn proposal_commitment(p: &Proposal) -> serde_json::Value {
     })
 }
 
+/// One proposal as the app reads it (phase-2 spec §2): the fields a card's `commitment:` carries,
+/// plus `source_uid` (what the app answers with), `window` (true only for the window proposal),
+/// and `when`, the §5.2 card label (Plan ruling Q2-a), `null` when there are no meetings.
+pub fn proposal_value(p: &Proposal) -> serde_json::Value {
+    serde_json::json!({
+        "kind": p.kind,
+        "level": p.level.as_str(),
+        "title": p.title,
+        "course": p.course,
+        "meets": meets_json(&p.meets),
+        "when": meets_label(&p.meets),
+        "where": p.where_,
+        "from": date_json(p.from),
+        "until": date_json(p.until),
+        "source_uid": p.source_uid,
+        "window": p.is_window(),
+    })
+}
+
 fn proposal_body(p: &Proposal) -> String {
     let sentence = if p.is_window() {
         WINDOW_SENTENCE
@@ -2827,6 +2944,12 @@ fn proposal_order(p: &Proposal) -> (usize, usize, Time, &str) {
     (rank, day, start, p.source_uid.as_str())
 }
 
+/// §5.2's card order as a comparator: the confirm screen's rows are sorted as the cards are
+/// (phase-2 spec §2, Plan ruling Q2-b).
+pub fn card_order(a: &Proposal, b: &Proposal) -> std::cmp::Ordering {
+    proposal_order(a).cmp(&proposal_order(b))
+}
+
 /// File today's `commitment-check` cards (§5.2, §5.4): change cards first, then proposals in
 /// [`proposal_order`]. Returns `(paths, count, warnings)`.
 ///
@@ -2930,6 +3053,310 @@ pub fn emit_checks(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Phase 2 — the per-course fallback card, `commitment-ask` (parent §5.3, phase-2 spec §5).
+// ---------------------------------------------------------------------------------------------
+
+/// The per-course fallback card's kind (one of [`LOCAL_CARD_KINDS`]).
+pub const COMMITMENT_ASK: &str = "commitment-ask";
+
+/// At most this many `commitment-ask` cards are first proposed on any one day (§5.3).
+pub const ASKS_PER_DAY: i64 = 2;
+
+/// The first vault day ([`vault_day`]) on which an ask may be filed (§5.3).
+pub const ASK_FROM_DAY: i64 = 3;
+
+/// A course's ask key: the card's `source_uid`, and the decline marker's that closes it (§5.3).
+pub fn ask_key(slug: &str) -> String {
+    format!("card:{slug}")
+}
+
+fn ask_body(title: &str) -> String {
+    format!(
+        "**When does this class meet?** Knowlu didn't find {title} on your calendar.\n\n\
+         Answer with its days and times and Knowlu plans around them.\n\n\
+         Reject if it has no set meeting times (an online course), and you won't be asked again.\n"
+    )
+}
+
+/// Every course an ask card in `approvals/` or `archive/` already covers, unless that card is
+/// `superseded` or `expired` (Plan ruling Q6-c), and how many ask cards were first proposed
+/// `today`, whatever their status.
+fn asked_courses(vault: &Path, today: Date) -> (BTreeSet<String>, i64) {
+    let mut courses = BTreeSet::new();
+    let mut today_count = 0;
+    for folder in ["approvals", "archive"] {
+        let dir = vault.join(folder);
+        if !dir.is_dir() {
+            continue;
+        }
+        for path in crate::approvals::sorted_md(&dir) {
+            let Ok(raw) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&raw) else { continue };
+            let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+            if field("type") != "approval" || field("kind") != COMMITMENT_ASK {
+                continue;
+            }
+            if crate::approvals::as_date(get(&meta, "first_proposed_at")) == Some(today) {
+                today_count += 1;
+            }
+            if matches!(field("status").as_str(), "superseded" | "expired") {
+                continue;
+            }
+            let course = field("course");
+            if !course.is_empty() {
+                courses.insert(course);
+            }
+        }
+    }
+    (courses, today_count)
+}
+
+/// File today's `commitment-ask` cards (parent §5.3, phase-2 spec §5): one per
+/// [`uncovered_courses`] course, in slug order, from the vault's day [`ASK_FROM_DAY`], at most
+/// `min(budget, ASKS_PER_DAY − asks first proposed today)`. A course is skipped when its
+/// `card:<slug>` marker exists or an ask card already covers it ([`asked_courses`]). Every card
+/// goes through [`file_card`]. A card that cannot be filed is one warning, and ends this run's
+/// asks. Returns `(paths, count, warnings)`.
+pub fn emit_asks(
+    vault: &Path,
+    proposals: &[Proposal],
+    today: Date,
+    budget: i64,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (Vec<PathBuf>, usize, Vec<String>) {
+    let mut filed: Vec<PathBuf> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    if vault_day(vault, today) < ASK_FROM_DAY {
+        return (filed, 0, warnings);
+    }
+    let (mut asked, today_count) = asked_courses(vault, today);
+    let allowance = budget.min(ASKS_PER_DAY - today_count).max(0) as usize;
+    if allowance == 0 {
+        return (filed, 0, warnings);
+    }
+    let set = load(vault);
+    let (codes, _) = Codes::load(vault);
+    for course in uncovered_courses(vault, &set, proposals, &codes) {
+        if filed.len() >= allowance {
+            break;
+        }
+        let key = ask_key(&course.slug);
+        if set.declined.contains(&key) || asked.contains(&course.slug) {
+            continue;
+        }
+        let name = short_title(&course.title);
+        let fields = vec![
+            ("source_uid", Field::Scalar(Node::text(&key))),
+            ("course", Field::Scalar(Node::text(&course.slug))),
+        ];
+        let title = format!("When does {name} meet?");
+        match file_card(vault, COMMITMENT_ASK, fields, &title, &ask_body(&name), today, ctx, journal) {
+            Ok(path) => {
+                asked.insert(course.slug.clone());
+                filed.push(path);
+            }
+            Err(err) => {
+                warnings.push(err);
+                break;
+            }
+        }
+    }
+    let count = filed.len();
+    (filed, count, warnings)
+}
+
+/// What settling an approved `commitment-ask` card decided (phase-2 spec §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskSettled {
+    /// The class note was created: stamped `executed` and archived.
+    Executed,
+    /// Nothing written and nothing will be: stamped `refused` and archived, one warning.
+    Refused(String),
+    /// The answer is missing or invalid: back to `pending`, one warning (Plan ruling Q7-a).
+    Returned(String),
+}
+
+fn ask_course(meta: &Mapping) -> String {
+    field_text(meta, "course").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// Whether a confirmed `class` note covers `slug`, by Q2-c's two rules ([`covered_course_keys`],
+/// review finding 3): a title-only class note covers its course here exactly as it does for
+/// [`uncovered_courses`].
+fn has_class(set: &Commitments, slug: &str, codes: &Codes) -> bool {
+    covered_course_keys(set, codes).contains(&course_key(slug, codes))
+}
+
+/// Settle an approved `commitment-ask` card (parent §5.3): validate `answer_meets` as §2.2
+/// validates `meets` (every entry valid, at least one), then create the class note
+/// `{kind: class, level: hard, title, course, meets}` with `source_uid: card:<slug>`, actor
+/// `agent:commitments` (Plan ruling Q7-b). A class note the course already has refuses the card,
+/// unless this card's own settlement wrote it and the run died before the stamp.
+pub fn settle_ask_approved(
+    vault: &Path,
+    meta: &Mapping,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<AskSettled, crate::write::WriteError> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return Ok(AskSettled::Refused("the card has no course".to_string()));
+    }
+    let key = ask_key(&slug);
+    let set = load(vault);
+    let (codes, _) = Codes::load(vault);
+    if has_class(&set, &slug, &codes) {
+        if created_by_this_card(vault, meta, Some(&key), journal) {
+            return Ok(AskSettled::Executed);
+        }
+        return Ok(AskSettled::Refused(format!("{slug} already has a confirmed class; nothing written")));
+    }
+    let meets = match strict_meets(meta, "answer_meets") {
+        Ok(meets) => meets,
+        Err(why) => return Ok(AskSettled::Returned(format!("{why}; answer again"))),
+    };
+    let title = active_courses(vault).into_iter().find(|(s, _)| *s == slug).map(|(_, t)| t).unwrap_or_else(|| slug.clone());
+    let mut map = Mapping::new();
+    for (k, v) in [("kind", "class"), ("level", "hard"), ("title", title.as_str()), ("course", slug.as_str())] {
+        map.insert(Value::String(k.into()), Value::String(v.into()));
+    }
+    map.insert(Value::String("meets".into()), to_value(meets_json(&meets)));
+    create_confirmed(vault, &map, &key, today, ctx, journal)?;
+    Ok(AskSettled::Executed)
+}
+
+/// Settle a rejected `commitment-ask` card: the `card:<slug>` marker, which closes the question
+/// (parent §5.3). Returns the marker written, `None` when it existed already.
+pub fn settle_ask_rejected(
+    vault: &Path,
+    meta: &Mapping,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Option<PathBuf>, crate::write::WriteError> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    create_marker(vault, &ask_key(&slug), ctx, journal)
+}
+
+/// Why a pending or snoozed ask's question went away (Plan ruling Q7-c), or `None` while it
+/// stands: a class proposal for its course appeared (that card asks instead), a confirmed class
+/// note covers the course, or the `card:<slug>` marker exists.
+pub fn ask_withdrawal_reason(meta: &Mapping, proposals: &[Proposal], set: &Commitments, codes: &Codes) -> Option<String> {
+    let slug = ask_course(meta);
+    if slug.is_empty() {
+        return None;
+    }
+    let wanted = course_key(&slug, codes);
+    if proposals
+        .iter()
+        .any(|p| p.kind == "class" && p.course.as_deref().is_some_and(|c| course_key(c, codes) == wanted))
+    {
+        return Some(format!("a class proposal for {slug} appeared"));
+    }
+    if has_class(set, &slug, codes) {
+        return Some(format!("{slug} already has a class"));
+    }
+    if set.declined.contains(&ask_key(&slug)) {
+        return Some(format!("{slug} was answered"));
+    }
+    None
+}
+
+/// The fields the console may set on a confirmed commitment (phase-2 spec D5); `window` is not
+/// one of them: it goes through `--confirm`.
+pub const CONSOLE_FIELDS: [&str; 2] = ["kind", "level"];
+
+/// The kinds a confirmed commitment may be given from the console: §2.2's list without
+/// `planning-day` (Plan ruling Q8-b).
+pub const CONSOLE_KINDS: [&str; 9] =
+    ["class", "lab", "work", "club", "meeting", "office-hours", "event", "exam", "task-block"];
+
+/// Phase-2 spec D5, the engine half of `set_fields`' checks (Plan ruling Q8-a): `field` (one of
+/// [`CONSOLE_FIELDS`]) may be set on `target` only when it is a confirmed note under
+/// `commitments/` other than the planning day, and only to a word on §2.2's list. Reads only.
+pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde_json::Value) -> Result<(), String> {
+    let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
+    let rel = crate::ids::rel(vault, &path);
+    if !rel.starts_with(&format!("{FOLDER}/")) {
+        return Err(format!("{field} can only be set on a commitment, not {rel}"));
+    }
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
+    // `type: commitment` too (review M1): `resolve_target` keeps `..`, so the path test alone
+    // would let `commitments/../tasks/x.md` through.
+    if field_text(&meta, "type").as_deref() != Some("commitment")
+        || field_text(&meta, "status").as_deref() != Some("confirmed")
+        || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY)
+    {
+        return Err(format!("{field} can only be set on a confirmed commitment, not {rel}"));
+    }
+    let word = value.as_str().ok_or_else(|| format!("{field} must be one word"))?;
+    let known = match field {
+        "kind" => CONSOLE_KINDS.contains(&word),
+        "level" => Level::parse(word).is_some(),
+        _ => false,
+    };
+    if known {
+        Ok(())
+    } else {
+        Err(format!("{field} {word:?} is not one Knowlu knows"))
+    }
+}
+
+/// The `commitment-ask` card's answer from the console (review I1): `meets` must be a list of
+/// `{days, start, end}` objects with no other key, `days` a list of day words, `start`/`end`
+/// `"HH:MM"` strings with start before end, and no string may carry a line break or `---`. It
+/// is validated as §2.2 validates `meets` and returned as the canonical single-line flow sequence
+/// the settlement writes into `meets:`; an error is the message for the card. Pure.
+pub fn answer_literal(meets: &serde_json::Value) -> Result<String, String> {
+    const SHAPE: &str = "answer_meets must be a list of {days, start, end}";
+    let items = meets.as_array().ok_or(SHAPE)?;
+    for item in items {
+        let entry = item.as_object().ok_or(SHAPE)?;
+        if let Some(key) = entry.keys().find(|k| !["days", "start", "end"].contains(&k.as_str())) {
+            return Err(format!("answer_meets entry has an unknown key {key:?}"));
+        }
+        let days = entry.get("days").and_then(|d| d.as_array()).ok_or(SHAPE)?;
+        let mut words: Vec<&str> = Vec::new();
+        for value in days.iter().chain([entry.get("start"), entry.get("end")].into_iter().flatten()) {
+            words.push(value.as_str().ok_or("answer_meets days, start and end must be text")?);
+        }
+        if let Some(bad) = words.iter().find(|w| crate::write::single_line_problem(w).is_some() || w.contains("---")) {
+            return Err(format!("answer_meets {bad:?} must be one line of a day or a time"));
+        }
+    }
+    let mut map = Mapping::new();
+    map.insert(Value::String("answer_meets".into()), crate::yaml::from_json(meets));
+    let parsed = strict_meets(&map, "answer_meets").map_err(|why| format!("{why}; answer again"))?;
+    Ok(crate::write::to_literal(&to_value(meets_json(&parsed))))
+}
+
+/// `answer_card`'s engine check (review finding 6): `target` is a `pending` approval of kind
+/// [`COMMITMENT_ASK`], or a `snoozed` one whose `snooze_until` is `today` or earlier. Anything
+/// else — a task proposal, a settled card, a card still asleep — is refused before a write, so a
+/// wrong id can never approve and materialise another card. Reads only.
+pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), String> {
+    let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
+    let rel = crate::ids::rel(vault, &path);
+    let text = pystr::read_text(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = split_frontmatter(&text).map_err(|e| e.to_string())?;
+    let field = |key: &str| field_text(&meta, key).unwrap_or_default();
+    // Final review M1: a snooze that has come is pending in every view (surface wakes it in
+    // memory until the next slot's `process_approvals` rewrites the status), so it answers too.
+    let woke = field("status") == "snoozed"
+        && crate::approvals::as_date(get(&meta, "snooze_until")).is_some_and(|d| d <= today);
+    if field("type") == "approval" && field("kind") == COMMITMENT_ASK && (field("status") == "pending" || woke) {
+        Ok(())
+    } else {
+        Err(format!("{rel} is not a pending commitment-ask card"))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
@@ -2977,10 +3404,13 @@ fn to_value(json: serde_json::Value) -> Value {
 }
 
 /// The judge-once rule, per field (final-fix-report m3): did the journal show `quinn` — not an
-/// agent, not the settlement — setting this field on this note? `journal::human_set` is the same
-/// query `write::write_literals` guards judged fields with; a change card is judge-once too.
+/// agent, not the settlement — setting this field on this note? Only a later `set` counts
+/// (`journal::human_edited`), never the `create`: the confirm screen mints every confirmed note as
+/// `quinn` with the calendar's own `meets`, `where` and `until` in it, and `journal::human_set`
+/// (which counts a create) would freeze them against every later calendar change. An edit made
+/// after, through the Schedule view (`set_fields`), is a `set` by `quinn` and still blocks.
 fn is_human_set(journal: &mut crate::journal::Journal, note_id: &str, field: &str) -> bool {
-    journal.human_set(note_id, field).is_some()
+    journal.human_edited(note_id, field).is_some()
 }
 
 fn text_value(text: Option<&str>) -> Value {
@@ -3016,8 +3446,9 @@ fn text_value(text: Option<&str>) -> Value {
 /// current value of every changed field, an absent one as `null`; no field is proposed as `null`.
 ///
 /// **Judge-once, per field (final-fix-report m3):** a field the journal shows the student set by
-/// hand on the note — `journal::human_set`, the same query `write::write_literals` uses — is never
-/// proposed back, on the `changed`, `ended` or `succeeded` path. A field the settlement itself wrote
+/// hand on the note — a later `set` by `quinn` (`journal::human_edited`; the note's `create`, even
+/// the confirm screen's by `quinn`, is not one) — is never proposed back, on the `changed`, `ended`
+/// or `succeeded` path. A field the settlement itself wrote
 /// (`agent:commitments`, not `quinn`) is not a human set and is still watched, so a series whose
 /// calendar end moves still gets a card. Every other field of the same note is still watched, so a
 /// human-set `where` beside a calendar `meets` change still proposes `meets` alone.
@@ -3333,6 +3764,17 @@ pub fn create_marker(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<Option<PathBuf>, crate::write::WriteError> {
+    create_marker_as(vault, key, &ctx.with_actor(CARD_ACTOR), journal)
+}
+
+/// [`create_marker`] under the context it is given (Plan ruling Q3-a): the confirm screen's
+/// markers are the student's own writes (phase-2 spec §3), a settlement's are `agent:commitments`.
+fn create_marker_as(
+    vault: &Path,
+    key: &str,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Option<PathBuf>, crate::write::WriteError> {
     if load(vault).declined.contains(key) {
         return Ok(None);
     }
@@ -3344,14 +3786,7 @@ pub fn create_marker(
     ])
     .map_err(|e| io(format!("marker not written: {e}")))?;
     let rel = free_rel(vault, &marker_stem(key));
-    let path = crate::write::create(
-        vault,
-        &rel,
-        &format!("---\n{front}---\n"),
-        &ctx.with_actor(CARD_ACTOR),
-        journal,
-        None,
-    )?;
+    let path = crate::write::create(vault, &rel, &format!("---\n{front}---\n"), ctx, journal, None)?;
     Ok(Some(path))
 }
 
@@ -3441,6 +3876,18 @@ pub fn create_confirmed(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<PathBuf, crate::write::WriteError> {
+    create_confirmed_as(vault, commitment, source_uid, today, &ctx.with_actor(CARD_ACTOR), journal)
+}
+
+/// [`create_confirmed`] under the context it is given (Plan ruling Q3-a).
+fn create_confirmed_as(
+    vault: &Path,
+    commitment: &Mapping,
+    source_uid: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<PathBuf, crate::write::WriteError> {
     let p = proposed(commitment).map_err(|e| io(format!("commitment not created: {e}")))?;
     let id = crate::ids::new_id("cmt");
     let mut fields: Vec<(&str, Field)> = vec![
@@ -3474,6 +3921,8 @@ pub fn create_confirmed(
         let key = single_line(source_uid).trim().to_string();
         let body = if key.starts_with("gcal-series:") {
             "Found as a weekly series on your Google Calendar.\n"
+        } else if key.starts_with("card:") {
+            "You told Knowlu when this class meets.\n"
         } else {
             "Found as a weekly series on your calendar.\n"
         };
@@ -3486,14 +3935,7 @@ pub fn create_confirmed(
     fields.push(("confirmed_at", Field::Scalar(Node::Date(today))));
     let front = front_matter(&fields).map_err(|e| io(format!("commitment not created: {e}")))?;
     let rel = free_rel(vault, &stem);
-    crate::write::create(
-        vault,
-        &rel,
-        &format!("---\n{front}---\n\n{body}"),
-        &ctx.with_actor(CARD_ACTOR),
-        journal,
-        None,
-    )
+    crate::write::create(vault, &rel, &format!("---\n{front}---\n\n{body}"), ctx, journal, None)
 }
 
 /// A field's value as `load` would read it, as comparable text (carry-forward 2): `meets` and
@@ -3908,6 +4350,296 @@ pub fn withdrawal_reason(
             None
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 2 — `commitments --confirm` (phase-2 spec §3, D4).
+// ---------------------------------------------------------------------------------------------
+
+/// The proposals as the series file holds them now: [`read_series_file`], never
+/// [`refresh_series`], so nothing is fetched. What `--confirm` and [`overview`] read. `proposals`
+/// is the current set of questions over the real notes. `unanswered` is the same computation over
+/// no notes, so a key the notes have since answered can still be found (a second Finish). Both are
+/// built with `for_cards: false`, so office hours are included.
+pub struct Stored {
+    pub file: SeriesFile,
+    pub set: Commitments,
+    pub codes: Codes,
+    pub template: crate::weekcal::WeekCalendar,
+    pub proposals: Vec<Proposal>,
+    pub unanswered: Vec<Proposal>,
+    pub warnings: Vec<String>,
+}
+
+pub fn stored_proposals(vault: &Path, today: Date) -> Stored {
+    let (file, mut warnings) = read_series_file(vault);
+    let set = load(vault);
+    warnings.extend(set.warnings.iter().cloned());
+    let (codes, code_warnings) = Codes::load(vault);
+    warnings.extend(code_warnings_hit(code_warnings, &file));
+    let planning = crate::planning::load_planning(&vault.join("config").join("planning.yaml"));
+    let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    let template = crate::weekcal::WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
+    let held = successor_keys(vault);
+    let current = proposals(&file, &set, &codes, &names, &template, &held, today, false);
+    let unanswered = proposals(&file, &Commitments::default(), &codes, &names, &template, &held, today, false);
+    Stored { file, set, codes, template, proposals: current, unanswered, warnings }
+}
+
+/// The screen's answers (phase-2 spec §3): keys, levels and a window, never event data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfirmInput {
+    /// `(source_uid, level)`, in input order.
+    pub mine: Vec<(String, String)>,
+    pub not_mine: Vec<String>,
+    /// A flow sequence shaped like the planning-day note's `window`.
+    pub window: Option<String>,
+}
+
+/// What `--confirm` did: `{"created", "declined", "window", "warnings"}`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfirmReport {
+    pub created: usize,
+    /// Decline markers written, twins included (Plan ruling Q3-c).
+    pub declined: usize,
+    /// `created`, `updated` or `unchanged`; `None` when no window was given.
+    pub window: Option<&'static str>,
+    pub warnings: Vec<String>,
+}
+
+impl ConfirmReport {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "created": self.created,
+            "declined": self.declined,
+            "window": self.window,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+/// The `--confirm` file (phase-2 spec §3). Every key is optional; `null` is absent. `Err` is
+/// unreadable input, and the CLI exits 2.
+pub fn parse_confirm(text: &str) -> Result<ConfirmInput, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("--confirm is not JSON ({e})"))?;
+    let obj = value.as_object().ok_or("--confirm is not a JSON object")?;
+    let mut input = ConfirmInput::default();
+    if let Some(rows) = obj.get("mine").filter(|v| !v.is_null()) {
+        for row in rows.as_array().ok_or("mine is not a list")? {
+            let key = row.get("source_uid").and_then(|v| v.as_str()).ok_or("a mine row has no source_uid")?;
+            let level = row.get("level").and_then(|v| v.as_str()).unwrap_or("");
+            input.mine.push((key.to_string(), level.to_string()));
+        }
+    }
+    if let Some(keys) = obj.get("not_mine").filter(|v| !v.is_null()) {
+        for key in keys.as_array().ok_or("not_mine is not a list")? {
+            input.not_mine.push(key.as_str().ok_or("a not_mine key is not a string")?.to_string());
+        }
+    }
+    if let Some(window) = obj.get("window").filter(|v| !v.is_null()) {
+        input.window = Some(window.as_str().ok_or("window is not a string")?.to_string());
+    }
+    Ok(input)
+}
+
+/// The two signatures that close a proposal's question, as [`proposals`] closes one.
+fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
+    vec![p.signature(codes), signature(&p.kind, None, &p.title, &p.meets, codes)]
+}
+
+/// `commitments --confirm` (phase-2 spec §3): the screen's answers, written under `ctx` (the
+/// console's human context; parent §2.5). Every row is re-derived from the series file
+/// ([`stored_proposals`]). Nothing from the app becomes a field value but `level` and the
+/// window.
+///
+/// The window is validated first ([`parse_window`], strictly; one day at least, Plan ruling Q4-b).
+/// If it is invalid, this returns `Err` before any write. Then, in order (Plan ruling Q4-d):
+/// - **`mine`** → [`create_confirmed_as`] at the chosen level. A key a confirmed note already holds,
+///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
+/// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
+///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
+///   silently.
+/// - **the window** → the planning day, created when there is none ([`create_confirmed_as`]).
+///   Otherwise its one `window:` line is written through `write_literals`, a human edit that
+///   `journal.human_set` protects. An equal window writes nothing (`unchanged`).
+///
+/// A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
+/// write that fails is reported, and the rest still run. No card is filed, so nothing is charged
+/// to the cap.
+pub fn confirm(
+    vault: &Path,
+    input: &ConfirmInput,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<ConfirmReport, String> {
+    let window = match &input.window {
+        None => None,
+        Some(raw) => {
+            let parsed = parse_window(raw)?;
+            if parsed.iter().all(Option::is_none) {
+                return Err(format!("window {raw:?} names no day"));
+            }
+            let value: Value = serde_yaml_ng::from_str(raw).map_err(|_| format!("{raw:?} is not a flow sequence"))?;
+            Some((parsed, value))
+        }
+    };
+
+    let stored = stored_proposals(vault, today);
+    let codes = &stored.codes;
+    let mut report = ConfirmReport::default();
+    let stale = |key: &str| format!("{key}: not a current proposal; skipped");
+
+    for (key, level) in &input.mine {
+        let set = load(vault);
+        if set.confirmed.iter().any(|n| n.source_uid.as_deref() == Some(key.as_str())) {
+            continue;
+        }
+        let Some(p) = stored.unanswered.iter().find(|p| &p.source_uid == key && !p.is_window()) else {
+            report.warnings.push(stale(key));
+            continue;
+        };
+        let sigs = proposal_signatures(p, codes);
+        if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+            continue;
+        }
+        if set.declined.contains(key) || !stored.proposals.iter().any(|q| &q.source_uid == key) {
+            report.warnings.push(stale(key));
+            continue;
+        }
+        let Some(level) = Level::parse(level) else {
+            report.warnings.push(format!("{key}: level {level:?} is not hard, soft or optional; skipped"));
+            continue;
+        };
+        let chosen = Proposal { level, ..p.clone() };
+        let Value::Mapping(map) = to_value(proposal_commitment(&chosen)) else {
+            report.warnings.push(format!("{key}: not written (no commitment mapping)"));
+            continue;
+        };
+        match create_confirmed_as(vault, &map, key, today, ctx, journal) {
+            Ok(_) => report.created += 1,
+            Err(e) => report.warnings.push(format!("{key}: not written ({e})")),
+        }
+    }
+
+    for key in &input.not_mine {
+        let set = load(vault);
+        if set.declined.contains(key) {
+            continue;
+        }
+        let Some(p) = stored.proposals.iter().find(|p| &p.source_uid == key && !p.is_window()) else {
+            report.warnings.push(stale(key));
+            continue;
+        };
+        let held: BTreeSet<String> = set.confirmed.iter().filter_map(|n| n.source_uid.clone()).collect();
+        for twin in twin_keys(vault, key, proposal_signatures(p, codes), codes) {
+            if held.contains(&twin) {
+                continue;
+            }
+            match create_marker_as(vault, &twin, ctx, journal) {
+                Ok(Some(_)) => report.declined += 1,
+                Ok(None) => {}
+                Err(e) => report.warnings.push(format!("{twin}: marker not written ({e})")),
+            }
+        }
+    }
+
+    if let Some((parsed, value)) = window {
+        let set = load(vault);
+        let outcome: Result<&'static str, String> = match &set.planning_day {
+            Some(_) if set.window == parsed => Ok("unchanged"),
+            Some(day) => {
+                let rel = day.path.to_string_lossy().replace('\\', "/");
+                let literals = vec![("window".to_string(), crate::write::to_literal(&value))];
+                crate::write::write_literals(vault, &rel, &literals, ctx, journal, &crate::write::WriteOpts::default())
+                    .map(|_| "updated")
+                    .map_err(|e| format!("planning day not written ({e})"))
+            }
+            None => {
+                let mut map = Mapping::new();
+                map.insert(Value::String("kind".into()), Value::String(PLANNING_DAY.into()));
+                map.insert(Value::String("window".into()), value);
+                create_confirmed_as(vault, &map, "", today, ctx, journal)
+                    .map(|_| "created")
+                    .map_err(|e| format!("planning day not written ({e})"))
+            }
+        };
+        match outcome {
+            Ok(done) => report.window = Some(done),
+            Err(why) => report.warnings.push(why),
+        }
+    }
+    Ok(report)
+}
+
+/// What the *Schedule* view and the confirm screen read (phase-2 spec §4). Built purely, with no
+/// fetch and no write, over [`stored_proposals`]. Rows are JSON (Plan ruling Q5-a).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overview {
+    /// Every confirmed note but the planning day: `{id, path, kind, level, title, course, meets,
+    /// when, where, from, until}`.
+    pub commitments: Vec<serde_json::Value>,
+    /// The office-hours proposals not yet confirmed or declined, as [`proposal_value`].
+    pub office_hours: Vec<serde_json::Value>,
+    /// The effective window per weekday, `DAY_KEYS` order: `{day, start, end, source}`, where
+    /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
+    pub window: Vec<serde_json::Value>,
+    pub uncovered_courses: Vec<UncoveredCourse>,
+    /// D3: the vault is on its first day and has no planning-day note.
+    pub setup: bool,
+    pub warnings: Vec<String>,
+}
+
+impl Overview {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "commitments": self.commitments,
+            "office_hours": self.office_hours,
+            "window": self.window,
+            "uncovered_courses": self.uncovered_courses,
+            "setup": self.setup,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+pub fn overview(vault: &Path, today: Date) -> Overview {
+    let stored = stored_proposals(vault, today);
+    let commitments = stored
+        .set
+        .confirmed
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "path": n.path.to_string_lossy().replace('\\', "/"),
+                "kind": n.kind,
+                "level": n.level.as_str(),
+                "title": n.title,
+                "course": n.course,
+                "meets": meets_json(&n.meets),
+                "when": meets_label(&n.meets),
+                "where": n.where_,
+                "from": date_json(n.from),
+                "until": date_json(n.until),
+            })
+        })
+        .collect();
+    let office_hours = stored.proposals.iter().filter(|p| p.kind == "office-hours").map(proposal_value).collect();
+    let window = DAY_KEYS
+        .iter()
+        .enumerate()
+        .map(|(i, day)| {
+            let ((start, end), source) = match stored.set.window[i] {
+                Some(span) => (span, "note"),
+                None => ((stored.template.day_start, stored.template.day_end), "template"),
+            };
+            serde_json::json!({ "day": day, "start": hm(start), "end": hm(end), "source": source })
+        })
+        .collect();
+    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes);
+    let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
+    Overview { commitments, office_hours, window, uncovered_courses, setup, warnings: stored.warnings }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -8575,7 +9307,7 @@ mod change_tests {
     // --- judge-once (final-fix-report m3) ---------------------------------------------------
 
     /// A `set` record on `note.id`, as `write::write_literals` journals the dashboard's
-    /// `set_fields` — the same shape `journal::human_set` is built to find.
+    /// `set_fields` — the shape `journal::human_edited` finds.
     fn quinn_set(journal: &mut Journal, id: &str, field: &str, ts: &str) {
         let mut spec = crate::journal::NewRecord::new("set", "commitments/cs-100.md", "quinn", "dashboard");
         spec.id = Some(id);
@@ -9148,5 +9880,701 @@ mod moved_tests {
         ] {
             assert!(parse_window(bad).is_err(), "{bad} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod phase2_tests {
+    //! Phase 2 (spec `docs/specs/2026-09-24-commitment-model-phase2-design.md`). Every title,
+    //! key, room and course is invented.
+
+    use super::*;
+    use crate::journal::{make_record, Journal, NewRecord};
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    /// Tuesday 2026-09-01; `mk`'s series start on Monday 2026-08-31.
+    const TODAY: Date = Date::constant(2026, 9, 1);
+
+    /// A scratch vault removed when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-p2-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        Scratch(dir)
+    }
+
+    /// One journal record stamped `ts` (UTC, `…Z`).
+    fn journal_at(vault: &Path, ts: &str) {
+        let mut spec = NewRecord::new("create", "archive/_seed.md", "system:migration", "cli");
+        spec.ts = Some(ts.to_string());
+        let mut rec = make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
+    }
+
+    /// One journal record stamped noon UTC on `day`: that date in every zone from UTC−11 to UTC+11,
+    /// so the vault's first local day is `day` on any development machine.
+    fn journal_on(vault: &Path, day: &str) {
+        journal_at(vault, &format!("{day}T12:00:00.000Z"));
+    }
+
+    #[test]
+    fn a_vault_with_no_journal_is_on_day_one() {
+        let v = scratch("noday");
+        assert_eq!(vault_day(&v, TODAY), 1);
+    }
+
+    #[test]
+    fn the_day_counts_from_the_earliest_journal_record() {
+        let v = scratch("days");
+        journal_on(&v, "2026-09-24");
+        journal_on(&v, "2026-09-26");
+        assert_eq!(vault_day(&v, date(2026, 9, 23)), 1, "a pinned --today before the first record is day 1");
+        assert_eq!(vault_day(&v, date(2026, 9, 24)), 1);
+        assert_eq!(vault_day(&v, date(2026, 9, 25)), 2);
+        assert_eq!(vault_day(&v, date(2026, 9, 26)), 3);
+    }
+
+    /// Review finding 1: east of UTC, a wizard finished at 00:30 local on Sep 24 journals at
+    /// 22:30 UTC on Sep 23. The first day is the vault-local date, Sep 24, not the file's.
+    #[test]
+    fn the_first_day_is_the_vault_local_date_of_the_earliest_record() {
+        let v = scratch("athens");
+        std::fs::write(v.join("config").join("ingest.yaml"), "timezone: Europe/Athens\n").unwrap();
+        journal_at(&v, "2026-09-23T22:30:00.000Z");
+        assert_eq!(vault_day(&v, date(2026, 9, 24)), 1);
+        assert_eq!(vault_day(&v, date(2026, 9, 25)), 2);
+    }
+
+    fn course(vault: &Path, slug: &str, front: &str) {
+        let dir = vault.join("courses");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{slug}.md")), format!("---\n{front}---\n\nInvented.\n")).unwrap();
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn meet(days: &[DayKey], s: Time, e: Time) -> Meet {
+        Meet { days: days.to_vec(), start: s, end: e }
+    }
+
+    fn note_of(kind: &str, title: &str, course: Option<&str>) -> Commitment {
+        Commitment {
+            id: "cmt_00000000c1".into(),
+            path: PathBuf::from("commitments/x.md"),
+            kind: kind.into(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.into(),
+            course: course.map(String::from),
+            meets: vec![meet(&["tue"], t(9, 0), t(10, 0))],
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: None,
+        }
+    }
+
+    fn proposal_of(kind: &str, title: &str, course: Option<&str>, uid: &str) -> Proposal {
+        Proposal {
+            kind: kind.into(),
+            level: default_level(kind).unwrap_or(Level::Soft),
+            title: title.into(),
+            course: course.map(String::from),
+            meets: vec![meet(&["mon", "wed", "fri"], t(12, 0), t(12, 50))],
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: uid.into(),
+        }
+    }
+
+    /// `ant-101` (title `ANT 101`), `bui-100` (`BUI 100`) and `cs-100` (`CS 100`), all active.
+    fn three_courses(name: &str) -> Scratch {
+        let v = scratch(name);
+        course(&v, "ant-101", "title: \"ANT 101\"\nslug: ant-101\ncode: \"ANT 101\"\nstatus: active\n");
+        course(&v, "bui-100", "title: \"BUI 100\"\nslug: bui-100\ncode: \"BUI 100\"\nstatus: active\n");
+        course(&v, "cs-100", "title: \"CS 100\"\nslug: cs-100\ncode: \"CS 100\"\nstatus: active\n");
+        v
+    }
+
+    fn slugs(got: &[UncoveredCourse]) -> Vec<&str> {
+        got.iter().map(|c| c.slug.as_str()).collect()
+    }
+
+    #[test]
+    fn every_active_course_with_no_class_is_uncovered_in_slug_order() {
+        let v = three_courses("uncovered");
+        let (codes, _) = Codes::load(&v);
+        let got = uncovered_courses(&v, &Commitments::default(), &[], &codes);
+        assert_eq!(slugs(&got), ["ant-101", "bui-100", "cs-100"]);
+        assert_eq!(got[1], UncoveredCourse { slug: "bui-100".into(), title: "BUI 100".into() });
+    }
+
+    #[test]
+    fn a_confirmed_class_or_a_class_proposal_covers_its_course_by_slug_or_code() {
+        let v = three_courses("covered");
+        let (codes, _) = Codes::load(&v);
+        let set = Commitments {
+            confirmed: vec![note_of("class", "BUI 100", Some("BUI 100")), note_of("class", "ANT 101 Lecture", None)],
+            ..Commitments::default()
+        };
+        let proposals = [proposal_of("class", "CS 100", Some("cs-100"), "gcal-series:cs100")];
+        assert!(uncovered_courses(&v, &set, &proposals, &codes).is_empty());
+    }
+
+    #[test]
+    fn a_lab_or_office_hours_does_not_cover_and_an_inactive_course_is_left_out() {
+        let v = three_courses("labonly");
+        course(&v, "old-200", "title: \"OLD 200\"\nslug: old-200\nstatus: archived\n");
+        let (codes, _) = Codes::load(&v);
+        let set = Commitments { confirmed: vec![note_of("lab", "CS 100 Lab", Some("cs-100"))], ..Commitments::default() };
+        let proposals = [proposal_of("office-hours", "CS 100 Office Hours", Some("cs-100"), "gcal-series:oh")];
+        assert_eq!(slugs(&uncovered_courses(&v, &set, &proposals, &codes)), ["ant-101", "bui-100", "cs-100"]);
+    }
+
+    #[test]
+    fn a_proposal_value_carries_the_card_label_and_the_window_flag() {
+        let p = proposal_of("class", "CS 100", Some("cs-100"), "gcal-series:cs100");
+        let v = proposal_value(&p);
+        assert_eq!(v["when"], serde_json::json!("Mon/Wed/Fri 12–12:50pm"));
+        assert_eq!(v["meets"], serde_json::json!([{"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"}]));
+        assert_eq!(v["window"], serde_json::json!(false));
+        assert_eq!(v["source_uid"], serde_json::json!("gcal-series:cs100"));
+        let mut club = proposal_of("club", "Chess Club", None, "gcal-series:a-club");
+        club.meets = Vec::new();
+        assert_eq!(proposal_value(&club)["when"], serde_json::Value::Null);
+        let mut ps = vec![club, p];
+        ps.sort_by(card_order);
+        assert_eq!(ps[0].kind, "class", "classes first, as the cards are");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q3 — `commitments::confirm`: `mine` and `not_mine` as the human (D4, §3).
+    // -----------------------------------------------------------------------------------------
+
+    /// Three weeks of a weekly series from Monday 2026-08-31 on `days`, `s`–`e`, last seen
+    /// `TODAY`; `meets` as P8 derives it.
+    fn mk(uid: &str, cal: &str, title: &str, days: &[DayKey], s: Time, e: Time) -> Series {
+        let monday = date(2026, 8, 31);
+        let mut instances = Vec::new();
+        for week in 0..3 {
+            for day in days {
+                let offset = DAY_KEYS.iter().position(|k| k == day).unwrap() as i64;
+                instances.push(Instance { date: add_days(monday, week * 7 + offset), start: Some(s), end: Some(e) });
+            }
+        }
+        instances.sort_by_key(|i| i.date);
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            meets: meets_of(&instances),
+            instances,
+            first: Some(monday),
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn write_series(vault: &Path, series: Vec<Series>) {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(vault.join(SERIES_FILE), file_bytes(&file)).unwrap();
+    }
+
+    fn human() -> WriteContext {
+        WriteContext::new("quinn", "dashboard")
+    }
+
+    /// `courses/cs-100.md` and a series file holding CS 100 (Mon/Wed/Fri 12–12:50pm), Chess Club
+    /// (Wed 6–7pm) and CS 100 Office Hours (Thu 3–4pm), all on one Google calendar.
+    fn week_vault(name: &str) -> Scratch {
+        let v = scratch(name);
+        course(&v, "cs-100", "title: \"CS 100\"\nslug: cs-100\ncode: \"CS 100\"\nstatus: active\n");
+        write_series(
+            &v,
+            vec![
+                mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+                mk("gcal-series:chess", "google:abc", "Chess Club", &["wed"], t(18, 0), t(19, 0)),
+                mk("gcal-series:oh", "google:abc", "CS 100 Office Hours", &["thu"], t(15, 0), t(16, 0)),
+            ],
+        );
+        v
+    }
+
+    fn files(vault: &Path, folder: &str) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(vault.join(folder))
+            .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn journal_records(vault: &Path) -> Vec<crate::ledger::Record> {
+        Journal::new(vault).read(None, None)
+    }
+
+    fn input(mine: &[(&str, &str)], not_mine: &[&str], window: Option<&str>) -> ConfirmInput {
+        ConfirmInput {
+            mine: mine.iter().map(|(k, l)| (k.to_string(), l.to_string())).collect(),
+            not_mine: not_mine.iter().map(|k| k.to_string()).collect(),
+            window: window.map(String::from),
+        }
+    }
+
+    fn run(vault: &Path, given: &ConfirmInput) -> ConfirmReport {
+        confirm(vault, given, TODAY, &human(), &mut Journal::new(vault)).unwrap()
+    }
+
+    #[test]
+    fn parse_confirm_reads_every_optional_key_and_refuses_what_is_not_json() {
+        let got = parse_confirm(r#"{"mine": [{"source_uid": "gcal-series:a", "level": "soft"}], "not_mine": ["gcal-series:b"], "window": "[]"}"#).unwrap();
+        assert_eq!(got, input(&[("gcal-series:a", "soft")], &["gcal-series:b"], Some("[]")));
+        assert_eq!(parse_confirm("{}").unwrap(), ConfirmInput::default());
+        assert!(parse_confirm("not json").is_err());
+        assert!(parse_confirm(r#"{"mine": "gcal-series:a"}"#).is_err());
+    }
+
+    #[test]
+    fn mine_writes_exactly_the_rows_given_at_the_given_level_as_the_human() {
+        let v = week_vault("mine");
+        let report = run(&v, &input(&[("gcal-series:cs100", "soft")], &[], None));
+        assert_eq!((report.created, report.declined, report.window), (1, 0, None));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(files(&v, FOLDER), ["cs-100.md"], "the club and office hours were not given");
+        let set = load(&v);
+        assert_eq!(set.confirmed.len(), 1);
+        assert_eq!(set.confirmed[0].level, Level::Soft);
+        assert_eq!(set.confirmed[0].source_uid.as_deref(), Some("gcal-series:cs100"));
+        let create = journal_records(&v).into_iter()
+            .find(|r| r.get("op").and_then(|o| o.as_str()) == Some("create"))
+            .expect("a create record");
+        assert_eq!(create.get("actor").and_then(|a| a.as_str()), Some("quinn"));
+        assert_eq!(create.get("via").and_then(|a| a.as_str()), Some("dashboard"));
+        assert!(!v.join("approvals").exists(), "no card, so nothing is charged to the cap");
+    }
+
+    #[test]
+    fn an_unknown_or_stale_key_is_warned_and_skipped() {
+        let v = week_vault("stale");
+        let report = run(&v, &input(&[("gcal-series:gone", "hard")], &["gcal-series:never"], None));
+        assert_eq!((report.created, report.declined), (0, 0));
+        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with("gcal-series:gone: "), "{:?}", report.warnings);
+        assert!(report.warnings[1].starts_with("gcal-series:never: "), "{:?}", report.warnings);
+        assert!(files(&v, FOLDER).is_empty());
+    }
+
+    #[test]
+    fn a_level_outside_the_three_is_skipped_with_a_warning() {
+        let v = week_vault("badlevel");
+        let report = run(&v, &input(&[("gcal-series:cs100", "urgent")], &[], None));
+        assert_eq!(report.created, 0);
+        assert_eq!(report.warnings, ["gcal-series:cs100: level \"urgent\" is not hard, soft or optional; skipped"]);
+    }
+
+    #[test]
+    fn a_second_finish_is_a_no_op() {
+        let v = week_vault("twice");
+        let given = input(&[("gcal-series:cs100", "hard")], &["gcal-series:chess"], None);
+        let first = run(&v, &given);
+        assert_eq!((first.created, first.declined), (1, 1));
+        let before: Vec<String> = files(&v, FOLDER);
+        let records = journal_records(&v).len();
+        let second = run(&v, &given);
+        assert_eq!((second.created, second.declined), (0, 0));
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+        assert_eq!(files(&v, FOLDER), before);
+        assert_eq!(journal_records(&v).len(), records, "nothing journaled either");
+    }
+
+    #[test]
+    fn not_mine_declines_the_twin_group_together() {
+        let v = week_vault("twins");
+        // The same CS 100 seen through a direct ICS feed under its own key (an Outlook invite).
+        let mut series = vec![
+            mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+            mk("ics-series:cs100-outlook", "personal", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50)),
+        ];
+        series.push(mk("gcal-series:chess", "google:abc", "Chess Club", &["wed"], t(18, 0), t(19, 0)));
+        write_series(&v, series);
+        let report = run(&v, &input(&[], &["gcal-series:cs100"], None));
+        assert_eq!(report.declined, 2, "{report:?}");
+        let set = load(&v);
+        assert!(set.declined.contains("gcal-series:cs100") && set.declined.contains("ics-series:cs100-outlook"));
+        assert!(!set.declined.contains("gcal-series:chess"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q4 — the window (D4, D5, §3): the planning day, `--confirm`, the no-network pin.
+    // -----------------------------------------------------------------------------------------
+
+    const WEEKDAYS_8_22: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]";
+
+    #[test]
+    fn a_window_creates_the_planning_day_as_the_human() {
+        let v = week_vault("wincreate");
+        let report = run(&v, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        assert_eq!(report.window, Some("created"));
+        let set = load(&v);
+        let day = set.planning_day.expect("a planning-day note");
+        assert_eq!(day.path, PathBuf::from("commitments/planning-day.md"));
+        assert_eq!(set.window[0], Some((t(8, 0), t(22, 0))));
+        assert_eq!(set.window[5], None, "Saturday keeps the template");
+        let create = journal_records(&v).into_iter().find(|r| r.get("op").and_then(|o| o.as_str()) == Some("create")).unwrap();
+        assert_eq!(create.get("actor").and_then(|a| a.as_str()), Some("quinn"));
+    }
+
+    #[test]
+    fn a_window_edit_on_an_existing_note_changes_one_line() {
+        let v = week_vault("winedit");
+        run(&v, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        let path = v.join(FOLDER).join("planning-day.md");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let later = "[{days: [mon, tue, wed, thu, fri], start: \"07:30\", end: \"22:00\"}, {days: [sat, sun], start: \"10:00\", end: \"22:00\"}]";
+        let report = run(&v, &input(&[], &[], Some(later)));
+        assert_eq!(report.window, Some("updated"));
+        let after = std::fs::read_to_string(&path).unwrap();
+        let changed: Vec<(&str, &str)> = before.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert!(changed[0].1.starts_with("window: "), "{changed:?}");
+        assert_eq!(load(&v).window[5], Some((t(10, 0), t(22, 0))));
+        let set = journal_records(&v).into_iter().find(|r| r.get("op").and_then(|o| o.as_str()) == Some("set")).unwrap();
+        assert_eq!(set.get("field").and_then(|f| f.as_str()), Some("window"));
+        assert_eq!(set.get("actor").and_then(|a| a.as_str()), Some("quinn"), "a human edit journal.human_set protects");
+        assert_eq!(run(&v, &input(&[], &[], Some(later))).window, Some("unchanged"));
+    }
+
+    #[test]
+    fn an_invalid_window_writes_nothing_at_all() {
+        let v = week_vault("winbad");
+        let bad = "[{days: [mon], start: \"15:00\", end: \"14:00\"}]";
+        let got = confirm(&v, &input(&[("gcal-series:cs100", "hard")], &["gcal-series:chess"], Some(bad)), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(got.unwrap_err().contains("planning day mon"));
+        assert!(files(&v, FOLDER).is_empty(), "not even the rows");
+        assert!(journal_records(&v).is_empty());
+        let empty = confirm(&v, &input(&[], &[], Some("[]")), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(empty.is_err(), "a window naming no day is invalid (Q4-b)");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Q5 — `commitments::overview`: the Schedule view's read (D3, §4).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn overview_has_every_key_the_view_reads_and_seven_window_days() {
+        let v = week_vault("overview");
+        journal_on(&v, "2026-09-01");
+        run(&v, &input(&[("gcal-series:chess", "soft")], &[], None));
+        let o = overview(&v, TODAY);
+        assert!(o.setup, "day 1 (the earliest journal file is 2026-09-01) and no planning-day note");
+        let json = o.to_json();
+        for key in ["commitments", "office_hours", "window", "uncovered_courses", "setup", "warnings"] {
+            assert!(json.get(key).is_some(), "{key} missing: {json}");
+        }
+        let row = &json["commitments"][0];
+        assert_eq!(row["kind"], "club");
+        assert_eq!(row["level"], "soft");
+        assert_eq!(row["title"], "Chess Club");
+        assert_eq!(row["when"], "Wed 6–7pm");
+        assert_eq!(row["path"], "commitments/chess-club.md");
+        assert!(row["id"].as_str().unwrap().starts_with("cmt_"));
+        assert_eq!(json["office_hours"].as_array().unwrap().len(), 1);
+        assert_eq!(json["office_hours"][0]["kind"], "office-hours");
+        let window = json["window"].as_array().unwrap();
+        assert_eq!(window.len(), 7);
+        assert_eq!(window[0], serde_json::json!({"day": "mon", "start": "08:00", "end": "18:00", "source": "template"}));
+        assert_eq!(json["uncovered_courses"], serde_json::json!([]), "CS 100 has a class proposal");
+        let bytes = crate::ledger::dumps_value(&json);
+        assert!(bytes.contains("\"setup\": true"), "{bytes}");
+    }
+
+    #[test]
+    fn setup_is_true_only_on_the_first_day_with_no_planning_day() {
+        let v = week_vault("setup");
+        journal_on(&v, "2026-09-01");
+        assert!(overview(&v, TODAY).setup, "day 1, no planning-day note");
+        assert!(!overview(&v, date(2026, 9, 2)).setup, "day 2: the cards take over");
+        run(&v, &input(&[], &[], Some("[{days: [mon], start: \"07:00\", end: \"23:00\"}]")));
+        let o = overview(&v, TODAY);
+        assert!(!o.setup, "Finish wrote the planning day, so the screen never comes back");
+        assert_eq!(o.window[0], serde_json::json!({"day": "mon", "start": "07:00", "end": "23:00", "source": "note"}));
+        assert_eq!(o.window[1]["source"], "template");
+    }
+
+    fn file_asks(vault: &Path, today: Date, budget: i64) -> (Vec<PathBuf>, usize, Vec<String>) {
+        let ctx = WriteContext::new("agent:rank", "cli");
+        emit_asks(vault, &[], today, budget, &ctx, &mut Journal::new(vault))
+    }
+
+    fn front_of(path: &Path) -> Mapping {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        split_frontmatter(&raw).unwrap().0
+    }
+
+    #[test]
+    fn no_ask_before_the_vaults_third_day() {
+        let v = three_courses("day3");
+        journal_on(&v, "2026-08-31");
+        assert_eq!(file_asks(&v, TODAY, 15).1, 0, "2026-09-01 is day 2");
+        assert_eq!(file_asks(&v, date(2026, 9, 2), 15).1, 2, "day 3");
+    }
+
+    #[test]
+    fn at_most_two_a_day_in_slug_order_and_each_course_once() {
+        let v = three_courses("twoaday");
+        journal_on(&v, "2026-08-20");
+        let (paths, n, warnings) = file_asks(&v, TODAY, 15);
+        assert_eq!((n, warnings.len()), (2, 0), "{warnings:?}");
+        let courses: Vec<String> = paths.iter().map(|p| field_text(&front_of(p), "course").unwrap()).collect();
+        assert_eq!(courses, ["ant-101", "bui-100"]);
+        assert_eq!(file_asks(&v, TODAY, 15).1, 0, "two already filed today");
+        let (next, ..) = file_asks(&v, date(2026, 9, 2), 15);
+        assert_eq!(next.len(), 1);
+        assert_eq!(field_text(&front_of(&next[0]), "course").as_deref(), Some("cs-100"));
+        assert_eq!(file_asks(&v, date(2026, 9, 3), 15).1, 0, "every course asked once");
+    }
+
+    #[test]
+    fn the_budget_caps_the_asks() {
+        let v = three_courses("budget");
+        journal_on(&v, "2026-08-20");
+        assert_eq!(file_asks(&v, TODAY, 1).1, 1);
+        assert_eq!(file_asks(&v, date(2026, 9, 2), 0).1, 0);
+    }
+
+    #[test]
+    fn the_card_carries_its_kind_course_key_and_title() {
+        let v = three_courses("card");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        assert_eq!(paths[0], v.join("approvals").join("commitment-ask-when-does-ant-101-meet.md"));
+        let meta = front_of(&paths[0]);
+        let field = |k: &str| field_text(&meta, k).unwrap_or_default();
+        assert_eq!(field("type"), "approval");
+        assert_eq!(field("kind"), COMMITMENT_ASK);
+        assert_eq!(field("title"), "When does ANT 101 meet?");
+        assert_eq!(field("status"), "pending");
+        assert_eq!(field("source_uid"), "card:ant-101");
+        assert_eq!(field("course"), "ant-101");
+        assert_eq!(field("first_proposed_at"), "2026-09-01");
+        assert_eq!(field("created_by"), CARD_ACTOR);
+    }
+
+    #[test]
+    fn a_declined_or_answered_course_is_not_asked_but_a_withdrawn_one_is() {
+        let v = three_courses("closed");
+        journal_on(&v, "2026-08-20");
+        create_marker(&v, &ask_key("ant-101"), &WriteContext::new("agent:rank", "cli"), &mut Journal::new(&*v)).unwrap();
+        let archive = v.join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        for (name, course, status) in [("a.md", "bui-100", "rejected"), ("b.md", "cs-100", "superseded")] {
+            std::fs::write(
+                archive.join(name),
+                format!("---\ntype: approval\nkind: commitment-ask\nstatus: {status}\ncourse: {course}\nfirst_proposed_at: 2026-08-25\n---\n"),
+            )
+            .unwrap();
+        }
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let courses: Vec<String> = paths.iter().map(|p| field_text(&front_of(p), "course").unwrap()).collect();
+        assert_eq!(courses, ["cs-100"]);
+    }
+
+    #[test]
+    fn console_edits_reach_only_a_confirmed_commitment_and_only_known_values() {
+        let v = week_vault("edits");
+        run(&v, &input(&[("gcal-series:cs100", "hard")], &[], Some("[{days: [mon], start: \"08:00\", end: \"22:00\"}]")));
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntitle: Essay\n---\n").unwrap();
+        let word = |w: &str| serde_json::json!(w);
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "level", &word("soft")), Ok(()));
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "kind", &word("lab")), Ok(()));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "level", &word("urgent")).unwrap_err().contains("level"));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &word("planning-day")).is_err());
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &serde_json::json!(3)).is_err());
+        assert!(check_console_edit(&v, "tasks/essay.md", "kind", &word("class")).unwrap_err().contains("commitment"));
+        assert!(check_console_edit(&v, "commitments/planning-day.md", "level", &word("hard")).is_err());
+    }
+
+    #[test]
+    fn only_a_pending_ask_card_is_answerable() {
+        let v = three_courses("answerable");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()));
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntitle: Essay\n---\n").unwrap();
+        assert!(check_answerable(&v, "tasks/essay.md", TODAY).unwrap_err().contains("not a pending commitment-ask card"));
+    }
+
+    /// Final review M1: a snoozed ask whose `snooze_until` has come is shown as pending (surface
+    /// wakes it in memory), so it takes an answer; one still asleep does not.
+    #[test]
+    fn a_snoozed_ask_that_woke_is_answerable() {
+        let v = three_courses("woke");
+        journal_on(&v, "2026-08-20");
+        let (paths, ..) = file_asks(&v, TODAY, 15);
+        let rel = format!("approvals/{}", paths[0].file_name().unwrap().to_string_lossy());
+        let text = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(text.contains("status: pending") && text.contains("snooze_until: null"));
+        let snooze = |until: &str| {
+            let t = text.replace("status: pending", "status: snoozed").replace("snooze_until: null", &format!("snooze_until: {until}"));
+            std::fs::write(&paths[0], t).unwrap();
+        };
+        snooze(&TODAY.to_string());
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()), "woke today");
+        snooze(&TODAY.yesterday().unwrap().to_string());
+        assert_eq!(check_answerable(&v, &rel, TODAY), Ok(()), "woke yesterday");
+        snooze(&TODAY.tomorrow().unwrap().to_string());
+        assert!(check_answerable(&v, &rel, TODAY).is_err(), "still asleep");
+    }
+
+    /// Review M1: a `..` path that starts with `commitments/` but lands on a confirmed task is
+    /// refused: the note itself must be `type: commitment`.
+    #[test]
+    fn a_dotted_path_out_of_commitments_is_refused() {
+        let v = week_vault("dotted");
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntype: task\ntitle: Essay\nstatus: confirmed\n---\n").unwrap();
+        let err = check_console_edit(&v, "commitments/../tasks/essay.md", "kind", &serde_json::json!("class")).unwrap_err();
+        assert!(err.contains("commitment"), "{err}");
+    }
+
+    /// Review I1: the answer is validated as §2.2 validates `meets` and comes back as the one
+    /// canonical single-line flow sequence the engine writes; anything else is refused.
+    #[test]
+    fn answer_literal_canonicalises_a_valid_answer_and_refuses_the_rest() {
+        let j = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        assert_eq!(
+            answer_literal(&j(r#"[{"days": ["wed", "mon"], "start": "9:00", "end": "10:15"}]"#)),
+            Ok("[{days: [wed, mon], end: '10:15', start: '09:00'}]".to_string())
+        );
+        for bad in [
+            r#"[{"days": ["mon\nx"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00\n", "end": "15:00"}]"#,
+            r#"[{"days": ["mon---x"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "---14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00", "end": "15:00", "room": "B1"}]"#,
+            r#"[{"days": ["someday"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#,
+            r#"[{"days": ["mon"], "start": 14, "end": "15:00"}]"#,
+            r#"[{"days": "mon", "start": "14:00", "end": "15:00"}]"#,
+            r#"{"days": ["mon"], "start": "14:00", "end": "15:00"}"#,
+            r#"[]"#,
+        ] {
+            assert!(answer_literal(&j(bad)).is_err(), "{bad} should be refused");
+        }
+        let why = answer_literal(&j(r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#)).unwrap_err();
+        assert!(why.starts_with("answer_meets entry mon"), "{why}");
+    }
+
+    // --- the controller's ruling on screen-confirmed notes: `create` is not an edit ----------
+
+    /// A vault whose one series is CS 100, Mon/Wed/Fri 12–12:50pm in Room 101 until Dec 4,
+    /// confirmed on the screen (`commitments --confirm`, as `quinn` via `dashboard`) — the create
+    /// record's `new` then carries `meets`, `where` and `until`.
+    fn screen_confirmed(name: &str) -> (Scratch, Series) {
+        let v = scratch(name);
+        course(&v, "cs-100", "title: \"CS 100\"
+slug: cs-100
+code: \"CS 100\"
+status: active
+");
+        let mut s = mk("gcal-series:cs100", "google:abc", "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50));
+        s.where_ = Some("Room 101".into());
+        s.until = Some(date(2026, 12, 4));
+        write_series(&v, vec![s.clone()]);
+        let report = run(&v, &input(&[("gcal-series:cs100", "hard")], &[], None));
+        assert_eq!(report.created, 1, "{:?}", report.warnings);
+        (v, s)
+    }
+
+    fn detect_in(vault: &Path, file: &SeriesFile) -> Vec<Change> {
+        let set = load(vault);
+        assert_eq!(set.confirmed.len(), 1);
+        let (codes, _) = Codes::load(vault);
+        let fresh: BTreeSet<String> = file.calendars.keys().cloned().collect();
+        let (changes, _) = detect_changes(file, &set, &codes, &[], &fresh, TODAY, &mut Journal::new(vault));
+        changes
+    }
+
+    fn file_with(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        file.calendars.insert("google:abc".into(), TODAY);
+        file.series = series;
+        file
+    }
+
+    #[test]
+    fn a_screen_confirmed_note_still_gets_a_change_card_when_its_series_moves() {
+        let (v, mut s) = screen_confirmed("confirmed-moves");
+        s.meets = vec![Meet { days: vec!["tue".into(), "thu".into()], start: t(9, 30), end: t(10, 45) }];
+        let changes = detect_in(&v, &file_with(vec![s]));
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            crate::yaml::to_json(&Value::Mapping(changes[0].change.clone())),
+            serde_json::json!({"meets": [{"days": ["tue", "thu"], "start": "09:30", "end": "10:45"}]})
+        );
+    }
+
+    #[test]
+    fn a_screen_confirmed_note_still_gets_an_end_card_when_its_series_is_gone() {
+        let (v, _) = screen_confirmed("confirmed-ends");
+        let mut file = file_with(Vec::new());
+        let gone = Ended {
+            calendar: "google:abc".into(),
+            dropped: TODAY,
+            last_instance: Some(date(2026, 9, 18)),
+            until: Some(date(2026, 12, 4)),
+        };
+        file.ended.insert("gcal-series:cs100".into(), gone);
+        let changes = detect_in(&v, &file);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            crate::yaml::to_json(&Value::Mapping(changes[0].change.clone())),
+            serde_json::json!({"until": "2026-09-18"})
+        );
+    }
+
+    #[test]
+    fn a_meets_the_student_later_set_is_not_proposed_back() {
+        let (v, mut s) = screen_confirmed("confirmed-edited");
+        let literals = vec![("meets".to_string(), "[{days: [mon, wed], end: '12:50', start: '12:00'}]".to_string())];
+        crate::write::write_literals(&v, "commitments/cs-100.md", &literals, &human(), &mut Journal::new(v.as_path()), &crate::write::WriteOpts::default())
+            .unwrap();
+        s.meets = vec![Meet { days: vec!["tue".into(), "thu".into()], start: t(9, 30), end: t(10, 45) }];
+        assert!(detect_in(&v, &file_with(vec![s])).is_empty());
     }
 }
