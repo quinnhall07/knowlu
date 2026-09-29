@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { NOTE_PATH_RE } from "./functions/_shared/sync_rows.ts";
 
 const DIR = new URL("./migrations/", import.meta.url);
 
@@ -169,6 +170,62 @@ Deno.test("the account purge names every table C3′ leaves, and no table it dro
   // The quoted NAME, not the word: the comment above the list is allowed to say where
   // `sync_generation` went (hand-off H1 does), and only a string literal in the list is a purge.
   assert(!purge.includes('"sync_generation"'), "sync_generation is gone; purging it is a 404 every time");
+});
+
+/** Grades spec §7: the migration that widens `sync_notes_path_check` to `grades/` (and to
+ * `commitments/`, which the commitment model's branch adds on its own). */
+const GRADES_PATH_CHECK = "20260929000100_sync_note_path_check_grades.sql";
+
+/** The LIVE note-path check: every migration in this lineage drops and re-adds
+ * `sync_notes_path_check`, and migrations apply in name order, so the lexically latest
+ * `*sync_note_path_check*.sql` is the one Postgres enforces — the same file the engine's
+ * `is_note_path_and_the_servers_regex_agree` reads. Found by that name across every day, because a
+ * later stream widens it; nothing outside the lineage is read (R-X-8). */
+async function latestPathCheck(): Promise<{ name: string; sql: string }> {
+  const names: string[] = [];
+  for await (const e of Deno.readDir(DIR)) {
+    if (e.isFile && e.name.includes("sync_note_path_check") && e.name.endsWith(".sql")) names.push(e.name);
+  }
+  names.sort();
+  const name = names.at(-1);
+  assert(name, "expected at least one *sync_note_path_check*.sql");
+  return { name: name!, sql: await Deno.readTextFile(new URL(name!, DIR)) };
+}
+
+Deno.test("the live note-path check is the grades migration, and its folder group is NOTE_PATH_RE's exactly", async () => {
+  const { name, sql } = await latestPathCheck();
+  assertEquals(name, GRADES_PATH_CHECK);
+  const code = sql
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("--");
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join("\n");
+  assert(code.includes("drop constraint sync_notes_path_check,"), "it replaces the one constraint, in place");
+  assert(code.includes("add constraint sync_notes_path_check check ("), "and re-declares it under the same name");
+
+  const literals = regexLiteralsIn(sql);
+  const folderChecks = literals.filter((l) => l.startsWith("^("));
+  assertEquals(folderChecks.length, 1, `exactly one folder-group regex in ${name}: ${JSON.stringify(literals)}`);
+  const group = folderChecks[0].slice(2, folderChecks[0].indexOf(")"));
+  const serverGroup = NOTE_PATH_RE.source.slice(2, NOTE_PATH_RE.source.indexOf(")"));
+  // Every folder, in `ids::NOTE_FOLDERS` order as it reads once the commitment model's branch has
+  // merged too: `commitments` sits before `grades` (grades spec §7).
+  assertEquals(group, "tasks|approvals|archive|courses|issues|info|commitments|grades");
+  assertEquals(group, serverGroup, "the column check and NOTE_PATH_RE carry the same folders, in the same order");
+
+  // 000400's shape, unchanged but for the group: the unbounded class (Postgres caps a bound
+  // repetition count at 255) and the same separate length check, never a bound over DUPMAX.
+  assertEquals(folderChecks[0], `^(${group})/[A-Za-z0-9._ /-]+\\.md$`);
+  for (const literal of literals) {
+    assertEquals(maxBoundOver255(literal), undefined, `${name}: ${JSON.stringify(literal)} has a bound over 255`);
+  }
+  const prior = (await migrations()).find((m) => m.name === "20260912000400_sync_note_path_check.sql");
+  assert(prior, "expected 20260912000400_sync_note_path_check.sql to still exist");
+  const lengthCheck = prior!.sql.split("\n").find((line) => line.includes("char_length("))?.trim();
+  assert(lengthCheck, "000400 carries a char_length check");
+  assert(code.includes(lengthCheck!), `${name} keeps 000400's length check: ${lengthCheck}`);
 });
 
 /** Every single-quoted string literal that follows a regex operator (`~`, `!~`, `~*`, `!~*`) or

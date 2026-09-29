@@ -385,20 +385,70 @@ fn a_push_over_the_byte_budget_is_split_across_two_build_push_calls_and_nothing_
 // R-C3′-exec-8/11: the device applies the server's exact path rule.
 // ---------------------------------------------------------------------------
 
+/// `sql` with every `--` comment removed, so a migration header that quotes an older folder group
+/// is never read as the live one.
+fn sql_code(sql: &str) -> String {
+    sql.lines().map(|line| line.split("--").next().unwrap_or_default()).collect::<Vec<_>>().join("\n")
+}
+
+/// The `|`-separated names inside the parenthesised group that opens right after `anchor`, which
+/// must occur exactly once in `code`.
+fn group_after(code: &str, anchor: &str, what: &str) -> Vec<String> {
+    assert_eq!(code.matches(anchor).count(), 1, "{what}: expected exactly one `{anchor}`");
+    let start = code.find(anchor).expect("counted above") + anchor.len();
+    let len = code[start..].find(')').unwrap_or_else(|| panic!("{what}: the folder group never closes"));
+    code[start..start + len].split('|').map(str::to_string).collect()
+}
+
+/// The lexically latest `*sync_note_path_check*.sql`: migrations are forward-only and applied in
+/// name order, so the last one to drop and re-add `sync_notes_path_check` is the live column check.
+fn latest_path_check(migrations: &Path) -> (String, String) {
+    let mut names: Vec<String> = std::fs::read_dir(migrations)
+        .expect("cloud/supabase/migrations")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("sync_note_path_check") && n.ends_with(".sql"))
+        .collect();
+    names.sort();
+    let name = names.pop().expect("at least one *sync_note_path_check*.sql");
+    let sql = std::fs::read_to_string(migrations.join(&name)).expect("the latest path check");
+    (name, sql)
+}
+
 #[test]
 fn is_note_path_and_the_servers_regex_agree() {
     // The rule lives in three places by necessity — Rust, TypeScript and a column check — so it is
-    // pinned from one side rather than trusted three times. The TS source is read, not imported.
-    let ts = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase")
-            .join("functions").join("_shared").join("sync_rows.ts"),
-    ).expect("sync_rows.ts");
-    assert!(ts.contains("(tasks|approvals|archive|courses|issues|info)"), "the server's folder list is the engine's");
+    // pinned from one side rather than trusted three times. The TS source and the SQL are read, not
+    // imported or applied.
+    //
+    // Grades spec §7: the folder list is derived from `NOTE_FOLDERS`, never a literal, so a folder
+    // the engine gains and the server lacks fails here — against `NOTE_PATH_RE` AND against the live
+    // column check (the latest migration that re-declares it). A SUBSET, not equality: the server may
+    // already name a folder this branch does not write yet (`commitments`, which the commitment
+    // model's branch adds), so the server is right whichever of the two merges first. That the
+    // server's two sides carry the same group is `migrations_sync_test.ts`'s to pin.
+    let supabase = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase");
+    let ts = std::fs::read_to_string(supabase.join("functions").join("_shared").join("sync_rows.ts"))
+        .expect("sync_rows.ts");
+    let ts_group = group_after(&ts, "export const NOTE_PATH_RE = /^(", "sync_rows.ts");
+    let (check_name, check_sql) = latest_path_check(&supabase.join("migrations"));
+    let sql_group = group_after(&sql_code(&check_sql), "path ~ '^(", &check_name);
+    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+        assert!(ts_group.iter().any(|f| f == folder), "sync_rows.ts's NOTE_PATH_RE lacks {folder}: {ts_group:?}");
+        assert!(sql_group.iter().any(|f| f == folder), "{check_name}'s path check lacks {folder}: {sql_group:?}");
+    }
     assert!(ts.contains("[A-Za-z0-9._ /-]{1,300}"), "the server's character class and length are the engine's");
     let vault = std::env::temp_dir();
-    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md"] { assert!(sync::is_note_path(&vault, ok), "{ok}"); }
+    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+        let ok = format!("{folder}/x.md");
+        assert!(sync::is_note_path(&vault, &ok), "{ok}");
+    }
+    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "grades/a.md"] {
+        assert!(sync::is_note_path(&vault, ok), "{ok}");
+    }
     for bad in ["state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../x.md", "tasks//x.md",
-                "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks", ""] {
+                "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks", "", "grades/../tasks/a.md", "grade/a.md",
+                "state/grades.json"] {
         assert!(!sync::is_note_path(&vault, bad), "{bad}");
     }
     // The middle's own length bound: 300 characters accepted, 301 refused.
@@ -749,7 +799,7 @@ fn a_pulled_record_that_is_not_a_record_never_reaches_the_ledger() {
 #[test]
 fn a_pulled_note_for_a_path_this_device_has_never_seen_arrives_whole() {
     // The second-desktop case: a note created on the other machine has no local file to reconcile
-    // against, so its text is written as it stands — and a path outside the six folders is refused
+    // against, so its text is written as it stands — and a path outside the note folders is refused
     // before anything is written.
     let dir = fixture("newnote");
     let mut journal = Journal::new(&dir);

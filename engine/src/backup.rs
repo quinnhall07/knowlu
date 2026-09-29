@@ -17,9 +17,10 @@ use crate::ids;
 /// cannot drift out of sync by hand; `note_folders_is_a_subset_of_backup_folders` below still
 /// checks it at runtime in case a future edit to either array quietly breaks the derivation's
 /// assumptions (e.g. reordering one without the other).
-pub const BACKUP_FOLDERS: [&str; 9] = [
+pub const BACKUP_FOLDERS: [&str; 10] = [
     ids::NOTE_FOLDERS[0], ids::NOTE_FOLDERS[1], ids::NOTE_FOLDERS[2],
     ids::NOTE_FOLDERS[3], ids::NOTE_FOLDERS[4], ids::NOTE_FOLDERS[5],
+    ids::NOTE_FOLDERS[6],
     "state", "config", "profile",
 ];
 pub const SNAPSHOTS_KEPT: usize = 30;
@@ -288,6 +289,18 @@ mod tests {
         for f in crate::ids::NOTE_FOLDERS {
             assert!(BACKUP_FOLDERS.contains(&f), "{f} (from ids::NOTE_FOLDERS) missing from BACKUP_FOLDERS");
         }
+    }
+
+    #[test]
+    fn backup_folders_is_every_note_folder_in_order_then_the_three_it_also_owns() {
+        // Grades spec §7: `grades/` is backed up like every other note folder. Stated against
+        // `NOTE_FOLDERS` itself rather than a count, so the array's length and order are pinned
+        // whichever folder is added next.
+        let n = crate::ids::NOTE_FOLDERS.len();
+        assert_eq!(BACKUP_FOLDERS.len(), n + 3, "{BACKUP_FOLDERS:?}");
+        assert_eq!(BACKUP_FOLDERS[..n], crate::ids::NOTE_FOLDERS[..], "{BACKUP_FOLDERS:?}");
+        assert_eq!(BACKUP_FOLDERS[n..], ["state", "config", "profile"], "{BACKUP_FOLDERS:?}");
+        assert!(BACKUP_FOLDERS.contains(&"grades"), "{BACKUP_FOLDERS:?}");
     }
 
     #[test]

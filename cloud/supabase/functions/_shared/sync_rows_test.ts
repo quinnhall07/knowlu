@@ -46,7 +46,7 @@ Deno.test("a record body carrying a null byte is a named 400, not a 502 from the
   assertEquals(e.status, 400);
 });
 
-Deno.test("a note path is one of the six folders, markdown, and cannot climb out", () => {
+Deno.test("a note path is one of the note folders, markdown, and cannot climb out", () => {
   for (const ok of ["tasks/x.md", "courses/cs-100.md", "archive/a-b.md", "info/x.md", "issues/i.md", "approvals/amend-1.md"]) {
     assert(isNotePath(ok), ok);
   }
@@ -54,6 +54,18 @@ Deno.test("a note path is one of the six folders, markdown, and cannot climb out
     "state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../etc/hosts", "../tasks/x.md",
     "tasks//x.md", "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks/", "", "TASKS/x.md",
   ]) {
+    assert(!isNotePath(bad), `${bad} was accepted`);
+  }
+});
+
+Deno.test("a grade note and a commitment note are note paths; state/grades.json is not (grades spec §7)", () => {
+  // `grades/` is the engine's newest note folder. `commitments/` is accepted too, on purpose: the
+  // commitment model's branch adds that folder on its own, and a path the server refuses wedges
+  // every push (the batch is all-or-nothing), so the server takes both whichever branch merges first.
+  for (const ok of ["grades/x.md", "grades/cs-100-hw-01.md", "commitments/x.md"]) {
+    assert(isNotePath(ok), ok);
+  }
+  for (const bad of ["state/grades.json", "grades/x.json", "grades/", "grade/x.md", "grades/../tasks/a.md", "GRADES/x.md"]) {
     assert(!isNotePath(bad), `${bad} was accepted`);
   }
 });
@@ -110,9 +122,17 @@ Deno.test("the byte bounds and the note path's character class match the migrati
   assert(plaintextSql.includes(`between 2 and ${MAX_RECORD_BYTES})`), "sync_records.body's octet_length bound");
   assert(plaintextSql.includes(`between 1 and ${MAX_NOTE_BYTES})`), "sync_notes.body's octet_length bound");
 
-  const pathCheckSql = await Deno.readTextFile(
-    new URL("../../migrations/20260912000400_sync_note_path_check.sql", import.meta.url),
-  );
+  // The LIVE path check, not 000400 by name (grades spec §7): each migration that widens the folder
+  // group drops and re-adds `sync_notes_path_check`, and migrations apply in name order, so the
+  // lexically latest `*sync_note_path_check*.sql` is the one Postgres enforces.
+  const migrationsDir = new URL("../../migrations/", import.meta.url);
+  const pathChecks: string[] = [];
+  for await (const e of Deno.readDir(migrationsDir)) {
+    if (e.isFile && e.name.includes("sync_note_path_check") && e.name.endsWith(".sql")) pathChecks.push(e.name);
+  }
+  pathChecks.sort();
+  assert(pathChecks.length > 0, "expected at least one *sync_note_path_check*.sql");
+  const pathCheckSql = await Deno.readTextFile(new URL(pathChecks.at(-1)!, migrationsDir));
   // The character class alone — the SQL's version is unbounded (`+`), since Postgres cannot express
   // a bound over 255, where the device's regex still bounds it ({1,300}); only the class itself is
   // shared text between the two, so it is derived from the constant rather than retyped.

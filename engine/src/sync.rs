@@ -351,7 +351,8 @@ pub fn load_status(vault: &Path) -> SyncStatus {
 /// other two sides of the wire, and `is_note_path_and_the_servers_regex_agree` pins them together.
 ///
 /// **The name itself is bounded too** (R-C3′-exec-8/11): the server's regex is
-/// `^(tasks|approvals|archive|courses|issues|info)\/[A-Za-z0-9._ /-]{1,300}\.md$`, so the part after
+/// `^(tasks|approvals|archive|courses|issues|info|commitments|grades)\/[A-Za-z0-9._ /-]{1,300}\.md$`
+/// (its group may name a folder `NOTE_FOLDERS` does not have yet, never the reverse), so the part after
 /// `<folder>/` and before the final `.md` must be 1–300 characters, each one of
 /// `A-Z a-z 0-9 . _ space / -`. Checked with plain character comparisons rather than a new `regex`
 /// call — the crate already depends on `regex` for `ids.rs`, but this rule is small enough that a
@@ -381,7 +382,7 @@ pub fn is_note_path(vault: &Path, rel: &str) -> bool {
 /// Every note in the vault, vault-relative and POSIX-separated, sorted.
 ///
 /// **Flat, like every other pass in this engine.** `ids::scan_notes` and `backup::BACKUP_FOLDERS`
-/// treat the six folders as flat and nothing in this product has ever produced a nested note;
+/// treat the note folders as flat and nothing in this product has ever produced a nested note;
 /// `is_note_path` accepts any depth because a *pulled* path must be checked whatever it is, but
 /// making this side recursive alone would push a file nothing else in the engine can see. Deferred,
 /// and recorded in *Deferred minors*.
