@@ -652,6 +652,53 @@ fn a_null_status_is_refused_and_the_note_is_untouched() {
     assert_eq!(set_fields_inner(&cs, "today", &id, ok).unwrap()["ok"], true);
 }
 
+/// The note behind `first_id`, read through the engine's one note reader — `None` if it cannot be.
+fn fixture_title_and_status(v: &Path) -> Option<(String, String)> {
+    let text = knowlu_engine::pystr::read_text(&v.join("tasks/ph-106-exam-1-prep.md")).ok()?;
+    let (meta, _) = knowlu_engine::models::split_frontmatter(&text).ok()?;
+    let get = |k: &str| knowlu_engine::yaml::get(&meta, k).and_then(knowlu_engine::yaml::text);
+    Some((get("title")?, get("status")?))
+}
+
+/// A reviewer's probe: `title: "a---b"` broke the note — it wrote once and then neither read nor
+/// took a second edit. A title with dashes is legitimate text and must round-trip; a line break
+/// that would reach the note raw is refused by name with nothing written.
+#[test]
+fn a_title_with_dashes_or_a_line_break_never_breaks_the_note() {
+    // `to_literal` escapes `\n`; it leaves U+2028 raw, and a note reads that back intact.
+    for (n, title) in ["a---b", "--- x", "line one\nline two", "pasted\u{2028}from a PDF"].into_iter().enumerate() {
+        let v = scratch(&format!("dashes{n}"));
+        let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-dashes{n}-data-{}", std::process::id())));
+        let id = first_id(&cs);
+        let mut f = serde_json::Map::new(); f.insert("title".into(), json!(title));
+        let env = set_fields_inner(&cs, "today", &id, f).unwrap();
+        assert_eq!(env["ok"], true, "{title:?}: {env}");
+        assert_eq!(fixture_title_and_status(&v), Some((title.to_string(), "active".to_string())), "{title:?}");
+        assert_eq!(note_inner(&cs, &id).unwrap()["ok"], true, "{title:?}: the note must still be found");
+        // The second edit is the one the probe broke.
+        let mut again = serde_json::Map::new(); again.insert("status".into(), json!("done"));
+        let env = set_fields_inner(&cs, "today", &id, again).unwrap();
+        assert_eq!(env["ok"], true, "{title:?}: second edit: {env}");
+        assert_eq!(fixture_title_and_status(&v), Some((title.to_string(), "done".to_string())), "{title:?}");
+    }
+    // A raw `\n` or `\r` in a verbatim field (passed through as the literal) is refused.
+    for (n, (field, value)) in [("due", "2026-10-01\n---"), ("due", "2026-10-01\r2026-10-02")].into_iter().enumerate() {
+        let v = scratch(&format!("breaks{n}"));
+        let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-breaks{n}-data-{}", std::process::id())));
+        let id = first_id(&cs);
+        let before = std::fs::read(v.join("tasks/ph-106-exam-1-prep.md")).unwrap();
+        let records = journal_records(&v).len();
+        let mut f = serde_json::Map::new(); f.insert(field.into(), json!(value));
+        let env = set_fields_inner(&cs, "today", &id, f).unwrap();
+        assert_eq!(env["ok"], false, "{value:?}: {env}");
+        assert!(env["error"].as_str().unwrap().contains("line break"), "{value:?}: {env}");
+        assert_eq!(before, std::fs::read(v.join("tasks/ph-106-exam-1-prep.md")).unwrap(), "{value:?}");
+        assert_eq!(journal_records(&v).len(), records, "{value:?}: no journal record");
+        let mut ok = serde_json::Map::new(); ok.insert("status".into(), json!("done"));
+        assert_eq!(set_fields_inner(&cs, "today", &id, ok).unwrap()["ok"], true, "{value:?}");
+    }
+}
+
 /// Plan 4a Task 7: the settings panel's one write. `set_profile_name_in` is the testable core —
 /// which registry, which vault, which name — so the rename is exercised without an `AppHandle`.
 #[test]

@@ -33,6 +33,9 @@ use crate::pystr;
 pub enum WriteError {
     NoFrontmatter(String),
     AppendLine(&'static str),
+    /// A frontmatter literal carrying a line break, named by its field. Refused before anything is
+    /// journalled or written: surgery replaces one line, so a second line would be orphaned.
+    LineBreak(String),
     Exists(String),
     Id(IdError),
     Ingest(IngestError),
@@ -45,6 +48,9 @@ impl std::fmt::Display for WriteError {
         match self {
             WriteError::NoFrontmatter(p) => write!(f, "{p} has no readable frontmatter"),
             WriteError::AppendLine(why) => write!(f, "append line {why}"),
+            WriteError::LineBreak(field) => {
+                write!(f, "{field}: a frontmatter value must not contain a line break")
+            }
             WriteError::Exists(p) => write!(f, "{p} exists"),
             WriteError::Id(e) => write!(f, "{e}"),
             WriteError::Ingest(e) => write!(f, "{e}"),
@@ -230,6 +236,14 @@ pub fn write_literals(
     journal: &mut Journal,
     opts: &WriteOpts<'_>,
 ) -> Result<WriteResult, WriteError> {
+    // Every literal is one line, or nothing is written: surgery replaces exactly one line, so a
+    // literal carrying a break would orphan its tail (and a tail of `---` would close the block).
+    // Only `\n` and `\r` count: surgery splits on `\n` and `read_text` maps `\r` to `\n`. U+2028,
+    // U+2029 and U+0085 are not breaks to anything that re-reads a note, so they are written
+    // (refusing them would fail a whole coursework or enrich batch on an upstream title).
+    if let Some((name, _)) = literals.iter().find(|(_, l)| l.contains(['\n', '\r'])) {
+        return Err(WriteError::LineBreak(name.clone()));
+    }
     let path = resolve_target(vault, target)?;
     let rel_path = rel(vault, &path);
     let (_, meta) = load(&path, true)?;
@@ -972,6 +986,83 @@ mod tests {
         // never matched itself on re-read and was appended again on every pass.
         assert_eq!(single_line_problem("a\u{2028}b"), Some("must be a single line"));
         assert_eq!(single_line_problem("  --- x"), Some("must not start a frontmatter block"));
+    }
+
+    // -- dashes and line breaks in a literal --------------------------------
+
+    #[test]
+    fn a_title_carrying_dashes_is_quoted_and_the_note_survives_a_second_edit() {
+        // `a---b` and `--- x` are legitimate titles. Quoted, each is one line that is not a
+        // delimiter line, so the note must still read in full and take a later edit.
+        for title in ["a---b", "--- x", "x ---", "---"] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            assert_eq!(literal.lines().count(), 1, "{title:?}");
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal)]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("active"), "{title:?}");
+            assert_eq!(get_str(&meta, "id").as_deref(), Some("task_0123456789"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+
+            // The second edit is what the reviewer's probe broke.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+            let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+        }
+    }
+
+    #[test]
+    fn a_literal_carrying_a_line_break_is_refused_and_nothing_is_written() {
+        for raw in ["a\nb", "a\rb", "a\r\nb", "\"a\n---\nb\"", "\"a\rb\""] {
+            let v = vault();
+            let path = seed(&v);
+            let before = std::fs::read(&path).unwrap();
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done"), ("title", raw)]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{raw:?} must be refused"));
+            assert!(err.to_string().contains("title"), "{raw:?}: {err}");
+            assert!(err.to_string().contains("line break"), "{raw:?}: {err}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{raw:?}: the note must be untouched");
+            assert!(j.read(None, None).is_empty(), "{raw:?}: no journal record for a refused write");
+        }
+    }
+
+    #[test]
+    fn an_invisible_separator_is_not_a_line_break_to_the_note_and_is_written() {
+        // Surgery splits on `\n` and `read_text` maps `\r` to `\n`; nothing that re-reads a note
+        // breaks on U+2028/U+2029/U+0085. Refusing them would fail a whole coursework or enrich
+        // batch on every run for as long as an upstream title (pasted from a PDF) carries one.
+        for (title, reads_back) in [
+            ("a\u{2028}b", "a\u{2028}b"),
+            ("a\u{2029}b", "a\u{2029}b"),
+            // NEL is folded to a space by the YAML reader — lossy, pre-existing, not a break.
+            ("a\u{85}b", "a b"),
+        ] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal), ("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(reads_back), "{title:?}");
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+            assert_eq!(j.read(None, None).len(), 2, "{title:?}");
+            // ...and the note still takes a second edit.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "active")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+        }
     }
 
     // -- the ordering invariant --------------------------------------------
