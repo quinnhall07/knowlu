@@ -639,11 +639,22 @@ pub fn route_zybook(code: &str, courses: &Mapping, ignore: &[String]) -> BookRou
     }
 }
 
-#[cfg(windows)]
 pub fn fetch_zybooks(
     cfg: &Mapping,
     tz: &TimeZone,
     warnings: &mut Vec<String>,
+) -> Result<Vec<Assignment>, SourceError> {
+    fetch_zybooks_into(cfg, tz, warnings, &CompletionSink::default())
+}
+
+/// [`fetch_zybooks`], also reporting each mapped book's completion figures into `sink`
+/// (stream J T8) — read from the payload this fetch already holds.
+#[cfg(windows)]
+pub fn fetch_zybooks_into(
+    cfg: &Mapping,
+    tz: &TimeZone,
+    warnings: &mut Vec<String>,
+    sink: &CompletionSink,
 ) -> Result<Vec<Assignment>, SourceError> {
     let credential = crate::wincred::read_credential(&cfg_str(cfg, "credential_target", ""))
         .map_err(|err| SourceError::Failed(format!("{err}")))?;
@@ -674,23 +685,51 @@ pub fn fetch_zybooks(
             }
         };
         let payload = crate::zybooks::fetch_assignments(&token, &code, None)?;
-        out.extend(crate::zybooks::parse_assignments(
-            &payload,
-            &cfg_str(&mapping, "course", ""),
-            &cfg_str(&mapping, "label", ""),
-            cfg,
-            tz,
-            warnings,
-        )?);
+        out.extend(absorb_zybooks_book(&payload, &mapping, cfg, tz, warnings, sink)?);
     }
     Ok(out)
 }
 
-#[cfg(windows)]
+/// One fetched zyBooks book: its assignments, and — only once they parsed — its completion figures
+/// into `sink`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn absorb_zybooks_book(
+    payload: &serde_json::Value,
+    mapping: &Mapping,
+    cfg: &Mapping,
+    tz: &TimeZone,
+    warnings: &mut Vec<String>,
+    sink: &CompletionSink,
+) -> Result<Vec<Assignment>, SourceError> {
+    let items = crate::zybooks::parse_assignments(
+        payload,
+        &cfg_str(mapping, "course", ""),
+        &cfg_str(mapping, "label", ""),
+        cfg,
+        tz,
+        warnings,
+    )?;
+    // Only AFTER the payload parsed (final review item 7), as the VHL wrapper already does:
+    // `completions` is lenient, so a payload the parser rejects could otherwise still file cards.
+    sink.borrow_mut().extend(crate::zybooks::completions(payload));
+    Ok(items)
+}
+
 pub fn fetch_vhl(
     cfg: &Mapping,
     tz: &TimeZone,
     warnings: &mut Vec<String>,
+) -> Result<Vec<Assignment>, SourceError> {
+    fetch_vhl_into(cfg, tz, warnings, &CompletionSink::default())
+}
+
+/// [`fetch_vhl`], also reporting every bucket's completion figure into `sink` (stream J T8).
+#[cfg(windows)]
+pub fn fetch_vhl_into(
+    cfg: &Mapping,
+    tz: &TimeZone,
+    warnings: &mut Vec<String>,
+    sink: &CompletionSink,
 ) -> Result<Vec<Assignment>, SourceError> {
     let credential = crate::wincred::read_credential(&cfg_str(cfg, "credential_target", ""))
         .map_err(|err| SourceError::Failed(format!("{err}")))?;
@@ -701,17 +740,20 @@ pub fn fetch_vhl(
         &base,
         None,
     )?;
-    crate::vhl::parse_dashboard(&html, cfg, tz, warnings)
+    let items = crate::vhl::parse_dashboard(&html, cfg, tz, warnings)?;
+    sink.borrow_mut().extend(crate::vhl::completions(&html));
+    Ok(items)
 }
 
 /// The credential store is Windows-only (spec §6.5), so the live fetchers are too. A cloud build
 /// still compiles; it simply has no way to authenticate, and says so rather than pretending the
 /// semester is empty.
 #[cfg(not(windows))]
-pub fn fetch_zybooks(
+pub fn fetch_zybooks_into(
     _cfg: &Mapping,
     _tz: &TimeZone,
     _warnings: &mut Vec<String>,
+    _sink: &CompletionSink,
 ) -> Result<Vec<Assignment>, SourceError> {
     Err(SourceError::Failed(
         "credential store unavailable on this platform".to_string(),
@@ -719,10 +761,11 @@ pub fn fetch_zybooks(
 }
 
 #[cfg(not(windows))]
-pub fn fetch_vhl(
+pub fn fetch_vhl_into(
     _cfg: &Mapping,
     _tz: &TimeZone,
     _warnings: &mut Vec<String>,
+    _sink: &CompletionSink,
 ) -> Result<Vec<Assignment>, SourceError> {
     Err(SourceError::Failed(
         "credential store unavailable on this platform".to_string(),
@@ -810,6 +853,31 @@ pub fn assignment_from_row(row: &serde_json::Value) -> Option<Assignment> {
 pub(crate) enum FetchedSource {
     ZyBooks { config: serde_json::Value, books: Vec<(String, serde_json::Value)> },
     Vhl { config: serde_json::Value, html: String },
+}
+
+/// Where a run's fetchers report the vendors' completion figures (stream J T8). A `RefCell`
+/// because a [`Fetcher`] is a shared `Fn` and cannot take a `&mut` of its own; one sink per run.
+pub type CompletionSink = std::cell::RefCell<Vec<crate::completion::VendorCompletion>>;
+
+/// The completion figures in the raw vendor bytes a cloud vault posts (stream J T8). **Pure** and
+/// device-side: the server parses these same bytes into assignments, and the uid scheme both
+/// parsers share (`zybooks:<assignment_id>`, `vhl:<section>:<date>`) is what joins a figure to the
+/// note the reply creates. No cloud change is needed for it.
+pub(crate) fn completions_from_sources(
+    sources: &[FetchedSource],
+) -> Vec<crate::completion::VendorCompletion> {
+    let mut out = Vec::new();
+    for source in sources {
+        match source {
+            FetchedSource::ZyBooks { books, .. } => {
+                for (_, payload) in books {
+                    out.extend(crate::zybooks::completions(payload));
+                }
+            }
+            FetchedSource::Vhl { html, .. } => out.extend(crate::vhl::completions(html)),
+        }
+    }
+    out
 }
 
 /// The exact JSON body `/ingest-coursework` receives. **Pure** — no credential, no fetch, no
@@ -920,6 +988,8 @@ pub struct MapProposal {
 /// `approvals/` rather than only a line in `warnings`. R-C2-E18 fix 1 widens it once more with
 /// `dry_run`: the fetch and the reconciliation still run (dry run has never skipped the network
 /// half — `collect`'s local path doesn't either), but the card-minting step below does not.
+/// Stream J T8 widens it with `completions`: the vendors' completion figures, read from the raw
+/// payloads before they are posted (see [`completions_from_sources`]).
 #[cfg(windows)]
 pub fn collect_cloud(
     vault: &Path,
@@ -929,6 +999,7 @@ pub fn collect_cloud(
     today: Date,
     dry_run: bool,
     client: &crate::cloudmodel::CloudClient,
+    completions: &mut Vec<crate::completion::VendorCompletion>,
 ) -> Vec<Assignment> {
     let block = match crate::yaml::get(config, "coursework") {
         Some(Yaml::Mapping(map)) => map.clone(),
@@ -976,6 +1047,9 @@ pub fn collect_cloud(
     if sources.is_empty() {
         return Vec::new();
     }
+    // Stream J T8: the vendors' own completion figures, read on the device from the same bytes
+    // the server is about to parse.
+    completions.extend(completions_from_sources(&sources));
     let request = coursework_request(&tz_name, &sources);
     let result = post_coursework(client, &request, warnings);
 
@@ -1056,6 +1130,7 @@ pub fn collect_cloud(
     _today: Date,
     _dry_run: bool,
     _client: &crate::cloudmodel::CloudClient,
+    _completions: &mut Vec<crate::completion::VendorCompletion>,
 ) -> Vec<Assignment> {
     warnings.push("coursework: credential store unavailable on this platform".to_string());
     Vec::new()
@@ -1701,6 +1776,34 @@ pub fn main_with_fetchers(
     run_id: Option<&str>,
     fetchers: Option<&[(&str, Fetcher)]>,
 ) -> i32 {
+    main_with_sources(vault, dry_run, via, run_id, fetchers, None)
+}
+
+/// [`main_with_fetchers`] with the completion sink exposed too (stream J T8).
+///
+/// Every fetcher of a run reports the vendors' completion figures into one [`CompletionSink`];
+/// after the sync, each figure at 100% whose uid names an active task note becomes one
+/// `status: done` amend card ([`crate::completion::propose_vendor_completions`]). `None` means the
+/// run owns its sink — the production path, where the default fetchers and the cloud path both
+/// fill it. A test passes its own so a stand-in fetcher can report a figure the way a real one does.
+pub fn main_with_sources(
+    vault: &Path,
+    dry_run: bool,
+    via: &str,
+    run_id: Option<&str>,
+    fetchers: Option<&[(&str, Fetcher)]>,
+    completions: Option<&CompletionSink>,
+) -> i32 {
+    let own_sink = CompletionSink::default();
+    let sink = completions.unwrap_or(&own_sink);
+    let zybooks_into = |cfg: &Mapping, tz: &TimeZone, warnings: &mut Vec<String>| {
+        fetch_zybooks_into(cfg, tz, warnings, sink)
+    };
+    let vhl_into = |cfg: &Mapping, tz: &TimeZone, warnings: &mut Vec<String>| {
+        fetch_vhl_into(cfg, tz, warnings, sink)
+    };
+    let defaults: [(&str, Fetcher); 2] = [("zybooks", &zybooks_into), ("vhl", &vhl_into)];
+    let local_fetchers: &[(&str, Fetcher)] = fetchers.unwrap_or(&defaults);
     // `sync_coursework` re-actors this per item (`agent:coursework.zybooks` / `.vhl`); only `via`
     // and `run_id` need to survive from the command line. Without them the runner's writes journal
     // as `via: cli, run_id: null` — indistinguishable from someone typing the command by hand, and
@@ -1746,14 +1849,34 @@ pub fn main_with_fetchers(
         assignments = match (fetchers, crate::cloudmodel::resolve(vault).ok()) {
             // `fetchers` is the test seam and always wins; a vault with an account parses on the
             // server (§4.3); everything else is plan-3a's local path, unchanged until C4.
-            (None, Some(client)) => collect_cloud(vault, &config, &mut warnings, &ctx, today, dry_run, &client),
-            _ => collect(vault, &config, &mut warnings, fetchers),
+            (None, Some(client)) => collect_cloud(
+                vault,
+                &config,
+                &mut warnings,
+                &ctx,
+                today,
+                dry_run,
+                &client,
+                &mut sink.borrow_mut(),
+            ),
+            _ => collect(vault, &config, &mut warnings, Some(local_fetchers)),
         };
         if !assignments.is_empty() {
             // R-C1c-6: `sync_coursework` now judges the archive per source group, computed from
             // `assignments` and the vault's own `known`/`seen` state — no first-run flag to pass.
             log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?);
         }
+        // Stream J T8: after the sync, so a note created this run can be proposed this run. Its
+        // log lines (`proposed done: …`) start with none of the sync step's counted prefixes.
+        let (done_log, done_warnings) = crate::completion::propose_vendor_completions(
+            vault,
+            &sink.borrow(),
+            today,
+            &ctx,
+            dry_run,
+        );
+        log.extend(done_log);
+        warnings.extend(done_warnings);
         Ok(())
     })();
     if let Err(err) = outcome {
@@ -4441,5 +4564,126 @@ mod tests {
             "a dry run must not write config/ingest.yaml, approvals/, archive/, or the journal"
         );
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- completion detection, tier 1 (stream J T8) -------------------------------------------
+
+    fn approvals_in(vault: &Path) -> Vec<String> {
+        crate::approvals::sorted_md(&vault.join("approvals"))
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// A fetcher standing in for `fetch_zybooks`: returns `plain()` and reports its figure into
+    /// the sink, exactly as the real one reports what the payload it just fetched says.
+    fn run_with_figure(vault: &Path, dry_run: bool, earned: f64) -> i32 {
+        let sink: CompletionSink = std::cell::RefCell::new(Vec::new());
+        // R-C1c-6: a group with no history archives an item already past on the vault's clock, so
+        // `plain()`'s fixed 2026-08-26 due date would be archived rather than created. The same
+        // assignment, due three days ahead on the clock the code under test reads, keeps these
+        // tests about the completion card (the fix `main_writes_a_coursework_run_record_…` uses).
+        let soon = crate::cli::local_now(vault).date().checked_add(jiff::Span::new().days(3)).unwrap();
+        let due = soon.at(23, 59, 0, 0);
+        let zy = |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            sink.borrow_mut().push(crate::completion::VendorCompletion {
+                source: "zybooks".to_string(),
+                uid: "zybooks:1".to_string(),
+                earned,
+                possible: 193.0,
+            });
+            Ok(vec![Assignment { due, ..plain() }])
+        };
+        let fetchers: [(&str, Fetcher); 1] = [("zybooks", &zy)];
+        main_with_sources(vault, dry_run, "local-runner", None, Some(&fetchers), Some(&sink))
+    }
+
+    #[test]
+    fn a_finished_assignment_is_proposed_done_once_across_runs() {
+        let vault = runnable_vault(
+            "done-once",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
+        );
+        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
+        assert_eq!(approvals_in(&vault), vec!["amend-cs-100-hw-01-done.md".to_string()]);
+        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
+        assert_eq!(approvals_in(&vault).len(), 1, "a second run filed a second card");
+        // `progress` is still never written after creation; the proposal is the only output.
+        let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-01.md")).unwrap();
+        assert!(note.contains("\nprogress: 0\n") && note.contains("\nstatus: active\n"), "{note}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_partial_assignment_is_never_proposed_and_a_dry_run_files_nothing() {
+        let vault = runnable_vault(
+            "done-partial",
+            "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
+        );
+        assert_eq!(run_with_figure(&vault, false, 168.0), 0); // 87%
+        assert!(approvals_in(&vault).is_empty());
+        let before = snapshot(&vault);
+        assert_eq!(run_with_figure(&vault, true, 193.0), 0);
+        assert_eq!(snapshot(&vault), before, "a dry run wrote something");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Final review item 7: a zyBooks payload of unexpected shape must file no completion cards.
+    /// `completions` is deliberately lenient (it skips what it cannot read), so if the figures were
+    /// taken before `parse_assignments` had accepted the payload, a payload the parser rejects
+    /// could still propose "done" cards for the assignments it did manage to read.
+    #[test]
+    fn a_zybooks_payload_that_fails_to_parse_reports_no_completion_figures() {
+        let payload = serde_json::json!({
+            "success": true,
+            "assignments": [{"assignment_id": 1, "sections": [], "section_scores": []}, 42],
+        });
+        assert!(!crate::zybooks::completions(&payload).is_empty(), "precondition: a figure is readable");
+        let sink = CompletionSink::default();
+        let mut warnings = Vec::new();
+        let got = absorb_zybooks_book(&payload, &Mapping::new(), &Mapping::new(), &TimeZone::get(DEFAULT_TZ).unwrap(), &mut warnings, &sink);
+        assert!(got.is_err(), "the payload must not parse: {got:?}");
+        assert!(sink.borrow().is_empty(), "a rejected payload reported {:?}", sink.borrow());
+    }
+
+    #[test]
+    fn a_zybooks_payload_that_parses_reports_its_completion_figures() {
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string("tests/fixtures/zybooks-assignments-scored.json").unwrap(),
+        )
+        .unwrap();
+        let sink = CompletionSink::default();
+        let mut warnings = Vec::new();
+        let items = absorb_zybooks_book(&payload, &Mapping::new(), &Mapping::new(), &TimeZone::get(DEFAULT_TZ).unwrap(), &mut warnings, &sink)
+            .expect("the scored fixture parses");
+        assert_eq!(items.len(), 6);
+        assert_eq!(sink.borrow().len(), 6);
+    }
+
+    #[test]
+    fn the_cloud_path_reads_completion_from_the_raw_payloads_it_posts() {
+        // Cloud vaults parse on the server; the device still holds the vendor bytes it posted, and
+        // reads completion from those — no cloud change, and the same uids the server's parsers use.
+        let zy: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string("tests/fixtures/zybooks-assignments-scored.json").unwrap(),
+        )
+        .unwrap();
+        let html = "<div class=\"js-student-dashboard-app\" data-assignment-summaries=\"[{&quot;due_date&quot;: &quot;2026-09-21&quot;, &quot;detail_url&quot;: &quot;/courses/1/sections/2000001/x&quot;, &quot;percentage_complete&quot;: 100}]\"></div>";
+        let sources = vec![
+            FetchedSource::ZyBooks {
+                config: serde_json::json!({}),
+                books: vec![("FAB100".to_string(), zy)],
+            },
+            FetchedSource::Vhl { config: serde_json::json!({}), html: html.to_string() },
+        ];
+        let complete: Vec<String> = completions_from_sources(&sources)
+            .into_iter()
+            .filter(|c| c.is_complete())
+            .map(|c| c.uid)
+            .collect();
+        assert_eq!(
+            complete,
+            vec!["zybooks:9100001", "zybooks:9100005", "vhl:2000001:2026-09-21"]
+        );
     }
 }

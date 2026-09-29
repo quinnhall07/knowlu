@@ -831,6 +831,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Stream J Task T1 (CHECKPOINT J-1, ruled 2026-09-22): defect B, the re-ask-forever bug.
+    ///
+    /// `unsure` is what a service reply the device cannot otherwise use (below the confidence
+    /// floor, incomplete, refused, truncated, or a bare model failure) becomes on the device side
+    /// (`cloudmodel::CloudModel::judge_event`) — this test does not depend on that HTTP-level
+    /// rescue at all; it proves the OTHER half of the fix, that this module's own "already judged"
+    /// filter (`pending`, above) settles a uid on `unsure` exactly as it settles one on
+    /// `obligation`/`opportunity`/`drop`, so recording `unsure` is sufficient to stop the re-ask.
+    /// **RED before `eventledger::VALID_VERDICTS` carried `unsure`**: `record_verdict` would have
+    /// refused the word, the uid would stay unjudged, and the second `judge_roster` call below
+    /// would have invoked the model a second time — the counter would read 2, not 1.
+    #[test]
+    fn an_unsure_verdict_is_recorded_and_the_uid_is_never_re_asked() {
+        let (vault, feed) = scratch_vault_with_feed("unsure-once");
+        let fetch = |_: &str| Ok(feed.clone());
+
+        struct Counting<'a>(&'a std::cell::RefCell<usize>);
+        impl crate::judge::EventModel for Counting<'_> {
+            fn judge_event(
+                &self,
+                _item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                *self.0.borrow_mut() += 1;
+                Ok(verdict("unsure", "audience not stated in the event text"))
+            }
+        }
+        let calls = std::cell::RefCell::new(0usize);
+        let model = Counting(&calls);
+
+        let first = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert!(first.iter().any(|l| l.contains("engage:2") && l.contains("unsure")), "{first:?}");
+        assert_eq!(*calls.borrow(), 1);
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger["ics:engage:2"].verdict.as_deref(), Some("unsure"));
+
+        // A later slot, same feed: engage:2 must not be sent to the model again.
+        let second = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 29), 150, std::time::Duration::from_secs(60));
+        assert!(!second.iter().any(|l| l.contains("engage:2")), "{second:?}");
+        assert_eq!(*calls.borrow(), 1, "the uid must not be re-asked once unsure is recorded for it");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn the_judged_item_carries_the_description_and_the_real_source() {
         // The defect this pass was rewritten to avoid: judging from `read_roster` would send an

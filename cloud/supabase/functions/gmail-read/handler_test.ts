@@ -21,7 +21,9 @@ const TASK_ANSWER = {
   effort_hours: 2.5, importance: 4, why: "the email states a Friday deadline", confidence: 0.86,
 };
 
-function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"]) {
+type Message = { subject: string; from: string; date: string; text: string };
+
+function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], message?: Message) {
   const rows: JudgmentRow[] = [];
   const queued: Array<{ uid: string; tier: string; payload: Record<string, unknown> }> = [];
   const delivered: string[] = [];
@@ -35,6 +37,7 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"]) {
     },
     message: (_t, id) => {
       if (id === "attachment") attachments += 1;
+      if (message !== undefined) return Promise.resolve(message);
       return Promise.resolve({
         subject: "PH 106 problem set 4 is posted",
         from: "noreply@lms.example.invalid",
@@ -473,4 +476,138 @@ Deno.test("a label carrying a double quote is escaped, not left to break the que
   const { deps, asked } = fakes([TASK_ANSWER]);
   await readHandler(OK, { ...deps, excludedLabels: () => Promise.resolve(['Say "Hi"']) })(post());
   assertEquals(asked[0], 'newer_than:7d -label:"Say \\"Hi\\""');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T9: an LMS submission receipt is recognised BEFORE the model (tier 2 before tier 3),
+// and a device that has not declared it understands `completion` is handed `information` instead.
+// Every fixture is fabricated in the real template's shape.
+// ---------------------------------------------------------------------------------------------
+
+const RECEIPT: Message = {
+  subject: "Submission received",
+  from: "Blackboard <do-not-reply@blackboard.com>",
+  date: "Thu, 03 Sep 2026 14:16:00 -0500",
+  text: "12345.202640 202640-XX-101-001\nAssessment submitted\nLab 3: Pendulum\n" +
+    `Submitted: Thursday, September 3, 2026 2:15:57 PM CDT\nConfirmation number: 0f1e2d3c4b5a ${TRIPWIRE}`,
+};
+
+Deno.test("T9: a submission receipt is queued as completion without a model call", async () => {
+  // No scripted replies: a model call would find none and defer the message.
+  const { deps, queued, rows, seen } = fakes([], ["m1"], RECEIPT);
+  const reply = await (await readHandler(OK, deps)(post({ accepts: ["completion"] }))).json();
+  assertEquals(reply.read, 1);
+  assertEquals(reply.deferred, 0);
+  assertEquals(queued.length, 1);
+  assertEquals(queued[0].tier, "completion");
+  assertEquals(queued[0].payload.title, "Lab 3: Pendulum");
+  assertEquals(queued[0].payload.why, "Blackboard submission receipt");
+  assert(seen.has("gmail:m1"));
+  // Recorded as a free, deterministic tier-2 answer — never tier 3, so rule promotion never learns
+  // from it — and with nothing of the message in it.
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].tier, 2);
+  assertEquals(rows[0].model, null);
+  assertEquals(rows[0].fields.tier, "completion");
+  for (const leak of [TRIPWIRE, "0f1e2d3c4b5a", "Lab 3", "Submission received"]) {
+    assert(!JSON.stringify(rows).includes(leak), `${leak} reached a judgment row`);
+    assert(!JSON.stringify(queued).includes(leak) || leak === "Lab 3", `${leak} reached the queue`);
+  }
+  assertEquals(reply.items[0].tier, "completion");
+});
+
+Deno.test("T9: an unrelated newsletter still reaches the model and is queued as information", async () => {
+  const { deps, queued, rows } = fakes([{
+    tier: "information", title: "Weekly newsletter", course: null, due: null,
+    effort_hours: null, importance: null, why: "a newsletter", confidence: 0.95,
+  }], ["m1"], {
+    subject: "This week on campus", from: "Campus News <news@example.invalid>",
+    date: "Thu, 03 Sep 2026 08:00:00 -0500", text: "Five things happening this week.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"] }));
+  assertEquals(queued[0].tier, "information");
+  assertEquals(rows[0].tier, 3);
+});
+
+Deno.test("T9: a posted grade from the same LMS is not a receipt, so the model is asked", async () => {
+  const { deps, rows } = fakes([{
+    tier: "information", title: "Grade posted", course: null, due: null,
+    effort_hours: null, importance: null, why: "a grade notification", confidence: 0.9,
+  }], ["m1"], {
+    subject: "New grade and feedback for Lab 3: Pendulum in 202640-XX-101-001",
+    from: "Blackboard <do-not-reply@blackboard.com>",
+    date: "Thu, 10 Sep 2026 08:00:00 -0500", text: "A new grade and feedback is available.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"] }));
+  assertEquals(rows[0].tier, 3);
+});
+
+Deno.test("T9: a device that does not declare completion is handed it as information", async () => {
+  // An older engine files every tier it does not know as a `kind: task` card — for a receipt that
+  // would propose ADDING the work the student just finished. It never declares `accepts`, so it is
+  // given the one tier every engine drops and records.
+  const { deps, queued } = fakes([], ["m1"], RECEIPT);
+  const old = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(queued[0].tier, "completion", "the queue keeps the real tier");
+  assertEquals(old.items.length, 1);
+  assertEquals(old.items[0].tier, "information");
+  // The same row, pulled again by a device that does declare it, is completion.
+  const fresh = await (await readHandler(OK, deps)(post({ accepts: ["completion"] }))).json();
+  assertEquals(fresh.items[0].tier, "completion");
+});
+
+// ---------------------------------------------------------------------------------------------
+// T9 fix round 1: a vendor's own not-evidence mail (a posted grade, "overdue", "due soon") is NEVER
+// completion, deterministically — even when the model answers `completion` with the exact title.
+// ---------------------------------------------------------------------------------------------
+
+for (
+  const [shape, subject] of [
+    ["grade posted", "New grade and feedback for Lab 3: Pendulum in 202640-XX-101-001"],
+    ["overdue", "Lab 3: Pendulum is overdue in 202640-XX-101-001"],
+    ["due soon", "Lab 3: Pendulum is due soon in 202640-XX-101-001"],
+  ]
+) {
+  Deno.test(`T9 fix 1: a model 'completion' for a Blackboard ${shape} email is queued as information`, async () => {
+    const { deps, queued } = fakes([{
+      tier: "completion", title: "Lab 3: Pendulum", course: null, due: null,
+      effort_hours: null, importance: null, why: "the work is graded", confidence: 0.9,
+    }], ["m1"], {
+      subject, from: "Blackboard <do-not-reply@blackboard.com>",
+      date: "Thu, 10 Sep 2026 08:00:00 -0500", text: "Lab 3: Pendulum.",
+    });
+    const reply = await (await readHandler(OK, deps)(post({ accepts: ["completion"] }))).json();
+    assertEquals(queued.length, 1);
+    assertEquals(queued[0].tier, "information");
+    assertEquals(queued[0].payload.tier, "information");
+    assertEquals(reply.items[0].tier, "information");
+  });
+}
+
+Deno.test("T9 fix 1: a model 'completion' from a sender with no template is left alone", async () => {
+  const { deps, queued } = fakes([{
+    tier: "completion", title: "Essay 2", course: null, due: null,
+    effort_hours: null, importance: null, why: "a submission confirmation", confidence: 0.9,
+  }], ["m1"], {
+    subject: "New grade and feedback for Essay 2 in XX-202",
+    from: "Other LMS <noreply@lms.example.invalid>",
+    date: "Thu, 10 Sep 2026 08:00:00 -0500", text: "Received.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"] }));
+  assertEquals(queued[0].tier, "completion");
+});
+
+// Due-fix (2026-09-23): the device sends the vault's timezone on `/gmail-read`, and the handler
+// hands it to the pipeline, so a UTC-stamped evening email's "tomorrow" is the next LOCAL day.
+Deno.test("the request's timezone reaches the due resolver for every message the read judges", async () => {
+  const { deps, queued } = fakes([{
+    tier: "task", title: "Submit lab writeup", course: null, due: "tomorrow",
+    effort_hours: 1, importance: 3, why: "the message sets a deadline", confidence: 0.9,
+  }], ["m1"], {
+    subject: "Lab writeup", from: "Instructor <instructor@example.invalid>",
+    date: "Fri, 18 Sep 2026 04:30:00 +0000", text: "Submit the writeup by tomorrow.",
+  });
+  await readHandler(OK, deps)(post({ accepts: ["completion"], timezone: "America/Chicago" }));
+  assertEquals(queued.length, 1);
+  assertEquals(queued[0].payload.due, "2026-09-18");
 });

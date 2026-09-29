@@ -3,7 +3,7 @@
 // `judge_prompts_test.ts` before this task; the prompt shape was exercised only indirectly, through
 // `judge_pipeline_test.ts` and the handlers' own tests, none of which pin prompt TEXT.
 import { assert, assertEquals } from "@std/assert";
-import { buildPrompt, MAX_BODY_CHARS, systemTemplate } from "./judge_prompts.ts";
+import { buildPrompt, MAX_BODY_CHARS, promptHash, schemaFor, systemTemplate } from "./judge_prompts.ts";
 
 // ---------------------------------------------------------------------------------------------
 // (a) clipping appends " …[truncated]" when text exceeds MAX_BODY_CHARS, and appends nothing
@@ -89,13 +89,18 @@ Deno.test("email: a message under MAX_BODY_CHARS is not marked truncated", () =>
 });
 
 // ---------------------------------------------------------------------------------------------
-// (b) the email rules text names how to resolve a relative deadline, against the Date line.
+// (b) T4: the model is EXTRACTION ONLY for `due` — it must not resolve a relative deadline
+// itself (`judge_due.ts` does that, between the model and `validate`). The old assertion here
+// pinned the opposite instruction ("resolve a relative deadline... against the Date line") and is
+// replaced, not kept alongside the new one: that sentence must be GONE from the prompt, not merely
+// supplemented, or the model would see both instructions at once.
 // ---------------------------------------------------------------------------------------------
 
-Deno.test("email rules: the due bullet resolves a relative deadline against the Date line", () => {
+Deno.test("email rules: the due bullet asks for the phrase as written, not a resolved date", () => {
   const rules = systemTemplate("email");
-  assert(rules.includes("Resolve a relative deadline"), `missing sentence in: ${rules}`);
-  assert(rules.includes("against the Date line above"), `missing sentence in: ${rules}`);
+  assert(rules.includes("exactly as the email states it"), `missing sentence in: ${rules}`);
+  assert(rules.includes("do NOT compute or resolve it yourself"), `missing sentence in: ${rules}`);
+  assert(!rules.includes("Resolve a relative deadline"), `the old resolve-it-yourself rule is still present: ${rules}`);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -170,6 +175,21 @@ Deno.test("email: a long bearer-shaped string in subject and text is scrubbed be
   assert(user.includes("<secret>"), `expected the credential placeholder in: ${user}`);
 });
 
+// ---------------------------------------------------------------------------------------------
+// CHECKPOINT J-1 (ruled 2026-09-22): the event schema and prompt teach `unsure` as a real answer.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("event schema: the verdict enum carries unsure as a fourth word", () => {
+  const schema = schemaFor("event") as { properties: { verdict: { enum: string[] } } };
+  assertEquals(schema.properties.verdict.enum, ["obligation", "opportunity", "drop", "unsure"]);
+});
+
+Deno.test("event rules: unsure is named and told not to guess the audience", () => {
+  const rules = systemTemplate("event");
+  assert(rules.includes("unsure"), `missing 'unsure' in: ${rules}`);
+  assert(rules.includes("do not guess"), `missing the no-guessing rule in: ${rules}`);
+});
+
 Deno.test("email: From is never scrubbed, even though it is an email address", () => {
   const { user } = buildPrompt("email", {
     subject: "Reminder",
@@ -178,4 +198,41 @@ Deno.test("email: From is never scrubbed, even though it is an email address", (
     text: "See you Friday.",
   }, {});
   assert(user.includes("From: registrar@example.invalid"), `From must survive unscrubbed: ${user}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Stream J Task T9: the sixth email tier. Folded into T4's `email-3` (nothing deployed between
+// the two), so `email-3`'s hash is the one computed here, not T4's draft.
+// ---------------------------------------------------------------------------------------------
+
+/** T4's `email-3` draft hash, before T9 added the tier. Pinned so the fold is provably a change. */
+const T4_EMAIL_DRAFT_HASH = "c4bb4925b8104c38b064ad4d3b8535181838a6dfcb433a33fe43a6f361a7094d";
+
+Deno.test("T9: the email schema's tier enum names completion", () => {
+  const tier = (schemaFor("email").properties as Record<string, { enum: string[] }>).tier;
+  assertEquals(tier.enum, ["task", "borderline", "event", "opportunity", "information", "completion"]);
+});
+
+Deno.test("T9: the email rules define completion, name the work as its title, and exclude a posted grade", () => {
+  const rules = systemTemplate("email");
+  assert(rules.includes("into exactly one of six tiers"), `tier count not updated in: ${rules}`);
+  assert(
+    rules.includes("- completion: this email confirms the student already submitted or finished a specific piece of work."),
+    `missing completion tier line in: ${rules}`,
+  );
+  assert(rules.includes("for completion, the name of that piece of work"), `missing completion title rule in: ${rules}`);
+  assert(rules.includes("A grade or feedback being posted is not completion"), `missing grade exclusion in: ${rules}`);
+  // `information` no longer claims receipts wholesale, or the two tiers would contradict each other.
+  assert(!rules.includes("including receipts,"), `information still swallows every receipt: ${rules}`);
+});
+
+Deno.test("T9: email-3's hash moved off T4's draft; the task hash did not move", async () => {
+  assert((await promptHash("email")) !== T4_EMAIL_DRAFT_HASH, "the email prompt hash did not change");
+  // email-3 as shipped (T4 + T9). Any edit to the email template or schema moves this and must
+  // come with a new prompt_version in a migration.
+  assertEquals(await promptHash("email"), "ad890b53c5e984a8bd7ac03eff7170085cbb8df17e316e7d8d48ad6c15fa2405");
+  assertEquals(await promptHash("task"), "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6");
+  // event-3 (stream J T1, the `unsure` verdict), pinned at integration: T9 was written on a branch
+  // without T1, where the event prompt was still event-2 (0faedc21...). T9 does not touch it.
+  assertEquals(await promptHash("event"), "b6324351b0a70976f818930a3dd2e1e66478c804f4a8ff01d4a9123b674b5e92");
 });

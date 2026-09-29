@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 use knowlu_engine::cloudmodel::{CloudClient, CloudConfig, CloudModel};
-use knowlu_engine::judge::{self, Heuristics, Item, Model, Verdict};
+use knowlu_engine::judge::{self, EventModel, Heuristics, Item, Model, Verdict};
 
 /// A loopback server that answers `replies` in order and hands back everything it was sent.
 struct Loopback {
@@ -238,6 +238,189 @@ fn a_verdict_the_service_refused_is_an_error_that_names_the_cause() {
     let err = model.judge(&item(), &heuristics(), &seed).expect_err("no verdict is an error");
     assert!(err.to_string().contains("below floor"), "{err}");
     let _ = server.requests();
+}
+
+fn event_item(uid: &str) -> judge::EventItem {
+    judge::EventItem {
+        uid: uid.to_string(),
+        title: "AI Club Kickoff".to_string(),
+        start: "2026-08-29T18:00".to_string(),
+        end: "2026-08-29T19:30".to_string(),
+        source: "engage".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Stream J Task T1, CHECKPOINT J-1: defect B for the below-floor / no-verdict path.
+///
+/// Before this fix, `CloudModel::judge_event` propagated exactly the same shape of `Err` the task
+/// path still does (proven above), and `events::judge_roster` writes nothing on an `Err` — so the
+/// uid stayed unjudged and `judge_roster`'s own "already judged" filter would send it again every
+/// slot, forever. **The task path is deliberately unchanged** (the test above still expects an
+/// `Err`): only events get the fourth verdict word, so only events get this device-side rescue.
+#[test]
+fn a_below_floor_event_reply_becomes_unsure_instead_of_an_error_the_device_would_re_ask_forever() {
+    let refused = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"below floor"}"#;
+    let mut server = loopback(vec![(200, refused.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model
+        .judge_event(&event_item("engage:1"))
+        .expect("a below-floor reply must become a usable verdict, not an error");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("below floor"), "{}", got.why);
+    assert_eq!(got.confidence, 0.0, "the service never returns a number for this case (server log only)");
+    let _ = server.requests();
+}
+
+/// The same rescue for an `incomplete` reply (a required field missing, not merely low confidence)
+/// — the second of the two shapes `verdict_of` folds into one `ModelError::Failed`.
+#[test]
+fn an_incomplete_event_reply_also_becomes_unsure() {
+    let incomplete = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"incomplete"}"#;
+    let mut server = loopback(vec![(200, incomplete.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let got = model.judge_event(&event_item("engage:2")).expect("incomplete must not be a dead end either");
+    assert_eq!(got.verdict, "unsure");
+    assert!(got.why.contains("incomplete"), "{}", got.why);
+    let _ = server.requests();
+}
+
+/// A spent cap answers every remaining event identically and must stay retryable TOMORROW, never
+/// recorded today as if the event itself had been weighed and found wanting.
+#[test]
+fn a_capped_event_reply_still_stops_the_batch_rather_than_becoming_unsure() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let mut server = loopback(vec![(200, capped.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:1"))
+        .expect_err("a spent cap must stay an error, never a recorded unsure");
+    assert!(matches!(err, judge::ModelError::Capped), "{err:?}");
+    assert_eq!(model.fatal(), Some(judge::CAPPED_LABEL));
+    let _ = server.requests();
+}
+
+/// A 401 (no session) must stay exactly as fatal for events as it is for tasks — this is a
+/// transport/auth failure from `self.call(...)`, never reaching `verdict_of` at all, so it must
+/// never be rescued into `unsure`.
+#[test]
+fn a_401_event_reply_is_still_an_error_naming_the_session() {
+    let mut server = loopback(vec![(401, r#"{"error":"invalid jwt"}"#.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model.judge_event(&event_item("engage:1")).expect_err("a 401 is an error");
+    assert!(err.to_string().contains("no session"), "{err}");
+    assert_eq!(model.fatal(), Some("no session"));
+    let _ = server.requests();
+}
+
+/// Final review item 1: `judge_pipeline.ts` answers a provider exception (OpenRouter 5xx/429/timeout)
+/// as HTTP 200 with `cause: "model failed"`. That is an outage, not a judgment of the event — it
+/// must stay an error so the uid is asked again next slot, never be buried as a recorded `unsure`.
+#[test]
+fn a_model_failed_event_reply_stays_an_error_so_an_outage_is_retried() {
+    let failed = r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"model failed"}"#;
+    let mut server = loopback(vec![(200, failed.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let err = model
+        .judge_event(&event_item("engage:3"))
+        .expect_err("an upstream outage must never be recorded as unsure");
+    assert!(matches!(err, judge::ModelError::Failed(_)), "{err:?}");
+    assert!(err.to_string().contains("model failed"), "{err}");
+    let _ = server.requests();
+}
+
+/// The same for a verdict-less reply naming no cause the device recognises: only the four
+/// repeatable causes (`below floor`, `incomplete`, `refused`, `truncated`) become `unsure`.
+#[test]
+fn a_verdict_less_event_reply_with_no_recognised_cause_stays_an_error() {
+    for body in [
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence"}"#,
+        r#"{"verdict":null,"tier":3,"outcome":"low confidence","cause":"something new"}"#,
+    ] {
+        let mut server = loopback(vec![(200, body.to_string())]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let err = model.judge_event(&event_item("engage:4")).expect_err(body);
+        assert!(matches!(err, judge::ModelError::Failed(_)), "{body}: {err:?}");
+        let _ = server.requests();
+    }
+}
+
+/// The two remaining repeatable causes also become `unsure` (below floor and incomplete are above).
+#[test]
+fn refused_and_truncated_event_replies_become_unsure() {
+    for cause in ["refused", "truncated"] {
+        let body = format!(r#"{{"verdict":null,"tier":3,"outcome":"low confidence","cause":"{cause}"}}"#);
+        let mut server = loopback(vec![(200, body)]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let model = CloudModel::new(&client);
+        let got = model.judge_event(&event_item("engage:5")).expect(cause);
+        assert_eq!(got.verdict, "unsure", "{cause}");
+        assert!(got.why.contains(cause), "{}", got.why);
+        let _ = server.requests();
+    }
+}
+
+/// Final review item 2: the device declares it understands the fourth verdict word, so the
+/// service may answer `unsure`; an engine that does not declare it gets the pre-T1 shape instead.
+#[test]
+fn the_event_request_declares_it_accepts_unsure() {
+    let body = knowlu_engine::cloudmodel::event_request(&event_item("engage:6"));
+    assert_eq!(body["accepts"], serde_json::json!(["unsure"]), "{body}");
+}
+
+fn email_item() -> judge::EmailItem {
+    judge::EmailItem {
+        message_id: "msg-1".to_string(),
+        subject: "Quiz due".to_string(),
+        from: "prof@example.edu".to_string(),
+        date: "Tue, 22 Sep 2026 23:30:00 +0000".to_string(),
+        text: "Submit tonight.".to_string(),
+        known_courses: vec!["cs-100".to_string()],
+    }
+}
+
+/// T4 follow-up: `email_request` (used by the eval harness's parity check and §13's forwarding
+/// fallback, per its own doc comment — not by the production Gmail path) carries the vault's
+/// timezone when it has one, and the key is absent, never null or empty, when it does not.
+#[test]
+fn the_email_request_carries_the_vaults_timezone_when_given_one() {
+    let with_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some("America/Chicago"));
+    assert_eq!(with_tz["timezone"], serde_json::json!("America/Chicago"), "{with_tz}");
+
+    let without_tz = knowlu_engine::cloudmodel::email_request(&email_item(), None);
+    assert!(without_tz.get("timezone").is_none(), "{without_tz}");
+
+    let blank_tz = knowlu_engine::cloudmodel::email_request(&email_item(), Some(""));
+    assert!(blank_tz.get("timezone").is_none(), "{blank_tz}");
+}
+
+const EMPTY_GMAIL_REPLY: &str = r#"{"items":[],"more":false,"deferred":0}"#;
+
+/// The other half of the T4 follow-up: `pull_gmail_queue`'s `/gmail-read` body is the DOMINANT
+/// production path for email judgment (Gmail text never reaches the device, D12), so this is
+/// where a live, UTC-stamped evening email actually gets fixed.
+#[test]
+fn the_gmail_read_body_carries_the_vaults_timezone_when_given_one() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], Some("America/Chicago"));
+    let sent = server.requests().remove(0);
+    assert!(sent.contains("\"timezone\": \"America/Chicago\""), "{sent}");
+}
+
+#[test]
+fn the_gmail_read_body_has_no_timezone_key_when_the_vault_names_none() {
+    let mut server = loopback(vec![(200, EMPTY_GMAIL_REPLY.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let _ = knowlu_engine::cloudmodel::pull_gmail_queue(&client, &[], None);
+    let sent = server.requests().remove(0);
+    assert!(!sent.contains("timezone"), "{sent}");
 }
 
 #[test]
