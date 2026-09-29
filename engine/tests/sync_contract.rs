@@ -393,10 +393,19 @@ fn is_note_path_and_the_servers_regex_agree() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase")
             .join("functions").join("_shared").join("sync_rows.ts"),
     ).expect("sync_rows.ts");
-    assert!(ts.contains("(tasks|approvals|archive|courses|issues|info)"), "the server's folder list is the engine's");
+    // Commitment-model spec §10 gate 1 (plan review C2): derived from `NOTE_FOLDERS`, never a
+    // literal, so a folder the engine gains and the server lacks fails here. `NOTE_PATH_RE` is a JS
+    // regex literal, which escapes its slash: the group reads `(…)\/` in the source.
+    let folders = knowlu_engine::ids::NOTE_FOLDERS;
+    let group = format!("({})\\/", folders.join("|"));
+    assert!(ts.contains(&group), "the server's folder list is the engine's: {group}");
     assert!(ts.contains("[A-Za-z0-9._ /-]{1,300}"), "the server's character class and length are the engine's");
     let vault = std::env::temp_dir();
-    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md"] { assert!(sync::is_note_path(&vault, ok), "{ok}"); }
+    for folder in folders {
+        let ok = format!("{folder}/x.md");
+        assert!(sync::is_note_path(&vault, &ok), "{ok}");
+    }
+    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "commitments/cs-100.md"] { assert!(sync::is_note_path(&vault, ok), "{ok}"); }
     for bad in ["state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../x.md", "tasks//x.md",
                 "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks", ""] {
         assert!(!sync::is_note_path(&vault, bad), "{bad}");

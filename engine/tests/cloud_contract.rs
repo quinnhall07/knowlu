@@ -689,12 +689,121 @@ fn the_calendar_fetch_is_a_get_that_names_the_feed_and_no_address() {
     );
     let mut server = loopback(vec![(200, body)]);
     let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
-    let got = knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    let (got, series) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
     assert!(got.contains("BEGIN:VEVENT"));
+    assert_eq!(series, None, "no series field in the reply must parse to None");
     let sent = server.requests().remove(0);
-    assert!(sent.starts_with("GET /functions/v1/ingest-calendar?name=google HTTP/1.1"), "{sent}");
+    assert!(
+        sent.starts_with("GET /functions/v1/ingest-calendar?name=google&accepts=series HTTP/1.1"),
+        "{sent}"
+    );
     // The device does not know the secret address any more and must not be able to name one.
     assert!(!sent.contains("ics_url") && !sent.contains("calendar_ics"), "{sent}");
+}
+
+/// §4.3 "new engine, old function": a reply with no `series` field — every reply until the
+/// function ships §4.1 — must parse to `None`, not an empty object or a default value that would
+/// read as "the account has no series" when the truth is "the server never said".
+#[test]
+fn a_calendar_reply_without_series_parses_to_none() {
+    let body = knowlu_engine::ledger::dumps_value(
+        &serde_json::json!({ "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "source": "google_calendar" }),
+    );
+    let server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (_, series) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    assert_eq!(series, None);
+}
+
+/// The §4.1 example reply, verbatim: the function hands the whole `series` object back untouched
+/// — parsing and normalising it is `commitments::refresh_series`'s job (P16), not this one's.
+#[test]
+fn a_calendar_reply_with_series_returns_it() {
+    let series = serde_json::json!({
+        "calendars_read": ["google:3b9e0c1d2a4f5e60"],
+        "items": [{
+            "calendar": "google:3b9e0c1d2a4f5e60",
+            "id": "4k2q9x7m1abc",
+            "title": "CS 100",
+            "location": "",
+            "description": "Room 101",
+            "event_type": "default",
+            "first": "2026-08-19T12:00:00-05:00",
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+            "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]
+        }]
+    });
+    let body = knowlu_engine::ledger::dumps_value(&serde_json::json!({
+        "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+        "source": "google_calendar",
+        "series": series
+    }));
+    let server = loopback(vec![(200, body)]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let (_, got) =
+        knowlu_engine::cloudmodel::fetch_calendar(&client, "google").expect("the service answered");
+    assert_eq!(got, Some(series));
+}
+
+/// The bounds of `main.rs`'s `// commitments command: begin` / `// commitments command: end`
+/// markers, panicking (not silently empty) if either is missing — the same "cannot pass
+/// vacuously" property [`the_commitments_arm_markers_exist`] pins on its own.
+fn commitments_arm(main: &str) -> &str {
+    let begin = main
+        .find("// commitments command: begin")
+        .expect("main.rs must carry the `// commitments command: begin` marker");
+    let end = main
+        .find("// commitments command: end")
+        .expect("main.rs must carry the `// commitments command: end` marker");
+    assert!(begin < end, "the commitments markers are out of order in main.rs");
+    &main[begin..end]
+}
+
+/// `cloudmodel.rs` legitimately holds `CloudModel`, `/judge-task` and the rest — scanning it whole
+/// would trip on code that is supposed to be there. `fetch_calendar` is the one function of that
+/// module `calendar_fetcher` (and so `rank`, and so the `commitments` command) ever calls, so P19
+/// fix round 1 (I1) extracts just its own source by brace-counting from its signature, rather than
+/// scanning the whole file or asking `cloudmodel.rs` to carry a marker comment of its own.
+fn fetch_calendar_source(cloudmodel: &str) -> &str {
+    let start = cloudmodel
+        .find("pub fn fetch_calendar(")
+        .expect("cloudmodel.rs must still define fetch_calendar");
+    let body_start = cloudmodel[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fetch_calendar must have a body");
+    let mut depth = 0i32;
+    let mut end = body_start;
+    for (i, ch) in cloudmodel[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = body_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(end > body_start, "fetch_calendar's closing brace was not found");
+    &cloudmodel[start..end]
+}
+
+/// P19, spec §6.5: the markers exist and actually wrap the `commitments` match arm, not two
+/// adjacent lines with nothing between — otherwise [`rank_cannot_reach_a_judgment_endpoint`]'s
+/// extended scan would pass on an empty slice no matter what `main.rs` contained.
+#[test]
+fn the_commitments_arm_markers_exist() {
+    let main = include_str!("../src/main.rs");
+    let arm = commitments_arm(main);
+    assert!(
+        arm.contains("Command::Commitments"),
+        "the `// commitments command` markers must wrap the `Command::Commitments` match arm: {arm:?}"
+    );
 }
 
 /// `rank` never calls a model (decision 11), and after hand-off H4 that is a property of the
@@ -702,17 +811,52 @@ fn the_calendar_fetch_is_a_get_that_names_the_feed_and_no_address() {
 /// proxy. So it is pinned the way the SDK boundary is pinned (`dependency_boundary.rs`): cheaply,
 /// statically, and at the moment somebody writes the wrong line rather than the moment a slot
 /// starts judging in the wrong step.
+///
+/// Extended by P19/§6.5 (M5) to every module `commitment_passes` reaches: `commitments.rs` (the
+/// series, classifier and proposal machinery), `approvals.rs` (`withdraw_stale`, `emit_checks`'s
+/// card filing), `calfeed.rs` (`calendar_entries`) and `weekcal.rs` (`WeekCalendar`), plus
+/// `main.rs`'s `commitments` arm and the one function of `cloudmodel.rs` that arm and `rank` can
+/// both reach, `fetch_calendar`. Fix round 1 (I1) also widens the word list past the three named
+/// endpoints: `"/judge-"` catches any judgment path by prefix (including one built with `format!`
+/// or a future `/judge-rules`), `"judge_roster"` catches an indirect `judge::Model` construction
+/// reaching `events::judge_roster`, and `"judge::Model"` catches a trait object built from it —
+/// `"judge::"` bare is deliberately left out, since `commitments.rs` legitimately calls
+/// `crate::judge::one_line`. Scanning `commitments.rs`, `approvals.rs`, `calfeed.rs` and
+/// `weekcal.rs` whole is deliberate — nothing in any of them may ever gain a judgment call, not
+/// just the lines each carries today.
 #[test]
 fn rank_cannot_reach_a_judgment_endpoint() {
     let cli = include_str!("../src/cli.rs");
-    for forbidden in ["/judge-task", "/judge-event", "/judge-email", "judge_task", "CloudModel", "EventModel", "EmailModel"] {
-        assert!(
-            !cli.contains(forbidden),
-            "engine/src/cli.rs mentions `{forbidden}`. `rank` may reach the service for TRANSPORT \
-             (cloudmodel::fetch_event_source, cloudmodel::fetch_ics) and for nothing else: judgment \
-             is the separate `judge` command, which runs before `rank` and writes fields into notes \
-             (Knowlu spec decision 11, CLAUDE.md)."
-        );
+    let commitments = include_str!("../src/commitments.rs");
+    let approvals = include_str!("../src/approvals.rs");
+    let calfeed = include_str!("../src/calfeed.rs");
+    let weekcal = include_str!("../src/weekcal.rs");
+    let cloudmodel = include_str!("../src/cloudmodel.rs");
+    let fetch_calendar = fetch_calendar_source(cloudmodel);
+    let main = include_str!("../src/main.rs");
+    let arm = commitments_arm(main);
+    let sources: [(&str, &str); 7] = [
+        ("engine/src/cli.rs", cli),
+        ("engine/src/commitments.rs", commitments),
+        ("engine/src/approvals.rs", approvals),
+        ("engine/src/calfeed.rs", calfeed),
+        ("engine/src/weekcal.rs", weekcal),
+        ("engine/src/cloudmodel.rs's fetch_calendar", fetch_calendar),
+        ("main.rs's `commitments` arm", arm),
+    ];
+    for forbidden in [
+        "/judge-task", "/judge-event", "/judge-email", "/judge-", "judge_task", "judge_roster",
+        "judge::Model", "CloudModel", "EventModel", "EmailModel",
+    ] {
+        for (name, source) in sources {
+            assert!(
+                !source.contains(forbidden),
+                "{name} mentions `{forbidden}`. `rank` may reach the service for TRANSPORT \
+                 (cloudmodel::fetch_event_source, cloudmodel::fetch_calendar, cloudmodel::fetch_ics) \
+                 and for nothing else: judgment is the separate `judge` command, which runs before \
+                 `rank` and writes fields into notes (Knowlu spec decision 11, CLAUDE.md, spec §6.5)."
+            );
+        }
     }
     // And the two transport functions ARE allowed, so this test fails loudly if H4 was never
     // applied rather than passing vacuously.

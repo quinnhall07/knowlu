@@ -14,9 +14,11 @@
 //! by construction and a test pins it that way; it stays in the outcome (and `rank` still prints
 //! it when non-empty) so that a step removed from this function can only ever be removed loudly.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use jiff::civil::{Date, DateTime};
+use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::TimeZone;
 use jiff::Timestamp;
 
@@ -216,8 +218,30 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
     counts.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).unwrap_or(0)
 }
 
-/// The two network reads a run performs, replaceable so a test can drive the **whole** run offline
-/// against a scripted feed.
+/// One calendar feed's raw series material, stashed by the closure that fetched it (spec §4.2),
+/// keyed by the feed's **URL** exactly as the calendar closure received it (`cloud:google`, or a
+/// direct `https://` address) — the same string `calfeed::calendar_entries` hands back, so P16's
+/// `commitments::refresh_series` can match a stash entry to its `config/ingest.yaml` row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StashEntry {
+    /// `/ingest-calendar`'s `series` field, verbatim, for `cloud:google` (§4.1) — normalised
+    /// directly, with no ICS round trip.
+    Google(serde_json::Value),
+    /// The ICS text of any other feed the closure fetched — a direct address, or `cloud:personal`
+    /// (which the function never sends series for). **Not** `cloud:google` with no `series`: that
+    /// case stashes nothing at all (§3.3/§4.3 — see `calendar_fetcher`). `calfeed::weekly_series`
+    /// derives series from this text.
+    Ics(String),
+}
+
+/// One run's series material, gathered while `Fetchers.calendar` runs and read afterward by P16's
+/// `commitments::refresh_series` — never written to or read from inside the calendar closure
+/// itself except to insert. A `RefCell` because the closure `run` hands to `run_with` is a shared
+/// `&dyn Fn`, not a `FnMut`.
+pub type SeriesStash = RefCell<BTreeMap<String, StashEntry>>;
+
+/// The three network reads a run performs, replaceable so a test can drive the **whole** run
+/// offline against a scripted feed.
 ///
 /// Python's `test_cli.py` monkeypatches `calfeed.fetch_ics` and `eventfeed.fetch_event_source`
 /// as module globals; `calfeed` and `eventfeed` already carry this seam one level down, and
@@ -225,12 +249,66 @@ fn count(counts: &[(&'static str, i64)], key: &str) -> i64 {
 /// `events` closure that tries the service first and falls back to `eventfeed::fetch_event_source`,
 /// and a `calendar` closure that routes a `cloud:<name>` url to the service and everything else to
 /// `calfeed::fetch_ics`. Only tests construct a bare `Fetchers` directly, and several of those pass
-/// `Fetchers::default()`, which leaves both closures at `None` — the on-device fallbacks `calfeed`
-/// and `eventfeed` would have used anyway.
+/// `Fetchers::default()`, which leaves every field at `None` — the on-device fallbacks `calfeed`
+/// and `eventfeed` would have used anyway, and no series stash.
+///
+/// `series` is explicit rather than folded into the `calendar` closure's own state (plan review
+/// I8): `run_with`'s callers hand it a `&SeriesStash` so a test can inspect what the closure
+/// stashed, or inject series ahead of time, with no network at all.
 #[derive(Default, Clone, Copy)]
 pub struct Fetchers<'a> {
     pub calendar: Option<&'a dyn Fn(&str) -> Result<String, String>>,
     pub events: Option<&'a dyn Fn(&str) -> Result<String, String>>,
+    pub series: Option<&'a SeriesStash>,
+}
+
+/// Builds the real `calendar` closure `run` hands to `run_with` — pulled out of `run` itself so a
+/// test can drive it directly against a loopback service or a loopback feed, with no vault and no
+/// `run_with` call at all.
+///
+/// A `cloud:<name>` url routes to `cloudmodel::fetch_calendar`. For `name == "google"` the reply's
+/// `series` is stashed as `StashEntry::Google` **only when the reply carried one**; when it did
+/// not — an old server that predates §4.1, or a new one whose series budget ran out or whose
+/// series gathering failed — that feed's stash is left **untouched**, exactly as if this run had
+/// never asked (§3.3: "a Google reply that carried no `series` field — keeps its series and its
+/// date untouched"; §4.3: "`series` absent → `None` → that feed's series keep their previous
+/// state"). Every other successfully fetched feed — a direct address, or a `cloud:`-routed feed
+/// the function never sends series for (`cloud:personal`) — stashes its ICS text as
+/// `StashEntry::Ics` instead. A failed fetch stashes nothing, under every branch. The closure's
+/// own `Fn(&str) -> Result<String, String>` shape is unchanged, so `calfeed::load_calendar_events`
+/// and every oracle test are untouched (spec §4.2).
+fn calendar_fetcher<'a>(
+    cloud: &'a Option<crate::cloudmodel::CloudClient>,
+    stash: &'a SeriesStash,
+) -> impl Fn(&str) -> Result<String, String> + 'a {
+    move |url: &str| -> Result<String, String> {
+        match (url.strip_prefix("cloud:"), cloud) {
+            (Some(name), Some(client)) => {
+                let (ics, series) = crate::cloudmodel::fetch_calendar(client, name)?;
+                match (series, name) {
+                    (Some(series), "google") => {
+                        stash.borrow_mut().insert(url.to_string(), StashEntry::Google(series));
+                    }
+                    // §3.3/§4.3: no `series` field on a `cloud:google` reply means this calendar
+                    // was not read this run — the stash must stay exactly as it was, never gain a
+                    // phantom ICS-derived entry under the same url.
+                    (None, "google") => {}
+                    _ => {
+                        stash.borrow_mut().insert(url.to_string(), StashEntry::Ics(ics.clone()));
+                    }
+                }
+                Ok(ics)
+            }
+            // A `cloud:` feed on a vault with no account is not an error worth failing a run for:
+            // `load_calendar_events` turns this into "using snapshot" and the day still ranks.
+            (Some(_), None) => Err("no account on this vault".to_string()),
+            (None, _) => {
+                let ics = crate::calfeed::fetch_ics(url)?;
+                stash.borrow_mut().insert(url.to_string(), StashEntry::Ics(ics.clone()));
+                Ok(ics)
+            }
+        }
+    }
 }
 
 /// Rank, run the passes, and write `state/today.md`.
@@ -261,22 +339,16 @@ pub fn run(
     // iCal address, rendered as ICS. Every other url is fetched on the device exactly as before,
     // so the `calendar_ics` secret-address path keeps working with no account at all. `calfeed`
     // then parses, bounds to its 28-day horizon, dedups and snapshots it like any other feed:
-    // there is no second parser and no new vault file.
-    let calendar = |url: &str| -> Result<String, String> {
-        match (url.strip_prefix("cloud:"), &cloud) {
-            (Some(name), Some(client)) => crate::cloudmodel::fetch_calendar(client, name),
-            // A `cloud:` feed on a vault with no account is not an error worth failing a run for:
-            // `load_calendar_events` turns this into "using snapshot" and the day still ranks.
-            (Some(_), None) => Err("no account on this vault".to_string()),
-            (None, _) => crate::calfeed::fetch_ics(url),
-        }
-    };
+    // there is no second parser and no new vault file. `run` owns the one stash the closure fills
+    // (spec §4.2); P16's `commitments::refresh_series` reads it after `load_calendar_events` runs.
+    let stash: SeriesStash = RefCell::new(BTreeMap::new());
+    let calendar = calendar_fetcher(&cloud, &stash);
     run_with(
         vault,
         today_iso,
         runner,
         run_id,
-        Fetchers { calendar: Some(&calendar), events: Some(&events) },
+        Fetchers { calendar: Some(&calendar), events: Some(&events), series: Some(&stash) },
     )
 }
 
@@ -450,12 +522,32 @@ pub fn run_with(
     }
 
     // Calendar busy-time ingest — wave 4, PORTED.
-    let (cal_events, cal_warnings) = load_calendar_events(vault, today, fetchers.calendar);
+    let (cal_events, mut cal_warnings) = load_calendar_events(vault, today, fetchers.calendar);
 
-    let cal = WeekCalendar::from_file(
-        &vault.join("config").join("week_template.yaml"),
-        cal_events,
+    // The commitment passes (spec §4.2, §5.2, §5.4; P16): after the calendar closure filled the
+    // stash and before the calendar is built. Every warning joins the `calendar` step (R13: no new
+    // step). The cards they file are counted into this run's pending line, as the events pass
+    // counts its checks (re-review M-a).
+    let passes = commitment_passes(
+        vault,
+        today,
+        &planning,
+        fetchers.series,
+        &ctx,
+        &mut journal,
+        &mut cal_warnings,
     );
+    // A card withdrawn this run was counted pending by `process_approvals`: take it back out, and
+    // re-age the queue without it (P16 fix round 1, I1).
+    approvals.pending += passes.filed - passes.withdrawn_pending;
+    if passes.withdrawn_pending > 0 {
+        approvals.oldest_pending_days = crate::approvals::oldest_pending_days(vault, today);
+    }
+    let commitments = passes.set;
+
+    // §6.1 (C3): the one constructor `surface` uses too, so `today.md` and the console agree.
+    let cal = WeekCalendar::for_vault(vault, cal_events);
+    cal_warnings.extend(crate::commitments::record_baseline(vault, &commitments, &cal, today));
 
     let mut skipped: Vec<String> = Vec::new();
     let mut tasks = load_tasks(&vault.join("tasks"), Some(&mut skipped));
@@ -656,6 +748,278 @@ pub fn run_with(
     );
 
     Ok(RunOutcome { output, status, summary, steps, not_ported, run_id })
+}
+
+/// §3.2 over one run's stash: each entry becomes `(calendar key, its series)` for every calendar
+/// it read fresh and complete. A Google entry is normalised directly (its `calendars_read` are
+/// the keys; a calendar with an unreadable item is left out by `series_from_google`); an ICS entry
+/// is normalised once per `config/ingest.yaml` feed whose url it was fetched from, under that
+/// feed's name (text that is not a calendar is no read at all). In stash (url) order, so the same
+/// stash always gives the same list. Returns `(fresh, warnings)`.
+fn normalise_stash(
+    vault: &Path,
+    entries: &BTreeMap<String, StashEntry>,
+    tz: &TimeZone,
+    today: Date,
+) -> (Vec<(String, Vec<crate::commitments::Series>)>, Vec<String>) {
+    let feeds = crate::calfeed::calendar_entries(vault);
+    let mut fresh: Vec<(String, Vec<crate::commitments::Series>)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for (url, entry) in entries {
+        match entry {
+            StashEntry::Google(value) => {
+                let (series, calendars, found) = crate::commitments::series_from_google(value, tz, today);
+                warnings.extend(found);
+                for calendar in calendars {
+                    let list = series.iter().filter(|s| s.calendar == calendar).cloned().collect();
+                    fresh.push((calendar, list));
+                }
+            }
+            StashEntry::Ics(text) => {
+                // The closure stashes only urls `calendar_entries` handed it this run, so a url
+                // with no feed row cannot occur; if it ever did, nothing is read (no ageing).
+                for (name, _) in feeds.iter().filter(|(_, feed_url)| feed_url == url) {
+                    let (series, found) = crate::commitments::series_from_ics(name, text, tz, today);
+                    warnings.extend(found);
+                    if let Some(series) = series {
+                        fresh.push((name.clone(), series));
+                    }
+                }
+            }
+        }
+    }
+    (fresh, warnings)
+}
+
+/// The commitment passes of one `rank`, in the order plan review I5 and the P13/P8 carry-forwards
+/// fix: normalise the stash; `refresh_series` → the file; `commitments::load` → the set (after
+/// `process_approvals`, so this run's settlements are in it); `withdraw_stale` — skipped when the
+/// series file could not be read, as is the **ended** rule, because a bad read is never "gone";
+/// `detect_changes`; `successor_keys`; `proposals`; `emit_checks`, with the budget recounted here
+/// after the events pass took its share. Pure of clocks, networks and models: the stash was filled
+/// by the calendar closure and everything here is deterministic. Every warning is pushed onto
+/// `warnings`.
+fn commitment_passes(
+    vault: &Path,
+    today: Date,
+    planning: &crate::planning::PlanningConfig,
+    stash: Option<&SeriesStash>,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    warnings: &mut Vec<String>,
+) -> CommitmentPasses {
+    use crate::commitments as cm;
+    let entries: BTreeMap<String, StashEntry> = stash.map(|s| s.borrow().clone()).unwrap_or_default();
+    let (fresh, normalise_warnings) = normalise_stash(vault, &entries, &vault_zone(vault), today);
+    warnings.extend(normalise_warnings);
+
+    let (file, series_warnings) = cm::refresh_series(vault, &fresh, today);
+    let read_failed = cm::series_read_failed(&series_warnings);
+    warnings.extend(series_warnings);
+
+    let set = cm::load(vault);
+    warnings.extend(set.warnings.iter().cloned());
+
+    let mut withdrawn_pending = 0;
+    if !read_failed {
+        let withdrawal = crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
+        withdrawn_pending = withdrawal.pending;
+        warnings.extend(withdrawal.warnings);
+    }
+
+    let (codes, code_warnings) = cm::Codes::load(vault);
+    warnings.extend(cm::code_warnings_hit(code_warnings, &file));
+    let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
+    let watched = match read_failed {
+        true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
+        false => file.clone(),
+    };
+    let (changes, change_warnings) = cm::detect_changes(&watched, &set, &codes, &names, &fresh_keys, today, journal);
+    warnings.extend(change_warnings);
+
+    let held = cm::successor_keys(vault);
+    let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
+    let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, true);
+    let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
+    let (_, filed, card_warnings) = cm::emit_checks(vault, &proposals, &changes, today, budget, ctx, journal);
+    warnings.extend(card_warnings);
+    CommitmentPasses { filed: filed as i64, withdrawn_pending, set }
+}
+
+/// What [`commitment_passes`] hands back to `run_with`.
+struct CommitmentPasses {
+    /// Cards filed this run (added to the pending line).
+    filed: i64,
+    /// Cards withdrawn this run that `process_approvals` had counted pending (taken back out).
+    withdrawn_pending: i64,
+    /// The notes, for `record_baseline`.
+    set: crate::commitments::Commitments,
+}
+
+// -----------------------------------------------------------------------------------------------
+// R14: the read-only `commitments` command (spec §5.1's phase-2 data source).
+// -----------------------------------------------------------------------------------------------
+
+/// [`commitments_report`]'s answer: the current proposals (the window proposal included, office
+/// hours included — R8's card-only exclusion does not apply here) and every warning collecting
+/// them raised. Never a note, a card or a journal record.
+pub struct CommitmentsReport {
+    pub proposals: Vec<crate::commitments::Proposal>,
+    pub warnings: Vec<String>,
+}
+
+/// `"HH:MM"`, 24-hour — [`crate::commitments`]'s own `hm` is private to that module, so the
+/// command prints its own (same format, spec §5.2).
+fn hm(time: Time) -> String {
+    format!("{:02}:{:02}", time.hour(), time.minute())
+}
+
+/// One proposal as the phase-2 screen reads it: everything [`crate::commitments::file_card`]
+/// would put in a card's `commitment:` mapping, plus the `source_uid` the app answers back with
+/// (§5.1: "the app passes keys, levels and the window ... re-derives each proposal from the
+/// series file by its `source_uid`"). Not a byte contract — no frozen fixture pins this shape.
+pub fn proposal_json(p: &crate::commitments::Proposal) -> serde_json::Value {
+    serde_json::json!({
+        "kind": p.kind,
+        "level": p.level.as_str(),
+        "title": p.title,
+        "course": p.course,
+        "meets": p.meets.iter().map(|m| serde_json::json!({
+            "days": m.days,
+            "start": hm(m.start),
+            "end": hm(m.end),
+        })).collect::<Vec<_>>(),
+        "where": p.where_,
+        "from": p.from.map(|d| d.to_string()),
+        "until": p.until.map(|d| d.to_string()),
+        "source_uid": p.source_uid,
+        // M3 (fix round 1): explicit, so the phase-2 screen can group the window row under "Your
+        // day" without knowing `commitments::WINDOW_PREFIX`.
+        "window": p.is_window(),
+    })
+}
+
+/// One proposal, one line, for a human running `commitments` without `--json`.
+pub fn proposal_line(p: &crate::commitments::Proposal) -> String {
+    let when: Vec<String> = p
+        .meets
+        .iter()
+        .map(|m| format!("{} {}-{}", m.days.join("/"), hm(m.start), hm(m.end)))
+        .collect();
+    if when.is_empty() {
+        format!("{} ({})", p.title, p.kind)
+    } else {
+        format!("{} ({}) {}", p.title, p.kind, when.join(", "))
+    }
+}
+
+/// Production `commitments`: builds the same calendar fetcher and stash [`run`] does, so a
+/// `cloud:` feed and a direct address are both reached exactly as a slot would reach them, and
+/// hands off to [`commitments_report_with`].
+pub fn commitments_report(vault: &Path, today_iso: Option<&str>) -> CommitmentsReport {
+    let cloud = crate::cloudmodel::resolve(vault).ok();
+    let stash: SeriesStash = RefCell::new(BTreeMap::new());
+    let calendar = calendar_fetcher(&cloud, &stash);
+    commitments_report_with(
+        vault,
+        today_iso,
+        Fetchers { calendar: Some(&calendar), events: None, series: Some(&stash) },
+    )
+}
+
+/// [`commitments_report`] with the network seam exposed (mirrors [`run`]/[`run_with`]) — a test
+/// seam: production always builds the real fetcher; a test can inject stash entries directly, as
+/// [`run_with`]'s own commitment-pass tests do, with no network at all.
+///
+/// R14: fetches each `calfeed::calendar_entries` feed **directly through `fetchers.calendar`,
+/// never through `load_calendar_events`**, so `state/calendar.md` is not rewritten; refreshes
+/// `state/calendar-series.json` (`commitments::refresh_series`, written only when a feed answered
+/// and the bytes changed); reads `commitments::load`, the codes and the planning names exactly as
+/// [`commitment_passes`] does; builds the proposals with `for_cards: false`, so office hours are
+/// not filtered out of what the phase-2 screen sees. **Always succeeds**: an unreadable or
+/// malformed `config/ingest.yaml`, and a feed that fails to fetch, each become one line in
+/// `warnings` rather than an error — the command has nothing to crash a morning's ranking with,
+/// because it never touches `today.md`, a note, a card or the journal.
+pub fn commitments_report_with(
+    vault: &Path,
+    today_iso: Option<&str>,
+    fetchers: Fetchers<'_>,
+) -> CommitmentsReport {
+    use crate::commitments as cm;
+    let mut warnings: Vec<String> = Vec::new();
+    let today = match today_iso {
+        Some(iso) => match Date::strptime("%Y-%m-%d", iso) {
+            Ok(d) => d,
+            Err(_) => {
+                warnings.push(format!("bad --today {iso:?}; using today"));
+                Timestamp::now().to_zoned(vault_zone(vault)).date()
+            }
+        },
+        None => Timestamp::now().to_zoned(vault_zone(vault)).date(),
+    };
+
+    // `calendar_entries` itself swallows a bad `config/ingest.yaml` silently (an empty feed list —
+    // correct for `refresh_series`, which must never treat a config problem as a reason to drop
+    // series it already has), so the same read is repeated here only to name the failure.
+    let config_path = vault.join("config").join("ingest.yaml");
+    if config_path.exists() {
+        match pystr::read_text(&config_path) {
+            Err(err) => warnings.push(format!("config unreadable: {err}")),
+            Ok(text) => match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
+                Err(err) => warnings.push(format!("config unreadable: {err}")),
+                Ok(config) => {
+                    // M4 (fix round 1): a `calendars:` value that is present and truthy but not a
+                    // list is exactly the shape `calendars_feeds` (private to `calfeed.rs`) still
+                    // iterates without error — a string one character at a time, a mapping one key
+                    // at a time — and `calendar_entries` then filters every one of those out
+                    // silently (`feed.as_mapping()` is `None`), so today's command would otherwise
+                    // report "no proposals, no warnings" for a config it could not use at all.
+                    if let Some(value) = config.get("calendars") {
+                        if pystr::yaml_truthy(value) && value.as_sequence().is_none() {
+                            warnings.push(format!(
+                                "config: calendars is not a list ({}); no feed will be read",
+                                pystr::yaml_type_name(value)
+                            ));
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if let Some(fetch) = fetchers.calendar {
+        for (name, url) in crate::calfeed::calendar_entries(vault) {
+            if url.is_empty() {
+                continue;
+            }
+            if let Err(err) = fetch(&url) {
+                warnings.push(format!("{name}: fetch failed ({err})"));
+            }
+        }
+    }
+
+    let entries: BTreeMap<String, StashEntry> =
+        fetchers.series.map(|s| s.borrow().clone()).unwrap_or_default();
+    let (fresh, normalise_warnings) = normalise_stash(vault, &entries, &vault_zone(vault), today);
+    warnings.extend(normalise_warnings);
+
+    let (file, series_warnings) = cm::refresh_series(vault, &fresh, today);
+    warnings.extend(series_warnings);
+
+    let set = cm::load(vault);
+    warnings.extend(set.warnings.iter().cloned());
+
+    let (codes, code_warnings) = cm::Codes::load(vault);
+    warnings.extend(cm::code_warnings_hit(code_warnings, &file));
+
+    let planning = load_planning(&vault.join("config").join("planning.yaml"));
+    let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    let held = cm::successor_keys(vault);
+    let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
+    let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
+
+    CommitmentsReport { proposals, warnings }
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -1388,7 +1752,7 @@ calendars:
             "---\ntitle: Test task\ndue: 2026-09-25\neffort_hours: 2\nimportance: 3\n---\n",
         )
         .unwrap();
-        let fetchers = Fetchers { calendar: Some(&fetch), events: None };
+        let fetchers = Fetchers { calendar: Some(&fetch), events: None, series: None };
         run_with(&vault, Some("2026-09-07"), "manual", None, fetchers).unwrap();
         let out = page(&vault);
         assert!(out.contains("- 09:00\u{2013}09:30 Client call"), "{out}");
@@ -1422,7 +1786,7 @@ calendars:
         )
         .unwrap();
         let boom = |_: &str| Err("tunnel closed".to_string());
-        let fetchers = Fetchers { calendar: Some(&boom), events: None };
+        let fetchers = Fetchers { calendar: Some(&boom), events: None, series: None };
         run_with(&vault, Some("2026-09-07"), "local", None, fetchers).unwrap();
         let out = page(&vault);
         assert!(out.contains("- 09:00\u{2013}09:30 Client call"), "{out}"); // snapshot kept the event
@@ -1588,7 +1952,7 @@ Bring questions.
         pending_proposals(&vault, 14);
         let ics = judged_feed(&vault, 2);
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
         assert_eq!(digest_uids(&vault), vec!["ics:ev-0".to_string()]);
         let _ = std::fs::remove_dir_all(&vault);
@@ -1608,7 +1972,7 @@ Bring questions.
         pending_proposals(&vault, 5);
         let ics = judged_feed(&vault, 1);
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         // Sorted by (expires, stem) with all five sharing one expiry date, the allowance of 3
@@ -1684,7 +2048,7 @@ Bring questions.
         }
         let ics = format!("BEGIN:VCALENDAR\n{}\nEND:VCALENDAR\n", blocks.join("\n"));
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         // remaining budget = 15 - 5 Gmail proposals = 10; exactly 10 of the 11 eligible events
@@ -1718,7 +2082,7 @@ Bring questions.
         )
         .unwrap();
         let fetch = |_: &str| Ok(ics.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         let cards = md_names(&vault.join("approvals"), "event-check-");
@@ -1733,7 +2097,7 @@ Bring questions.
         assert!(md_names(&vault.join("approvals"), "events-digest-").is_empty());
 
         // The next run asks nothing new and still counts the card pending.
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
         assert_eq!(md_names(&vault.join("approvals"), "event-check-").len(), 1);
         let recs = run_records(&vault);
@@ -1781,7 +2145,7 @@ Bring questions.
         )
         .unwrap();
         let fetch = |_: &str| Ok(feed.clone());
-        let fetchers = Fetchers { calendar: None, events: Some(&fetch) };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
         run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
 
         let seen = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
@@ -1961,6 +2325,1165 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
             .filter(|r| record_str(r, "via") == "external" && record_str(r, "id") == digest_id)
             .collect();
         assert!(external.is_empty(), "{external:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- the series stash (P14, spec §4.2) ----------------------------------------------------
+
+    /// A one-shot loopback HTTP server (CLAUDE.md's loopback-only rule; mirrors
+    /// `cloud_contract.rs`'s `loopback`, kept local since these tests read no header or request
+    /// line — only `calendar_fetcher`'s own return value and what it left in the stash). Answers
+    /// exactly one request, at 200, with `body`; hands back the bare `http://127.0.0.1:<port>`
+    /// base and the server thread's handle, so a test can join it and see a panic if the read or
+    /// write ever failed.
+    fn loopback_once(body: String) -> (String, std::thread::JoinHandle<()>) {
+        loopback_once_status(200, body)
+    }
+
+    /// [`loopback_once`] with the status line spelled out (M1, review round 1: a non-2xx reply
+    /// from the cloud route).
+    fn loopback_once_status(status: u16, body: String) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (stream, _) = listener.accept().expect("accept the one connection");
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone the stream"));
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap_or(0);
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let mut stream = reader.into_inner();
+            let response = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write the response");
+            stream.flush().expect("flush the response");
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    fn cloud_config(api_base: String) -> crate::cloudmodel::CloudConfig {
+        crate::cloudmodel::CloudConfig {
+            api_base,
+            anon_key: "anon-not-a-secret".to_string(),
+            session_credential_target: "knowlu/test-profile/session".to_string(),
+            account_id: "acct-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn fetchers_default_has_no_calendar_events_or_series() {
+        let fetchers = Fetchers::default();
+        assert!(fetchers.calendar.is_none());
+        assert!(fetchers.events.is_none());
+        assert!(fetchers.series.is_none());
+    }
+
+    #[test]
+    fn the_calendar_closure_stashes_google_series_by_url() {
+        let series = serde_json::json!({
+            "calendars_read": ["google:3b9e0c1d2a4f5e60"],
+            "items": [{
+                "calendar": "google:3b9e0c1d2a4f5e60",
+                "id": "4k2q9x7m1abc",
+                "title": "CS 100",
+                "location": "",
+                "description": "Room 101",
+                "event_type": "default",
+                "first": "2026-08-19T12:00:00-05:00",
+                "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261205T055959Z"],
+                "instances": [{"start": "2026-09-23T17:00:00Z", "end": "2026-09-23T17:50:00Z"}]
+            }]
+        });
+        let ics = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "google_calendar", "series": series }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:google").expect("the service answered");
+        assert!(got.contains("BEGIN:VCALENDAR"), "{got}");
+        match stash.borrow().get("cloud:google") {
+            Some(StashEntry::Google(value)) => assert_eq!(value, &series),
+            other => panic!("expected a stashed Google series at \"cloud:google\", got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// I1 (review round 1): a `cloud:google` reply with no `series` field — an old server that
+    /// predates §4.1, or a new one whose series budget ran out or whose series gathering failed
+    /// (§4.1: "`series` is omitted") — must stash **nothing** for that feed. §3.3: "a Google reply
+    /// that carried no `series` field — keeps its series and its date untouched"; §4.3: "`series`
+    /// absent → `None` → that feed's series keep their previous state". The `ics` this reply
+    /// carries is `toIcs` output (no `RRULE`); stashing it as `StashEntry::Ics` would let P16's
+    /// `refresh_series` derive a fresh, empty series read and mint a phantom ICS-keyed calendar
+    /// beside the real `google:<hash>` keys — exactly the state drift the two specs rule out.
+    #[test]
+    fn the_calendar_closure_stashes_nothing_for_google_without_series() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "google_calendar" }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:google").expect("the service answered");
+        assert_eq!(got, ics);
+        assert!(stash.borrow().get("cloud:google").is_none(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// `cloud:personal` gets no `series` field (spec §4.1): the closure stashes the ICS text under
+    /// the feed's own url rather than leaving the stash empty, so a later refresh still has ICS
+    /// text to derive series from. Unlike `cloud:google` (see the test above), `personal` never
+    /// carries series at all — this is its only branch, not a fallback from a missing one.
+    #[test]
+    fn the_calendar_closure_stashes_ics_text_for_a_cloud_feed_with_no_series() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:p1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let body = crate::ledger::dumps_value(
+            &serde_json::json!({ "ics": ics, "source": "personal_ics" }),
+        );
+        let (base, handle) = loopback_once(body);
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let got = fetch("cloud:personal").expect("the service answered");
+        assert_eq!(got, ics);
+        match stash.borrow().get("cloud:personal") {
+            Some(StashEntry::Ics(text)) => assert_eq!(text, ics),
+            other => panic!("expected stashed ICS text at \"cloud:personal\", got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    #[test]
+    fn the_calendar_closure_stashes_ics_text_for_a_direct_feed() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:d1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".to_string();
+        let (base, handle) = loopback_once(ics.clone());
+        let cloud: Option<crate::cloudmodel::CloudClient> = None;
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let url = format!("{base}/cal.ics");
+        let got = fetch(&url).expect("the feed answered");
+        assert_eq!(got, ics);
+        match stash.borrow().get(&url) {
+            Some(StashEntry::Ics(text)) => assert_eq!(text, &ics),
+            other => panic!("expected stashed ICS text at {url:?}, got {other:?}"),
+        }
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    /// Two failing branches, neither of which touches the stash: a direct feed whose scheme
+    /// `calfeed::fetch_ics` cannot even parse a connector for, and a `cloud:` feed on a vault with
+    /// no account (`cloud: None`) — the "no account on this vault" arm `run`'s own closure takes
+    /// on a vault that has never signed in.
+    #[test]
+    fn a_failed_fetch_stashes_nothing() {
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let cloud: Option<crate::cloudmodel::CloudClient> = None;
+        let fetch = calendar_fetcher(&cloud, &stash);
+
+        let err = fetch("unreachable://example.test/cal.ics").unwrap_err();
+        assert!(!err.is_empty());
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+
+        let err = fetch("cloud:google").unwrap_err();
+        assert_eq!(err, "no account on this vault");
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+    }
+
+    /// M1 (review round 1): the cloud route itself can fail two ways `fetch_calendar` surfaces as
+    /// `Err` — a non-2xx status, and a 200 whose body carries no `ics` field — and the `?` in
+    /// `calendar_fetcher` must return before either ever reaches an `insert`.
+    #[test]
+    fn a_failed_cloud_fetch_stashes_nothing() {
+        let (base, handle) =
+            loopback_once_status(409, crate::ledger::dumps_value(&serde_json::json!({ "error": "conflict" })));
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        assert!(fetch("cloud:google").is_err());
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
+
+        let (base, handle) =
+            loopback_once(crate::ledger::dumps_value(&serde_json::json!({ "source": "google_calendar" })));
+        let cloud = Some(crate::cloudmodel::CloudClient::new(
+            &cloud_config(format!("{base}/functions/v1")),
+            "jwt-not-a-secret",
+        ));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        assert!(fetch("cloud:google").is_err(), "a body with no ics field must be Err");
+        assert!(stash.borrow().is_empty(), "{:?}", stash.borrow());
+        handle.join().expect("the loopback thread did not panic");
+    }
+
+    // --- P16: the commitment passes inside `rank` ----------------------------------------------
+
+    /// Spec §8 test 5 (M7): `vault-full` ranked through the production `run` (its feed has no
+    /// `ics_url`, so nothing is fetched) gains no series file, no plan file, no `commitments/` and
+    /// no card, and its `calendar` step says exactly what it said before P16 (captured on a7efe3d).
+    #[test]
+    fn rank_on_vault_full_writes_no_new_state() {
+        let vault = fixture("p16full", "tests/fixtures/vault-full");
+        run(&vault, Some("2026-08-28"), "manual", None).unwrap();
+        assert!(!vault.join("state").join("calendar-series.json").exists());
+        assert!(!vault.join("state").join("plan.json").exists());
+        assert!(!vault.join("commitments").exists());
+        assert!(md_names(&vault.join("approvals"), "commitment-check-").is_empty());
+        let recs = run_records(&vault);
+        let calendar = step_of(recs.last().unwrap(), "calendar");
+        assert_eq!(calendar["message"], serde_json::json!("personal: no ics_url"), "{calendar:?}");
+        assert_eq!(calendar["result"], serde_json::json!("WARN"), "{calendar:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Two feeds (the Google grant and one direct address), all invented.
+    const P16_FEEDS: &str = "timezone: America/Chicago\ncalendars:\n  - name: google\n    ics_url: 'cloud:google'\n  - name: personal\n    ics_url: https://calendar.example.test/personal.ics\n";
+    const P16_ICS_URL: &str = "https://calendar.example.test/personal.ics";
+    const P16_GOOGLE: &str = "google:0a1b2c3d4e5f6071";
+    /// A Monday; every series below starts on it.
+    const P16_MONDAY: Date = Date::constant(2026, 9, 7);
+
+    /// A migrated scratch vault with a flat 08:00–18:00 week template, the two feeds, one active
+    /// task (so `today.md` carries its capacity line) and `courses/cs-100.md` (so `CS 100`
+    /// classifies as a class).
+    fn p16_vault(name: &str) -> PathBuf {
+        let vault = scratch(name);
+        for dir in ["config", "tasks", "courses"] {
+            std::fs::create_dir_all(vault.join(dir)).unwrap();
+        }
+        let write = |rel: &str, text: &str| pystr::write_text(&vault.join(rel), text).unwrap();
+        write(
+            "config/week_template.yaml",
+            "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        );
+        write("config/ingest.yaml", P16_FEEDS);
+        write("tasks/essay.md", "---\ntitle: Invented essay\ndue: 2026-10-30\neffort_hours: 2\nimportance: 3\n---\n");
+        write("courses/cs-100.md", "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n");
+        seed_migrated(&vault);
+        vault
+    }
+
+    fn p16_day(offset: i64) -> Date {
+        P16_MONDAY.checked_add(jiff::Span::new().days(offset)).unwrap()
+    }
+
+    /// One Google `series` item: weekly on `days` (0 = Monday) from `P16_MONDAY`, `start`–`end`
+    /// (CDT), for `weeks` weeks.
+    fn google_item(id: &str, title: &str, days: &[i64], start: &str, end: &str, weeks: i64) -> serde_json::Value {
+        let names = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+        let mut instances = Vec::new();
+        for week in 0..weeks {
+            for d in days {
+                let day = p16_day(week * 7 + d);
+                instances.push(serde_json::json!({
+                    "start": format!("{day}T{start}:00-05:00"),
+                    "end": format!("{day}T{end}:00-05:00"),
+                }));
+            }
+        }
+        let byday: Vec<&str> = days.iter().map(|d| names[*d as usize]).collect();
+        serde_json::json!({
+            "calendar": P16_GOOGLE,
+            "id": id,
+            "title": title,
+            "location": "",
+            "description": "",
+            "event_type": "default",
+            "first": instances[0]["start"].clone(),
+            "recurrence": [format!("RRULE:FREQ=WEEKLY;BYDAY={}", byday.join(","))],
+            "instances": instances,
+        })
+    }
+
+    /// A fresh, complete read of `P16_GOOGLE` returning `items`.
+    fn google_entry(items: Vec<serde_json::Value>) -> StashEntry {
+        StashEntry::Google(serde_json::json!({ "calendars_read": [P16_GOOGLE], "items": items }))
+    }
+
+    fn cs100_item() -> serde_json::Value {
+        google_item("cs100aa", "CS 100", &[0, 2, 4], "12:00", "12:50", 8)
+    }
+
+    /// `run_with` on `day` with `entries` injected into the stash (no network: every feed answers
+    /// an empty calendar and stashes nothing itself).
+    fn rank_p16(vault: &Path, day: Date, entries: Vec<(&str, StashEntry)>) -> RunOutcome {
+        let stash: SeriesStash =
+            RefCell::new(entries.into_iter().map(|(url, entry)| (url.to_string(), entry)).collect());
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        run_with(vault, Some(&day.to_string()), "manual", None, fetchers).unwrap()
+    }
+
+    fn commitment_note(vault: &Path, file: &str, front: &str) {
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        let text = format!("---\n{front}---\n\nInvented.\n");
+        pystr::write_text(&vault.join("commitments").join(file), &text).unwrap();
+        // A real confirmed commitments note is minted by `create_confirmed` (actor
+        // `commitments::CARD_ACTOR`) and is already in the journal the moment any rank first sees
+        // it. Journal this fixture the same way, or `detect_external` reads it as a hand edit
+        // nobody journaled and judge-once (final-fix-report m3) locks every field a
+        // change-detection test needs to see move.
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        let id = crate::yaml::get(&meta, "id").and_then(crate::yaml::text).unwrap();
+        let whole = crate::yaml::to_json(&serde_yaml_ng::Value::Mapping(meta));
+        let rel_path = format!("commitments/{file}");
+        let mut spec = crate::journal::NewRecord::new("create", &rel_path, crate::commitments::CARD_ACTOR, "cli");
+        spec.id = Some(&id);
+        spec.new = whole;
+        spec.ts = Some("2026-09-01T00:00:00.000Z".into());
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        Journal::new(vault).append(&mut rec).unwrap();
+    }
+
+    /// `CS 100`, confirmed, exactly as `cs100_item` meets.
+    const CS100_NOTE: &str = "id: cmt_00000000a1\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"CS 100\"\n\
+        course: cs-100\nmeets: [{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}]\n\
+        source_uid: \"gcal-series:cs100aa\"\nstatus: confirmed\n";
+
+    /// `PH 106`, confirmed at 13:00–14:45; its series (`ph106_moved`) now meets an hour later.
+    const PH106_NOTE: &str = "id: cmt_00000000a2\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"PH 106\"\n\
+        meets: [{days: [tue, thu], start: \"13:00\", end: \"14:45\"}]\n\
+        source_uid: \"gcal-series:ph106aa\"\nstatus: confirmed\n";
+
+    fn ph106_moved() -> serde_json::Value {
+        google_item("ph106aa", "PH 106", &[1, 3], "14:00", "15:45", 8)
+    }
+
+    const PLANNING_NOTE: &str = "id: cmt_00000000b1\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+        window: [{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]\n";
+
+    fn checks(vault: &Path, folder: &str) -> Vec<String> {
+        md_names(&vault.join(folder), "commitment-check-")
+    }
+
+    fn capacity_today(vault: &Path) -> f64 {
+        let text = page(vault);
+        let at = text.find("Capacity today: ").unwrap_or_else(|| panic!("no capacity line: {text}"));
+        let rest = &text[at + "Capacity today: ".len()..];
+        rest[..rest.find('h').unwrap()].parse().unwrap()
+    }
+
+    fn plan_json(vault: &Path) -> String {
+        std::fs::read_to_string(vault.join("state").join("plan.json")).unwrap()
+    }
+
+    #[test]
+    fn rank_files_a_commitment_check_for_an_injected_class_series_and_counts_it_pending() {
+        let vault = p16_vault("p16card");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let cards = checks(&vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card = vault.join("approvals").join(&cards[0]);
+        assert_eq!(meta_str(&card, "title"), "CS 100 · Mon/Wed/Fri 12–12:50pm · a class?");
+        assert_eq!(meta_str(&card, "source_uid"), "gcal-series:cs100aa");
+        assert!(page(&vault).contains("**Approvals: 1 pending**"), "{}", page(&vault));
+        let recs = run_records(&vault);
+        assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["pending"], serde_json::json!(1));
+        assert!(vault.join("state").join("calendar-series.json").is_file());
+        // R18: a proposal is never a note.
+        assert!(!vault.join("commitments").exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn commitment_checks_take_only_what_the_events_pass_left() {
+        let vault = p16_vault("p16budget");
+        pystr::write_text(
+            &vault.join("config").join("events.yaml"),
+            "sources:\n  - name: campus\n    type: ics\n    url: unreachable://x\n    enabled: true\n",
+        )
+        .unwrap();
+        pystr::write_text(&vault.join("config").join("planning.yaml"), "daily_approval_budget: 15\n").unwrap();
+        pending_proposals(&vault, 12);
+        let ics = judged_feed(&vault, 2);
+        let events = |_: &str| Ok(ics.clone());
+        let items = vec![
+            cs100_item(),
+            google_item("cs100lab", "CS 100 Lab", &[1], "15:00", "16:50", 8),
+            google_item("chess01", "Chess Club", &[3], "18:00", "19:00", 8),
+        ];
+        let stash: SeriesStash = RefCell::new(BTreeMap::from([("cloud:google".to_string(), google_entry(items))]));
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let today = Date::constant(2026, 8, 26);
+        for _ in 0..2 {
+            let fetchers = Fetchers { calendar: Some(&empty), events: Some(&events), series: Some(&stash) };
+            run_with(&vault, Some("2026-08-26"), "manual", None, fetchers).unwrap();
+            // 12 proposals + a 2-event digest leave 1: the class takes it, and nothing is deferred.
+            assert_eq!(digest_uids(&vault).len(), 2);
+            assert_eq!(checks(&vault, "approvals").len(), 1, "{:?}", checks(&vault, "approvals"));
+            assert_eq!(count_proposals_created(&vault, today), 15);
+            let recs = run_records(&vault);
+            assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["deferred"], serde_json::json!(0));
+            for i in 0..12 {
+                let path = vault.join("approvals").join(format!("task-{i}.md"));
+                assert_eq!(meta_str(&path, "status"), "pending", "task-{i}");
+            }
+        }
+        let card = vault.join("approvals").join(&checks(&vault, "approvals")[0]);
+        assert_eq!(meta_str(&card, "source_uid"), "gcal-series:cs100aa");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_subtracts_a_confirmed_class_from_capacity() {
+        let vault = p16_vault("p16capacity");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let before = capacity_today(&vault);
+        commitment_note(
+            &vault,
+            "seminar.md",
+            "id: cmt_00000000a3\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"Invented Seminar\"\n\
+             meets: [{days: [mon], start: \"15:00\", end: \"16:00\"}]\nstatus: confirmed\n",
+        );
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let after = capacity_today(&vault);
+        assert!((before - after - 1.0).abs() < 1e-9, "before {before}, after {after}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_withdraws_a_card_whose_series_left_the_file() {
+        let vault = p16_vault("p16withdraw");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let filed = checks(&vault, "approvals");
+        assert_eq!(filed.len(), 1);
+        // One unrelated card, two days old on the drop run: after the withdrawal it is the only
+        // pending card and the oldest (P16 fix round 1, I1).
+        pystr::write_text(
+            &vault.join("approvals").join("task-reply.md"),
+            "---\ntype: approval\nkind: task\ntitle: Reply to advisor\nstatus: pending\n\
+             proposed_at: 2026-09-19\nfirst_proposed_at: 2026-09-19\nexpires: 2026-09-30\n\
+             snooze_until: null\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        // Fourteen days of fresh reads without it: the series leaves the file, the card goes.
+        rank_p16(&vault, p16_day(14), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert!(checks(&vault, "approvals").is_empty());
+        assert_eq!(checks(&vault, "archive"), filed);
+        assert_eq!(meta_str(&vault.join("archive").join(&filed[0]), "status"), "superseded");
+        // The withdrawn card is not counted on the run that withdrew it, nor is its age.
+        let text = page(&vault);
+        assert!(text.contains("**Approvals: 1 pending** (oldest 2d)"), "{text}");
+        let recs = run_records(&vault);
+        assert_eq!(step_of(recs.last().unwrap(), "approvals")["counts"]["pending"], serde_json::json!(1));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// C1: a change card is not withdrawn by the next ranks and not filed again.
+    #[test]
+    fn a_change_card_survives_two_more_ranks() {
+        let vault = p16_vault("p16change");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        for _ in 0..3 {
+            rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![ph106_moved()]))]);
+            let cards = checks(&vault, "approvals");
+            assert_eq!(cards.len(), 1, "{cards:?}");
+            let card = vault.join("approvals").join(&cards[0]);
+            assert_eq!(meta_str(&card, "status"), "pending");
+            assert_eq!(meta_str(&card, "target"), "commitments/ph-106.md");
+            assert!(checks(&vault, "archive").is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// C1: a proposal card, a window card and a change card, ranked on three consecutive days with
+    /// the same stash, are each filed once, never archived, and charged only on day one.
+    #[test]
+    fn no_card_is_withdrawn_and_refiled_across_three_ranks() {
+        let vault = p16_vault("p16three");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        let items = || {
+            vec![
+                cs100_item(),
+                ph106_moved(),
+                google_item("wake01", "Wake up", &[0, 1, 2, 3, 4], "07:00", "07:15", 8),
+                google_item("bed01", "Bedtime", &[0, 1, 2, 3, 4], "22:30", "22:45", 8),
+            ]
+        };
+        for offset in 0..3 {
+            rank_p16(&vault, p16_day(offset), vec![("cloud:google", google_entry(items()))]);
+            let cards = checks(&vault, "approvals");
+            assert_eq!(cards.len(), 3, "day {offset}: {cards:?}");
+            let mut kinds: Vec<&str> = Vec::new();
+            for name in &cards {
+                let card = vault.join("approvals").join(name);
+                assert_eq!(meta_str(&card, "status"), "pending", "{name}");
+                assert_eq!(meta_str(&card, "first_proposed_at"), "2026-09-07", "{name}");
+                assert_eq!(meta_str(&card, "proposed_at"), "2026-09-07", "{name}");
+                kinds.push(match (meta_str(&card, "target").is_empty(), meta_str(&card, "source_uid")) {
+                    (false, _) => "change",
+                    (true, key) if key.starts_with("window:") => "window",
+                    (true, _) => "proposal",
+                });
+            }
+            kinds.sort();
+            assert_eq!(kinds, vec!["change", "proposal", "window"], "day {offset}");
+            assert!(checks(&vault, "archive").is_empty(), "day {offset}");
+            assert_eq!(count_proposals_created(&vault, p16_day(offset)), if offset == 0 { 3 } else { 0 });
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Ranks `CS100_NOTE`'s vault on `P16_MONDAY` with its series, then on days 7 and 14 with fresh
+    /// reads that no longer return it (the drop run is day 14).
+    fn age_out_cs100(vault: &Path, drop_budget: Option<i64>) {
+        commitment_note(vault, "cs-100.md", CS100_NOTE);
+        rank_p16(vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(checks(vault, "approvals").is_empty(), "the note matches its series");
+        rank_p16(vault, p16_day(7), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert!(checks(vault, "approvals").is_empty());
+        if let Some(budget) = drop_budget {
+            pystr::write_text(
+                &vault.join("config").join("planning.yaml"),
+                &format!("daily_approval_budget: {budget}\n"),
+            )
+            .unwrap();
+        }
+        rank_p16(vault, p16_day(14), vec![("cloud:google", google_entry(Vec::new()))]);
+    }
+
+    /// The last instance the day-0 read held: Friday Oct 2, inside `[Sep 7, Oct 5)`.
+    fn assert_one_end_card(vault: &Path) {
+        let cards = checks(vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let card = vault.join("approvals").join(&cards[0]);
+        assert_eq!(meta_str(&card, "title"), "CS 100 ends Oct 2 · update?");
+        assert_eq!(meta_str(&card, "target"), "commitments/cs-100.md");
+        let meta = crate::ids::read_meta(&card).unwrap();
+        let change = crate::yaml::to_json(crate::yaml::get(&meta, "change").unwrap());
+        assert_eq!(change, serde_json::json!({ "until": "2026-10-02" }));
+    }
+
+    /// I1: an aged-out series files exactly one end card, `until` its last instance.
+    #[test]
+    fn an_aged_out_series_files_exactly_one_end_card_with_its_last_instance() {
+        let vault = p16_vault("p16ended");
+        age_out_cs100(&vault, None);
+        assert_one_end_card(&vault);
+        rank_p16(&vault, p16_day(15), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert_one_end_card(&vault);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I1: the drop run had no budget; the next day's rank files the card from `ended`.
+    #[test]
+    fn an_end_card_starved_by_the_budget_is_filed_on_the_next_run() {
+        let vault = p16_vault("p16starved");
+        age_out_cs100(&vault, Some(0));
+        assert!(checks(&vault, "approvals").is_empty());
+        let series = std::fs::read_to_string(vault.join("state").join("calendar-series.json")).unwrap();
+        assert!(series.contains("gcal-series:cs100aa"), "{series}");
+        pystr::write_text(&vault.join("config").join("planning.yaml"), "daily_approval_budget: 15\n").unwrap();
+        rank_p16(&vault, p16_day(15), vec![("cloud:google", google_entry(Vec::new()))]);
+        assert_one_end_card(&vault);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// I2: one series reaching the file through the Google grant and a direct ICS feed (a Google
+    /// UID keeps its `gcal-series:` key on both routes) is one card.
+    #[test]
+    fn one_series_from_google_and_ics_files_one_card() {
+        let vault = p16_vault("p16twin");
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Invented//EN\nBEGIN:VEVENT\nUID:cs100aa@google.com\n\
+                   SUMMARY:CS 100\nDTSTART;TZID=America/Chicago:20260907T120000\n\
+                   DTEND;TZID=America/Chicago:20260907T125000\nRRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\n\
+                   END:VEVENT\nEND:VCALENDAR\n";
+        rank_p16(
+            &vault,
+            P16_MONDAY,
+            vec![
+                ("cloud:google", google_entry(vec![cs100_item()])),
+                (P16_ICS_URL, StashEntry::Ics(ics.to_string())),
+            ],
+        );
+        let series = std::fs::read_to_string(vault.join("state").join("calendar-series.json")).unwrap();
+        assert_eq!(series.matches("\"gcal-series:cs100aa\"").count(), 2, "held under both calendars: {series}");
+        let cards = checks(&vault, "approvals");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(meta_str(&vault.join("approvals").join(&cards[0]), "source_uid"), "gcal-series:cs100aa");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_records_the_template_window_when_plan_json_is_missing() {
+        let vault = p16_vault("p16plan1");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), "{\"date\": \"2026-09-07\", \"end\": \"18:00\", \"start\": \"08:00\"}\n");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_keeps_the_days_first_window_across_runs() {
+        let vault = p16_vault("p16plan2");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        let first = plan_json(&vault);
+        commitment_note(&vault, "planning-day.md", &PLANNING_NOTE.replace("22:00", "23:00"));
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), first);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_records_todays_window_on_a_new_day() {
+        let vault = p16_vault("p16plan3");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        pystr::write_text(
+            &vault.join("state").join("plan.json"),
+            "{\"date\": \"2026-09-06\", \"end\": \"18:00\", \"start\": \"08:00\"}\n",
+        )
+        .unwrap();
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert_eq!(plan_json(&vault), "{\"date\": \"2026-09-07\", \"end\": \"22:00\", \"start\": \"08:00\"}\n");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M2 (fix round 1): `plan.json` goes through temp-then-rename, and no temp file is left.
+    #[test]
+    fn rank_writes_plan_json_whole_and_leaves_no_temp_file() {
+        let vault = p16_vault("p16plan5");
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(plan_json(&vault).ends_with("}\n"));
+        let temps = md_like(&vault.join("state"), ".tmp");
+        assert!(temps.is_empty(), "{temps:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    fn md_like(dir: &Path, needle: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.contains(needle))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// M1 (fix round 1, controller ruling): a code two courses claim is only worth a warning when
+    /// a series this run actually carries that code. A vault with the clash and nothing else keeps
+    /// a clean `calendar` step.
+    #[test]
+    fn a_course_code_clash_with_no_series_leaves_the_calendar_step_clean() {
+        let vault = p16_vault("p16codeclash");
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "timezone: America/Chicago\n").unwrap();
+        pystr::write_text(
+            &vault.join("courses").join("cs-100-honors.md"),
+            "---\nid: course_00000000c2\ntitle: \"CS 100 Honors\"\ncode: \"CS 100\"\n---\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, Vec::new());
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!((calendar.result, calendar.message.as_str()), ("ok", ""));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M1's other half: a series that carries the ambiguous code surfaces the warning.
+    #[test]
+    fn a_course_code_clash_a_series_hits_warns_in_the_calendar_step() {
+        let vault = p16_vault("p16codehit");
+        pystr::write_text(
+            &vault.join("courses").join("cs-100-honors.md"),
+            "---\nid: course_00000000c2\ntitle: \"CS 100 Honors\"\ncode: \"CS 100\"\n---\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!(calendar.result, "WARN");
+        assert!(calendar.message.contains("code CS100: claimed by both"), "{}", calendar.message);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Every file under `vault`, by vault-relative path, with its bytes.
+    fn tree_bytes(vault: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.insert(rel, std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(vault, vault, &mut out);
+        out
+    }
+
+    /// M3 (fix round 1): a second rank on the same day with the same stash changes nothing but
+    /// the run's own record of itself — the run ledger, the runner log and `today.md`'s
+    /// generated-at line. Cards, the series file, `plan.json`, the journal and every note are
+    /// byte-identical. `state/.journal-index.json` (`detect_external`'s git-ignored cache) is
+    /// the one exception on the second run: it catches up to the records the first run wrote
+    /// after `detect_external` had run (its cards). A third rank leaves even that unchanged.
+    #[test]
+    fn a_second_rank_with_the_same_inputs_changes_no_file() {
+        let vault = p16_vault("p16twice");
+        commitment_note(&vault, "ph-106.md", PH106_NOTE);
+        commitment_note(&vault, "planning-day.md", PLANNING_NOTE);
+        let entries = || vec![("cloud:google", google_entry(vec![cs100_item(), ph106_moved()]))];
+        rank_p16(&vault, P16_MONDAY, entries());
+        assert_eq!(checks(&vault, "approvals").len(), 2, "a proposal and a change card");
+        let normalise = |mut tree: BTreeMap<String, Vec<u8>>| {
+            tree.retain(|rel, _| !rel.starts_with("state/runs/") && rel != "state/runner-log.md");
+            if let Some(page) = tree.get_mut("state/today.md") {
+                let text = String::from_utf8(page.clone()).unwrap();
+                let kept: Vec<&str> = text.lines().filter(|l| !l.contains("Generated")).collect();
+                *page = kept.join("\n").into_bytes();
+            }
+            tree
+        };
+        const INDEX: &str = "state/.journal-index.json";
+        let first = normalise(tree_bytes(&vault));
+        rank_p16(&vault, P16_MONDAY, entries());
+        let second = normalise(tree_bytes(&vault));
+        assert_eq!(first.keys().collect::<Vec<_>>(), second.keys().collect::<Vec<_>>());
+        for (rel, bytes) in first.iter().filter(|(rel, _)| rel.as_str() != INDEX) {
+            assert!(second[rel] == *bytes, "{rel} changed on the second rank");
+        }
+        rank_p16(&vault, P16_MONDAY, entries());
+        let third = normalise(tree_bytes(&vault));
+        assert_eq!(second.keys().collect::<Vec<_>>(), third.keys().collect::<Vec<_>>());
+        for (rel, bytes) in &second {
+            assert!(third[rel] == *bytes, "{rel} changed on the third rank");
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn rank_writes_no_plan_json_without_a_planning_day_note() {
+        let vault = p16_vault("p16plan4");
+        rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(vec![cs100_item()]))]);
+        assert!(!vault.join("state").join("plan.json").exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// P8's carry-forward: a malformed series file warns in the `calendar` step (no new step), and
+    /// that run withdraws nothing — a card whose key is not in this run's (fresh-only) file stays.
+    #[test]
+    fn a_malformed_series_file_warns_in_the_calendar_step() {
+        let vault = p16_vault("p16malformed");
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(vault.join("state").join("calendar-series.json"), "{not json").unwrap();
+        std::fs::create_dir_all(vault.join("approvals")).unwrap();
+        let card = vault.join("approvals").join("commitment-check-old-seminar.md");
+        pystr::write_text(
+            &card,
+            "---\ntype: approval\nkind: commitment-check\ntitle: \"Old Seminar · Tue 3–4pm · a class?\"\n\
+             status: pending\nsource_uid: \"gcal-series:elsewhere\"\nproposed_at: 2026-09-06\n\
+             first_proposed_at: 2026-09-06\nexpires: null\nsnooze_until: null\ncreated_by: agent:commitments\n\
+             ---\n\nInvented.\n",
+        )
+        .unwrap();
+        let out = rank_p16(&vault, P16_MONDAY, vec![("cloud:google", google_entry(Vec::new()))]);
+        let names: Vec<&str> = out.steps.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["passes", "tasks", "calendar", "events", "approvals"]);
+        let calendar = out.steps.iter().find(|s| s.name == "calendar").unwrap();
+        assert_eq!(calendar.result, "WARN");
+        assert!(
+            calendar.message.contains("series file: state/calendar-series.json malformed"),
+            "{}",
+            calendar.message
+        );
+        assert!(card.is_file(), "a bad read is never \"gone\"");
+        assert_eq!(meta_str(&card, "status"), "pending");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- P19: the `commitments` command (R14, spec §5.1, §6.5) --------------------------------
+
+    /// Every file under `vault`, path relative with forward slashes, to its bytes — so a test can
+    /// diff before and after a call and name every path that changed, not just assert a few paths
+    /// stayed absent.
+    fn snapshot(vault: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(rel, std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        if vault.is_dir() {
+            walk(vault, vault, &mut out);
+        }
+        out
+    }
+
+    /// Every path present in `before` or `after` whose bytes differ (an addition, a removal or a
+    /// changed file), sorted.
+    fn changed_paths(before: &BTreeMap<String, Vec<u8>>, after: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+        let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (path, bytes) in after {
+            if before.get(path) != Some(bytes) {
+                changed.insert(path.clone());
+            }
+        }
+        for path in before.keys() {
+            if !after.contains_key(path) {
+                changed.insert(path.clone());
+            }
+        }
+        changed.into_iter().collect()
+    }
+
+    /// The command builds the same fetcher-and-stash shape `rank` does, refreshes the series file
+    /// from an injected class series, and prints the one proposal it found — writing nothing else
+    /// under the vault: no note in `commitments/`, no card in `approvals/`, no journal record
+    /// (`state/journal/` never appears in the diff at all).
+    #[test]
+    fn commitments_command_prints_proposals_and_writes_no_note_card_or_journal() {
+        let vault = p16_vault("p19cards");
+        let before = snapshot(&vault);
+        let stash: SeriesStash =
+            RefCell::new(BTreeMap::from([("cloud:google".to_string(), google_entry(vec![cs100_item()]))]));
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+
+        assert_eq!(report.proposals.len(), 1, "{:?}", report.proposals);
+        let p = &report.proposals[0];
+        assert_eq!(p.title, "CS 100");
+        assert_eq!(p.kind, "class");
+        assert_eq!(p.source_uid, "gcal-series:cs100aa");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let after = snapshot(&vault);
+        assert_eq!(
+            changed_paths(&before, &after),
+            vec!["state/calendar-series.json".to_string()],
+            "the commitments command must write nothing else under the vault"
+        );
+        assert!(!vault.join("commitments").exists(), "R18: a proposal is never a note");
+        assert!(md_names(&vault.join("approvals"), "commitment-check-").is_empty(), "no card either");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A vault with no configured feed and no injected stash gets no series, so `refresh_series`
+    /// writes nothing (`fresh` is empty) and `proposals` returns the empty list — no routines, no
+    /// window either.
+    #[test]
+    fn commitments_command_with_no_feed_prints_an_empty_list() {
+        let vault = scratch("p19nofeed");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        pystr::write_text(
+            &vault.join("config").join("week_template.yaml"),
+            "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        )
+        .unwrap();
+        let before = snapshot(&vault);
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report.proposals.is_empty(), "{:?}", report.proposals);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(changed_paths(&before, &snapshot(&vault)), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Plan review M14: two separate failures, each named in `warnings` rather than raised —
+    /// a malformed `config/ingest.yaml` (this crate's own read, since `calfeed::calendar_entries`
+    /// swallows a bad config silently and correctly), and a feed that fails to fetch. Both leave
+    /// the vault exactly as they found it and the command still hands back its (empty) report.
+    #[test]
+    fn commitments_command_exits_0_on_an_unreadable_config_and_a_failed_fetch() {
+        // A malformed config/ingest.yaml: an unterminated flow sequence.
+        let vault = scratch("p19badconfig");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        pystr::write_text(&vault.join("config").join("ingest.yaml"), "calendars: [\n  - name: x\n").unwrap();
+        let before = snapshot(&vault);
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report.proposals.is_empty(), "{:?}", report.proposals);
+        assert!(
+            report.warnings.iter().any(|w| w.starts_with("config unreadable:")),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(changed_paths(&before, &snapshot(&vault)), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // A feed that is configured but fails to fetch.
+        let vault = scratch("p19badfetch");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        pystr::write_text(
+            &vault.join("config").join("ingest.yaml"),
+            "calendars:\n  - name: personal\n    ics_url: https://calendar.example.test/personal.ics\n",
+        )
+        .unwrap();
+        let before = snapshot(&vault);
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let boom = |_: &str| Err("connection refused".to_string());
+        let fetchers = Fetchers { calendar: Some(&boom), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+        assert!(report.proposals.is_empty(), "{:?}", report.proposals);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("personal") && w.contains("connection refused")),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(changed_paths(&before, &snapshot(&vault)), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M2 (fix round 1): `for_cards: false` is the one behaviour that separates this command's
+    /// proposal list from `rank`'s own card-filing pass — `commitments::proposals`'s
+    /// `office_hours_are_never_filed`/`office_hours_is_proposed_for_the_screen_not_for_cards`
+    /// tests pin the library function; this pins that the command actually passes `false`, since
+    /// flipping it to `true` would still pass every other test in this file.
+    #[test]
+    fn commitments_command_includes_office_hours_because_for_cards_is_false() {
+        let vault = p16_vault("p19officehours");
+        let stash: SeriesStash = RefCell::new(BTreeMap::from([(
+            "cloud:google".to_string(),
+            google_entry(vec![
+                cs100_item(),
+                google_item("cs100oh", "CS 100 Office Hours", &[3], "15:00", "16:00", 8),
+            ]),
+        )]));
+        let empty = |_: &str| Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string());
+        let fetchers = Fetchers { calendar: Some(&empty), events: None, series: Some(&stash) };
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), fetchers);
+        assert_eq!(report.proposals.len(), 2, "{:?}", report.proposals);
+        assert!(
+            report
+                .proposals
+                .iter()
+                .any(|p| p.kind == "office-hours" && p.title == "CS 100 Office Hours"),
+            "office hours must be in the command's list even though `rank` would never file a card \
+             for one: {:?}",
+            report.proposals
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// M3 (fix round 1): `proposal_json` carries an explicit `"window"` boolean (`Proposal::is_window`)
+    /// rather than making the phase-2 screen infer it from `commitments::WINDOW_PREFIX`.
+    #[test]
+    fn proposal_json_carries_an_explicit_window_flag() {
+        let ordinary = crate::commitments::Proposal {
+            kind: "class".to_string(),
+            level: crate::commitments::Level::Hard,
+            title: "CS 100".to_string(),
+            course: Some("cs-100".to_string()),
+            meets: Vec::new(),
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: "gcal-series:cs100aa".to_string(),
+        };
+        assert_eq!(proposal_json(&ordinary)["window"], serde_json::json!(false));
+
+        let window = crate::commitments::Proposal {
+            kind: crate::commitments::PLANNING_DAY.to_string(),
+            level: crate::commitments::Level::Optional,
+            title: "Your day".to_string(),
+            course: None,
+            meets: Vec::new(),
+            where_: None,
+            from: None,
+            until: None,
+            source_uid: format!("{}mon-wake,tue-wake", crate::commitments::WINDOW_PREFIX),
+        };
+        assert_eq!(proposal_json(&window)["window"], serde_json::json!(true));
+    }
+
+    /// M4 (fix round 1): a `calendars:` value that parses as YAML but is not a list is exactly the
+    /// shape `calendars_feeds` (private to `calfeed.rs`) still "iterates" without error — a string
+    /// one character at a time — and `calendar_entries` then filters every resulting non-mapping
+    /// "feed" out silently, so the command would otherwise answer "no proposals, no warnings" for
+    /// a config it could not use at all.
+    #[test]
+    fn commitments_command_warns_on_a_wrongly_shaped_calendars_value() {
+        let vault = scratch("p19badshape");
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        pystr::write_text(
+            &vault.join("config").join("ingest.yaml"),
+            "calendars: \"https://calendar.example.test/personal.ics\"\n",
+        )
+        .unwrap();
+        let report = commitments_report_with(&vault, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report.proposals.is_empty(), "{:?}", report.proposals);
+        assert!(
+            report.warnings.iter().any(|w| w.starts_with("config: calendars is not a list")),
+            "{:?}",
+            report.warnings
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // A falsy `calendars:` (no feeds intended at all) must stay silent — the same shape
+        // `calendars_feeds` reads as `Ok(None)`, not a config problem.
+        let vault2 = scratch("p19nocalendars");
+        std::fs::create_dir_all(vault2.join("config")).unwrap();
+        pystr::write_text(&vault2.join("config").join("ingest.yaml"), "calendars: null\n").unwrap();
+        let report2 = commitments_report_with(&vault2, Some(&P16_MONDAY.to_string()), Fetchers::default());
+        assert!(report2.warnings.is_empty(), "{:?}", report2.warnings);
+        let _ = std::fs::remove_dir_all(&vault2);
+    }
+
+    // --- I1 (fix round 1): the runtime trap ------------------------------------------------------
+    //
+    // The lexical scan in `cloud_contract.rs` proves no forbidden substring appears in source
+    // text; this proves something a scan cannot — over one concrete `rank`, against a server that
+    // would happily answer a judgment request too, none is ever sent (spelled out, not written as
+    // the literal endpoint text, so this file itself stays clean of it for that same scan).
+
+    /// A loopback server that answers every request with a valid `/ingest-calendar` reply and
+    /// records the request line it saw (via `tx`), rather than accepting exactly one connection
+    /// and refusing the rest — a stray extra request during the run under test is caught, not left
+    /// to hang a listener that only ever answered once. Stops on a `/__stop__` request, which the
+    /// caller sends itself once the run under test has returned.
+    fn judge_trap_server() -> (String, std::sync::mpsc::Receiver<String>, u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().expect("the listener has an address").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            loop {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone the stream"));
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).unwrap_or(0);
+                    if n == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                let mut stream = reader.into_inner();
+                if request_line.contains("__stop__") {
+                    let body = "{}";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    break;
+                }
+                let _ = tx.send(request_line.trim_end().to_string());
+                let body = crate::ledger::dumps_value(&serde_json::json!({
+                    "ics": "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                    "source": "google_calendar",
+                }));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), rx, port, handle)
+    }
+
+    /// I1: a `rank` (`run_with`, the same production function `run` calls) against a vault that
+    /// already carries a confirmed commitment, a series file and a pending `commitment-check` card
+    /// — so `commitment_passes` exercises `approvals::withdraw_stale`, `calfeed`, `weekcal` and
+    /// `commitments::proposals` fully, not just an empty vault's early returns — never sends a
+    /// request to anything but `/ingest-calendar`, even with a server on the other end that would
+    /// happily answer a judgment request instead of refusing it. The assertion below is a
+    /// **whitelist** (every request must be the calendar transport), which is what actually rules
+    /// a judgment request out — a blacklist checked against the literal endpoint text would have
+    /// to write that text into this very file, which the extended `rank_cannot_reach_a_judgment_endpoint`
+    /// scan (I1) then correctly refuses.
+    #[test]
+    fn rank_never_sends_a_request_to_a_judge_endpoint_on_a_vault_with_commitments_series_and_pending_cards() {
+        let vault = scratch("p19trap");
+        for dir in ["config", "tasks", "courses", "approvals"] {
+            std::fs::create_dir_all(vault.join(dir)).unwrap();
+        }
+        let write = |rel: &str, text: &str| pystr::write_text(&vault.join(rel), text).unwrap();
+        write(
+            "config/week_template.yaml",
+            "day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        );
+        write(
+            "config/ingest.yaml",
+            "timezone: America/Chicago\ncalendars:\n  - name: google\n    ics_url: 'cloud:google'\n",
+        );
+        write(
+            "courses/cs-100.md",
+            "---\nid: course_00000000c1\ntitle: \"CS 100 Intro to Computing\"\ncode: \"CS 100\"\n---\n",
+        );
+        // "commitments": CS 100 is already confirmed.
+        commitment_note(&vault, "cs100.md", CS100_NOTE);
+        // "pending cards": a card for a series this run will not fetch.
+        write(
+            "approvals/commitment-check-old-seminar.md",
+            "---\ntype: approval\nkind: commitment-check\ntitle: \"Old Seminar · Tue 3–4pm · a class?\"\n\
+             status: pending\nsource_uid: \"gcal-series:elsewhere\"\nproposed_at: 2026-09-06\n\
+             first_proposed_at: 2026-09-06\nexpires: null\nsnooze_until: null\ncreated_by: agent:commitments\n\
+             ---\n\nInvented.\n",
+        );
+        // "series": the series file, written offline (no network at all) before the trap run.
+        let entries: BTreeMap<String, StashEntry> =
+            BTreeMap::from([("cloud:google".to_string(), google_entry(vec![cs100_item()]))]);
+        let (fresh, _) = normalise_stash(&vault, &entries, &vault_zone(&vault), P16_MONDAY);
+        let (_file, _warn) = crate::commitments::refresh_series(&vault, &fresh, P16_MONDAY);
+        assert!(vault.join("state").join("calendar-series.json").is_file());
+
+        // The runtime trap: a real round trip through the same `calendar_fetcher` `rank` itself
+        // builds, against a server that would answer any path at all rather than refuse one.
+        let (base, rx, port, handle) = judge_trap_server();
+        let cloud = Some(crate::cloudmodel::CloudClient::new(&cloud_config(base), "jwt-not-a-secret"));
+        let stash: SeriesStash = RefCell::new(BTreeMap::new());
+        let fetch = calendar_fetcher(&cloud, &stash);
+        let fetchers = Fetchers { calendar: Some(&fetch), events: None, series: Some(&stash) };
+        run_with(&vault, Some(&P16_MONDAY.to_string()), "manual", None, fetchers)
+            .expect("a vault this shaped must still rank");
+
+        // Tell the server to stop, then check what it actually saw.
+        {
+            use std::io::Write;
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                let _ = write!(s, "GET /__stop__ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            }
+        }
+        handle.join().expect("the loopback thread did not panic");
+        let requests: Vec<String> = rx.try_iter().collect();
+        assert!(!requests.is_empty(), "the calendar fetch must have reached the loopback server");
+        for r in &requests {
+            // A whitelist, not a blacklist against the literal endpoint text (see the doc comment
+            // above): every request this run made was the calendar transport and nothing else.
+            assert!(r.contains("/ingest-calendar"), "unexpected request, not the calendar transport: {r}");
+        }
         let _ = std::fs::remove_dir_all(&vault);
     }
 }

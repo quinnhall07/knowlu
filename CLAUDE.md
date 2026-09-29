@@ -32,8 +32,11 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Engine invariants
 
 - A vault is markdown + YAML frontmatter (`tasks/`, `approvals/`, `archive/`, `courses/`, `info/`,
-  `issues/`, `config/`), the single source of truth. `state/` is generated; `today.md` is rewritten
-  every run. The engine is **deterministic**: same input, same order.
+  `issues/`, `config/`, `commitments/`), the single source of truth. `state/` is generated;
+  `today.md` is rewritten every run. The engine is **deterministic**: same input, same order.
+  `commitments/` holds confirmed clock-time commitments (a class, a shift, a club), decline
+  markers and the one `planning-day` note (the day's wake-to-bed window) — a student's `propose`d
+  and undecided candidates never live here, only what they confirmed or declined.
 - **`rank` never calls a model** (Knowlu spec decision 11). Judgment is the separate `judge`
   command, which writes fields into notes before `rank` reads them; `src/judge.rs` is pure and the
   model process lives behind a trait in `src/runtime.rs`, so nothing under `cli.rs` can reach one.
@@ -45,6 +48,13 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   `propose` it files a `kind: amend` approval instead. `judgment:` is a single-line flow mapping.
 - Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted. `proposed_at`
   is the day a proposal charges; `first_proposed_at` is set once and drives every age.
+- Commitment proposals and `state/calendar-series.json` never leave the device: a card of a kind in
+  `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; today only
+  `commitment-check` is filed) is local by kind. Until C3′'s sync is merged there is no sync; once it is,
+  P21 keeps the cards and the series file off the wire — only a **confirmed** note in `commitments/`
+  or a decline marker syncs — and `commitments.rs`'s tripwires
+  (`sync_keeps_every_local_card_kind_local`, `the_servers_note_path_rules_name_every_note_folder`)
+  fail until it does.
 - All JSON the crate writes goes through `ledger::dumps_value` (Python `json.dumps` separators), so
   a new line and an old line carrying the same data are the same bytes.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
@@ -86,7 +96,13 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
   `%LOCALAPPDATA%\knowlu\profiles\<id>\entitlement.json` and the refusal is a named line at exit 0.
   `rank`, `surface` and `write` are never gated.
 - `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
-  [--today] [--now] [--seen-at] [--build-sha]` — the read model as JSON. Never writes.
+  [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
+  Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
+  exits 2 — and reports `moved` against the current window without writing one.
+- `commitments --vault <v> [--today YYYY-MM-DD] [--json]` — fetches the configured calendar feeds,
+  refreshes `state/calendar-series.json`, and prints the current commitment proposals
+  (`coursework-discover`'s style: read-only except for the generated series-file refresh, always
+  exits 0). Writes no note, no card and no journal record.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live

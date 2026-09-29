@@ -245,9 +245,14 @@ Series { source_uid, calendar, title, where, event_type, rule: {freq, interval, 
      `EXDATE`s removed; an override `VEVENT` (one carrying `RECURRENCE-ID`) replaces the instance
      it names, or removes it if it has `STATUS:CANCELLED`. A master with `STATUS:CANCELLED`, with
      `TRANSP:TRANSPARENT`, or with an `ATTENDEE` line for the feed owner carrying
-     `PARTSTAT=DECLINED` yields no series. (The feed owner is the `ORGANIZER`'s address when the
-     feed has one line naming it; if the owner cannot be told, any `DECLINED` attendee line makes
-     the series ineligible — when in doubt, do not propose.) Each rule has its own test.
+     `PARTSTAT=DECLINED` yields no series. (The feed owner is the address a calendar-level
+     `X-WR-CALNAME` names, when it is email-shaped — Google names a primary calendar so — and is
+     **never** inferred from `ORGANIZER` lines, since a feed whose invites all come from one
+     person would make that person the owner (P4 review I1, controller ruling). Without it the
+     owner is unknown, and any `DECLINED` attendee line, on the master or an override, makes the
+     series ineligible — when in doubt, do not propose; the cost is that some invite-based
+     series reach the student as a card later instead of a proposal now.) Each rule has its own
+     test.
    - `parse_calendar_ics`'s busy time keeps today's override-blind behaviour: it feeds the frozen
      `calendar-snapshot-gcal.md` reference, and a doubled busy span subtracts nothing extra.
 2. **Rule.** From the master's `RRULE`: `FREQ`, `INTERVAL` (absent = 1), `UNTIL` (the raw value,
@@ -341,9 +346,14 @@ anything the student declined — is **never** proposed (C5). The first rule tha
 matching is on the title with surrounding punctuation trimmed, case-insensitive unless stated.
 
 0. **Not proposed at all.** The title contains a word or phrase that marks the student's own work
-   time — `study`, `homework`, `hw`, `review`, `prep`, `tutoring`, `work on`, `focus` — or equals
-   the name of a `config/planning.yaml` `recurring:` entry (already budgeted in hours; counting it
-   again as busy time would double it). These are piece 3's `task-block` territory.
+   time — `study`, `studying`, `homework`, `hw`, `review`, `prep`, `tutoring`, `focus`, `work on`,
+   `working on`, `work session`, `work block`, `work time` — or equals the name of a
+   `config/planning.yaml` `recurring:` entry (already budgeted in hours; counting it again as busy
+   time would double it). These are piece 3's `task-block` territory. **Ruling (fix round 1, I3):**
+   "Work session", "Work block", "Work time", "Work on …" and "Working on …" are the student's own
+   study time, in any spacing and any case — never kind `work`, and never proposed as a commitment.
+   Rule 4's `work` is reserved for a job shift: a bare "Work", "Shift", "Work @ <place>" or
+   "<Employer> shift". When unsure, not `work`.
 1. **Routine.** The whole title is one of `wake`, `wake up`, `get up`, `alarm` → wake side; or
    `bed`, `bedtime`, `go to bed`, `sleep`, `lights out` → bed side. Whole-title only, so "Sleep
    study" is not a routine. A `sleep` series that crosses midnight is both: its start is the bed
@@ -355,10 +365,15 @@ matching is on the title with surrounding punctuation trimmed, case-insensitive 
    it is empty, or a section word — `lab`, `laboratory`, `lecture`, `lec`, `recitation`, `rec`,
    `discussion`, `disc`, `seminar`, `section`, `sec`, `studio`, `class` — optionally with a section
    number, or words that all appear in that course note's own `name`/`title` ("CS 100 – Intro to
-   Computer Science"). Separators between code and remainder are space, `-`, `–`, `:`, `(`.
+   Computer Science"). Separators between code and remainder are space, `-`, `–`, `:`, `(`, `.`.
    `lab`/`laboratory` → `lab`; otherwise `class`; `course` = the course's slug. A title that starts
    with a known code but continues with anything else ("CS 100 TA hours") is not a class and falls
-   through to rules 4–6.
+   through to rules 4–6. A section word's own trailing token counts only when it is a section
+   number, not a second word: it holds a digit, or is a single letter — "CS 100 Lab 01" and "CS 100
+   Sec 1" are a class, "CS 100 Lab Hours" and "CS 100 Class Party" are not. **Ruling (fix round 1,
+   I4):** a remainder that is a bare section designator, with no leading section word, is also a
+   class — `-001`, ` 001`, `.001`, `001 LEC`, `LEC`, `SEC 1`. A lab designator such as `LAB`, `L01`
+   or `-L01` makes it a lab instead.
 4. **Work.** The title starts with the word `work`, or has the word `shift` → `work`.
 5. **Club.** The title has the word `club`, `society`, `team`, `practice`, `rehearsal` or `chapter`
    → `club`.
@@ -569,9 +584,11 @@ One card per proposal not yet answered (§3.5), built on F2's `event-check` patt
 - **Body.** First paragraph (the card's `why`): `**Is this part of your week?** Knowlu found it
   repeating on your calendar.` Then what approving does, by level — hard: "Approve and Knowlu never
   plans anything over it."; soft: "Approve and Knowlu counts it as busy; an event suggestion may
-  overlap it, and will say so."; the window: "Approve and Knowlu plans your days in these hours.
-  You can change them any time." Then `where` when present, and `Reject and it's ignored. Either
-  way you won't be asked again.`
+  overlap it, and will say so."; optional: "Optional: Knowlu won't plan around it." Then `where`
+  when present, and `Reject and it's ignored. Either way you won't be asked again.` The window
+  card instead says "Approve to plan inside these hours. Reject to keep your usual hours." and
+  then "Either way you won't be asked again.": rejecting it keeps the usual hours, so "ignored"
+  would be wrong (controller ruling, P11 fix round 1; for Quinn to revisit).
 - **Settlement**, a new arm in `approvals::transition_note` beside F3's `event-check` arm:
   - `approved` → if a confirmed note already has the card's `source_uid` or signature (or, for the
     window, a `planning-day` note exists), the card is archived `refused` with one warning and
@@ -634,6 +651,10 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
     and so is in the file's `ended` map (§3.3), and no fresh series has the note's signature (R22)
     → propose `until` = the last instance date the file held, else its last-known `until` (neither:
     no card); nothing when the note's `until` already ends it by then;
+    an open-ended series (no UNTIL, no COUNT) that merely stops appearing never ends a **soft or
+    optional** note (club, meeting, office hours) — a club dormant over the summer is not lost; the
+    student can delete the note — while hard ones (class, lab, work) keep this rule (controller
+    ruling, P12 fix round 1, m1);
   - **succeeded** (R22) — an eligible class or lab series for the same course, with different
     meets, whose first instance falls on or after the note's series' last instance, while that
     series is ending → propose `meets` (and `where`) of the new series **and** `source_uid` = the
@@ -645,9 +666,11 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
   9:30–10:45am · update?` / `CS 100 ends Dec 4 · update?`. `source_uid` is the note's. Local-only
   (R20); charged to the cap and filed before new proposals' cards (§5.2).
 - **Settlement** (the same arm): `approved` → for each field in `change`, the note's current value
-  (absent = null) and the card's `was` value are compared as canonical text —
-  `safe_dump_flow(parse(value))` for both — and any mismatch means the student changed the note
-  since: the card is archived `refused` with a warning and nothing is written. Otherwise each field
+  (absent = null) and the card's `was` value are compared as parsed, normalised values (read the
+  way `load` reads them) — and any mismatch means the student changed the note since: the card is
+  archived `superseded` (not `refused`, so a successor is never held forever) with a warning and
+  nothing is written. If the note already holds every value in `change` (a re-run after a crash),
+  the card is stamped `executed` and nothing is written. Otherwise each field
   is written with `write::write_literals` (a sequence through `to_literal` of the parsed value, so
   it reads back as the sequence `commitments::load` accepts), the card is stamped `executed` and
   archived. `rejected` → archived, no write to the note. No field is ever proposed as `null`.
@@ -659,7 +682,7 @@ recoverable, so an amend of `until` or `meets` would return to `pending` for eve
 - **Never re-asked:** a card with the same `target` and the same canonical `change` text in
   `approvals/` or `archive/` suppresses another; a different change is a new question.
 - **Tests:** an `until` change onto a note with no `until` applies; a `meets` change applies and
-  reads back as a sequence `load` accepts; a stale `was` is refused and archived; a split series
+  reads back as a sequence `load` accepts; a stale `was` is superseded and archived; a split series
   with the same meets files nothing; a split with new meets files exactly one card.
 
 ### 5.5 Never re-asked
@@ -710,7 +733,10 @@ Then:
 - **`template_blocks(day)`** takes its busy list as the template's spans for `day_key(day)`
   **plus** each commitment span active that day: when `day` is inside the span's source horizon in
   `instances`, the span's actual instances on that date (none on a cancelled date, the moved time on
-  a moved one); otherwise the weekly span on its weekday when `from ≤ day ≤ until`. The sort, the
+  a moved one); otherwise the weekly span on its weekday when `from ≤ day ≤ until`. The note's own
+  `from`/`until` gate both paths: outside them the span is inactive even where the series still
+  has instances, so a student who ends a class by setting `until` gets the time back at once (final
+  review I1). The sort, the
   cursor walk and the clamp to the window's end are unchanged, so overlapping or duplicate spans
   behave exactly as overlapping template classes already do.
 - **`free_blocks`, `capacity`, `template_capacity`** follow from `template_blocks` with no change,

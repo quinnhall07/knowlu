@@ -46,7 +46,7 @@ Deno.test("a record body carrying a null byte is a named 400, not a 502 from the
   assertEquals(e.status, 400);
 });
 
-Deno.test("a note path is one of the six folders, markdown, and cannot climb out", () => {
+Deno.test("a note path is one of the seven folders, markdown, and cannot climb out", () => {
   for (const ok of ["tasks/x.md", "courses/cs-100.md", "archive/a-b.md", "info/x.md", "issues/i.md", "approvals/amend-1.md"]) {
     assert(isNotePath(ok), ok);
   }
@@ -54,6 +54,17 @@ Deno.test("a note path is one of the six folders, markdown, and cannot climb out
     "state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../etc/hosts", "../tasks/x.md",
     "tasks//x.md", "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks/", "", "TASKS/x.md",
   ]) {
+    assert(!isNotePath(bad), `${bad} was accepted`);
+  }
+});
+
+Deno.test("a confirmed commitment or a decline marker is a note path; state/ still is not (commitment model §10, phase 1s)", () => {
+  // `commitments/` is the engine's seventh note folder (`ids::NOTE_FOLDERS`); a refused path there
+  // would wedge every push (R-C3′-exec-12). The cards about commitments never reach here at all.
+  for (const ok of ["commitments/x.md", "commitments/cs-100.md", "commitments/declined-0123456789.md"]) {
+    assert(isNotePath(ok), ok);
+  }
+  for (const bad of ["state/calendar-series.json", "state/plan.json", "state/x.md", "commitments/x.json", "commitments/"]) {
     assert(!isNotePath(bad), `${bad} was accepted`);
   }
 });

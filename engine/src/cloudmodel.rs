@@ -799,21 +799,31 @@ pub fn fetch_ics(client: &CloudClient, first_run: bool) -> Result<(String, Vec<S
     Ok((ics, past_due_uids))
 }
 
-/// One calendar feed, as ICS, from the service (cloud design §11a). **Transport, not judgment** —
-/// `calfeed` parses what comes back with the same `parse_calendar_ics` the golden `today.md`
-/// oracle covers, bounds it to the same 28-day horizon and falls back to the same snapshot.
+/// One calendar feed, as ICS, from the service (cloud design §11a, §4.1–§4.2). **Transport, not
+/// judgment** — `calfeed` parses what comes back with the same `parse_calendar_ics` the golden
+/// `today.md` oracle covers, bounds it to the same 28-day horizon and falls back to the same
+/// snapshot.
+///
+/// The request always asks `&accepts=series`; the function only ever fills `series` for
+/// `name=google`, so this is one call whether or not the caller wants it. The second element of
+/// the pair is the reply's `series` field, verbatim, when the reply carries one — **`None` only
+/// when the field is absent**, which is every reply from a server that predates §4.1 ("new engine,
+/// old function", §4.3) and every reply for a feed the function never sends series for. Nothing
+/// here validates the shape of `series`; that is `commitments::refresh_series`'s job.
 ///
 /// `Err(String)` because the caller is `Fetchers.calendar`, whose contract predates this module
 /// and whose failure already degrades to "using snapshot".
-pub fn fetch_calendar(client: &CloudClient, name: &str) -> Result<String, String> {
+pub fn fetch_calendar(client: &CloudClient, name: &str) -> Result<(String, Option<Value>), String> {
     let reply = client
-        .get(&format!("/ingest-calendar?name={}", urlencode_component(name)))
+        .get(&format!("/ingest-calendar?name={}&accepts=series", urlencode_component(name)))
         .map_err(|e| e.to_string())?;
-    reply
+    let ics = reply
         .get("ics")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| "the reply carried no ics field".to_string())
+        .ok_or_else(|| "the reply carried no ics field".to_string())?;
+    let series = reply.get("series").cloned();
+    Ok((ics, series))
 }
 
 /// Fetch one event feed through the service (cloud design §3.1). **Transport, and nothing else**:

@@ -82,6 +82,10 @@ pub mod cli;
 // `cli` already knows how to load, never written to it.
 pub mod surface;
 
+// The commitment model (spec 2026-09-23): the notes in `commitments/`, read into plain data for
+// `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.
+pub mod commitments;
+
 // The console's write path (Knowlu plan 1): interaction events only, through the same
 // `JsonlLedger` seam as the journal. Never read by the engine.
 pub mod uievents;

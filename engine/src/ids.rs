@@ -16,12 +16,12 @@ use crate::ingest::{update_frontmatter_fields, IngestError};
 use crate::models::split_frontmatter;
 use crate::pystr;
 
-pub const KINDS: [&str; 5] = ["task", "appr", "info", "iss", "course"];
-pub const NOTE_FOLDERS: [&str; 6] =
-    ["tasks", "approvals", "archive", "courses", "issues", "info"];
+pub const KINDS: [&str; 6] = ["task", "appr", "info", "iss", "course", "cmt"];
+pub const NOTE_FOLDERS: [&str; 7] =
+    ["tasks", "approvals", "archive", "courses", "issues", "info", "commitments"];
 
 pub static ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(task|appr|info|iss|course)_[0-9a-f]{10}$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(task|appr|info|iss|course|cmt)_[0-9a-f]{10}$").unwrap());
 
 pub fn is_id(text: &str) -> bool {
     ID_RE.is_match(text)
@@ -85,10 +85,14 @@ pub fn kind_for(path: &Path, meta: Option<&Mapping>) -> String {
         "approval" => return "appr".to_string(),
         "issue" => return "iss".to_string(),
         "info" => return "info".to_string(),
+        "commitment" => return "cmt".to_string(),
         _ => {}
     }
     if path.parent().and_then(|p| p.file_name()).map(|n| n == "courses") == Some(true) {
         return "course".to_string();
+    }
+    if path.parent().and_then(|p| p.file_name()).map(|n| n == "commitments") == Some(true) {
+        return "cmt".to_string();
     }
     "task".to_string()
 }
@@ -335,6 +339,41 @@ mod tests {
         assert_eq!(kind_for(Path::new("a/courses/x.md"), Some(&m("title: x"))), "course");
         assert_eq!(kind_for(Path::new("a/tasks/x.md"), Some(&m("title: x"))), "task");
         assert_eq!(kind_for(Path::new("a/tasks/x.md"), None), "task");
+    }
+
+    #[test]
+    fn kind_for_maps_type_commitment_to_cmt() {
+        let m = |src: &str| crate::yaml::mapping_of(src);
+        // type: commitment gives cmt in any folder, not just commitments/.
+        assert_eq!(kind_for(Path::new("a/commitments/x.md"), Some(&m("type: commitment"))), "cmt");
+        assert_eq!(kind_for(Path::new("a/tasks/x.md"), Some(&m("type: commitment"))), "cmt");
+    }
+
+    #[test]
+    fn a_note_in_commitments_without_type_is_cmt() {
+        let m = |src: &str| crate::yaml::mapping_of(src);
+        assert_eq!(kind_for(Path::new("a/commitments/x.md"), Some(&m("title: x"))), "cmt");
+        assert_eq!(kind_for(Path::new("a/commitments/x.md"), None), "cmt");
+    }
+
+    #[test]
+    fn is_id_accepts_cmt_and_still_refuses_cmx() {
+        assert!(is_id("cmt_3f9a1c2b7d"));
+        assert!(!is_id("cmx_3f9a1c2b7d"));
+    }
+
+    #[test]
+    fn id_repair_gives_a_commitment_note_a_cmt_id() {
+        let v = vault();
+        note(&v, "commitments/cs-100.md", "---\ntitle: \"CS 100\"\n---\n\nb\n");
+        let log = ensure_ids(&v, None);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].starts_with("assigned cmt_"), "{}", log[0]);
+        assert!(log[0].ends_with(" to commitments/cs-100.md"), "{}", log[0]);
+
+        let meta = read_meta(&v.join("commitments").join("cs-100.md")).unwrap();
+        let id = crate::yaml::get(&meta, "id").and_then(crate::yaml::text).unwrap();
+        assert_eq!(id, derived_id("cmt", "commitments/cs-100.md"));
     }
 
     #[test]

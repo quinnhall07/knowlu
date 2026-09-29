@@ -94,6 +94,10 @@ pub struct Loaded {
     pub planning: PlanningConfig,
     pub ranked: Vec<Task>,
     pub takes: Vec<Take>,
+    /// §6.4's "what moved": today's plan against the day's first window (or, in the `--window`
+    /// preview, against the current window). `None` with no planning-day note, and whenever the
+    /// windows or the plans are equal.
+    pub moved: Option<crate::commitments::Moved>,
 }
 
 /// The one place the vault is read for the page: notes, calendar snapshot, and the ranking and
@@ -101,6 +105,34 @@ pub struct Loaded {
 /// not a fetch — capacity here is only as fresh as the last run, which is what keeps this
 /// function free of network access and file writes.
 pub fn load(vault: &Path, today: Date) -> Loaded {
+    load_with(vault, today, None)
+}
+
+/// A planning window per weekday (`DAY_KEYS` order), as `commitments::parse_window` returns it.
+pub type Window = [Option<(jiff::civil::Time, jiff::civil::Time)>; 7];
+
+/// `cal` with its whole planning window replaced by `window`: a weekday `window` leaves out gets
+/// the template's `(day_start, day_end)`. Seven consecutive days from `today` cover every weekday.
+fn with_window(mut cal: WeekCalendar, today: Date, window: &Window) -> WeekCalendar {
+    let template = (cal.day_start, cal.day_end);
+    for offset in 0..7 {
+        let day = add_days(today, offset);
+        let idx = crate::planning::DAY_KEYS
+            .iter()
+            .position(|k| *k == crate::planning::day_key(day))
+            .unwrap_or(0);
+        let (start, end) = window[idx].unwrap_or(template);
+        cal = cal.with_day_window(day, start, end);
+    }
+    cal
+}
+
+/// [`load`], optionally under a proposed planning window (the `--window` preview, §6.4). Live
+/// (`preview: None`), `moved` diffs today's plan against `commitments::baseline` — only when that
+/// baseline differs from `cal.window(today)`. Under a preview, the day is computed under the
+/// proposed window and `moved` diffs it against the **current** window. Both designations come
+/// from the same ranked list. Writes nothing.
+fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
     let planning = load_planning(&vault.join("config").join("planning.yaml"));
     let mut unreadable = Vec::new();
     let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
@@ -112,10 +144,22 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
         .into_values()
         .flatten()
         .collect();
-    let cal = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), events);
+    let current = WeekCalendar::for_vault(vault, events);
+    let (cal, against) = match preview {
+        Some(window) => (with_window(current.clone(), today, window), Some(current)),
+        None => {
+            let set = crate::commitments::load(vault);
+            let base = crate::commitments::baseline(vault, &set, &current, today)
+                .filter(|base| *base != current.window(today));
+            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
+            (current, against)
+        }
+    };
     let ranked = rank(&tasks, today, &cal);
     let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes }
+    let moved = against
+        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -852,12 +896,13 @@ pub struct TheDay {
     pub empty_text: Option<String>,
 }
 
-/// The day laid out as one lane: free blocks (carrying today's takes), calendar busy time, and the
-/// class gaps in the timetable — everything on the same timeline, in start order. A recurring
-/// commitment spends the effort budget and renders in `commitments`; it never appears as a block,
-/// because a commitment spends Quinn's time, not a slot on today's clock. An all-day event never
-/// subtracts capacity (`weekcal::free_blocks` already excludes it), so it surfaces only in
-/// `all_day`, read for display and nothing else.
+/// The day laid out as one lane: free blocks (carrying today's takes), calendar busy time, commitment
+/// blocks and the class gaps in the timetable — everything on the same timeline, in start order. A
+/// recurring commitment (`planning.recurring`) spends the effort budget and renders in
+/// `commitments`; it never appears as a block, because it spends the student's time, not a slot on
+/// today's clock — a confirmed `commitments/` note is different: it IS a slot on today's clock, so
+/// it draws one (§6.2). An all-day event never subtracts capacity (`weekcal::free_blocks` already
+/// excludes it), so it surfaces only in `all_day`, read for display and nothing else.
 pub fn the_day(l: &Loaded, today: Date) -> TheDay {
     let free = l.cal.free_blocks(today);
     let mut blocks: Vec<DayBlock> = free
@@ -877,28 +922,63 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
                 .collect(),
         })
         .collect();
+
+    // §6.1/§6.3: every date-based use of day_start/day_end goes through `window(day)`, which
+    // falls back to the template's when there is no confirmed planning day.
+    let (window_start, window_end) = l.cal.window(today);
+    let day_start = today.to_datetime(window_start);
+    let day_end = today.to_datetime(window_end);
+
+    // Each confirmed commitment span active today draws its own block (§6.2) — `kind: "class"`
+    // for a class or lab, `"busy"` otherwise, `label` the note's title — clamped to the window and
+    // dropped if wholly outside it. Two ranges are kept, but only for a span that IS drawn: a span
+    // wholly outside the window `continue`s before either is recorded, so a Google event mirroring
+    // an out-of-window commitment still shows (NEW-1) rather than being silently dropped by a
+    // commitment that itself left no trace. `commitment_raw` (the UNCLAMPED span) matches a Google
+    // event, which is never clamped either (I1: a class that straddles the window — the normal
+    // case, since confirmed commitments come from Google series — must still de-duplicate against
+    // its own event, which sits at the unclamped time); `commitment_drawn` (the clamped, drawn
+    // range) matches a template class-gap block covering the identical span (M1).
+    let mut commitment_raw: Vec<(DateTime, DateTime)> = Vec::new();
+    let mut commitment_drawn: Vec<(DateTime, DateTime)> = Vec::new();
+    for (start, end, span) in l.cal.spans_on(today) {
+        let clamped_start = start.max(day_start);
+        let clamped_end = end.min(day_end);
+        if clamped_start >= clamped_end {
+            continue; // wholly outside window(today): not drawn (R15), and no trace kept either
+        }
+        commitment_raw.push((start, end));
+        let kind = if span.kind == "class" || span.kind == "lab" { "class" } else { "busy" };
+        blocks.push(DayBlock { start: hm(clamped_start), end: hm(clamped_end), kind: kind.into(), label: span.title.clone(), hours: hours_between(clamped_start, clamped_end), takes: Vec::new() });
+        commitment_drawn.push((clamped_start, clamped_end));
+    }
+
     let mut all_day = Vec::new();
     for e in l.cal.events_on(today) {
         if e.all_day {
             all_day.push(e.title.clone());
-        } else {
+        } else if !commitment_raw.iter().any(|(s, en)| *s == e.start && *en == e.end) {
+            // A Google event identical to a commitment's own (unclamped) span is drawn once — the
+            // commitment's own block above, not this one (R15, I1).
             blocks.push(DayBlock { start: hm(e.start), end: hm(e.end), kind: "busy".into(), label: e.title.clone(), hours: hours_between(e.start, e.end), takes: Vec::new() });
         }
     }
-    // Classes are the gaps between template blocks inside the day window — `template_blocks` is
-    // free time from the timetable alone, WITHOUT the minimum-length filter (weekcal.rs), so the
-    // gaps it leaves behind are exactly where a class sits; no second data source is needed.
-    let template = l.cal.template_blocks(today);
-    let day_start = today.to_datetime(l.cal.day_start);
-    let day_end = today.to_datetime(l.cal.day_end);
+    // Classes are the gaps between the TEMPLATE's classes alone inside the day window —
+    // `template_only_blocks` (weekcal.rs) has no commitment span folded in, so a confirmed club
+    // is never mistaken for a class gap here (R15); the commitment spans draw their own blocks
+    // above instead. A gap that exactly matches a commitment's own (clamped) span is dropped too
+    // (M1, controller ruling): a class listed in both `week_template.yaml` and `commitments/` with
+    // an equal span draws once, from the commitment, since it carries the title; an unequal span
+    // draws both.
+    let template = l.cal.template_only_blocks(today);
     let mut cursor = day_start;
     for b in &template {
-        if b.start > cursor {
+        if b.start > cursor && !commitment_drawn.iter().any(|(s, e)| *s == cursor && *e == b.start) {
             blocks.push(DayBlock { start: hm(cursor), end: hm(b.start), kind: "class".into(), label: "class".into(), hours: hours_between(cursor, b.start), takes: Vec::new() });
         }
         cursor = b.end;
     }
-    if cursor < day_end {
+    if cursor < day_end && !commitment_drawn.iter().any(|(s, e)| *s == cursor && *e == day_end) {
         blocks.push(DayBlock { start: hm(cursor), end: hm(day_end), kind: "class".into(), label: "class".into(), hours: hours_between(cursor, day_end), takes: Vec::new() });
     }
     blocks.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
@@ -1757,6 +1837,10 @@ pub struct State {
     pub empty: Empty,
     pub texts: Texts,
     pub unreadable: Vec<String>,
+    /// §6.4's "what moved", on the today view only; omitted (not `null`) when there is none, so a
+    /// vault with no planning-day note serialises exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moved: Option<crate::commitments::Moved>,
     /// Every `Journal::warnings()` this build touched (a malformed journal line) — collected
     /// once, after every builder that opens the shared `Journal` has run.
     pub warnings: Vec<String>,
@@ -1767,7 +1851,37 @@ pub struct State {
 /// `horizon` is `None` for `Today` and every rail-only view (`Decisions`, `GoodToKnow`, `Issues`,
 /// `Runs`) — only the four horizon views (`Overdue`/`Week`/`Later`/`AllActive`) carry a `list`.
 pub fn build_state(vault: &Path, view: View, today: Date, now: &jiff::Zoned, seen_at: Option<&str>) -> State {
-    let l = load(vault, today);
+    build_state_with(vault, view, today, now, seen_at, None)
+}
+
+/// `surface --view today --window '<flow sequence>'` (§6.4 "Preview", the phase-2 window editor's
+/// data source): the today view under a proposed planning window, with `moved` against the
+/// **current** window. `window` is validated as a planning-day note's `window` is, strictly; an
+/// invalid one, or any view but today, is an `Err` the CLI turns into exit 2. Writes nothing.
+pub fn build_state_preview(
+    vault: &Path,
+    view: View,
+    today: Date,
+    now: &jiff::Zoned,
+    seen_at: Option<&str>,
+    window: &str,
+) -> Result<State, String> {
+    if view != View::Today {
+        return Err(format!("--window previews the today view, not {:?}", view.name()));
+    }
+    let window = crate::commitments::parse_window(window)?;
+    Ok(build_state_with(vault, view, today, now, seen_at, Some(&window)))
+}
+
+fn build_state_with(
+    vault: &Path,
+    view: View,
+    today: Date,
+    now: &jiff::Zoned,
+    seen_at: Option<&str>,
+    preview: Option<&Window>,
+) -> State {
+    let l = load_with(vault, today, preview);
     let civil = now.datetime();
     // `closed_this_week`'s "not closed yet" bound compares against journal `ts` values, which
     // are UTC ISO strings — `civil` above is the vault-LOCAL wall clock (it feeds the page's
@@ -1814,6 +1928,7 @@ pub fn build_state(vault: &Path, view: View, today: Date, now: &jiff::Zoned, see
         runs_panel: runs,
         issues_panel: issues,
         unreadable: l.unreadable.iter().map(|n| format!("tasks/{n}")).collect(),
+        moved: if view == View::Today { l.moved.clone() } else { None },
         warnings: Vec::new(),
     };
     state.warnings = journal.warnings().to_vec();
@@ -2140,6 +2255,226 @@ mod tests {
         assert_eq!(d.commitments, vec![Commitment { name: "Gym".into(), hours: 1.5 }]);
         assert_eq!(d.open_hours, 4.5);
         assert!(d.blocks.iter().all(|b| b.label != "Gym"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // P17: the_day's commitment blocks and window (spec §6.2).
+    // -----------------------------------------------------------------------------------------
+
+    /// A confirmed commitment note, written straight into `vault/commitments/`, never re-dumped —
+    /// same shape `commitments.rs`'s own tests use.
+    fn commitment_note(vault: &Path, file: &str, front: &str) {
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        std::fs::write(
+            vault.join("commitments").join(file),
+            format!("---\n{front}---\n\nInvented for a test.\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_day_draws_a_club_as_busy_with_its_title_not_as_class() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "chess-club.md",
+            "id: cmt_0000000001\ntype: commitment\nkind: club\ntitle: \"Chess Club\"\n\
+             meets: [{days: [fri], start: \"16:00\", end: \"17:00\"}]\n\
+             source_uid: \"gcal-series:chess\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.start == "16:00").expect("the club's block");
+        assert_eq!((block.kind.as_str(), block.label.as_str(), block.end.as_str()), ("busy", "Chess Club", "17:00"));
+        // R15's exact regression: if the gap walk ever went back to `template_blocks` (which folds
+        // commitment spans into its busy list), the club would ALSO paint a generic "class" gap at
+        // this span, alongside the titled "busy" block above.
+        assert!(!d.blocks.iter().any(|b| b.kind == "class" && b.start == "16:00"), "{:?}", d.blocks);
+    }
+
+    #[test]
+    fn a_class_commitment_is_drawn_as_class_with_its_title() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "extra-lab.md",
+            "id: cmt_0000000002\ntype: commitment\nkind: lab\ntitle: \"Extra Lab\"\n\
+             meets: [{days: [fri], start: \"10:15\", end: \"10:45\"}]\n\
+             source_uid: \"gcal-series:lab\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.start == "10:15").expect("the lab's block");
+        assert_eq!((block.kind.as_str(), block.label.as_str(), block.end.as_str()), ("class", "Extra Lab", "10:45"));
+    }
+
+    #[test]
+    fn a_commitment_straddling_the_window_is_clamped_and_one_outside_is_not_drawn() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday.
+        commitment_note(
+            &v,
+            "early-bird.md",
+            "id: cmt_0000000003\ntype: commitment\nkind: club\ntitle: \"Early Bird\"\n\
+             meets: [{days: [fri], start: \"07:00\", end: \"08:30\"}]\n\
+             source_uid: \"gcal-series:early\"\nstatus: confirmed\n",
+        );
+        commitment_note(
+            &v,
+            "night-owl.md",
+            "id: cmt_0000000004\ntype: commitment\nkind: club\ntitle: \"Night Owl\"\n\
+             meets: [{days: [fri], start: \"19:00\", end: \"20:00\"}]\n\
+             source_uid: \"gcal-series:night\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let block = d.blocks.iter().find(|b| b.label == "Early Bird").expect("the clamped block");
+        assert_eq!((block.start.as_str(), block.end.as_str()), ("08:00", "08:30"));
+        assert!(d.blocks.iter().all(|b| b.label != "Night Owl"), "wholly outside the window: never drawn");
+    }
+
+    /// NEW-1 (re-review of fix round 1): a commitment wholly outside the window leaves no trace
+    /// (`commitment_raw`/`commitment_drawn` never record it), so a Google event mirroring it must
+    /// not be swallowed by the event de-dup — it is the only visible sign that time is spoken for.
+    #[test]
+    fn a_google_event_matching_an_out_of_window_commitment_is_still_drawn() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday; this commitment is wholly outside.
+        commitment_note(
+            &v,
+            "night-owl.md",
+            "id: cmt_0000000012\ntype: commitment\nkind: club\ntitle: \"Night Owl\"\n\
+             meets: [{days: [fri], start: \"19:00\", end: \"20:00\"}]\n\
+             source_uid: \"gcal-series:night\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let mirror = crate::weekcal::CalEvent {
+            title: "Night Owl (calendar copy)".into(),
+            start: TODAY.at(19, 0, 0, 0),
+            end: TODAY.at(20, 0, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![mirror]);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().all(|b| b.label != "Night Owl"), "the commitment itself is still never drawn");
+        let event = d.blocks.iter().find(|b| b.label == "Night Owl (calendar copy)").expect("the event still draws");
+        assert_eq!((event.kind.as_str(), event.start.as_str(), event.end.as_str()), ("busy", "19:00", "20:00"));
+    }
+
+    #[test]
+    fn a_google_event_identical_to_a_commitment_is_drawn_once() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "cs-extra.md",
+            "id: cmt_0000000005\ntype: commitment\nkind: class\ntitle: \"CS Extra Session\"\n\
+             meets: [{days: [fri], start: \"10:00\", end: \"10:45\"}]\n\
+             source_uid: \"gcal-series:extra\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let duplicate = crate::weekcal::CalEvent {
+            title: "CS Extra Session (calendar copy)".into(),
+            start: TODAY.at(10, 0, 0, 0),
+            end: TODAY.at(10, 45, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![duplicate]);
+        let d = the_day(&l, TODAY);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.start == "10:00" && b.end == "10:45").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!(matching[0].label, "CS Extra Session", "the commitment's own block wins, the event's copy is dropped");
+    }
+
+    /// I1: the de-duplication must match the event against the commitment's UNCLAMPED span, not
+    /// its clamped, drawn one — otherwise a straddling class that is also on Google (the normal
+    /// case, since confirmed commitments come from Google series) draws twice: the commitment
+    /// clamped to the window, and the event at its own, now-unmatched, times.
+    #[test]
+    fn a_google_event_matching_a_straddling_commitments_raw_span_is_drawn_once_clamped() {
+        let v = fixture_full();
+        // week_template.yaml's window is 08:00-18:00 on Friday; this class starts before it.
+        commitment_note(
+            &v,
+            "early-class.md",
+            "id: cmt_0000000009\ntype: commitment\nkind: class\ntitle: \"Early Class\"\n\
+             meets: [{days: [fri], start: \"07:30\", end: \"08:45\"}]\n\
+             source_uid: \"gcal-series:earlyclass\"\nstatus: confirmed\n",
+        );
+        let mut l = load(&v, TODAY);
+        let duplicate = crate::weekcal::CalEvent {
+            title: "Early Class (calendar copy)".into(),
+            start: TODAY.at(7, 30, 0, 0),
+            end: TODAY.at(8, 45, 0, 0),
+            all_day: false,
+        };
+        l.cal = WeekCalendar::for_vault(&v, vec![duplicate]);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().all(|b| b.label != "Early Class (calendar copy)"), "{:?}", d.blocks);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.label == "Early Class").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!((matching[0].start.as_str(), matching[0].end.as_str()), ("08:00", "08:45"), "clamped to the window");
+    }
+
+    /// M1 (controller ruling): a class in both `week_template.yaml` and `commitments/` with an
+    /// EQUAL span is drawn once — the commitment wins, since it carries the title.
+    #[test]
+    fn a_class_matching_the_template_exactly_is_drawn_once_and_the_commitment_wins() {
+        let v = fixture_full();
+        // week_template.yaml's Friday has PH 106 at 13:00-13:45.
+        commitment_note(
+            &v,
+            "ph-106-confirmed.md",
+            "id: cmt_0000000010\ntype: commitment\nkind: class\ntitle: \"PH 106 (confirmed)\"\n\
+             meets: [{days: [fri], start: \"13:00\", end: \"13:45\"}]\n\
+             source_uid: \"gcal-series:ph106\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        let matching: Vec<_> = d.blocks.iter().filter(|b| b.start == "13:00" && b.end == "13:45").collect();
+        assert_eq!(matching.len(), 1, "one block, not two: {:?}", d.blocks);
+        assert_eq!(matching[0].label, "PH 106 (confirmed)", "the commitment wins, the generic gap is dropped");
+    }
+
+    /// M1: an UNEQUAL span (a different end than the template's class) is not deduplicated — both
+    /// the template's generic gap and the commitment's own, differently-bounded block are drawn.
+    #[test]
+    fn a_class_with_an_unequal_span_from_the_template_is_drawn_alongside_it() {
+        let v = fixture_full();
+        // week_template.yaml's Friday has CS 100 at 12:00-12:50; this commitment ends earlier.
+        commitment_note(
+            &v,
+            "cs-100-early-half.md",
+            "id: cmt_0000000011\ntype: commitment\nkind: class\ntitle: \"CS 100 (early half)\"\n\
+             meets: [{days: [fri], start: \"12:00\", end: \"12:30\"}]\n\
+             source_uid: \"gcal-series:cs100early\"\nstatus: confirmed\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        assert!(d.blocks.iter().any(|b| b.start == "12:00" && b.end == "12:50" && b.label == "class"), "the template's own gap is unaffected: {:?}", d.blocks);
+        assert!(d.blocks.iter().any(|b| b.start == "12:00" && b.end == "12:30" && b.label == "CS 100 (early half)"), "the commitment's own span is drawn too: {:?}", d.blocks);
+    }
+
+    #[test]
+    fn the_day_uses_the_planning_window() {
+        let v = fixture_full();
+        commitment_note(
+            &v,
+            "planning-day.md",
+            "id: cmt_0000000006\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+             window: [{days: [fri], start: \"07:00\", end: \"20:00\"}]\n",
+        );
+        let l = load(&v, TODAY);
+        let d = the_day(&l, TODAY);
+        // vault-full's Friday: PH 106 Lecture 09:00-10:00 and Advising appointment 14:00-15:00
+        // (state/calendar.md), classes at 12:00-12:50 and 13:00-13:45 (week_template.yaml) — the
+        // same shape `the_day_on_the_golden_friday` pins for the template's 08:00-18:00 window,
+        // now under the widened 07:00-20:00 one: every block's bounds are checked, not just the
+        // first start and last end, so a stray gap at the old 08:00/18:00 boundary would fail this.
+        let shape: Vec<(&str, &str, &str, f64)> = d.blocks.iter().map(|b| (b.start.as_str(), b.end.as_str(), b.kind.as_str(), b.hours)).collect();
+        assert_eq!(shape, [
+            ("07:00", "09:00", "free", 2.0), ("09:00", "10:00", "busy", 1.0), ("10:00", "12:00", "free", 2.0),
+            ("12:00", "12:50", "class", 0.83), ("13:00", "13:45", "class", 0.75), ("14:00", "15:00", "busy", 1.0), ("15:00", "20:00", "free", 5.0),
+        ]);
     }
 
     #[test]
@@ -2692,3 +3027,239 @@ mod tests {
     }
 }
 
+
+/// P18 — §6.4's `moved`, computed live by `load` and never written; the `--window` preview.
+#[cfg(test)]
+mod moved_tests {
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::{WriteContext, WriteOpts};
+    use std::path::PathBuf;
+
+    /// A Thursday.
+    const DAY: Date = Date::constant(2026, 9, 24);
+    const NOTE: &str = "commitments/planning-day.md";
+    const WEEKDAYS_18: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"18:00\"}]";
+    const WEEKDAYS_20: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"20:00\"}]";
+    const WEEKDAYS_22: &str = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]";
+
+    fn now() -> jiff::Zoned {
+        DAY.at(9, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap()
+    }
+
+    /// A scratch vault: weekdays busy 08:00–17:30 in a flat 08:00–18:00 template (so the day's
+    /// only room is what a later window opens), weekends free, three invented tasks due far out.
+    fn vault(name: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qo-p18-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["config", "tasks", "state"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let busy = "[['08:00', '17:30']]";
+        std::fs::write(
+            dir.join("config").join("week_template.yaml"),
+            format!("day_start: '08:00'\nday_end: '18:00'\nclasses:\n  mon: {busy}\n  tue: {busy}\n  wed: {busy}\n  thu: {busy}\n  fri: {busy}\n  sat: []\n  sun: []\n"),
+        )
+        .unwrap();
+        for slug in ["essay", "lab", "reading"] {
+            std::fs::write(
+                dir.join("tasks").join(format!("{slug}.md")),
+                format!("---\ntitle: Invented {slug}\ndue: 2026-11-30\neffort_hours: 1.5\nimportance: 3\n---\n"),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// The planning-day note, created through `write::create` with `window`.
+    fn note(v: &Path, window: &str) {
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        crate::write::create(
+            v,
+            NOTE,
+            &format!("---\ntype: commitment\nkind: planning-day\nstatus: confirmed\nwindow: {window}\n---\n\nInvented.\n"),
+            &WriteContext::new("student", "dashboard"),
+            &mut Journal::new(v),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// The student edits the note's window through the engine's `write`, as the console does.
+    fn edit(v: &Path, window: &str) {
+        crate::write::write_literals(
+            v,
+            NOTE,
+            &[("window".to_string(), window.to_string())],
+            &WriteContext::new("student", "dashboard"),
+            &mut Journal::new(v),
+            &WriteOpts::default(),
+        )
+        .unwrap();
+    }
+
+    fn plan(v: &Path, date: Date, start: &str, end: &str) {
+        std::fs::write(
+            v.join("state").join("plan.json"),
+            format!("{{\"date\": \"{date}\", \"end\": \"{end}\", \"start\": \"{start}\"}}\n"),
+        )
+        .unwrap();
+    }
+
+    /// Every file under `v`, with its bytes.
+    fn snapshot(v: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut stack = vec![v.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn surface_reports_moved_at_once_after_a_window_edit_without_a_rank() {
+        let v = vault("edit");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        assert_eq!(load(&v, DAY).moved, None, "an unedited window moves nothing");
+        edit(&v, WEEKDAYS_22);
+        let moved = load(&v, DAY).moved.expect("the edit shows at once, before any rank");
+        assert!(moved.to.evening > 0, "{moved:?}");
+        assert_eq!((moved.to.morning, moved.to.afternoon, moved.dropped), (0, 0, 0), "{moved:?}");
+        assert!(moved.text.ends_with("moved to this evening"), "{}", moved.text);
+        let s = build_state(&v, View::Today, DAY, &now(), None);
+        assert_eq!(s.moved, Some(moved.clone()));
+        assert!(state_json(&s).contains("\"moved\": {"));
+        // The line is the today view's; another view carries none.
+        assert_eq!(build_state(&v, View::Week, DAY, &now(), None).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_first_window_is_diffed_against_the_template() {
+        let v = vault("first");
+        note(&v, WEEKDAYS_22);
+        assert!(!v.join("state").join("plan.json").exists());
+        let moved = load(&v, DAY).moved.expect("the template's 08:00–18:00 is the baseline");
+        assert!(moved.to.evening > 0, "{moved:?}");
+        // An unreadable plan file reads the same way.
+        std::fs::write(v.join("state").join("plan.json"), "not json\n").unwrap();
+        assert_eq!(load(&v, DAY).moved, Some(moved));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_second_edit_is_reported_against_the_days_first_window() {
+        let v = vault("second");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        let first = load(&v, DAY).moved.unwrap();
+        edit(&v, WEEKDAYS_20);
+        let second = load(&v, DAY).moved.expect("still against the morning's 08:00–18:00");
+        // Against the first edit (22:00) a 20:00 end could only drop takes; against 18:00 it opens
+        // the evening.
+        assert!(second.to.evening > 0, "{second:?}");
+        assert_eq!(second.dropped, 0, "{second:?}");
+        assert!(second.to.evening <= first.to.evening, "{first:?} {second:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn an_undone_edit_reports_nothing() {
+        let v = vault("undo");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        assert!(load(&v, DAY).moved.is_some());
+        edit(&v, WEEKDAYS_18);
+        assert_eq!(load(&v, DAY).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_plan_json_from_yesterday_reports_nothing_before_the_first_rank() {
+        let v = vault("yesterday");
+        note(&v, WEEKDAYS_22);
+        plan(&v, add_days(DAY, -1), "08:00", "18:00");
+        assert_eq!(load(&v, DAY).moved, None);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn no_note_means_no_moved_key_in_the_json() {
+        let v = vault("nonote");
+        // A plan file alone is no baseline: without the note there is none.
+        plan(&v, DAY, "08:00", "12:00");
+        assert_eq!(load(&v, DAY).moved, None);
+        let s = build_state(&v, View::Today, DAY, &now(), None);
+        assert!(!state_json(&s).contains("\"moved\""), "{}", state_json(&s));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn surface_load_writes_nothing() {
+        let v = vault("nowrite");
+        note(&v, WEEKDAYS_18);
+        edit(&v, WEEKDAYS_22);
+        let before = snapshot(&v);
+        assert!(load(&v, DAY).moved.is_some());
+        let _ = build_state(&v, View::Today, DAY, &now(), None);
+        let _ = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_20).unwrap();
+        assert_eq!(snapshot(&v), before, "surface must not write, preview included");
+        assert!(!v.join("state").join("plan.json").exists());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn window_preview_diffs_against_the_current_window_and_writes_nothing() {
+        let v = vault("preview");
+        note(&v, WEEKDAYS_18);
+        plan(&v, DAY, "08:00", "18:00");
+        edit(&v, WEEKDAYS_22);
+        let before = snapshot(&v);
+        // Against the current 22:00 window (not the day's 18:00 baseline), 20:00 only drops.
+        let s = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_20).unwrap();
+        let moved = s.moved.clone().expect("20:00 fits less than 22:00");
+        assert!(moved.dropped > 0, "{moved:?}");
+        assert_eq!(moved.to, crate::commitments::MovedTo::default(), "{moved:?}");
+        // The day itself is computed under the proposed window.
+        assert_eq!(s.the_day, the_day(&load_with(&v, DAY, Some(&crate::commitments::parse_window(WEEKDAYS_20).unwrap())), DAY));
+        // Proposing the current window moves nothing, whatever the baseline says.
+        let same = build_state_preview(&v, View::Today, DAY, &now(), None, WEEKDAYS_22).unwrap();
+        assert_eq!(same.moved, None);
+        // With no note at all the current window is the template, and a preview still works.
+        let bare = vault("preview-bare");
+        let opened = build_state_preview(&bare, View::Today, DAY, &now(), None, WEEKDAYS_22).unwrap();
+        assert!(opened.moved.unwrap().to.evening > 0);
+        assert_eq!(snapshot(&v), before);
+        let _ = std::fs::remove_dir_all(&v);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn a_bad_window_argument_is_refused() {
+        let v = vault("bad");
+        for bad in [
+            "[{days: [mon], start: \"22:00\", end: \"08:00\"}]",
+            "[{days: [mon], start: \"08:00\", end: \"25:00\"}]",
+            "[{days: [someday], start: \"08:00\", end: \"18:00\"}]",
+            "not a window",
+            "[{days: [mon",
+        ] {
+            let err = build_state_preview(&v, View::Today, DAY, &now(), None, bad).err();
+            assert!(err.is_some(), "{bad} must be refused");
+        }
+        assert!(build_state_preview(&v, View::Week, DAY, &now(), None, WEEKDAYS_22).is_err());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+}
