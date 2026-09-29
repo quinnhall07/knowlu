@@ -1,7 +1,7 @@
 # Knowlu: know what's next
 
-The end state, so near-term decisions don't foreclose it. **Check every design against this file.**
-It states what holds now; how each point was decided lives in `docs/specs/2026-09-09-knowlu-cloud-design.md`
+What Knowlu is and must stay, so near-term decisions don't foreclose it. **Check every design against
+this file.** It states what holds now; how each point was decided lives in `docs/specs/2026-09-09-knowlu-cloud-design.md`
 (signed, with its amendments), the product and business plan
 (`docs/notes/2026-09-01-product-and-business-plan.md`, "the plan"), and git history.
 
@@ -21,14 +21,16 @@ A design that breaks one of these is wrong even if it is otherwise better.
 1. **The engine is deterministic.** Same input, same output, no inference inside it. Judgment happens
    at the boundary, in our judgment service, and enters the engine as data. `rank` never calls a model.
 2. **The account is the source of truth; every desktop holds a plain-text mirror the engine ranks
-   offline.** The cloud stores, judges, syncs and bills. Nothing the student sees depends on the
-   network being up.
+   offline.** The cloud stores, judges, syncs and bills. The service can read what it stores
+   (encrypted at rest, not end-to-end), the privacy page says so, and deleting the account deletes it.
+   Nothing the student sees depends on the network being up.
 3. **The AI never produces anything the student sends externally.** No drafted emails, notes or
    messages. Its only generative output is internal proposals and information displays.
-4. **Time is typed by commitment.** Every calendar item in the vault carries its kind (class, work,
-   club, meeting, event, exam, task block) and its level: **hard** (never overlapped), **soft** (a
-   proposal may overlap it) or **optional** (a proposal). Knowlu never proposes over a hard
-   commitment. Commitments live in the vault; Google Calendar and other feeds are inputs to it.
+4. **Time is typed by commitment.** Every confirmed commitment is a note in the vault with a kind
+   (class, lab, work, club, meeting, office hours, …) and a level: **hard** (never overlapped), **soft**
+   (a proposal may overlap it, and says so) or **optional** (never busy time; it changes nothing the
+   morning answer shows). Knowlu never proposes over a hard commitment. Google Calendar and other feeds
+   are inputs to the vault, never its source of truth. Detail: `docs/specs/2026-09-23-commitment-model-design.md`.
 
 ## Knowlu succeeds when
 
@@ -47,9 +49,9 @@ changes.
 
 ## The product
 
-- **Desktop only**, Rust + Tauri, OS-native webview, Windows first. No web app and no mobile app; the
-  account carries a student between desktops. Base app under 50 MB, ideally under 20. The shared Rust
-  core keeps a later mobile port a UI job rather than a rewrite.
+- **A Windows desktop app**, Rust + Tauri, OS-native webview. No web app and no mobile app, and nothing
+  builds toward either; the account carries a student between desktops. Base app under 50 MB, ideally
+  under 20.
 - **One edition: $9.99 a month, an account required**, no free tier. An academic-year price is kept as
   an option; billing pauses June to August. The deterministic engine still keeps today's page on the
   screen when the network is down.
@@ -59,8 +61,8 @@ changes.
   schema-constrained output on every call, and a rule-promotion loop that retires model calls into
   deterministic rules as patterns repeat (plan §2.2–§2.3). The model's job keeps shrinking to the
   residue rules cannot decide.
-- **Judgment is a service.** Extraction and classification run in our cloud on zero-retention
-  inference, model-pinned per kind, logged by id. Nothing model-shaped ships in the app. **Fetch on
+- **Judgment is a service.** Extraction and classification run in our cloud, each kind pinned to
+  one named model at one named zero-retention host, with no fallback routing, and logged by id. Nothing model-shaped ships in the app. **Fetch on
   device, think in the cloud:** the one thing that stays on the device is the fetch that needs the
   student's own portal credentials.
 - **Teach once, run deterministically forever.** A browser and a model bootstrap a source once; the

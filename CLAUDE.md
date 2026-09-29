@@ -53,6 +53,8 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
   a new line and an old line carrying the same data are the same bytes.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
   byte-identical, never renamed.
+- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`); `provenance::is_agent` is a
+  `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
 
 ## Command and app contracts
 
@@ -74,18 +76,21 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 - `app/src/commands.rs` computes nothing; every vault write goes through the engine's `write` with
   `console_ctx()`. A new Tauri command goes in the right `generate_handler!` list in `app/src/main.rs`
   and beside the module it serves; recount before quoting a number.
-- Credentials are `knowlu/<profile_id>/<source>` in Credential Manager, the session JWT
-  `knowlu/<profile_id>/session`. There is no password: sign-in is Google (loopback PKCE on
-  `127.0.0.1:0`) or an emailed code. App data lives under `state::app_data_root()`
-  (`%LOCALAPPDATA%\knowlu\`).
+- Credentials the app writes are `knowlu/<profile_id>/<source>` in Credential Manager, the session JWT
+  `knowlu/<profile_id>/session`; the engine's `wincred.rs` reads whatever `credential_target` the
+  vault names and never assumes that shape. There is no password: sign-in is Google (loopback PKCE on
+  `127.0.0.1:0`) or an emailed code. App data lives under `%LOCALAPPDATA%\knowlu\`, and
+  `state::app_data_root()` is the one place that path is decided. `profiles::migrate_flat_layout`
+  keeps the one `quinn-ops` literal in `app/src` (it folds an old flat install in); it stays.
 - The identifier `com.knowlu.desktop` is permanent. The updater's private key exists only as the
-  GitHub secret `TAURI_SIGNING_PRIVATE_KEY`.
+  GitHub secret `TAURI_SIGNING_PRIVATE_KEY`; `release.ps1` reads it from the environment and nowhere
+  else, and `release.yml` never runs self-hosted.
 - **Releases are CI-only** (`release.yml` on a `v*` tag). A human runs `scripts\release.ps1` only with
   `-DryRun`; a hand-run `cargo tauri build` is unsupported and can ship a zero-byte engine.
 - `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until C4
   removes them and are not extended.
 - Desktop safety: a live shared desktop — never synthetic keyboard or mouse input; screenshots by
-  window handle (`PrintWindow`) only. Develop against scratch vaults
+  window handle (`PrintWindow`) only. Develop and demo against scratch vaults
   (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
 
 ## Model and effort
@@ -118,11 +123,16 @@ attempts means one level up, never straight to `max`; Fable and `max` are Quinn'
 
 - `cargo build --workspace` and `cargo test --workspace` from the root, dev profile
   (`cargo test --release` will not link). **0 warnings is part of green**; the one accepted line is
-  the app's `.rsrc merge failure: multiple non-default manifests`. `ci.yml` gates every push and PR.
-- Four tests are `#[ignore]` by design, each with its reason in the attribute. None may be
-  un-ignored by changing the assertion. TDD: the test first, then the code.
+  the app's `.rsrc merge failure: multiple non-default manifests`. `ci.yml` gates every push and PR:
+  the workspace tests (its line reads `warnings: N accepted (.rsrc), N tallies, N other`), the eol
+  contract (`scripts/ci/eol-check.ps1`) and SHA-pinned actions (`engine/tests/workflows.rs`).
+- Four tests are `#[ignore]` by design, each with its reason in the attribute: traps 4 and 5 in
+  `engine/src/events.rs`, `runtime.rs`'s real-runtime smoke test, and
+  `app/tests/scheduler.rs::run_slot_end_to_end`. None may be un-ignored by changing the assertion. TDD: the test first, then the code.
 - TLS via `rustls`/`ring`, **never OpenSSL**; `tauri` never enters the engine
   (`engine/tests/dependency_boundary.rs`). Build trouble: `docs/reference/toolchain.md`.
+- **Tests never leave the machine**: a test that needs a server binds a listener to `127.0.0.1:0` and
+  serves itself — no egress, no name resolution, no listener on a routable interface.
 - **Tests that touch the real Credential Manager are serialised**: each test file that writes, reads
   or deletes a real credential holds a file-scoped `CREDMAN_LOCK` mutex, uses a generated test id and
   cleans up with a `Drop` guard (`app/tests/account.rs`).
@@ -136,7 +146,7 @@ attempts means one level up, never straight to `max`; Fable and `max` are Quinn'
 
 ## Direction
 
-`VISION.md` states the end state; the cloud design is the authority on how. In one line: **accounts
+`VISION.md` states what Knowlu is and must stay; the cloud design is the authority on how. In one line: **accounts
 and $9.99 a month, no free tier; every judgment runs in our cloud; CI builds and signs every release;
 the vault stays plain text on the student's machine and is created by the app; portal credentials
 never leave the device — fetch on device, think in the cloud.** Streams and their order are in
