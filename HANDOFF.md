@@ -10,11 +10,9 @@ older under `docs/` is history or design authority from the previous repository 
 ## 1. State, in facts
 
 ▶ **C1b and C1c MERGED 2026-09-24, C3′ MERGED 2026-09-25, each on Quinn's word, each green on the self-hosted runner. Live billing is proven on prod (2026-09-24).**
-- **CI runs on Quinn's laptop:** PR #10, `312d833`. The Actions minutes were blocked by the billing/spending limit.
-  - The repository variable `CI_SELF_HOSTED` = `on` sends every `ci.yml` job to the runner `knowlu-laptop`, labels `[self-hosted, windows, x64, knowlu-ci]`, at `C:\actions-runner`. Start it with `C:\actions-runner\start-knowlu-runner.cmd`, which sets PATH, `CARGO_HOME` and `RUSTUP_HOME` for the runner.
-  - One runner means one job at a time: parallel sessions' PRs queue behind each other.
-  - A laptop that sleeps mid-job fails it with "lost communication"; re-run with `gh run rerun <id> --failed`.
+- **CI runs on GitHub's runners again (2026-09-29).** Quinn made the repository public that day, which makes Actions minutes free. The same day the controller deleted the `CI_SELF_HOSTED` variable, deregistered the `knowlu-laptop` runner and set fork-PR approval to *all external contributors*: a self-hosted runner on a public repository runs any fork's pull request on the laptop. **Do not re-register it while the repository is public.** Quinn plans to make it private again later; only then is the laptop runner safe to bring back (`C:\actions-runner\start-knowlu-runner.cmd`, labels `[self-hosted, windows, x64, knowlu-ci]`, PR #10 `312d833`).
   - `release.yml` never runs self-hosted.
+  - Public since 2026-09-29: the fixtures' real coursework titles and a few personal paths in docs are visible (history included). Quinn's ruling: develop freely now, go private later; no scrub for now. No secret is in the pushed history (scanned 2026-09-29: the only token is the production anon key, public by design).
 - **C1b, sign-in:** PR #9, `7477ec5`. Continue with Google or an emailed code; no password.
 - **C1c, the first day:** PR #13, `f30da69`.
   - The first-run view, the per-source coursework archive, and a doubled first-day proposal cap (migration `20260923000100`).
@@ -132,7 +130,7 @@ calendar URLs stay as the offline fallback until C3/C4).
 
 ## 3. Sequence
 
-**▶ RESUME HERE (2026-09-25).** C1b, C1c and C3′ are merged (§1's first ▶ block). CI runs on Quinn's laptop runner, so start it before pushing. The four merged streams are closed. Their ledgers, reviews, rulings and deferred rows are preserved in `docs/reports/` (§1's first ▶ block names the files).
+**▶ RESUME HERE (2026-09-25).** C1b, C1c and C3′ are merged (§1's first ▶ block). CI runs on GitHub's runners (the repository is public since 2026-09-29; §1). The four merged streams are closed. Their ledgers, reviews, rulings and deferred rows are preserved in `docs/reports/` (§1's first ▶ block names the files).
 
 Order from here:
 - **(1) Production parity and the 0.1.1 release:** the checklist in §4's production-parity row.

@@ -59,8 +59,11 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   0 warnings (the gate prints `warnings: N accepted (.rsrc), N tallies, N other`), the eol contract
   (`scripts/ci/eol-check.ps1`), SHA-pinned actions (`engine/tests/workflows.rs`). A repository
   variable `CI_SELF_HOSTED` = `on` sends every `ci.yml` job to a self-hosted runner labelled
-  `knowlu-ci` (Quinn's laptop, 2026-09-22, while the Actions minutes were exhausted); unset, they
-  run on GitHub's; `release.yml` never runs self-hosted.
+  `knowlu-ci`; unset, they run on GitHub's; `release.yml` never runs self-hosted. **Since
+  2026-09-29 the repository is public, the variable is unset and no self-hosted runner is
+  registered** — a self-hosted runner on a public repository runs any fork's pull request on the
+  runner's machine, so the switch stays off for as long as the repository is public. Workflow runs
+  from outside contributors need a maintainer's approval (`all_external_contributors`).
 - Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
