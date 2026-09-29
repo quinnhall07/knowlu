@@ -102,8 +102,10 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 |---|---|---|
 | `explorer` | Haiku, low | read-only search, before editing |
 | `mechanical` / `test-writer` / `console-ui` | Sonnet, low / medium / medium | specified edits / the failing test / `app/static`, `site/` |
-| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review |
-| `contract-engineer` | Opus, xhigh | the contract list |
+| `implementer` / `integrator` | Sonnet, high / Opus, high | specified feature tasks off the contract list / the merge train |
+| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review, and spec/plan review |
+| `contract-engineer` / `contract-reviewer` | Opus, xhigh | the contract list / contract-list diffs |
+| `researcher` / `docs-keeper` | Sonnet, medium / medium | read-only gap research / HANDOFF, docs/reference, ledgers |
 
 **The contract list** — cheaper agents never edit it:
 `engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
@@ -112,8 +114,8 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 **No agent fits? Ask in order:** could a silent error corrupt vault bytes, leak a credential or
 student data, move money or break a release (Opus; `xhigh` on the contract list, `high` elsewhere)?
 Is a design choice open, or more than about three files touched (Opus `high`, plan first)? Fully
-specified and checked by the compiler or a test (Sonnet, `low`/`medium`)? Read-only (Haiku, `low`)?
-Small or tied to this conversation (do it in the main session)? Use the closest agent rather than
+specified and checked by the compiler or a test (Sonnet, `low` to `high`)? Read-only (Haiku, `low`)?
+The main session orchestrates; it edits only what fits on one screen. Use the closest agent rather than
 inventing one. Subagents don't see the conversation: give them the goal, the files and the
 constraints. Anything a cheaper agent changed goes through `reviewer` before a push. Two failed
 attempts means one level up, never straight to `max`; Fable and `max` are Quinn's call.
