@@ -238,12 +238,19 @@ impl Drop for Cleanup {
 /// this holds `CREDMAN_LOCK` for its whole life (the same reason `app/tests/account.rs` does) and
 /// deletes every credential it touched on drop, including on a panicking assertion: the pending
 /// entry itself, and the profile's own copy `move_session` leaves behind on success.
+///
+/// The name is shared by every process too, not only this binary's threads, so the lock is the
+/// cross-process one in `support/credman_lock.rs`
+/// (`holding_the_credman_lock_holds_the_mutex_other_test_processes_wait_on`).
 #[cfg(windows)]
-static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/credman_lock.rs"]
+mod credman_lock;
+#[cfg(windows)]
+static CREDMAN_LOCK: credman_lock::CredmanLock = credman_lock::CredmanLock::new();
 
 #[cfg(windows)]
 struct PendingSession {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: credman_lock::CredmanGuard,
     /// Whatever was already at `PENDING_TARGET` before this guard wrote over it — `(username,
     /// secret)`, read raw rather than through `load_session` so a session this process cannot even
     /// parse is still put back byte for byte. `None` means there was nothing there.
@@ -440,6 +447,42 @@ fn create_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     session.expect_move_to(&id);
     assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The cross-process flake (2026-09-29).** `PENDING_TARGET` is one machine-wide name, and two
+/// processes running this file at once (two lanes, two worktrees, a workspace run beside a targeted
+/// one) used to interleave on it: one process's `create_vault_in` moved the other's pending session
+/// away, or its no-session test deleted it, and a `PendingSession` that read the other process's
+/// session as "what was here before" restored it after that process had cleaned up — leaving a test
+/// session at the real pending target. A `std::sync::Mutex` cannot see another process.
+///
+/// So holding `CREDMAN_LOCK` must also hold the named, session-wide mutex every real-store test file
+/// shares. Probed from a second thread with its own handle: a Windows mutex is owned per thread, so
+/// the probe sees exactly what another process would.
+#[cfg(windows)]
+#[test]
+fn holding_the_credman_lock_holds_the_mutex_other_test_processes_wait_on() {
+    fn probe(wait_ms: u32) -> bool {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+        std::thread::spawn(move || unsafe {
+            let h = CreateMutexW(None, false, windows::core::w!("Local\\knowlu-tests-credman")).expect("open the named mutex");
+            let r = WaitForSingleObject(h, wait_ms);
+            let got = r == WAIT_OBJECT_0 || r == WAIT_ABANDONED;
+            if got { let _ = ReleaseMutex(h); }
+            let _ = CloseHandle(h);
+            got
+        })
+        .join()
+        .expect("probe thread")
+    }
+    {
+        let _guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!probe(0), "another process could take the Credential Manager lock while this one holds it");
+    }
+    // Released on drop. Other holders (this process's other tests, another process) come and go, so
+    // this waits for its turn rather than demanding the mutex be free this instant.
+    assert!(probe(300_000), "the named mutex was never released");
 }
 
 /// Fix round 1, item 4: with nothing at the pending target, `create_vault_in` refuses — naming the
