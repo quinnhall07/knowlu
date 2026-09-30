@@ -100,8 +100,8 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
   else, and `release.yml` never runs self-hosted.
 - **Releases are CI-only** (`release.yml` on a `v*` tag). A human runs `scripts\release.ps1` only with
   `-DryRun`; a hand-run `cargo tauri build` is unsupported and can ship a zero-byte engine.
-- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until C4
-  removes them and are not extended.
+- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until the
+  Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10) removes them and are not extended.
 - Desktop safety: a live shared desktop — never synthetic keyboard or mouse input; screenshots by
   window handle (`PrintWindow`) only. Develop and demo against scratch vaults
   (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.

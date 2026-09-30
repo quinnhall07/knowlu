@@ -84,7 +84,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   cloud.**
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
-  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). Until C4 lands, that runtime
-  code stays and is not extended.
+  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). C4 is no longer a phase:
+  that runtime code stays until the Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10)
+  removes it, and is not extended.
 - Cut day (spec §7.2) is a procedure with Quinn at the machine: the old `quinn-ops` vault is archived,
   not migrated; Quinn re-onboards into `%USERPROFILE%\Knowlu\`.
