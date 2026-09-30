@@ -595,8 +595,9 @@ signed.
     C-number is issued again and none is renumbered.
     - **MVP:** quinn-ops parity plus grades from Blackboard (item 9), proven on a founder-owned
       scratch profile and test account on staging, with no second person. It holds commitment-model
-      phases 1–2, M1 grades, Gmail connect in the app, events (required events become tasks; accept
-      and decline), body and profile editing, each small parity item done or cut, and UA's
+      phases 1–2, M1 grades, Gmail connect in the app, events (required events enter the plan as a
+      one-off commitment; accept and decline) *(amended 2026-09-29, events spec Q1: enter the plan as
+      a one-off commitment, signed by Quinn)*, body and profile editing, each small parity item done or cut, and UA's
       university-policy read (ruling 12). *Exit:* the parity audit re-run shows no open row; Quinn
       has recorded UA's read; the founder's grades proof has passed through the app's real gate on a
       dev build from the proof branch that carries UA's date (Quinn is a UA student and the MVP's

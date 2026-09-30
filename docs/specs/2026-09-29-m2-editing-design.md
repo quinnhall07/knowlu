@@ -1,6 +1,9 @@
 # M2 editing: task bodies and the student's profile, from the app — design
 
-**Status: Draft — for Quinn's signature.** Written 2026-09-29 on branch `mvp-specs` at main `97dc27b`.
+**Status: Signed by Quinn, 2026-09-29 (every recommendation accepted).** Q1–Q8 in §12 are decided
+as recommended: Q1 (A), Q2 (A), Q3 (A), Q4 (A), Q5 (A), Q6 (A), Q7 per Appendix A ((a) cut, (b) cut
+from the MVP, (c) delivered by the events spec's D3, (d) done), Q8 (A).
+Written 2026-09-29 on branch `mvp-specs` at main `97dc27b`.
 **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its *Amendment 2026-09-29* (ruling 10:
 the MVP holds "body and profile editing, each small parity item done or cut"; ruling 11: the human
 actor token). **Implements:** parity rows P5 and P6 of `docs/notes/2026-09-29-vision-program.md`, and
@@ -458,7 +461,7 @@ each event. Until bump #1 that copy is the only disclosure of interests reaching
 - A `knowlu-engine write set-body` subcommand; `docs/reference/engine-commands.md` does not change.
 - Re-judging a task because its body changed (D9).
 - Carrying a body edit to a second desktop, or syncing `profile/` (§7.5, D13).
-- A profile panel in the wizard, or converting a hand-written block list (unless Quinn picks Q4 (B)).
+- A profile panel in the wizard, or converting a hand-written block list (Q4 decided (A)).
 - Any change to `append_body` or to how agents write bodies.
 
 ## 11. Test plan (the test first, then the code)
@@ -556,14 +559,17 @@ body without a trailing newline, undo it, force a conflict by appending through 
 meanwhile, edit preferences and undo that, edit interests, then check `sync` pushed the task's record
 and note and no `profile/` record.
 
-## 12. Open questions for Quinn
+## 12. Open questions for Quinn (all decided, 2026-09-29)
+
+Quinn signed this spec on 2026-09-29 and accepted every recommendation. Each question below is kept
+with its options and reasoning; its **DECIDED** line records the answer.
 
 Each changes what gets built. The research's four questions are merged into Q1, Q2, Q4 and Q7.
 
 **Q1. What does the journal record of a body edit hold?**
 (A) Two SHA-256 digests and two byte counts, no text. (B) The two digests only. (C) The old and new
 text in full.
-**RECOMMENDATION: (A).** §5 gives the five reasons text is worse. (C) would keep deleted prose on
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** §5 gives the five reasons text is worse. (C) would keep deleted prose on
 the account for 400 days, split any edit of more than about 8 KiB of body into a record that never
 sends, and move the privacy page and `PRIVACY_VERSION` into bump #1. The byte counts cost nothing
 and let the history say how big an edit was; (B) is fine if Quinn wants the minimum.
@@ -571,12 +577,12 @@ and let the history say how big an edit was; (B) is fine if Quinn wants the mini
 **Q2. The body changed after the drawer opened it (an agent appended a line, another window saved).
 What does Save do?**
 (A) Refuse, say so, keep the student's draft in the editor. (B) The last writer wins.
-**RECOMMENDATION: (A).** (B) erases a line the student never saw, and a hand edit to a body leaves
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** (B) erases a line the student never saw, and a hand edit to a body leaves
 no journal record, so nothing would show that it happened.
 
 **Q3. Which note bodies can the student edit in the app?**
 (A) Tasks and courses. (B) Tasks only. (C) Every folder the drawer opens.
-**RECOMMENDATION: (A).** A course's `## Grade weights` section grounds importance (`judge.rs:409`),
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** A course's `## Grade weights` section grounds importance (`judge.rs:409`),
 which moves the order, and quinn-ops edited course notes (inventory row 28). An approval's body is
 the card the deck parses, so (C) could break a card.
 
@@ -585,7 +591,7 @@ the card the deck parses, so (C) could break a card.
 refused by name. (B) As (A), but the first save rewrites a multi-line list as a one-line list (a new
 block-aware surgery in `write.rs`, on the contract list). (C) Preferences only; interests stay a
 file edited by hand.
-**RECOMMENDATION: (A).** Every vault the app made since cut day has no `profile/` at all, so Knowlu
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** Every vault the app made since cut day has no `profile/` at all, so Knowlu
 creates the file in the one-line form and the refusal meets only hand-written files. (B) adds a
 second surgery rule to the one write path for a case no app-made vault has. (C) leaves the campus
 event filter out of reach of every student who never opens the vault folder, and editing the file
@@ -595,7 +601,7 @@ as raw text is how a stray colon empties every list.
 (A) *Saved · Undo* for 10 seconds after each save, in the session, for the body, preferences and
 interests editors alike (D8). (B) Body only; the two profile editors have none, and that gap goes
 to the parity audit. (C) No undo in the MVP.
-**RECOMMENDATION: (A).** VISION commitment 5 says an edit the student makes "acts at once, with
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** VISION commitment 5 says an edit the student makes "acts at once, with
 undo", and the page already holds the old text, so it costs a button and one more call per editor.
 Undo sends the re-read body as `expected`, and the compare is on normalised bodies (§7.1), so D6's
 added final newline cannot make an undo refuse itself (test 30). Field edits (`set_fields`) have
@@ -606,21 +612,22 @@ no undo today either. That gap is outside M2 and is named here so the parity aud
 today's code would send them. (C) Sync `profile/` itself now: the server's note-path rule, a
 migration (`cloud-engineer`), the restore path, and the privacy page with `PRIVACY_VERSION` in
 bump #1.
-**RECOMMENDATION: (A).** Under (B) the account would keep the interest lists for as long as the
+**DECIDED (Quinn, 2026-09-29): (A), as recommended.** Under (B) the account would keep the interest lists for as long as the
 account exists (a student's `set` is a kept record), no computer could use them (apply and restore
 both refuse the path), and every restore would print one refusal line per record. (C) is real work
 for a second desktop, which is Launch's; the two-desktop stream can take it with its own privacy
 words.
 
 **Q7. P6: which small parity items are done in M2, and which are cut?**
-**RECOMMENDATION:** Appendix A, item by item:
+**DECIDED (Quinn, 2026-09-29): Appendix A as recommended, item by item:**
 - (a) cut;
-- (b) **cut from the MVP**, an explicit cut for Quinn to rule on, and no longer a hand-off (the
-  events spec lists it as "P6, M2 or cut", so a hand-off would leave it with no owner);
+- (b) **cut from the MVP**, an explicit cut that Quinn ruled on 2026-09-29, and not a hand-off (the
+  events spec listed it as "P6, M2 or cut", so a hand-off would have left it with no owner);
 - (c) cut from M2, because the events spec's D3 delivers it;
 - (d) do.
 
-Quinn answers per item. When this spec and the events spec are signed, in one sitting, the
+Quinn accepted all four items as recommended. Both specs were signed in one sitting on 2026-09-29,
+and the signing commit aligns events-design.md's non-goal line with them. As drafted: the
 controller changes events-design.md's non-goal line ("a conflict line on the card … P6, M2 or
 cut") so that it agrees. The conflict line becomes "cut (M2 Appendix A (b)), unless Quinn rules
 it into events", and the audit list becomes "M2 (d)". If Quinn instead wants (b) built, the events
@@ -633,7 +640,7 @@ privacy bump #1, and bump #1's page must carry §5's interests sentence, which t
 to bump #1's row in HANDOFF §4 when this spec is signed. (B) A mechanical gate, like ruling 12's
 date-and-bump rule. The *Campus events* editor is hidden, and `set_interests` refuses by name,
 while `PRIVACY_VERSION` is older than bump #1, and a test pins that.
-**RECOMMENDATION: (A). It costs the MVP nothing.** The Pilot gate is already the hard stop for
+**DECIDED (Quinn, 2026-09-29): (A), as recommended. It costs the MVP nothing.** The Pilot gate is already the hard stop for
 every non-founder, and the founder is the MVP's only user. The in-app copy states the fact in the
 meantime, and console-ui may not drop it (§9.2). (B) is safe as well, but it needs bump #1's
 version date before one exists. It would also hide the editor from the founder's MVP proof on any
@@ -718,10 +725,13 @@ T5 M, T6 S, T7 S, T8-T9 S. M2 as a whole is M.
 | Item | What exists at `97dc27b` | Do or cut | Size | Why |
 |---|---|---|---|---|
 | **(a)** A producer for *Good to know* items | The list, its read model and its expiry pass exist (`surface::good_to_know`, `surface.rs:1406`; `info::info_pass`, `info.rs:194-226`); `info::open_info` is called only by the `info` CLI (`info.rs:320`). Gmail's `information` tier is deliberately the noise tier and writes nothing (`enrich.rs:660-665`). | **Cut** | S-M, and an open design | A producer is a judgment design (which email is worth knowing, which is noise) plus a prompt change in the cloud. Nothing names what should feed it. Revisit with the assistant or a Gmail pass that has a use for it. |
-| **(b)** Conflict flags | Read and shown (`models.rs:179`, `:262`; `render.rs:460`; `surface.rs:592`); nothing writes `conflicts_with`. `commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). | **Cut from the MVP** (explicit, for Quinn's ruling; not a hand-off) | S-M if later built | The commitment model no longer blocks it. What is missing is tasks with a clock time, which arrive when required events become tasks (P4). The events spec lists the conflict line as "P6, M2 or cut", so handing it to events from here would leave it with neither owner. It is recorded as a cut, so the parity audit can close the row. If Quinn rules it in, the events spec takes it, computed at read time from `commitments::conflicts` and never written into a note, and its non-goal line says so (Q7). |
+| **(b)** Conflict flags | Read and shown (`models.rs:179`, `:262`; `render.rs:460`; `surface.rs:592`); nothing writes `conflicts_with`. `commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). | **Cut from the MVP** (explicit; ruled by Quinn, 2026-09-29; not a hand-off) | S-M if later built | The commitment model no longer blocks it. What is missing is tasks with a clock time, which arrive when required events become tasks (P4). The events spec lists the conflict line as "P6, M2 or cut", so handing it to events from here would leave it with neither owner. It is recorded as a cut, so the parity audit can close the row. If Quinn rules it in, the events spec takes it, computed at read time from `commitments::conflicts` and never written into a note, and its non-goal line says so (Q7). |
 | **(c)** Opportunity proposals expire after 14 days | Opportunities are proposed in the **digest**, not the `event-check` card (whose lines `eventemit.rs:660` and `:735-737` are). An event becomes eligible at `horizon_start` (`eventemit.rs:59-70`, used by `eligible_events`, `:118`, `:141`). That is the **earlier** of `start − propose_horizon_days` (default 14) and three days before a registration deadline. The digest's `expires` is its earliest event (`:316`). **Counterexample:** an event on Nov 30 with registration closing Nov 5 opens on Nov 2; its digest is filed Nov 2, expires Nov 30 and lives 28 days. | **Cut from M2; delivered by the events spec's D3** | none in M2 | It does not hold today. The events spec's D3 replaces the digest with one card per opportunity that "expires after 14 days or at the event, whichever is first", and its F1 fixes the digest's decline-on-expiry. A pin in M2 would either fail or pin a false claim, and it would sit in `eventemit.rs`, which the events spec's T2a rewrites. So M2 adds no test. The events spec's §4.4 and §11.1 test 7 already carry the cap: an opportunity card expires at "the earlier of that date and `first_proposed_at + 14`". When both specs are signed, the controller asks that test 7 include the registration-deadline case above. |
 | **(d)** The dropped-event audit list | Every drop, the prefilter's included, is written to the audit section of `state/events.md` (`eventroster.rs:11-13`), which no student opens. | **Do** | S + S | VISION: "failures are visible" and "nothing missed that Knowlu had the information to catch". A read-only *Not shown (N)* list under *Coming up*, each line the event, its date and why it was dropped, from a new read command (T6, T4, T7). No engine write, no new key in the state, no oracle change. T6's test reads a scratch copy of the frozen `vault-full/state/events.md` and never writes the reference. |
 
 **Before signing.** The spec review (`reviewer`, Opus high) lands in
 `docs/reports/2026-09-29-m2-editing-spec-review.md`; Quinn's answers to §12 are folded into §3 and
 recorded in a closing section, as the two-desktop spec did.
+
+**Signed.** Quinn signed this spec on 2026-09-29 and accepted every recommendation in §12, so §3's
+decisions stand as written and each question's **DECIDED** line is the record.

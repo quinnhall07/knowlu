@@ -1,6 +1,8 @@
 # Gmail connect in the app (MVP): design
 
-**Status: Draft — for Quinn's signature.** Written 2026-09-29 on branch `mvp-specs` at main `97dc27b`;
+**Status: Signed by Quinn, 2026-09-29 (every recommendation accepted).** Q1–Q9 in §11 are decided
+as recommended: Q1 (a′), Q2 (a), Q3 (a), Q4 (a), Q5 (a), Q6 (a), Q7 (c), Q8 (a) held by (a1),
+Q9 (a) with (ii). Written 2026-09-29 on branch `mvp-specs` at main `97dc27b`;
 revised the same day after the spec review (D4's gate wording, D7's test ledger, D13 → Q8, D14 and Q7–Q9
 added; the one finding not taken as stated is at the end of §11), and again after the re-check (Q9's
 `judgments` sub-question and the corrected Disconnect copy, D4's real offline cost and Q1 (a′), and the
@@ -174,8 +176,9 @@ stage decides three things:
 
 ## 3. Decisions
 
-Decisions marked *(Qn)* follow the recommendation of that open question in §11. Quinn's answer there
-replaces them.
+Decisions marked *(Qn)* follow the recommendation of that open question in §11. Quinn accepted every
+recommendation on 2026-09-29, so each stands as written; where a row names an option (Q1 (a′), Q8 (a1),
+Q9 (a)(ii)), that option is the decided one.
 
 | # | Decision | Reason | Cost if wrong |
 |---|---|---|---|
@@ -765,7 +768,10 @@ Pass means every step as written. Quinn's word that the item is done closes the 
   both pull. The service's `gmail:<id>` dedup and the seen ledger bound the result. This spec changes
   nothing about it; D4 only widens which vaults pull.
 
-## 11. Open questions for Quinn
+## 11. Open questions for Quinn (all decided, 2026-09-29)
+
+Quinn signed this spec on 2026-09-29 and accepted every recommendation. Each question below is kept
+with its options and reasoning; its **DECIDED** line records the answer.
 
 Each question changes what gets built. They are ordered by how much of the build they move. The
 research's four questions are Q1–Q4 here (its Q3 merged with the Testing copy). Q5 and Q6 are new, from
@@ -796,7 +802,7 @@ so a student who skipped the calendar step gets no mail after connecting Gmail.
   change, but the call count is the same. Because `?status=1` hides revoked rows, a lapsed grant would
   go silent after the first slot, which breaks "fails visibly".
 
-**RECOMMENDATION: (a′).** D4 as written, plus the transport stop. The stall and the two lines fall on
+**DECIDED (Quinn, 2026-09-29): (a′), as recommended.** D4 as written, plus the transport stop. The stall and the two lines fall on
 every student who is offline, the stop is small, and the slot lost to a probe blip comes back on the
 next slot. If Quinn prefers not to widen T3, (a) alone is acceptable: the stall stays inside the arm's
 budget and the scheduler's child cap, and D4 names it.
@@ -812,7 +818,7 @@ budget and the scheduler's child cap, and D4 names it.
 - (c) (a), plus removing the `cloud:google` marker. This needs the config-write path that §10 defers to
   the two-desktop work.
 
-**RECOMMENDATION: (a).** It is D6 as written.
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** It is D6 as written.
 
 **Q3. Who sees the row before Google's review is done, and what happens at the Pilot?** In Testing
 mode, only addresses on Google's tester list (100 at most) can connect. The app cannot see that list.
@@ -826,7 +832,7 @@ mode, only addresses on Google's tester list (100 at most) can connect. The app 
   flag, and the per-student step still exists (you set both).
 - (c) Gmail stays founder-only until Launch: release builds hide the row. Pilot students get no Gmail.
 
-**RECOMMENDATION: (a).** It is D10 as written. It keeps Gmail in the Pilot, which is where the
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** It is D10 as written. It keeps Gmail in the Pilot, which is where the
 product's first honest test of email judgment happens.
 
 **Q4. Should the row show which Google account is connected, and whether the connection lapsed?** Both
@@ -837,7 +843,7 @@ need `?status=1` to return the `status` and `email_hint` it already stores.
 - (c) Neither. The row cannot tell "never connected" from "expired", so a lapsed grant reads as
   "not connected" with no reason.
 
-**RECOMMENDATION: (a).** It is D5 as written. The address is the student's own, shown back to them,
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** It is D5 as written. The address is the student's own, shown back to them,
 and §6 discloses that it is stored.
 
 **Q5. Should an email that is clearly a task become a task at once, or a proposal?**
@@ -847,7 +853,7 @@ and §6 discloses that it is stored.
 - (b) Keep today's direct note for the `task` tier. That matches quinn-ops and cloud design §5.3, but
   contradicts both ruling 3 and the page.
 
-**RECOMMENDATION: (a).** It is D7 as written. The deck's 15-a-day cap and the snooze-not-delete rule
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** It is D7 as written. The deck's 15-a-day cap and the snooze-not-delete rule
 already carry the extra cards.
 
 **Q6. Does the wizard's Gmail panel get the button now?**
@@ -856,7 +862,7 @@ already carry the extra cards.
   Skip as the default.
 - (b) No. The panel keeps its "Skip it for now" text, and Gmail is connected only from Settings.
 
-**RECOMMENDATION: (a).** It is D11 as written. The panel's current copy says it will connect "in one
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** It is D11 as written. The panel's current copy says it will connect "in one
 click" once possible, and with D4 nothing else is needed for that.
 
 Q7–Q9 come from the spec review.
@@ -888,7 +894,7 @@ item a card, so the answer shows on every one.
 - (c) (a) in the MVP, and (b) as a Pilot item that lands with bump #1, before any pilot student
   connects Gmail.
 
-**RECOMMENDATION: (c).** It is D15 as written. The MVP's only user is the founder, who needs no
+**DECIDED (Quinn, 2026-09-29): (c), as recommended.** It is D15 as written. The MVP's only user is the founder, who needs no
 disclosure to themselves. The Pilot is the first time a card reaches someone else, and bump #1 is
 already the PR where the disclosure has to go. If Quinn reads commitment 5 as the sender and wants it
 from day one, choose (b) and add it to T1, T3 and T4 now. The bump-#1 ordering in D13 then covers
@@ -914,7 +920,7 @@ its disclosure too.
   PR; possibly a version and a consent record that exist only between this merge and bump #1; and a
   departure from how ruling 10 lists bump #1 and how ruling 12 handles its sentences.
 
-**RECOMMENDATION: (a), held by (a1).** It is D13 as written. It matches rulings 10 and 12, and it
+**DECIDED (Quinn, 2026-09-29): (a), held by (a1), as recommended.** It is D13 as written. It matches rulings 10 and 12, and it
 costs no extra version. (a1) is enough because the one release ruling 10 plans before any
 non-founder account, v0.1.1, already carries bump #1, and a Pilot-gate line is the kind of check
 Quinn already runs at that gate. Choose (a2) if a pre-Pilot hotfix release is likely.
@@ -947,7 +953,7 @@ nothing else (§0.1).
   with no end date after the student asked Knowlu to stop, and a reconnect weeks later delivers
   stale proposals.
 
-**RECOMMENDATION: (a), with (ii).** It is D14 as written. "Disconnect" should delete what exists only
+**DECIDED (Quinn, 2026-09-29): (a), with (ii), as recommended.** It is D14 as written. "Disconnect" should delete what exists only
 to serve the connection: the token, the undelivered summaries and the read ledger. The judgment record
 is the account's history. It holds no message text, feeds rule learning, is already disclosed at
 `:48`, and goes when the account goes. The re-judging cost falls only on a student who disconnects and

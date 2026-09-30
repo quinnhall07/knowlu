@@ -1,7 +1,8 @@
 # Events (MVP): required events enter the plan, with accept and decline
 
-**Date:** 2026-09-29. **Status: Draft — for Quinn's signature.** Nothing here is built. The plan
-follows this spec once §12's questions are answered.
+**Date:** 2026-09-29. **Status: Signed by Quinn, 2026-09-29 (every recommendation accepted).**
+Nothing here is built. §12's questions are decided as recommended: Q1 (c), Q1a (i), Q1b (i), Q2 (a),
+Q3 (a), Q4 (a), Q5 (c). The plan follows this spec.
 
 **Authority.** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its Amendment 2026-09-29 (signed).
 Ruling 10 puts "events (required events become tasks; accept and decline)" in the **MVP**. Then
@@ -37,7 +38,7 @@ After this spec:
 - A required event the student accepts goes **into the plan**. It is on Today's schedule on its day,
   it takes its hours out of capacity, and Knowlu never proposes work over it. An all-day or
   multi-day event has no hours to take, so it goes in the day's all-day lane instead. That fallback
-  is Q1b, and until Quinn answers it this promise holds only for timed one-day events (§4.2).
+  is Q1b, decided (i) at signing, so the promise holds for every shape (§4.2).
 - A declined event leaves Coming up and is never asked about again, across its whole series.
 - An unanswered card is not a decline. It expires and says nothing, and the event stays in Coming up.
 
@@ -108,13 +109,15 @@ account, with no second person.
   onboarding work (research Q5, trimmed: it changes no line of this build);
 - write-back to Google Calendar: VISION's dedicated calendar, Beyond;
 - events found in email: the Gmail spec;
-- a conflict line on the card ("overlaps CS 100") and the dropped-event audit list: P6, M2 or cut;
+- a conflict line on the card ("overlaps CS 100"): cut from the MVP (M2 spec Q7 (b), Appendix A (b),
+  signed 2026-09-29); the dropped-event audit list: M2 (Q7 (d)); the 14-day expiry of opportunity
+  proposals (P6 (c)) is not M2's: this spec's D3 delivers it;
 - two-desktop behaviour: Launch (§9).
 
 ## 3. Decisions
 
-The first four are §12's questions, shown here with their recommended answers so the rest of the
-spec reads whole. Each can be reversed at signing. D5–D12 are the planner's, each with its reason
+The first four are §12's questions, shown here with their recommended answers, which Quinn accepted
+at signing on 2026-09-29. D5–D12 are the planner's, each with its reason
 and what it costs if wrong.
 
 | # | Decision | Reason | Cost if wrong |
@@ -593,7 +596,10 @@ practice): one real slot against the Alabama feeds; one obligation and one oppor
 one declined; the schedule and Coming up checked; one `rank` repeated to show that nothing is
 re-asked. The scratch profile is removed afterwards.
 
-## 12. Open questions for Quinn
+## 12. Open questions for Quinn (all decided, 2026-09-29)
+
+Quinn signed this spec on 2026-09-29 and accepted every recommendation. Each question below is kept
+with its options and reasoning; its **DECIDED** line records the answer.
 
 These are W1's five research questions, merged and trimmed to the ones that change the build. Two
 were dropped:
@@ -615,9 +621,10 @@ Ruling 10 says "required events become tasks". Since it was written, the commitm
 - (c) **(b), plus a "Register" task** when the feed says the event needs registration, due at the
   registration deadline.
 
-**RECOMMENDATION: (c).** It is the honest answer to "what's next?": the event is on the schedule,
-and the only list item is the one real piece of work. If signed, ruling 10's parenthetical reads
-"required events enter the plan", and the cloud design gains a one-line marker in the signing commit.
+**DECIDED (Quinn, 2026-09-29): (c), as recommended.** It is the honest answer to "what's next?":
+the event is on the schedule, and the only list item is the one real piece of work. Signed, so ruling
+10's parenthetical now says required events enter the plan as a one-off commitment, and the cloud
+design carries the marker from the signing commit (§14).
 It costs one small change in `commitments.rs` (§4.2) and nothing on the contract list beyond (a)'s.
 
 **What (b) and (c) cost in behaviour.** A commitment needs a start and an end on one day. With
@@ -626,7 +633,8 @@ breaks §0's promise, and campus feeds often publish fairs and orientations that
 such gap: a task takes any shape, due at the event's start. **How many Alabama events have that
 shape is not measured.** This revision was written offline, and no file on disk marks one. T0
 (§13) counts them from the Alabama preset's feeds before Q1 is asked, so Quinn sees the number.
-Q1b is the fallback, and it stands whatever the count is.
+Q1b is the fallback, and it stands whatever the count is. (Quinn signed before T0's count existed,
+on that basis; T0's number is still recorded when it is measured.)
 
 **Q1a. When the feed says "registration required" but gives no deadline, how is the Register task
 dated?**
@@ -636,7 +644,7 @@ dated?**
 - (iii) Due at the event's start. This was the draft, and it is withdrawn: the start is not the
   deadline, and VISION says Knowlu never invents a due date.
 
-**RECOMMENDATION: (i).** It keeps the one real piece of work in a list, and invents nothing. Its
+**DECIDED (Quinn, 2026-09-29): (i), as recommended.** It keeps the one real piece of work in a list, and invents nothing. Its
 cost: an undated task sorts last, so a student who never opens the undated list can miss a
 registration that closes early. The event itself is still on the schedule. The task is not closed
 when the event passes. The student ticks it or deletes it.
@@ -650,7 +658,7 @@ when the event passes. The student ticks it or deletes it.
   length clamped to 0.25–4 (1 hour when the length is unknown). Capacity counts it before the day.
 - (iii) **Nothing** (the draft): the answer is recorded and the event stays in Coming up.
 
-**RECOMMENDATION: (i).** It is the only option that puts the event on its day. It invents no hours
+**DECIDED (Quinn, 2026-09-29): (i), as recommended.** It is the only option that puts the event on its day. It invents no hours
 for a fair whose length is the student's choice. It costs one read in `surface.rs` (T4b) and no
 vault writes.
 
@@ -659,7 +667,7 @@ afterwards?**
 - (a) **Ask**: an Accept/Decline card; an unanswered card changes nothing.
 - (b) **Auto-add** the commitment and file a card to undo it.
 
-**RECOMMENDATION: (a).** A campus feed is not an authority on what this student must attend: the
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** A campus feed is not an authority on what this student must attend: the
 model inferred it, and VISION commitment 5 says Knowlu proposes and waits when it noticed something.
 The miss (cost 3) is covered because the event stays in Coming up while its card waits or after it
 expires (D8). (b) would put a model's guess into the student's hard time without a click.
@@ -669,7 +677,7 @@ expires (D8). (b) would put a model's guess into the student's hard time without
   digest stays only for vaults without the switch.
 - (b) **Keep the digest** for opportunities, and fix its two defects (F1 and F2) instead.
 
-**RECOMMENDATION: (a).** The deck cannot show a digest (`surface.rs:1323-1326`), so a student cannot
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** The deck cannot show a digest (`surface.rs:1323-1326`), so a student cannot
 answer one at all, and its expiry declines every event in it. Fixing it would mean building a
 batch-card UI the anatomy already ruled out ("Event digests — one approval per event", anatomy §6).
 The switch keeps `golden-today-full.md` byte-identical. The founder's scratch profile is created by
@@ -681,7 +689,7 @@ the wizard, so it carries the switch.
 - (b) **Declines only**: each later instance of an accepted series gets its own card.
 - (c) **Neither**: every instance is asked on its own.
 
-**RECOMMENDATION: (a).** VISION already rules the decline half ("a declined recurring opportunity
+**DECIDED (Quinn, 2026-09-29): (a), as recommended.** VISION already rules the decline half ("a declined recurring opportunity
 stays declined across the series"). For the accept half, a weekly required meeting asked about
 every week is the notification fatigue VISION designs against. The student asked once, so Knowlu
 acts (VISION commitment 5), lists each carried instance in the delta, and the student can delete
@@ -707,7 +715,7 @@ included. D7's cap holds that to 3 cards a day.
   opportunities show in Coming up only.
 - (c) **On, and run B1 before the founder's MVP proof**, so the proof sees whichever prompt wins.
 
-**RECOMMENDATION: (c).** The build is the same either way: one line in a preset. B1's harness is
+**DECIDED (Quinn, 2026-09-29): (c), as recommended.** The build is the same either way: one line in a preset. B1's harness is
 already built and its seed is 26 cases. The proof is the first time a student meets these cards, so
 it should meet the better prompt.
 
@@ -773,8 +781,9 @@ at any time before T10.
 
 ## 14. What signing changes elsewhere
 
-- If Q1 is (b) or (c): Amendment 2026-09-29, ruling 10's MVP list gains the marker *(events: "enter
-  the plan", per `2026-09-29-events-design.md` Q1)*, in the signing commit.
+- Q1 was decided (c), so Amendment 2026-09-29, ruling 10's MVP list is reworded in the signing
+  commit: required events enter the plan as a one-off commitment, with the marker *(amended
+  2026-09-29, events spec Q1: enter the plan as a one-off commitment, signed by Quinn)*.
 - `docs/notes/2026-09-29-vision-program.md`'s P4 row points at this spec (T8).
 - Nothing in `VISION.md` changes. The spec applies commitments 4 and 5 and the Learning section's
   series rule as they stand.
