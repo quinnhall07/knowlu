@@ -178,9 +178,12 @@ message names the three columns that differ and how.
      `status: removed`;
    - every created note's `id:` equals `ids::derived_id("grade", <its path>)` (a silent re-mint by
      `write::create` fails this);
-   - a student-set field, written with a `console_ctx()`-style actor (what `Journal::human_set`
-     recognises), is never re-set: `apply` filters by `human_set` before writing. If ruling 11's
-     neutral token (`student`) has merged by then, the test covers both `quinn` and `student`;
+   - a student-set field, written as the vault's human (the actor `console_ctx(vault)` gives, what
+     `Journal::human_set` recognises), is never re-set: `apply` filters by `human_set` before
+     writing. Ruling 11 has merged (#23), so the test covers both a legacy vault (no
+     `config/actor.yaml`; actor `journal::LEGACY_HUMAN_ACTOR`) and a `student` vault
+     (`journal::create_actor_file(v, journal::HUMAN_ACTOR)` first: `write` refuses a human token
+     that is not the vault's), naming each through those constants, never a literal;
    - past the entitlement grace the command prints `grades (skipped: …)` at exit 0 and writes
      nothing, tested here in `engine/tests/grades.rs` with `entitlement_gate.rs`'s pattern (T3C adds
      `grades` to that file's own lists);
