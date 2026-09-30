@@ -1582,6 +1582,55 @@
     // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
     EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
+  // Gmail connect T9a (spec §4.4, D1, D10, D12): the Google row. `SET` is the settings panel's own
+  // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
+  // bumped on close and on every new load, so a stale reply never repaints the row. The buttons are
+  // wired in T9b (Connect, Reconnect) and T9c (Disconnect).
+  var SET = { googleSeq: 0, google: null, googleNote: "", googlePolling: false };
+  var GOOGLE_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.";
+  var GOOGLE_DISCLOSURE = "Google also tells Knowlu which Google account you connected, so this row can show it.";
+  function googleSentence(g) {
+    if (!g) { return "Checking Google…"; }
+    if (!g.ok) { return g.error || "Knowlu could not reach Google just now."; }
+    var who = g.email ? " (as " + g.email + ")" : "";
+    if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
+    if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
+    if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
+    return "Google Calendar is connected" + who + ". Gmail is not.";
+  }
+  function renderGoogleRow() {
+    var g = SET.google, busy = SET.googlePolling;
+    var known = !!(g && g.ok), none = known && g.state === "none", revoked = known && g.state === "revoked";
+    var live = known && !none && !revoked;
+    EL("set-google-state").textContent = googleSentence(g);
+    EL("set-google-note").textContent = (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
+    EL("set-google-connect").hidden = !(none || (live && !g.gmail));
+    EL("set-google-reconnect").hidden = !revoked;
+    EL("set-google-disconnect-1").hidden = !(revoked || live);
+    EL("set-google-retry").hidden = !(g && !g.ok);
+    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry"].forEach(function (id) { EL(id).disabled = busy; });
+  }
+  function loadGoogleRow() {
+    var seq = ++SET.googleSeq;
+    SET.google = null; SET.googleNote = ""; SET.googlePolling = false;
+    EL("set-google").hidden = false;
+    renderGoogleRow();
+    return invoke("google_status", {}).then(function (g) {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = g || { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    }).catch(function () {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    });
+  }
+  // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
+  function gateGoogleRow(a) {
+    if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
+    SET.googleSeq += 1; EL("set-google").hidden = true;
+  }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; EL("settings").hidden = true; }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -1591,8 +1640,9 @@
   function checkAccount() {
     return invoke("account_status", {}).then(function (s) {
       renderAccountRow(s);
+      gateGoogleRow(s);
       maybeUpgrade(s);
-    }).catch(function () { renderAccountRow(null); EL("upgrade").hidden = true; });
+    }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
   function openSettings() {
     EL("settings").hidden = false;
@@ -1606,7 +1656,7 @@
   window.KNOWLU_OPEN_SETTINGS = openSettings;
 
   EL("settings").addEventListener("click", function (e) {
-    if (e.target.closest("#set-close")) { EL("settings").hidden = true; return; }
+    if (e.target.closest("#set-close")) { closeSettings(); return; }
     if (e.target.closest("#set-name-save")) {
       invoke("set_profile_name", { name: EL("set-name-in").value }).then(function (r) {
         EL("set-diag-note").textContent = r.ok ? "saved" : r.error;
@@ -1665,7 +1715,7 @@
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
     // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
     if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
-    if (e.key === "Escape" && !EL("settings").hidden) { EL("settings").hidden = true; }
+    if (e.key === "Escape" && !EL("settings").hidden) { closeSettings(); }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
   // `report.rs` builds and scrubs it, the textarea shows it, and the send posts exactly what is on

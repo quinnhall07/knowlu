@@ -1805,3 +1805,25 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }
+
+/// Gmail connect T9a (spec §8.4 item 1): the Google row sits after Account, inside Settings, with
+/// every id T9b and T9c bind to.
+#[test]
+fn the_google_row_sits_after_account_with_its_ids() {
+    let html = read("index.html");
+    let js = read("console.js");
+    let open = html.find("id=\"settings\"").expect("#settings");
+    let close = open + html[open..].find("</aside>").expect("end of #settings");
+    let acct = html.find("id=\"set-account\"").expect("#set-account");
+    let google = html.find("id=\"set-google\"").expect("#set-google");
+    assert!(open < acct && acct < google && google < close, "#set-google is inside #settings, after #set-account");
+    for id in [
+        "set-google-state", "set-google-connect", "set-google-reconnect",
+        "set-google-disconnect-1", "set-google-disconnect-2", "set-google-note",
+    ] {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has no #{id}"));
+        assert!(google < at && at < close, "#{id} is inside the Google row");
+        assert!(js.contains(&format!("\"{id}\"")), "console.js never names #{id}");
+    }
+    assert!(js.contains("\"google_status\""), "the row asks google_status");
+}
