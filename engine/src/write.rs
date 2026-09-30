@@ -70,11 +70,22 @@ impl std::fmt::Display for WriteError {
 /// `judge`, `sync`, `coursework` and the rank's own passes keep their exit-0 contracts whatever the
 /// file says. The file is read on every human write, never cached, so a hand fix takes effect at
 /// once.
+///
+/// Plan Q2: a human actor that is not the vault's own token — `quinn` on a `student` vault,
+/// `student` on a legacy one, any name — is refused too, so one stray CLI call can never put a
+/// second token into an account (which would flip every later restore's choice).
 fn human_gate(vault: &Path, ctx: &WriteContext) -> Result<(), WriteError> {
     if is_agent(&ctx.actor) || ctx.actor.starts_with("system:") {
         return Ok(());
     }
-    crate::journal::read_human_actor(vault).map_err(|e| WriteError::Actor(e.to_string()))?;
+    let token = crate::journal::read_human_actor(vault).map_err(|e| WriteError::Actor(e.to_string()))?;
+    if ctx.actor != token {
+        return Err(WriteError::Actor(format!(
+            "{}: this vault's human is {token}, so a write as {:?} is refused (one account writes one token)",
+            crate::journal::ACTOR_FILE,
+            ctx.actor
+        )));
+    }
     Ok(())
 }
 
@@ -1266,6 +1277,32 @@ mod tests {
         assert_eq!(res.records[0]["actor"], serde_json::json!("student"));
         assert_eq!(j.read(None, None)[0]["actor"], serde_json::json!("student"));
         assert!(pystr::read_text(&v.join("tasks").join("a.md")).unwrap().contains("status: done"));
+    }
+
+    /// Plan Q2 (recommended yes): one account writes one token, mechanically. A human actor that is
+    /// not the vault's own token is refused by name, before anything is journalled or written.
+    #[test]
+    fn a_human_actor_other_than_the_vaults_is_refused() {
+        for (file, actor, token) in [
+            (Some("human_actor: student\n"), "quinn", "student"),
+            (None, "student", "quinn"),
+            (None, "alice", "quinn"),
+            (Some("human_actor: student\n"), "alice", "student"),
+            (None, "Quinn", "quinn"),
+        ] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let ctx = WriteContext::new(actor, "cli");
+            let mut j = Journal::new(&v);
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{actor} on a {token} vault must be refused"))
+                .to_string();
+            assert!(err.starts_with("config/actor.yaml: ") && err.contains(token) && err.contains(&format!("{actor:?}")), "{err}");
+            assert!(create(&v, "tasks/new.md", "---\ntitle: New\n---\n\nb\n", &ctx, &mut j, None).is_err(), "{actor}: create");
+            assert_eq!(fingerprint(&v), before, "{actor} on a {token} vault: nothing written");
+        }
     }
 
     #[test]

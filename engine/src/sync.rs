@@ -2764,6 +2764,8 @@ mod tests {
         let today = jiff::civil::Date::constant(2026, 8, 20);
         let now = jiff::civil::DateTime::constant(2026, 8, 20, 12, 0, 0, 0);
         let v = scratch("local-cards");
+        // Ruling 11: the console below writes as the student, which only a `student` vault takes.
+        crate::journal::create_actor_file(&v, crate::journal::HUMAN_ACTOR).unwrap();
         let runner = WriteContext::new("agent:rank", "cli");
         let console = WriteContext::new("student", "dashboard");
         let mut journal = Journal::new(&v);

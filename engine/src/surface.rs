@@ -3087,6 +3087,9 @@ mod moved_tests {
         for sub in ["config", "tasks", "state"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
+        // Ruling 11: `note` and `edit` write as the student, which a vault accepts only when its
+        // `config/actor.yaml` says so (a vault with none is a legacy `quinn` vault).
+        crate::journal::create_actor_file(&dir, crate::journal::HUMAN_ACTOR).unwrap();
         let busy = "[['08:00', '17:30']]";
         std::fs::write(
             dir.join("config").join("week_template.yaml"),
