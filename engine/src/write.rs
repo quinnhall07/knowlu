@@ -44,6 +44,15 @@ pub enum WriteError {
     /// Ruling 11: a human write refused because `config/actor.yaml` is not valid, named by the
     /// reader's own line. Refused before anything is journalled or written.
     Actor(String),
+    /// M2 D5: a body edit refused because the note's body is not the one the caller last read,
+    /// named by the note's path. Nothing is journalled or written.
+    Conflict(String),
+    /// M2 D4: a body edit refused for a named reason (an unclosed fence, a NUL, a note over the
+    /// sync limit, a `---` first line on a note without frontmatter), before any record.
+    Body(&'static str),
+    /// M2 D10: a list the one-line surgery cannot replace because its value spans lines, named by
+    /// its key, before any record.
+    MultiLine(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -60,8 +69,23 @@ impl std::fmt::Display for WriteError {
             WriteError::Provenance(e) => write!(f, "{e}"),
             WriteError::Io(m) => write!(f, "{m}"),
             WriteError::Actor(m) => write!(f, "{m}"),
+            WriteError::Conflict(p) => {
+                write!(f, "{p} changed since it was read; nothing was written")
+            }
+            WriteError::Body(why) => write!(f, "the body was not written: {why}"),
+            WriteError::MultiLine(key) => {
+                write!(f, "{key}: Knowlu can only edit a list written on one line")
+            }
         }
     }
+}
+
+/// M2 §7.2: **the one hash** of a note body, SHA-256 of its UTF-8 bytes in lowercase hex. A
+/// `set_body` record's `old` and `new` carry it, so the app and the tests call this and never hash
+/// on their own.
+pub fn body_sha256(body: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Ruling 11 (plan D3): **the one gate** every public entry point below takes before the journal is
@@ -1968,5 +1992,32 @@ mod tests {
         let body = pystr::read_text(&res.proposal.unwrap()).unwrap();
         assert!(body.contains("Evidence: {\"why\": \"syllabus\"}"), "{body}");
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // -- M2: the body hash and the new refusals -----------------------------
+
+    #[test]
+    fn body_sha256_is_lowercase_hex_of_the_utf8_bytes() {
+        // The empty body: §6.2's example `old`, and every SHA-256 implementation's first vector.
+        assert_eq!(body_sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        // Non-ASCII: the digest covers the UTF-8 bytes (63 61 66 c3 a9 20 e2 80 94 20 e6 97 a5
+        // e6 9c ac 0a), checked against `sha256sum` and Python's `hashlib` over those bytes.
+        let body = "caf\u{e9} \u{2014} \u{65e5}\u{672c}\n";
+        assert_eq!(body_sha256(body), "954d89d459ee5f2d1a8902b9d7bfe745cb84445dfc5228c168ced2bb35cab546");
+        for digest in [body_sha256(""), body_sha256(body)] {
+            assert_eq!(digest.len(), 64, "{digest}");
+            assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{digest}");
+        }
+    }
+
+    #[test]
+    fn the_new_write_errors_name_the_file_or_the_reason() {
+        let conflict = WriteError::Conflict("tasks/stats-hw-4.md".into()).to_string();
+        assert!(conflict.contains("tasks/stats-hw-4.md"), "{conflict}");
+        let body = WriteError::Body("the frontmatter has no closing line").to_string();
+        assert!(body.contains("the frontmatter has no closing line"), "{body}");
+        let multi = WriteError::MultiLine("strong".into()).to_string();
+        assert!(multi.contains("Knowlu can only edit a list written on one line"), "{multi}");
+        assert!(multi.contains("strong"), "{multi}");
     }
 }
