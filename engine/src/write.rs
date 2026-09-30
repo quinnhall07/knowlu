@@ -727,8 +727,9 @@ fn body_digest(body: &str) -> serde_json::Value {
 
 /// M2 §7.1: replace a note's body, everything after its closing fence, and nothing before it. The
 /// head is carried over as text, never parsed and re-dumped. `expected` is the body the caller last
-/// read; `Ok(true)` when it wrote. Each refusal comes before the record, so it leaves the journal and
-/// the note untouched. **Journal first, file second**, like every write here.
+/// read; `Ok(true)` when it wrote, `Ok(false)` when the new body equals the current one under D6.
+/// Each refusal comes before the record, so it leaves the journal and the note untouched. **Journal
+/// first, file second**, like every write here.
 pub fn set_body(
     vault: &Path,
     target: &str,
@@ -744,10 +745,16 @@ pub fn set_body(
     let (head, run, current) = split_body(&text)?;
     // D5, compare-and-swap on normalised bodies (equal strings, equal `body_sha256` digests), so a
     // copy that differs from the file only by CRLF or a trailing newline is not a conflict.
-    if normalise_body(current) != normalise_body(expected) {
+    let shown = normalise_body(current);
+    if shown != normalise_body(expected) {
         return Err(WriteError::Conflict(rel_path));
     }
     let new = normalise_body(new_body);
+    // D6, §7.1 step 4: a save equal to the current body under D6's rule writes nothing, no record
+    // and no file (the F4 rule of `write_literals`), and leaves a file not in D6's form as it is.
+    if new == shown {
+        return Ok(false);
+    }
     // D4's refusals, each by name.
     if new.contains('\u{0}') {
         return Err(WriteError::Body("the body contains a NUL character"));
@@ -2364,5 +2371,179 @@ mod tests {
             assert_eq!(pystr::read_text(&path).unwrap(), want, "{text:?}");
             assert_eq!(shown_body(&path), "New\n", "{text:?}");
         }
+    }
+
+    // -- M2: set_body's no-op, and the pins (T1a.3) --------------------------
+
+    /// The seeded task's body as `surface::note_detail` gives it to the drawer (D6's one string).
+    fn detail_body(v: &Path, j: &mut Journal) -> String {
+        let day = jiff::civil::Date::constant(2026, 9, 30);
+        crate::surface::note_detail(v, "task_0123456789", day, j).expect("the seeded task").body
+    }
+
+    #[test]
+    fn set_body_is_a_no_op_when_the_body_is_unchanged() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let mut j = Journal::new(&v);
+        let before = fingerprint(&v);
+        for same in ["Body text.\r\n", "Body text.", "Body text.\n\n\n", "\n\nBody text.\n", "\r\n\r\nBody text.\r\n\r\n", "\rBody text.\r"] {
+            assert_eq!(set_body(&v, "tasks/a.md", "Body text.\n", same, &ctx, &mut j), Ok(false), "{same:?}");
+            // The caller's copy may differ from the file the same ways (§7.1 step 3).
+            assert_eq!(set_body(&v, "tasks/a.md", same, "Body text.\n", &ctx, &mut j), Ok(false), "{same:?}");
+        }
+        // The no-op comes after the compare-and-swap: a stale copy is still a conflict.
+        assert_eq!(set_body(&v, "tasks/a.md", "Stale.\n", "Body text.\n", &ctx, &mut j), Err(WriteError::Conflict("tasks/a.md".into())));
+        assert!(body_records(&mut j).is_empty(), "nothing is journalled");
+        assert_eq!(fingerprint(&v), before, "the journal and the note are byte-identical");
+
+        // A file whose own text is not in D6's form is left in it, never rewritten into it.
+        for text in [
+            NOTE.replace("---\n\nBody text.\n", "---\n\n\n\nBody text.\n\n\n"),
+            "---\nid: task_0123456789\n---".to_string(),
+        ] {
+            pystr::write_text(&path, &text).unwrap();
+            let before = fingerprint(&v);
+            let shown = shown_body(&path);
+            assert_eq!(set_body(&v, "tasks/a.md", shown.trim_end(), &format!("\r\n{shown}\n\n"), &ctx, &mut j), Ok(false), "{text:?}");
+            assert_eq!(fingerprint(&v), before, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn set_body_record_holds_hashes_and_never_text() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = v.join("tasks").join("a.md");
+        let old = "Old notes: marker-OLD-4e1c, caf\u{e9} \u{2014} \u{65e5}\u{672c}.\n";
+        pystr::write_text(&path, &NOTE.replace("Body text.\n", old)).unwrap();
+        let new = "New notes: marker-NEW-9b7d\r\nsecond line";
+        let mut j = Journal::new(&v);
+        assert!(set_body(&v, "tasks/a.md", old, new, &ctx, &mut j).unwrap());
+
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        // §6.2: `make_record`'s twelve keys plus `seq`, stamped by `Journal::append`.
+        let mut keys: Vec<&str> = rec.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "device", "evidence", "field", "id", "new", "old", "op", "path", "run_id", "seq", "ts", "via"]);
+        assert_eq!(rec["actor"], ctx.actor.as_str(), "the test's own context, never §6.2's example");
+        assert_eq!(rec["via"], ctx.via.as_str());
+        assert_eq!(rec["op"], "set_body");
+        assert_eq!(rec["id"], "task_0123456789");
+        assert_eq!(rec["path"], "tasks/a.md");
+        for key in ["run_id", "field", "evidence"] {
+            assert_eq!(rec[key], serde_json::Value::Null, "{key}");
+        }
+        assert!(rec["ts"].as_str().is_some_and(|ts| ts.ends_with('Z')) && rec["device"].is_string() && rec["seq"].is_u64(), "{rec:?}");
+        let norm = "New notes: marker-NEW-9b7d\nsecond line\n";
+        assert_eq!(rec["old"], serde_json::json!({"sha256": body_sha256(old), "bytes": old.len()}), "UTF-8 bytes, not chars");
+        assert_eq!(rec["new"], serde_json::json!({"sha256": body_sha256(norm), "bytes": norm.len()}));
+
+        // On disk: one line, `dumps_value`'s bytes, and no text of either body in any form.
+        let files: Vec<PathBuf> = std::fs::read_dir(v.join("state").join("journal")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 1);
+        let raw = std::fs::read_to_string(&files[0]).unwrap();
+        assert_eq!(raw, format!("{}{}", crate::ledger::dumps_value(&serde_json::Value::Object(rec.clone())), pystr::NEWLINE));
+        for marker in ["marker-OLD-4e1c", "marker-NEW-9b7d", "Old notes", "New notes", "second line", "caf\u{e9}", "\u{65e5}\u{672c}"] {
+            assert!(!raw.contains(marker), "{marker:?} reached the journal: {raw}");
+        }
+    }
+
+    #[test]
+    fn set_body_hashes_chain() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        seed(&v);
+        let mut j = Journal::new(&v);
+        let digest = |body: &str| serde_json::json!({"sha256": body_sha256(body), "bytes": body.len()});
+        let b0 = detail_body(&v, &mut j);
+        assert!(set_body(&v, "task_0123456789", &b0, "\r\n\r\nFirst edit\r\nline two", &ctx, &mut j).unwrap());
+        let b1 = detail_body(&v, &mut j);
+        assert!(set_body(&v, "task_0123456789", &b1, "Second edit.\n\n\n", &ctx, &mut j).unwrap());
+        let b2 = detail_body(&v, &mut j);
+        assert_eq!((b1.as_str(), b2.as_str()), ("First edit\nline two\n", "Second edit.\n"));
+
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["old"], digest(&b0), "the first `old` is the body the drawer showed");
+        assert_eq!(records[0]["new"], digest(&b1), "`new` is the body `note_detail` then shows");
+        assert_eq!(records[1]["old"], records[0]["new"], "a second edit's `old` is the first's `new`");
+        assert_eq!(records[1]["new"], digest(&b2));
+    }
+
+    #[test]
+    fn an_emptied_body_keeps_the_blank_line_after_the_fence() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        // `create_task_inner`'s shape: the frontmatter, its fence, one blank line and no body.
+        let path = create(&v, "tasks/new.md", "---\ntitle: New task\nstatus: active\n---\n\n", &ctx, &mut j, None).unwrap();
+        let minted = std::fs::read(&path).unwrap();
+        let minted_text = pystr::read_text(&path).unwrap();
+        assert!(minted_text.ends_with("\n---\n\n"), "{minted_text:?}");
+        for empty in ["", "\n", "\r\n\r\n"] {
+            assert!(set_body(&v, "tasks/new.md", &shown_body(&path), "Notes.", &ctx, &mut j).unwrap());
+            assert_eq!(pystr::read_text(&path).unwrap(), format!("{minted_text}Notes.\n"));
+            assert!(set_body(&v, "tasks/new.md", "Notes.\n", empty, &ctx, &mut j).unwrap(), "{empty:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), minted, "{empty:?}: the create_task shape, byte for byte");
+            assert_eq!(shown_body(&path), "", "{empty:?}");
+        }
+        // A note that had a body from the start keeps its blank line too.
+        let seeded = seed(&v);
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "", &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&seeded).unwrap(), NOTE.replace("Body text.\n", ""));
+    }
+
+    #[test]
+    fn set_body_records_are_invisible_to_judge_once_and_verify_tail() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let mut j = Journal::new(&v);
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "My own notes.\n", &ctx, &mut j).unwrap());
+        assert_eq!(body_records(&mut j)[0]["actor"], ctx.actor.as_str(), "a human record, so a reader that took it would freeze a field");
+        // `sha256` and `bytes` are the keys of the record's `new`: a reader treating it as a `create`
+        // would find them.
+        for field in ["body", "sha256", "bytes", "status", "effort_hours"] {
+            assert!(j.human_set("task_0123456789", field).is_none(), "human_set {field}");
+            assert!(j.human_edited("task_0123456789", field).is_none(), "human_edited {field}");
+        }
+        assert!(crate::journal::latest_by_field(&j.read(None, None)).is_empty());
+        // The file back at the old body, as a crash between record and file would leave it (§7.5):
+        // `verify_tail` re-applies nothing and writes nothing.
+        pystr::write_text(&path, NOTE).unwrap();
+        let before = fingerprint(&v);
+        assert_eq!(crate::passes::verify_tail(&v, &mut j, &ctx, 1000), Vec::<String>::new());
+        assert_eq!(fingerprint(&v), before);
+    }
+
+    #[test]
+    fn set_body_undo_succeeds_after_a_save_without_a_trailing_newline() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let seeded = std::fs::read(&path).unwrap();
+        let mut j = Journal::new(&v);
+        let original = detail_body(&v, &mut j);
+        let typed = "Edited, with no final newline";
+        // D8: save, then undo with the body the page re-read as `expected` and the old text as new.
+        assert!(set_body(&v, "task_0123456789", &original, typed, &ctx, &mut j).unwrap());
+        let reread = detail_body(&v, &mut j);
+        assert_eq!(reread, format!("{typed}\n"));
+        assert_eq!(set_body(&v, "task_0123456789", &reread, &original, &ctx, &mut j), Ok(true));
+        assert_eq!(detail_body(&v, &mut j), original, "the original body is back");
+        assert_eq!(std::fs::read(&path).unwrap(), seeded, "byte for byte");
+        let r = body_records(&mut j);
+        assert_eq!((&r[1]["old"], &r[1]["new"]), (&r[0]["new"], &r[0]["old"]), "the undo's record chains back");
+        // §7.1 step 3: the textarea's own text, with no final newline or with CRLF, is no conflict.
+        for expected in [typed.to_string(), format!("{typed}\r\n")] {
+            assert!(set_body(&v, "task_0123456789", &original, typed, &ctx, &mut j).unwrap());
+            assert_eq!(set_body(&v, "task_0123456789", &expected, &original, &ctx, &mut j), Ok(true), "{expected:?}");
+            assert_eq!(detail_body(&v, &mut j), original, "{expected:?}");
+        }
+        assert_eq!(body_records(&mut j).len(), 6);
     }
 }
