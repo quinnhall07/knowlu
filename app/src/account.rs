@@ -1392,31 +1392,48 @@ pub fn google_connected() -> Value {
 /// own pending session has gone stale (the fix is a sign-in, not a retry of THIS request), and 503
 /// means the deployment has no Google client configured at all (`GOOGLE_NOT_CONFIGURED` on the
 /// service side) — the fix is the `calendar_ics` fallback the panel already shows, not "try again".
-/// Every other status keeps the generic form, which names the code but nothing more specific.
+/// Gmail connect (spec §4.2) adds two: 402 is `requireActiveEntitlement` refusing every
+/// `google-connect` call for a lapsed subscription, so the fix is the subscription, not Google; 502
+/// is `DELETE` failing to revoke at Google, which leaves the grant and the row in place, so a retry
+/// is the right ask. Every other status keeps the generic form, which names the code but nothing
+/// more specific.
 fn google_error_for_status(code: u16) -> String {
     match code {
         401 => "sign in again".to_string(),
+        402 => "your subscription is not active, so Google cannot be connected".to_string(),
+        502 => "Google could not be reached to disconnect; try again".to_string(),
         503 => "Google sign-in is not available right now — use the secret address below".to_string(),
         _ => format!("the service refused (HTTP {code})"),
     }
 }
 
-/// One bearer GET against the functions base. `check_api_base` is applied first, so an
-/// `KNOWLU_API_BASE` pointing anywhere but https (or loopback, for the tests) is refused here
-/// rather than turned into a request to a host nobody chose.
+/// One bearer GET against the functions base: [`send_json`] with `GET`, kept so the wizard's
+/// callers read as they always have.
 fn get_json(url: &str, token: &str) -> Result<Value, String> {
+    send_json(ureq::http::Method::GET, url, token)
+}
+
+/// One bearer request with no body against the functions base, answering the reply's JSON.
+/// `check_api_base` is applied first, so an `KNOWLU_API_BASE` pointing anywhere but https (or
+/// loopback, for the tests) is refused here rather than turned into a request to a host nobody
+/// chose. `Agent::run` on a bodiless `http::Request` is the path `RequestBuilder::call` takes, and a
+/// request that will not build fails as `call` would have (`ureq::Error::Http`), so `get_json`'s
+/// errors are unchanged. No error carries the token or the reply's body.
+fn send_json(method: ureq::http::Method, url: &str, token: &str) -> Result<Value, String> {
     check_api_base(url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
         .build()
         .into();
-    let mut response = agent
-        .get(url)
+    let request = ureq::http::Request::builder()
+        .method(method)
+        .uri(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("apikey", anon_key())
-        .call()
-        .map_err(|e| format!("no network ({e})"))?;
+        .body(())
+        .map_err(|e| format!("no network ({})", ureq::Error::from(e)))?;
+    let mut response = agent.run(request).map_err(|e| format!("no network ({e})"))?;
     let code = response.status().as_u16();
     let body = response.body_mut().read_to_string().unwrap_or_default();
     if !(200..300).contains(&code) {
@@ -1473,10 +1490,85 @@ mod google_error_for_status_tests {
     }
 
     #[test]
+    fn a_402_names_the_subscription_rather_than_google() {
+        assert_eq!(
+            google_error_for_status(402),
+            "your subscription is not active, so Google cannot be connected"
+        );
+    }
+
+    #[test]
+    fn a_502_says_google_could_not_be_reached_and_asks_for_a_retry() {
+        assert_eq!(google_error_for_status(502), "Google could not be reached to disconnect; try again");
+    }
+
+    #[test]
     fn every_other_status_keeps_the_generic_form() {
         assert_eq!(google_error_for_status(500), "the service refused (HTTP 500)");
         assert_eq!(google_error_for_status(429), "the service refused (HTTP 429)");
         assert_eq!(google_error_for_status(404), "the service refused (HTTP 404)");
+    }
+}
+
+/// `send_json` on a real `127.0.0.1:0` socket: nothing in `app/tests/account.rs` reaches it (the
+/// wizard's commands read `PENDING_TARGET`, which no test writes), so these are the refactor's guard.
+#[cfg(test)]
+mod send_json_tests {
+    use super::{get_json, send_json};
+    use std::io::{Read, Write};
+
+    /// Answers one request with `status` and `body`; `join()` yields the request head. The accept
+    /// polls against a 10-second deadline, so a request that never comes fails instead of hanging.
+    fn serve_one(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(e) => panic!("loopback: no request within 10s ({e})"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking");
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+            let (mut head, mut chunk) = (Vec::new(), [0u8; 1024]);
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) { Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]), _ => break }
+            }
+            let reply = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(reply.as_bytes()).expect("reply");
+            String::from_utf8_lossy(&head).to_ascii_lowercase()
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn get_json_still_sends_a_get_with_the_bearer_and_the_apikey() {
+        let (base, server) = serve_one(200, r#"{"connected":false}"#);
+        let reply = get_json(&format!("{base}/google-connect?status=1"), "t0k");
+        let head = server.join().expect("server");
+        assert_eq!(reply, Ok(serde_json::json!({ "connected": false })));
+        assert!(head.starts_with("get /google-connect?status=1 http/1.1\r\n"), "{head}");
+        assert!(head.contains("\r\nauthorization: bearer t0k\r\n") && head.contains("\r\napikey: "), "{head}");
+    }
+
+    #[test]
+    fn a_delete_goes_out_as_a_delete_and_a_refusal_maps_by_status_not_body() {
+        let (base, server) = serve_one(502, r#"{"error":"a body the page never sees"}"#);
+        let reply = send_json(ureq::http::Method::DELETE, &format!("{base}/google-connect"), "t0k");
+        let head = server.join().expect("server");
+        assert_eq!(reply, Err("Google could not be reached to disconnect; try again".to_string()));
+        assert!(head.starts_with("delete /google-connect http/1.1\r\n"), "{head}");
+        assert!(head.contains("\r\nauthorization: bearer t0k\r\n"), "{head}");
+    }
+
+    #[test]
+    fn check_api_base_applies_before_any_request() {
+        let refused = send_json(ureq::http::Method::DELETE, "ftp://127.0.0.1:9/google-connect", "t0k");
+        assert!(refused.is_err_and(|e| e.ends_with("an api_base must be https://")));
     }
 }
 
