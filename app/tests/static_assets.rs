@@ -1827,3 +1827,16 @@ fn the_google_row_sits_after_account_with_its_ids() {
     }
     assert!(js.contains("\"google_status\""), "the row asks google_status");
 }
+
+/// The launch-time `checkAccount` (upgrade overlay) must not reach `google_status`: the row loads
+/// only while Settings is open (spec section 4.4).
+#[test]
+fn the_launch_account_check_does_not_reach_google_status() {
+    let js = read("console.js");
+    let start = js.find("function gateGoogleRow").expect("gateGoogleRow");
+    let end = start + js[start..].find("function closeSettings").expect("closeSettings");
+    let gate = &js[start..end];
+    let guard = gate.find("EL(\"settings\").hidden").expect("gateGoogleRow checks that Settings is open");
+    let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
+    assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
+}

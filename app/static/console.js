@@ -1627,6 +1627,8 @@
   }
   // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
   function gateGoogleRow(a) {
+    // checkAccount also runs at launch; the row asks google_status only while Settings is open.
+    if (EL("settings").hidden) { return; }
     if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
     SET.googleSeq += 1; EL("set-google").hidden = true;
   }
