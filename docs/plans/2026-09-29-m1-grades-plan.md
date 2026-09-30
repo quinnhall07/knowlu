@@ -47,7 +47,12 @@ deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-en
   (reviewed by `contract-reviewer`), never part of an `implementer` task. No real grades, names or
   ids in any fixture or test.
 - **No task on this branch adds a `policy_read` date to any curated row.** Tests exercise dated rows
-  through rows they build themselves, never by editing `scaffold::CAMPUSES`.
+  through rows they build themselves, never by editing `scaffold::CAMPUSES`, and each test file
+  builds them through **one helper**, `test_row(lms_kind, policy_read)`: a struct update from a
+  `CAMPUSES` row with a synthetic `unitid` and `lms_host`
+  (`Curated { unitid: "999999", lms_host: "lms.example.test", lms_kind, policy_read, ..CAMPUSES[0] }`),
+  never a full `Curated` literal. A field another lane adds to `Curated` (`p3-registrar`'s
+  `registrar`, see "Carried findings") then needs no test edit.
 - **No build skips the predicate.** No `cfg(test)`, `cfg(debug_assertions)`, feature flag or
   environment variable bypasses it.
 - The spec is cited by section heading, never by line number; each dispatch names the task by its
@@ -55,7 +60,8 @@ deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-en
 
 ## Roster and order
 
-`implementer` is Sonnet at `high`. T3 (vault writes) and T5 (the kept session) **start on Opus**:
+`implementer` is Sonnet at `high`. T3 (vault writes) and T5a–T5c (the gate and the kept session)
+**start on Opus**:
 the controller dispatches `implementer` with `model: 'opus'` from the first attempt rather than
 escalating after two failures, because a silent error in either corrupts vault bytes or leaks a
 student's session (CLAUDE.md, "No agent fits?", first question).
@@ -69,15 +75,19 @@ student's session (CLAUDE.md, "No agent fits?", first question).
 | T3 the `grades` command | `implementer`, **Opus from the start** | writes the vault through `write`; judge-once filtering |
 | T3C the gated-command pins | `contract-engineer` | `engine/tests/entitlement_gate.rs` and `entitle.rs` are on the contract list |
 | T4 the read model | `implementer` (Sonnet, high) | pure read-model code; `surface_oracle.rs` must pass untouched |
-| T5 the app's session, capture, gate and commands | `implementer`, **Opus from the start** | the kept Blackboard session (ruling 12's exception) and the gate |
-| T6 the slot | `implementer` (Sonnet, high) | scheduler glue; the gate's fourth caller, decided in T5 |
+| T5a the field, the predicate, the date-and-bump test | `implementer`, **Opus from the start** | the gate itself (ruling 12's promise) |
+| T5b the pure pieces: prefs, bundle, paging, detection, session directory | `implementer`, **Opus from the start** | the kept session's directory and its delete |
+| T5c the window, the gated seams, the four commands | `implementer`, **Opus from the start** | the kept Blackboard session (ruling 12's exception) and the gate's three app callers |
+| T6 the slot | `implementer` (Sonnet, high) | scheduler glue; the gate's fourth caller, decided in T5a |
 | T7 the console | `console-ui` (Sonnet, medium) | `app/static` only |
 | T8 docs | `docs-keeper` (Sonnet, medium); the main session for CLAUDE.md's two lines | HANDOFF and `docs/reference/`; CLAUDE.md fits on one screen |
 | T9 whole-branch review and the PR | `reviewer` (Opus, high), `contract-reviewer` (Opus, xhigh) on the contract-list diffs; the main session opens the PR | pre-push review; a code push asks Quinn first |
 | P the proof branch and live proof | the main session | UA's date is Quinn's to record; the proof is the controller's |
 
-Order: T1 → T2F → T2 → T3F → T3 → T3C → T4 → T5 → T6 → T7 → T8 → T9 → P. T4 and T5 touch disjoint
-files and may run in parallel only when the controller grants two build slots. Each step appends
+Order: T1 → T2F → T2 → T3F → T3 → T3C → T4 → T5a → T5b → T5c → T6 → T7 → T8 → T9 → P. T4 and
+T5a–T5c touch disjoint files and may run in parallel only when the controller grants two build
+slots; T5a, T5b and T5c run in that order, each reviewed on its own, so the gate is reviewed before
+any session code exists. Each step appends
 its ledger line and is reviewed before the next begins.
 
 ## Task 1 — `grades/` becomes a note folder (`contract-engineer`; done)
@@ -177,7 +187,17 @@ message names the three columns that differ and how.
    - an unmatched course and a course with `"error"` are named in stdout and change nothing;
    - `state/grades.json` holds `fetched_at`, the host and the per-course counts, through
      `ledger::dumps_value`;
-   - a missing or unparseable `--input` exits 1; every other outcome exits 0.
+   - a missing or unparseable `--input` exits 1; every other outcome exits 0;
+   - **no grade reaches a log** (spec §11: grades never enter telemetry or an issue report). The
+     slot keeps each step's stdout and stderr in `slot-*.log` (`scheduler::run_child`), and
+     `report::log_tail` puts those files in an issue report, beside `runs_panel`'s run summaries.
+     So for both
+     `bundle-basic.json` and `bundle-changed.json`, every line of stdout and stderr, and the
+     `state/runner-log.md` line the run appends, matches one of the output shapes spec §6 documents
+     (counts, course codes, HTTP and error codes); and no column `name` or category title read from
+     the fixture appears anywhere in them. A later per-item line (`changed: Midterm 1 score 87`)
+     fails it. The exit-1 message for an unparseable bundle names serde's error category, line and
+     column, never its `Display`, which can quote the offending value.
 2. Code (Task 1 finding: `pystr::write_text` makes no parent directories, so `apply` creates
    `grades/` itself before the first create): `grades::apply(vault, &bundle, &ctx, &mut journal) ->
    Report`, using `write::create` for new notes and `write::write` with only the changed fields;
@@ -212,42 +232,47 @@ confirms no behavioural change to `entitle.rs`.
 3. **Accept:** workspace green with `surface_oracle.rs` and every `surface-today-*.json` unchanged;
    anatomy.md describes the strip-and-drawer block and drops the stale "Grades page".
 
-## Task 5 — the app's session, capture, gate and commands (`implementer`, Opus from the start)
+## Task 5a — the field, the predicate and the date-and-bump test (`implementer`, Opus from the start)
 
-**Files:** new `app/src/grades.rs`, `app/src/lib.rs`, `app/src/main.rs` (the console window's
-`generate_handler!` list), `app/src/scaffold.rs` (`Curated.policy_read`; `build_into` gains
-`grades`, the Task 1 finding), new `app/tests/grades.rs`, `docs/reference/app.md` (the command
-count only).
+**Files:** `app/src/scaffold.rs` (`Curated.policy_read`; `build_into` gains `grades`, the Task 1
+finding), new `app/src/grades.rs` (the predicate only), `app/src/lib.rs`, new `app/tests/grades.rs`.
 
-1. Tests first (no network, no window):
+1. Tests first (no network, no window; every row a test builds comes from the file's `test_row`
+   helper, see "Rules every task carries"):
    - **`Curated.policy_read`:** both `CAMPUSES` rows carry no date on this branch (the field is
      absent in the sense of `None`, not an empty string); a new vault's `build_into` creates
      `grades/`.
    - **The predicate.** It takes the curated row (or none) and the vault's `config/campus.yaml`
      `lms`, and answers one of three: *available* (with the row's `lms_host`), *not a Blackboard
      school*, or *not available yet*. Available only for a curated row whose `lms_kind` is
-     `blackboard` and which carries `policy_read`. Cases, each on a row the test builds: a dated
-     Blackboard row → available with its host; an undated Blackboard row → not available yet; an
-     uncurated school whose `lms` is `blackboard` → not available yet; a curated Canvas row → not a
-     Blackboard school; no `unitid` → not a Blackboard school.
-   - **Three of the four callers**, each through a seam that takes the curated row as input (the
-     Tauri command is a thin wrapper that resolves the row with `scaffold::curated` and calls the
-     seam), for a dated row, an undated row and an uncurated school:
-     - `grades_status` reports available or not, and with a dated row the connected, signed-out,
-       host and last-fetched fields; with no date it reports *not available* whatever session
-       directory exists.
-     - `grades_connect` and `grades_refresh` refuse with exactly `not available at your school yet`;
-       the seam takes the window-opening and session-reading actions as injected closures, and the
-       test asserts **neither is called** on a refusal. On a dated row both proceed.
-     - `grades_forget` is not gated: it deletes the session directory whatever the predicate says.
-   - **The date-and-bump test** (spec §4). A pure check, in the test file, that takes the curated
-     rows and a privacy version and fails when any row carries a `policy_read` date while the
-     version is at or before `2026-09-24`, the `PRIVACY_VERSION` in force at signing (every later
-     version is privacy bump #1 or after it, because `account.rs:21-23` moves the constant only with
-     the page). Shown failing on a synthetic dated row with `2026-09-24`; passing with a later
-     version, and with an undated row. Then pinned: the check passes on the real
-     `scaffold::CAMPUSES` and `account::PRIVACY_VERSION`. Any present date must parse as
-     `YYYY-MM-DD`.
+     `blackboard` and which carries `policy_read`. Cases: a dated Blackboard row → available with
+     its host; an undated Blackboard row → not available yet; an uncurated school whose `lms` is
+     `blackboard` → not available yet; a curated Canvas row → not a Blackboard school; no `unitid` →
+     not a Blackboard school.
+   - **The date-and-bump test** (spec §4). It keys on privacy bump #1's own version, never on "any
+     version after `2026-09-24`": the test file holds `const PRIVACY_BUMP_1: Option<&str> = None;`,
+     which only privacy bump #1's PR sets, to its `PRIVACY_VERSION`, in the commit that puts spec
+     §11's sentences on the page. A pure check takes the curated rows, a privacy version and that
+     anchor, and fails when any row carries a `policy_read` date while the anchor is `None` (bump #1
+     has not happened, so every version is older than it) or the version is before the anchor. A
+     version that moves for another reason (`p3-registrar`'s page edit, open question 4) therefore
+     never lets a date through. Shown failing on a synthetic dated row with no anchor at both
+     `2026-09-24` and a later version such as `2026-10-02`, and with an anchor later than the
+     version; passing with an undated row and no anchor, and with a dated row at or after its
+     anchor. Any present date, and the anchor when set, must parse as `YYYY-MM-DD`; a set anchor
+     must be later than `2026-09-24`, the version in force at signing, whose page does not disclose
+     the kept session. Then pinned: the check passes on the real `scaffold::CAMPUSES`,
+     `account::PRIVACY_VERSION` and the file's `PRIVACY_BUMP_1`, which is `None` on this branch.
+2. Code: `policy_read: Option<&'static str>` after `lms_kind`, `None` in both rows; `grades/` in
+   `build_into`; the predicate in `app/src/grades.rs`. Nothing else in `grades.rs` yet.
+3. **Accept:** workspace green; `git grep -n "policy_read: Some" -- app/src` is empty; in
+   `app/tests/`, `Curated {` appears only inside `test_row`.
+
+## Task 5b — the pure pieces (`implementer`, Opus from the start)
+
+**Files:** `app/src/grades.rs`, `app/tests/grades.rs`.
+
+1. Tests first (no network, no window):
    - `GradesPrefs` holds `hidden` only and round-trips `grades.json` through `ledger::dumps_value`; a
      missing or corrupt file is `hidden: false` and never touches `settings.json`.
    - `assemble_bundle(user, memberships, per_course)` from canned JSON produces spec §5's shape,
@@ -258,15 +283,35 @@ count only).
    - `session_dir(data_dir)` is `<data_dir>\lms-session` and `is_session_dir` refuses anything else;
      `forget` deletes only that directory.
    - the capability file `app/capabilities/default.json` never names `lms-grades` (static read).
-2. Code: the predicate, the seams and the pure functions; then the window half (`open_visible`,
-   which closes the window on detection; `refresh_hidden`, the 45-second settle, the cookie handover
-   exactly as `lms_link::capture_courses`, one `ureq` agent with a 30-second timeout); the **four**
-   commands (`grades_status`, `grades_connect`, `grades_refresh`, `grades_forget`), each
+2. Code: those pure functions only. No window, no Tauri command, no network call.
+3. **Accept:** workspace green; `app/src/grades.rs` names no `tauri::` item yet.
+
+## Task 5c — the window, the gated seams and the four commands (`implementer`, Opus from the start)
+
+**Files:** `app/src/grades.rs`, `app/src/main.rs` (the console window's `generate_handler!` list and
+its `on_window_event`), `app/tests/grades.rs`, `docs/reference/app.md` (the command count only).
+
+1. Tests first (no network, no window):
+   - **Three of the four callers**, each through a seam that takes the curated row as input (the
+     Tauri command is a thin wrapper that resolves the row with `scaffold::curated` and calls the
+     seam), for a dated row, an undated row (both from `test_row`) and an uncurated school (`None`):
+     - `grades_status` reports available or not, and with a dated row the connected, signed-out,
+       host and last-fetched fields; with no date it reports *not available* whatever session
+       directory exists.
+     - `grades_connect` and `grades_refresh` refuse with exactly `not available at your school yet`;
+       the seam takes the window-opening and session-reading actions as injected closures, and the
+       test asserts **neither is called** on a refusal. On a dated row both proceed.
+     - `grades_forget` is not gated: it deletes the session directory whatever the predicate says.
+2. Code: the seams; then the window half (`open_visible`, which closes the window on detection;
+   `refresh_hidden`, the 45-second settle, the cookie handover exactly as
+   `lms_link::capture_courses`, one `ureq` agent with a 30-second timeout); the **four** commands
+   (`grades_status`, `grades_connect`, `grades_refresh`, `grades_forget`), each
    `#[tauri::command(async)]` (a synchronous command that builds and waits on a window blocks the
    main thread on Windows). `grades_connect` and `grades_refresh` check the predicate **before**
    anything else. `grades_refresh` runs the capture and then the engine's `grades` step as a child
-   process with `--via dashboard`, holding no vault lock across it. No address prompt and no
-   `grades_set_host`.
+   process with `--via dashboard`, holding no vault lock across it. The console's `on_window_event`
+   today hides **every** window on close; it hides only `main`, so `lms-grades` closes for real
+   when the student closes it early (§4). No address prompt and no `grades_set_host`.
 3. **Accept:** workspace green; `docs/reference/app.md`'s command counts **recounted by script** over
    both `generate_handler!` lists (the console list gains four) and corrected in the same commit;
    `git grep -n grades_set_host -- app docs/reference` is empty; `git grep -n "policy_read: Some"
@@ -280,8 +325,9 @@ count only).
    - `slot_argv` places `grades --vault v --input <file> --via local-runner` after `ingest` and before
      `judge` when a bundle path is given, and leaves it out otherwise;
    - **the gate's fourth caller:** the scheduler's grades decision takes the curated row as input and
-     calls T5's predicate (it never re-derives availability). With a saved session present in every
-     case: a dated row captures; an undated row and an uncurated school record
+     calls T5a's predicate (it never re-derives availability). Rows come from this file's own
+     `test_row` helper, as in T5a. With a saved session present in every case: a dated row
+     captures; an undated row and an uncurated school record
      `grades (skipped: not available at your school yet)` and the injected capture action is never
      called; a Canvas row records `grades (skipped: not a Blackboard school)`;
    - **the skip order** (spec §10 fixes the first three relative to each other; the rest is this
@@ -319,7 +365,7 @@ count only).
 ## Task 8 — docs (`docs-keeper`; the main session for CLAUDE.md)
 
 **Files:** `docs/reference/app.md` (the grades section, the gate, the four commands and the slot
-text; the count is T5's), `HANDOFF.md`; the main session edits CLAUDE.md's gated-command list and
+text; the count is T5c's), `HANDOFF.md`; the main session edits CLAUDE.md's gated-command list and
 slot line (two lines). **Not** `site/privacy.html`, `app/src/account.rs`, `engine/tests/site.rs` or
 the privacy pins in `app/tests/static_assets.rs`: those move in privacy bump #1 (spec §11).
 
@@ -327,16 +373,17 @@ the privacy pins in `app/tests/static_assets.rs`: those move in privacy bump #1 
    CLAUDE.md's gated list names `grades` and its slot line reads
    `sync → coursework → ingest → grades → judge → rank`; HANDOFF's stream table and §4 row say what
    privacy bump #1 owes from M1 (spec §11's two sentences on the page, its Effective date,
-   `PRIVACY_VERSION`, the sentence pins, the lawyer-packet delta; the Pilot's re-consent screen,
+   `PRIVACY_VERSION`, the sentence pins, `PRIVACY_BUMP_1` in `app/tests/grades.rs` set to its
+   version (T5a), the lawyer-packet delta; the Pilot's re-consent screen,
    R-PS-4, still owed before a second account), that UA's `policy_read` date reaches `main` only in
    bump #1's PR or after it, and that the `20260929000100` migration is applied before any release
    that writes `grades/`.
 2. **Accept:** workspace green; `git diff <branch base> -- site/ app/src/account.rs
    engine/tests/site.rs` is empty over the whole branch.
 
-## Carried findings (from Task 1)
+## Carried findings (from Task 1 and the plan's review)
 
-`app/src/scaffold.rs::build_into` lists the folders a new vault is born with; Task 5 adds `grades`
+`app/src/scaffold.rs::build_into` lists the folders a new vault is born with; Task 5a adds `grades`
 there (with its test). `app/src/report.rs::vault_shape` counts folders for the issue report and its
 payload may be a server contract, so it is **left alone** in this stream and named in the PR.
 **Rollout:** the `20260929000100` migration must be applied before any release that writes `grades/`
@@ -348,17 +395,49 @@ expects its own `20260926000100` to be the newest path check, and
 merger updates both: the newest check is `20260929000100`, and the backup array has eleven entries
 (`…info, commitments, grades, state, config, profile`).
 
+**Merging with `p3-registrar`** (in flight; `origin/p3-registrar` at `2ad1e3d`, either may merge
+first). The second to merge resolves:
+
+- `app/src/scaffold.rs`: p3 adds `Call`, `Registrar` and `Curated.registrar: Option<Registrar>`,
+  set in both `CAMPUSES` rows (UA `Some(…)`, UK `None`); T5a adds `policy_read` to the same struct
+  and rows. Both append after `lms_kind`, so the struct and each row conflict. After both merge the
+  field order is `unitid, key, label, lms_host, lms_kind, registrar, policy_read`, each row writing
+  both (`policy_read: None` in both until bump #1). Tests build rows only through `test_row` (struct
+  update from `CAMPUSES[0]`), so neither lane's tests need an edit for the other's field.
+- `app/src/main.rs`: both extend the console's `generate_handler!` list (p3:
+  `registrar::open_registrar_window`, `capture_registrar`, `close_registrar_window`; T5c: the four
+  `grades::` commands), and both change its `on_window_event` (p3 dispatches by label: the
+  `lms_link::WINDOW` session is wiped on `Destroyed`, only `main` hides on close; T5c hides only
+  `main`). The merged handler keeps p3's arms and lets `lms-grades` close for real; its session is
+  kept, never wiped by the `lms_link` arm. `docs/reference/app.md`'s console count is recounted by
+  script after both (p3 does not recount on its branch).
+- `app/src/lib.rs` (`pub mod`), `docs/surface/anatomy.md` (T4), `app/static/*` and
+  `app/tests/static_assets.rs` (T7): additive, text conflicts only.
+- `site/privacy.html:52` and `engine/tests/site.rs`: p3 changes the page's session sentence without
+  moving `PRIVACY_VERSION`, which `account.rs:21-23` forbids, and the packet puts the registrar's
+  page text in privacy bump #1 (M1's sentences, the registrar's and the re-consent screen together,
+  one lawyer read). The controller raises this with that lane before T5a. T5a does not wait on the
+  answer: its test keys on bump #1's recorded version, so a version moved for p3's edit lets no
+  `policy_read` date through (open question 4).
+
 ## Task 9 — whole-branch review and the PR (`reviewer`; `contract-reviewer`; the main session)
 
 `reviewer` reviews the whole diff against the signed spec, CLAUDE.md's two rules and VISION;
 `contract-reviewer` reviews the contract-list diffs (T1, T2F, T3F, T3C). The review checks, beyond
 the tests: no `grades_set_host` and no address entry anywhere; no `policy_read` date in any row;
 `site/`, `account.rs` and `site.rs` untouched; the predicate has exactly four callers and nothing
-else calls `scaffold::curated` to decide grades; no build path skips it; no manual-entry surface or
-write path for grades beyond the agent's `apply` (spec §12). Fix waves until it reads ready, and the
-report lands in `docs/reports/`. Then the main session asks Quinn before pushing, and opens the PR
-with the hand-offs named: the `NOTE_FOLDERS` merge with `p1-commitments`; whichever migration is
-applied last must carry the union; and **what privacy bump #1 owes from M1** (spec §14).
+else calls `scaffold::curated` to decide grades; no build path skips it; `PRIVACY_BUMP_1` is `None`
+and no test builds a full `Curated` literal outside `test_row`; no manual-entry surface or write
+path for grades beyond the agent's `apply` (spec §12); and no grade enters telemetry or an issue
+report (spec §11): nothing in the engine's `grades` command or `app/src/grades.rs` prints, logs or
+puts in an error a column name, category title, score or possible value, and `report.rs` is
+unchanged. Fix waves until it reads ready, and the report lands in `docs/reports/`. Then the main
+session asks Quinn before pushing, and opens the PR with the hand-offs named: the `NOTE_FOLDERS`
+merge with `p1-commitments`; whichever migration is applied last must carry the union; the merge
+with `p3-registrar` ("Carried findings": the `scaffold.rs` conflict and the merged `Curated` field
+order, the shared `generate_handler!` list and `on_window_event`, the recount, and p3's privacy-page
+edit belonging to bump #1); and **what privacy bump #1 owes from M1** (spec §14), including
+setting `PRIVACY_BUMP_1`.
 
 ## Step P — the proof branch and the founder's live proof (the main session)
 
@@ -380,29 +459,30 @@ condition). Then:
 
 | Spec | Task | Proven by |
 |---|---|---|
-| G1 persistent session, hidden refresh, forget | 5, 6, P | `app/tests/grades.rs` (session dir, forget); live proof |
-| G1 / ruling 12 gate: `policy_read`, one predicate, four callers, named refusal | 5, 6, 7 | the predicate cases and the three-case matrix per caller (`app/tests/grades.rs`, `app/tests/scheduler.rs`); injected-closure tests (no window, no session on refusal); static not-available test |
-| No build skips the predicate | 5, 9 | review: no `cfg`, feature or environment bypass; step P runs through the real gate |
-| Date-and-bump rule | 5, P | date-and-bump test (shown failing on a synthetic row, pinned on `CAMPUSES`); proof branch unmerged until bump #1 |
+| G1 persistent session, hidden refresh, forget | 5b, 5c, 6, P | `app/tests/grades.rs` (session dir, forget); live proof |
+| G1 / ruling 12 gate: `policy_read`, one predicate, four callers, named refusal | 5a, 5c, 6, 7 | the predicate cases (5a) and the three-case matrix per caller (`app/tests/grades.rs`, `app/tests/scheduler.rs`); injected-closure tests (no window, no session on refusal); static not-available test |
+| No build skips the predicate | 5a, 5c, 9 | review: no `cfg`, feature or environment bypass; step P runs through the real gate |
+| Date-and-bump rule | 5a, P | date-and-bump test keyed on `PRIVACY_BUMP_1` (shown failing on a synthetic dated row with no anchor, at `2026-09-24` and at a later version; pinned on `CAMPUSES` with the anchor `None`); proof branch unmerged until bump #1 |
 | G2 overall else points | 2, 4 | `course_grade` tests; surface test |
 | G3 letter scale | 2 | `letter` boundary tests |
 | §2 strip states, incl. not available with no button | 7 | static-asset tests; console shots |
-| §3 endpoints, paging | 5 | `assemble_bundle`, `next_page` tests |
-| §3 `grades.json` holds `hidden` only | 5 | `GradesPrefs` test |
-| §4 host from the curated row only; no address entry | 5, 7, 9 | predicate tests; `grades_set_host` grep empty; static test (no address input) |
-| §5 bundle verbatim, in app data, deleted | 2F, 5, 6 | bundle tests; scheduler deletion test |
+| §3 endpoints, paging | 5b | `assemble_bundle`, `next_page` tests |
+| §3 `grades.json` holds `hidden` only | 5b | `GradesPrefs` test |
+| §4 host from the curated row only; no address entry | 5a, 5c, 7, 9 | predicate tests; `grades_set_host` grep empty; static test (no address input) |
+| §5 bundle verbatim, in app data, deleted | 2F, 5b, 6 | bundle tests; scheduler deletion test |
 | §6 gated, deterministic ids, change-only, judge-once, state file, exit codes | 3F, 3, 3C | `engine/tests/grades.rs`; `entitlement_gate.rs` |
 | §7 folder, ids, backup, sync both sides | 1 | ids/backup/sync_contract tests; Deno tests |
 | §8 read model, both bases' sums, references unchanged | 4 | surface test; `surface_oracle.rs` untouched |
-| §9 four commands, recount | 5, 7 | the recount script; grep; static-asset tests |
+| §9 four commands, recount | 5c, 7 | the recount script; grep; static-asset tests |
 | §10 slot order, named skips incl. not available, their order | 6 | scheduler tests |
 | §11 edit 3: sentences drafted in the spec only; page, date and version untouched | 8, 9 | empty branch diff on `site/`, `account.rs`, `site.rs`; bump #1's debt named in HANDOFF and the PR |
+| §11 grades never enter telemetry or an issue report | 3, 9 | T3's output test (stdout, stderr and the run-log line match §6's shapes, no column name or category title, both fixtures; no serde `Display` on exit 1); review check |
 | §12 edit 4: manual entry out | 9 | review: no editing surface or write path for grades |
 | §13 tests; live proof through the real gate on the proof branch | 1–7, P | the tests above; step P |
-| §15 default 1: window closes on detection | 5, P | detection test; live proof |
+| §15 default 1: window closes on detection | 5b, 5c, P | detection test; live proof |
 | §15 default 2: both bases shown | 2, 4, 7 | `course_grade` and surface tests; static footer test |
 
-## Open questions for Quinn (at the first checkpoint; none block T2F–T5)
+## Open questions for Quinn (at the first checkpoint; none block T2F–T5c)
 
 1. **The skip order beyond what §10 fixes.** The spec fixes `not a Blackboard school` → `not
    available at your school yet` → `not connected`. *Recommend* placing `no entitlement` after the
@@ -415,11 +495,18 @@ condition). Then:
 3. **The proof branch stays local.** *Recommend* never pushing it: its date-and-bump test is red by
    design, and a local branch cannot be merged by accident. The alternative, pushing it for a
    record, spends a CI run on a known failure.
-4. **The date-and-bump test compares versions, not page text.** It treats any `PRIVACY_VERSION`
-   after `2026-09-24` as bump #1 or later, which holds because `account.rs:21-23` moves the constant
-   only with the page. An unrelated page fix before bump #1 would satisfy it early. *Recommend*
-   version-only, as signed; the alternative, also requiring §11's sentence on the page, ties the
-   test to wording the lawyer read may change.
+4. **The date-and-bump test keys on bump #1's recorded version, not on any later version.** A
+   version moved for another page change is not bump #1, and one is pending now: `p3-registrar`
+   edits `site/privacy.html:52` (the class schedule in the session sentence) without moving
+   `PRIVACY_VERSION`. If that lane is fixed by bumping the version alone, a test that took "any
+   version after `2026-09-24`" as bump #1 would pass a `policy_read` date while the page still says
+   the session is thrown away. So T5a's test fails for every date until `PRIVACY_BUMP_1` names bump
+   #1's version, which only bump #1's PR sets (fail-closed: if that PR forgets, the first date is
+   refused, not let through). The registrar's page edit belongs in bump #1 per the packet; the
+   controller raises that with the lane. *Recommend* this, still version-only as signed. The
+   alternative, also requiring a marker on the page (an element id on §11's kept-session
+   paragraph, not its wording), adds a second check but ties bump #1's page markup to this test.
+   Cost if wrong: bump #1's PR sets one constant.
 5. **A Canvas school sees the signed line** *Grades from Blackboard are not available at your school
    yet*. *Recommend* keeping it for M1 (it is the signed text and true); hiding the strip at
    non-Blackboard schools is a one-line console change if Quinn prefers it.

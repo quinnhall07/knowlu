@@ -331,7 +331,9 @@ uncurated Blackboard school (§4); a school gains grades only through a curated 
   array on `p1-commitments`; the second branch to merge adds its entry beside the first's.
 - `main.rs` (engine and app), `lib.rs`, `scheduler.rs`, `scaffold.rs` (`Curated` gains
   `policy_read`) and `console.js` are shared files; the changes are additive and small, and the PR
-  lists them as hand-offs.
+  lists them as hand-offs. The registrar lane (`p3-registrar`) adds `registrar` to the same
+  `Curated` struct and rows and edits the same `generate_handler!` list, so whichever merges second
+  resolves those conflicts; the M1 plan's "Carried findings" names the merged field order.
 - **Privacy bump #1** is not this stream's PR (§11). The PR names what bump #1 owes from M1: §11's
   sentences on the page, its Effective date, `PRIVACY_VERSION`, the sentence pins in
   `engine/tests/site.rs` and `app/tests/static_assets.rs`; and UA's `policy_read` date reaches
