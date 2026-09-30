@@ -1,5 +1,6 @@
-// GET /google-connect?scope=calendar|gmail -> the Google consent URL.
-// DELETE /google-connect                    -> revoke and forget.
+// GET /google-connect?scope=calendar|gmail|reconnect -> the Google consent URL.
+// GET /google-connect?status=1                       -> {connected, scopes, status, email}.
+// DELETE /google-connect                             -> revoke and forget.
 //
 // **One Google connect, two scopes, in a deliberate order** (cloud design §11a). The wizard's
 // first connection step is *Connect your calendars*, so the default and first ask is
@@ -36,14 +37,47 @@ export const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
  */
 export const IDENTITY_SCOPES = ["openid", "email"];
 
-/** `?scope=` -> the scope string this consent asks for — the identity scopes plus exactly ONE
- * Google API scope. Every ask widens whatever is already granted (`include_granted_scopes=true`
- * below), so nothing here says which. */
-export function scopeFor(name: string | null): { scope: string } | null {
-  const ask = (apiScope: string) => ({ scope: [...IDENTITY_SCOPES, apiScope].join(" ") });
-  if (name === null || name === "" || name === "calendar") return ask(CALENDAR_SCOPE);
-  if (name === "gmail") return ask(GMAIL_SCOPE);
+/** The Google API scopes a reconnect may re-ask for, in the order it asks. Anything else a row
+ * records is never forwarded to Google. */
+const RECONNECTABLE = [CALENDAR_SCOPE, GMAIL_SCOPE];
+
+/** `?scope=` -> the scope string this consent asks for — the identity scopes plus ONE Google API
+ * scope for `calendar` or `gmail`. Every ask widens whatever is already granted
+ * (`include_granted_scopes=true` below), so nothing here says which.
+ *
+ * `reconnect` (Gmail connect D8) is the one ask that names more than one API scope: it re-asks for
+ * every API scope `recorded` on the account's row, in one consent, so the new refresh token can
+ * never cover fewer scopes than the row claims (the P3 live defect). It widens nothing the student
+ * had not already granted. With nothing recorded it answers `{ nothing: true }` (a 400). */
+export function scopeFor(
+  name: string | null,
+  recorded: readonly string[] = [],
+): { scope: string } | { nothing: true } | null {
+  const ask = (apiScopes: string[]) => ({ scope: [...IDENTITY_SCOPES, ...apiScopes].join(" ") });
+  if (name === null || name === "" || name === "calendar") return ask([CALENDAR_SCOPE]);
+  if (name === "gmail") return ask([GMAIL_SCOPE]);
+  if (name === "reconnect") {
+    const again = RECONNECTABLE.filter((s) => recorded.includes(s));
+    return again.length === 0 ? { nothing: true } : ask(again);
+  }
   return null;
+}
+
+/** The account's `google_accounts` row, read with NO status filter (spec §4.1). */
+export interface GoogleGrant {
+  scopes: string[];
+  status: "active" | "revoked" | "quiet";
+  /** `google_accounts.email_hint`: the student's own Google address, shown back to them (D5). */
+  email: string | null;
+}
+
+/** `?status=1`'s answer (D5). `connected` and `scopes` keep their pre-D5 meaning — a revoked row
+ * reads as no scopes, exactly what the wizard saw when that row was filtered out — and `status`
+ * adds `"none"` for no row, so the Settings row can tell "never connected" from "reconnect". */
+export function statusFrom(row: GoogleGrant | null) {
+  if (row === null) return { connected: false, scopes: [] as string[], status: "none", email: null };
+  const scopes = row.status === "revoked" ? [] : row.scopes;
+  return { connected: scopes.length > 0, scopes, status: row.status, email: row.email ?? null };
 }
 
 export interface ConnectDeps {
@@ -53,8 +87,9 @@ export interface ConnectDeps {
   saveState(accountId: string): Promise<string>;
   /** Revokes the refresh token at Google, then deletes the Vault secret and the row — in that order. */
   disconnect(accountId: string): Promise<void>;
-  /** What Google actually granted, from `google_accounts.scopes`. `[]` when there is no grant. */
-  grantedScopes(accountId: string): Promise<string[]>;
+  /** The account's `google_accounts` row, whatever its status; `null` when there is none. One read
+   * serves `?status=1`'s `status` and `email` and `?scope=reconnect`'s scopes. */
+  grant(accountId: string): Promise<GoogleGrant | null>;
 }
 
 export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Request) => Promise<Response> {
@@ -89,12 +124,18 @@ export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Reque
       // the consent screen, and "connected" without "which" would be a wizard that says the
       // calendar is on when only Gmail is.
       if (new URL(req.url).searchParams.get("status") !== null) {
-        const scopes = await deps.grantedScopes(account_id);
-        return Response.json({ connected: scopes.length > 0, scopes });
+        return Response.json(statusFrom(await deps.grant(account_id)));
       }
-      const asked = scopeFor(new URL(req.url).searchParams.get("scope"));
+      const name = new URL(req.url).searchParams.get("scope");
+      // Only `reconnect` reads the row; the calendar and Gmail asks stay a row-free consent.
+      const recorded = name === "reconnect" ? (await deps.grant(account_id))?.scopes ?? [] : [];
+      const asked = scopeFor(name, recorded);
       if (asked === null) {
-        return Response.json({ error: "scope must be 'calendar' or 'gmail'" }, { status: 400 });
+        return Response.json({ error: "scope must be 'calendar', 'gmail' or 'reconnect'" }, { status: 400 });
+      }
+      if ("nothing" in asked) {
+        // Checked before `saveState`: a refused reconnect mints no nonce.
+        return Response.json({ error: "nothing to reconnect" }, { status: 400 });
       }
       const url = new URL(AUTH_ENDPOINT);
       url.searchParams.set("client_id", deps.clientId);
