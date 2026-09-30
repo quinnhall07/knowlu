@@ -283,6 +283,8 @@ pub fn write_literals(
     // `(name, old, new)` — `propose_amendment` writes both sides into the card's `changes` block,
     // and `approvals::apply_amendment` compares `from` against the note before it applies.
     let mut proposed: Vec<(String, Value, Value)> = Vec::new();
+    // Ruling 11: the human records behind `proposed`, so the card names their token, not a person.
+    let mut proposed_over: Vec<Record> = Vec::new();
 
     for (name, literal) in literals {
         let new = parse_literal(literal);
@@ -298,6 +300,7 @@ pub fn write_literals(
             if let Some(human) = human {
                 if opts.propose && old != Value::Null {
                     proposed.push((name.clone(), old.clone(), new.clone()));
+                    proposed_over.push(human);
                 } else if opts.propose {
                     // validate_amendment refuses a null `from` (the 08-21 hardening rule); a
                     // proposal it can never apply is worse than no proposal at all.
@@ -405,8 +408,11 @@ pub fn write_literals(
                     Some((get_str(m, "judgment_id")?, get_str(m, "judgment_kind")?))
                 });
                 let judgment = judgment_ids.as_ref().map(|(id, kind)| (id.as_str(), kind.as_str()));
+                // The legacy token if any field's hand-set carries it, as the restore rule reads an
+                // account; otherwise the student's.
+                let human = crate::journal::pick_human_actor(proposed_over.iter());
                 result.proposal = Some(propose_amendment(
-                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment,
+                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment, human,
                 )?);
             }
         }
@@ -695,9 +701,10 @@ pub const AMEND_BUTTONS: &str = "\n```meta-bind-button\nlabel: Approve\nstyle: p
 /// Judge-once's other half: the agent may **re-propose, never silently overwrite** (Quinn,
 /// 2026-08-29). Port of `engine/write.py:propose_amendment` (lines 333–353).
 ///
-/// Called only from [`write_literals`], and only when the journal shows Quinn set the field himself
-/// and `propose` is on. It mints one `kind: amend` approval naming every re-judged field, through
-/// [`create`] — so the proposal is journalled like any other note and gets its own `id`.
+/// Called from [`write_literals`] when the journal shows the student set the field and `propose` is
+/// on, and from `sync` for a field both desktops moved. It mints one `kind: amend` approval naming
+/// every re-judged field, through [`create`] — so the proposal is journalled like any other note
+/// and gets its own `id`.
 ///
 /// Four details that are load-bearing:
 ///
@@ -740,6 +747,10 @@ pub fn propose_amendment(
     // a local run, or an older server), which renders the card exactly as before this parameter
     // existed.
     judgment: Option<(&str, &str)>,
+    // Ruling 11 (CLAUDE.md rule 1): the human token whose hand-set this card re-proposes over.
+    // `journal::LEGACY_HUMAN_ACTOR` keeps the sentence Python wrote, byte for byte (legacy vaults,
+    // `scripts/diff-engines-notes.ps1`); any other value reads "the student", never a person.
+    human: &str,
 ) -> Result<PathBuf, WriteError> {
     let target_rel = rel(vault, target_path);
     let stem_of_target = target_path
@@ -803,10 +814,12 @@ pub fn propose_amendment(
     }
     front_pairs.push(("changes", crate::yamlemit::Node::Map(change_block)));
     let front = crate::yamlemit::Node::map(front_pairs);
-    let mut why = format!(
-        "{} re-judged {fields}; Quinn had set them by hand, so this is a proposal (judge-once rule).",
-        ctx.actor
-    );
+    let hand = if human == crate::journal::LEGACY_HUMAN_ACTOR {
+        "Quinn had set them by hand"
+    } else {
+        "the student had set them by hand"
+    };
+    let mut why = format!("{} re-judged {fields}; {hand}, so this is a proposal (judge-once rule).", ctx.actor);
     // Python's `if evidence:` is TRUTHINESS, so an empty mapping appends nothing — not just `None`.
     // A `!e.is_null()` test alone would write a bare `Evidence: {}` the other engine never writes.
     let truthy = |e: &&serde_json::Value| match e {
@@ -1746,6 +1759,41 @@ mod tests {
         );
         assert_eq!(text, expected);
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Ruling 11 and CLAUDE.md rule 1: the card's `**Why proposed:**` line follows the recorded
+    /// human's token and never names a person on a vault the app makes. A legacy vault (no
+    /// `config/actor.yaml`, `quinn` in its journal) keeps the sentence Python wrote, byte for byte;
+    /// the whole legacy card is pinned by `an_amend_card_without_one_is_byte_identical` above.
+    #[test]
+    fn an_amend_cards_why_line_names_no_person_on_a_student_vault() {
+        for (file, human, hand) in [
+            (None, "quinn", "Quinn had set them by hand"),
+            (Some("human_actor: student\n"), "student", "the student had set them by hand"),
+        ] {
+            let v = propose_vault(&format!("why-{human}"));
+            if let Some(text) = file { actor_file(&v, text) }
+            let mut journal = Journal::new(&v);
+            write_literals(&v, "tasks/t.md", &[("effort_hours".to_string(), "4.0".to_string())],
+                &WriteContext::new(human, "dashboard"), &mut journal, &WriteOpts::default()).unwrap();
+            let res = write_literals(
+                &v, "tasks/t.md",
+                &[("effort_hours".to_string(), "2.0".to_string())],
+                &WriteContext::new("agent:knowlu.enrich", "local-runner"),
+                &mut journal,
+                &WriteOpts { judged: true, propose: true, ..Default::default() },
+            ).unwrap();
+            let text = pystr::read_text(&res.proposal.expect("an amendment was filed")).unwrap();
+            let why = format!(
+                "\n**Why proposed:** agent:knowlu.enrich re-judged effort_hours; {hand}, so this is a \
+                 proposal (judge-once rule).\n"
+            );
+            assert!(text.contains(&why), "{human}: {text}");
+            if human == "student" {
+                assert!(!text.to_lowercase().contains("quinn"), "no person's name on a student's card: {text}");
+            }
+            let _ = std::fs::remove_dir_all(&v);
+        }
     }
 
     /// An amend card must survive the single-line surgery `defer_over_budget` performs on it.

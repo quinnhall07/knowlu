@@ -2170,7 +2170,10 @@ pub fn apply(
                 }
             }
             if !changes.is_empty() && keep.is_none() {
-                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None) {
+                // Ruling 11: the card names the vault's own token, never a person. A bad
+                // `config/actor.yaml` reads as the student here: sync never fails on it (exit 0).
+                let human = crate::journal::read_human_actor(vault).unwrap_or(crate::journal::HUMAN_ACTOR);
+                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None, human) {
                     // One card, however many fields it carries — the fifteen-a-day cap the deck
                     // already applies counts cards, and so does this.
                     Ok(_) => report.cards += 1,
