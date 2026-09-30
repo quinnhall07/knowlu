@@ -316,10 +316,12 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // 20260912000300 (the amendment's plaintext tables read `body` instead of `ciphertext`; same
   // trigger function, exempt by kind, one more definition parsed), plus C1c's R-C1c-7
   // `create or replace function charge_call` in 20260923000100 (still a writing, non-definer
-  // function — revoked again in the same file, and one more definition parsed) —
-  // counted by hand against today's corpus: C3′ adds six and C1c one, on top of the 21 both
-  // streams inherited (the C3′ merge of main, PR #13).
-  assertEquals(parsed, 28, "today's corpus should parse exactly 28 function creations");
+  // function — revoked again in the same file, and one more definition parsed), plus Gmail
+  // connect D14's `create or replace function delete_google_grant` in 20260929000200 (SECURITY
+  // DEFINER, revoked from `public, anon, authenticated` again in the same file) —
+  // counted by hand against today's corpus: C3′ adds six, C1c one and D14 one, on top of the 21
+  // both streams inherited (the C3′ merge of main, PR #13).
+  assertEquals(parsed, 29, "today's corpus should parse exactly 29 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -889,4 +891,81 @@ Deno.test("the last charge_call doubles the cap on an account's first two judgin
     normalized.includes("on conflict"),
     `${last!.name}: charge_call's single insert must still be the on-conflict upsert`,
   );
+});
+
+// Gmail connect D14 (spec §4.1's migration bullet, §8.3 item 6; Q9 (a) with (ii)): Disconnect also
+// deletes the account's `gmail_queue` and `gmail_seen` rows, and keeps its `judgments`. Forward-only,
+// read the way `gmail_queue_tier_check`'s test reads its constraint: the LAST definition across every
+// migration governs the function today, so that is the one these pins read.
+async function lastDeleteGoogleGrant(): Promise<{ name: string; sql: string; header: string; body: string }> {
+  let last: { name: string; sql: string; header: string; body: string } | undefined;
+  for (const [name, raw] of await everyMigrationFile()) {
+    const sql = stripLineComments(raw);
+    for (const m of sql.matchAll(FUNCTION_DEFINITION)) {
+      if (m[2].toLowerCase() !== "delete_google_grant") continue;
+      // m[0] runs from `create` through the terminating `;`; the body is what sits between the
+      // opening dollar tag (the end of the header, m[1]) and the same tag closing it.
+      const rest = m[0].slice(m[1].length);
+      last = { name, sql, header: m[1], body: rest.slice(0, rest.indexOf(m[3])) };
+    }
+  }
+  assert(last !== undefined, "no migration defines delete_google_grant");
+  return last!;
+}
+
+/** Every `delete from <table> …;` statement in `body`, whitespace-normalised and lower-cased. */
+function deletesFrom(body: string, table: string): string[] {
+  const re = new RegExp(`delete\\s+from\\s+${identPattern(table)}\\b([^;]*);`, "gi");
+  return [...body.matchAll(re)].map((m) => m[1].replace(/\s+/g, " ").trim().toLowerCase());
+}
+
+Deno.test("the last delete_google_grant purges the account's gmail_queue and gmail_seen rows", async () => {
+  const last = await lastDeleteGoogleGrant();
+  for (const table of ["gmail_queue", "gmail_seen", "google_accounts"]) {
+    const deletes = deletesFrom(last.body, table);
+    assertEquals(deletes.length, 1, `${last.name}: exactly one delete from ${table}`);
+    // Filtered on the account and on nothing looser: the where clause is exactly this one term.
+    assertEquals(deletes[0], "where account_id = p_account", `${last.name}: ${table}'s delete`);
+  }
+  // The Vault secret still goes, by the id read off the row before the row is deleted.
+  const normalized = last.body.replace(/\s+/g, " ").toLowerCase();
+  assert(
+    normalized.includes("select secret_id into sid from google_accounts where account_id = p_account"),
+    `${last.name}: the secret id is read from the account's row`,
+  );
+  assert(normalized.includes("delete from vault.secrets where id = sid"), `${last.name}: the Vault secret is deleted`);
+});
+
+Deno.test("the last delete_google_grant keeps judgments (Q9 (a)(ii))", async () => {
+  const last = await lastDeleteGoogleGrant();
+  assert(!/delete\s+from\s+(?:public\.)?judgments/i.test(last.body), `${last.name}: must not delete judgments`);
+  assert(!/judgments/i.test(last.body), `${last.name}: the body must not reference judgments at all`);
+  assert(/gmail_queue/i.test(last.body), `${last.name}: must be the D14 definition, which names gmail_queue`);
+});
+
+Deno.test("the last delete_google_grant is still security definer, service-role only", async () => {
+  const last = await lastDeleteGoogleGrant();
+  const header = last.header.replace(/\s+/g, " ").toLowerCase();
+  assert(header.includes("returns void"), `${last.name}: same signature, returns void`);
+  assert(/delete_google_grant\s*\(\s*p_account uuid\s*\)/.test(header), `${last.name}: same signature`);
+  assert(header.includes("security definer"), `${last.name}: security definer`);
+  assert(header.includes("set search_path = public, vault, extensions"), `${last.name}: pinned search_path`);
+  const file = last.sql.replace(/\s+/g, " ").toLowerCase();
+  assert(
+    file.includes("revoke execute on function delete_google_grant(uuid) from public, anon, authenticated;"),
+    `${last.name}: the same file re-issues the revoke`,
+  );
+  assert(
+    file.includes("grant execute on function delete_google_grant(uuid) to service_role;"),
+    `${last.name}: the same file re-issues the service-role grant`,
+  );
+});
+
+Deno.test("the original google migration is unchanged", async () => {
+  // SHA-256 of 20260911000200_google.sql as committed at main 4cf3661 (`git show 4cf3661:<path>`),
+  // the Gmail connect stream's base. Applied migrations are never edited; D14 is a new file.
+  const bytes = await Deno.readFile(new URL("20260911000200_google.sql", HERE));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(hex, "c86e118dc0bed63875b4785870ccc1bfed15e5299599bd48ce4c2b7d18feeda0");
 });
