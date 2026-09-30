@@ -1,9 +1,8 @@
 # Knowlu — Claude working rules
 
-Knowlu is a desktop app for students that answers one question every morning: **what should I work
-on today, and in what order?** Rust + Tauri, Windows, desktop-only. This repository is the product:
-`engine/` (`knowlu-engine`) and `app/` (`knowlu`) in one Cargo workspace. Where the code came from
-and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
+Knowlu is a desktop app for students that answers one question: **what's next?** (`VISION.md`) Rust + Tauri, Windows, desktop-only. This repository is the product:
+`engine/` (`knowlu-engine`) and `app/` (`knowlu`) in one Cargo workspace, plus `cloud/` (Supabase).
+Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 
 > ## Two rules that override the rest
 >
@@ -21,13 +20,17 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 ## Read first
 
 - `HANDOFF.md`, then `VISION.md` — check every decision against it.
-- `docs/specs/2026-08-11-personal-ops-system-design.md` — the parent design (vault schema, ranking,
-  rendering; language-neutral, authoritative); `2026-09-01-rust-rewrite-design.md` (crate budget, the
-  oracle); `2026-09-02-console-on-rust-design.md` (the read model); `2026-09-04-knowlu-independent-app-design.md`
-  and `2026-09-05-knowlu-friends-shell-design.md` (the app, onboarding, profiles, releases).
-- `docs/notes/2026-09-01-market-pricing-and-distribution.md` (§0 first), then
+- `docs/specs/2026-09-09-knowlu-cloud-design.md` is the authority: its §1 decisions and amendments are
+  Quinn's and signed; where an older spec or note disagrees, it wins. Older design authority:
+  `2026-08-11-personal-ops-system-design.md` (vault schema, ranking, rendering),
+  `2026-09-01-rust-rewrite-design.md`, `2026-09-02-console-on-rust-design.md`,
+  `2026-09-04-knowlu-independent-app-design.md`, `2026-09-05-knowlu-friends-shell-design.md`.
+- Reference, read when the task touches it: `docs/reference/engine-commands.md` (every command's
+  flags and contract), `docs/reference/app.md` (commands, app data, scheduler, sign-in, updater,
+  releases, CI), `docs/reference/toolchain.md` (build setup and known traps), `docs/surface/anatomy.md`
+  (the read model), `app/README.md`, `cloud/supabase/README.md`.
+- Business context: `docs/notes/2026-09-01-market-pricing-and-distribution.md` (§0 first), then
   `2026-09-01-product-and-business-plan.md` (§12's rulings win over its body); the most recent ruling wins.
-- `docs/surface/anatomy.md` — the read model behind the window; `app/README.md` — the app itself.
 
 ## Engine invariants
 
@@ -51,202 +54,115 @@ and what was left behind: `PROVENANCE.md`. Where the work stands: `HANDOFF.md`.
 - Commitment proposals and `state/calendar-series.json` never leave the device: a card of a kind in
   `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; both are filed, and
   no proposal card is filed on the vault's first day — the vault-local date of its earliest journal
-  record, `commitments::vault_day`) is local by kind. Until C3′'s sync is merged there is no sync;
-  once it is, P21 keeps the cards and the series file off the wire — only a **confirmed** note in `commitments/`
-  or a decline marker syncs — and `commitments.rs`'s tripwires
-  (`sync_keeps_every_local_card_kind_local`, `the_servers_note_path_rules_name_every_note_folder`)
-  fail until it does.
+  record, `commitments::vault_day`) is local by kind. `sync` (P21) keeps those cards, every record
+  about one and the series file off the wire — only a **confirmed** note in `commitments/` or a
+  decline marker syncs — and `commitments.rs`'s tripwires (`sync_keeps_every_local_card_kind_local`,
+  `the_servers_note_path_rules_name_every_note_folder`) fail if that ever stops holding.
 - All JSON the crate writes goes through `ledger::dumps_value` (Python `json.dumps` separators), so
   a new line and an old line carrying the same data are the same bytes.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
   byte-identical, never renamed.
+- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`, completion detection as
+  `agent:knowlu.completion`, commitment cards as `agent:commitments`); `provenance::is_agent` is a
+  `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
 
-## The engine's commands (`knowlu-engine`, `engine/src/main.rs`)
+## Command and app contracts
 
-- `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]`
-- `coursework --vault <v> [--dry-run] [--via <via>] [--run-id <id>]` — zyBooks + VHL into `tasks/`.
-  Always exits 0. An empty parse is a failure, never an empty semester. A vendor figure at 100%
-  (zyBooks points, VHL `percentage_complete`) files a `status: done` amend proposal as
-  `agent:knowlu.completion` (`engine/src/completion.rs`); `progress` is still never written after
-  creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
-  zyBooks 403s without a `User-Agent`; VHL is CAS with a one-time `lt` ticket and a dashboard on
-  `m3a.vhlcentral.com`.
-- `coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — read-only: the
-  zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
-  row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
-  come from it, and it writes nothing.
-- `ingest --vault <v> [--via <via>] [--run-id <id>]` — the LMS `.ics` feed into `tasks/`. A vault
-  with no account and an empty `ics_url` exits 1, which is why the app leaves the step out rather
-  than run it — but **a cloud vault runs `ingest` regardless of `ics_url`**, because the feed lives
-  in the account, not the vault (C2 final review A-1/A-2): `/ingest-ics` answering 404 (no
-  `lms_ics` source configured) is a named skip at exit 0, never a failure, and any other service
-  failure with no local `ics_url` names the real cause honestly and keeps exit 1.
-- `judge --vault <v> [--via <via>] [--run-id <id>] [--runtime <llama-cli.exe>] [--model <.gguf>]
-  [--log-dir <dir>] [--limit N]` — enriches tasks flagged `needs_enrichment: true` in three tiers
-  (heuristics, promoted rules, the model — one process per judgment). **Always exits 0**: no runtime
-  and no model are normal outcomes. Writes as `agent:knowlu.enrich` (`provenance::is_agent` is a
-  `starts_with` test) with `judged: true`, `propose: true`. Judgment logs never enter the vault.
-- `sync --vault <v> [--direction pull|push|both] [--via <via>] [--run-id <id>]` — the account's copy
-  of the vault: new journal records and changed note text up, another desktop's writes down and
-  applied through `write`. **Always exits 0**: no account, no session, no entitlement and no network
-  are normal outcomes. The account is the source of truth and the folder is its mirror (cloud design,
-  amendment 2026-09-17, ruling 2); the service can read what it stores, says so on the privacy page,
-  and deletes it with the account.
-- **The engine gates itself** (ruling 3): `coursework`, `ingest`, `judge` and `sync` do not run past the
-  72-hour entitlement grace the app caches — `engine/src/entitle.rs` reads
-  `%LOCALAPPDATA%\knowlu\profiles\<id>\entitlement.json` and the refusal is a named line at exit 0.
-  `rank`, `surface` and `write` are never gated.
-- `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
-  [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
-  Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
-  exits 2 — and reports `moved` against the current window without writing one.
-- `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`
-  — without `--confirm`, it fetches the configured calendar feeds, refreshes
-  `state/calendar-series.json`, and prints the current commitment proposals as of today
-  (`coursework-discover`'s style: read-only except for the generated series-file refresh, always
-  exits 0; no note, no card, no journal record); `--json` adds `uncovered_courses` and orders the
-  proposals as the cards are. With `--confirm` (phase 2), it fetches nothing and writes the confirm
-  screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
-  `--actor quinn --via dashboard`), journal first. It prints `{created, declined, warnings, window}`
-  and exits 2 on unreadable input or an invalid window, having written nothing.
-- **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
-  onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
-  `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
-  server-side, so `CloudModel` (`engine/src/cloudmodel.rs`) implements the same `judge::Model` the
-  local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
-  for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
-  move server-side) — never for judgment, so `rank` never calls a model still holds.
-  `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud passes a judge step runs in one slot:
-  the tier-3 judge pass, the events pass, the Gmail pull, the rule-decision pull and the label
-  report (F8: card answers and rejections, keyed by `judgment_id`, to `/telemetry`; never an
-  `email`-kind decision).
-  The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
-  a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
-  `completion::propose_done`, matched to exactly one active task by title.
-- `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
-  items, issue notes, journaled note edits.
+Full detail in `docs/reference/`; these are the parts a change must not break.
 
-## Knowlu (the app)
+- `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no runtime, model,
+  account, session, entitlement or network is a named outcome, never a failure. An empty coursework
+  parse is a failure, never an empty semester. `surface` (`--window` included) and
+  `coursework-discover` never write. `commitments` without `--confirm` always exits 0 and writes only
+  the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
+  `write`, journal first, and exits 2 having written nothing on bad input. Judgment logs never enter
+  the vault.
+- **The engine gates itself:** `coursework`, `ingest`, `judge` and `sync` do not run past the 72-hour
+  entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
+  `surface` and `write` are never gated.
+- Cloud calls from `ingest`, `coursework` and `rank` are **transport only**, never judgment. Judgment
+  is `judge`'s tier 3 through `CloudModel` (`engine/src/cloudmodel.rs`); the prompt, schema and pinned
+  model live server-side.
+- A slot is `sync → coursework → ingest → judge → rank`. A step that cannot run is left out and named
+  (`judge (skipped: no entitlement)`), never run-and-failed; a non-zero step means backoff and an
+  amber tray.
+- `app/src/commands.rs` computes nothing; every vault write goes through the engine's `write` with
+  `console_ctx()`. A new Tauri command goes in the right `generate_handler!` list in `app/src/main.rs`
+  and beside the module it serves; recount before quoting a number.
+- Credentials the app writes are `knowlu/<profile_id>/<source>` in Credential Manager, the session JWT
+  `knowlu/<profile_id>/session`; the engine's `wincred.rs` reads whatever `credential_target` the
+  vault names and never assumes that shape. There is no password: sign-in is Google (loopback PKCE on
+  `127.0.0.1:0`) or an emailed code. App data lives under `%LOCALAPPDATA%\knowlu\`, and
+  `state::app_data_root()` is the one place that path is decided. `profiles::migrate_flat_layout`
+  keeps the one `quinn-ops` literal in `app/src` (it folds an old flat install in); it stays.
+- The identifier `com.knowlu.desktop` is permanent. The updater's private key exists only as the
+  GitHub secret `TAURI_SIGNING_PRIVATE_KEY`; `release.ps1` reads it from the environment and nowhere
+  else, and `release.yml` never runs self-hosted.
+- **Releases are CI-only** (`release.yml` on a `v*` tag). A human runs `scripts\release.ps1` only with
+  `-DryRun`; a hand-run `cargo tauri build` is unsupported and can ship a zero-byte engine.
+- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until the
+  Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10) removes them and are not extended.
+- Desktop safety: a live shared desktop — never synthetic keyboard or mouse input; screenshots by
+  window handle (`PrintWindow`) only. Develop and demo against scratch vaults
+  (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
 
-- `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-26 (the merge of
-  C3′ into commitment model phase 2)** (by script, over the two `generate_handler!` lists in
-  `app/src/main.rs`; C3′ added none): the console window registers **47** (phase 2 added
-  `answer_card`, `commitment_proposals`, `commitments_confirm`, `your_week`, `preview_window`), the
-  vault-less picker/wizard window **29** (C2's hand-off H9 phase (a) added
-  `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's H1
-  removed `account::sign_up` and `account::sign_in` with the password and added
-  `account::google_sign_in` to both lists) — **66** distinct. Commands live beside the module they
-  serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never
-  all in one file. **Ten** mutate notes (`set_fields`, `create_task`, `delete_note`, `decide`,
-  `answer_card`, `commitments_confirm`, `close_info`, `open_issue`, `resolve_issue`, `sync` — the
-  last applies another desktop's writes through `write` and can file a `kind: amend` card);
-  `set_fields` edits a commitment's `kind`/`level` only as `commitments::check_console_edit` allows;
-  `backup_now` is the one command that moves the vault without writing a note; `ui_event` writes the
-  `state/events-ui/` ledger; everything else touches app data, `profiles.json`, the clipboard, the
-  process or the updater — never a note. Recount before quoting a number.
-- **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
-  seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
-  place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
-  `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
-  `app/src`, and it stays.
-- A slot is `sync → coursework → ingest → judge → rank` (`scheduler::slot_argv`), each the sibling
-  `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
-  named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
-  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)` —
-  never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
-  unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
-  wizard-created vault carries both from birth.
-- Credentials the app writes are `knowlu/<profile_id>/<source>` (`app/src/credentials.rs`); the
-  engine's `wincred.rs` reads whatever `credential_target` the vault names.
-- The account's session JWT is Credential Manager's `knowlu/<profile_id>/session`
-  (`app/src/account.rs`), moved there at onboarding from a pre-vault `knowlu/pending/session` entry;
-  `config/cloud.yaml` names it alongside the project's `api_base`, its public `anon_key` and the
-  `account_id`. Entitlement is cached at `profiles\<id>\entitlement.json` with a 72-hour grace, and
-  past it every cloud step is a named skipped step, never a failure.
-- There is no password on a Knowlu account: sign-in is `account::google_sign_in` (a loopback PKCE
-  round trip on `127.0.0.1:0`, one listener per sign-in) or the emailed one-time code;
-  `/auth/v1/signup` and `grant_type=password` are called by nothing.
-- The identifier is **`com.knowlu.desktop`**, permanent: uninstall key, autostart entry and window state are keyed by it.
-- The updater is configured: `tauri-plugin-updater`, `plugins.updater` (endpoint + minisign public
-  key) and `bundle.createUpdaterArtifacts: true` are one decision — a static test pins flag ⇔ plugin.
-  The private key exists **only** as the GitHub secret `TAURI_SIGNING_PRIVATE_KEY` (C0 Task 4
-  regenerates it; the laptop's old Credential Manager copy is retired); `release.ps1` takes it from
-  the environment and nowhere else. If it is ever lost, regenerate: one `pubkey` line and a release,
-  and installed apps need one manual reinstall.
-- `app/src/inference.rs`: `SUPPORTED_RUNTIMES` is a compiled-in table of release tag, asset name and
-  SHA-256; both install paths verify against it, so there is no unverified path to executing a
-  runtime. Adding a release is a code change. Model files are data, not pinned. Not bundled.
-- Plain `cargo build` / `cargo test` work on a fresh checkout because `app/build.rs` drops a
-  zero-byte placeholder sidecar at `app/binaries/knowlu-engine-<triple>.exe`. **Releases are CI-only**
-  (`.github/workflows/release.yml`, on a `v*` tag): `scripts\release.ps1` is what CI runs; a human runs
-  it only with `-DryRun`, which bundles unsigned and publishes nothing. A hand-run `cargo tauri build`
-  is unsupported — it skips the clean-tree gate, the sidecar staging and the placeholder check, and
-  can ship a zero-byte engine. `ci.yml` is the gate on every push and PR: `cargo test --workspace` at
-  0 warnings (the gate prints `warnings: N accepted (.rsrc), N tallies, N other`), the eol contract
-  (`scripts/ci/eol-check.ps1`), SHA-pinned actions (`engine/tests/workflows.rs`). A repository
-  variable `CI_SELF_HOSTED` = `on` sends every `ci.yml` job to a self-hosted runner labelled
-  `knowlu-ci` (Quinn's laptop, 2026-09-22, while the Actions minutes were exhausted); unset, they
-  run on GitHub's; `release.yml` never runs self-hosted.
-- Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
-  window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
-  vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
+## Model and effort
 
-## Toolchain and conventions
+The session default is Opus 5.5 at `medium`, capped at `xhigh` (`.claude/settings.json`). The main
+session does everyday work and delegates a separable piece to a subagent in `.claude/agents/` when that
+is cheaper or safer; each agent's `description:` says when. Rationale: `docs/notes/2026-09-29-model-and-effort-hierarchy.md`.
 
-- `cargo build --workspace` and `cargo test --workspace` from the root. **0 warnings is part of
-  green.** The one accepted line is the app's pre-existing `.rsrc merge failure: multiple non-default
-  manifests` linker message. Four tests are `#[ignore]` by design, each with its reason in the
-  attribute (traps 4 and 5 in `engine/src/events.rs`; `runtime.rs`'s real-runtime smoke test, run by
-  hand with `KNOWLU_RUNTIME` and `KNOWLU_MODEL` set; `app/tests/scheduler.rs::run_slot_end_to_end`).
-  None may be un-ignored by changing the assertion. TDD: the test first, then the code.
-- Toolchain `stable-x86_64-pc-windows-gnu` (1.98); TLS via `rustls`/`ring`, **never OpenSSL**
-  (`engine/tests/dependency_boundary.rs` pins it, and that `tauri` never enters the engine). **The
-  GNU host needs mingw-w64 binutils** — rustup's `self-contained/` lacks `as`, so `windows-*` crates
-  fail with `dlltool ... CreateProcess` without WinLibs POSIX **MSVCRT** (`winget install
-  BrechtSanders.WinLibs.POSIX.MSVCRT`; MSVCRT because the GNU target links msvcrt). If a build fails
-  with `failed to find tool "gcc.exe"`, the shell's PATH is stale — refresh it:
-  `$m=[Environment]::GetEnvironmentVariable("Path","Machine"); $u=[Environment]::GetEnvironmentVariable("Path","User"); $env:Path="$env:USERPROFILE\.cargo\bin;$m;$u"`
-- The **one** release profile is the workspace root's (`opt-level = "z"`, `lto`, `codegen-units = 1`,
-  `panic = "abort"`, `strip`); Cargo ignores `[profile.*]` in members. **`cargo test --release` will
-  not link** — test in the dev profile.
-- `ureq` is built with its non-default **`cookies`** feature and VHL does not work without it: CAS
-  login on `www.vhlcentral.com`, dashboard on `m3a.vhlcentral.com`, one jar scoped to `.vhlcentral.com`
-  — `vhl::default_opener` owns one agent; a fresh agent per request reads as a dead session.
-- **`tauri-plugin-dialog` is unusable on this toolchain**: its `rfd` hard-codes `common-controls-v6`,
-  which imports `TaskDialogIndirect` from `comctl32.dll` by name and fails to load with
-  `STATUS_ENTRYPOINT_NOT_FOUND` before `main`. The folder picker is **`rfd 0.16` with
-  `default-features = false`**, called from an app command; message boxes are `MessageBoxW`.
-- `cargo-bloat` needs a non-LTO audit build (`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_LTO=false
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo bloat --release --crates`) or everything lands in
-  `[Unknown]` — and it replaces `target/release`; `cargo build --release` again before quoting a size.
-- **Tests that touch the real Credential Manager are serialised.** Windows races parallel
-  `CredWriteW`/`CredReadW` calls (spurious `ERROR_NOT_FOUND`), so `app/tests/account.rs` holds a
-  file-scoped `CREDMAN_LOCK` mutex and every test that writes, reads or deletes a real credential
-  takes it, under a generated test id with a `Drop` guard that deletes what it wrote. A new test file
-  that touches the store carries its own lock.
-- **Line endings: LF everywhere in this repo** (`.gitattributes`: `* text=auto eol=lf`; `*.ps1` are
-  CRLF). `engine/tests/fixtures/**` is `-text`: those bytes are the contract — several are compared
-  byte for byte and they are CRLF because vaults are — **never re-encode them**. The engine still
-  translates CRLF on every vault read and write (`pystr`): users' vaults are whatever they are.
-  `str::lines()` strips a trailing `\r`; `split('\n')` does not.
-- Workflow: brainstorm → spec (`docs/specs/`) → plan (`docs/plans/`) → execute with review
-  checkpoints; every plan carries a fidelity ledger and every review lands in `docs/reports/`. Quinn
-  reviews at checkpoints — surface trade-offs, ask before assuming.
+| Agent | Model, effort | Use for |
+|---|---|---|
+| `explorer` | Haiku, low | read-only search, before editing |
+| `mechanical` / `test-writer` / `console-ui` | Sonnet, low / medium / medium | specified edits / the failing test / `app/static`, `site/` |
+| `implementer` / `integrator` | Sonnet, high / Opus, high | specified feature tasks off the contract list / the merge train |
+| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review, and spec/plan review |
+| `contract-engineer` / `contract-reviewer` | Opus, xhigh | the contract list / contract-list diffs |
+| `researcher` / `docs-keeper` | Sonnet, medium / medium | read-only gap research / HANDOFF, docs/reference, ledgers |
 
-## Direction (signed 2026-09-09)
+**The contract list** — cheaper agents never edit it:
+`engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
+`app/src/{credentials,account,updates}.rs`, the oracle/sync/entitlement tests, `engine/tests/fixtures/**`.
 
-- The authority is `docs/specs/2026-09-09-knowlu-cloud-design.md`: its §1 decisions D1–D12 are
-  Quinn's and signed; §11's recommendations are ruled (R3: the academic-year price and the June–August
-  pause both stay). Where an older spec or note disagrees with it, the cloud design wins.
-- In one line: **accounts + $9.99/month, no free tier; every judgment runs in our cloud (Supabase +
-  Cloudflare + Stripe, an open-weights model per kind through OpenRouter, pinned to a zero-retention
-  host); CI builds and signs every release; the vault stays plain text on the student's machine and
-  is created by the app; portal credentials never leave the device — fetch on device, think in the
-  cloud.**
-- The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
-  telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
-  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). Until C4 lands, that runtime
-  code stays and is not extended.
-- Cut day (spec §7.2) is a procedure with Quinn at the machine: the old `quinn-ops` vault is archived,
-  not migrated; Quinn re-onboards into `%USERPROFILE%\Knowlu\`.
+**No agent fits? Ask in order:** could a silent error corrupt vault bytes, leak a credential or
+student data, move money or break a release (Opus; `xhigh` on the contract list, `high` elsewhere)?
+Is a design choice open, or more than about three files touched (Opus `high`, plan first)? Fully
+specified and checked by the compiler or a test (Sonnet, `low` to `high`)? Read-only (Haiku, `low`)?
+The main session orchestrates; it edits only what fits on one screen. Use the closest agent rather than
+inventing one. Subagents don't see the conversation: give them the goal, the files and the
+constraints. Anything a cheaper agent changed goes through `reviewer` before a push. Two failed
+attempts means one level up, never straight to `max`; Fable and `max` are Quinn's call.
+
+## Gates and conventions
+
+- `cargo build --workspace` and `cargo test --workspace` from the root, dev profile
+  (`cargo test --release` will not link). **0 warnings is part of green**; the one accepted line is
+  the app's `.rsrc merge failure: multiple non-default manifests`. `ci.yml` gates every push and PR:
+  the workspace tests (its line reads `warnings: N accepted (.rsrc), N tallies, N other`), the eol
+  contract (`scripts/ci/eol-check.ps1`) and SHA-pinned actions (`engine/tests/workflows.rs`).
+- Four tests are `#[ignore]` by design, each with its reason in the attribute: traps 4 and 5 in
+  `engine/src/events.rs`, `runtime.rs`'s real-runtime smoke test, and
+  `app/tests/scheduler.rs::run_slot_end_to_end`. None may be un-ignored by changing the assertion. TDD: the test first, then the code.
+- TLS via `rustls`/`ring`, **never OpenSSL**; `tauri` never enters the engine
+  (`engine/tests/dependency_boundary.rs`). Build trouble: `docs/reference/toolchain.md`.
+- **Tests never leave the machine**: a test that needs a server binds a listener to `127.0.0.1:0` and
+  serves itself — no egress, no name resolution, no listener on a routable interface.
+- **Tests that touch the real Credential Manager are serialised**: each test file that writes, reads
+  or deletes a real credential holds a file-scoped `CREDMAN_LOCK` mutex, uses a generated test id and
+  cleans up with a `Drop` guard (`app/tests/account.rs`).
+- **Line endings: LF everywhere** (`*.ps1` are CRLF). `engine/tests/fixtures/**` is `-text`: those
+  bytes are the contract, CRLF because vaults are — **never re-encode them**. The engine translates
+  CRLF on every vault read and write (`pystr`). `str::lines()` strips a trailing `\r`;
+  `split('\n')` does not.
+- Workflow: brainstorm → spec (`docs/specs/`) → plan (`docs/plans/`, with a fidelity ledger) →
+  execute with review checkpoints; reviews land in `docs/reports/`. Quinn reviews at checkpoints —
+  surface trade-offs, ask before assuming.
+
+## Direction
+
+`VISION.md` states what Knowlu is and must stay; the cloud design is the authority on how. In one line: **accounts
+and $9.99 a month, no free tier; every judgment runs in our cloud; CI builds and signs every release;
+the vault stays plain text on the student's machine and is created by the app; portal credentials
+never leave the device — fetch on device, think in the cloud.** Streams and their order are in
+`HANDOFF.md` §2.
