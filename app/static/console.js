@@ -938,6 +938,8 @@
   function drawGrades() {
     var el = EL("grades"), s = GRADES.status, html;
     if (!el) { return; }
+    // The settings panel's Hide grades box shows the student's own flag, whatever the strip shows.
+    if (s && s.ok !== false) { EL("set-grades-hide-in").checked = !!s.hidden; }
     if (!s || s.ok === false || s.hidden) { el.hidden = true; el.innerHTML = ""; return; }
     html = '<div class="sec-hd"><h2>Grades</h2></div>';
     if (s.available === false) {
@@ -1026,6 +1028,14 @@
   EL("set-grades-forget").addEventListener("click", function () {
     invoke("grades_forget", {}).then(function (r) {
       EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "forgotten";
+      return gradesStatus();
+    }).catch(function () {});
+  });
+  // Hide grades (spec §2, §9): a settings row like Start with Windows, through set_settings; the
+  // flag lives in grades.json, and the strip follows grades_status's `hidden`.
+  EL("set-grades-hide-in").addEventListener("change", function () {
+    invoke("set_settings", { patch: { grades_hidden: EL("set-grades-hide-in").checked } }).then(function (r) {
+      EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "";
       return gradesStatus();
     }).catch(function () {});
   });
@@ -1727,6 +1737,7 @@
   function openSettings() {
     EL("settings").hidden = false;
     checkAccount();
+    gradesStatus();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";

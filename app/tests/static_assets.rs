@@ -1925,6 +1925,26 @@ fn the_grades_buttons_and_the_settings_row_are_in_the_page() {
     assert!(css.contains(".grades") && css.contains(".ring"), "the strip is styled");
 }
 
+/// Spec §2 and §9 (T9 finding 3): *Hide grades* is a settings row like *Start with Windows*, a box
+/// whose change goes through `set_settings` (the grades commands stay four). The box shows
+/// `grades_status`'s `hidden`, which opening the panel re-reads; `drawGrades` already hides the strip
+/// on it.
+#[test]
+fn the_settings_panel_hides_grades_through_set_settings() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-grades-hide\"") && html.contains("Hide grades") && html.contains("<input type=\"checkbox\" id=\"set-grades-hide-in\">"), "the settings row");
+    let js = grades_js();
+    assert!(js.contains("EL(\"set-grades-hide-in\").addEventListener(\"change\""), "the box is wired");
+    assert!(js.contains("invoke(\"set_settings\", { patch: { grades_hidden: EL(\"set-grades-hide-in\").checked } })"), "through set_settings, like the other rows");
+    let draw = grades_fn("drawGrades");
+    assert!(draw.contains("EL(\"set-grades-hide-in\").checked = !!s.hidden"), "the box shows grades_status's hidden: {draw}");
+    let all = read("console.js");
+    let at = all.find("function openSettings(").expect("openSettings");
+    let rest = &all[at + 1..];
+    let open = &all[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
+    assert!(open.contains("gradesStatus()"), "opening the panel re-reads grades_status: {open}");
+}
+
 #[test]
 fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
     // The one #drawer is shared: the breakdown's open marker must not outlive the breakdown.

@@ -31,7 +31,9 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   or a curated row without a date) or `not a Blackboard school`; the slot records the same as
   `grades (skipped: not available at your school yet)` / `(skipped: not a Blackboard school)`, at exit
   0. The four commands live in `app/src/grades.rs` (`grades_forget` is never gated: it closes the
-  `lms-grades` window and deletes the kept session). The slot's other skips, in order: `no entitlement`,
+  `lms-grades` window and deletes the kept session). *Hide grades* is a settings row like *Start with
+  Windows*: `set_settings`'s `grades_hidden` key writes `grades::GradesPrefs` (`<profile>\grades.json`)
+  and never `settings.json`, and `grades_status` reports it as `hidden`. The slot's other skips, in order: `no entitlement`,
   `not connected`, `no window on this run`, the sign-in window open, then the capture's own outcomes
   (signed out, Blackboard unreachable). A capture writes a bundle private to that run
   (`grades::slot_bundle_path`) for the engine's `grades` step, deleted afterwards. That step, the
