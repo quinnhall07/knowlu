@@ -365,32 +365,13 @@ pub fn run_lines_with(
     let arm_started = std::time::Instant::now();
     let (events_config, _) =
         crate::events::load_events_config(&vault.join("config").join("events.yaml"));
-    let any_feed = events_config.sources.iter().any(|s| s.enabled);
-    // R-C2-E38: the Gmail pull's own precondition, computed once and reused below — a vault that
-    // has never linked a Google calendar must not make the probe fire just to learn there is
-    // nothing to pull, and a vault that HAS linked one must not be starved by an empty enrichment
-    // queue and no event source, or its mail would never be asked for.
-    let google = google_calendar_linked(vault);
-    // R-C2-E15, widened by fix 1 (R-C2-E22 #1), again by Task 11 (R-C2-E38) and again by Task 12
-    // (R-C2-E46): the probe is a network round trip, and it must not fire when there is nothing to
-    // judge or send in ANY of the passes — reusing `pending`'s own predicate, `judge_roster`'s
-    // own enabled-source predicate, `google_calendar_linked`, and `rule_decisions_waiting` (an
-    // answered `kind: rule` card not yet sent) here, rather than a second scanning routine for any
-    // of them, is what lets a job that runs twice a day forever skip both the call and, on a
-    // network that black-holes rather than refuses, the up-to-`CALL_TIMEOUT` stall a probe with no
-    // queue behind it would otherwise risk. `enrich_with` below re-derives the pending list; that
-    // second read is the accepted cost of leaving `enrich_with`'s own signature — and every test
-    // that calls it directly — untouched.
-    // F8 widens it once more: `labels_waiting` (a decision on a judged card not yet reported) is
-    // the fifth pass's own predicate, last so the cheaper four short-circuit it.
-    if pending(vault).0.is_empty()
-        && !any_feed
-        && !google
-        && !rule_decisions_waiting(vault)
-        && !labels_waiting(vault)
-    {
-        return enrich_with(vault, opts, Ok(&model));
-    }
+    // D4 (Gmail connect spec §4.3): the probe runs on EVERY cloud slot. The Gmail grant lives in the
+    // account, not in the vault (the vault's `calendars:` marker is only a trace of the calendar
+    // step), so no local predicate can say "there is nothing to pull" — the pull has to ask. The
+    // early return that used to guard the probe (an empty queue, no feed, no Google marker, no
+    // answered rule card, no label waiting) is removed whole, and R-C2-E15, R-C2-E38 and R-C2-E46,
+    // which pinned it, are superseded for this arm. The cost is one cheap probe a slot; a service
+    // that cannot be reached is named once by the probe, not once per pass.
     // A session or entitlement problem answers every item identically, so the FIRST call decides
     // the batch. Asked once before the loop, the whole run then reports one honest outcome
     // (`Missing::Service`, which becomes `Outcome::ServiceUnavailable` and logs as
@@ -421,7 +402,7 @@ pub fn run_lines_with(
 
             // C2 Task 9 — the events pass. Runs whenever at least one event source is enabled,
             // even when the enrichment batch above was empty: a vault can have nothing to enrich
-            // and forty events to judge (the early return above already covers "neither"). The
+            // and forty events to judge. The
             // feeds are fetched through the same server-side proxy `rank` uses, so the HTML
             // sources return a page here too. Fix 1 (R-C2-E22 #2): it shares `opts.budget` with
             // the enrichment batch rather than getting a fresh fifteen minutes of its own — the
@@ -446,16 +427,14 @@ pub fn run_lines_with(
                 remaining_budget,
             ));
 
-            // Task 11 — the Gmail pull. Runs whenever this vault has ever linked a Google
-            // calendar, even when both passes above found nothing (the early return above already
-            // covers "neither, and no Google either"). `pull_gmail` talks to `/gmail-read` through
-            // `client` directly, not through `model`, so it carries its own failure lines rather
-            // than feeding `model.fatal()`. R-C2-E42: it takes whatever of `opts.budget` the
-            // events pass has not already spent, the same way `judge_roster` above does.
-            if google {
-                let gmail_budget = opts.budget.saturating_sub(arm_started.elapsed());
-                lines.extend(pull_gmail(vault, client, opts, gmail_budget));
-            }
+            // Task 11 — the Gmail pull, unconditional past the probe (D4): an account with no
+            // Gmail grant answers `no_gmail_scope`, which prints nothing. `pull_gmail` talks to
+            // `/gmail-read` through `client` directly, not through `model`, so it carries its own
+            // failure lines rather than feeding `model.fatal()`. R-C2-E42: it takes whatever of
+            // `opts.budget` the events pass has not already spent, the same way `judge_roster`
+            // above does.
+            let gmail_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(pull_gmail(vault, client, opts, gmail_budget));
 
             // C2 Task 12 — rule promotion. Runs whenever the cloud arm got past the probe,
             // whatever the three passes above found: it sends any decision the student already
@@ -515,22 +494,6 @@ pub fn run(
             budget: BATCH_BUDGET,
         },
     )
-}
-
-/// R-C2-E38, narrowed to a pure read by R-C2-E43. The vault's `config/ingest.yaml` `calendars:`
-/// list is the device's only trace of a Google grant — hand-off H9 writes `- name: google` /
-/// `ics_url: 'cloud:google'` — so a vault that has never linked a Google calendar asks the service
-/// nothing extra.
-///
-/// **Named for what the marker actually is, not for "the account has a grant"**: the app's Tauri
-/// command `google_connected` means the latter — a live grant, which this vault might have and
-/// still never have taken the wizard's calendar step to write the marker for (or vice versa, on a
-/// vault whose grant was later revoked server-side). This predicate answers only "does this
-/// vault's OWN config carry the marker", through [`crate::calfeed::calendar_entries`] — the one
-/// place `calendars:` is parsed, so this is a config read and nothing else: no fetch, no snapshot
-/// write, no network round trip.
-fn google_calendar_linked(vault: &Path) -> bool {
-    crate::calfeed::calendar_entries(vault).iter().any(|(_, url)| url.starts_with("cloud:google"))
 }
 
 /// The agent actor for Gmail-derived writes. `agent:` prefix, so judge-once holds and a field the
@@ -956,10 +919,9 @@ pub const RULES_ACTOR: &str = "agent:knowlu.rules";
 
 /// Send the decisions the student has already made, then file whatever the service is offering.
 ///
-/// **Runs on a cloud arm that got past the probe** — not on "every cloud arm". A vault with
-/// nothing to enrich, no enabled event source, no Google grant and no answered rule card takes
-/// `run_lines_with`'s early return and never reaches this, which is exactly what keeps a twice-daily
-/// slot from spending two PostgREST round trips a day forever on a vault that has nothing to say.
+/// **Runs on a cloud arm that got past the probe** — not on "every cloud arm". D4 removed the early
+/// return that used to skip it on a vault with nothing to say, so every slot whose probe succeeds
+/// reaches this; a probe the service refuses or cannot answer still stops the arm first.
 ///
 /// **Sending first** means a slot never proposes a rule the student answered an hour ago. The card
 /// is an ordinary proposal, so it is counted, escalated, snoozed past the 15-a-day cap and expired
@@ -1008,8 +970,7 @@ pub fn pull_rules(
             // that died between the POST above and the stamp below. Treated as success, not
             // failure: stamped and archived exactly as `Ok` is. Without this, a card whose POST
             // succeeded once but whose stamp never landed would re-POST every slot forever, 404
-            // every time, and — because `rule_decisions_waiting` scans exactly this card — keep the
-            // widened early return (R-C2-E46) from ever firing again for this vault.
+            // every time.
             //
             // **Matched on the handler's own body, not the status alone** (`judge-rules/handler.ts`'s
             // `Response.json({ error: "no such undecided proposal" }, { status: 404 })`, extracted
@@ -1078,8 +1039,7 @@ fn archive_decided_card(vault: &Path, path: &std::path::Path, ctx: &WriteContext
     }
 }
 
-/// `kind: rule` cards the student has answered, as `(path, rule_id, decision)`. Also what
-/// [`rule_decisions_waiting`] scans — one scanner for "is there an answered rule card", not two.
+/// `kind: rule` cards the student has answered, as `(path, rule_id, decision)`.
 fn decided_rule_cards(vault: &Path) -> Vec<(std::path::PathBuf, i64, String)> {
     let mut out = Vec::new();
     for path in crate::approvals::sorted_md(&vault.join("approvals")) {
@@ -1101,10 +1061,6 @@ fn decided_rule_cards(vault: &Path) -> Vec<(std::path::PathBuf, i64, String)> {
 /// R-C2-E46: whether this vault has an answered `kind: rule` card not yet sent to the service —
 /// reusing [`decided_rule_cards`], the same scan `pull_rules` performs to find them, so there is
 /// one scanner for this question, not two.
-fn rule_decisions_waiting(vault: &Path) -> bool {
-    !decided_rule_cards(vault).is_empty()
-}
-
 // -----------------------------------------------------------------------------------------
 // F8: the device reports the student's decisions on judged cards, keyed by `judgment_id`.
 // -----------------------------------------------------------------------------------------
@@ -1202,8 +1158,7 @@ fn labels_to_report(vault: &Path) -> Vec<LabelCard> {
 }
 
 /// F8: whether a decision is waiting to be reported — the same scan [`report_labels`] makes, so
-/// `run_lines_with`'s early return and the pass agree on what "waiting" means. An `email` card is
-/// never waiting.
+/// a caller and the pass agree on what "waiting" means. An `email` card is never waiting.
 pub fn labels_waiting(vault: &Path) -> bool {
     !labels_to_report(vault).is_empty()
 }
@@ -2865,6 +2820,102 @@ mod tests {
         let requests2 = handle2.join().expect("the listener thread did not panic");
         assert!(requests2.is_empty(), "no judge request either way: {requests2:?}");
         let _ = std::fs::remove_dir_all(&unconnected);
+    }
+
+    /// D4 (spec §4.3, §8.2 item 1): the grant lives in the account, not the vault, so the pull no
+    /// longer waits for a `calendars:` marker. A vault with no marker still asks `/gmail-read`
+    /// after the probe. Replaces the marker-gate test above (T7b removes that one).
+    #[test]
+    fn the_gmail_pull_runs_without_a_calendar_marker() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-no-marker");
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        assert!(
+            crate::calfeed::calendar_entries(&v).is_empty(),
+            "the vault must carry no calendars: entry"
+        );
+        let (base, handle) = gmail_loopback(vec![
+            (200, "{}".to_string()),
+            gmail_reply("[]", false),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let (code, _lines) = run_lines_with(&v, &opts(&log), Some(&client));
+        assert_eq!(code, 0);
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert!(
+            requests.iter().any(|r| r.starts_with("POST /functions/v1/gmail-read")),
+            "a vault with no calendar marker must still pull mail: {requests:?}"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// D4 (spec §4.3, §8.2 item 2): the cloud arm has no early return. A bare vault — nothing
+    /// pending, no event feed, no rule decision, no label — probes, pulls mail (answered
+    /// `no_gmail_scope`, which adds no line) and pulls rules, in that order.
+    #[test]
+    fn a_bare_vault_probes_pulls_mail_and_pulls_rules_in_that_order() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-bare-vault");
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![
+            (200, "{}".to_string()),
+            (200, no_scope),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let (code, lines) = run_lines_with(&v, &opts(&log), Some(&client));
+        assert_eq!(code, 0);
+        assert!(!lines.iter().any(|l| l.starts_with("gmail")), "no_gmail_scope adds no line: {lines:?}");
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 3, "the probe, the pull, the rule pull: {requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
+        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// D4 (spec §8.2 item 4): a revoked grant, met through the whole cloud arm rather than through
+    /// `pull_gmail` alone, prints exactly the reconnect line and the run exits 0.
+    #[test]
+    fn a_revoked_grant_through_the_whole_arm_prints_the_reconnect_line_and_exits_zero() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("gmail-revoked-whole-arm");
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let revoked = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "revoked", "more": false,
+        }));
+        let (base, handle) = gmail_loopback(vec![
+            (200, "{}".to_string()),
+            (200, revoked),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let client = client_for(base);
+        let log = v.join("_log");
+        let (code, lines) = run_lines_with(&v, &opts(&log), Some(&client));
+        assert_eq!(code, 0, "{lines:?}");
+        let gmail: Vec<&String> = lines.iter().filter(|l| l.starts_with("gmail")).collect();
+        assert_eq!(
+            gmail,
+            vec!["gmail: skipped (gmail is not connected; re-connect from settings)"],
+            "{lines:?}"
+        );
+        handle.join().expect("the listener thread did not panic");
+        let _ = std::fs::remove_dir_all(&v);
     }
 
     /// C2 final review E-2 (closing deferred m5): `outcome: "capped"` is the account's daily
