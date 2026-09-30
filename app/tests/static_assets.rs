@@ -1805,3 +1805,122 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }
+
+// ---- M1 grades (spec 2026-09-29-grades-design §2 and §9; plan Task 7) ------------------------------
+
+/// The console's grades code: everything between the two markers in `console.js`.
+fn grades_js() -> String {
+    let js = read("console.js");
+    let from = js.find("// ---- M1 grades").expect("console.js carries the grades region");
+    let to = js.find("// ---- end M1 grades").expect("console.js closes the grades region");
+    js[from..to].to_string()
+}
+
+/// One function's body out of the grades region, up to the next top-level `function`.
+fn grades_fn(name: &str) -> String {
+    let js = grades_js();
+    let at = js.find(&format!("function {name}(")).unwrap_or_else(|| panic!("no function {name} in the grades region"));
+    let rest = &js[at + 1..];
+    js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())].to_string()
+}
+
+#[test]
+fn the_grades_strip_renders_from_state_grades_and_has_its_four_states() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"grades\""), "Today carries the strip's container");
+    let draw = grades_fn("drawGrades");
+    assert!(grades_fn("renderGrades").contains("state.grades"), "the strip renders from state.grades");
+    assert!(draw.contains("GRADES.list"), "…and draws it");
+    // The four states: not available, not connected, signed out, hidden.
+    assert!(draw.contains("s.hidden"), "the hidden state: {draw}");
+    assert!(draw.contains("s.available === false") && draw.contains("gradesUnavailableHtml("), "the not-available state");
+    assert!(draw.contains("!s.connected") && grades_js().contains("Connect Blackboard to see your grades"), "the not-connected state");
+    assert!(draw.contains("s.signed_out") && grades_js().contains("Sign in to Blackboard again to update grades"), "the signed-out state");
+    // A signed-out session is a named state, never an error and never amber.
+    assert!(!draw.contains("crit") && !draw.contains("warn"), "signed out is never amber or red: {draw}");
+    assert!(grades_js().contains("no grades yet"), "a course with nothing graded reads \"no grades yet\"");
+}
+
+#[test]
+fn the_not_available_state_is_one_line_and_no_button() {
+    let line = grades_fn("gradesUnavailableHtml");
+    assert!(line.contains("Grades from Blackboard are not available at your school yet"), "{line}");
+    assert!(!line.contains("<button") && !line.contains("<input") && !line.contains("<a "), "no control on the not-available line: {line}");
+    // The console decides the state only from `grades_status`: no campus file, no campus list, no host.
+    let js = grades_js();
+    assert!(js.contains("invoke(\"grades_status\""), "the console asks grades_status");
+    for word in ["campus", "unitid", "lms_host", "policy_read", "lms_kind"] {
+        assert!(!js.contains(word), "the grades region names {word}: the console never decides availability itself");
+    }
+}
+
+#[test]
+fn the_console_has_no_address_entry_and_never_names_grades_set_host() {
+    for f in ["console.js", "index.html", "console.css"] {
+        assert!(!read(f).contains("grades_set_host"), "{f} names grades_set_host");
+    }
+    let js = grades_js();
+    assert!(!js.contains("<input") && !js.contains("prompt("), "no address input in the grades region");
+    let html = read("index.html");
+    for id in ["grades-host", "grades-address", "grades-url"] {
+        assert!(!html.contains(id), "index.html carries {id}");
+    }
+    // The four commands, and only those, are called from here.
+    for call in ["invoke(\"grades_status\"", "gradesAct(\"grades_connect\"", "gradesAct(\"grades_refresh\"", "invoke(\"grades_forget\""] {
+        assert!(js.contains(call), "{call} is called");
+    }
+    assert!(grades_fn("gradesAct").contains("invoke(cmd"), "gradesAct forwards to the named command");
+}
+
+#[test]
+fn the_rings_are_svg_coloured_by_five_grade_tokens_in_both_themes() {
+    let ring = grades_fn("ringSvg");
+    assert!(ring.contains("<svg") && ring.contains("<circle") && ring.contains("stroke-dasharray"), "the ring is inline SVG: {ring}");
+    let css = read("console.css");
+    for t in ["--grade-a", "--grade-b", "--grade-c", "--grade-d", "--grade-f"] {
+        assert_eq!(css.matches(&format!("{t}:")).count(), 2, "{t} is defined once per theme");
+        assert!(grades_js().contains(&t[2..]) || grades_js().contains("grade-\" +"), "the page picks {t}");
+    }
+    assert!(css.contains(":root[data-theme=\"light\"]"), "the light set is a named theme, not a media query over the dark console");
+    assert!(css.contains("color-scheme: dark"), "the console stays dark by default");
+}
+
+#[test]
+fn the_breakdown_drawer_is_read_only_and_the_footer_says_where_the_number_came_from() {
+    let drawer = grades_fn("openGradesDrawer");
+    for banned in ["set_fields", "data-field", "contenteditable", "<input", "<textarea", "create_task", "delete_note"] {
+        assert!(!drawer.contains(banned), "the grades drawer contains {banned}: it is read-only");
+    }
+    let all = grades_js();
+    assert!(!all.contains("set_fields"), "nothing in the grades region writes a note");
+    let footer = grades_fn("gradesFooterHtml");
+    assert!(footer.contains("From Blackboard") && footer.contains("Overall Grade") && footer.contains("points so far"), "{footer}");
+    assert!(footer.contains("c.basis === \"overall\"") && footer.contains("c.earned") && footer.contains("c.possible"),
+        "points so far sits beside the Overall Grade when the course carries both: {footer}");
+    assert!(footer.contains("data-grades-refresh") && footer.contains("updated "), "Refresh and the age: {footer}");
+    // The four statuses the engine sends, each with words.
+    for s in ["graded", "needs-grading", "not-submitted", "exempt"] {
+        assert!(all.contains(&format!("\"{s}\"")), "status {s} has a label");
+    }
+}
+
+#[test]
+fn every_number_on_the_strip_is_the_engines() {
+    let js = grades_js();
+    for banned in ["reduce(", "Math.round(", "/ c.possible", "* 100", "/ 100", "parseFloat("] {
+        assert!(!js.contains(banned), "the grades region computes ({banned}): every number comes from state.grades");
+    }
+}
+
+#[test]
+fn the_grades_buttons_and_the_settings_row_are_in_the_page() {
+    let js = grades_js();
+    for hook in ["data-grades-connect", "data-grades-refresh", "data-grades-course"] {
+        assert!(js.contains(hook), "{hook}");
+    }
+    assert!(js.contains("invoke(\"grades_forget\""), "Forget calls grades_forget");
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-grades\"") && html.contains("id=\"set-grades-forget\"") && html.contains("Forget Blackboard sign-in"), "settings carry Forget Blackboard sign-in");
+    let css = read("console.css");
+    assert!(css.contains(".grades") && css.contains(".ring"), "the strip is styled");
+}
