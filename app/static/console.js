@@ -1586,8 +1586,10 @@
   // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
   // bumped on close and on every new load, so a stale reply never repaints the row. The buttons are
   // wired in T9b (Connect, Reconnect) and T9c (Disconnect).
-  var SET = { googleSeq: 0, google: null, googleNote: "", googlePolling: false };
+  var SET = { googleSeq: 0, google: null, googleNote: "", googlePolling: false, confirming: false, leaving: false };
   var GOOGLE_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.";
+  // T9c (D6, D14): Disconnect is two steps, like Delete my data. Step 1 shows this and step 2.
+  var GOOGLE_DISCONNECT_CONFIRM = "This disconnects Google Calendar too — Google keeps them as one permission. Knowlu stops reading both and deletes the proposals from your mail it had not delivered yet. What it already added stays in your vault, and your calendar stops updating.";
   var GOOGLE_DISCLOSURE = "Google also tells Knowlu which Google account you connected, so this row can show it.";
   function googleSentence(g) {
     if (!g) { return "Checking Google…"; }
@@ -1603,16 +1605,17 @@
     var known = !!(g && g.ok), none = known && g.state === "none", revoked = known && g.state === "revoked";
     var live = known && !none && !revoked;
     EL("set-google-state").textContent = busy ? GOOGLE_POLLING : googleSentence(g);
-    EL("set-google-note").textContent = (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
+    EL("set-google-note").textContent = (SET.confirming ? GOOGLE_DISCONNECT_CONFIRM + " " : "") + (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
     EL("set-google-connect").hidden = !(none || (live && !g.gmail));
     EL("set-google-reconnect").hidden = !revoked;
     EL("set-google-disconnect-1").hidden = !(revoked || live);
     EL("set-google-retry").hidden = !(g && !g.ok);
-    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry"].forEach(function (id) { EL(id).disabled = busy; });
+    EL("set-google-disconnect-2").hidden = !(SET.confirming && (revoked || live));
+    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry"].forEach(function (id) { EL(id).disabled = busy || SET.leaving; });
   }
   function loadGoogleRow() {
     var seq = ++SET.googleSeq;
-    SET.google = null; SET.googleNote = ""; SET.googlePolling = false;
+    SET.google = null; SET.googleNote = ""; SET.googlePolling = false; SET.confirming = false;
     EL("set-google").hidden = false;
     renderGoogleRow();
     return invoke("google_status", {}).then(function (g) {
@@ -1632,7 +1635,7 @@
   var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
   async function connectGoogle(scope) {
     var mySeq = ++SET.googleSeq;
-    SET.googlePolling = true; SET.googleNote = "";
+    SET.googlePolling = true; SET.googleNote = ""; SET.confirming = false;
     renderGoogleRow();
     var started = await invoke("google_connect", { scope: scope }).catch(function () { return { ok: false, error: UNREACHABLE }; });
     if (SET.googleSeq !== mySeq) { return; }
@@ -1658,6 +1661,19 @@
     SET.googlePolling = false; SET.googleNote = GOOGLE_TIMEOUT;
     renderGoogleRow();
   }
+  // T9c: step 2. On ok: false the row keeps its previous state and shows the error under it; on ok
+  // the row is asked afresh. A close or a new click bumps the token, so a late reply repaints nothing.
+  async function disconnectGoogle() {
+    var mySeq = ++SET.googleSeq;
+    SET.leaving = true;
+    renderGoogleRow();
+    var r = await invoke("google_disconnect", {}).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.leaving = false;
+    if (r && r.ok) { loadGoogleRow(); return; }
+    SET.confirming = false; SET.googleNote = (r && r.error) || UNREACHABLE;
+    renderGoogleRow();
+  }
   // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
   function gateGoogleRow(a) {
     // checkAccount also runs at launch; the row asks google_status only while Settings is open.
@@ -1665,7 +1681,7 @@
     if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
     SET.googleSeq += 1; EL("set-google").hidden = true;
   }
-  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; EL("settings").hidden = true; }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -1695,6 +1711,8 @@
     if (e.target.closest("#set-google-connect")) { connectGoogle("gmail"); return; }
     if (e.target.closest("#set-google-reconnect")) { connectGoogle("reconnect"); return; }
     if (e.target.closest("#set-google-retry")) { loadGoogleRow(); return; }
+    if (e.target.closest("#set-google-disconnect-1")) { SET.confirming = true; SET.googleNote = ""; renderGoogleRow(); return; }
+    if (e.target.closest("#set-google-disconnect-2")) { disconnectGoogle(); return; }
     if (e.target.closest("#set-name-save")) {
       invoke("set_profile_name", { name: EL("set-name-in").value }).then(function (r) {
         EL("set-diag-note").textContent = r.ok ? "saved" : r.error;

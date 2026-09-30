@@ -1888,3 +1888,22 @@ fn the_google_row_poll_is_cancelled_when_settings_closes() {
     assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
     assert!(!js.contains("gmail.readonly"), "no scope string on the page");
 }
+
+/// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
+/// to `google_disconnect`, and closing Settings puts the confirm away.
+#[test]
+fn the_disconnect_confirm_names_calendar() {
+    let js = read("console.js");
+    assert!(js.contains("Google Calendar too"), "the step-1 text names Calendar");
+    let text = js.find("var GOOGLE_DISCONNECT_CONFIRM").expect("the confirm text is one constant");
+    assert!(js[text..text + 400].contains("This disconnects Google Calendar too"), "step 1 opens with the spec's sentence");
+    assert!(js.contains("\"#set-google-disconnect-1\"") && js.contains("\"#set-google-disconnect-2\""), "both steps are wired");
+    let step2 = js.find("closest(\"#set-google-disconnect-2\")").expect("step 2 handler");
+    assert!(js[step2..step2 + 120].contains("disconnectGoogle()"), "step 2 runs disconnectGoogle");
+    let f = js.find("function disconnectGoogle(").expect("disconnectGoogle");
+    let call = js.find("invoke(\"google_disconnect\"").expect("google_disconnect is invoked");
+    assert!(f < call && call < f + 400, "google_disconnect is called from disconnectGoogle only");
+    assert_eq!(js.matches("invoke(\"google_disconnect\"").count(), 1);
+    let close = js.find("function closeSettings(").map(|i| js[i..].lines().next().unwrap()).expect("closeSettings");
+    assert!(close.contains("SET.confirming = false"), "closing Settings hides step 2: {close}");
+}
