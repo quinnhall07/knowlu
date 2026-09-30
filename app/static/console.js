@@ -1625,6 +1625,39 @@
       renderGoogleRow();
     });
   }
+  // T9b: Connect ("gmail") and Reconnect ("reconnect"). The browser opens from Rust; the page only
+  // polls google_status, every 3 s, twenty times. `mySeq` is taken on every click and Settings close
+  // bumps `SET.googleSeq`, so a stale poll never repaints the row (as `WIZ.googleSeq` does).
+  var GOOGLE_POLLING = "Finish signing in to Google in your browser — this may take a moment.";
+  var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
+  async function connectGoogle(scope) {
+    var mySeq = ++SET.googleSeq;
+    SET.googlePolling = true; SET.googleNote = GOOGLE_POLLING;
+    renderGoogleRow();
+    var started = await invoke("google_connect", { scope: scope }).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    if (!started || !started.ok) {
+      SET.googlePolling = false; SET.googleNote = (started && started.error) || UNREACHABLE;
+      renderGoogleRow();
+      return;
+    }
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (SET.googleSeq !== mySeq) { return; }
+      var g = await invoke("google_status", {}).catch(function () { return null; });
+      if (SET.googleSeq !== mySeq) { return; }
+      if (g && g.ok && (scope === "reconnect" ? g.state === "active" : g.gmail === true)) {
+        SET.google = g; SET.googlePolling = false; SET.googleNote = "";
+        renderGoogleRow();
+        return;
+      }
+    }
+    var fresh = await invoke("google_status", {}).catch(function () { return null; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.google = fresh || { ok: false, error: UNREACHABLE };
+    SET.googlePolling = false; SET.googleNote = GOOGLE_TIMEOUT;
+    renderGoogleRow();
+  }
   // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
   function gateGoogleRow(a) {
     // checkAccount also runs at launch; the row asks google_status only while Settings is open.
@@ -1659,6 +1692,9 @@
 
   EL("settings").addEventListener("click", function (e) {
     if (e.target.closest("#set-close")) { closeSettings(); return; }
+    if (e.target.closest("#set-google-connect")) { connectGoogle("gmail"); return; }
+    if (e.target.closest("#set-google-reconnect")) { connectGoogle("reconnect"); return; }
+    if (e.target.closest("#set-google-retry")) { loadGoogleRow(); return; }
     if (e.target.closest("#set-name-save")) {
       invoke("set_profile_name", { name: EL("set-name-in").value }).then(function (r) {
         EL("set-diag-note").textContent = r.ok ? "saved" : r.error;

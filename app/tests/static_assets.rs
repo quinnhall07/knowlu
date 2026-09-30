@@ -1840,3 +1840,36 @@ fn the_launch_account_check_does_not_reach_google_status() {
     let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
     assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
 }
+
+/// Gmail connect T9b (spec section 8.4 item 2): the console invokes the three Google commands, and
+/// `open_external` is invoked only inside the wizard's Google handler. Its `google_disconnect` half
+/// is red until T9c wires the two-step Disconnect.
+#[test]
+fn the_console_invokes_the_three_google_commands_and_never_open_external_outside_the_wizard() {
+    let js = read("console.js");
+    for cmd in ["google_status", "google_connect", "google_disconnect"] {
+        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
+    }
+    let wiz_start = js.find("getElementById(\"wiz-google\").addEventListener").expect("the wizard's Google handler");
+    let wiz_end = wiz_start + js[wiz_start..].find("\n  });").expect("end of the wizard's Google handler");
+    for (at, _) in js.match_indices("invoke(\"open_external\"") {
+        assert!(wiz_start < at && at < wiz_end, "open_external is invoked outside the wizard's Google handler");
+    }
+}
+
+/// Gmail connect T9b (spec section 8.4 item 3): the row's poll carries `SET.googleSeq`, bumped on
+/// Settings close and on every new click.
+#[test]
+fn the_google_row_poll_is_cancelled_when_settings_closes() {
+    let js = read("console.js");
+    let start = js.find("function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(f.contains("var mySeq = ++SET.googleSeq"), "every click takes a new token: {f}");
+    assert!(f.matches("SET.googleSeq !== mySeq").count() >= 2, "the loop checks the token after each await: {f}");
+    assert!(f.contains("SET.googlePolling = true") && f.contains("SET.googlePolling = false"), "{f}");
+    let close = js.find("function closeSettings(").map(|i| &js[i..i + 160]).expect("closeSettings");
+    assert!(close.contains("SET.googleSeq += 1"), "closing Settings bumps the token: {close}");
+    assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
+    assert!(!js.contains("gmail.readonly"), "no scope string on the page");
+}
