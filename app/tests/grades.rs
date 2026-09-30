@@ -19,7 +19,7 @@
 //! closures, so a refusal is shown to open no window and read no session.
 use knowlu::grades::{
     assemble_bundle, availability, campus_of, connect_with, forget, forget_with, is_session_dir, next_page, read_list,
-    refresh_with, session_dir, set_signed_out, signed_in, status_for, Availability, CaptureHead, CourseCalls,
+    refresh_with, session_dir, set_signed_out, signed_in, status_for, step_answer, Availability, CaptureHead, CourseCalls,
     GradesPrefs, MAX_PAGES, NOT_AVAILABLE, NOT_BLACKBOARD,
 };
 use std::cell::Cell;
@@ -597,4 +597,22 @@ fn the_console_registers_the_four_grades_commands_and_hides_only_main() {
     }
     assert!(!main.contains(&["grades", "set", "host"].join("_")));
     assert!(main.contains(r#"w.label() == "main""#), "the console's close handler hides only main");
+}
+
+/// T9 finding 1: the engine's `grades` step takes `state/sync.lock` and, finding it held, writes
+/// nothing and prints a named skip at exit 0. A Refresh whose step skipped must say so, not answer
+/// `ok` with nothing changed; the skip is a named outcome in the strip's quiet note, never an error
+/// line. An applied step and a failed step answer as before.
+#[test]
+fn a_refresh_whose_engine_step_skipped_names_the_skip() {
+    let busy = step_answer(true, b"grades (skipped: the vault is busy with a sync or another grades run)\r\n", b"");
+    assert_eq!(busy["ok"], json!(false), "{busy}");
+    assert_eq!(busy["error"], json!("the vault is busy with a sync or another grades run"));
+    assert_eq!(busy["lines"], json!(["grades (skipped: the vault is busy with a sync or another grades run)"]));
+    let gated = step_answer(true, b"grades (skipped: no entitlement)\n", b"");
+    assert_eq!(gated["error"], json!("no entitlement"), "{gated}");
+    let applied = step_answer(true, b"grades: 2 courses, 3 changed items\ngrades: SYN-220 failed (403)\n", b"");
+    assert_eq!(applied, json!({ "ok": true, "error": null, "lines": ["grades: 2 courses, 3 changed items", "grades: SYN-220 failed (403)"] }));
+    let failed = step_answer(false, b"", b"knowlu-engine: --input is not a capture bundle (eof, line 1, column 0)\n");
+    assert_eq!(failed, json!({ "ok": false, "error": "knowlu-engine: --input is not a capture bundle (eof, line 1, column 0)", "lines": [] }));
 }

@@ -315,6 +315,36 @@ fn past_the_grace_grades_prints_the_named_skip_at_exit_0_and_writes_nothing() {
     cleanup(&v);
 }
 
+// ---- one writer of grades/ at a time: the sync run lock (T9 finding 1) ----
+
+/// `grades/` is a synced folder. The slot's `sync` child, *Sync now*, the quit push and every other
+/// `grades` run take `state/sync.lock`, so a run that finds it held writes nothing and says so at
+/// exit 0. The test holds the same file with the same exclusive OS lock `sync::RunLock` takes,
+/// standing in for a sync mid-pull (`app/tests/week.rs`'s pattern).
+#[test]
+fn a_run_that_finds_the_sync_run_lock_held_writes_nothing_and_says_so_at_exit_0() {
+    let v = vault("busy");
+    let lock_path = v.join(knowlu_engine::sync::RUN_LOCK_FILE);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let held = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).unwrap();
+    held.try_lock().unwrap();
+    let out = run(&v, "bundle-basic.json");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout(&out).trim_end(), "grades (skipped: the vault is busy with a sync or another grades run)");
+    assert!(!v.join("grades").exists(), "no note while a sync holds the lock");
+    assert!(!v.join("state").join("journal").exists(), "no journal record");
+    assert!(!v.join("state").join("grades.json").exists(), "state/grades.json untouched");
+    let log = std::fs::read_to_string(v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok grades (skipped: the vault is busy with a sync or another grades run)"), "{log}");
+    drop(held);
+    let out = run(&v, "bundle-basic.json");
+    assert!(stdout(&out).lines().any(|l| l == "grades: 2 courses, 11 changed items"), "the lock was the only reason: {}", stdout(&out));
+    // and the run let go of it: a sync that starts now gets the lock
+    let again = std::fs::OpenOptions::new().write(true).open(&lock_path).unwrap();
+    again.try_lock().expect("grades released the run lock when it finished");
+    cleanup(&v);
+}
+
 // ---- unmatched and failed courses ----
 
 #[test]

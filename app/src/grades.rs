@@ -679,9 +679,13 @@ pub fn grades_argv(vault: &Path, input: &Path, via: &str) -> Vec<String> {
 }
 
 /// Write the bundle, run the engine's `grades` step as a child process, and delete the bundle
-/// whatever the outcome. No vault lock is held across the child: the engine writes through `write`,
-/// and the rows never pass through this process's logs. The answer carries the engine's own lines,
-/// which name counts, course codes and error codes only (spec §6, §11).
+/// whatever the outcome. This process holds no lock across the child. **The child takes
+/// `state/sync.lock` itself** (`engine::grades::run`, T9 finding 1), so it is serialised against every
+/// sync (the slot's child, *Sync now*, the quit push) and every other `grades` run across processes.
+/// Finding the lock held, it writes nothing and prints a named skip, which [`step_answer`] passes on.
+/// `vault_io` is not taken: the console's own writes never touch `grades/`. The rows never pass
+/// through this process's logs. The answer carries the engine's own lines, which name counts, course
+/// codes and error codes only (spec §6, §11).
 pub fn run_grades_step(vault: &Path, data_dir: &Path, bundle: &Value, via: &str) -> Value {
     let path = bundle_path(data_dir);
     let ran = std::fs::create_dir_all(data_dir)
@@ -692,11 +696,26 @@ pub fn run_grades_step(vault: &Path, data_dir: &Path, bundle: &Value, via: &str)
             std::process::Command::new(exe).no_console().args(grades_argv(vault, &path, via)).output().map_err(|e| format!("could not run the engine ({})", e.kind()))
         });
     let _ = std::fs::remove_file(&path);
-    let lines = |b: &[u8]| String::from_utf8_lossy(b).lines().map(str::to_string).filter(|l| !l.is_empty()).collect::<Vec<_>>();
     match ran {
-        Ok(out) if out.status.success() => json!({ "ok": true, "error": null, "lines": lines(&out.stdout) }),
-        Ok(out) => json!({ "ok": false, "error": lines(&out.stderr).join("; "), "lines": [] }),
+        Ok(out) => step_answer(out.status.success(), &out.stdout, &out.stderr),
         Err(e) => json!({ "ok": false, "error": e, "lines": [] }),
+    }
+}
+
+/// The engine step's output as the command's answer. Exit 0 applied the bundle, unless a line reads
+/// `grades (skipped: <why>)`: the busy run lock, a newer capture already applied, or the entitlement
+/// gate. That run wrote nothing, so the answer is `ok: false` with `<why>` as its error, the strip's
+/// quiet note, never an update that did not happen. A non-zero exit answers stderr's lines.
+pub fn step_answer(success: bool, stdout: &[u8], stderr: &[u8]) -> Value {
+    let lines = |b: &[u8]| String::from_utf8_lossy(b).lines().map(str::to_string).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+    if !success {
+        return json!({ "ok": false, "error": lines(stderr).join("; "), "lines": [] });
+    }
+    let out = lines(stdout);
+    let skip = out.iter().find_map(|l| l.strip_prefix("grades (skipped: ").and_then(|r| r.strip_suffix(')')));
+    match skip {
+        Some(why) => json!({ "ok": false, "error": why, "lines": out }),
+        None => json!({ "ok": true, "error": null, "lines": out }),
     }
 }
 

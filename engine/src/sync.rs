@@ -265,6 +265,11 @@ pub const RUN_LOCK_FILE: &str = "state/sync.lock";
 /// talks to the account, so the slot's own `sync` child, the console's *Sync now* and the quit
 /// push can never run at once and file the same conflict twice (review I1).
 ///
+/// **`grades::run` takes it too** (M1 T9), for its whole apply: `grades/` is a synced folder, so a
+/// pull must never write a grade note between that run's read of it and its surgery, and two
+/// `grades` runs (the slot's and the console's Refresh) must never both create one note. Public for
+/// that one caller; the hold itself is unchanged.
+///
 /// **Deliberately not given `history.rs`'s own lock type's name** (fix round 1; fix round 2,
 /// review N1 — spelling that name here at all, even in a comment, fails Task 10's own gate the
 /// moment `history.rs` is deleted, since the gate scans this file's text for it): `history.rs`
@@ -276,7 +281,7 @@ pub const RUN_LOCK_FILE: &str = "state/sync.lock";
 /// Released by `Drop`ping the held `File`, which closes its handle and so releases the OS-level
 /// lock `try_lock` took — on every return path out of `run_lines_with`, panic or not, because the
 /// OS itself reclaims a lock its holder's process no longer has open.
-struct RunLock {
+pub struct RunLock {
     #[allow(dead_code)]
     file: std::fs::File,
 }
@@ -286,7 +291,7 @@ impl RunLock {
     /// `File::try_lock` is std's own non-blocking exclusive OS lock (stable since Rust 1.89; this
     /// toolchain is 1.98), so no new crate is needed for what `history.rs`'s own git-shaped lock
     /// type used to reach for a whole file-existence-and-pid dance to approximate.
-    fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
+    pub fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
         let path = vault.join(RUN_LOCK_FILE);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

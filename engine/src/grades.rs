@@ -590,9 +590,26 @@ fn read_bundle(input: &Path) -> Result<Bundle, String> {
     Ok(bundle)
 }
 
-/// `knowlu-engine grades`: `Ok(lines)` for stdout at exit 0 (every per-course outcome), `Err(line)`
-/// for stderr at exit 1 (a missing or unparseable bundle: a capture bug, not a slow school). Either
-/// way the run appends one line to `state/runner-log.md`.
+/// What a run prints, at exit 0 having written nothing, when `state/sync.lock` is already held.
+pub const BUSY: &str = "grades (skipped: the vault is busy with a sync or another grades run)";
+
+/// A skip: the one line, also to `state/runner-log.md` with `status`; nothing else is written.
+fn skipped(vault: &Path, status: &str, line: String) -> Vec<String> {
+    let _ = crate::cli::append_run_log(vault, "local", status, &line, None);
+    vec![line]
+}
+
+/// `knowlu-engine grades`: `Ok(lines)` for stdout at exit 0 (every per-course outcome, and the
+/// skips), `Err(line)` for stderr at exit 1 (a missing or unparseable bundle: a capture bug, not a
+/// slow school). Either way the run appends one line to `state/runner-log.md`.
+///
+/// **One writer of `grades/` at a time** (T9 finding 1). The run holds [`crate::sync::RunLock`] from
+/// before its first read of the vault until it returns. `grades/` is a synced folder: without the
+/// lock, a pull could land between `update_note`'s read and its surgery, which then writes over
+/// the pulled text. Two runs (the slot's and a Refresh) could also both pass `write::create`'s
+/// exists check for one note. Every sync (the slot's child, *Sync now*, the quit push) takes the
+/// same lock, across processes. A run that finds it held takes the named skip [`BUSY`] and never
+/// waits.
 pub fn run(vault: &Path, input: &Path, via: &str, run_id: Option<&str>) -> Result<Vec<String>, String> {
     let bundle = match read_bundle(input) {
         Ok(bundle) => bundle,
@@ -600,6 +617,11 @@ pub fn run(vault: &Path, input: &Path, via: &str, run_id: Option<&str>) -> Resul
             let _ = crate::cli::append_run_log(vault, "local", "FAIL", &line, None);
             return Err(line);
         }
+    };
+    let _lock = match crate::sync::RunLock::try_acquire(vault) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Ok(skipped(vault, "ok", BUSY.to_string())),
+        Err(e) => return Ok(skipped(vault, "WARN", format!("grades (skipped: the vault could not be locked ({}))", e.kind()))),
     };
     let mut ctx = WriteContext::new(ACTOR, via);
     ctx.run_id = run_id.map(str::to_string);

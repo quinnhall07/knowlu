@@ -19,7 +19,10 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   `write::create`d and existing notes get only the fields that differ, so an unchanged gradebook
   writes no journal record; a column gone from a matched course becomes `status: removed`. Writes as
   `agent:knowlu.grades` and drops, before every write, each field `Journal::human_set` shows the
-  student set. Gated like `coursework`. Rewrites `state/grades.json` (`fetched_at`, `host`, the
+  student set. Gated like `coursework`. Holds `state/sync.lock` (`sync::RunLock`, the lock every
+  sync takes) from its first read of the vault to its exit, because `grades/` is a synced folder;
+  finding it held, it writes nothing and prints `grades (skipped: the vault is busy with a sync or
+  another grades run)` at exit 0. Rewrites `state/grades.json` (`fetched_at`, `host`, the
   course counts `matched`/`skipped`/`failed`; device-local, never synced). Output is counts, course
   codes, note paths and error codes only — never a column name, category or score (spec §11):
   `grades: 2 courses, 3 changed items`, `grades: <code> not matched`, `grades: <code> failed (403)`,
