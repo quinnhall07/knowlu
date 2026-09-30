@@ -19,7 +19,7 @@ use std::path::Path;
 
 use jiff::tz::TimeZone;
 use jiff::Timestamp;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::journal::Journal;
@@ -612,6 +612,146 @@ pub fn run(vault: &Path, input: &Path, via: &str, run_id: Option<&str>) -> Resul
     let status = if report.failed.is_empty() && report.not_written.is_empty() { "ok" } else { "WARN" };
     let _ = crate::cli::append_run_log(vault, "local", status, &lines.join("; "), None);
     Ok(lines)
+}
+
+// ---- the read model (Task 4): the strip and its drawer (spec §8), read from the vault -----------
+
+impl Basis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Basis::Overall => "overall",
+            Basis::Points => "points",
+            Basis::None => "none",
+        }
+    }
+}
+
+/// One line of a course's breakdown (spec §8). `pct` is the item's own percentage, `None` until it
+/// has a score and a positive `possible`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GradeEntry {
+    pub title: String,
+    pub category: Option<String>,
+    pub score: Option<f64>,
+    pub possible: Option<f64>,
+    pub pct: Option<f64>,
+    pub status: String,
+    pub due: Option<String>,
+    pub counts: bool,
+}
+
+/// One course on the Grades strip (spec §8). `earned` and `possible` are the points-so-far sums
+/// whatever the basis; `pct`, `letter` and `family` are `None` on basis `none`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CourseGrade {
+    pub course: String,
+    pub title: String,
+    pub pct: Option<f64>,
+    pub basis: &'static str,
+    pub letter: Option<&'static str>,
+    pub family: Option<String>,
+    pub earned: f64,
+    pub possible: f64,
+    pub graded: usize,
+    pub items: usize,
+    pub pending: usize,
+    pub fetched_at: Option<String>,
+    pub entries: Vec<GradeEntry>,
+}
+
+/// When the last capture ran, from `state/grades.json`; a missing or unreadable file is `None`.
+fn fetched_at(vault: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(vault.join(STATE_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value["fetched_at"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// A grade note read for the read model: the vault course slug it belongs to, the numbers
+/// `course_grade` needs and the entry it shows.
+fn read_grade_note(meta: &serde_yaml_ng::Mapping) -> Option<(String, GradeNote, GradeEntry)> {
+    let course = meta_text(meta, "course")?;
+    let number = |key: &str| crate::yaml::get(meta, key).and_then(crate::yaml::f64_of);
+    let kind = meta_text(meta, "kind").and_then(|k| Kind::parse(&k)).unwrap_or(Kind::Item);
+    let status = meta_text(meta, "status").and_then(|s| Status::parse(&s))?;
+    let counts = !matches!(crate::yaml::get(meta, "counts"), Some(serde_yaml_ng::Value::Bool(false)));
+    let (score, possible) = (number("score"), number("possible"));
+    let pct = match (score, possible) {
+        (Some(s), Some(p)) if p > 0.0 => Some(crate::render::round2(s * 100.0 / p)),
+        _ => None,
+    };
+    let entry = GradeEntry {
+        title: meta_text(meta, "title").unwrap_or_default(),
+        category: meta_text(meta, "category"),
+        score,
+        possible,
+        pct,
+        status: status.as_str().to_string(),
+        due: meta_text(meta, "due"),
+        counts,
+    };
+    Some((course, GradeNote { kind, score, possible, status, counts }, entry))
+}
+
+/// Every course with grade notes, in the order of the course notes' titles (spec §8). Pure over
+/// the vault's `courses/`, `grades/` and `state/grades.json`; it writes nothing. A vault with no
+/// `grades/` notes yields an empty list. A grade note whose course has no course note is not
+/// shown, and a course whose notes are all `removed` is not shown.
+pub fn course_grades(vault: &Path) -> Vec<CourseGrade> {
+    let mut by_course: std::collections::BTreeMap<String, Vec<(GradeNote, GradeEntry)>> = Default::default();
+    for path in notes_in(&vault.join("grades")) {
+        let Some(meta) = crate::ids::read_meta(&path) else { continue };
+        if let Some((course, note, entry)) = read_grade_note(&meta) {
+            by_course.entry(course).or_default().push((note, entry));
+        }
+    }
+    if by_course.is_empty() {
+        return Vec::new();
+    }
+    let fetched = fetched_at(vault);
+    let mut courses: Vec<(String, String)> = notes_in(&vault.join("courses"))
+        .into_iter()
+        .filter_map(|path| {
+            let meta = crate::ids::read_meta(&path)?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            let slug = meta_text(&meta, "slug").unwrap_or(stem);
+            let title = meta_text(&meta, "title").unwrap_or_else(|| slug.clone());
+            Some((slug, title))
+        })
+        .collect();
+    courses.sort_by(|a, b| (a.1.to_lowercase(), &a.1, &a.0).cmp(&(b.1.to_lowercase(), &b.1, &b.0)));
+    courses
+        .into_iter()
+        .filter_map(|(slug, title)| {
+            let pairs = by_course.remove(&slug)?;
+            if pairs.iter().all(|(n, _)| n.status == Status::Removed) {
+                return None;
+            }
+            let notes: Vec<GradeNote> = pairs.iter().map(|(n, _)| n.clone()).collect();
+            let standing = course_grade(&notes);
+            let mut shown: Vec<GradeEntry> = pairs
+                .into_iter()
+                .filter(|(n, _)| n.kind == Kind::Item && n.status != Status::Removed)
+                .map(|(_, e)| e)
+                .collect();
+            let key = |e: &GradeEntry| (e.status != Status::Graded.as_str(), e.due.is_none(), e.due.clone(), e.title.clone());
+            shown.sort_by_key(key);
+            Some(CourseGrade {
+                course: slug,
+                title,
+                pct: standing.pct.map(crate::render::round2),
+                basis: standing.basis.as_str(),
+                letter: standing.letter,
+                family: standing.family.map(String::from),
+                earned: crate::render::round2(standing.earned),
+                possible: crate::render::round2(standing.possible),
+                graded: standing.graded,
+                items: standing.items,
+                pending: standing.pending,
+                fetched_at: fetched.clone(),
+                entries: shown,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
