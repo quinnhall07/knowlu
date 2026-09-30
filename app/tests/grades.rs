@@ -9,9 +9,18 @@
 //! Every row a test needs is built by `test_row` and nothing else — never by editing
 //! `scaffold::CAMPUSES` and never as a full `Curated` literal, so a field another lane adds to
 //! `Curated` needs no edit here.
-use knowlu::grades::{availability, Availability};
+//!
+//! **Task 5b: the pure pieces** — `grades.json`, the bundle's assembly from canned responses, paging,
+//! sign-in detection and the kept session's directory. Still no window and no network: every
+//! response here is canned JSON and every host is `lms.example.test`.
+use knowlu::grades::{
+    assemble_bundle, availability, forget, is_session_dir, next_page, read_list, session_dir, signed_in, Availability,
+    CaptureHead, CourseCalls, GradesPrefs, MAX_PAGES,
+};
 use knowlu::scaffold::{create_vault, Curated, VaultPlan, CAMPUSES};
-use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// The one place this file builds a curated row: a synthetic school (`unitid` and `lms_host` no real
 /// school uses), everything else from `CAMPUSES[0]`.
@@ -193,4 +202,232 @@ fn dates_and_the_anchor_must_be_iso_and_the_anchor_later_than_signing() {
 #[test]
 fn the_real_campuses_pass_the_date_and_bump_rule() {
     date_and_bump(&CAMPUSES, knowlu::account::PRIVACY_VERSION, PRIVACY_BUMP_1).unwrap();
+}
+
+// ---- `grades.json`, the preferences (spec §3) ------------------------------------------------
+
+/// `hidden` and nothing else — no LMS host, ever — written through `ledger::dumps_value`.
+#[test]
+fn grades_prefs_hold_hidden_only_and_round_trip_through_dumps_value() {
+    let d = temp("prefs");
+    assert_eq!(GradesPrefs::default(), GradesPrefs { hidden: false });
+    GradesPrefs { hidden: true }.save(&d).unwrap();
+    let text = std::fs::read_to_string(d.join("grades.json")).unwrap();
+    assert_eq!(text, knowlu_engine::ledger::dumps_value(&json!({ "hidden": true })));
+    assert_eq!(text, r#"{"hidden": true}"#);
+    assert_eq!(GradesPrefs::load(&d), GradesPrefs { hidden: true });
+    GradesPrefs { hidden: false }.save(&d).unwrap();
+    assert_eq!(GradesPrefs::load(&d), GradesPrefs { hidden: false });
+    assert!(!d.join("settings.json").exists(), "grades.json sits beside settings.json, never in it");
+}
+
+#[test]
+fn a_missing_or_corrupt_grades_json_is_not_hidden_and_never_touches_settings() {
+    let d = temp("prefs-bad");
+    std::fs::write(d.join("settings.json"), "SETTINGS, UNTOUCHED").unwrap();
+    assert_eq!(GradesPrefs::load(&d), GradesPrefs { hidden: false }, "missing");
+    for bad in ["", "{", "[]", "null", r#"{"hidden": "yes"}"#, r#"{"shown": true}"#] {
+        std::fs::write(d.join("grades.json"), bad).unwrap();
+        assert_eq!(GradesPrefs::load(&d), GradesPrefs { hidden: false }, "{bad:?}");
+    }
+    GradesPrefs { hidden: true }.save(&d).unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("settings.json")).unwrap(), "SETTINGS, UNTOUCHED");
+}
+
+// ---- the capture bundle (spec §5), from canned responses -------------------------------------
+
+const HOST: &str = "lms.example.test";
+
+/// One page of a Blackboard list, verbatim in shape: `results`, and `paging.nextPage` while more
+/// pages remain.
+fn page(results: Value, next: Option<&str>) -> Value {
+    match next {
+        Some(n) => json!({ "results": results, "paging": { "nextPage": n } }),
+        None => json!({ "results": results }),
+    }
+}
+
+fn membership(course_id: &str, available: &str) -> Value {
+    json!({ "userId": "_900001_1", "courseId": course_id, "availability": { "available": available },
+            "course": { "id": course_id, "courseId": format!("SYN-{course_id}"), "name": "Synthetic" } })
+}
+
+fn head() -> CaptureHead<'static> {
+    CaptureHead { lms: "blackboard", host: HOST, fetched_at: "2026-09-29T14:02:11Z" }
+}
+
+#[test]
+fn assemble_bundle_produces_the_spec_shape_merging_pages_and_skipping_unavailable_memberships() {
+    let user = json!({ "id": "_900001_1", "userName": "synthetic" });
+    let (m1, m2, m3) = (membership("_1_1", "Yes"), membership("_2_1", "No"), membership("_3_1", "Yes"));
+    let memberships = vec![page(json!([m1, m2]), Some("/learn/api/public/v1/users/me/courses?offset=2")), page(json!([m3]), None)];
+    let (c1, c2, c3) = (json!({ "id": "_c1_1", "name": "HW 1" }), json!({ "id": "_c2_1" }), json!({ "id": "_c3_1" }));
+    let (g1, g2) = (json!({ "columnId": "_c1_1", "score": 18.0 }), json!({ "columnId": "_c3_1", "score": 7.0 }));
+    let cat = json!({ "id": "_k1_1", "title": "Homework" });
+    let mut per_course = BTreeMap::new();
+    per_course.insert(
+        "_1_1".to_string(),
+        CourseCalls {
+            columns: Ok(vec![page(json!([c1, c2]), Some("/next")), page(json!([c3]), None)]),
+            grades: Ok(vec![page(json!([g1]), Some("/next")), page(json!([g2]), None)]),
+            categories: Ok(vec![page(json!([cat]), None)]),
+        },
+    );
+    // A refused category list only drops the grouping: `categories` is null, never an error.
+    per_course.insert(
+        "_3_1".to_string(),
+        CourseCalls { columns: Ok(vec![page(json!([]), None)]), grades: Ok(vec![page(json!([]), None)]), categories: Err("403".into()) },
+    );
+    let b = assemble_bundle(&head(), &user, &memberships, &per_course).unwrap();
+    let course = |m: &Value, cols: Value, grades: Value, cats: Value| {
+        json!({ "membership": m, "columns": cols, "grades": grades, "categories": cats, "error": null })
+    };
+    assert_eq!(
+        b,
+        json!({ "schema": 1, "lms": "blackboard", "host": HOST, "fetched_at": "2026-09-29T14:02:11Z", "user_id": "_900001_1",
+                "courses": [ course(&m1, json!([c1, c2, c3]), json!([g1, g2]), json!([cat])),
+                             course(&m3, json!([]), json!([]), Value::Null) ] })
+    );
+    // The engine reads exactly what the app writes.
+    let parsed: knowlu_engine::grades::Bundle = serde_json::from_value(b).unwrap();
+    assert_eq!(parsed.courses.len(), 2);
+}
+
+/// A course whose calls failed carries `"error": "<status or reason>"` and empty arrays; the others
+/// are untouched. An available membership nobody captured is named the same way, never dropped.
+#[test]
+fn a_failed_course_records_its_error_and_empty_arrays() {
+    let user = json!({ "id": "_900001_1" });
+    let ms = vec![page(json!([membership("_1_1", "Yes"), membership("_2_1", "Yes"), membership("_3_1", "Yes"), membership("_4_1", "Yes")]), None)];
+    let ok = || Ok(vec![page(json!([{ "id": "_c_1" }]), None)]);
+    let mut per_course = BTreeMap::new();
+    per_course.insert("_1_1".to_string(), CourseCalls { columns: Err("500".into()), grades: ok(), categories: ok() });
+    per_course.insert("_2_1".to_string(), CourseCalls { columns: ok(), grades: Err("unreachable".into()), categories: ok() });
+    // A page that is not a list is unreadable, whichever call it came from.
+    per_course.insert("_3_1".to_string(), CourseCalls { columns: Ok(vec![json!({ "oops": true })]), grades: ok(), categories: ok() });
+    let b = assemble_bundle(&head(), &user, &ms, &per_course).unwrap();
+    let errors: Vec<&Value> = b["courses"].as_array().unwrap().iter().map(|c| &c["error"]).collect();
+    assert_eq!(errors, [&json!("500"), &json!("unreachable"), &json!("unreadable"), &json!("not captured")]);
+    for c in b["courses"].as_array().unwrap() {
+        assert_eq!((&c["columns"], &c["grades"], &c["categories"]), (&json!([]), &json!([]), &Value::Null), "{c}");
+    }
+}
+
+#[test]
+fn a_bundle_needs_a_user_id_and_readable_memberships() {
+    let ms = vec![page(json!([]), None)];
+    assert!(assemble_bundle(&head(), &json!({}), &ms, &BTreeMap::new()).is_err(), "users/me without an id");
+    assert!(assemble_bundle(&head(), &json!({ "id": "_900001_1" }), &[json!({ "oops": 1 })], &BTreeMap::new()).is_err());
+    let empty = assemble_bundle(&head(), &json!({ "id": "_900001_1" }), &ms, &BTreeMap::new()).unwrap();
+    assert_eq!(empty["courses"], json!([]), "no enrolment is an empty bundle, not a failure");
+}
+
+// ---- paging (spec §3: every list to the end, 20 pages at most) -------------------------------
+
+#[test]
+fn next_page_follows_paging_next_page_only_on_the_same_host() {
+    let next = |n: Value| next_page(HOST, &json!({ "results": [], "paging": { "nextPage": n } }));
+    let path = "/learn/api/public/v1/users/me/courses?offset=100&expand=course";
+    assert_eq!(next(json!(path)), Some(format!("https://{HOST}{path}")), "Blackboard's relative nextPage");
+    assert_eq!(next(json!("https://lms.example.test/x?offset=2")), Some("https://lms.example.test/x?offset=2".into()));
+    assert_eq!(next(json!("https://LMS.Example.Test/x")), Some("https://LMS.Example.Test/x".into()), "hosts are case-blind");
+    assert_eq!(next_page(HOST, &json!({ "results": [] })), None, "the last page");
+    for foreign in [
+        json!(null), json!(""), json!(7),
+        json!("https://evil.example/x"), json!("http://lms.example.test/x"), json!("//evil.example/x"),
+        json!("https://lms.example.test.evil.example/x"), json!("https://lms.example.test@evil.example/x"),
+        json!("https://lms.example.test:8443/x"), json!("x?offset=2"), json!("/\\evil.example/x"),
+        json!("https://evil.example/?h=lms.example.test"), json!("/x y"), json!("/x\ny"),
+    ] {
+        assert_eq!(next(foreign.clone()), None, "{foreign}");
+    }
+}
+
+#[test]
+fn read_list_follows_pages_to_the_end_and_stops_at_twenty() {
+    assert_eq!(MAX_PAGES, 20);
+    // A runaway list: every page names another.
+    let mut calls = Vec::new();
+    let pages = read_list(HOST, "https://lms.example.test/a", |url: &str| {
+        calls.push(url.to_string());
+        Ok(page(json!([calls.len()]), Some(format!("/a?offset={}", calls.len()).as_str())).to_string())
+    })
+    .unwrap();
+    assert_eq!((calls.len(), pages.len()), (20, 20));
+    assert_eq!(calls[1], "https://lms.example.test/a?offset=1");
+    // A list that ends, and one whose nextPage points off the host, which is not followed.
+    let mut n = 0;
+    let three = read_list(HOST, "https://lms.example.test/a", |_: &str| {
+        n += 1;
+        Ok(page(json!([n]), (n < 3).then_some("/a?more")).to_string())
+    });
+    assert_eq!(three.unwrap().len(), 3);
+    let off_host = read_list(HOST, "https://lms.example.test/a", |_: &str| Ok(page(json!([]), Some("https://evil.example/a")).to_string()));
+    assert_eq!(off_host.unwrap().len(), 1);
+    // A failed call is its status; a body that is not JSON is unreadable.
+    assert_eq!(read_list(HOST, "https://lms.example.test/a", |_: &str| Err("403".into())), Err("403".to_string()));
+    assert_eq!(read_list(HOST, "https://lms.example.test/a", |_: &str| Ok("<html>".into())), Err("unreadable".to_string()));
+}
+
+// ---- sign-in detection (spec §15, default 1) -------------------------------------------------
+
+#[test]
+fn signed_in_needs_the_window_on_the_lms_host_and_users_me_answering_200() {
+    let on = Some("https://lms.example.test/ultra/course");
+    assert!(signed_in(on, HOST, Some(200)));
+    assert!(!signed_in(Some("https://sso.example.test/login?next=lms.example.test"), HOST, Some(200)), "200 alone is not");
+    assert!(!signed_in(on, HOST, Some(401)), "the host alone is not");
+    assert!(!signed_in(on, HOST, Some(403)));
+    assert!(!signed_in(on, HOST, None), "users/me not asked or unreachable");
+    assert!(!signed_in(None, HOST, Some(200)), "no window");
+    assert!(!signed_in(Some("https://lms.example.test.evil.example/"), HOST, Some(200)));
+    assert!(!signed_in(Some("http://lms.example.test/"), HOST, Some(200)));
+}
+
+// ---- the kept session's directory (spec §4) --------------------------------------------------
+
+#[test]
+fn session_dir_is_lms_session_in_the_profile_and_is_session_dir_refuses_anything_else() {
+    let d = temp("session");
+    assert_eq!(session_dir(&d), d.join("lms-session"));
+    assert!(is_session_dir(&d, &session_dir(&d)));
+    let other = temp("session-other");
+    for wrong in [
+        d.clone(), d.parent().unwrap().to_path_buf(), d.join("lms-session").join("Default"), d.join("lms-session-2"),
+        d.join("LMS-SESSION"), d.join("lms-session").join("..").join("lms-session"), other.join("lms-session"),
+    ] {
+        assert!(!is_session_dir(&d, &wrong), "{}", wrong.display());
+    }
+    assert!(!is_session_dir(Path::new("relative"), &session_dir(Path::new("relative"))), "a relative profile is refused");
+}
+
+#[test]
+fn forget_deletes_only_the_session_directory() {
+    let d = temp("forget");
+    std::fs::create_dir_all(d.join("lms-session").join("Default").join("Network")).unwrap();
+    std::fs::write(d.join("lms-session").join("Default").join("Network").join("Cookies"), "synthetic").unwrap();
+    std::fs::write(d.join("settings.json"), "{}").unwrap();
+    std::fs::write(d.join("grades.json"), r#"{"hidden": true}"#).unwrap();
+    std::fs::create_dir_all(d.join("lms-session-keep")).unwrap();
+    assert!(forget(&d));
+    assert!(!d.join("lms-session").exists());
+    for kept in ["settings.json", "grades.json", "lms-session-keep"] {
+        assert!(d.join(kept).exists(), "{kept} survives forget");
+    }
+    assert!(forget(&d), "nothing to forget is done, not a failure");
+    assert!(!forget(Path::new("relative")), "a relative profile is refused");
+}
+
+// ---- the capability file (spec §4) -----------------------------------------------------------
+
+/// `lms-grades` has no capability grant, like `lms-signin`: the console window is the only window
+/// named, so neither a label nor a glob can reach the Blackboard window.
+#[test]
+fn the_capability_file_never_names_the_grades_window() {
+    assert_eq!(knowlu::grades::WINDOW, "lms-grades");
+    let text = std::fs::read_to_string("capabilities/default.json").unwrap();
+    assert!(!text.contains(knowlu::grades::WINDOW), "capabilities/default.json names lms-grades");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["windows"], json!(["main"]));
+    assert!(v.get("webviews").is_none());
 }
