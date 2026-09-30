@@ -376,9 +376,13 @@ pub fn run_lines_with(
     // the batch. Asked once before the loop, the whole run then reports one honest outcome
     // (`Missing::Service`, which becomes `Outcome::ServiceUnavailable` and logs as
     // `service unavailable`) instead of fifty `model failed` lines — ruling R-3a-20's point, at
-    // the boundary a cloud judge adds. Every other failure (a 429, a 5xx, a dropped connection)
-    // stays per-item, because the next item genuinely may succeed.
-    let probe = model.probe();
+    // the boundary a cloud judge adds. A 429 or a 5xx stays per-item, because the next item
+    // genuinely may succeed. A probe that fails in TRANSPORT ends the arm's network passes (Q1
+    // (a′), as Quinn's PQ1 answer (i) of 2026-09-30 reads it): tier 1 is still written with the
+    // service marked missing, one `judge: skipped (no network (…))` line leads, and no events,
+    // Gmail, rule or label pass runs — so an offline slot costs one `CALL_TIMEOUT`, not four. The
+    // cost: a one-off blip on the probe loses the slot's network passes to the next slot.
+    let probe = model.probe_outcome();
     // C2 final review E-1: `enrich_with` starts its OWN clock (`batch_started`), so before this it
     // was handed a full `opts.budget` no matter how much of the slot the probe had already spent —
     // and on a network that black-holes rather than refuses, the probe alone can cost a whole
@@ -387,7 +391,14 @@ pub fn run_lines_with(
     // ones before it spent. The sum is what has to fit inside `scheduler::CHILD_TIMEOUT`.
     let arm_opts = Options { budget: opts.budget.saturating_sub(arm_started.elapsed()), ..*opts };
     match probe {
-        Some(reason) => {
+        crate::cloudmodel::ProbeOutcome::Transport(e) => {
+            // The path `run_lines` takes for a missing session: tier 1 needs no network, so it is
+            // still written, and the service is named once. `e`'s text is scrubbed of the bearer.
+            let (code, mut lines) = enrich_with(vault, &arm_opts, Err(judge::Missing::Service(e.label())));
+            lines.insert(0, format!("judge: skipped ({e})"));
+            (code, lines)
+        }
+        crate::cloudmodel::ProbeOutcome::Fatal(reason) => {
             // Exactly one line: `probe()` already set `model.fatal()` to this same reason, so the
             // `if let Some(reason) = model.fatal()` line below — which exists for a batch that
             // turned fatal partway through — must not also fire here, or the run would print two
@@ -397,7 +408,7 @@ pub fn run_lines_with(
             lines.insert(0, format!("judge: the service answered {reason}; nothing was sent"));
             (code, lines)
         }
-        None => {
+        crate::cloudmodel::ProbeOutcome::Clear => {
             let (code, mut lines) = enrich_with(vault, &arm_opts, Ok(&model));
 
             // C2 Task 9 — the events pass. Runs whenever at least one event source is enabled,
@@ -1884,6 +1895,67 @@ mod tests {
         let (code, lines) = run_lines_with(&v, &opts, Some(&client));
         assert_eq!(code, 0, "the judge step always exits 0");
         assert!(lines.iter().any(|l| l.contains("no network")), "{lines:?}");
+        // Q1 (a′), PQ1 (i): the transport stop ends the network passes, never tier 1.
+        let meta = meta_of(&v, "hw3.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "course")).as_deref(), Some("cs-100"), "tier 1 answered");
+        assert_eq!(crate::yaml::get(&meta, "needs_enrichment"), Some(&serde_yaml_ng::Value::Bool(true)), "still owed");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Q1 (a′) as PQ1 (i) answers it (spec §4.3, §8.2 item 9): a probe that fails in transport
+    /// ends the cloud arm's network passes. The listener is bound and then dropped, so the
+    /// connection is refused locally (no egress). A bare vault prints the one skipped line and
+    /// tier 1's `judge: nothing to enrich`, and no events, Gmail, rule or label pass runs.
+    #[test]
+    fn a_transport_failed_probe_ends_the_arm_with_one_named_line() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("probe-transport");
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let client = client_for(format!("http://127.0.0.1:{port}/functions/v1"));
+        let (code, lines) = run_lines_with(&v, &opts(&v.join("_log")), Some(&client));
+        assert_eq!(code, 0, "{lines:?}");
+        assert!(lines[0].starts_with("judge: skipped (no network ("), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("gmail:") || l.starts_with("rules:") || l.starts_with("labels:")),
+            "no further pass runs: {lines:?}"
+        );
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], "judge: nothing to enrich", "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("jwt-not-a-secret")), "the token never prints: {lines:?}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Q1 (a′) guard: a 503 on the probe is not transport, so the arm runs as it does today — the
+    /// probe, the Gmail pull and the rule pull are all made.
+    #[test]
+    fn a_probe_answered_503_still_runs_the_arm() {
+        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
+        let v = vault("probe-503");
+        crate::pystr::write_text(
+            &v.join("tasks").join("hw3.md"),
+            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
+        ).unwrap();
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
+        let (client, mut server) = loopback_client(vec![
+            (503, "{}".to_string()),
+            (200, no_scope),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
+        let (code, lines) = run_lines_with(&v, &opts(&v.join("_log")), Some(&client));
+        assert_eq!(code, 0, "{lines:?}");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3, "the probe, the pull, the rule pull: {requests:?}");
+        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
+        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
