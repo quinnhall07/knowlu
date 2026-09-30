@@ -673,6 +673,111 @@ pub fn append_body(
     append_body_line(&path, line)
 }
 
+// ---------------------------------------------------------------------------
+// Body replace (M2 §6.1, §7.1)
+// ---------------------------------------------------------------------------
+
+const UNCLOSED: &str = "the frontmatter has no closing line";
+const SPACED: &str = "the frontmatter's closing line is not exactly ---";
+
+/// M2 D6, **the one normaliser**: `read_text`'s line endings (`\r\n` and a lone `\r` become `\n`),
+/// leading and trailing newlines trimmed, one final `\n` when anything is left. The compare-and-swap
+/// and the write both use it, so the drawer, the hash and the file agree on one string.
+fn normalise_body(raw: &str) -> String {
+    let text = pystr::universal_newlines(raw);
+    let trimmed = text.trim_matches('\n');
+    if trimmed.is_empty() { String::new() } else { format!("{trimmed}\n") }
+}
+
+/// M2 §6.1: `(head, run, body)` of a note's text as `read_text` gives it. `head` runs through the
+/// closing fence's three dashes, `run` is the newlines after them (the fence's own line ending
+/// included) and `body` is exactly what `split_frontmatter` returns, i.e. what `note_detail` shows. A
+/// text not starting `---` is all body. The closing line is the **reader's** (the first that is
+/// `---` once trailing whitespace is stripped), and it must also be the **writer's** (exactly `---`,
+/// `apply_frontmatter_fields_to_text`): where the two differ the body the drawer shows is not the
+/// text after the fence the surgery finds, so the note is refused, never guessed at.
+fn split_body(text: &str) -> Result<(&str, &str, &str), WriteError> {
+    if !text.starts_with("---") {
+        return Ok(("", "", text));
+    }
+    let mut start = text.find('\n').map(|i| i + 1).ok_or(WriteError::Body(UNCLOSED))?;
+    let close = loop {
+        if start >= text.len() {
+            return Err(WriteError::Body(UNCLOSED));
+        }
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        let line = &text[start..end];
+        if line.trim_end() == "---" {
+            if line != "---" {
+                return Err(WriteError::Body(SPACED));
+            }
+            break start + 3;
+        }
+        start = end + 1;
+    };
+    let rest = &text[close..];
+    let body = rest.trim_start_matches('\n');
+    Ok((&text[..close], &rest[..rest.len() - body.len()], body))
+}
+
+/// A body as a `set_body` record carries it (§6.2, D3): its digest and byte count, never its text.
+fn body_digest(body: &str) -> serde_json::Value {
+    serde_json::json!({"sha256": body_sha256(body), "bytes": body.len()})
+}
+
+/// M2 §7.1: replace a note's body, everything after its closing fence, and nothing before it. The
+/// head is carried over as text, never parsed and re-dumped. `expected` is the body the caller last
+/// read; `Ok(true)` when it wrote. Each refusal comes before the record, so it leaves the journal and
+/// the note untouched. **Journal first, file second**, like every write here.
+pub fn set_body(
+    vault: &Path,
+    target: &str,
+    expected: &str,
+    new_body: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
+    let path = resolve_target(vault, target)?;
+    let rel_path = rel(vault, &path);
+    let (text, meta) = load(&path, false)?;
+    let (head, run, current) = split_body(&text)?;
+    // D5, compare-and-swap on normalised bodies (equal strings, equal `body_sha256` digests), so a
+    // copy that differs from the file only by CRLF or a trailing newline is not a conflict.
+    if normalise_body(current) != normalise_body(expected) {
+        return Err(WriteError::Conflict(rel_path));
+    }
+    let new = normalise_body(new_body);
+    // D4's refusals, each by name.
+    if new.contains('\u{0}') {
+        return Err(WriteError::Body("the body contains a NUL character"));
+    }
+    if head.is_empty() && new.starts_with("---") {
+        return Err(WriteError::Body("a note without frontmatter cannot start with ---"));
+    }
+    // D6: the file's own run of newlines after the fence, or one blank line (the `create_task`
+    // shape) when the body was empty and there was none, so the fence always ends its line.
+    let run = if !head.is_empty() && current.is_empty() && run.len() < 2 { "\n\n" } else { run };
+    let out = format!("{head}{run}{new}");
+    // `sync` measures a note after `read_text`, which is `out` exactly: it holds no `\r`.
+    if out.len() > crate::sync::MAX_NOTE_BYTES {
+        return Err(WriteError::Body("the note would be too large to sync"));
+    }
+
+    let note_id = get_str(&meta, "id").filter(|s| is_id(s));
+    let mut spec = NewRecord::new("set_body", &rel_path, &ctx.actor, &ctx.via);
+    spec.id = note_id.as_deref();
+    spec.old = body_digest(current);
+    spec.new = body_digest(&new);
+    spec.run_id = ctx.run_id.as_deref();
+    let mut record = make_record(spec).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- journal first ----
+    journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- note second ----
+    pystr::write_text(&path, &out).map_err(|e| WriteError::Io(e.to_string()))?;
+    Ok(true)
+}
+
 /// An already-pending `kind: amend` proposal for the same target and the same **set of fields**.
 ///
 /// Matched on the field-name set, not the values: a re-judgement that moved `due` again is still
@@ -2019,5 +2124,245 @@ mod tests {
         let multi = WriteError::MultiLine("strong".into()).to_string();
         assert!(multi.contains("Knowlu can only edit a list written on one line"), "{multi}");
         assert!(multi.contains("strong"), "{multi}");
+    }
+
+    // -- M2: set_body (T1a.2) ------------------------------------------------
+
+    /// A vault made after ruling 11 and its human's context. The token comes from the constant,
+    /// never a literal (plan §5), so these tests hold on both sides of the token.
+    fn human_ctx(v: &Path) -> WriteContext {
+        crate::journal::create_actor_file(v, crate::journal::HUMAN_ACTOR).unwrap();
+        WriteContext::new(crate::journal::HUMAN_ACTOR, "dashboard")
+    }
+
+    /// The body as the drawer shows it: `surface::note_detail`'s, which is the reader's split.
+    fn shown_body(path: &Path) -> String {
+        split_frontmatter(&pystr::read_text(path).unwrap()).unwrap().1
+    }
+
+    fn body_records(j: &mut Journal) -> Vec<Record> {
+        j.read(None, None).into_iter().filter(|r| r["op"] == "set_body").collect()
+    }
+
+    #[test]
+    fn set_body_replaces_only_the_body_and_keeps_the_head_bytes() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let head = "---\ntitle: \"Stats HW 4\"\nstatus: active\njudgment: {by: \"agent:knowlu.enrich\", at: \"2026-09-29T10:00:00Z\", fields: [effort_hours]}\nid: task_0123456789\n---\n";
+        let path = v.join("tasks").join("a.md");
+        // `write_text` writes the platform newline, so on Windows this is a CRLF note, as vaults are.
+        pystr::write_text(&path, &format!("{head}\nOld notes.\n")).unwrap();
+        let head_bytes = head.replace('\n', pystr::NEWLINE).into_bytes();
+        assert!(std::fs::read(&path).unwrap().starts_with(&head_bytes));
+        let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        let mut j = Journal::new(&v);
+
+        let wrote = set_body(&v, "task_0123456789", "Old notes.\n", "Read ch. 4\r\nthen pp. 12-14", &ctx, &mut j).unwrap();
+        assert!(wrote);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(&after[..head_bytes.len()], &head_bytes[..], "the head, through the fence's line ending, is byte-identical");
+        let (meta_after, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        assert_eq!(meta_after, meta);
+        assert_eq!(body, "Read ch. 4\nthen pp. 12-14\n", "the body reads back as the normalised new body");
+        assert_eq!(pystr::read_text(&path).unwrap(), format!("{head}\nRead ch. 4\nthen pp. 12-14\n"), "the blank line after the fence is kept");
+        assert_eq!(body_records(&mut j).len(), 1);
+    }
+
+    #[test]
+    fn set_body_journals_before_it_writes() {
+        // Mirrors `the_journal_record_is_written_before_the_note`: the file write fails (the note is
+        // read-only, which every earlier step tolerates), and the record is already in the journal.
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let before = std::fs::read(&path).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms.clone()).unwrap();
+        let mut j = Journal::new(&v);
+        let res = set_body(&v, "tasks/a.md", "Body text.\n", "New text.\n", &ctx, &mut j);
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        assert!(matches!(res, Err(WriteError::Io(_))), "the file write must fail for this test to mean anything: {res:?}");
+        assert_eq!(body_records(&mut j).len(), 1, "journal-first was violated");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the note is unchanged");
+    }
+
+    #[test]
+    fn set_body_refuses_a_stale_expected_body() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let read = shown_body(&path);
+        // An agent appends a line after the drawer read the body, so the drawer's copy is stale.
+        let mut j = Journal::new(&v);
+        append_body(&v, "tasks/a.md", "an agent's line", &WriteContext::new("agent:knowlu.enrich", "local-runner"), &mut j).unwrap();
+        let before = fingerprint(&v);
+
+        let err = set_body(&v, "tasks/a.md", &read, "Mine.\n", &ctx, &mut j).unwrap_err();
+        assert_eq!(err, WriteError::Conflict("tasks/a.md".into()));
+        assert!(body_records(&mut j).is_empty(), "no record");
+        assert_eq!(fingerprint(&v), before, "the journal and the note are byte-identical");
+    }
+
+    #[test]
+    fn a_body_holding_a_dash_rule_keeps_the_frontmatter() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        let mut j = Journal::new(&v);
+        let new = "---\nPart one\n---\n--- \ntitle: not a field\n---\n";
+
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", new, &ctx, &mut j).unwrap());
+        let (meta_after, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        assert_eq!(meta_after, meta, "the frontmatter mapping is unchanged");
+        assert_eq!(body, new, "the body reads back whole");
+        // ...and the note still takes a second body edit and a field edit.
+        assert!(set_body(&v, "tasks/a.md", new, "After.\n", &ctx, &mut j).unwrap());
+        write_literals(&v, "tasks/a.md", &lit(&[("status", "\"done\"")]), &ctx, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(shown_body(&path), "After.\n");
+        assert_eq!(get_str(&split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap().0, "status").as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn set_body_on_a_file_without_frontmatter_replaces_the_whole_text() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        std::fs::create_dir_all(v.join("profile")).unwrap();
+        let path = v.join("profile").join("preferences.md");
+        pystr::write_text(&path, "\nMornings are best.\n\nNo work after 9pm.\n").unwrap();
+        let mut j = Journal::new(&v);
+
+        assert!(set_body(&v, "profile/preferences.md", &shown_body(&path), "Evenings now.\r\n\r\n", &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&path).unwrap(), "Evenings now.\n", "the whole text is the body");
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], serde_json::Value::Null, "a file with no id records a null id");
+
+        // A first line starting `---` would turn the body into frontmatter on the next read.
+        let before = fingerprint(&v);
+        for new in ["---\nstrong: [x]\n---\n", "\n\n---", "--- not a rule"] {
+            let err = set_body(&v, "profile/preferences.md", "Evenings now.\n", new, &ctx, &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Body(_)), "{new:?}: {err}");
+        }
+        assert_eq!(fingerprint(&v), before, "refused before any record");
+    }
+
+    #[test]
+    fn set_body_refuses_an_unclosed_fence_and_a_space_trailed_one() {
+        let unclosed = "the frontmatter has no closing line";
+        let spaced = "the frontmatter's closing line is not exactly ---";
+        for (text, why) in [
+            ("---\nid: task_0123456789\n\nno closing line\n", unclosed),
+            ("---", unclosed),
+            ("---\nid: task_0123456789\n--- \n\nBody\n", spaced),
+            // The reader closes on `---\t`; the writer would close on the body's rule below it.
+            ("---\nid: task_0123456789\n---\t\nBody\n---\nMore\n", spaced),
+        ] {
+            let v = vault();
+            let ctx = human_ctx(&v);
+            let path = v.join("tasks").join("a.md");
+            pystr::write_text(&path, text).unwrap();
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = set_body(&v, "tasks/a.md", &shown_body(&path), "New.\n", &ctx, &mut j).unwrap_err();
+            assert_eq!(err, WriteError::Body(why), "{text:?}");
+            assert_eq!(fingerprint(&v), before, "{text:?}: nothing journalled or written");
+        }
+    }
+
+    #[test]
+    fn set_body_refuses_nul_and_a_note_over_the_sync_limit() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let before = fingerprint(&v);
+        let mut j = Journal::new(&v);
+        let limit = crate::sync::MAX_NOTE_BYTES;
+        // Everything but the body, as `sync` measures a note (after `read_text`).
+        let head = NOTE.len() - "Body text.\n".len();
+        let over = format!("{}\n", "x".repeat(limit - head));
+        for (new, why) in [
+            ("a\u{0}b", "the body contains a NUL character"),
+            (over.as_str(), "the note would be too large to sync"),
+        ] {
+            let err = set_body(&v, "tasks/a.md", "Body text.\n", new, &ctx, &mut j).unwrap_err();
+            assert_eq!(err, WriteError::Body(why));
+        }
+        assert_eq!(fingerprint(&v), before, "nothing journalled or written");
+        // Exactly the limit is sendable, so it is written.
+        let at = format!("{}\n", "x".repeat(limit - head - 1));
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", &at, &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&path).unwrap().len(), limit);
+    }
+
+    #[test]
+    fn set_body_normalises_by_d6() {
+        for (raw, want) in [
+            ("", ""),
+            ("\n\r\n\r", ""),
+            ("a", "a\n"),
+            ("a\r\nb\rc\n\n\n", "a\nb\nc\n"),
+            ("\n\n  indented\n", "  indented\n"),
+            ("x\n  \n", "x\n  \n"),
+            // Not a newline to `read_text`, so not one here: the drawer and the hash must agree.
+            ("one\u{2028}line", "one\u{2028}line\n"),
+        ] {
+            assert_eq!(normalise_body(raw), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn set_body_takes_the_human_gate() {
+        use crate::journal::{HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        for (file, actor) in [
+            (Some("human_actor: alice\n".to_string()), HUMAN_ACTOR),
+            (Some(format!("human_actor: {HUMAN_ACTOR}\n")), LEGACY_HUMAN_ACTOR),
+            (None, HUMAN_ACTOR),
+        ] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = &file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = set_body(&v, "tasks/a.md", "Body text.\n", "New.\n", &WriteContext::new(actor, "dashboard"), &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Actor(_)), "{actor} with {file:?}: {err}");
+            assert_eq!(fingerprint(&v), before, "{actor} with {file:?}: nothing journalled or written");
+        }
+        // An agent is never gated, whatever the file says.
+        let v = vault();
+        let path = seed(&v);
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "Agent notes.\n", &agent, &mut j).unwrap());
+        assert_eq!(body_records(&mut j)[0]["actor"], "agent:knowlu.enrich");
+        assert_eq!(shown_body(&path), "Agent notes.\n");
+    }
+
+    /// D6's parenthesis: an empty body with no blank line after the fence (or no line ending at all)
+    /// gets the `create_task` shape, so the fence still ends its line; a note with a body keeps its
+    /// own run of newlines.
+    #[test]
+    fn set_body_keeps_the_fence_a_whole_line_and_the_notes_own_separator() {
+        let fm = "---\nid: task_0123456789\n---";
+        for (text, want) in [
+            (fm.to_string(), format!("{fm}\n\nNew\n")),
+            (format!("{fm}\n"), format!("{fm}\n\nNew\n")),
+            (format!("{fm}\n\n\n"), format!("{fm}\n\n\nNew\n")),
+            (format!("{fm}\nOld\n"), format!("{fm}\nNew\n")),
+            (format!("{fm}\n\n\nOld\n"), format!("{fm}\n\n\nNew\n")),
+        ] {
+            let v = vault();
+            let ctx = human_ctx(&v);
+            let path = v.join("tasks").join("a.md");
+            pystr::write_text(&path, &text).unwrap();
+            let mut j = Journal::new(&v);
+            assert!(set_body(&v, "tasks/a.md", &shown_body(&path), "New", &ctx, &mut j).unwrap(), "{text:?}");
+            assert_eq!(pystr::read_text(&path).unwrap(), want, "{text:?}");
+            assert_eq!(shown_body(&path), "New\n", "{text:?}");
+        }
     }
 }
