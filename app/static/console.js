@@ -1001,7 +1001,7 @@
     d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
   }
   function refreshGradesDrawer() {
-    var d = EL("drawer"), open = d && !d.hidden ? d.getAttribute("data-grades-open") : null;
+    var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
     if (open) { openGradesDrawer(open); }
   }
   function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
@@ -1212,7 +1212,7 @@
   function openDrawer(id) {
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
-      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); return; }
+      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
       var n = env.note, fm = n.frontmatter || {}, dl = "", title = fm.title || n.slug;
       Object.keys(fm).sort().forEach(function (k) {
         var val = typeof fm[k] === "object" ? JSON.stringify(fm[k]) : fm[k];
@@ -1227,7 +1227,7 @@
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
-      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || "");
+      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
       d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
     });
   }

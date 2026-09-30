@@ -1924,3 +1924,15 @@ fn the_grades_buttons_and_the_settings_row_are_in_the_page() {
     let css = read("console.css");
     assert!(css.contains(".grades") && css.contains(".ring"), "the strip is styled");
 }
+
+#[test]
+fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
+    // The one #drawer is shared: the breakdown's open marker must not outlive the breakdown.
+    let refresh = grades_fn("refreshGradesDrawer");
+    assert!(refresh.contains("getAttribute(\"data-kind\") === \"grades\""), "a repaint only rebuilds a drawer that is the breakdown: {refresh}");
+    let js = read("console.js");
+    let at = js.find("function openDrawer(").expect("openDrawer");
+    let rest = &js[at + 1..];
+    let body = &js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
+    assert!(body.matches("removeAttribute(\"data-grades-open\")").count() >= 2, "openDrawer clears the marker on both its found and not-found paths: {body}");
+}
