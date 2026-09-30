@@ -309,8 +309,8 @@ checklist. This section lists what it will need beyond that row as written.
   uploads note text. Two more sentences are pending before a release: #14's recurring-series read,
   and M1's grades line once it lands. `PRIVACY_VERSION` moves only in a release PR.
 - **Proofs.** The §6 smokes, repeated on prod. Then prod's `jwt_expiry` confirmed at 3600, a slot
-  and *Sync now* run more than an hour after the last refresh, and the two-desktop live proof (§4's
-  row, item 5).
+  and *Sync now* run more than an hour after the last refresh. The two-desktop live proof is
+  Launch's, not parity's (ruling 10).
 - **Then** the release tag carrying F8 and P21, on Quinn's word.
 
 ## 10. Recording the run
