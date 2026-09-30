@@ -835,7 +835,7 @@ pub fn create_profile_file(
 /// `\n`) continue past its own line, so that the one-line surgery (`apply_frontmatter_fields_to_text`)
 /// would replace its first line and orphan the rest? The frontmatter is found by the writer's fence
 /// rule: it opens with `---` and closes on the first later line exactly `---`. A text with none has
-/// no value to continue, and the surgery refuses it by its own name.
+/// no value to continue, and [`write_one_line_literals`] refuses it by name before any record.
 ///
 /// True when the key's line (the first starting `key:`, as the surgery finds it) is followed by a
 /// non-blank line before the next line that starts at column 0 with a character other than `-`, `#`
@@ -886,10 +886,22 @@ pub fn value_spans_lines(text: &str, key: &str) -> bool {
     alone.as_ref() != crate::yaml::get(&meta, key)
 }
 
-/// M2 D10, §7.2: [`write_literals`] for lists written on one line. It reads the note once and, when
-/// [`value_spans_lines`] is true for any key in `literals` (one that would not change included),
-/// refuses with `MultiLine(key)` before any record: the surgery replaces one line and would orphan
-/// the rest. Otherwise it is exactly `write_literals`, which does not change.
+/// The writer's fence rule (`ingest::apply_frontmatter_fields_to_text`): `text`, its newlines
+/// already universal, opens with `---` and has a later line exactly `---`.
+fn has_writer_frontmatter(text: &str) -> bool {
+    text.starts_with("---") && text.split('\n').skip(1).any(|line| line == "---")
+}
+
+/// M2 D10, §7.2: [`write_literals`] for lists written on one line. It reads the note once and
+/// refuses before any record: with `NoFrontmatter(path)` when the file has no frontmatter by the
+/// writer's fence rule, and with `MultiLine(key)` when [`value_spans_lines`] is true for any key in
+/// `literals` (one that would not change included), since the surgery replaces one line and would
+/// orphan the rest. Otherwise it is exactly `write_literals`, which does not change.
+///
+/// The first refusal is its own because `write_literals` reads a file with no frontmatter (prose,
+/// an unclosed fence, a BOM before the fence) as an empty mapping, as the reader does, journals a
+/// record per key, and only then does the surgery refuse: records that name no id, so `verify_tail`
+/// cannot heal them, and every retry would add more.
 pub fn write_one_line_literals(
     vault: &Path,
     target: &str,
@@ -901,6 +913,9 @@ pub fn write_one_line_literals(
     human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let text = pystr::read_text(&path).map_err(|e| WriteError::Io(e.to_string()))?;
+    if !has_writer_frontmatter(&text) {
+        return Err(WriteError::NoFrontmatter(rel(vault, &path)));
+    }
     if let Some((key, _)) = literals.iter().find(|(key, _)| value_spans_lines(&text, key)) {
         return Err(WriteError::MultiLine(key.clone()));
     }
@@ -2760,6 +2775,26 @@ mod tests {
             assert_eq!(fingerprint(&v), before, "{why}: no record, and the bytes are left alone");
         }
 
+        // No frontmatter by the writer's fence rule: the reader reads four empty lists, so no key
+        // spans lines, yet `write_literals` would journal a record per key before the surgery refused
+        // (records with no id, which `verify_tail` cannot heal). Refused by name before any record.
+        for (why, text) in [
+            ("prose, which the event filter reads", "I like AI talks.\n"),
+            ("an unclosed fence", "---\nstrong: [a]\n"),
+            ("a BOM before the fence", "\u{feff}---\nstrong: [a]\nmild: []\nnever: []\nclubs: []\n---\n"),
+            ("only a spaced closing line", "---\nstrong: [a]\nmild: []\n--- \n"),
+        ] {
+            let v = vault();
+            let (_, ctx) = interests_vault(&v, text);
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            for _ in 0..2 {
+                let err = write_one_line_literals(&v, "profile/interests.md", &four(["[x]", "[y]", "[z]", "[w]"]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+                assert_eq!(err, WriteError::NoFrontmatter("profile/interests.md".to_string()), "{why}");
+            }
+            assert_eq!(fingerprint(&v), before, "{why}: no record on any retry, and the bytes are left alone");
+        }
+
         // A one-line or absent key is exactly `write_literals`: the same bytes and the same records
         // on a copy of the same file. `clubs` is absent, `mild` does not change, the body is kept.
         let text = "---\nstrong: [research]\nmild: []\n\nnever: []  # none yet\n---\n\nMy own notes.\n";
@@ -2856,7 +2891,7 @@ mod tests {
             ("an absent key", "---\nmild: []\n---\n"),
             ("a longer key sharing the prefix", "---\nstrongest:\n  - x\nstrong: [a]\n---\n"),
             ("list lines in the body", "---\nmild: []\n---\nstrong:\n  - x\n"),
-            ("no frontmatter: the surgery refuses the file by its own name", "Mornings.\nstrong:\n  - x\n"),
+            ("no frontmatter: write_one_line_literals refuses the file by name", "Mornings.\nstrong:\n  - x\n"),
         ]
         .map(|(why, text)| (why.to_string(), text, "strong"))
         .into();
