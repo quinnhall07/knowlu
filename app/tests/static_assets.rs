@@ -606,6 +606,10 @@ fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
     assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
     assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
     assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
+    assert!(panel.contains("Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings."), "the plan's what-it-does sentence");
+    assert_eq!(panel.matches("read your").count(), 1, "one what-it-does sentence");
+    assert!(js.contains("WIZ.gmailNote = \"Gmail is connected.\";"), "the plan's success note");
+    assert!(js.contains("WIZ.gmailNote = GOOGLE_TIMEOUT;"), "the Settings timeout sentence, unchanged");
     assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
     assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
     assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");

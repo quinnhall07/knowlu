@@ -2894,13 +2894,13 @@
       if (status.ok && status.gmail) {
         WIZ.gmail = true;
         WIZ.gmailPolling = false;
-        WIZ.gmailNote = "Gmail connected, read-only. Knowlu proposes what it finds; nothing is added without you.";
+        WIZ.gmailNote = "Gmail is connected.";
         renderWizard();
         return;
       }
     }
     WIZ.gmailPolling = false;
-    WIZ.gmailNote = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet. You can skip this and try again in Settings.";
+    WIZ.gmailNote = GOOGLE_TIMEOUT;
     renderWizard();
   });
 
