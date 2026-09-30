@@ -65,6 +65,9 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 - Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`, completion detection as
   `agent:knowlu.completion`, commitment cards as `agent:commitments`); `provenance::is_agent` is a
   `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
+- `config/actor.yaml` is written once at vault creation and accepts only `student` or `quinn`; the two
+  compare equal forever, and a bad value is a named error that stops human writes (ruling 11,
+  Amendment 2026-09-29).
 
 ## Command and app contracts
 
@@ -87,7 +90,7 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
   (`judge (skipped: no entitlement)`), never run-and-failed; a non-zero step means backoff and an
   amber tray.
 - `app/src/commands.rs` computes nothing; every vault write goes through the engine's `write` with
-  `console_ctx()`. A new Tauri command goes in the right `generate_handler!` list in `app/src/main.rs`
+  `console_ctx(vault)`. A new Tauri command goes in the right `generate_handler!` list in `app/src/main.rs`
   and beside the module it serves; recount before quoting a number.
 - Credentials the app writes are `knowlu/<profile_id>/<source>` in Credential Manager, the session JWT
   `knowlu/<profile_id>/session`; the engine's `wincred.rs` reads whatever `credential_target` the

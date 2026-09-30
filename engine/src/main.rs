@@ -78,8 +78,9 @@ enum Command {
         /// `{"mine": [{"source_uid", "level"}], "not_mine": [...], "window": "<flow sequence>"}`.
         #[arg(long)]
         confirm: Option<PathBuf>,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `--confirm` writes as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "dashboard", value_parser = journal::VIAS)]
         via: String,
     },
@@ -194,8 +195,9 @@ enum Command {
     Info {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `open`/`close` write as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli")]
         via: String,
         #[command(subcommand)]
@@ -205,8 +207,9 @@ enum Command {
     Issues {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `open`/`address` write as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli")]
         via: String,
         #[command(subcommand)]
@@ -216,8 +219,9 @@ enum Command {
     Write {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who the change is journalled as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli", value_parser = journal::VIAS)]
         via: String,
         #[arg(long = "run-id")]
@@ -238,7 +242,7 @@ enum WriteArgs {
         /// Apply the judge-once rule and write a provenance block.
         #[arg(long)]
         judged: bool,
-        /// File a `kind: amend` proposal instead of skipping a field Quinn set.
+        /// File a `kind: amend` proposal instead of skipping a field the student set.
         #[arg(long)]
         propose: bool,
         /// JSON mapping recorded in the judgment block.
@@ -281,8 +285,9 @@ enum InfoArgs {
         kind: String,
         #[arg(long, default_value = "")]
         body: String,
-        #[arg(long = "opened-by", default_value = "quinn")]
-        opened_by: String,
+        /// Default: the vault's human token (config/actor.yaml).
+        #[arg(long = "opened-by")]
+        opened_by: Option<String>,
         /// The exact key a later close signal will carry.
         #[arg(long = "close-key")]
         close_key: Option<String>,
@@ -296,8 +301,9 @@ enum InfoArgs {
         key: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        #[arg(long = "closed-by", default_value = "quinn")]
-        closed_by: String,
+        /// Default: the vault's human token (config/actor.yaml).
+        #[arg(long = "closed-by")]
+        closed_by: Option<String>,
     },
     /// Every open item.
     List,
@@ -466,6 +472,7 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
+                let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
                 let ctx = write::WriteContext::new(&actor, &via);
                 return match cli::commitments_confirm(&vault, today.as_deref(), &text, &ctx) {
                     Ok(report) => {
@@ -568,16 +575,30 @@ fn main() -> ExitCode {
             },
         },
         Command::Info { vault, actor, via, command } => {
+            // `list` only reads, so it never looks at `config/actor.yaml`.
+            let actor = match command {
+                InfoArgs::List => actor.unwrap_or_default(),
+                _ => match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code },
+            };
             let command = match command {
                 InfoArgs::Open { title, kind, body, opened_by, close_key, expires } => {
+                    let opened_by = match human_or_vaults(&vault, opened_by) { Ok(a) => a, Err(code) => return code };
                     InfoCommand::Open { title, kind, body, opened_by, close_key, expires }
                 }
-                InfoArgs::Close { key, id, closed_by } => InfoCommand::Close { key, id, closed_by },
+                InfoArgs::Close { key, id, closed_by } => {
+                    let closed_by = match human_or_vaults(&vault, closed_by) { Ok(a) => a, Err(code) => return code };
+                    InfoCommand::Close { key, id, closed_by }
+                }
                 InfoArgs::List => InfoCommand::List,
             };
             print_lines(info::cli(&vault, &actor, &via, &command))
         }
         Command::Issues { vault, actor, via, command } => {
+            // `list` only reads, so it never looks at `config/actor.yaml`.
+            let actor = match command {
+                IssueArgs::List { .. } => actor.unwrap_or_default(),
+                _ => match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code },
+            };
             let command = match command {
                 IssueArgs::Open { target, category, text } => {
                     IssueCommand::Open { target, categories: category, text }
@@ -590,6 +611,7 @@ fn main() -> ExitCode {
             print_lines(issues::cli(&vault, &actor, &via, &command))
         }
         Command::Write { vault, actor, via, run_id, command } => {
+            let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
             let command = match command {
                 WriteArgs::Set { target, pairs, judged, propose, inputs, evidence } => {
                     WriteCommand::Set { target, pairs, judged, propose, inputs, evidence }
@@ -601,6 +623,21 @@ fn main() -> ExitCode {
             };
             print_lines(write::cli(&vault, &actor, &via, run_id.as_deref(), &command))
         }
+    }
+}
+
+/// Ruling 11 (plan D2): a human flag the caller left out is **the vault's own token**, read from
+/// `config/actor.yaml` (absent: the legacy token) — never a fixed name, which would either put a
+/// second token into an existing vault or a person's name into a new one. An explicit value passes
+/// through unchanged, and `write`'s gate still judges it. A bad file is the reader's named line on
+/// stderr and exit 2, before anything is written. Only a command that writes calls this.
+fn human_or_vaults(vault: &std::path::Path, flag: Option<String>) -> Result<String, ExitCode> {
+    match flag {
+        Some(value) => Ok(value),
+        None => journal::read_human_actor(vault).map(str::to_string).map_err(|e| {
+            eprintln!("knowlu-engine: {e}");
+            ExitCode::from(2)
+        }),
     }
 }
 

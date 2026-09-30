@@ -41,6 +41,9 @@ pub enum WriteError {
     Ingest(IngestError),
     Provenance(ProvenanceError),
     Io(String),
+    /// Ruling 11: a human write refused because `config/actor.yaml` is not valid, named by the
+    /// reader's own line. Refused before anything is journalled or written.
+    Actor(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -56,8 +59,34 @@ impl std::fmt::Display for WriteError {
             WriteError::Ingest(e) => write!(f, "{e}"),
             WriteError::Provenance(e) => write!(f, "{e}"),
             WriteError::Io(m) => write!(f, "{m}"),
+            WriteError::Actor(m) => write!(f, "{m}"),
         }
     }
+}
+
+/// Ruling 11 (plan D3): **the one gate** every public entry point below takes before the journal is
+/// touched, so no caller — the CLI, the console, the scaffold, a pass — can write as the student
+/// while the vault's `config/actor.yaml` is invalid. An `agent:` or `system:` actor is never gated:
+/// `judge`, `sync`, `coursework` and the rank's own passes keep their exit-0 contracts whatever the
+/// file says. The file is read on every human write, never cached, so a hand fix takes effect at
+/// once.
+///
+/// Plan Q2: a human actor that is not the vault's own token — `quinn` on a `student` vault,
+/// `student` on a legacy one, any name — is refused too, so one stray CLI call can never put a
+/// second token into an account (which would flip every later restore's choice).
+fn human_gate(vault: &Path, ctx: &WriteContext) -> Result<(), WriteError> {
+    if is_agent(&ctx.actor) || ctx.actor.starts_with("system:") {
+        return Ok(());
+    }
+    let token = crate::journal::read_human_actor(vault).map_err(|e| WriteError::Actor(e.to_string()))?;
+    if ctx.actor != token {
+        return Err(WriteError::Actor(format!(
+            "{}: this vault's human is {token}, so a write as {:?} is refused (one account writes one token)",
+            crate::journal::ACTOR_FILE,
+            ctx.actor
+        )));
+    }
+    Ok(())
 }
 
 impl From<IdError> for WriteError {
@@ -236,6 +265,7 @@ pub fn write_literals(
     journal: &mut Journal,
     opts: &WriteOpts<'_>,
 ) -> Result<WriteResult, WriteError> {
+    human_gate(vault, ctx)?;
     // Every literal is one line, or nothing is written: surgery replaces exactly one line, so a
     // literal carrying a break would orphan its tail (and a tail of `---` would close the block).
     // Only `\n` and `\r` count: surgery splits on `\n` and `read_text` maps `\r` to `\n`. U+2028,
@@ -253,6 +283,8 @@ pub fn write_literals(
     // `(name, old, new)` — `propose_amendment` writes both sides into the card's `changes` block,
     // and `approvals::apply_amendment` compares `from` against the note before it applies.
     let mut proposed: Vec<(String, Value, Value)> = Vec::new();
+    // Ruling 11: the human records behind `proposed`, so the card names their token, not a person.
+    let mut proposed_over: Vec<Record> = Vec::new();
 
     for (name, literal) in literals {
         let new = parse_literal(literal);
@@ -268,6 +300,7 @@ pub fn write_literals(
             if let Some(human) = human {
                 if opts.propose && old != Value::Null {
                     proposed.push((name.clone(), old.clone(), new.clone()));
+                    proposed_over.push(human);
                 } else if opts.propose {
                     // validate_amendment refuses a null `from` (the 08-21 hardening rule); a
                     // proposal it can never apply is worse than no proposal at all.
@@ -280,9 +313,12 @@ pub fn write_literals(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // D5: the actor the record names, never a person's — on a legacy vault that is
+                    // still the legacy token, so the reason's bytes are unchanged.
+                    let who = human.get("actor").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     result.skipped.insert(
                         name.clone(),
-                        format!("judge-once: {name} set by quinn at {ts}"),
+                        format!("judge-once: {name} set by {who} at {ts}"),
                     );
                 }
                 continue;
@@ -372,8 +408,11 @@ pub fn write_literals(
                     Some((get_str(m, "judgment_id")?, get_str(m, "judgment_kind")?))
                 });
                 let judgment = judgment_ids.as_ref().map(|(id, kind)| (id.as_str(), kind.as_str()));
+                // The legacy token if any field's hand-set carries it, as the restore rule reads an
+                // account; otherwise the student's.
+                let human = crate::journal::pick_human_actor(proposed_over.iter());
                 result.proposal = Some(propose_amendment(
-                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment,
+                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment, human,
                 )?);
             }
         }
@@ -405,6 +444,7 @@ pub fn create(
     journal: &mut Journal,
     evidence: Option<&serde_json::Value>,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = crate::ids::inside_vault(vault, &vault.join(rel_path))?;
     if path.exists() {
         return Err(WriteError::Exists(rel_path.to_string()));
@@ -489,6 +529,7 @@ pub fn reassert(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let current = yaml_to_json(&crate::yaml::get(&meta, field).cloned().unwrap_or(Value::Null));
@@ -515,6 +556,7 @@ pub fn delete(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let archive = vault.join("archive");
@@ -544,6 +586,7 @@ pub fn move_note(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let dest = crate::ids::inside_vault(vault, &vault.join(new_rel))?;
@@ -574,6 +617,7 @@ pub fn append_body(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     if let Some(problem) = single_line_problem(line) {
@@ -657,9 +701,10 @@ pub const AMEND_BUTTONS: &str = "\n```meta-bind-button\nlabel: Approve\nstyle: p
 /// Judge-once's other half: the agent may **re-propose, never silently overwrite** (Quinn,
 /// 2026-08-29). Port of `engine/write.py:propose_amendment` (lines 333–353).
 ///
-/// Called only from [`write_literals`], and only when the journal shows Quinn set the field himself
-/// and `propose` is on. It mints one `kind: amend` approval naming every re-judged field, through
-/// [`create`] — so the proposal is journalled like any other note and gets its own `id`.
+/// Called from [`write_literals`] when the journal shows the student set the field and `propose` is
+/// on, and from `sync` for a field both desktops moved. It mints one `kind: amend` approval naming
+/// every re-judged field, through [`create`] — so the proposal is journalled like any other note
+/// and gets its own `id`.
 ///
 /// Four details that are load-bearing:
 ///
@@ -702,6 +747,10 @@ pub fn propose_amendment(
     // a local run, or an older server), which renders the card exactly as before this parameter
     // existed.
     judgment: Option<(&str, &str)>,
+    // Ruling 11 (CLAUDE.md rule 1): the human token whose hand-set this card re-proposes over.
+    // `journal::LEGACY_HUMAN_ACTOR` keeps the sentence Python wrote, byte for byte (legacy vaults,
+    // `scripts/diff-engines-notes.ps1`); any other value reads "the student", never a person.
+    human: &str,
 ) -> Result<PathBuf, WriteError> {
     let target_rel = rel(vault, target_path);
     let stem_of_target = target_path
@@ -765,10 +814,12 @@ pub fn propose_amendment(
     }
     front_pairs.push(("changes", crate::yamlemit::Node::Map(change_block)));
     let front = crate::yamlemit::Node::map(front_pairs);
-    let mut why = format!(
-        "{} re-judged {fields}; Quinn had set them by hand, so this is a proposal (judge-once rule).",
-        ctx.actor
-    );
+    let hand = if human == crate::journal::LEGACY_HUMAN_ACTOR {
+        "Quinn had set them by hand"
+    } else {
+        "the student had set them by hand"
+    };
+    let mut why = format!("{} re-judged {fields}; {hand}, so this is a proposal (judge-once rule).", ctx.actor);
     // Python's `if evidence:` is TRUTHINESS, so an empty mapping appends nothing — not just `None`.
     // A `!e.is_null()` test alone would write a bare `Evidence: {}` the other engine never writes.
     let truthy = |e: &&serde_json::Value| match e {
@@ -1165,6 +1216,140 @@ mod tests {
 
         assert!(res.written.is_empty(), "the agent must not write over a human decision");
         assert!(res.skipped.get("importance").unwrap().starts_with("judge-once: importance set by quinn at"));
+    }
+
+    // -- ruling 11: the human token and the gate (D3, D5) -------------------
+
+    fn actor_file(v: &Path, text: &str) {
+        std::fs::create_dir_all(v.join("config")).unwrap();
+        std::fs::write(v.join("config").join("actor.yaml"), text).unwrap();
+    }
+
+    /// Every file under the vault, with its bytes, in path order — the "nothing moved" oracle.
+    fn fingerprint(v: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() { walk(&path, out) } else { out.push((path.clone(), std::fs::read(&path).unwrap())) }
+            }
+        }
+        let mut out = Vec::new();
+        walk(v, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_human_write_on_a_vault_with_a_bad_actor_file_writes_nothing() {
+        for human in ["quinn", "student"] {
+            let v = vault();
+            seed(&v);
+            actor_file(&v, "human_actor: alice\n");
+            let before = fingerprint(&v);
+            let ctx = WriteContext::new(human, "dashboard");
+            let mut j = Journal::new(&v);
+            let named = |r: Result<(), WriteError>, what: &str| {
+                let err = r.expect_err(&format!("{human}: {what} must be refused")).to_string();
+                assert!(err.starts_with("config/actor.yaml: ") && err.contains("\"alice\""), "{human}: {what}: {err}");
+            };
+            named(write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default()).map(|_| ()), "set");
+            named(create(&v, "tasks/new.md", "---\ntitle: New\n---\n\nb\n", &ctx, &mut j, None).map(|_| ()), "create");
+            named(delete(&v, "tasks/a.md", &ctx, &mut j).map(|_| ()), "delete");
+            named(move_note(&v, "tasks/a.md", "tasks/b.md", &ctx, &mut j).map(|_| ()), "move");
+            named(append_body(&v, "tasks/a.md", "a line", &ctx, &mut j).map(|_| ()), "append_body");
+            named(reassert(&v, "tasks/a.md", "status", &serde_json::json!("done"), &ctx, &mut j).map(|_| ()), "reassert");
+            assert_eq!(fingerprint(&v), before, "{human}: the journal and every note are byte-identical");
+        }
+    }
+
+    #[test]
+    fn an_agent_or_system_write_ignores_the_actor_file() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(res.records.len(), 1);
+        create(&v, "tasks/agent.md", "---\ntitle: Agent\n---\n\nb\n", &agent, &mut j, None).unwrap();
+        let system = WriteContext::new("system:idfix", "cli");
+        write_literals(&v, "tasks/a.md", &lit(&[("progress", "10")]), &system, &mut j, &WriteOpts::default()).unwrap();
+        let actors: Vec<String> = j.read(None, None).iter().map(|r| r["actor"].as_str().unwrap().to_string()).collect();
+        assert_eq!(actors, ["agent:knowlu.enrich", "agent:knowlu.enrich", "system:idfix"]);
+    }
+
+    #[test]
+    fn a_student_vault_takes_student_writes() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: student\n");
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("student", "dashboard");
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(res.records[0]["actor"], serde_json::json!("student"));
+        assert_eq!(j.read(None, None)[0]["actor"], serde_json::json!("student"));
+        assert!(pystr::read_text(&v.join("tasks").join("a.md")).unwrap().contains("status: done"));
+    }
+
+    /// Plan Q2 (recommended yes): one account writes one token, mechanically. A human actor that is
+    /// not the vault's own token is refused by name, before anything is journalled or written.
+    #[test]
+    fn a_human_actor_other_than_the_vaults_is_refused() {
+        for (file, actor, token) in [
+            (Some("human_actor: student\n"), "quinn", "student"),
+            (None, "student", "quinn"),
+            (None, "alice", "quinn"),
+            (Some("human_actor: student\n"), "alice", "student"),
+            (None, "Quinn", "quinn"),
+        ] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let ctx = WriteContext::new(actor, "cli");
+            let mut j = Journal::new(&v);
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{actor} on a {token} vault must be refused"))
+                .to_string();
+            assert!(err.starts_with("config/actor.yaml: ") && err.contains(token) && err.contains(&format!("{actor:?}")), "{err}");
+            assert!(create(&v, "tasks/new.md", "---\ntitle: New\n---\n\nb\n", &ctx, &mut j, None).is_err(), "{actor}: create");
+            assert_eq!(fingerprint(&v), before, "{actor} on a {token} vault: nothing written");
+        }
+    }
+
+    #[test]
+    fn judge_once_skip_names_the_recorded_human() {
+        for (human, file) in [("quinn", None), ("student", Some("human_actor: student\n"))] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = file { actor_file(&v, text) }
+            let mut j = Journal::new(&v);
+            let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "1")]), &WriteContext::new(human, "dashboard"), &mut j, &WriteOpts::default()).unwrap();
+            let ts = res.records[0]["ts"].as_str().unwrap().to_string();
+            let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+            let opts = WriteOpts { judged: true, ..Default::default() };
+            let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &opts).unwrap();
+            // On a legacy vault these are the exact bytes the reason has always had.
+            assert_eq!(res.skipped["importance"], format!("judge-once: importance set by {human} at {ts}"));
+        }
+    }
+
+    #[test]
+    fn an_agent_cannot_overwrite_a_field_student_set() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: student\n");
+        let mut j = Journal::new(&v);
+        let student = WriteContext::new("student", "dashboard");
+        write_literals(&v, "tasks/a.md", &lit(&[("importance", "1")]), &student, &mut j, &WriteOpts::default()).unwrap();
+
+        let agent = WriteContext::new("agent:routine.enrich", "cloud-routine");
+        let opts = WriteOpts { judged: true, ..Default::default() };
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &opts).unwrap();
+
+        assert!(res.written.is_empty(), "the agent must not write over the student's decision");
+        assert!(res.skipped.get("importance").unwrap().starts_with("judge-once: importance set by student at"));
     }
 
     #[test]
@@ -1574,6 +1759,41 @@ mod tests {
         );
         assert_eq!(text, expected);
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Ruling 11 and CLAUDE.md rule 1: the card's `**Why proposed:**` line follows the recorded
+    /// human's token and never names a person on a vault the app makes. A legacy vault (no
+    /// `config/actor.yaml`, `quinn` in its journal) keeps the sentence Python wrote, byte for byte;
+    /// the whole legacy card is pinned by `an_amend_card_without_one_is_byte_identical` above.
+    #[test]
+    fn an_amend_cards_why_line_names_no_person_on_a_student_vault() {
+        for (file, human, hand) in [
+            (None, "quinn", "Quinn had set them by hand"),
+            (Some("human_actor: student\n"), "student", "the student had set them by hand"),
+        ] {
+            let v = propose_vault(&format!("why-{human}"));
+            if let Some(text) = file { actor_file(&v, text) }
+            let mut journal = Journal::new(&v);
+            write_literals(&v, "tasks/t.md", &[("effort_hours".to_string(), "4.0".to_string())],
+                &WriteContext::new(human, "dashboard"), &mut journal, &WriteOpts::default()).unwrap();
+            let res = write_literals(
+                &v, "tasks/t.md",
+                &[("effort_hours".to_string(), "2.0".to_string())],
+                &WriteContext::new("agent:knowlu.enrich", "local-runner"),
+                &mut journal,
+                &WriteOpts { judged: true, propose: true, ..Default::default() },
+            ).unwrap();
+            let text = pystr::read_text(&res.proposal.expect("an amendment was filed")).unwrap();
+            let why = format!(
+                "\n**Why proposed:** agent:knowlu.enrich re-judged effort_hours; {hand}, so this is a \
+                 proposal (judge-once rule).\n"
+            );
+            assert!(text.contains(&why), "{human}: {text}");
+            if human == "student" {
+                assert!(!text.to_lowercase().contains("quinn"), "no person's name on a student's card: {text}");
+            }
+            let _ = std::fs::remove_dir_all(&v);
+        }
     }
 
     /// An amend card must survive the single-line surgery `defer_over_budget` performs on it.

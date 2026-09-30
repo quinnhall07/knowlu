@@ -566,6 +566,47 @@ fn normalize_personal_calendar(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(rewritten))
 }
 
+/// Ruling 11 (plan D6): **the token this account already carries**, read from its journal before the
+/// wizard writes `config/actor.yaml` or any human record — [`journal::LEGACY_HUMAN_ACTOR`] if any
+/// record there is by it, otherwise [`journal::HUMAN_ACTOR`] (including an account with no human
+/// record, or no record at all). Never a new one, so one account writes one token.
+///
+/// Pages `sync::pull` under the pending session (the wizard signed in under
+/// `account::PENDING_TARGET`, and there is no vault yet to hold a `cloud.yaml`), with the same stall
+/// guard as `sync::restore_all`, and stops at the first legacy record. Nothing it reads is written
+/// anywhere — `restore_into` does the real pull. `Err` is a closed-set word naming why the account
+/// could not be read; the bearer is never in it (`CloudClient` scrubs its own errors).
+///
+/// [`journal::LEGACY_HUMAN_ACTOR`]: knowlu_engine::journal::LEGACY_HUMAN_ACTOR
+/// [`journal::HUMAN_ACTOR`]: knowlu_engine::journal::HUMAN_ACTOR
+fn account_human_actor(account_id: &str) -> Result<&'static str, String> {
+    use knowlu_engine::journal::{pick_human_actor, HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+    let api = crate::account::api_base();
+    let auth = crate::account::auth_base(&api)?;
+    let target = crate::account::PENDING_TARGET;
+    let token = crate::account::valid_access_token_at(&auth, &crate::account::anon_key(), target, jiff::Timestamp::now().as_second())?;
+    let cfg = knowlu_engine::cloudmodel::CloudConfig {
+        api_base: api.trim_end_matches('/').to_string(),
+        anon_key: crate::account::anon_key(),
+        session_credential_target: target.to_string(),
+        account_id: account_id.to_string(),
+    };
+    let client = knowlu_engine::cloudmodel::CloudClient::new(&cfg, &token);
+    let (mut records_after, mut notes_after) = (0i64, 0i64);
+    loop {
+        let page = knowlu_engine::sync::pull(&client, records_after, notes_after).map_err(|e| e.label())?;
+        if pick_human_actor(page.records.iter().map(|(_, r)| r)) == LEGACY_HUMAN_ACTOR {
+            return Ok(LEGACY_HUMAN_ACTOR);
+        }
+        // `restore_all`'s own guard: a page that moved neither cursor would loop for ever.
+        let stalled = page.record_cursor == records_after && page.note_cursor == notes_after;
+        (records_after, notes_after) = (page.record_cursor, page.note_cursor);
+        if !page.more || stalled {
+            return Ok(HUMAN_ACTOR);
+        }
+    }
+}
+
 /// *Finish* for a new vault. Scaffold+seed (one atomic `create_vault`) → the session moves onto this
 /// profile → settings → register.
 ///
@@ -590,6 +631,19 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
+    };
+    // Ruling 11 (plan D6): the vault's human token is decided HERE — before `scaffold::create_vault`
+    // writes `config/actor.yaml` and the seeds as it, and before anything is on disk. An account the
+    // wizard cannot read refuses Finish (plan Q1): a guessed `student` on an account whose journal
+    // already says `quinn` would give one account two tokens. Nothing is made and the pending
+    // session stays where it is, so pressing Finish again is the whole retry.
+    let human_actor = match account_human_actor(&account_id) {
+        Ok(token) => token,
+        Err(why) => return json!({
+            "ok": false,
+            "error": format!("Knowlu could not reach your account to check for an existing vault ({why}); check the connection and press Finish again"),
+            "profile": Value::Null,
+        }),
     };
     // **The page sends a course CODE and a label; the slug is made here, from the code — never the
     // label** (review round 1, I3). `CS 100` is what `suggest_course` proposed and the student
@@ -675,6 +729,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         api_base: crate::account::api_base(),
         anon_key: crate::account::anon_key(),
         account_id,
+        human_actor,
     };
     if let Err(e) = crate::scaffold::create_vault(&dest, &vp) {
         return json!({ "ok": false, "error": e, "profile": Value::Null });
