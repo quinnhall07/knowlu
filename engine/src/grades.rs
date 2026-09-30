@@ -5,15 +5,26 @@
 //! column plus the student's row for it into the fields of a `grades/` note (§6), and computes a
 //! course's standing from its notes (§8, G2, G3).
 //!
-//! Pure: no I/O, no clock, no network, no model. The apply half (`write::create` and
-//! `write::write` through the journal) is a later task and lives beside these functions. Rows
+//! The pure half has no I/O, no clock, no network and no model. The apply half (below its marker,
+//! Task 3) is the `grades` command: it reads the bundle and the vault's course notes and writes
+//! only through `write::create` and `write::write`, journal first, as `agent:knowlu.grades`. Rows
 //! stay `serde_json::Value`, verbatim, so this module owns every interpretation and a fixture
 //! recorded from a real account replays through the same code.
+//!
+//! **No grade reaches a log** (spec §11): every line the command prints or logs is a count, a
+//! course code, a note path or an error code — never a column name, category title or score.
+
+use std::collections::BTreeSet;
+use std::path::Path;
 
 use jiff::tz::TimeZone;
 use jiff::Timestamp;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::journal::Journal;
+use crate::write::{WriteContext, WriteError, WriteOpts};
+use crate::yamlemit::Node;
 
 /// The letter scale's minus sign is U+2212, the character the spec (G3) writes; the tests build
 /// the expected letters from it.
@@ -302,12 +313,310 @@ pub fn course_grade(notes: &[GradeNote]) -> Standing {
     }
 }
 
+// ---- the apply half (Task 3): the `grades` command -------------------------------------------
+
+/// The actor every grade write carries: an agent, so `provenance::is_agent` holds and a field the
+/// student set is never re-set.
+pub const ACTOR: &str = "agent:knowlu.grades";
+/// Generated and device-local, rewritten on every run, never synced (spec §6).
+pub const STATE_FILE: &str = "state/grades.json";
+const SOURCE: &str = "blackboard";
+
+/// What one run did, in the only terms it may print: counts, course codes, note paths and error
+/// codes (spec §6, §11).
+#[derive(Debug, Default, PartialEq)]
+pub struct Report {
+    pub matched: usize,
+    /// Course codes no vault course note matched.
+    pub skipped: Vec<String>,
+    /// `(course code, the bundle's error code)`.
+    pub failed: Vec<(String, String)>,
+    /// Notes created, or written with at least one changed field.
+    pub changed: usize,
+    /// `(path, error kind)`: a write `write` refused.
+    pub not_written: Vec<(String, &'static str)>,
+}
+
+impl Report {
+    pub fn lines(&self) -> Vec<String> {
+        let plural = |n: usize, word: &str| if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") };
+        let mut out = vec![format!("grades: {}, {}", plural(self.matched, "course"), plural(self.changed, "changed item"))];
+        out.extend(self.skipped.iter().map(|c| format!("grades: {c} not matched")));
+        out.extend(self.failed.iter().map(|(c, why)| format!("grades: {c} failed ({why})")));
+        out.extend(self.not_written.iter().map(|(p, kind)| format!("grades: {p} not written ({kind})")));
+        out
+    }
+}
+
+/// Only `[A-Za-z0-9_.-]` (and spaces when `spaces`), at most 40 characters: a course code or an
+/// error code from the capture, made safe for one log line.
+fn code_text(raw: &str, spaces: bool, fallback: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') || (spaces && *c == ' '))
+        .take(40)
+        .collect();
+    let kept = kept.trim().to_string();
+    if kept.is_empty() { fallback.to_string() } else { kept }
+}
+
+/// The code a student would recognise: `course.courseId`, else the membership's, else `course.id`.
+fn code_of(course: &BundleCourse) -> String {
+    let m = &course.membership;
+    let raw = [&m["course"]["courseId"], &m["courseId"], &m["course"]["id"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    code_text(raw, false, "course")
+}
+
+/// `<dir>/*.md`, sorted, so a run is deterministic.
+fn notes_in(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn meta_text(meta: &serde_yaml_ng::Mapping, key: &str) -> Option<String> {
+    crate::yaml::get(meta, key).and_then(crate::yaml::text).filter(|s| !s.is_empty())
+}
+
+/// The vault's course notes that carry a `code:`: slug from `slug:`, else the file stem.
+fn course_refs(vault: &Path) -> Vec<CourseRef> {
+    notes_in(&vault.join("courses"))
+        .into_iter()
+        .filter_map(|path| {
+            let meta = crate::ids::read_meta(&path)?;
+            let code = meta_text(&meta, "code")?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            Some(CourseRef { slug: meta_text(&meta, "slug").unwrap_or(stem), code })
+        })
+        .collect()
+}
+
+/// Spec §6's fields after `id`, `type`, `course` and `source`, in the table's order; `Null` is
+/// absent.
+fn desired(f: &GradeFields) -> Vec<(&'static str, Value)> {
+    let opt = |v: Option<Value>| v.unwrap_or(Value::Null);
+    vec![
+        ("title", Value::from(f.title.clone())),
+        ("source_uid", Value::from(f.source_uid.clone())),
+        ("kind", Value::from(f.kind.as_str())),
+        ("possible", opt(f.possible.map(Value::from))),
+        ("score", opt(f.score.map(Value::from))),
+        ("status", Value::from(f.status.as_str())),
+        ("counts", Value::from(f.counts)),
+        ("category", opt(f.category.clone().map(Value::from))),
+        ("due", opt(f.due.clone().map(Value::from))),
+    ]
+}
+
+fn node_of(v: &Value) -> Node {
+    match v {
+        Value::Bool(b) => Node::Bool(*b),
+        Value::Number(n) if n.is_f64() => Node::Float(n.as_f64().unwrap_or(0.0)),
+        Value::Number(n) => Node::Int(n.as_i64().map(i128::from).unwrap_or(0)),
+        Value::String(s) => Node::text(s),
+        _ => Node::Null,
+    }
+}
+
+/// Equal as the note means it: `20` and `20.0` are the same number.
+fn same(old: &Value, new: &Value) -> bool {
+    match (old.as_f64(), new.as_f64()) {
+        (Some(a), Some(b)) => a == b,
+        _ => old == new,
+    }
+}
+
+fn error_kind(e: &WriteError) -> &'static str {
+    match e {
+        WriteError::NoFrontmatter(_) => "no-frontmatter",
+        WriteError::AppendLine(_) => "append",
+        WriteError::LineBreak(_) => "line-break",
+        WriteError::Exists(_) => "exists",
+        WriteError::Id(_) => "id",
+        WriteError::Ingest(_) => "frontmatter",
+        WriteError::Provenance(_) => "block-style",
+        WriteError::Io(_) => "io",
+        WriteError::Actor(_) => "actor",
+    }
+}
+
+/// A new note: `write::create` with the deterministic id, so every desktop mints the same file.
+fn create_note(vault: &Path, rel: &str, slug: &str, fields: &[(&'static str, Value)], ctx: &WriteContext, journal: &mut Journal) -> Result<bool, WriteError> {
+    let mut front = vec![
+        ("id", Node::text(&crate::ids::derived_id("grade", rel))),
+        ("type", Node::text("grade")),
+        ("title", node_of(&fields[0].1)),
+        ("course", Node::text(slug)),
+        ("source", Node::text(SOURCE)),
+    ];
+    front.extend(fields[1..].iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (*k, node_of(v))));
+    let text = format!("---\n{}---\n", crate::yamlemit::safe_dump_block(&Node::map(front)));
+    crate::write::create(vault, rel, &text, ctx, journal, None).map(|_| true)
+}
+
+/// An existing note: only the fields whose values differ, less every field the journal shows the
+/// student set (judge once, explicit here: `write`'s own guard covers only `task` and `appr`).
+fn update_note(vault: &Path, rel: &str, fields: &[(&'static str, Value)], ctx: &WriteContext, journal: &mut Journal) -> Result<bool, WriteError> {
+    let Some(meta) = crate::ids::read_meta(&vault.join(rel)) else {
+        return Err(WriteError::NoFrontmatter(rel.to_string()));
+    };
+    let id = meta_text(&meta, "id").unwrap_or_else(|| crate::ids::derived_id("grade", rel));
+    let mut changes: Vec<(String, serde_yaml_ng::Value)> = Vec::new();
+    for (name, want) in fields {
+        let old = crate::yaml::get(&meta, name).map(crate::yaml::to_json).unwrap_or(Value::Null);
+        if same(&old, want) || journal.human_set(&id, name).is_some() {
+            continue;
+        }
+        let value = serde_yaml_ng::to_value(want).map_err(|_| WriteError::Io("unrepresentable".into()))?;
+        changes.push((name.to_string(), value));
+    }
+    if changes.is_empty() {
+        return Ok(false);
+    }
+    let result = crate::write::write(vault, rel, &changes, ctx, journal, &WriteOpts::default())?;
+    Ok(!result.written.is_empty())
+}
+
+/// This course's Blackboard notes whose column no longer comes back, not yet `removed`.
+fn gone(vault: &Path, slug: &str, seen: &BTreeSet<String>) -> Vec<String> {
+    notes_in(&vault.join("grades"))
+        .into_iter()
+        .filter_map(|path| {
+            let meta = crate::ids::read_meta(&path)?;
+            let uid = meta_text(&meta, "source_uid")?;
+            let ours = meta_text(&meta, "course").as_deref() == Some(slug) && meta_text(&meta, "source").as_deref() == Some(SOURCE);
+            let removed = meta_text(&meta, "status").as_deref() == Some(Status::Removed.as_str());
+            (ours && !removed && !seen.contains(&uid)).then(|| crate::ids::rel(vault, &path))
+        })
+        .collect()
+}
+
+/// Spec §6: every matched course's columns become `grades/` notes, created or changed field by
+/// field; a column gone from a matched course becomes `status: removed`. A failed or unmatched
+/// course is named and changes nothing.
+pub fn apply(vault: &Path, bundle: &Bundle, ctx: &WriteContext, journal: &mut Journal) -> Report {
+    let zone = crate::cli::vault_zone(vault);
+    let refs = course_refs(vault);
+    let mut report = Report::default();
+    let outcome = |report: &mut Report, rel: String, r: Result<bool, WriteError>| match r {
+        Ok(true) => report.changed += 1,
+        Ok(false) => {}
+        Err(e) => report.not_written.push((rel, error_kind(&e))),
+    };
+    for course in &bundle.courses {
+        if let Some(err) = &course.error {
+            report.failed.push((code_of(course), code_text(err, true, "error")));
+            continue;
+        }
+        let Some(cref) = match_course(course, &refs) else {
+            report.skipped.push(code_of(course));
+            continue;
+        };
+        report.matched += 1;
+        let mut seen = BTreeSet::new();
+        for column in &course.columns {
+            let Some(col_id) = column["id"].as_str().filter(|s| !s.is_empty()) else { continue };
+            seen.insert(col_id.to_string());
+            let row = course.grades.iter().find(|r| r["columnId"].as_str() == Some(col_id));
+            let mut fields = column_to_fields(column, row, &zone);
+            fields.category = category_title(column, course.categories.as_deref());
+            let rel = note_path(&cref.slug, col_id);
+            let want = desired(&fields);
+            let r = if vault.join(&rel).exists() {
+                update_note(vault, &rel, &want, ctx, journal)
+            } else {
+                create_note(vault, &rel, &cref.slug, &want, ctx, journal)
+            };
+            outcome(&mut report, rel, r);
+        }
+        for rel in gone(vault, &cref.slug, &seen) {
+            let status = [("status", Value::from(Status::Removed.as_str()))];
+            let r = update_note(vault, &rel, &status, ctx, journal);
+            outcome(&mut report, rel, r);
+        }
+    }
+    report
+}
+
+/// `state/grades.json`, whole, through `ledger::dumps_value`; written beside and renamed over, so a
+/// crash leaves the old file intact.
+fn save_state(vault: &Path, bundle: &Bundle, report: &Report) -> std::io::Result<()> {
+    let value = serde_json::json!({
+        "fetched_at": bundle.fetched_at,
+        "host": bundle.host,
+        "courses": {"matched": report.matched, "skipped": report.skipped.len(), "failed": report.failed.len()},
+    });
+    let path = vault.join(STATE_FILE);
+    std::fs::create_dir_all(vault.join("state"))?;
+    let tmp = path.with_file_name(format!("grades.json.tmp{}", std::process::id()));
+    std::fs::write(&tmp, format!("{}\n", crate::ledger::dumps_value(&value)))?;
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// The bundle, or the exit-1 line. serde's `Display` can quote the offending value, so the line
+/// names only its category, line and column.
+fn read_bundle(input: &Path) -> Result<Bundle, String> {
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| format!("knowlu-engine: --input could not be read ({})", e.kind()))?;
+    let bundle: Bundle = serde_json::from_str(&text).map_err(|e| {
+        let category = match e.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "data",
+            serde_json::error::Category::Eof => "eof",
+        };
+        format!("knowlu-engine: --input is not a capture bundle ({category}, line {}, column {})", e.line(), e.column())
+    })?;
+    if bundle.schema != 1 {
+        return Err(format!("knowlu-engine: --input is not a capture bundle (schema {})", bundle.schema));
+    }
+    Ok(bundle)
+}
+
+/// `knowlu-engine grades`: `Ok(lines)` for stdout at exit 0 (every per-course outcome), `Err(line)`
+/// for stderr at exit 1 (a missing or unparseable bundle: a capture bug, not a slow school). Either
+/// way the run appends one line to `state/runner-log.md`.
+pub fn run(vault: &Path, input: &Path, via: &str, run_id: Option<&str>) -> Result<Vec<String>, String> {
+    let bundle = match read_bundle(input) {
+        Ok(bundle) => bundle,
+        Err(line) => {
+            let _ = crate::cli::append_run_log(vault, "local", "FAIL", &line, None);
+            return Err(line);
+        }
+    };
+    let mut ctx = WriteContext::new(ACTOR, via);
+    ctx.run_id = run_id.map(str::to_string);
+    let mut journal = Journal::new(vault);
+    let mut report = apply(vault, &bundle, &ctx, &mut journal);
+    if save_state(vault, &bundle, &report).is_err() {
+        report.not_written.push((STATE_FILE.to_string(), "io"));
+    }
+    let lines = report.lines();
+    let status = if report.failed.is_empty() && report.not_written.is_empty() { "ok" } else { "WARN" };
+    let _ = crate::cli::append_run_log(vault, "local", status, &lines.join("; "), None);
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     const BASIC: &str = include_str!("../tests/fixtures/grades/bundle-basic.json");
+    /// Where the pure half ends: everything above it is checked for I/O.
+    const APPLY_MARKER: &str = "// ---- the apply half";
 
     fn bundle() -> Bundle {
         serde_json::from_str(BASIC).expect("bundle-basic.json is spec 5's shape")
@@ -665,9 +974,9 @@ mod tests {
     }
 
     #[test]
-    fn the_module_reads_no_files_and_opens_no_sockets() {
+    fn the_pure_half_reads_no_files_and_opens_no_sockets() {
         let src = include_str!("grades.rs");
-        let code = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let code = &src[..src.find(APPLY_MARKER).unwrap()];
         for banned in ["std::fs", "std::net", "ureq", "std::process"] {
             assert!(!code.contains(banned), "{banned}");
         }
