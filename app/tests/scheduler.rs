@@ -103,7 +103,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     // No judge args: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
     // `sync` is always first (C3′, cloud design §5.5 as amended): the pull half has to land before
     // `rank` orders the day, and the push half carries everything written since the last sync.
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "rank"]);
     assert_eq!(argv[0].1, vec!["sync", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert_eq!(argv[1].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
@@ -113,7 +113,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     assert!(has_ics_url(&v));
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
     assert_eq!(argv[2].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert!(argv.iter().all(|(e, _)| e == exe));
@@ -126,7 +126,7 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
         model: PathBuf::from(r"C:\rt\model.gguf"),
         log_dir: PathBuf::from(r"C:\data\judgments"),
     };
-    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja));
+    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "judge", "rank"]);
     assert_eq!(argv[3].1, vec![
         "judge".to_string(), "--vault".to_string(), v.to_string_lossy().to_string(),
@@ -168,7 +168,7 @@ fn a_cloud_vault_runs_ingest_with_no_ics_url() {
     )
     .unwrap();
 
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"));
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
 }
 
@@ -188,7 +188,7 @@ fn a_cloud_vault_runs_ingest_with_no_url_in_the_vault_at_all() {
         "api_base: 'https://x.example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/p/session'\naccount_id: 'acct-1'\n",
     ).expect("cloud.yaml");
     assert!(ingest_included(&v), "an account is a feed, wherever the URL lives");
-    let steps = slot_argv(&v, Path::new("knowlu-engine.exe"), &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    let steps = slot_argv(&v, Path::new("knowlu-engine.exe"), &JudgePlan::Skip("judge (skipped: no entitlement)"), None);
     assert_eq!(steps[0].1[0], "sync", "sync runs first");
     assert_eq!(steps.iter().filter(|(_, a)| a[0] == "ingest").count(), 1, "{steps:?}");
     let _ = std::fs::remove_dir_all(&v);
@@ -201,7 +201,7 @@ fn a_cloud_vault_runs_ingest_with_no_url_in_the_vault_at_all() {
 fn sync_is_the_slots_first_step() {
     let v = scratch("sync-first");
     let exe = Path::new("knowlu-engine.exe");
-    let steps = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no entitlement)"));
+    let steps = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no entitlement)"), None);
     assert_eq!(steps[0].1[0], "sync", "{steps:?}");
     assert_eq!(steps[1].1[0], "coursework", "and nothing was displaced");
     assert!(steps.iter().any(|(_, a)| a[0] == "rank"), "{steps:?}");
@@ -802,7 +802,7 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     let JudgePlan::Cloud { log_dir } = plan.clone() else { panic!("not the cloud plan: {plan:?}") };
     // The profile's own judgments folder, never the vault: judgment logs never enter a vault.
     assert!(log_dir.starts_with(&cs.data_dir), "{log_dir:?} is not under {:?}", cs.data_dir);
-    let argv = slot_argv(&v, Path::new(r"C:\bin\knowlu-engine.exe"), &plan);
+    let argv = slot_argv(&v, Path::new(r"C:\bin\knowlu-engine.exe"), &plan, None);
     let judge = argv.iter().find(|(_, a)| a[0] == "judge").expect("the judge step is in the argv");
     assert_eq!(
         judge.1,
@@ -1179,9 +1179,11 @@ fn a_fresh_active_entitlement_is_never_refreshed_inside_the_slot() {
     let s = run_slot_inner(&cs, &sch, None, false);
     let named: Vec<String> = s.steps.iter().map(|(n, _)| n.clone()).collect();
     assert!(!named.iter().any(|n| n.starts_with("entitlement (")), "{named:?}");
-    // Nothing was skipped, so nothing was written: D8 adds a line for a skip, not for every slot.
+    // Nothing of the judge's or ingest's was skipped, so nothing was written for them: D8 adds a line
+    // for a skip, not for every slot. (The grades step's own `not a Blackboard school` skip is spec
+    // §10's and is on every vault that is not a Blackboard school, this scratch vault included.)
     let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
-    assert!(!log.contains("(skipped:"), "{log}");
+    assert!(!log.contains("judge (skipped:") && !log.contains("ingest (skipped:"), "{log}");
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&v);
 }
@@ -1485,5 +1487,229 @@ fn a_slot_names_the_step_in_progress_while_it_runs() {
     assert!(lock(&sch.live).current.is_none(), "nothing is in progress once the slot has ended");
     let _ = std::fs::remove_dir_all(&hs);
     let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+// ---- Task 6 of the grades plan: the slot's grades step ------------------------------------------
+
+use knowlu::account::EntitlementState;
+use knowlu::grades::{self as grades_app, CaptureError};
+use knowlu::scaffold::{Curated, CAMPUSES};
+use knowlu::scheduler::{grades_step, run_slot_with, GradesSeam, GradesStep};
+use std::cell::Cell;
+
+/// The one place this file builds a curated row (as `tests/grades.rs` does): a synthetic school, a
+/// struct update from a `CAMPUSES` row, never a full `Curated` literal and never an edit to `CAMPUSES`.
+fn test_row(lms_kind: &'static str, policy_read: Option<&'static str>) -> Curated {
+    Curated { unitid: "999999", lms_host: "lms.example.test", lms_kind, policy_read, ..CAMPUSES[0] }
+}
+
+fn with_session(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("qo-sched-grades-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(grades_app::session_dir(&d)).unwrap();
+    d
+}
+
+fn bundle() -> Value {
+    json!({ "lms": "blackboard", "host": "lms.example.test", "courses": [] })
+}
+
+fn skip_of(s: GradesStep) -> String {
+    match s {
+        GradesStep::Skip(n) => n,
+        GradesStep::Captured(p) => panic!("expected a skip, a bundle was written at {}", p.display()),
+    }
+}
+
+#[test]
+fn slot_argv_places_grades_after_ingest_and_before_judge_only_with_a_bundle() {
+    let v = scratch("grades-argv");
+    let exe = Path::new(r"C:\bin\knowlu-engine.exe");
+    let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
+    let ja = JudgeArgs { runtime: PathBuf::from("rt.exe"), model: PathBuf::from("m.gguf"), log_dir: PathBuf::from("logs") };
+    let bundle = PathBuf::from(r"C:\data\grades-capture.json");
+    let judge = JudgePlan::Local(ja);
+    let with = slot_argv(&v, exe, &judge, Some(&bundle));
+    let at = names(&with).iter().position(|n| n == "grades").expect("a grades step");
+    assert_eq!(names(&with)[at - 1], "coursework", "no feed on this vault, so ingest is out: {:?}", names(&with));
+    assert_eq!(names(&with)[at + 1], "judge");
+    assert_eq!(with[at].1, vec!["grades", "--vault", v.to_string_lossy().as_ref(), "--input", bundle.to_string_lossy().as_ref(), "--via", "local-runner"]);
+    // With a feed, it sits after ingest.
+    let cfg = v.join("config").join("ingest.yaml");
+    let old = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
+    let with = slot_argv(&v, exe, &judge, Some(&bundle));
+    let n = names(&with);
+    assert_eq!(&n[n.iter().position(|x| x == "ingest").unwrap() + 1..][..2], ["grades", "judge"], "{n:?}");
+    // And without a bundle the step is not there at all.
+    assert!(!names(&slot_argv(&v, exe, &judge, None)).contains(&"grades".to_string()));
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The gate's fourth caller: with a saved session in every case, only a dated Blackboard row captures.
+#[test]
+fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
+    let calls = Cell::new(0);
+    let capture = |_host: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let undated = test_row("blackboard", None);
+    let canvas = test_row("canvas", Some("2026-10-01"));
+
+    let d = with_session("decision");
+    let got = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&capture));
+    let GradesStep::Captured(p) = got else { panic!("a dated row captures") };
+    assert_ne!(p, grades_app::bundle_path(&d), "the slot's bundle is its own, never the console's file");
+    assert_eq!(p.parent(), Some(d.as_path()), "still under the profile's app data");
+    assert_eq!(calls.get(), 1);
+    assert!(p.is_file(), "the bundle is on disk for the engine step");
+    let _ = std::fs::remove_dir_all(&d);
+
+    for (row, lms) in [(Some(&undated), "blackboard"), (None, "blackboard")] {
+        let d = with_session("undated");
+        let got = grades_step(row, lms, EntitlementState::Entitled, &d, false, Some(&capture));
+        assert_eq!(skip_of(got), "grades (skipped: not available at your school yet)");
+        assert!(!grades_app::bundle_path(&d).exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = with_session("canvas");
+    assert_eq!(skip_of(grades_step(Some(&canvas), "canvas", EntitlementState::Entitled, &d, false, Some(&capture))), "grades (skipped: not a Blackboard school)");
+    assert_eq!(skip_of(grades_step(None, "canvas", EntitlementState::Entitled, &d, false, Some(&capture))), "grades (skipped: not a Blackboard school)");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(calls.get(), 1, "the capture ran for the dated row only");
+}
+
+/// One test per adjacent pair: the earlier skip wins when both hold.
+#[test]
+fn the_skip_order_is_school_then_availability_then_entitlement_then_session_then_window() {
+    let calls = Cell::new(0);
+    let capture = |_h: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
+    let (dated, undated, canvas) = (test_row("blackboard", Some("2026-10-01")), test_row("blackboard", None), test_row("canvas", None));
+    let no_session = std::env::temp_dir().join(format!("qo-sched-grades-nosession-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&no_session);
+    let with = with_session("order");
+    let lapsed = EntitlementState::NotEntitled;
+    let ok = EntitlementState::Entitled;
+
+    // not a Blackboard school beats not available yet
+    assert_eq!(skip_of(grades_step(Some(&canvas), "canvas", lapsed, &no_session, true, Some(&capture))), "grades (skipped: not a Blackboard school)");
+    // not available yet beats no entitlement
+    assert_eq!(skip_of(grades_step(Some(&undated), "blackboard", lapsed, &no_session, true, Some(&capture))), "grades (skipped: not available at your school yet)");
+    // no entitlement beats not connected
+    assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", lapsed, &no_session, true, Some(&capture))), "grades (skipped: no entitlement)");
+    // not connected beats sign-in window open
+    assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", ok, &no_session, true, Some(&capture))), "grades (skipped: not connected)");
+    // sign-in window open, with a session
+    assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", ok, &with, true, Some(&capture))), "grades (skipped: sign-in window open)");
+    // no window on this run: after not connected
+    assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", ok, &no_session, true, None)), "grades (skipped: not connected)");
+    assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", ok, &with, false, None)), "grades (skipped: no window on this run)");
+    // an account-less vault is not gated by entitlement, as the engine's own gate treats it
+    assert!(matches!(grades_step(Some(&dated), "blackboard", EntitlementState::NoAccount, &with, false, Some(&capture)), GradesStep::Captured(_)));
+    assert_eq!(calls.get(), 1, "only the last call reached the capture");
+    let _ = std::fs::remove_dir_all(&with);
+}
+
+#[test]
+fn a_captures_own_outcomes_are_named_and_signed_out_is_remembered() {
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let d = with_session("outcomes");
+    let out = |e: CaptureError| skip_of(grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&move |_h| Err(e))));
+    assert_eq!(out(CaptureError::Unreachable), "grades (skipped: Blackboard unreachable)");
+    assert_eq!(grades_app::status_for(Some(&dated), "blackboard", &d, &d)["signed_out"], json!(false));
+    assert_eq!(out(CaptureError::SignedOut), "grades (skipped: signed out)");
+    assert_eq!(grades_app::status_for(Some(&dated), "blackboard", &d, &d)["signed_out"], json!(true), "the strip asks the student to sign in again");
+    assert_eq!(out(CaptureError::WindowOpen), "grades (skipped: sign-in window open)");
+    // a good capture clears the mark
+    let good = |_h: &'static str| Ok(bundle());
+    assert!(matches!(grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&good)), GradesStep::Captured(_)));
+    assert_eq!(grades_app::status_for(Some(&dated), "blackboard", &d, &d)["signed_out"], json!(false));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Spec §10 and §5: a capture never paints the tray amber, and each capture's bundle is deleted by its
+/// own step. The console's Refresh writes and deletes `grades-capture.json` while the slot's engine
+/// step is still to run; the slot's bundle must survive that, and must not be the console's.
+#[test]
+fn the_slots_bundle_is_private_to_its_run_and_survives_a_console_refresh() {
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let d = with_session("private");
+    let mine = |_h: &'static str| Ok(json!({ "lms": "blackboard", "host": "lms.example.test", "courses": [], "mine": "slot" }));
+    let GradesStep::Captured(p) = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&mine)) else { panic!("captured") };
+    // The console's Refresh: writes its own bundle, then deletes it after its engine step.
+    let console = grades_app::bundle_path(&d);
+    std::fs::write(&console, "{\"mine\":\"console\"}").unwrap();
+    std::fs::remove_file(&console).unwrap();
+    assert!(p.is_file(), "the console's delete must not take the slot's bundle");
+    assert!(std::fs::read_to_string(&p).unwrap().contains("\"slot\""), "and it is still the slot's own capture");
+    // The console writing over its own path must not overwrite the slot's either.
+    std::fs::write(&console, "{\"mine\":\"console\"}").unwrap();
+    assert!(std::fs::read_to_string(&p).unwrap().contains("\"slot\""));
+    // Two slot captures never share a path.
+    let GradesStep::Captured(q) = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&mine)) else { panic!("captured") };
+    assert_ne!(p, q);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// No `grades-capture*.json` of any run is left in the profile's app data.
+fn no_bundles_left(data_dir: &Path) -> bool {
+    std::fs::read_dir(data_dir).map(|d| d.flatten().all(|e| !e.file_name().to_string_lossy().starts_with("grades-capture"))).unwrap_or(true)
+}
+
+fn app_slot_vault(tag: &str) -> (PathBuf, ConsoleState) {
+    let v = scratch(tag);
+    std::fs::write(
+        v.join("config").join("runners.yaml"),
+        format!("runners:\n  - name: local\n    times: [\"12:00\"]\n    tz: America/Chicago\n    grace_minutes: 20\n    device: {}\n    scheduler: app\n", knowlu_engine::journal::device_name()),
+    ).unwrap();
+    let cs = open(&v, tag);
+    (v, cs)
+}
+
+/// Each skip is a named step at exit 0 and a runner-log line with status `ok`, through the same
+/// filter as the ingest and judge skips; and a slot that captured runs the `grades` step after
+/// `coursework` and deletes the bundle whatever the step's exit code.
+#[test]
+fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
+    let (v, cs) = app_slot_vault("grades-slot");
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-grades-localappdata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    std::fs::create_dir_all(grades_app::session_dir(&cs.data_dir)).unwrap();
+
+    // Undated row: the named skip, exit 0, in the runner log as `ok`, and the capture is never called.
+    let calls = Cell::new(0);
+    let capture = |_h: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
+    let undated = test_row("blackboard", None);
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&undated), capture: Some(&capture), window_open: false });
+    let skip = s.steps.iter().find(|(n, _)| n.starts_with("grades (skipped")).expect("a named grades skip");
+    assert_eq!(skip, &("grades (skipped: not available at your school yet)".to_string(), 0));
+    assert!(s.engine_ok, "a skip never paints the tray amber: {:?}", s.steps);
+    assert_eq!(calls.get(), 0);
+    assert!(!s.steps.iter().any(|(n, _)| n == "grades"));
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap();
+    assert!(log.contains("local ok grades (skipped: not available at your school yet)"), "{log}");
+
+    // Dated row: captured, the engine step runs between coursework and rank, and the bundle is gone.
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false });
+    let names: Vec<&str> = s.steps.iter().map(|(n, _)| n.as_str()).collect();
+    let at = names.iter().position(|n| *n == "grades").unwrap_or_else(|| panic!("{names:?}"));
+    assert!(names.iter().position(|n| *n == "coursework").unwrap() < at && at < names.iter().position(|n| *n == "rank").unwrap(), "{names:?}");
+    assert_eq!(calls.get(), 1);
+    assert!(no_bundles_left(&cs.data_dir), "the bundle is deleted after the step");
+
+    // A failing engine step (a path that cannot be spawned) deletes it too.
+    unsafe { std::env::set_var("KNOWLU_ENGINE_EXE", r"C:\knowlu-test-no-such-dir\knowlu-engine.exe") };
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false });
+    assert_eq!(calls.get(), 2);
+    assert!(s.steps.iter().any(|(n, c)| n == "grades" && *c != 0), "{:?}", s.steps);
+    assert!(no_bundles_left(&cs.data_dir), "the bundle is deleted whatever the exit code");
+
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
     let _ = std::fs::remove_dir_all(&v);
 }

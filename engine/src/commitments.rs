@@ -5493,8 +5493,8 @@ mod tests {
             "an attribute between"
         );
 
-        let seven = crate::ids::NOTE_FOLDERS;
-        let six = &seven[..6];
+        let every = crate::ids::NOTE_FOLDERS;
+        let six = &every[..6];
         assert!(!six.contains(&"commitments"));
         let rule = |folders: &[&str]| {
             format!(
@@ -5505,13 +5505,13 @@ mod tests {
         let sql =
             |folders: &[&str]| format!("path ~ '^({})/[A-Za-z0-9._ /-]+\\.md$'", folders.join("|"));
         assert!(
-            server_rules_name(&seven, Some(&rule(six)), &[]).is_err(),
+            server_rules_name(&every, Some(&rule(six)), &[]).is_err(),
             "six folders in sync_rows.ts"
         );
-        assert_eq!(server_rules_name(&seven, Some(&rule(&seven)), &[]), Ok(()));
-        assert!(server_rules_name(&seven, Some("// (tasks|approvals)"), &[]).is_err());
+        assert_eq!(server_rules_name(&every, Some(&rule(&every)), &[]), Ok(()));
+        assert!(server_rules_name(&every, Some("// (tasks|approvals)"), &[]).is_err());
         assert_eq!(
-            server_rules_name(&seven, None, &[]),
+            server_rules_name(&every, None, &[]),
             Ok(()),
             "phase 1 before C3′"
         );
@@ -5523,22 +5523,22 @@ mod tests {
             ),
             (
                 "20260930000100_sync_note_path_check_commitments.sql".to_string(),
-                sql(&seven),
+                sql(&every),
             ),
         ];
         assert_eq!(
             latest_migration(&migrations).map(|m| m.0.as_str()),
             Some(migrations[1].0.as_str())
         );
-        assert_eq!(server_rules_name(&seven, None, &migrations), Ok(()));
+        assert_eq!(server_rules_name(&every, None, &migrations), Ok(()));
         let reversed: Vec<_> = migrations.iter().rev().cloned().collect();
         assert_eq!(
-            server_rules_name(&seven, None, &reversed),
+            server_rules_name(&every, None, &reversed),
             Ok(()),
             "order on disk is irrelevant"
         );
         assert!(
-            server_rules_name(&seven, None, &migrations[..1]).is_err(),
+            server_rules_name(&every, None, &migrations[..1]).is_err(),
             "only the six-folder one"
         );
     }

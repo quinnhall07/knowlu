@@ -19,6 +19,13 @@
       // without the engine. Never reached inside Tauri, where __TAURI__ exists.
       var fx = new URLSearchParams(location.search).get("fixture");
       if (fx && cmd === "state") { return fetch(fx).then(function (r) { return r.json(); }).then(function (s) { return { ok: true, error: null, state: s }; }); }
+      // Also dev-only: the grades strip's answer, so the shots can show each of its states. `?gs=`
+      // names one of unavailable / notconnected / signedout / hidden; anything else is connected.
+      if (fx && cmd === "grades_status") {
+        var gs = new URLSearchParams(location.search).get("gs") || "";
+        return Promise.resolve({ ok: true, available: gs !== "unavailable", reason: null, connected: gs !== "notconnected" && gs !== "unavailable", signed_out: gs === "signedout",
+          host: "bb.example.edu", fetched_at: new Date(Date.now() - 7200000).toISOString(), hidden: gs === "hidden" });
+      }
       return Promise.reject(new Error("no engine: __TAURI__ is absent"));
     }
     return window.__TAURI__.core.invoke(cmd, args || {});
@@ -901,6 +908,139 @@
     EL("runs").innerHTML = html;
   }
 
+  // ---- M1 grades (grades spec §2 and §9). The strip on Today, one ring per course, and the read-only
+  // breakdown in the existing drawer. Nothing is computed here: every number is `state.grades`'s, and
+  // which of the states shows is `grades_status`'s word alone. The console has no address entry and
+  // never decides whether a school offers grades. A signed-out session is a named state, in the
+  // page's own quiet voice: never amber, never an error.
+  var GRADES = { status: null, list: [], note: "" };
+  var GRADE_STATUS_WORDS = { "graded": "graded", "needs-grading": "needs grading", "in-progress": "in progress", "not-submitted": "not submitted", "exempt": "exempt" };
+
+  function renderGrades(state) {
+    GRADES.list = (state && state.grades) || [];
+    return gradesStatus().then(refreshGradesDrawer);
+  }
+  function gradesStatus() {
+    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); }).catch(function () { GRADES.status = null; drawGrades(); });
+  }
+  function gradesUnavailableHtml() {
+    return '<div class="gs-line"><span>Grades from Blackboard are not available at your school yet</span></div>';
+  }
+  function ringSvg(c) {
+    var fam = c.family ? String(c.family).toLowerCase() : "";
+    var ring = '<svg class="ring" viewBox="0 0 36 36" aria-hidden="true"><circle class="rt" cx="18" cy="18" r="15.9155" fill="none"></circle>';
+    if (c.pct != null) {
+      // r = 100 / 2π, so the circle's length is 100 and the dash is the percentage itself.
+      ring += '<circle class="rf' + (/^[abcdf]$/.test(fam) ? " grade-" + fam : "") + '" cx="18" cy="18" r="15.9155" fill="none" stroke-dasharray="' + Math.max(0, Math.min(100, c.pct)) + ' 100" transform="rotate(-90 18 18)"></circle>';
+    }
+    return ring + "</svg>";
+  }
+  function drawGrades() {
+    var el = EL("grades"), s = GRADES.status, html;
+    if (!el) { return; }
+    // The settings panel's Hide grades box shows the student's own flag, whatever the strip shows.
+    if (s && s.ok !== false) { EL("set-grades-hide-in").checked = !!s.hidden; }
+    if (!s || s.ok === false || s.hidden) { el.hidden = true; el.innerHTML = ""; return; }
+    html = '<div class="sec-hd"><h2>Grades</h2></div>';
+    if (s.available === false) {
+      html += gradesUnavailableHtml();
+    } else {
+      if (GRADES.list.length) {
+        html += '<div class="gs-rings">' + GRADES.list.map(function (c) {
+          return '<button class="gring" type="button" data-grades-course="' + h(c.course) + '" title="' + h(c.title) + '">' + ringSvg(c)
+            + '<span class="gt"><b>' + h(c.title) + "</b><span>" + (c.pct == null ? "no grades yet" : h(c.pct) + "% " + h(c.letter || "")) + "</span></span></button>";
+        }).join("") + "</div>";
+      }
+      if (!s.connected) {
+        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect>Connect Blackboard</button></div>';
+      } else if (s.signed_out) {
+        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect>Sign in again</button></div>';
+      } else if (!GRADES.list.length) {
+        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh>Refresh</button></div>';
+      }
+    }
+    if (GRADES.note) { html += '<p class="hint gs-note">' + h(GRADES.note) + "</p>"; }
+    el.innerHTML = html; el.hidden = false;
+  }
+  function agoText(iso) {
+    var t = Date.parse(iso), m;
+    if (isNaN(t)) { return ""; }
+    m = Math.floor((Date.now() - t) / 60000);
+    return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 1440 ? Math.floor(m / 60) + " h ago" : Math.floor(m / 1440) + " d ago";
+  }
+  function gradesFooterHtml(c) {
+    var pts = c.earned + " / " + c.possible, src;
+    if (c.basis === "overall") { src = "Overall Grade" + (c.possible > 0 ? " · points so far " + pts : ""); }
+    else if (c.basis === "points") { src = "points so far · " + pts; }
+    else { src = "nothing graded yet"; }
+    return '<div class="gd-foot"><span>From Blackboard · ' + h(src) + (c.fetched_at ? " · updated " + h(agoText(c.fetched_at)) : "")
+      + '</span><button class="b" type="button" data-grades-refresh>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
+  }
+  function gradeRowHtml(e) {
+    var score = (e.score == null ? "–" : e.score) + " / " + (e.possible == null ? "–" : e.possible);
+    return '<div class="grw"><span class="gn">' + h(e.title) + (e.counts === false ? ' <small>not counted</small>' : "") + "</span>"
+      + '<span class="gsc">' + h(score) + '</span><span class="gst st-' + h(e.status) + '">' + h(GRADE_STATUS_WORDS[e.status] || e.status) + "</span>"
+      + (e.due ? '<span class="gdue">' + h(String(e.due).slice(0, 10)) + "</span>" : "") + "</div>";
+  }
+  // Read-only: the breakdown never edits, creates or deletes a note.
+  function openGradesDrawer(slug) {
+    var d = EL("drawer"), c = null, groups = [], html;
+    GRADES.list.forEach(function (x) { if (x.course === slug) { c = x; } });
+    if (!c) { return; }
+    (c.entries || []).forEach(function (e) {
+      var k = e.category || "", g = null;
+      groups.forEach(function (x) { if (x.cat === k) { g = x; } });
+      if (!g) { g = { cat: k, rows: [] }; groups.push(g); }
+      g.rows.push(e);
+    });
+    html = '<button class="close">&times;</button><h2>' + h(c.title) + "</h2>"
+      + '<p class="hint">' + (c.pct == null ? "no grades yet" : h(c.pct) + "% " + h(c.letter || "")) + " · " + h(c.graded) + " graded · " + h(c.pending) + " waiting</p>";
+    groups.forEach(function (g) {
+      html += (g.cat ? '<h3 class="gcat">' + h(g.cat) + "</h3>" : "") + g.rows.map(gradeRowHtml).join("");
+    });
+    d.innerHTML = html + gradesFooterHtml(c);
+    d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
+    d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
+  }
+  function refreshGradesDrawer() {
+    var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
+    if (open) { openGradesDrawer(open); }
+  }
+  function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
+  // A capture's answer is a named outcome, never an error line; the strip re-reads its own state after
+  // every press, and the day repaints from the new notes.
+  function gradesAct(cmd, button) {
+    if (button) { button.disabled = true; }
+    gradesSay("");
+    return invoke(cmd, {}).then(function (r) {
+      gradesSay(r && r.ok === false ? String(r.error || "") : "");
+      return gradesStatus().then(poll);
+    }).catch(function () { if (button) { button.disabled = false; } });
+  }
+  EL("grades").addEventListener("click", function (e) {
+    var ring = e.target.closest("[data-grades-course]"); if (ring) { openGradesDrawer(ring.getAttribute("data-grades-course")); return; }
+    var conn = e.target.closest("[data-grades-connect]"); if (conn) { gradesAct("grades_connect", conn); return; }
+    var ref = e.target.closest("[data-grades-refresh]"); if (ref) { gradesAct("grades_refresh", ref); }
+  });
+  EL("drawer").addEventListener("click", function (e) {
+    var ref = e.target.closest("[data-grades-refresh]"); if (ref) { gradesAct("grades_refresh", ref); }
+  });
+  EL("set-grades-forget").addEventListener("click", function () {
+    invoke("grades_forget", {}).then(function (r) {
+      EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "forgotten";
+      return gradesStatus();
+    }).catch(function () {});
+  });
+  // Hide grades (spec §2, §9): a settings row like Start with Windows, through set_settings; the
+  // flag lives in grades.json, and the strip follows grades_status's `hidden`.
+  EL("set-grades-hide-in").addEventListener("change", function () {
+    invoke("set_settings", { patch: { grades_hidden: EL("set-grades-hide-in").checked } }).then(function (r) {
+      EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      return gradesStatus();
+    }).catch(function () {});
+  });
+  // ---- end M1 grades
+
   function paint(state, force) {
     // R28/R29/R30: a reorder never freezes the whole page — only the order-bearing regions
     // (must-do/recommended on Today, the list on a horizon view) hold for the "refresh order"
@@ -922,7 +1062,7 @@
     EL("main-gtk").hidden = current.view !== "good-to-know";
     EL("main-issues").hidden = current.view !== "issues";
     EL("main-schedule").hidden = current.view !== "schedule";
-    if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); }
+    if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); renderGrades(state); }
     if (reordered) { watchSeen(); return; }   // hold only renderMustDo/renderRecommended or renderList below
     current.state = state; current.revision = state.revision;
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
@@ -1082,7 +1222,7 @@
   function openDrawer(id) {
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
-      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); return; }
+      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
       var n = env.note, fm = n.frontmatter || {}, dl = "", title = fm.title || n.slug;
       Object.keys(fm).sort().forEach(function (k) {
         var val = typeof fm[k] === "object" ? JSON.stringify(fm[k]) : fm[k];
@@ -1097,7 +1237,7 @@
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
-      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || "");
+      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
       d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
     });
   }
@@ -1597,6 +1737,7 @@
   function openSettings() {
     EL("settings").hidden = false;
     checkAccount();
+    gradesStatus();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";

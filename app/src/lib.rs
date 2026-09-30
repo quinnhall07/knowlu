@@ -4,6 +4,7 @@
 pub mod account;
 pub mod commands;
 #[cfg(windows)] pub mod credentials;
+pub mod grades;
 pub mod inference;
 pub mod lms_link;
 pub mod onboarding;

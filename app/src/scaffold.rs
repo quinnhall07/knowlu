@@ -35,6 +35,11 @@ pub struct Curated {
     pub lms_host: &'static str,
     /// `blackboard` or `canvas`. With `lms_host`, it is enough to build every endpoint either LMS has.
     pub lms_kind: &'static str,
+    /// **The date (`YYYY-MM-DD`) this school's university-policy read was done**, `None` until it is.
+    /// Grades are offered only on a `blackboard` row that carries one (grades spec §4; cloud design
+    /// ruling 12), and `grades::availability` is the one place that decides it. A date reaches `main`
+    /// only with or after privacy bump #1 (`app/tests/grades.rs`, the date-and-bump test).
+    pub policy_read: Option<&'static str>,
 }
 
 pub const CAMPUSES: [Curated; 2] = [
@@ -44,6 +49,7 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "The University of Alabama",
         lms_host: "ualearn.blackboard.com",
         lms_kind: "blackboard",
+        policy_read: None,
     },
     Curated {
         unitid: "157085",
@@ -51,6 +57,7 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "University of Kentucky",
         lms_host: "uk.instructure.com",
         lms_kind: "canvas",
+        policy_read: None,
     },
 ];
 
@@ -670,7 +677,7 @@ fn write_file(root: &Path, rel: &str, text: &str) -> Result<(), String> {
 }
 
 fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
-    for folder in ["tasks", "approvals", "archive", "courses", "issues", "info", "state", "state/journal", "config"] {
+    for folder in ["tasks", "approvals", "archive", "courses", "issues", "info", "grades", "state", "state/journal", "config"] {
         let path = root.join(folder);
         std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
