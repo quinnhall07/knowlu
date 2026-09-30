@@ -595,6 +595,49 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
     );
 }
 
+/// Gmail connect D11: the wizard's Gmail panel has a Connect Gmail button whose state follows the
+/// same A-5 rule as the calendar button's (`WIZ`, `renderWizard()`, a token `wizGo` bumps).
+#[test]
+fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-gmail\"").nth(1).and_then(|s| s.split("id=\"wiz-slots\"").next()).expect("the Gmail panel");
+    assert!(panel.contains("id=\"wiz-gmail-connect\""), "the panel has the button");
+    assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
+    assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
+    assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
+    assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
+    assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
+    assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");
+    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
+    assert!(
+        go.find("WIZ.gmailSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
+        "wizGo bumps the token on leaving the panel"
+    );
+}
+
+#[test]
+fn the_wizard_gmail_button_uses_the_wizard_commands() {
+    let js = read("console.js");
+    let h = js.split("getElementById(\"wiz-gmail-connect\")").nth(1).and_then(|s| s.split("// ---- R-OB-4").next()).expect("the Gmail handler");
+    assert!(h.contains("invoke(\"google_connect_url\", { scope: \"gmail\" })"), "the wizard command, scope gmail");
+    assert!(h.contains("invoke(\"open_external\""), "the wizard's opener");
+    assert!(h.contains("invoke(\"google_connected\")"), "polls the wizard's status command");
+    for console_only in ["google_status", "google_connect\"", "google_disconnect"] {
+        assert!(!h.contains(console_only), "no console-only command: {console_only}");
+    }
+}
+
+#[test]
+fn next_never_waits_on_gmail() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("function clearCredentialFields").next()).expect("renderWizard");
+    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy;"), "Next depends on busy alone");
+    assert!(!render.contains("wiz-next\").disabled = WIZ.busy ||") && !render.contains("gmailPolling ||  WIZ.busy"), "not on polling");
+    let finish = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
+    assert!(!finish.contains("gmail"), "nothing about Gmail reaches the plan");
+}
+
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
 /// first slot had both logins stored and `courses: {}` in the config, so the engine answered
 /// `zybook UACS100Fall2026 not in config; skipped` and then `0 assignments parsed; treating as
@@ -1850,10 +1893,14 @@ fn the_console_invokes_the_three_google_commands_and_never_open_external_outside
     for cmd in ["google_status", "google_connect", "google_disconnect"] {
         assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
     }
-    let wiz_start = js.find("getElementById(\"wiz-google\").addEventListener").expect("the wizard's Google handler");
-    let wiz_end = wiz_start + js[wiz_start..].find("\n  });").expect("end of the wizard's Google handler");
+    // The wizard's two handlers (calendar, and Gmail per D11) are the only places it may be invoked.
+    let spans: Vec<(usize, usize)> = ["wiz-google", "wiz-gmail-connect"].iter().map(|id| {
+        let start = js.find(&format!("getElementById(\"{id}\").addEventListener")).unwrap_or_else(|| panic!("the wizard's {id} handler"));
+        (start, start + js[start..].find("
+  });").expect("end of the handler"))
+    }).collect();
     for (at, _) in js.match_indices("invoke(\"open_external\"") {
-        assert!(wiz_start < at && at < wiz_end, "open_external is invoked outside the wizard's Google handler");
+        assert!(spans.iter().any(|&(a, b)| a < at && at < b), "open_external is invoked outside the wizard's handlers");
     }
 }
 

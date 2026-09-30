@@ -2123,6 +2123,9 @@
               // cancellation token `wizGo` bumps on leaving the panel, the same shape
               // `schoolSeq` uses for the typeahead.
               google: false, googleNote: "", googlePolling: false, googleSeq: 0,
+              // The Gmail panel's own flow (D11): the same shape, its own token. Nothing here reaches
+              // the plan — Next never waits on it and Finish never reads it.
+              gmail: false, gmailNote: "", gmailPolling: false, gmailSeq: 0,
               // R-OB-4: the school the student picked — a unitid, a name, a state and (once
               // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
               // command, and the page holds only the ten rows it is showing.
@@ -2228,6 +2231,8 @@
     // on it) always shows the truth — connected, mid-poll, or neither — never a stale DOM write.
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
+    EL("wiz-gmail-note").textContent = WIZ.gmailNote;
+    EL("wiz-gmail-connect").disabled = WIZ.gmail || WIZ.gmailPolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
     // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
     // has an actual answer from `restore_into`, never a claim made before Finish has even run.
@@ -2359,6 +2364,11 @@
     if (leaving === 4 && WIZ.googlePolling) {
       WIZ.googleSeq += 1;
       WIZ.googlePolling = false;
+    }
+    // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
+    if (leaving === 6 && WIZ.gmailPolling) {
+      WIZ.gmailSeq += 1;
+      WIZ.gmailPolling = false;
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
@@ -2861,6 +2871,36 @@
     }
     WIZ.googlePolling = false;
     WIZ.googleNote = "Google did not finish connecting. You can try again, or use the secret address above.";
+    renderWizard();
+  });
+
+  // ---- D11: the Gmail panel's Connect Gmail. The wizard's own commands with `scope: "gmail"`, the
+  // calendar button's poll shape and its own token (`WIZ.gmailSeq`, bumped by `wizGo`). Skip is the
+  // default path: Next is never gated on this, and nothing about it is written to the plan.
+  document.getElementById("wiz-gmail-connect").addEventListener("click", async () => {
+    var got = await invoke("google_connect_url", { scope: "gmail" });
+    if (!got.ok) { showWizardError(got.error); return; }
+    var opened = await invoke("open_external", { url: got.url });
+    if (!opened.ok) { showWizardError(opened.error); return; }
+    var mySeq = ++WIZ.gmailSeq;
+    WIZ.gmailPolling = true;
+    WIZ.gmailNote = "Finish signing in to Google in your browser — this may take a moment.";
+    renderWizard();
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      var status = await invoke("google_connected");
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      if (status.ok && status.gmail) {
+        WIZ.gmail = true;
+        WIZ.gmailPolling = false;
+        WIZ.gmailNote = "Gmail connected, read-only. Knowlu proposes what it finds; nothing is added without you.";
+        renderWizard();
+        return;
+      }
+    }
+    WIZ.gmailPolling = false;
+    WIZ.gmailNote = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet. You can skip this and try again in Settings.";
     renderWizard();
   });
 
