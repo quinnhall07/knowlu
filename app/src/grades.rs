@@ -662,6 +662,16 @@ pub fn bundle_path(data_dir: &Path) -> PathBuf {
     data_dir.join("grades-capture.json")
 }
 
+/// A bundle path private to one slot capture, beside [`bundle_path`] and never that file: the console's
+/// Refresh writes and deletes `grades-capture.json` while the slot's engine step is still to run
+/// (after sync, coursework and ingest), so sharing it would let either side delete or replace the
+/// other's bundle (spec §5, §10). Unique per process and per call.
+pub fn slot_bundle_path(data_dir: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::SeqCst);
+    data_dir.join(format!("grades-capture-slot-{}-{n}.json", std::process::id()))
+}
+
 /// `knowlu-engine grades --vault <v> --input <bundle> --via <via>`.
 pub fn grades_argv(vault: &Path, input: &Path, via: &str) -> Vec<String> {
     let s = |p: &Path| p.to_string_lossy().into_owned();

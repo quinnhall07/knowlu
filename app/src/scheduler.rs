@@ -392,7 +392,8 @@ fn judge_plan_for(state: crate::account::EntitlementState, cs: &ConsoleState) ->
 pub enum GradesStep {
     /// The whole step name, `grades (skipped: <why>)`; recorded at exit 0 like the ingest and judge skips.
     Skip(String),
-    /// The capture's bundle, at `grades::bundle_path`; the caller deletes it after the engine step.
+    /// The capture's bundle, at `grades::slot_bundle_path` (private to this run, never the console's
+    /// `grades-capture.json`); the caller deletes it after the engine step.
     Captured(PathBuf),
 }
 
@@ -441,7 +442,7 @@ pub fn grades_step(
     }
     match capture(host) {
         Ok(bundle) => {
-            let path = grades::bundle_path(data_dir);
+            let path = grades::slot_bundle_path(data_dir);
             let saved = std::fs::create_dir_all(data_dir).and_then(|()| std::fs::write(&path, knowlu_engine::ledger::dumps_value(&bundle)));
             match saved {
                 Ok(()) => {

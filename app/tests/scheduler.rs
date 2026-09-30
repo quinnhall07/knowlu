@@ -1559,7 +1559,8 @@ fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
     let d = with_session("decision");
     let got = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&capture));
     let GradesStep::Captured(p) = got else { panic!("a dated row captures") };
-    assert_eq!(p, grades_app::bundle_path(&d));
+    assert_ne!(p, grades_app::bundle_path(&d), "the slot's bundle is its own, never the console's file");
+    assert_eq!(p.parent(), Some(d.as_path()), "still under the profile's app data");
     assert_eq!(calls.get(), 1);
     assert!(p.is_file(), "the bundle is on disk for the engine step");
     let _ = std::fs::remove_dir_all(&d);
@@ -1626,6 +1627,35 @@ fn a_captures_own_outcomes_are_named_and_signed_out_is_remembered() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Spec §10 and §5: a capture never paints the tray amber, and each capture's bundle is deleted by its
+/// own step. The console's Refresh writes and deletes `grades-capture.json` while the slot's engine
+/// step is still to run; the slot's bundle must survive that, and must not be the console's.
+#[test]
+fn the_slots_bundle_is_private_to_its_run_and_survives_a_console_refresh() {
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let d = with_session("private");
+    let mine = |_h: &'static str| Ok(json!({ "lms": "blackboard", "host": "lms.example.test", "courses": [], "mine": "slot" }));
+    let GradesStep::Captured(p) = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&mine)) else { panic!("captured") };
+    // The console's Refresh: writes its own bundle, then deletes it after its engine step.
+    let console = grades_app::bundle_path(&d);
+    std::fs::write(&console, "{\"mine\":\"console\"}").unwrap();
+    std::fs::remove_file(&console).unwrap();
+    assert!(p.is_file(), "the console's delete must not take the slot's bundle");
+    assert!(std::fs::read_to_string(&p).unwrap().contains("\"slot\""), "and it is still the slot's own capture");
+    // The console writing over its own path must not overwrite the slot's either.
+    std::fs::write(&console, "{\"mine\":\"console\"}").unwrap();
+    assert!(std::fs::read_to_string(&p).unwrap().contains("\"slot\""));
+    // Two slot captures never share a path.
+    let GradesStep::Captured(q) = grades_step(Some(&dated), "blackboard", EntitlementState::Entitled, &d, false, Some(&mine)) else { panic!("captured") };
+    assert_ne!(p, q);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// No `grades-capture*.json` of any run is left in the profile's app data.
+fn no_bundles_left(data_dir: &Path) -> bool {
+    std::fs::read_dir(data_dir).map(|d| d.flatten().all(|e| !e.file_name().to_string_lossy().starts_with("grades-capture"))).unwrap_or(true)
+}
+
 fn app_slot_vault(tag: &str) -> (PathBuf, ConsoleState) {
     let v = scratch(tag);
     std::fs::write(
@@ -1670,14 +1700,14 @@ fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
     let at = names.iter().position(|n| *n == "grades").unwrap_or_else(|| panic!("{names:?}"));
     assert!(names.iter().position(|n| *n == "coursework").unwrap() < at && at < names.iter().position(|n| *n == "rank").unwrap(), "{names:?}");
     assert_eq!(calls.get(), 1);
-    assert!(!grades_app::bundle_path(&cs.data_dir).exists(), "the bundle is deleted after the step");
+    assert!(no_bundles_left(&cs.data_dir), "the bundle is deleted after the step");
 
     // A failing engine step (a path that cannot be spawned) deletes it too.
     unsafe { std::env::set_var("KNOWLU_ENGINE_EXE", r"C:\knowlu-test-no-such-dir\knowlu-engine.exe") };
     let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false });
     assert_eq!(calls.get(), 2);
     assert!(s.steps.iter().any(|(n, c)| n == "grades" && *c != 0), "{:?}", s.steps);
-    assert!(!grades_app::bundle_path(&cs.data_dir).exists(), "the bundle is deleted whatever the exit code");
+    assert!(no_bundles_left(&cs.data_dir), "the bundle is deleted whatever the exit code");
 
     let _ = std::fs::remove_dir_all(&fake);
     let _ = std::fs::remove_dir_all(&cs.data_dir);
