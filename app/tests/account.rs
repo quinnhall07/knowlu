@@ -1596,3 +1596,110 @@ fn a_session_refresh_that_fails_is_named_in_the_sync_status() {
     let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+// ---- Gmail connect T4b: the three pure cores (spec §4.2, D3; §8.1 items 1–3) ----
+//
+// Each core takes `(api_base, anon, token)` and reads nothing process-global, so these need neither
+// `CREDMAN_LOCK` nor the `ApiBase` seam: the base is the test's own loopback, and
+// `no_test_in_this_file_can_reach_the_compiled_in_project` scans these tests like every other.
+use knowlu::account::{google_connect_url_at, google_disconnect_at, google_status_at};
+
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+
+/// What every core sends: the named method and path, the session's bearer, and the anon key the
+/// caller passed in (not one read from the environment).
+fn assert_bearer_request(seen: &str, request_line: &str) {
+    assert!(seen.starts_with(&format!("{request_line} HTTP/1.1\r\n")), "{seen}");
+    let lower = seen.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer the-access-token\r\n"), "{seen}");
+    assert!(lower.contains("\r\napikey: the-anon-key\r\n"), "{seen}");
+}
+
+#[test]
+fn google_status_at_reads_each_state_and_both_scopes() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"connected":false,"scopes":[],"status":"none","email":null}"#.to_string()),
+        (200, format!(r#"{{"connected":true,"scopes":["openid","email","{CALENDAR_SCOPE}","{GMAIL_SCOPE}"],"status":"active","email":"student@example.invalid"}}"#)),
+        // A bare scope name is not the scope: only the full URL counts, as the wizard's check did.
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}","gmail.readonly"],"status":"quiet","email":"student@example.invalid"}}"#)),
+        (200, r#"{"connected":false,"scopes":[],"status":"revoked","email":"student@example.invalid"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..4).map(|_| google_status_at(&api, "the-anon-key", "the-access-token")).collect();
+    let got: Vec<_> = got.into_iter().map(|r| r.expect("a status")).collect();
+    assert_eq!(got.iter().map(|s| s.state).collect::<Vec<_>>(), ["none", "active", "quiet", "revoked"]);
+    assert_eq!(got.iter().map(|s| s.connected).collect::<Vec<_>>(), [false, true, true, false]);
+    assert_eq!(got.iter().map(|s| (s.calendar, s.gmail)).collect::<Vec<_>>(), [(false, false), (true, true), (true, false), (false, false)]);
+    let who = Some("student@example.invalid");
+    assert_eq!(got.iter().map(|s| s.email.as_deref()).collect::<Vec<_>>(), [None, who, who, who]);
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "GET /functions/v1/google-connect?status=1");
+    }
+}
+
+#[test]
+fn google_status_at_reads_an_older_servers_reply() {
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}"]}}"#)),
+        (200, r#"{"connected":false,"scopes":[]}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let on = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    let off = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    assert_eq!((on.state, on.connected, on.calendar, on.gmail, on.email), ("active", true, true, false, None));
+    assert_eq!((off.state, off.connected, off.calendar, off.gmail, off.email), ("none", false, false, false, None));
+    handle.join().expect("server thread");
+}
+
+/// `gmail`, `reconnect` and `calendar` pass through; anything else — a typo, another scope, or an
+/// attempt to smuggle a second `scope=` into the query — asks for `calendar`.
+#[test]
+fn google_connect_url_at_asks_for_the_named_scope_with_the_bearer() {
+    let consent = "https://accounts.google.com/o/oauth2/v2/auth?state=s";
+    let asks = ["gmail", "reconnect", "calendar", "drive", "gmail&scope=reconnect"];
+    let (base, handle) = loopback(asks.iter().map(|_| (200, format!(r#"{{"url":"{consent}"}}"#))).collect());
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = asks.iter().map(|ask| google_connect_url_at(&api, "the-anon-key", "the-access-token", ask)).collect();
+    assert!(got.iter().all(|u| u.as_deref() == Ok(consent)), "{got:?}");
+    let seen = handle.join().expect("server thread");
+    for (s, scope) in seen.iter().zip(["gmail", "reconnect", "calendar", "calendar", "calendar"]) {
+        assert_bearer_request(s, &format!("GET /functions/v1/google-connect?scope={scope}"));
+    }
+}
+
+/// The URL is checked in Rust before any caller can open it, and the refusal never repeats it.
+#[test]
+fn google_connect_url_at_refuses_a_url_knowlu_will_not_open() {
+    let (base, handle) = loopback(vec![(200, r#"{"url":"https://evil.example/o/oauth2/v2/auth?state=s"}"#.to_string())]);
+    let got = google_connect_url_at(&format!("{base}/functions/v1"), "the-anon-key", "the-access-token", "gmail");
+    assert_eq!(got, Err("the service returned a url Knowlu will not open".to_string()));
+    handle.join().expect("server thread");
+}
+
+/// Each refusal maps by its status, never by its body (T4a's sentences, spec §4.2).
+#[test]
+fn google_disconnect_at_sends_delete_and_maps_each_status() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"disconnected":true}"#.to_string()),
+        (502, r#"{"error":"a body the student never sees"}"#.to_string()),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+        (402, r#"{"error":"subscription required"}"#.to_string()),
+        (503, r#"{"error":"not configured"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..5).map(|_| google_disconnect_at(&api, "the-anon-key", "the-access-token")).collect();
+    assert_eq!(
+        got,
+        [
+            Ok(()),
+            Err("Google could not be reached to disconnect; try again".to_string()),
+            Err("sign in again".to_string()),
+            Err("your subscription is not active, so Google cannot be connected".to_string()),
+            Err("Google sign-in is not available right now — use the secret address below".to_string()),
+        ]
+    );
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "DELETE /functions/v1/google-connect");
+    }
+}

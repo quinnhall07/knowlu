@@ -1317,6 +1317,90 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
     json!({ "ok": true, "error": Value::Null })
 }
 
+// ---- Gmail connect (spec §4.2, D3): the three pure cores ----
+//
+// Each takes `(api_base, anon, token)` and reads no credential and no environment variable, so the
+// wizard's commands (the pending session, the compiled-in base) and the console's (the vault's) call
+// the same HTTP path, and a test drives it on a `127.0.0.1:0` loopback.
+
+/// The full scope URLs `google-connect` records; a bare name like `gmail.readonly` is not one.
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+
+/// `GET /google-connect?status=1`, read (D5). `state` is `none`, `active`, `quiet` or `revoked`.
+/// `connected` is the service's own flag, carried so the wizard's `google_connected` answers exactly
+/// what it did before the refactor (D3).
+#[derive(Clone, PartialEq, Eq)]
+pub struct GoogleStatus {
+    pub state: &'static str,
+    pub connected: bool,
+    pub calendar: bool,
+    pub gmail: bool,
+    pub email: Option<String>,
+}
+
+/// Hand-written, as `Session`'s is: the address is shown back to its owner on the Settings row and
+/// goes nowhere else, so a `{:?}` in a log line or a panic never prints it.
+impl std::fmt::Debug for GoogleStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleStatus")
+            .field("state", &self.state)
+            .field("connected", &self.connected)
+            .field("calendar", &self.calendar)
+            .field("gmail", &self.gmail)
+            .field("email", &self.email.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+pub fn google_status_at(api_base: &str, anon: &str, token: &str) -> Result<GoogleStatus, String> {
+    let v = get_json(&format!("{}/google-connect?status=1", api_base.trim_end_matches('/')), anon, token)?;
+    let scopes: Vec<&str> =
+        v.get("scopes").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let connected = v.get("connected").and_then(Value::as_bool).unwrap_or(false);
+    // An older server sends no `status`, and `connected` is then the whole story. A value this build
+    // does not know reads the same way, never as a state the page has no copy for.
+    let state = match v.get("status").and_then(Value::as_str) {
+        Some("none") => "none",
+        Some("active") => "active",
+        Some("quiet") => "quiet",
+        Some("revoked") => "revoked",
+        _ if connected => "active",
+        _ => "none",
+    };
+    Ok(GoogleStatus {
+        state,
+        connected,
+        calendar: scopes.contains(&CALENDAR_SCOPE),
+        gmail: scopes.contains(&GMAIL_SCOPE),
+        email: v.get("email").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
+/// `scope` is normalised here, so nothing a caller passes reaches the query but `calendar`, `gmail`
+/// or `reconnect` (D8). The URL is checked against [`external_url_allowed`] before any caller can
+/// open it, and the refusal never repeats the URL.
+pub fn google_connect_url_at(api_base: &str, anon: &str, token: &str, scope: &str) -> Result<String, String> {
+    let scope = match scope {
+        "gmail" => "gmail",
+        "reconnect" => "reconnect",
+        _ => "calendar",
+    };
+    let v = get_json(&format!("{}/google-connect?scope={scope}", api_base.trim_end_matches('/')), anon, token)?;
+    let url = v.get("url").and_then(Value::as_str).ok_or_else(|| "the service returned no url".to_string())?;
+    if !external_url_allowed(url) {
+        return Err("the service returned a url Knowlu will not open".to_string());
+    }
+    Ok(url.to_string())
+}
+
+/// A bearer `DELETE` (D6). The service revokes at Google first and forgets the grant second, so every
+/// refusal leaves the grant where it was, and [`google_error_for_status`] names each one.
+pub fn google_disconnect_at(api_base: &str, anon: &str, token: &str) -> Result<(), String> {
+    let url = format!("{}/google-connect", api_base.trim_end_matches('/'));
+    send_json(ureq::http::Method::DELETE, &url, anon, token).map(|_| ())
+}
+
 /// The Google consent URL for the account this wizard signed in as (§11a).
 ///
 /// **Vault-less on purpose.** `#wiz-google` is on the wizard window, which has no `ConsoleState`
@@ -1331,6 +1415,8 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
 /// Google token** — the exchange happens server-side in `google-callback` (D12).
 #[tauri::command(async)]
 pub fn google_connect_url(scope: String) -> Value {
+    // The wizard asks for `calendar` or `gmail` and nothing else, as it always has; `reconnect` is
+    // the Settings row's, so it is folded to `calendar` here before the core sees it.
     let scope = if scope == "gmail" { "gmail" } else { "calendar" };
     let api = api_base();
     let auth = match auth_base(&api) {
@@ -1341,11 +1427,8 @@ pub fn google_connect_url(scope: String) -> Value {
         Ok(token) => token,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
-    match get_json(&format!("{api}/google-connect?scope={scope}"), &token) {
-        Ok(v) => match v.get("url").and_then(Value::as_str) {
-            Some(url) => json!({ "ok": true, "url": url }),
-            None => json!({ "ok": false, "error": "the service returned no url" }),
-        },
+    match google_connect_url_at(&api, &anon_key(), &token, scope) {
+        Ok(url) => json!({ "ok": true, "url": url }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
@@ -1367,29 +1450,19 @@ pub fn google_connected() -> Value {
         Ok(token) => token,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
-    match get_json(&format!("{api}/google-connect?status=1"), &token) {
-        Ok(v) => {
-            let scopes: Vec<String> = v
-                .get("scopes")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            json!({
-                "ok": true,
-                "connected": v.get("connected").and_then(Value::as_bool).unwrap_or(false),
-                "calendar": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/calendar.readonly"),
-                "gmail": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/gmail.readonly"),
-            })
-        }
+    match google_status_at(&api, &anon_key(), &token) {
+        Ok(s) => json!({ "ok": true, "connected": s.connected, "calendar": s.calendar, "gmail": s.gmail }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 /// A-6: what the wizard's Google error line says for a failed status — pulled out as a pure
 /// function (no network, no agent) so the mapping is tested directly rather than only through a
-/// live `get_json` call. `get_json` below is reached by exactly two commands (`google_connect_url`,
-/// `google_connected`), so this is specific to the Google flow on purpose: 401 means the wizard's
-/// own pending session has gone stale (the fix is a sign-in, not a retry of THIS request), and 503
+/// live `get_json` call. `send_json` below is reached only by the three Google cores
+/// (`google_status_at`, `google_connect_url_at`, `google_disconnect_at`) and the commands built on
+/// them, so this is specific to the Google flow on purpose: 401 means the caller's own session
+/// (the wizard's pending one, or later the vault's) has gone stale (the fix is a sign-in, not a
+/// retry of THIS request), and 503
 /// means the deployment has no Google client configured at all (`GOOGLE_NOT_CONFIGURED` on the
 /// service side) — the fix is the `calendar_ics` fallback the panel already shows, not "try again".
 /// Gmail connect (spec §4.2) adds two: 402 is `requireActiveEntitlement` refusing every
@@ -1407,10 +1480,9 @@ fn google_error_for_status(code: u16) -> String {
     }
 }
 
-/// One bearer GET against the functions base: [`send_json`] with `GET`, kept so the wizard's
-/// callers read as they always have.
-fn get_json(url: &str, token: &str) -> Result<Value, String> {
-    send_json(ureq::http::Method::GET, url, token)
+/// One bearer GET against the functions base: [`send_json`] with `GET`, for the two GET cores.
+fn get_json(url: &str, anon: &str, token: &str) -> Result<Value, String> {
+    send_json(ureq::http::Method::GET, url, anon, token)
 }
 
 /// One bearer request with no body against the functions base, answering the reply's JSON.
@@ -1418,8 +1490,9 @@ fn get_json(url: &str, token: &str) -> Result<Value, String> {
 /// loopback, for the tests) is refused here rather than turned into a request to a host nobody
 /// chose. `Agent::run` on a bodiless `http::Request` is the path `RequestBuilder::call` takes, and a
 /// request that will not build fails as `call` would have (`ureq::Error::Http`), so `get_json`'s
-/// errors are unchanged. No error carries the token or the reply's body.
-fn send_json(method: ureq::http::Method, url: &str, token: &str) -> Result<Value, String> {
+/// errors are unchanged. No error carries the token or the reply's body. `anon` is the caller's
+/// (D3: the cores take it), so the key sent is the one the caller's base belongs to.
+fn send_json(method: ureq::http::Method, url: &str, anon: &str, token: &str) -> Result<Value, String> {
     check_api_base(url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
@@ -1430,7 +1503,7 @@ fn send_json(method: ureq::http::Method, url: &str, token: &str) -> Result<Value
         .method(method)
         .uri(url)
         .header("Authorization", format!("Bearer {token}"))
-        .header("apikey", anon_key())
+        .header("apikey", anon)
         .body(())
         .map_err(|e| format!("no network ({})", ureq::Error::from(e)))?;
     let mut response = agent.run(request).map_err(|e| format!("no network ({e})"))?;
@@ -1510,8 +1583,8 @@ mod google_error_for_status_tests {
     }
 }
 
-/// `send_json` on a real `127.0.0.1:0` socket: nothing in `app/tests/account.rs` reaches it (the
-/// wizard's commands read `PENDING_TARGET`, which no test writes), so these are the refactor's guard.
+/// `send_json` on a real `127.0.0.1:0` socket, beneath the cores: T4a's refactor guard, kept now that
+/// `app/tests/account.rs` also reaches it through the three Google cores (T4b).
 #[cfg(test)]
 mod send_json_tests {
     use super::{get_json, send_json};
@@ -1548,7 +1621,7 @@ mod send_json_tests {
     #[test]
     fn get_json_still_sends_a_get_with_the_bearer_and_the_apikey() {
         let (base, server) = serve_one(200, r#"{"connected":false}"#);
-        let reply = get_json(&format!("{base}/google-connect?status=1"), "t0k");
+        let reply = get_json(&format!("{base}/google-connect?status=1"), "an0n", "t0k");
         let head = server.join().expect("server");
         assert_eq!(reply, Ok(serde_json::json!({ "connected": false })));
         assert!(head.starts_with("get /google-connect?status=1 http/1.1\r\n"), "{head}");
@@ -1558,7 +1631,7 @@ mod send_json_tests {
     #[test]
     fn a_delete_goes_out_as_a_delete_and_a_refusal_maps_by_status_not_body() {
         let (base, server) = serve_one(502, r#"{"error":"a body the page never sees"}"#);
-        let reply = send_json(ureq::http::Method::DELETE, &format!("{base}/google-connect"), "t0k");
+        let reply = send_json(ureq::http::Method::DELETE, &format!("{base}/google-connect"), "an0n", "t0k");
         let head = server.join().expect("server");
         assert_eq!(reply, Err("Google could not be reached to disconnect; try again".to_string()));
         assert!(head.starts_with("delete /google-connect http/1.1\r\n"), "{head}");
@@ -1567,7 +1640,7 @@ mod send_json_tests {
 
     #[test]
     fn check_api_base_applies_before_any_request() {
-        let refused = send_json(ureq::http::Method::DELETE, "ftp://127.0.0.1:9/google-connect", "t0k");
+        let refused = send_json(ureq::http::Method::DELETE, "ftp://127.0.0.1:9/google-connect", "an0n", "t0k");
         assert!(refused.is_err_and(|e| e.ends_with("an api_base must be https://")));
     }
 }
