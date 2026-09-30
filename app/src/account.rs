@@ -1456,6 +1456,70 @@ pub fn google_connected() -> Value {
     }
 }
 
+// ---- Gmail connect (spec §4.2, D2): the three console commands ----
+//
+// The Settings row's commands, on the **console** window's list. Each is a Tauri wrapper over an
+// inner function taking the vault path, so `app/tests/account.rs` drives the inner one with no
+// `ConsoleState`, the shape `delete_local_data` and `attach_in` already have.
+
+/// The vault's own session, never `PENDING_TARGET` (D2). After onboarding the pending target is empty,
+/// and on a machine where a second student is mid-onboarding it holds *their* session; so the base,
+/// the anon key and the credential target all come from this vault's `config/cloud.yaml`, whose
+/// `api_base` `cloud_config` has already held to the host this build talks to (R-C1-59 I1).
+fn console_session(vault: &std::path::Path) -> Result<(CloudConfig, String), String> {
+    let cfg = cloud_config(vault)?;
+    let auth = auth_base(&cfg.api_base)?;
+    let token = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())?;
+    Ok((cfg, token))
+}
+
+/// `{ok, state, calendar, gmail, email, error}`. On a failure the four facts are `null`, never a
+/// guess, and `error` is the sentence the row shows verbatim. The email is the student's own Google
+/// address, shown back to them on the row; it reaches no log line.
+pub fn google_status_in(vault: &std::path::Path) -> Value {
+    match console_session(vault).and_then(|(cfg, token)| google_status_at(&cfg.api_base, &cfg.anon_key, &token)) {
+        Ok(s) => json!({ "ok": true, "state": s.state, "calendar": s.calendar, "gmail": s.gmail, "email": s.email, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "state": Value::Null, "calendar": Value::Null, "gmail": Value::Null, "email": Value::Null, "error": e }),
+    }
+}
+
+/// The consent URL, already through [`external_url_allowed`] (in [`google_connect_url_at`]); a
+/// refused one is an error carrying no URL, so the wrapper has nothing to open. `scope` is
+/// `calendar`, `gmail` or `reconnect` (D8), normalised by the core.
+pub fn google_connect_in(vault: &std::path::Path, scope: &str) -> Result<String, String> {
+    let (cfg, token) = console_session(vault)?;
+    google_connect_url_at(&cfg.api_base, &cfg.anon_key, &token, scope)
+}
+
+/// `{ok, error}`. Nothing on this machine changes either way (D6): what Knowlu wrote stays in the
+/// vault, the `cloud:google` marker included, and the session is the Knowlu sign-in, not Google's.
+pub fn google_disconnect_in(vault: &std::path::Path) -> Value {
+    match console_session(vault).and_then(|(cfg, token)| google_disconnect_at(&cfg.api_base, &cfg.anon_key, &token)) {
+        Ok(()) => json!({ "ok": true, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn google_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    google_status_in(&cs.vault)
+}
+
+/// Opens the consent page from Rust, as `open_portal` does (D2): the URL never passes through the
+/// console's webview, which is why `open_external` stays off the console's list. `{ok, error}`.
+#[tauri::command(async)]
+pub fn google_connect(cs: tauri::State<'_, crate::state::ConsoleState>, scope: String) -> Value {
+    match google_connect_in(&cs.vault, &scope).and_then(|url| open_in_browser(&url)) {
+        Ok(()) => json!({ "ok": true, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn google_disconnect(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    google_disconnect_in(&cs.vault)
+}
+
 /// A-6: what the wizard's Google error line says for a failed status — pulled out as a pure
 /// function (no network, no agent) so the mapping is tested directly rather than only through a
 /// live `get_json` call. `send_json` below is reached only by the three Google cores
