@@ -17,3 +17,5 @@ __pycache__/
 # WebView2 user-data folders left behind by running the console or the shot scripts from the repo.
 .wv/
 .wv2/
+# A stray supabase CLI state dir at the repo root; the project lives in cloud/supabase.
+/supabase/
