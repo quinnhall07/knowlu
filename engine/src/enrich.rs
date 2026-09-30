@@ -1887,46 +1887,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
-    /// R-C2-E15: an empty queue must never reach the service at all — not even the one-call probe.
-    /// A slot that runs twice a day forever and has nothing to enrich must not spend a round trip
-    /// (and, on a network that black-holes instead of refusing, risk up to `CALL_TIMEOUT` stalling
-    /// the slot) proving what `pending`'s own empty result already answers for free.
-    #[test]
-    fn an_empty_queue_makes_no_request_to_the_service() {
-        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
-        let v = vault("cloud-empty");
-        // The fixture's one note starts flagged; clear it so `pending` finds nothing.
-        crate::pystr::write_text(
-            &v.join("tasks").join("hw3.md"),
-            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
-        ).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let port = listener.local_addr().expect("addr").port();
-        let cfg = crate::cloudmodel::CloudConfig {
-            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
-            anon_key: "anon".into(),
-            session_credential_target: "knowlu/test/session".into(),
-            account_id: "acct-1".into(),
-        };
-        let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
-        let opts = Options {
-            via: "local-runner", run_id: None, runtime: None, model: None,
-            log_dir: None, limit: 10, budget: BATCH_BUDGET,
-        };
-        let (code, lines) = run_lines_with(&v, &opts, Some(&client));
-        assert_eq!(code, 0);
-        assert_eq!(lines, vec!["judge: nothing to enrich".to_string()], "{lines:?}");
-        // Non-blocking, not a timed wait: `run_lines_with` above already ran to completion on this
-        // thread, so a request — had one been sent to a live loopback listener — would already be
-        // sitting in the accept queue. `Err` here means the probe never dialled out at all.
-        assert!(
-            listener.accept().is_err(),
-            "an empty queue must never reach the judgment service"
-        );
-        let _ = std::fs::remove_dir_all(&v);
-    }
-
     /// A loopback server that answers `replies` in order (by arrival, not by path) and hands back
     /// everything it was sent, joined once at the end — the same discipline
     /// `engine/tests/cloud_contract.rs`'s `Loopback` uses, duplicated here rather than shared
@@ -2053,12 +2013,17 @@ mod tests {
         }));
         // In arrival order: the probe (`GET /judge-rules`), the feed fetch (`POST /events`), the
         // verdict (`POST /judge-event`) — `enrich_with` itself makes no call at all, because its
-        // own batch is empty — and, since Task 12, the rule pull's own `GET /judge-rules` at the
-        // end of the cloud arm, with nothing decided and nothing offered.
+        // own batch is empty — then, since D4, the Gmail pull (`POST /gmail-read`, answered
+        // `no_gmail_scope`) and, since Task 12, the rule pull's own `GET /judge-rules` at the end
+        // of the cloud arm, with nothing decided and nothing offered.
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
         let (base, handle) = multi_reply_loopback(vec![
             (200, "{}".to_string()),
             (200, events_reply),
             (200, judge_reply),
+            (200, no_scope),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let cfg = crate::cloudmodel::CloudConfig {
@@ -2078,11 +2043,12 @@ mod tests {
         assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
 
         let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert_eq!(requests.len(), 5, "{requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
         assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
-        assert!(requests[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /functions/v1/gmail-read"), "{}", requests[3]);
+        assert!(requests[4].starts_with("GET /functions/v1/judge-rules"), "{}", requests[4]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -2763,68 +2729,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
-    /// R-C2-E38, R-C2-E43: the Gmail pull's local precondition. A vault that has linked a Google
-    /// calendar — its `config/ingest.yaml` carries the `cloud:google` entry hand-off H9 writes —
-    /// asks the service even with an empty enrichment queue and no event source; a vault that
-    /// never linked one asks nothing at all, exactly as before Task 11. And the predicate itself
-    /// never writes: no `state/calendar.md` on a vault that had none.
-    #[test]
-    fn the_gmail_pull_runs_only_when_the_vault_has_linked_a_google_calendar() {
-        let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
-
-        // Linked: the early return must be skipped, so the probe AND the pull both fire.
-        let connected = vault("gmail-predicate-connected");
-        crate::pystr::write_text(
-            &connected.join("tasks").join("hw3.md"),
-            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
-        ).unwrap();
-        crate::pystr::write_text(
-            &connected.join("config").join("ingest.yaml"),
-            "calendars:\n  - name: google\n    ics_url: 'cloud:google'\n",
-        ).unwrap();
-        // The probe, then the Gmail pull, then Task 12's own rule pull at the end of the cloud
-        // arm (nothing decided, nothing offered).
-        let (base, handle) = gmail_loopback(vec![
-            (200, "{}".to_string()),
-            gmail_reply("[]", false),
-            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
-        ]);
-        let client = client_for(base);
-        let log = connected.join("_log");
-        let (code, _lines) = run_lines_with(&connected, &opts(&log), Some(&client));
-        assert_eq!(code, 0);
-        let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 3, "the probe, the pull, then the rule pull: {requests:?}");
-        assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
-        assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
-        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
-        assert!(
-            !connected.join("state").join("calendar.md").exists(),
-            "R-C2-E43: the predicate is a pure config read and must never write a snapshot"
-        );
-        let _ = std::fs::remove_dir_all(&connected);
-
-        // Not linked: the widened early return still applies, exactly as it did before this
-        // task — no request of any kind, `judge` included.
-        let unconnected = vault("gmail-predicate-unconnected");
-        crate::pystr::write_text(
-            &unconnected.join("tasks").join("hw3.md"),
-            &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
-        ).unwrap();
-        let (base2, handle2) = gmail_loopback(vec![]);
-        let client2 = client_for(base2);
-        let log2 = unconnected.join("_log");
-        let (code2, lines2) = run_lines_with(&unconnected, &opts(&log2), Some(&client2));
-        assert_eq!(code2, 0);
-        assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
-        let requests2 = handle2.join().expect("the listener thread did not panic");
-        assert!(requests2.is_empty(), "no judge request either way: {requests2:?}");
-        let _ = std::fs::remove_dir_all(&unconnected);
-    }
-
     /// D4 (spec §4.3, §8.2 item 1): the grant lives in the account, not the vault, so the pull no
     /// longer waits for a `calendars:` marker. A vault with no marker still asks `/gmail-read`
-    /// after the probe. Replaces the marker-gate test above (T7b removes that one).
+    /// after the probe. Replaces the marker-gate test (`the_gmail_pull_runs_only_when_the_vault_has_linked_a_google_calendar`).
     #[test]
     fn the_gmail_pull_runs_without_a_calendar_marker() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
@@ -2936,9 +2843,13 @@ mod tests {
         let capped = crate::ledger::dumps_value(&serde_json::json!({
             "verdict": null, "outcome": "capped", "cause": null, "tier": 3,
         }));
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
         let (client, mut server) = loopback_client(vec![
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // the probe
             (200, capped),                                                              // /judge-task
+            (200, no_scope),                                                            // /gmail-read (D4)
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // pull_rules
         ]);
         let log = v.join("_log");
@@ -3243,13 +3154,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vault);
     }
 
-    /// R-C2-E46: an answered `kind: rule` card is exactly what widens the four-way early return —
-    /// an empty enrichment queue, no event source and no linked Google calendar are not "nothing
-    /// to do" while a rule decision is still waiting to be sent. The companion half (no answered
-    /// card, everything else empty) proves the early return still fires exactly as before this
-    /// task: no request of any kind, not even the probe.
+    /// R-C2-E46, as D4 leaves it: an answered `kind: rule` card is still sent, whatever else is
+    /// empty. The companion half (no answered card, everything else empty) used to prove the early
+    /// return fired: no request of any kind. D4 removed that return, so a bare vault now still asks
+    /// for mail — the probe, `/gmail-read` (answered `no_gmail_scope`) and the rule pull, in that
+    /// order — and the only line is `judge: nothing to enrich`.
     #[test]
-    fn an_answered_rule_card_alone_makes_the_probe_fire_and_a_bare_vault_makes_none() {
+    fn an_answered_rule_card_is_sent_and_a_bare_vault_still_asks_for_mail() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
 
         let waiting = vault("rules-waiting");
@@ -3272,8 +3183,12 @@ mod tests {
         )
         .expect("approve");
 
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
         let (client, mut server) = loopback_client(vec![
             (200, "{}".to_string()),
+            (200, no_scope.clone()), // /gmail-read (D4)
             (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
@@ -3292,24 +3207,20 @@ mod tests {
             &bare.join("tasks").join("hw3.md"),
             &NOTE.replace("needs_enrichment: true", "needs_enrichment: false"),
         ).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let port = listener.local_addr().expect("addr").port();
-        let cfg = crate::cloudmodel::CloudConfig {
-            api_base: format!("http://127.0.0.1:{port}/functions/v1"),
-            anon_key: "anon".into(),
-            session_credential_target: "knowlu/test/session".into(),
-            account_id: "acct-1".into(),
-        };
-        let client2 = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
+        let (client2, mut server2) = loopback_client(vec![
+            (200, "{}".to_string()),
+            (200, no_scope),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]);
         let log2 = bare.join("_log");
         let (code2, lines2) = run_lines_with(&bare, &opts(&log2), Some(&client2));
         assert_eq!(code2, 0);
         assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
-        assert!(
-            listener.accept().is_err(),
-            "no rule decision waiting, and nothing else pending, must never reach the service"
-        );
+        let requests2 = server2.requests();
+        assert_eq!(requests2.len(), 3, "the probe, the pull, the rule pull: {requests2:?}");
+        assert!(requests2[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests2[0]);
+        assert!(requests2[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests2[1]);
+        assert!(requests2[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests2[2]);
         let _ = std::fs::remove_dir_all(&bare);
     }
 
