@@ -93,7 +93,7 @@ impl GradesPrefs {
 // ---- hosts and paging (spec §3) --------------------------------------------------------------
 
 /// Every list follows `paging.nextPage` to the end, and no list reads more than this many pages, so a
-/// runaway `nextPage` loop is impossible.
+/// runaway `nextPage` loop is impossible; a list longer than this is an error, never cut short.
 pub const MAX_PAGES: usize = 20;
 
 /// Whether `url` is `https://<host>…` exactly: the scheme `https`, the authority the host itself
@@ -122,22 +122,29 @@ pub fn next_page(host: &str, body: &Value) -> Option<String> {
 /// network call, injected, and answers a body or the status or reason the call failed with, which
 /// is returned as is; a body that is not JSON is `unreadable`. A `first` URL off `host` is refused
 /// before anything is fetched.
+///
+/// A list is whole or it is an error, never a truncated `Ok`: the engine reads a column missing from
+/// a course as removed, and a grade missing from a list as unattempted. So a page whose `nextPage`
+/// is set (neither absent, `null` nor empty) but refused by [`next_page`] is `next page off the LMS
+/// host`, and a twentieth page that still names a next page is `more than 20 pages`.
 pub fn read_list(host: &str, first: &str, mut fetch: impl FnMut(&str) -> Result<String, String>) -> Result<Vec<Value>, String> {
     if !on_host(first, host) {
         return Err("not on the LMS host".into());
     }
     let mut pages = Vec::new();
     let mut url = first.to_string();
-    while pages.len() < MAX_PAGES {
+    loop {
         let page: Value = serde_json::from_str(&fetch(&url)?).map_err(|_| "unreadable".to_string())?;
+        let named = page.pointer("/paging/nextPage").is_some_and(|n| !n.is_null() && n.as_str() != Some(""));
         let next = next_page(host, &page);
         pages.push(page);
         match next {
+            Some(_) if pages.len() >= MAX_PAGES => return Err(format!("more than {MAX_PAGES} pages")),
             Some(n) => url = n,
-            None => break,
+            None if named => return Err("next page off the LMS host".into()),
+            None => return Ok(pages),
         }
     }
-    Ok(pages)
 }
 
 // ---- sign-in detection (spec §15, signed default 1) ------------------------------------------

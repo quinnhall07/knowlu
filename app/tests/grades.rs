@@ -346,24 +346,41 @@ fn next_page_follows_paging_next_page_only_on_the_same_host() {
 #[test]
 fn read_list_follows_pages_to_the_end_and_stops_at_twenty() {
     assert_eq!(MAX_PAGES, 20);
-    // A runaway list: every page names another.
+    // A runaway list: every page names another. Twenty pages are read, and the list is a failure,
+    // never a truncated list the engine would read as columns removed.
     let mut calls = Vec::new();
-    let pages = read_list(HOST, "https://lms.example.test/a", |url: &str| {
+    let runaway = read_list(HOST, "https://lms.example.test/a", |url: &str| {
         calls.push(url.to_string());
         Ok(page(json!([calls.len()]), Some(format!("/a?offset={}", calls.len()).as_str())).to_string())
-    })
-    .unwrap();
-    assert_eq!((calls.len(), pages.len()), (20, 20));
+    });
+    assert_eq!(runaway, Err("more than 20 pages".to_string()));
+    assert_eq!(calls.len(), 20);
     assert_eq!(calls[1], "https://lms.example.test/a?offset=1");
-    // A list that ends, and one whose nextPage points off the host, which is not followed.
+    // Exactly twenty pages, the last naming no next page, is the whole list.
+    let mut n = 0;
+    let twenty = read_list(HOST, "https://lms.example.test/a", |_: &str| {
+        n += 1;
+        Ok(page(json!([n]), (n < 20).then_some("/a?more")).to_string())
+    });
+    assert_eq!(twenty.unwrap().len(), 20);
+    // A list that ends; an empty or null nextPage is the last page too.
     let mut n = 0;
     let three = read_list(HOST, "https://lms.example.test/a", |_: &str| {
         n += 1;
         Ok(page(json!([n]), (n < 3).then_some("/a?more")).to_string())
     });
     assert_eq!(three.unwrap().len(), 3);
-    let off_host = read_list(HOST, "https://lms.example.test/a", |_: &str| Ok(page(json!([]), Some("https://evil.example/a")).to_string()));
-    assert_eq!(off_host.unwrap().len(), 1);
+    for last in [json!(""), json!(null)] {
+        let body = json!({ "results": [], "paging": { "nextPage": last } }).to_string();
+        assert_eq!(read_list(HOST, "https://lms.example.test/a", |_: &str| Ok(body.clone())).unwrap().len(), 1, "{last}");
+    }
+    // A nextPage off the host is not followed, and the list is a failure, not its first page.
+    let mut n = 0;
+    let off_host = read_list(HOST, "https://lms.example.test/a", |_: &str| {
+        n += 1;
+        Ok(page(json!([n]), Some(if n < 2 { "/a?more" } else { "https://evil.example/a" })).to_string())
+    });
+    assert_eq!((off_host, n), (Err("next page off the LMS host".to_string()), 2));
     // A failed call is its status; a body that is not JSON is unreadable.
     assert_eq!(read_list(HOST, "https://lms.example.test/a", |_: &str| Err("403".into())), Err("403".to_string()));
     assert_eq!(read_list(HOST, "https://lms.example.test/a", |_: &str| Ok("<html>".into())), Err("unreadable".to_string()));
