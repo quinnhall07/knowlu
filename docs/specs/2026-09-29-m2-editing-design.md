@@ -66,8 +66,9 @@ interests "as four list editors via `write_literals`" is **unsafe as stated**: s
 on a block-style list replaces the `strong:` line and orphans its `  - …` lines, which breaks the
 YAML (D10). `write::create` would stamp `id: task_…` on a profile file, because `ids::kind_for`
 defaults to `task` (`ids.rs:97`) (D11). P6(b) is no longer blocked on the commitment model:
-`commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). P6(c) already
-holds at the default configuration (Appendix A). The interests text reaching the event judge is
+`commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). P6(c) does **not**
+hold today. A digest can outlive 14 days when a registration deadline opens its horizon early
+(Appendix A), and the events spec's D3 already replaces the digest. The interests text reaching the event judge is
 not named on the privacy page, and because no app-made vault has `profile/`, M2 is the first path
 by which a student's typed interests reach a model at all (§5, Q8).
 
@@ -113,13 +114,13 @@ account exists before bump #1, so this costs the MVP nothing. What it adds is a 
 | **D5** | **Compare-and-swap.** set_body takes the body the caller last read. If the note's current body differs (an agent appended a line, another window saved, a text editor changed the file), it refuses with a named `Conflict`, writes no record and changes nothing. (Q2.) | A body replace is the first write in the product that can erase text it did not see. `detect_external` never journals a body edit, so the file is the only witness. | A student who reopens after a conflict loses nothing: the page keeps their draft (§9). |
 | **D6** | **One definition of "the body"**: what `note_detail` shows, i.e. everything after the closing fence line with leading newlines stripped. The write keeps the file's own run of newlines after the fence (one blank line when the body was empty and there was none). The new body's line endings become `\n`, trailing newlines are trimmed, and one final `\n` is added when it is not empty. A save that equals the current body under that rule writes nothing (the F4 rule of `write_literals`, `write.rs:261-264`). | The drawer, the hash and the file must agree on one string, or the compare-and-swap refuses every save. | A body whose meaning lived in trailing blank lines loses them; none does. |
 | **D7** | **Scope of body editing in the app:** notes in `tasks/` and `courses/`, reached by id; the two profile files through their own commands (D11-D12). Approvals, issues, info, commitments and archive are refused by name. The engine primitive itself takes any target `resolve_target` accepts. (Q3.) | Tasks carry the student's working notes; courses carry grade weights, which move the order. An approval's body is the card the deck parses, and a commitment or an issue has its own editor. | Editing another folder later is a one-line allow-list change. |
-| **D8** | **Undo in the session.** After a save the page shows "Saved · Undo" for 10 seconds. Undo sends a second set_body whose expected body is the one just saved and whose new body is the text the page held before. It is journalled like any edit. There is no undo after the drawer closes or the app restarts. (Q5.) | VISION commitment 5: an edit "acts at once, with undo". The page already holds the old text, so undo needs no text in the journal. | A student who wants yesterday's text back cannot get it from Knowlu; the local backup snapshots still hold it. |
+| **D8** | **Undo in the session, for every M2 editor.** After a save the page shows "Saved · Undo" for 10 seconds. For a body, undo sends a second set_body. Its expected body is **the body the page re-read after the save**, never the textarea's text, and its new body is the text the page held before. Preferences undo the same way through `set_preferences`. Interests undo by sending the four lists the page held before through `set_interests`. Each undo is journalled like any edit. There is no undo after the drawer or the settings panel closes, or after the app restarts. (Q5.) | VISION commitment 5 and Amendment ruling 3: "the student asked → act at once with undo". The page already holds the old text, so undo needs no text in the journal. Using the re-read body, together with §7.1's normalised compare, means D6's added final newline can never make an undo refuse itself. | A student who wants yesterday's text back cannot get it from Knowlu; the local backup snapshots still hold it. |
 | **D9** | A body edit changes no frontmatter field and does not queue the task for judging again. | "Judge once" governs fields; a body edit is context, not a request for a new estimate. The student edits `effort_hours` directly when the estimate is wrong. | A task whose body now says "this is a 10-page paper" keeps its old estimate until the student changes it. |
-| **D10** | **Interests are edited as four lists**, one item per line, and written through `write::write_literals` as one-line flow lists (`strong: ["a", "b"]`). If a key's value in the file continues on following lines (block style, as the fixture writes it), the save is refused by name before any record, with the words "Knowlu can only edit a list written on one line". (Q4.) | Single-line surgery replaces one line (`ingest.rs:98-113`); on a block list it would orphan the `  - …` lines and break the file, so `load_interests` would return empty lists and the event filter would silently change. Files Knowlu creates are always flow style (D11), so the refusal only meets hand-written files. | A student with a hand-written block list must rewrite it on one line, or Quinn picks Q4 (B). |
+| **D10** | **Interests are edited as four lists**, one item per line, and written as one-line flow lists (`strong: ["a", "b"]`) through a new contract-list primitive, `write::write_one_line_literals`. It refuses by name, before any record, when any key it would replace has a value that continues onto following lines (block style, as the fixture writes it), with the words "Knowlu can only edit a list written on one line". Otherwise it does exactly what `write_literals` does. The detector is `write::value_spans_lines`, the one function `profile::read` also uses for `interests_editable` (§7.2). (Q4.) | Single-line surgery replaces one line (`ingest.rs:98-113`); on a block list it would orphan the `  - …` lines and break the file, so `load_interests` would return empty lists and the event filter would silently change. `guard_block_style` (`provenance.rs:198`) guards `judgment:` only. The check is the only guard against that corruption, so it lives in `write.rs` with contract-engineer at xhigh, not in `profile.rs` (CLAUDE.md: "could a silent error corrupt vault bytes"). Files Knowlu creates are always flow style (D11), so the refusal only meets hand-written files. | A student with a hand-written block list must rewrite it on one line, or Quinn picks Q4 (B). T1 grows by one primitive and one test. |
 | **D11** | **An absent profile file is created** by a new `write::create_profile_file`: only `profile/preferences.md` or `profile/interests.md`, only when absent, journal `create` first (id `null`, `new` the frontmatter mapping), file second, **no id stamped**. preferences.md is created with no frontmatter; interests.md with `strong: []`, `mild: []`, `never: []`, `clubs: []`. | `write::create` would mint `id: task_…` (`ids.rs:97`) and refuses a file with no frontmatter (`write.rs:412-416`). The wizard creates no profile, so every app-made vault needs this. | None known; the function refuses every other path. |
 | **D12** | **Preferences are edited through set_body.** A preferences.md with no frontmatter is all body, so the whole text is replaced; one a student gave frontmatter keeps it. | The same primitive, the same guarantees, the same hash-only record. | None. |
 | **D13** | **Records about `profile/` stay on this computer.** `sync::build_push` skips any journal record whose `path` fails `sync::is_note_path`. (Q6.) | Every other desktop and every restore refuses such a record (`sync.rs:1790-1795`, `:983-987`), so sending it gives the account data no computer can use and prints one refusal line per record on every restore. Data minimisation (VISION, standing rules). | The account's journal lacks a record no reader accepts. A future stream that syncs `profile/` removes the filter in the same change that adds the folder. |
-| **D14** | **The app computes nothing** (CLAUDE.md). Reading the profile, hashing a body and checking a list's style live in the engine (a new `engine/src/profile.rs`, off the contract list, and `write.rs`); `commands.rs` marshals. | The existing rule. | None. |
+| **D14** | **The app computes nothing** (CLAUDE.md). Reading the profile lives in a new `engine/src/profile.rs`, off the contract list. Hashing a body and checking a list's style live in `write.rs` (D10). `commands.rs` marshals. | The existing rule. | None. |
 | **D15** | **Telemetry is unchanged.** The page reuses `edit_started`, `edit_committed` and `edit_cancelled` (`uievents.rs:11-14`) with `object_kind` `body`, `preferences` or `interests`, and never sends text. | No new action means no new data class. | None. |
 
 ## 4. Contract-list impact
@@ -130,9 +131,10 @@ Files on the contract list that M2 edits, all by `contract-engineer` at `xhigh`,
 - `engine/src/journal.rs`: `OPS` gains `"set_body"` (seven entries). `VIAS`, `make_record`, the
   record shape, `latest_by_field`, `human_set` and `human_edited` do not change.
 - `engine/src/write.rs`: `set_body`, `body_sha256` (the one hash function, so the app and tests
-  never hash on their own), `create_profile_file`, and two `WriteError` variants (`Conflict`,
-  `Body(&'static str)` for D4's named refusals). `append_body`, `write_literals`, `create` and every
-  other function stay byte-for-byte as they are.
+  never hash on their own), `create_profile_file`, `value_spans_lines` and
+  `write_one_line_literals` (D10), and three `WriteError` variants: `Conflict`, `Body(&'static str)`
+  for D4's named refusals, and `MultiLine(key)` for D10's. `append_body`, `write_literals`,
+  `create` and every other function stay byte-for-byte as they are.
 - `engine/src/sync.rs`: one filter in `build_push`'s record loop (D13), placed with the other
   `continue` filters so it never advances the cursor over an unsent record. `record_is_well_formed`
   reads `journal::OPS` (`:837`) and needs no edit.
@@ -298,8 +300,12 @@ student wrote one, is never touched.
    as it is everywhere (`NoFrontmatter`).
 2. Split textually (§6.1). A file that starts with `---` and has no closing `---` line is refused
    (`Body("the frontmatter has no closing line")`).
-3. **Compare-and-swap:** if `body_sha256(current) != body_sha256(expected)`, refuse with
-   `Conflict(path)`. Nothing is journalled or written.
+3. **Compare-and-swap, on normalised bodies:** normalise `current` and `expected` by D6's rule
+   (line endings to `\n`, leading and trailing newlines trimmed, one final `\n` when not empty). If
+   `body_sha256` differs between the two, refuse with `Conflict(path)`. Nothing is journalled or written. So a
+   caller whose copy differs from the file only by a trailing newline, or by CRLF, is not refused
+   (test 30). The record's `old` stays the hash of the current body exactly as `note_detail` shows
+   it (§6.2, test 6).
 4. Normalise the new body. If it equals the normalised current body, return `Ok(false)`.
 5. D4's refusals: a NUL; a result over `sync::MAX_NOTE_BYTES`; on a file with no head, a first line
    starting `---`.
@@ -309,13 +315,27 @@ student wrote one, is never touched.
 The head's text is untouched. After the universal-newline translation every write path applies, a
 CRLF note stays CRLF, byte for byte, through the end of its closing fence line.
 
-### 7.2 `write::body_sha256` and `write::create_profile_file`
+### 7.2 `write::body_sha256`, `create_profile_file`, `value_spans_lines`, `write_one_line_literals`
 
 `body_sha256(body: &str) -> String` is SHA-256 through `ring`, already an engine dependency
 (`sync.rs:33`). `create_profile_file(vault, name, text, ctx, journal)` accepts only `preferences` or
 `interests`, refuses when the file exists (`Exists`), appends a `create` record with `id: null` and
 `new` the frontmatter mapping (`{}` for preferences), then creates `profile/` and writes the file. It
 never stamps an id (D11).
+
+`value_spans_lines(text, key) -> bool` scans only the frontmatter, by the writer's fence rule
+(`ingest.rs:86-92`). It is true when the key's line (the first line starting `key:`, as the
+surgery finds it) is followed by any non-blank line before the next line that starts at column 0
+with a character other than `-`, `#` or whitespace, or before the closing fence. It is also true
+when the key appears twice. **It errs toward true.** A false true only refuses an edit by name,
+while a false false corrupts the file. That covers the block list, a list at column 0 (`strong:`
+then `- a`), a comment line after the key, trailing spaces after `strong:`, and a blank line
+inside the block.
+
+`write_one_line_literals(vault, target, literals, ctx, journal, opts)` reads the file once. It
+returns `MultiLine(key)` before any record when `value_spans_lines` is true for any key it would
+replace, and otherwise does exactly what `write_literals` does. It is a wrapper, so
+`write_literals` itself does not change.
 
 ### 7.3 `sync::build_push`
 
@@ -351,14 +371,16 @@ page still holds the student's text and shows the failure, so nothing is lost.
 
 - `read(vault) -> Profile`: the preferences body, the four interest lists (through
   `events::load_interests`, so the app and the event filter read the same lists),
-  `interests_editable` (false when any of the four keys is written over more than one line), and
-  warnings (an unreadable file is a warning, never an error).
+  `interests_editable` (false when `write::value_spans_lines` is true for any of the four keys;
+  `profile.rs` has no detector of its own), and warnings (an unreadable file is a warning, never an
+  error).
 - `set_preferences(vault, expected, text, ctx, journal)`: `create_profile_file` when the file is
   absent, then `set_body`.
-- `set_interests(vault, lists, ctx, journal)`: `create_profile_file` when absent; refuse by name when
-  `interests_editable` is false (D10); clean the items (§6.3); then one `write_literals` call with
-  the four keys in the order `strong`, `mild`, `never`, `clubs`. Like every field edit today, this is
-  last-writer-wins: only the student writes these lists.
+- `set_interests(vault, lists, ctx, journal)`: `create_profile_file` when absent; clean the items
+  (§6.3); then one `write::write_one_line_literals` call with the four keys in the order `strong`,
+  `mild`, `never`, `clubs`. That primitive makes D10's refusal, so the refusal holds even if
+  `profile.rs` is wrong. Like every field edit today, this is last-writer-wins: only the student
+  writes these lists.
 - `pub mod profile;` in `engine/src/lib.rs` is a controller hand-off (HANDOFF §2: single owner).
 
 ## 8. The app's commands
@@ -366,8 +388,9 @@ page still holds the student's text and shows the failure, so nothing is lost.
 Four commands, in `app/src/commands.rs` beside `set_fields`, each an `_inner` function that
 `app/tests/commands.rs` calls directly and a thin `#[tauri::command]` wrapper, all four in the
 console's `generate_handler!` list (`app/src/main.rs:177`) and none in the wizard's (`:107`). The
-list holds 47 at `97dc27b`; with these four it holds 51, or 52 with P6(d)'s command. **Recount at
-merge before quoting a number.**
+list holds 47 at `97dc27b`. Gmail connect merges first and adds three (its spec: 47 to 50). With
+M2's four it then holds 54, or 55 with P6(d)'s command. **Recount at merge before quoting a
+number.**
 
 | Command | Arguments | Does | Returns |
 |---|---|---|---|
@@ -391,7 +414,9 @@ For a note in `tasks/` or `courses/`:
   Esc cancels. The loaded body is kept as `expected`.
 - **Saving.** The controls are disabled until the envelope returns.
 - **Saved.** The drawer re-reads the note and shows it; a toast says *Saved · Undo* for 10 seconds.
-  Undo is D8's second `set_body`.
+  Undo is D8's second `set_body`. Its `expected` is the body from that re-read (the `note`
+  command's `body`), never the textarea's text, and its `body` is the text loaded before the edit.
+  A refused undo is shown like any other refusal, and the pre-edit text stays copyable.
 - **Conflict.** The textarea stays, with the student's text in it, under one line: *This note
   changed since you opened it. Your text is still here. Copy it, then reload to see the new
   version.* *Copy* uses the existing `copy_text` command; *Reload* re-reads the note and asks first
@@ -416,7 +441,10 @@ A section in the settings panel (`index.html`, `console.js`, `console.css`), fil
   campus events to show you. The first 600 characters also go to its judge with each event it
   judges, for that one call.*
 - When `interests_editable` is false, the lists are shown read-only with D10's reason.
-- Each part saves on its own *Save* and behaves like the drawer on conflict and refusal.
+- Each part saves on its own *Save* and behaves like the drawer on save, conflict and refusal. A
+  save shows *Saved · Undo* for 10 seconds (D8). Preferences undo through `set_preferences`, whose
+  `expected` is the text `profile` returns after the save. Interests undo through
+  `set_interests` with the four lists held before the save.
 
 The copy is a draft. `console-ui` may tune the words but not the facts: 600 characters, one call,
 not kept, stays on this computer, and, for *Campus events*, that the text goes to the judge with
@@ -480,7 +508,9 @@ the behaviour; the implementer may adjust a name, not the assertion.
 19. `set_preferences_creates_then_edits`, with a conflict on a stale `expected`.
 20. `set_interests_writes_one_line_lists_that_load_interests_reads`: trimmed, empties and
     duplicates dropped; a line break in an item refused.
-21. `set_interests_refuses_a_block_list_before_any_record`.
+21. `set_interests_refuses_a_block_list_before_any_record`: the fixture's block form is refused
+    with `MultiLine` from `write::write_one_line_literals`, and `profile.rs` makes no check of its
+    own. The primitive's own cases are test 31.
 22. `a_set_body_record_reads_body_edited` (the history line).
 
 **App (`app/tests/commands.rs`; implementer):**
@@ -500,13 +530,31 @@ the behaviour; the implementer may adjust a name, not the assertion.
 28. No `ui_event` call carries a body or profile text; body events use `object_kind` `body`.
 29. The poll's repaint path leaves an element marked as an open editor alone.
 
+**Added by the re-check (numbered on so no reference above moves):**
+
+30. `set_body_undo_succeeds_after_a_save_without_a_trailing_newline` (`write.rs`, T1): save a text
+    with no final newline. Then undo, with the body `note_detail` re-reads as `expected` and the
+    original body as new: `Ok(true)`, the original body is back, and the two records chain
+    (`old`/`new`). Passing the saved text without its final newline as `expected` is also not a
+    `Conflict` (§7.1 step 3's normalised compare).
+31. `write_one_line_literals_refuses_a_value_that_spans_lines` (`write.rs`, T1). Each case returns
+    `MultiLine`, appends no record and leaves the bytes alone: a block list; a list at column 0;
+    a comment line after the key; `strong:` with trailing spaces, then items; a blank line inside the
+    block; a duplicated key. A one-line or absent key writes the same bytes and record that
+    `write_literals` writes for the same input.
+32. `app/tests/static_assets.rs` (T5): after a save the drawer offers *Undo*. Its `set_body` call
+    passes the re-read note's body as `expected`, not the textarea's value. The settings panel offers
+    *Undo* for preferences and interests.
+33. `scripts/settings-check.py` (T5) walks "Your preferences" with a stubbed `invoke`: save, Undo,
+    a conflict that keeps the draft, and the read-only block-list state.
+
 **Gates.** `cargo build --workspace` and `cargo test --workspace` from the root, 0 warnings but the
 one accepted `.rsrc` line; `git diff --stat main -- engine/tests/fixtures` empty; the four
 `#[ignore]` tests still ignored with their reasons; the eol check. The controller runs the live
 proof on a scratch profile against staging (dev build, the DOM driver, never OS input): edit a task
-body, undo it, force a conflict by appending through `knowlu-engine write` meanwhile, edit
-preferences and interests, then check `sync` pushed the task's record and note and no `profile/`
-record.
+body without a trailing newline, undo it, force a conflict by appending through `knowlu-engine write`
+meanwhile, edit preferences and undo that, edit interests, then check `sync` pushed the task's record
+and note and no `profile/` record.
 
 ## 12. Open questions for Quinn
 
@@ -543,12 +591,15 @@ second surgery rule to the one write path for a case no app-made vault has. (C) 
 event filter out of reach of every student who never opens the vault folder, and editing the file
 as raw text is how a stray colon empties every list.
 
-**Q5. Does a body edit get an undo?**
-(A) *Saved · Undo* for 10 seconds after each save, in the session (D8). (B) No undo in the MVP.
+**Q5. Does an M2 edit get an undo?**
+(A) *Saved · Undo* for 10 seconds after each save, in the session, for the body, preferences and
+interests editors alike (D8). (B) Body only; the two profile editors have none, and that gap goes
+to the parity audit. (C) No undo in the MVP.
 **RECOMMENDATION: (A).** VISION commitment 5 says an edit the student makes "acts at once, with
-undo", and the page already holds the old text, so it costs a button and one more call. Field
-edits have no undo today either; that gap is outside M2 and is named here so the parity audit can
-carry it.
+undo", and the page already holds the old text, so it costs a button and one more call per editor.
+Undo sends the re-read body as `expected`, and the compare is on normalised bodies (§7.1), so D6's
+added final newline cannot make an undo refuse itself (test 30). Field edits (`set_fields`) have
+no undo today either. That gap is outside M2 and is named here so the parity audit can carry it.
 
 **Q6. Do records about the profile go to the account?**
 (A) No: `build_push` skips every record whose path is outside the note folders (D13). (B) Yes, as
@@ -562,9 +613,18 @@ for a second desktop, which is Launch's; the two-desktop stream can take it with
 words.
 
 **Q7. P6: which small parity items are done in M2, and which are cut?**
-**RECOMMENDATION:** Appendix A, item by item: (a) cut, (b) cut from M2 and handed to the events
-stream, (c) cut as work because it already holds, with one test to pin it, (d) do. Quinn answers
-per item.
+**RECOMMENDATION:** Appendix A, item by item:
+- (a) cut;
+- (b) **cut from the MVP**, an explicit cut for Quinn to rule on, and no longer a hand-off (the
+  events spec lists it as "P6, M2 or cut", so a hand-off would leave it with no owner);
+- (c) cut from M2, because the events spec's D3 delivers it;
+- (d) do.
+
+Quinn answers per item. When this spec and the events spec are signed, in one sitting, the
+controller changes events-design.md's non-goal line ("a conflict line on the card … P6, M2 or
+cut") so that it agrees. The conflict line becomes "cut (M2 Appendix A (b)), unless Quinn rules
+it into events", and the audit list becomes "M2 (d)". If Quinn instead wants (b) built, the events
+spec takes it, computed at read time from `commitments::conflicts`, and that line says so.
 
 **Q8. Interests will now reach the event judge. How is that disclosed before a non-founder uses
 the editor?**
@@ -588,6 +648,29 @@ with M2: see §4, §6.2, tests 3 and 23, and §13. One nuance on the second find
 read the actor from `console_ctx()`. The revision still forbids the literal outright and makes
 §6.2's example explicitly illustrative.
 
+**Re-check findings (second round): none rejected.** All five were verified against the code, the
+two sibling specs and HANDOFF on `main`, and all five are folded in:
+
+1. **P6(c) did not hold.** The cited lines (`eventemit.rs:660`, `:735-737`) belong to the
+   `event-check` card. The digest becomes eligible at `horizon_start` (`eventemit.rs:59-70`), the
+   earlier of the 14-day horizon and three days before a registration deadline, and it expires at
+   its earliest event (`:316`). (c) is now "cut from M2; delivered by the events spec's D3", and
+   T6 no longer touches `eventemit.rs` (Appendix A, §13).
+2. **(b) had no owner.** It is now an explicit cut for Quinn, with the events spec's line to align
+   at signature (Q7, Appendix A).
+3. **Sibling lanes.** §13 now orders M2 after Gmail connect and before events (HANDOFF §3, MVP
+   items 2 to 4), names `scripts/settings-check.py` in T5, and recounts the handler list (§8).
+4. **Undo.** Undo now uses the re-read body, the compare is normalised, every M2 editor gets
+   Saved · Undo, and tests 30, 32 and 33 cover it (D8, §7.1, §9, Q5).
+5. **The block-style check** is now a contract-list primitive in `write.rs` (T1), with test 31
+   (D10, §7.2, §7.6).
+
+One nuance on finding 2: M2 takes the finding's second option, an explicit cut, rather than
+editing the events spec from here, which another pass is revising. The events spec's own
+lane-overlap table (its §9) does not list `m2-editing` either. The controller should add it when
+aligning that non-goal line: shared files
+`app/static/console.js` and `app/tests/static_assets.rs`, with M2 merging first.
+
 ## 13. Task sketch
 
 One worktree, one branch (`m2-editing`), one plan (`docs/plans/`, with its fidelity ledger) written
@@ -597,14 +680,28 @@ new-vault `student` token, the literal test). That lane and M2 never run alongsi
 If Quinn orders M2 first instead, T1's "After" becomes "—", and the lane rebases onto M2 once M2
 merges.
 
+**Ordering with the sibling MVP lanes.** HANDOFF §3 orders the MVP lanes Gmail connect (2), then
+M2 (3), then events (4).
+- **Gmail connect** shares `app/static/{index.html,console.js,console.css}`,
+  `app/tests/static_assets.rs` and `scripts/settings-check.py` with M2 (its T4 builds a row in the
+  same settings panel where M2's T5 adds "Your preferences"). It also shares `app/src/main.rs:177`
+  (its T6 adds three names). **M2's branch is cut from a `main` that already carries Gmail connect.**
+  No M2 task runs beside a Gmail task.
+- **Events** rewrites `eventemit.rs` (its T2a) and edits `console.js` and `static_assets.rs` (its
+  T5). Since P6(c) moved to events (Appendix A), M2 no longer edits `eventemit.rs`. The remaining
+  overlap is the page files, and events rebases onto M2 after M2 merges.
+- **The check.** Before dispatching T1 and again before T5, the controller runs
+  `git diff --name-only main...<branch>` for every open sibling branch and confirms that none
+  shares a file with the task. This is the check §4 already makes for ruling 11.
+
 | # | Agent | Files (exclusive to the task) | After | Why this agent |
 |---|---|---|---|---|
-| T1 | `contract-engineer` (Opus, xhigh), then `contract-reviewer` | `engine/src/journal.rs`, `engine/src/write.rs`; tests 1-14 | the ruling-11 lane merged (§4) | Both files are on the contract list; a silent error here corrupts vault bytes. `journal.rs` is also the ruling-11 lane's file. |
+| T1 | `contract-engineer` (Opus, xhigh), then `contract-reviewer` | `engine/src/journal.rs`, `engine/src/write.rs` (including D10's `value_spans_lines` and `write_one_line_literals`); tests 1-14, 30, 31 | the ruling-11 lane and Gmail connect merged (§4, above) | Both files are on the contract list; a silent error here corrupts vault bytes, and D10's detector is the only guard on a block list. `journal.rs` is also the ruling-11 lane's file. |
 | T2 | `contract-engineer`, then `contract-reviewer` | `engine/src/sync.rs`, `engine/tests/sync_contract.rs`; tests 15-16 | T1 | Sync and its tests are on the list. It also greps every writer for a record whose path is outside the note folders and reports what D13 stops sending. |
-| T3 | `implementer` (Sonnet, high) | `engine/src/profile.rs` (new), `engine/src/surface.rs` (`describe` only); tests 17-22 | T1 (so after the ruling-11 lane, which edits `surface.rs:1495`, `:1725`) | Fully specified, off the list, checked by tests. |
+| T3 | `implementer` (Sonnet, high) | `engine/src/profile.rs` (new), `engine/src/surface.rs` (`describe` only); tests 17-22 | T1 (so after the ruling-11 lane, which edits `surface.rs:1495`, `:1725`) | Fully specified, off the list, checked by tests. It holds no vault-byte guard of its own: the block-list refusal is T1's primitive, so a mistake here refuses or mis-cleans a list but cannot orphan list lines. |
 | T4 | `implementer` | `app/src/commands.rs`, `app/tests/commands.rs`; tests 23-26, then P6(d)'s command | T3 (so after the ruling-11 lane, which changes `console_ctx()`) | Thin wrappers, off the list. |
-| T5 | `console-ui` (Sonnet, medium) | `app/static/console.js`, `index.html`, `console.css`, `app/tests/static_assets.rs`; tests 27-29 | §8's names (may run beside T4) | `app/static` is its lane. |
-| T6 | `implementer` | `engine/src/eventroster.rs` (the audit reader), `engine/src/eventemit.rs` (the pin test) | T1 | P6(c) and (d), engine half; disjoint from T3. |
+| T5 | `console-ui` (Sonnet, medium) | `app/static/console.js`, `index.html`, `console.css`, `app/tests/static_assets.rs`, `scripts/settings-check.py`; tests 27-29, 32, 33 | §8's names, and Gmail connect merged (may run beside M2's own T4) | `app/static` and the walk scripts are its lane. |
+| T6 | `implementer` | `engine/src/eventroster.rs` (the audit reader) | T1 | P6(d), engine half; disjoint from T3. It does not touch `eventemit.rs`, which is the events spec's T2a file. |
 | T7 | `console-ui` | `app/static/console.js`, `console.css` (the *Not shown* list) | T5, T6, T4's command | P6(d), page half; same files as T5, so after it. |
 | T8 | `docs-keeper` (Sonnet, medium) | `docs/reference/app.md`, `docs/surface/anatomy.md`, `docs/surface/inventory.md` row 28, `docs/notes/2026-09-29-vision-program.md` P5-P6 | T7 | Reference text only. |
 | T9 | `reviewer` (Opus, high) | `docs/reports/<date>-m2-editing-whole-branch-review.md` | T8 | Everything a cheaper agent changed is reviewed before a push. |
@@ -613,16 +710,16 @@ merges.
 `engine/src/lib.rs`; the four or five names in `app/src/main.rs:177`), the gate, the live proof
 (§11), and the PR. It pushes nothing that carries code without Quinn's word.
 
-**Size.** T1 S-M (the risk is here), T2 S, T3 S-M, T4 S, T5 M, T6 S, T7 S, T8-T9 S. M2 as a
-whole is M.
+**Size.** T1 M (the risk is here, and D10's primitive moved it up from S-M), T2 S, T3 S, T4 S,
+T5 M, T6 S, T7 S, T8-T9 S. M2 as a whole is M.
 
 ## Appendix A. P6's small items
 
 | Item | What exists at `97dc27b` | Do or cut | Size | Why |
 |---|---|---|---|---|
 | **(a)** A producer for *Good to know* items | The list, its read model and its expiry pass exist (`surface::good_to_know`, `surface.rs:1406`; `info::info_pass`, `info.rs:194-226`); `info::open_info` is called only by the `info` CLI (`info.rs:320`). Gmail's `information` tier is deliberately the noise tier and writes nothing (`enrich.rs:660-665`). | **Cut** | S-M, and an open design | A producer is a judgment design (which email is worth knowing, which is noise) plus a prompt change in the cloud. Nothing names what should feed it. Revisit with the assistant or a Gmail pass that has a use for it. |
-| **(b)** Conflict flags | Read and shown (`models.rs:179`, `:262`; `render.rs:460`; `surface.rs:592`); nothing writes `conflicts_with`. `commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). | **Cut from M2; hand to the events stream (P4)** | S-M there | The commitment model no longer blocks it. What is missing is tasks with a clock time, which arrive when required events become tasks (P4). It should be computed at read time from `commitments::conflicts`, never written into a note, and specified with P4. |
-| **(c)** Opportunity proposals expire after 14 days | A card is filed only for an event within `today + propose_horizon_days` (default 14, `events.rs:27`; `eventemit.rs:735-737`) and expires on the event's date (`eventemit.rs:660`; the digest too, `:316`), and the approvals pass archives it after that. | **Cut as work: it already holds.** Add one test. | XS | No unanswered opportunity card outlives 14 days at the default. The pin: `no_opportunity_card_outlives_the_proposal_horizon`. A student who raises the horizon gets longer-lived cards by their own setting. |
+| **(b)** Conflict flags | Read and shown (`models.rs:179`, `:262`; `render.rs:460`; `surface.rs:592`); nothing writes `conflicts_with`. `commitments::conflicts` and `fit` are on main (`commitments.rs:7839`, `:7903`). | **Cut from the MVP** (explicit, for Quinn's ruling; not a hand-off) | S-M if later built | The commitment model no longer blocks it. What is missing is tasks with a clock time, which arrive when required events become tasks (P4). The events spec lists the conflict line as "P6, M2 or cut", so handing it to events from here would leave it with neither owner. It is recorded as a cut, so the parity audit can close the row. If Quinn rules it in, the events spec takes it, computed at read time from `commitments::conflicts` and never written into a note, and its non-goal line says so (Q7). |
+| **(c)** Opportunity proposals expire after 14 days | Opportunities are proposed in the **digest**, not the `event-check` card (whose lines `eventemit.rs:660` and `:735-737` are). An event becomes eligible at `horizon_start` (`eventemit.rs:59-70`, used by `eligible_events`, `:118`, `:141`). That is the **earlier** of `start − propose_horizon_days` (default 14) and three days before a registration deadline. The digest's `expires` is its earliest event (`:316`). **Counterexample:** an event on Nov 30 with registration closing Nov 5 opens on Nov 2; its digest is filed Nov 2, expires Nov 30 and lives 28 days. | **Cut from M2; delivered by the events spec's D3** | none in M2 | It does not hold today. The events spec's D3 replaces the digest with one card per opportunity that "expires after 14 days or at the event, whichever is first", and its F1 fixes the digest's decline-on-expiry. A pin in M2 would either fail or pin a false claim, and it would sit in `eventemit.rs`, which the events spec's T2a rewrites. So M2 adds no test. The events spec's §4.4 and §11.1 test 7 already carry the cap: an opportunity card expires at "the earlier of that date and `first_proposed_at + 14`". When both specs are signed, the controller asks that test 7 include the registration-deadline case above. |
 | **(d)** The dropped-event audit list | Every drop, the prefilter's included, is written to the audit section of `state/events.md` (`eventroster.rs:11-13`), which no student opens. | **Do** | S + S | VISION: "failures are visible" and "nothing missed that Knowlu had the information to catch". A read-only *Not shown (N)* list under *Coming up*, each line the event, its date and why it was dropped, from a new read command (T6, T4, T7). No engine write, no new key in the state, no oracle change. T6's test reads a scratch copy of the frozen `vault-full/state/events.md` and never writes the reference. |
 
 **Before signing.** The spec review (`reviewer`, Opus high) lands in

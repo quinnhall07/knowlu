@@ -2,7 +2,9 @@
 
 **Status: Draft — for Quinn's signature.** Written 2026-09-29 on branch `mvp-specs` at main `97dc27b`;
 revised the same day after the spec review (D4's gate wording, D7's test ledger, D13 → Q8, D14 and Q7–Q9
-added; the one finding not taken as stated is at the end of §11).
+added; the one finding not taken as stated is at the end of §11), and again after the re-check (Q9's
+`judgments` sub-question and the corrected Disconnect copy, D4's real offline cost and Q1 (a′), and the
+purge migration in production parity's step (1)).
 **Authority:** `docs/specs/2026-09-09-knowlu-cloud-design.md` (§5.3 D12, §9, §11a) and its *Amendment
 2026-09-29* (ruling 3: who started a change decides how it lands; ruling 10: the stages, which put
 "Gmail connect in the app" in the MVP). Where §5.3's body and ruling 3 disagree, ruling 3 wins (D7).
@@ -180,7 +182,7 @@ replaces them.
 | **D1** | A **Google** row in the console's Settings panel, placed after *Account*. It shows the connection's state and offers **Connect Gmail**, **Reconnect** and **Disconnect Google**. It is hidden for a vault with no account (`needs_account`). | Settings is where a student who skipped the wizard step looks. One row, because Google holds one grant. | None structural; copy only. |
 | **D2** | Three new **console** commands in `account.rs`: `google_status`, `google_connect(scope)` and `google_disconnect`. Each reads `cloud_config(&cs.vault)` and the vault's `session_credential_target`, never `PENDING_TARGET`. `google_connect` fetches the consent URL, checks it with `external_url_allowed` and opens it from Rust, as `open_portal` does. | The pending session does not exist after onboarding, so the wizard's commands would answer "sign in again". Opening from Rust keeps the URL out of the webview, so `open_external` stays out of the console list. | A command registered in the wrong list fails at run time (no `ConsoleState`). A test pins the lists (§8.1). |
 | **D3** | The wizard's three commands keep their names, signatures and behaviour. They are refactored onto the same pure cores (`google_status_at`, `google_connect_url_at`, `google_disconnect_at`), which take `(api_base, anon_key, token)`. | One HTTP path, tested once against a loopback server; the wizard's tests keep passing unchanged. | None; a pure refactor under existing tests. |
-| **D4** *(Q1)* | **The engine pulls Gmail on every slot where the cloud judge passes its probe**, whether or not the calendar marker exists. The service decides: an account with **no** `google_accounts` row answers the silent `no_gmail_scope`, and only a row whose status is `revoked` answers `revoked`. The cloud arm's early return goes (§4.3), and with it `google_calendar_linked` and `rule_decisions_waiting`. This supersedes R-C2-E15, R-C2-E38 and R-C2-E46 for the cloud arm. | The vault should not become a second record of a cloud grant, and a grant can change without the device knowing. The cost is the probe plus one `/gmail-read` call on every cloud slot, including slots that had nothing else to do. | Without the cloud half, every student with no Google connection gets a false "re-connect" line on every slot, so the cloud change deploys first (§12). On a network that black-holes rather than refuses, every such slot can now stall for up to `CALL_TIMEOUT` (the risk R-C2-E15 named). |
+| **D4** *(Q1)* | **The engine pulls Gmail on every slot where the cloud judge passes its probe**, whether or not the calendar marker exists. The service decides: an account with **no** `google_accounts` row answers the silent `no_gmail_scope`, and only a row whose status is `revoked` answers `revoked`. The cloud arm's early return goes (§4.3), and with it `google_calendar_linked` and `rule_decisions_waiting`. This supersedes R-C2-E15, R-C2-E38 and R-C2-E46 for the cloud arm. Under Q1 (a′), the recommendation, a probe that fails in transport ends the arm with one named line (§4.3). | The vault should not become a second record of a cloud grant, and a grant can change without the device knowing. The cost is the probe plus one `/gmail-read` call on every cloud slot, including slots that had nothing else to do. | Without the cloud half, every student with no Google connection gets a false "re-connect" line on every slot, so the cloud change deploys first (§12). A network that black-holes rather than refuses is worse than one stall (the risk R-C2-E15 named). A transport error is not fatal (`CloudError::fatal` matches only 401/402/403, `cloudmodel.rs:235-237`), so `probe()` returns `None` (`:712-720`) and the arm goes on. A bare vault then makes three calls in a row: the probe, `/gmail-read` and `pull_rules`' `GET /judge-rules`. Each can run to `CALL_TIMEOUT` (120 s, `:71`), so a slot that cost 0 s today can cost about 360 s, bounded only by the arm's `opts.budget`. Every offline slot for every student also gains up to two lines, `gmail: skipped (no network (…))` and `rules: skipped (no network (…))`, where a bare vault printed neither. Q1 (a′) offers a transport stop that caps this at one call and one line. |
 | **D5** *(Q4)* | `GET /google-connect?status=1` also returns `status` (`none`, `active`, `quiet` or `revoked`) and `email` (from `email_hint`). `connected` and `scopes` keep today's meaning, so the wizard is unaffected. | Without `status`, the row cannot tell "never connected" from "expired, reconnect". `email` tells a student with two Google accounts which one Knowlu reads. | An additive JSON change. An older app ignores both keys. |
 | **D6** *(Q2)* | **Disconnect Google** revokes the whole grant, Calendar included, after a two-step confirm whose copy says so. What Knowlu already wrote stays in the vault. The `cloud:google` marker stays too, so the calendar shows its last snapshot with the named `fetch failed … using snapshot` line until those events age out. | Google has no partial revoke (`disconnect.ts:4-7`), and the endpoint already does exactly this. | A student who wanted to keep Calendar has to reconnect it. The copy tells them before they confirm. |
 | **D7** *(Q5)* | **Every Gmail-derived item arrives as a proposal.** The `task` tier files the same `kind: task` approval card the middle tiers file (`write_gmail_card`). Approving it creates the same note as before. | Ruling 3: "Knowlu noticed (an email …) → it proposes and waits". The privacy page already promises this at `:80`. The 15-a-day cap then covers mail uniformly. | More cards in the deck. The cap and the first-day doubling (C1c) already bound them. |
@@ -190,7 +192,7 @@ replaces them.
 | **D11** *(Q6)* | The wizard's Gmail panel gets a **Connect Gmail** button. It uses the existing wizard commands with `scope: "gmail"`, the same poll pattern (`WIZ.gmailSeq`) and the same Testing sentence. Skip remains the default path. | Per D4, the button needs nothing but the existing commands and the page. A pilot student can then connect Gmail during onboarding. | More wizard surface for `wizard-check.py` to walk. |
 | **D12** | **No vault schema, read-model or telemetry change.** No new note field, no `surface` key, and no new `uievents::ACTIONS` entry. The row reads the connection's state from the service, not from the vault. | The grant belongs to the account, not the vault. The less that changes in the vault, the less the frozen references and the surface oracle are at risk. | None. |
 | **D13** *(Q8)* | **This stream does not edit `site/privacy.html` or move `PRIVACY_VERSION`.** §6 drafts the sentences here. They are folded into privacy bump #1, whose PR moves the text, the Effective date and the constant together after its lawyer read (ruling 12's pattern; ruling 10 puts bump #1 in the Pilot). **No release that carries the row or the wizard's button ships ahead of bump #1** (§6 says how this is held). | The MVP proof runs on a dev build against staging, so `:77` only becomes false in the first release that carries the row. Under ruling 10 that release is the Pilot's v0.1.1, which already carries bump #1. | A release cut from main between this merge and bump #1 would ship a page that says Gmail is not connected. §6's guard is what prevents it. |
-| **D14** *(Q9)* | **Disconnect also deletes what the server holds about the student's mail.** A new migration redefines `delete_google_grant` so that, in the same transaction, it deletes the account's `gmail_queue` rows (delivered or not) and its `gmail_seen` rows. The applied migration is not edited. | §0.1: today a Disconnect keeps model-written summaries of undelivered mail with no end date, and a reconnect weeks later delivers them stale. "It is deleted when you disconnect" should be true of everything the connection produced. | A reconnect within 30 days re-judges messages still in the read window. That spends model calls under the daily cap, but it creates no duplicates in the vault, because the device's `state/ingest-seen.md` acks a uid it already holds (`enrich.rs:640-643`). |
+| **D14** *(Q9)* | **Disconnect also deletes what the server holds about the student's mail.** A new migration redefines `delete_google_grant` so that, in the same transaction, it deletes the account's `gmail_queue` rows (delivered or not) and its `gmail_seen` rows. The applied migration is not edited. | §0.1: today a Disconnect keeps model-written summaries of undelivered mail with no end date, and a reconnect weeks later delivers them stale. The purge covers what exists only to serve the connection: the token, the undelivered summaries and the read ledger. It does **not** cover the `judgments` rows: each judged email leaves one, with `origin = 'gmail_api'`, its message id as `item_id` and the verdict's `fields` (`20260911000100_judgment_service.sql:67-83`; `gmail-read/handler.ts:281-296`), deleted only with the account, as `privacy.html:48` already says. Q9 (a)'s sub-question asks whether Disconnect should delete them too. | A reconnect within 30 days re-judges messages still in the read window. That spends model calls under the daily cap, but it creates no duplicates in the vault, because the device's `state/ingest-seen.md` acks a uid it already holds (`enrich.rs:640-643`). |
 | **D15** *(Q7)* | **In the MVP a Gmail card shows its Gmail attribution (`created_by: gmail`) and the model's reason, and no sender.** Storing and showing the sender's display name is a Pilot item, decided in Q7, whose disclosure joins bump #1. | VISION commitment 5 says "showing who it came from". This spec does not settle whether that means the sender; Q7 puts that reading to Quinn. The MVP's only user is the founder. | If Quinn reads commitment 5 as "the sender", the MVP ships cards that fall short of it until the Pilot item lands. |
 
 ## 4. What changes, by layer
@@ -230,13 +232,18 @@ replaces them.
   file should say so. The body deletes, for `p_account`:
   - the `gmail_queue` rows;
   - the `gmail_seen` rows;
-  - the `google_accounts` row and its Vault secret, as today.
+  - the `google_accounts` row and its Vault secret, as today;
+  - **only if Quinn answers Q9 (a)(i):** the account's `judgments` rows with `origin = 'gmail_api'`
+    (`rule_evidence` rows that cite them go by cascade).
 
   `20260911000200_google.sql` itself is never edited.
 - **Deploy.** The controller deploys both functions and the migration to staging from the merged
   branch (`db push --include-all`, as C3's migrations needed) before any device build with D4 runs a
-  slot there. They join production parity's function list (HANDOFF §4 (2)), which already names C2's
-  eleven.
+  slot there. For production, the functions join production parity's function list (HANDOFF §4's
+  production-parity row, step (2)), which already names C2's eleven, **and** the migration joins
+  step (1)'s ordered migration list, after J's `20260922120200` and in filename order. It must reach
+  production before the first release that carries the row; otherwise a production Disconnect keeps
+  `gmail_queue` and `gmail_seen` rows while bump #1's page says they are deleted. T7 makes both edits.
 
 ### 4.2 App commands (`app/src/account.rs`, contract list)
 
@@ -290,6 +297,12 @@ student's own address, shown back to them.
   - The comment at `:361-385` is rewritten to say the probe now runs every cloud slot, why, and
     that R-C2-E15, R-C2-E38 and R-C2-E46 are superseded for this arm.
   - The local arm (`cloud` is `None`, `:350-359`) is untouched.
+  - **Under Q1 (a′) only (recommended):** a probe that failed in transport ends the cloud arm. No
+    enrichment batch, events pass, Gmail pull, rule pull or label report runs, and the run prints
+    exactly one line, `judge: skipped (no network (…))`, at exit 0. `probe()` (`cloudmodel.rs:712-720`,
+    off the contract list) gains a way to report the transport case without changing what a fatal
+    status sets on `model.fatal()`. A 5xx or 429 on the probe is not transport and keeps today's
+    path. Test: §8.2 item 9.
 - **The task tier (D7).** In `pull_gmail`, `"task"` routes to `write_gmail_card`, as
   `"borderline" | "event" | "opportunity"` do (`:675`), and counts in `cards`. `write_gmail_note`
   (`:871`) then has no caller outside one test and **is deleted**, not kept as `#[cfg(test)]`.
@@ -331,7 +344,7 @@ verified, this Google account is not on the tester list yet."
 
 **Disconnect** is two steps, like *Delete my data*. The first button reveals
 "This disconnects Google Calendar too — Google keeps them as one permission. Knowlu stops reading both
-and deletes what it was still holding from your mail. What it already added stays in your vault, and
+and deletes the proposals from your mail it had not delivered yet. What it already added stays in your vault, and
 your calendar stops updating." (D14; under Q9's option (b) the middle sentence is replaced by (b)'s
 copy) and a
 **Yes, disconnect** button. On `ok: false`, the row stays as it was and shows the error.
@@ -431,10 +444,14 @@ Four things change for the page and the consent log:
    ships, "(Gmail is not connected in this version of Knowlu; the app will say when it is.)" is no
    longer true, so the parenthesis goes. The same paragraph says disconnecting Gmail "revokes our
    access at Google and deletes the stored connection". Under D6 that must also say Calendar goes
-   with it, and under D14 it can say what else goes. Proposed text: "Disconnecting (in Settings, at any
-   time) revokes our access at Google and deletes the stored connection, along with the message ids
-   and any proposals from your mail that had not reached your computer yet. Google holds Calendar and
-   Gmail as one permission, so disconnecting one disconnects both."
+   with it, and under D14 it can say what else goes. Proposed text, under Q9 (a)(ii): "Disconnecting
+   (in Settings, at any time) revokes our access at Google and deletes the stored connection, our list
+   of which emails we have already read, and any proposals from your mail that had not reached your
+   computer yet. The record of what Knowlu decided about each email, including its message id, stays
+   until you delete your account. Google holds Calendar and Gmail as one permission, so disconnecting
+   one disconnects both." Under Q9 (a)(i) the second sentence goes and the first ends "…had not
+   reached your computer yet, and the record of what we decided about each email", and `:48` and `:85`
+   change to say that record ends at a disconnect.
 2. **"What we collect" gains an entry for the connection itself.** The page says, "If a category is
    not on this list, we are not collecting it". It lists Gmail content but not the stored connection.
    Proposed entry: *Your Google connection, if you make one*, covering:
@@ -448,12 +465,15 @@ Four things change for the page and the consent log:
 3. **`privacy.html:80` becomes true.** It says every Gmail item is proposed for approval, which the
    `task` tier breaks today. D7 fixes the code rather than the page. This part lands with this
    stream: it makes an existing sentence true and needs no page edit.
-4. **"How long we keep it" gains a Gmail bullet (D14).** Proposed: "**Gmail** — the id of each
-   message we judged, for 30 days, so the same email is not proposed twice; a proposal waiting to
-   reach your computer, until it does, and then for 7 days. Disconnecting Gmail, or deleting your
-   account, deletes all of it at once." The 30 and 7 days are the nightly jobs in
-   `20260911000900_final_review_fixes.sql:48, 72`; the bump-#1 PR re-reads them before it quotes them.
-   Under Q9's option (b) the last sentence instead reads: "Disconnecting stops new reading;
+4. **"How long we keep it" gains a Gmail bullet (D14).** Proposed, under Q9 (a)(ii): "**Gmail** —
+   our list of the emails we have read, for 30 days, so the same email is not read twice; a proposal
+   waiting to reach your computer, until it does, and then for 7 days. Disconnecting Gmail, or
+   deleting your account, deletes both at once. The record of what we decided about each email,
+   including its message id, is kept until you delete your account." Under Q9 (a)(i) the last
+   sentence becomes "…is kept until you disconnect Gmail or delete your account." The 30 and 7 days
+   are the nightly jobs in `20260911000900_final_review_fixes.sql:48, 72`; the bump-#1 PR re-reads
+   them before it quotes them.
+   Under Q9's option (b) the fourth sentence instead reads: "Disconnecting stops new reading;
    proposals that had not reached your computer are kept, and delivered if you reconnect, until you
    delete your account."
 5. **If Q7 is answered (b):** "What survives" (`:48`) and `:85` add "and who the message was from",
@@ -623,6 +643,10 @@ the request, so each test can assert the method, the path, the bearer and the `a
    `write_gmail_note`, or a `mut` that is never mutated, would be a warning, which is why §4.3
    removes them.
 8. Every row of §7's two tables is done as tabled, and the stop rule held.
+9. **Q1 (a′) only, the transport stop:** a bare vault whose `api_base` points at a loopback listener
+   that is bound and then dropped (so the connection is refused locally; no egress) prints exactly
+   `judge: skipped (no network (…))`, makes no `/gmail-read` or `/judge-rules` request, and exits 0.
+   A probe answered 503 still runs the arm as today.
 
 ### 8.3 Cloud (Deno; cloud-engineer)
 
@@ -652,8 +676,12 @@ the request, so each test can assert the method, the path, the bearer and the `a
    deletes from `gmail_queue` and from `gmail_seen`, each filtered on `account_id = p_account`, as
    well as the `google_accounts` row and the Vault secret. It keeps `security definer`, and the
    service-role-only grant is still in force. `20260911000200_google.sql` is byte-identical to `97dc27b`.
+   Under Q9 (a)(ii) the body does **not** delete from `judgments`; under (a)(i) it deletes from
+   `judgments` filtered on both `account_id = p_account` and `origin = 'gmail_api'`, and on nothing
+   looser.
 7. **D14, live on staging (§9 step 6):** after Disconnect, the account has no `gmail_queue` and no
-   `gmail_seen` rows. The controller runs a count-only query through the service role, never a query
+   `gmail_seen` rows, and its `gmail_api` `judgments` count is unchanged under (a)(ii) or zero under
+   (a)(i). The controller runs a count-only query through the service role, never a query
    that reads a row's contents.
 
 ### 8.4 Page (`app/tests/static_assets.rs`, `scripts/settings-check.py`, `scripts/wizard-check.py`; console-ui)
@@ -679,7 +707,9 @@ These tests are handed to bump #1 with §6's draft. They are listed here so that
 them:
 
 1. The page no longer contains "Gmail is not connected in this version".
-2. The disconnect sentence names Calendar and what D14 deletes.
+2. The disconnect sentence names Calendar and what D14 deletes, and, under Q9 (a)(ii), says that the
+   record of each decision, message id included, stays until the account is deleted. No sentence on
+   the page says a disconnect deletes message ids that the answered Q9 option keeps.
 3. "What we collect" has the Google-connection entry, and "How long we keep it" has the Gmail bullet.
 4. The page's date equals `account::PRIVACY_VERSION`. This is already pinned by
    `app/tests/static_assets.rs:1605`, which stays green.
@@ -708,8 +738,8 @@ hold the token.
    - after Reconnect, the next slot pulls again, and both scopes are back if both were granted (D8).
 6. Disconnect Google through the two-step confirm. The row reads *not connected*, Google's
    third-party-access page no longer lists Knowlu, and the next slot prints no `gmail:` line. Under
-   D14, the controller's count-only query shows no `gmail_queue` or `gmail_seen` rows for the account
-   (§8.3 item 7).
+   D14, the controller's count-only query shows no `gmail_queue` or `gmail_seen` rows for the account,
+   and the `gmail_api` `judgments` count the answered Q9 option calls for (§8.3 item 7).
 7. Clean up per the standing rule: remove the scratch profile, its vault, its credentials and its
    autostart entry.
 
@@ -745,8 +775,20 @@ the verification in §0.
 so a student who skipped the calendar step gets no mail after connecting Gmail.
 
 - (a) Pull on every cloud slot, and have the service answer the silent `no_gmail_scope` for an account
-  with no Google connection. Costs one `/gmail-read` call per slot, plus the probe on slots that had
-  nothing else to do, plus a small cloud change that must deploy first.
+  with no Google connection. Costs one `/gmail-read` call per slot, plus the probe and the rule pull on
+  slots that had nothing else to do, plus a small cloud change that must deploy first. **Offline it
+  costs more.** A transport error is not fatal, so after a failed probe the arm still calls
+  `/gmail-read` and `GET /judge-rules`. On a network that black-holes, each of the three can run to
+  `CALL_TIMEOUT` (120 s): about 360 s on a slot that cost 0 s today, bounded only by the arm's budget.
+  Every offline slot for every student also prints `gmail: skipped (no network (…))` and
+  `rules: skipped (no network (…))`, where a bare vault printed neither.
+- (a′) (a), plus a **transport stop**: when the probe fails in transport (`CloudError::Transport`),
+  the cloud arm runs no further pass and prints one line, `judge: skipped (no network (…))`. This caps
+  an offline slot at one `CALL_TIMEOUT` and one line. Costs: a small `enrich.rs` branch and one §8.2
+  test; `probe()` must report a transport failure, which it now folds into `None` (`cloudmodel.rs:719`);
+  and a vault with pending items loses its whole slot to a one-off blip on the probe, where today each
+  item is tried. The plan must also find every existing test that scripts a transport-failed probe and
+  table it in §7 before T3 starts; none is tabled yet.
 - (b) Keep the marker and have the app write one when Gmail consent lands. The vault then records a
   cloud grant that can go stale, and the app has no journaled path for writing `config/ingest.yaml`
   (§10). A calendar marker on a Gmail-only grant would also make every `rank` fail its calendar fetch.
@@ -754,7 +796,10 @@ so a student who skipped the calendar step gets no mail after connecting Gmail.
   change, but the call count is the same. Because `?status=1` hides revoked rows, a lapsed grant would
   go silent after the first slot, which breaks "fails visibly".
 
-**RECOMMENDATION: (a).** It is D4 as written.
+**RECOMMENDATION: (a′).** D4 as written, plus the transport stop. The stall and the two lines fall on
+every student who is offline, the stop is small, and the slot lost to a probe blip comes back on the
+next slot. If Quinn prefers not to widen T3, (a) alone is acceptable: the stall stays inside the arm's
+budget and the scheduler's child cap, and D4 names it.
 
 **Q2. What does Disconnect mean?** Google can revoke only the whole grant.
 
@@ -881,7 +926,18 @@ nothing else (§0.1).
   redefines `delete_google_grant`, with a `migrations_test.ts` check (§8.3 item 6). Costs: one small
   migration and a staging `db push`. A reconnect within 30 days re-judges any message still in the
   read window. That spends model calls under the daily cap, but it adds nothing twice to the vault,
-  because the device's seen ledger catches it.
+  because the device's seen ledger catches it. **A sub-question within (a): the judgment record.** Each
+  judged email also leaves a `judgments` row (`origin = 'gmail_api'`, its message id as `item_id`,
+  and the verdict's `fields`), deleted today only with the account; `privacy.html:48` and `:85`
+  already say it survives.
+  - (i) D14 also runs `delete from judgments where account_id = p_account and origin = 'gmail_api'`.
+    Costs: `rule_evidence` cascades on a judgment delete (`20260911000100_judgment_service.sql:140`),
+    so the evidence behind the account's learned email rules goes with it (the rules themselves
+    stay); `knownCourses` (`gmail-read/index.ts:154-171`) loses the course names it read from those
+    rows; and the page's `:48` and `:85` must change in bump #1.
+  - (ii) Keep the `judgments` rows. §6 items 1 and 4 say plainly that the record of what Knowlu
+    decided about each email, message id included, stays until the account is deleted, consistent
+    with `:48`. Costs: no code; "Disconnect" does not mean the server forgets every message id.
 - (a′) Delete only the `gmail_queue` rows, the model-written summaries, and let `gmail_seen`'s
   30-day prune take the message ids. Costs: the page must say that message ids outlive a disconnect
   by up to 30 days. It saves re-judging on a quick reconnect.
@@ -891,9 +947,12 @@ nothing else (§0.1).
   with no end date after the student asked Knowlu to stop, and a reconnect weeks later delivers
   stale proposals.
 
-**RECOMMENDATION: (a).** It is D14 as written. "Disconnect" should mean the server keeps nothing
-from the connection. The re-judging cost falls only on a student who disconnects and reconnects
-within 30 days, and the daily cap bounds it.
+**RECOMMENDATION: (a), with (ii).** It is D14 as written. "Disconnect" should delete what exists only
+to serve the connection: the token, the undelivered summaries and the read ledger. The judgment record
+is the account's history. It holds no message text, feeds rule learning, is already disclosed at
+`:48`, and goes when the account goes. The re-judging cost falls only on a student who disconnects and
+reconnects within 30 days, and the daily cap bounds it. Choose (i) if Disconnect should leave no
+message id behind; the price is the account's email-rule evidence.
 
 ### Review findings not taken as stated
 
@@ -904,6 +963,10 @@ within 30 days, and the daily cap bounds it.
   the finding stands: `delete_google_grant` keeps `gmail_queue` and `gmail_seen`, undelivered rows have
   no sweep, and a later reconnect delivers them stale. §0.1 records the corrected behaviour, and D14 and
   Q9 answer it.
+- **The re-check's three findings** (D14's `judgments` rows, D4's offline cost, the purge missing from
+  production parity's migration list): each was verified against the code and taken, none rejected.
+  One note: the finding cites `HANDOFF.md:369` on main; this worktree's HANDOFF predates that list, so
+  §4.1 and T7 name it by heading (§4's production-parity row, step (1)).
 
 ## 12. Task sketch
 
@@ -917,11 +980,11 @@ Under Q8 (a2), T4's work and T6's three registrations land on the proof branch, 
 | **T0** | Record Quinn's answers to Q1–Q9. Under Q8 (b) only, read the date on the live `knowlu.com/privacy`. | main session; decisions and a live read are the controller's | — |
 | **T1** | Cloud: `lookupFromRow`, the extended `?status=1`, `scope=reconnect`, D14's migration, and §8.3's tests 1–6. Deno check, lint and test green. | **cloud-engineer** (Opus, high): `cloud/` is theirs. A wrong lookup either spams every student or hides a revoked grant, and a wrong purge deletes another account's rows | `cloud/supabase/functions/{gmail-read,google-connect}/**`, one new `cloud/supabase/migrations/<date>_gmail_disconnect_purge.sql`, `cloud/supabase/migrations/migrations_test.ts` |
 | **T2** | App: the three cores, `send_json`, the two error rows, the three console commands and their inner functions, and §8.1 tests 1–5 and 7. | **contract-engineer** (Opus, xhigh): `account.rs` is on the contract list and handles the session token | `app/src/account.rs`, `app/tests/account.rs` |
-| **T3** | Engine: the D4 gate (early return removed) and the D7 routing; `google_calendar_linked`, `rule_decisions_waiting` and `write_gmail_note` removed; the rewritten comment at `enrich.rs:361-385`; §8.2's tests; and all fifteen rows of §7's two tables, run under §7's stop rule. | **implementer** (Sonnet, high): fully specified, off the contract list, checked by the tests. Every test change is enumerated, so none is a judgment call. If the stop rule fires, the task goes back to the controller and does not move up an effort level on its own | `engine/src/enrich.rs`, `engine/tests/cloud_contract.rs` (one test) |
+| **T3** | Engine: the D4 gate (early return removed) and the D7 routing; `google_calendar_linked`, `rule_decisions_waiting` and `write_gmail_note` removed; the rewritten comment at `enrich.rs:361-385`; §8.2's tests; and all fifteen rows of §7's two tables, run under §7's stop rule. | **implementer** (Sonnet, high): fully specified, off the contract list, checked by the tests. Every test change is enumerated, so none is a judgment call. If the stop rule fires, the task goes back to the controller and does not move up an effort level on its own | `engine/src/enrich.rs`, `engine/tests/cloud_contract.rs` (one test); under Q1 (a′), also `engine/src/cloudmodel.rs` (`probe()` only) and §8.2 item 9 |
 | **T4** | Page: the Settings row, the wizard's Gmail button, their copy from §4.4, §8.4's tests and the two walk scripts. | **console-ui** (Sonnet, medium): `app/static` is theirs | `app/static/{index.html,console.js,console.css}`, `app/tests/static_assets.rs`, `scripts/{settings,wizard}-check.py` |
 | **T5** | *Under Q8 (a): no task.* §6's draft and §8.5's tests go to bump #1 through T7. *Under Q8 (b) only:* §6's edits, `PRIVACY_VERSION` if the live date requires it, and §8.5's tests, all in one commit. | **contract-engineer** (Opus, xhigh), under (b) only: the constant is on the list, and the page and the constant move together | under (b): `site/privacy.html`, `engine/tests/site.rs`, the one line of `app/src/account.rs` |
 | **T6** | Integration: the console `generate_handler!` hand-off (+3, recounted), §8.1 test 6, the full workspace gate (0 warnings), the staging deploy of T1 **before** the first slot of a D4 build, and §9's live proof. | **integrator** (Opus, high) for the merge; the **main session** for the deploy and the proof, since staging pushes, the OTP session and Quinn's consent click are the controller's | `app/src/main.rs` |
-| **T7** | Docs: HANDOFF (the MVP row; the production-parity order fix of §6; §6's draft sentences and §8.5's tests added to bump #1's list; under Q8 (a1), the release-order line in the Pilot gate; under Q7 (c), the sender as a Pilot item), `docs/reference/app.md` (three commands, the row), `docs/reference/engine-commands.md` (the `judge` step's Gmail pull on every cloud slot), and the Gmail and `delete_google_grant` lines in `cloud/supabase/README.md`. | **docs-keeper** (Sonnet, medium) | those docs |
+| **T7** | Docs: HANDOFF (the MVP row; the production-parity order fix of §6; in §4's production-parity row, T1's `<date>_gmail_disconnect_purge.sql` added to step (1)'s ordered migration list after J's `20260922120200` and in filename order, with a note that it reaches production before the first release that carries the row, and the two functions in step (2) (§4.1 Deploy); §6's draft sentences and §8.5's tests added to bump #1's list; under Q8 (a1), the release-order line in the Pilot gate; under Q7 (c), the sender as a Pilot item), `docs/reference/app.md` (three commands, the row), `docs/reference/engine-commands.md` (the `judge` step's Gmail pull on every cloud slot), and the Gmail and `delete_google_grant` lines in `cloud/supabase/README.md`. | **docs-keeper** (Sonnet, medium) | those docs |
 
 **Review checkpoints.**
 

@@ -143,7 +143,11 @@ and what it costs if wrong.
   horizon, or three days before a registration deadline, whichever is earlier;
 - no approval names its uid, as `source_uid` or in `events:`, in `approvals/` or `archive/`, of
   either event kind;
-- its series has no live event card and no answered one.
+- its series has no live event card and no answered one. "Answered" is the union of
+  `eventemit::settled_series` (answered `event-check` cards) and `eventcarry::answered_series`
+  (answered `event-accept` cards, §6.1). This is the same union `judge_roster` skips. The emitter
+  calls `answered_series` and never re-derives it, so one `rank` cannot both carry a series and
+  ask about it.
 
 These are `emit_event_checks`' tests (`eventemit.rs:566`, `:700`), widened to both kinds. A card
 lists up to 20 instances of one series; the soonest is its primary.
@@ -239,7 +243,8 @@ note.
 ### 4.5 The series carry (D4)
 
 At each `rank`, before any event card is filed, the carry reads the answered `event-accept` series
-from `archive/`: `rejected` cards and `executed` cards, each by `series_uid`. It then acts on every
+through `eventcarry::answered_series`: `rejected` and `executed` cards in `archive/`, each by
+`series_uid` (§6.1 gives its edge rules). It then acts on every
 instance of those series in the roster that the card did not list:
 - **Declined series:** one `declined` line per new instance (`record_declined`).
 - **Accepted series:** §4.2's notes for each new instance whose start is today or later, **unless
@@ -254,9 +259,27 @@ answers, and the new carry lives beside it in its own module (§6.1).
 **Listed, not silent.** The student answered for the series, so Knowlu acts (VISION commitment 5).
 Every carried note is a journal `create` record in the `rank` run. The read model's delta
 (anatomy §3.2) groups those records and expands to one record per note, so each carried commitment
-is listed under what changed, with its title and run id. No new surface is added. If the delta's
-"since the last run" window turns out to leave out the carrying run's own records, the plan raises
-it with Quinn rather than build a second list.
+is listed under what changed, with its title and run id. No new surface is added, and **no task
+edits `surface::delta`**.
+
+The delta's window decides whether the carry shows. The code answers this (`surface.rs:1699-1721`
+on 97dc27b):
+- **With a `seen_at`**, the carry is listed. The console passes its persisted stamp
+  (`ConsoleState::seen_at`, `app/src/state.rs:145`), and `delta` keeps every record later than it.
+  That includes the carrying run's own `create`s.
+- **With no `seen_at`**, the carry is not listed. `delta` falls back to the newest run's `end` and
+  keeps only records later than it. When the carrying run is the newest run, its own records are
+  earlier than its `end` and are dropped.
+
+The console writes the stamp at the end of each look, on blur or hidden (`mark_seen`, `console.js`
+`endOfLook`). A carry needs an Accept made earlier in the console, so the stamp normally exists by
+the time a carry runs. The gap is narrow: the window never lost focus or hid between that Accept and
+the carrying run, or the stamp file is gone (a rebuilt profile). Q4's cost names it, and this spec
+accepts it rather than change `delta`.
+
+**A known limit: the display cap.** `delta` counts every record in its summary but lists only the
+newest `DELTA_RECORD_CAP` (200, `surface.rs:29`) and sets `truncated`. A carry that falls in a
+window of more than 200 records is counted but not every record is expanded.
 
 ## 5. Data model
 
@@ -339,8 +362,8 @@ on, and anything else, or no key, means off with no warning. `EventsConfig` gain
 
 | Where | Change | On the contract list? |
 |---|---|---|
-| `engine/src/eventemit.rs` | `emit_event_accepts` beside `emit_event_checks`. One shared selection (§4.1) over a verdict-to-card table: `unsure` → `event-check`, `obligation` → `event-accept`, `opportunity` → `event-accept` (switched). Shared caps, series grouping and never-ask-twice. `instances:` on both kinds. `inherit_series_answers` and `settled_series` are **unchanged**. | No |
-| `engine/src/eventcarry.rs` (new) | The vault-writing event state outside `approvals.rs`: §5.3's ever-written set, §4.5's decline and accept carry, D9's rebuild of `declined` lines from `archive/`, and `answered_series` (the `event-accept` series settled in `archive/`). `judge_roster` (`events.rs:447`) skips the union of `settled_series` and `answered_series`, so it stops paying for a settled series' new instances. That one call-site edit in `events.rs` is made here, after T1. | No, but contract-engineer's (§13): a silent error here declines or hard-books a whole series. |
+| `engine/src/eventemit.rs` | `emit_event_accepts` beside `emit_event_checks`. One shared selection (§4.1) over a verdict-to-card table: `unsure` → `event-check`, `obligation` → `event-accept`, `opportunity` → `event-accept` (switched). Shared caps, series grouping and never-ask-twice. Never-ask-twice's series test is the union of `settled_series` and `eventcarry::answered_series`, the same union `judge_roster` uses. The emitter calls `answered_series` and has no predicate of its own for answered `event-accept` cards. `instances:` on both kinds. `inherit_series_answers` and `settled_series` are **unchanged**. | No |
+| `engine/src/eventcarry.rs` (new) | The vault-writing event state outside `approvals.rs`: §5.3's ever-written set, §4.5's decline and accept carry, D9's rebuild of `declined` lines from `archive/`, and `answered_series` (the `event-accept` series settled in `archive/`). There is **one** `answered_series`, and the emitter, the carry and `judge_roster` all call it. Its edge rules follow `settled_series`: it reads `archive/` only; `executed` answers accept and `rejected` answers decline; `expired` or any other status answers nothing (ruling G1); a card with a missing or empty `series_uid` answers no series, and the uid rule (§4.1) closes that card's own instances; if two cards answer one series, the lowest file name wins. `judge_roster` (`events.rs:447`) skips the union of `settled_series` and `answered_series`, so it stops paying for a settled series' new instances. That one call-site edit in `events.rs` is made here, after T1. | No, but contract-engineer's (§13): a silent error here declines or hard-books a whole series. |
 | `engine/src/eventaccept.rs` (new) | Pure builders with no I/O. From one instance, it builds the commitment mapping §4.2 hands to `create_confirmed`, or the all-day marker for Q1b's lane. It builds the register task's frontmatter, with `due: null` when there is no deadline. | No |
 | `engine/src/surface.rs` | Q1b: `the_day`'s all-day lane gains accepted all-day and multi-day events, read from `executed` `event-accept` and `event-check` cards' `instances:`. Coming up marks an accepted event "Accepted". Read-only. | No |
 | `engine/src/approvals.rs` | The `event-accept` arms: approved → the accept settlement, then stamp and archive; rejected → the declined lines, then archive. The `event-check` approved arm runs the accept settlement after `settle_event_check` when `instances:` is present. `proposal_weight` stays 1 for both kinds. | **Yes** |
@@ -485,7 +508,10 @@ directories, as `eventemit.rs` and `approvals.rs` tests already do. No test touc
    use the digest's `sort_key`. Two runs over the same input write the same bytes.
 5. Never ask twice: a uid named on any event card of either kind, in `approvals/` or `archive/`, is
    skipped. So is a uid with a `proposed` or `declined` line, or one whose series has a live card or
-   an answered one. An expired card closes only its own instances (ruling G1).
+   an answered one. An expired card closes only its own instances (ruling G1). The answered-series
+   case seeds an `executed` and a `rejected` `event-accept` card in `archive/` and asserts a skip.
+   It goes through `eventcarry::answered_series` and does not restate the predicate. The edge cases
+   are T2b's unit tests, not T2a's.
 6. A series files one card listing at most 20 instances, the soonest as primary.
 7. Expiry: an obligation card expires at its primary's date; an opportunity card at the earlier of
    that date and `first_proposed_at + 14`.
@@ -530,8 +556,13 @@ directories, as `eventemit.rs` and `approvals.rs` tests already do. No test touc
 20a. **Delete sticks:** accept a series, run `rank` so that a later instance is carried, delete that
     commitment through `write::delete` (it moves to `archive/`), then run `rank` twice. Neither run
     writes a note or a journal record for that uid. The same holds for a deleted register task.
-20b. **Listed:** after a `rank` that carries an instance, `surface`'s delta counts the `create` and
-    expands to a record naming the carried commitment and the run id.
+20b. **Listed:** after a `rank` that carries an instance, `surface`'s delta, called with a `seen_at`
+    earlier than the carrying run's start, counts the `create`. It expands to a record naming the
+    carried commitment and the run id.
+20c. **The fallback is pinned:** the same vault with no `seen_at`, where the carrying run is the
+    newest run. The delta's `since` is that run's `end`, `since_kind` is `"run"`, and the delta holds
+    none of the carry's `create` records. This pins today's `delta` (§4.5), so a failing 20b is never
+    "fixed" by editing `delta`. If it fails, `delta` changed, and the change goes to Quinn.
 21. `judge_roster` does not send a new instance of a settled `event-accept` series.
 22. `surface` shows an event card as an ordinary deck card, with `why` from the first paragraph.
     After Accept, `the_day` for the event's date carries the commitment block.
@@ -661,7 +692,11 @@ deleted instance would come back at the next `rank`. §5.3's ever-written set is
 reads `archive/`, where a deleted note goes. So a delete is permanent for that instance. The only
 way back is for the student to add it by hand, and there is no "restore this event" control in the
 MVP. Carried notes arrive with no card. They are listed in the delta line, which records them but
-does not ask about them. Tests 20, 20a and 20b pin all three.
+does not ask about them. That listing needs the console's `seen_at` stamp (§4.5). With no stamp,
+because the window never lost focus between the Accept and the carrying run or the stamp file is
+gone, the carry is written but not listed. The note is still on the schedule. The delta also expands
+at most 200 records (it counts the rest). This spec accepts both limits and does not change `delta`.
+Tests 20, 20a, 20b and 20c pin them.
 
 **Q5. Does the Alabama preset switch opportunity cards on before B1 has a result?**
 With `event-3`, 47 of 50 labelled campus events came back as opportunities, faculty-only ones
@@ -685,6 +720,19 @@ none was rejected. Two are only partly met, and each says why:
   three of them: p3's body-line branch, human-actor's token in `app/tests`, and m1-grades' tripwire.
   It did not re-run the diff. The integrator re-runs it before T1 (§9).
 
+**Re-check findings of 2026-09-29.** Two findings were checked against the code on 97dc27b and
+accepted, and none was rejected:
+- **The delta window (§4.5, tests 20b and 20c).** Confirmed at `surface.rs:1699-1721` and
+  `newest_end_ts`. A carry is listed when the console passes `seen_at`, and not listed with none
+  when the carrying run is the newest. Test 20b now passes a `seen_at`, 20c pins the fallback, and
+  the 200-record display cap is named. The no-stamp gap is accepted in Q4's cost and not raised as a
+  separate question. It is narrow because the console stamps at the end of every look, and an Accept
+  needs a look. If Quinn wants carried notes listed even then, that is a change to `delta` and a
+  question of its own.
+- **One `answered_series` (§4.1, §6.1, §13).** Confirmed: T2a would have had to copy T2b's
+  predicate. The predicate now has one definition in `eventcarry.rs`, with its edge rules written
+  down. T2b lands it first, and T2a, the carry and `judge_roster` all call it.
+
 ## 13. Task sketch
 
 One branch and one worktree, cut from main after signing, and after `human-actor` and `m1-grades`
@@ -698,10 +746,10 @@ land in `docs/reports/`. A cheaper agent's work goes through `reviewer` before a
 |---|---|---|---|---|
 | **T0** The Alabama count | `researcher` (Sonnet, medium) | none. It returns counts, and the controller adds the number to Q1 | — | Read-only research over public feeds, before signing. It counts the next 60 days of the Alabama preset's feeds by shape: timed one-day, past-midnight, all-day and multi-day. |
 | **T1** Builders and the switch | `implementer` (Sonnet, high) | new `engine/src/eventaccept.rs`; `engine/src/events.rs` (`event_cards`); `engine/src/commitments.rs` (the `kind: event` body line); `engine/src/lib.rs` (both new `mod` lines) | 8, plus the loader's parse | Fully specified, pure (no I/O), compiler- and test-checked, and off the contract list. It writes nothing to a vault. |
-| **T2a** The emitter | `implementer` (Sonnet, high) | `engine/src/eventemit.rs` | 1–7, 25 | Off the list, and it generalises `emit_event_checks`, whose shape it keeps. What it writes is a card and its `proposed` line. A wrong card is a proposal the student sees and answers, never a silent change to their plan. `reviewer` checks it before any push. Two failed attempts go to Opus, high. |
-| **T2b** The series carry and D9 | `contract-engineer` (Opus, xhigh) | new `engine/src/eventcarry.rs`; the `judge_roster` call site in `engine/src/events.rs` (after T1) | 19, 20, 20a, 21, plus unit tests for the ever-written set | A silent error here declines or hard-books a whole series, or brings back a note the student deleted, with no card to catch it. CLAUDE.md sends that to Opus. The roster has no Opus-`high` implementer, and contract-engineer's description names this case. `contract-reviewer` reviews it with T3. |
+| **T2a** The emitter | `implementer` (Sonnet, high) | `engine/src/eventemit.rs` | 1–7, 25 | It starts after T2b's first commit and calls `eventcarry::answered_series` from it. It does not write its own predicate. Off the list, and it generalises `emit_event_checks`, whose shape it keeps. What it writes is a card and its `proposed` line. A wrong card is a proposal the student sees and answers, never a silent change to their plan. `reviewer` checks it before any push. Two failed attempts go to Opus, high. |
+| **T2b** The series carry and D9 | `contract-engineer` (Opus, xhigh) | new `engine/src/eventcarry.rs`; the `judge_roster` call site in `engine/src/events.rs` (after T1) | 19, 20, 20a, 21, plus unit tests for the ever-written set and for `answered_series`' edge rules (§6.1: `expired`, a missing or empty `series_uid`, an `event-check` card not counted, two cards for one series). Its **first commit** is `answered_series` and those unit tests alone. T2a starts from it. | A silent error here declines or hard-books a whole series, or brings back a note the student deleted, with no card to catch it. CLAUDE.md sends that to Opus. The roster has no Opus-`high` implementer, and contract-engineer's description names this case. `contract-reviewer` reviews it with T3. |
 | **T3** The settlement | `contract-engineer` (Opus, xhigh) | `engine/src/approvals.rs` | 9–17 | On the contract list. A silent error here writes the wrong note into a student's vault, or none. It calls T2b's ever-written set, so it runs after T2b. |
-| **T4** `rank` wiring | `contract-engineer` (Opus, xhigh) | `engine/src/cli.rs` | 18, 20b, 22, 23, 24 (the test sits in `enrich.rs`; no code changes there) | It sets the order of the vault-writing passes (the carry and D9 before any card) and the budget each gets. A wrong order files or carries against stale state without a word, so it goes to Opus for the reason T2b does. `cli.rs` is shared with `p3-registrar` (§9), and the integrator applies the hunk at merge. It runs after T1–T3. |
+| **T4** `rank` wiring | `contract-engineer` (Opus, xhigh) | `engine/src/cli.rs` | 18, 20b, 20c, 22, 23, 24 (the test sits in `enrich.rs`; no code changes there). It never edits `surface::delta` (§4.5). | It sets the order of the vault-writing passes (the carry and D9 before any card) and the budget each gets. A wrong order files or carries against stale state without a word, so it goes to Opus for the reason T2b does. `cli.rs` is shared with `p3-registrar` (§9), and the integrator applies the hunk at merge. It runs after T1–T3. |
 | **T4b** The all-day lane (Q1b) | `implementer` (Sonnet, high) | `engine/src/surface.rs` | 22a | Read-only: `surface` never writes, so an error misdraws a lane but never changes vault bytes. `surface_oracle.rs` must pass unchanged. It runs only if Q1b is (i), after T3. |
 | **T5** Deck labels | `console-ui` (Sonnet, medium) | `app/static/console.js`; `app/tests/static_assets.rs` | 26 | `app/static` is console-ui's. |
 | **T6** Presets | `mechanical` (Sonnet, low) | `app/assets/campus/*.yaml`; `app/tests/scaffold.rs` | 27 | Two one-line asset edits and one assertion. |
@@ -710,9 +758,10 @@ land in `docs/reports/`. A cheaper agent's work goes through `reviewer` before a
 | **T9** B1 | `cloud-engineer` (Opus, high), on `j-events` | `scripts/experiments/e1-decomposition/` (run, not edited); a report in `docs/reports/` | B1's own | Cloud-side, and needs the OpenRouter key from Credential Manager. Only if Q5 is (c). |
 | **T10** Live proof | main session | none (a scratch profile) | the live proof in §11.4 | It needs a staging session by OTP and a desktop. Neither is delegated. |
 
-**Order:** T0 before signing. After signing, T1. Then T2a (implementer) runs in parallel with T2b
-and then T3 (contract-engineer, in sequence: T3 calls T2b's set). All three test against §5.1's
-card, built by hand. Then T4, then T4b, T5, T6 and T7 in parallel, then T8. T9 runs in its own lane
+**Order:** T0 before signing. After signing, T1. Then T2b's first commit (`answered_series`, the one
+definition). Then T2a (implementer) runs in parallel with the rest of T2b and then T3
+(contract-engineer, in sequence: T3 calls T2b's set). All three test against §5.1's card, built by
+hand. Then T4, then T4b, T5, T6 and T7 in parallel, then T8. T9 runs in its own lane
 at any time before T10.
 
 **Checkpoints for Quinn:**
