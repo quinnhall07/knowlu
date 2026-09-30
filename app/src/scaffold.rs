@@ -185,6 +185,11 @@ pub struct VaultPlan {
     pub api_base: String,
     pub anon_key: String,
     pub account_id: String,
+    /// Ruling 11: the vault's human token, `journal::HUMAN_ACTOR` or `journal::LEGACY_HUMAN_ACTOR`,
+    /// decided before the vault is made (a restore takes the one the account already carries,
+    /// `onboarding::create_vault_in`). `build_into` writes it into `config/actor.yaml` once, before
+    /// any seed, so every human record the wizard makes carries it.
+    pub human_actor: &'static str,
 }
 
 /// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
@@ -676,6 +681,10 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     write_file(root, "config/planning.yaml", PLANNING)?;
     write_file(root, "config/week_template.yaml", WEEK_TEMPLATE)?;
     write_file(root, ".gitignore", GITIGNORE)?;
+    // Ruling 11 (plan D7): the vault states its human token once, before `seed_writes`, so the
+    // first task and every course note are written as it. Create-new: never rewritten. The adopt
+    // path and the backup-folder restore copy or keep a vault and never reach this.
+    knowlu_engine::journal::create_actor_file(root, plan.human_actor).map_err(|e| e.to_string())?;
     let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
     write_file(root, "config/events.yaml", campus)?;
     write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
@@ -706,7 +715,7 @@ const FIRST_TASK_BODY: &str = "Open the drawer on this row to see every field Kn
 it off when you have had a look — Today will fill up as your courses do.";
 
 /// The two engine calls, in this order (spec §3.1). Both go through `knowlu_engine::write`, and only
-/// the first uses a non-`console_ctx()` context — **the one exception in the whole app** (R2).
+/// the first uses a non-`console_ctx(vault)` context — **the one exception in the whole app** (R2).
 ///
 /// **Private, and it stays private** (review round 1, Important 2): `create_vault` runs it against
 /// the staging folder before the rename, so a second call — against a vault that already holds
@@ -726,21 +735,24 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     write::create(vault, "archive/_migrated.md", &seed, &WriteContext::new("system:migration", "cli"), &mut journal, None)
         .map_err(|e| e.to_string())?;
 
-    // …and one real task, so Today is not empty and the first `rank` has something to order.
+    // …and one real task, so Today is not empty and the first `rank` has something to order. Its
+    // `effort_source` and `created_by` are the vault's own token (ruling 11), from the same context
+    // that journals it — `config/actor.yaml`, which `build_into` has just written.
+    let ctx = crate::commands::console_ctx(vault)?;
     let front = Node::map(vec![
         ("title", Node::text("Get to know Knowlu")),
         ("course", Node::Null),
         ("domain", Node::text("school")),
         ("due", Node::Null),
         ("effort_hours", Node::Float(0.5)),
-        ("effort_source", Node::text("quinn")),
+        ("effort_source", Node::text(&ctx.actor)),
         ("importance", Node::Int(2)),
         ("status", Node::text("active")),
         ("progress", Node::Int(0)),
-        ("created_by", Node::text("quinn")),
+        ("created_by", Node::text(&ctx.actor)),
     ]);
     let text = format!("---\n{}---\n\n{FIRST_TASK_BODY}\n", safe_dump_block(&front));
-    write::create(vault, "tasks/get-to-know-knowlu.md", &text, &crate::commands::console_ctx(), &mut journal, None)
+    write::create(vault, "tasks/get-to-know-knowlu.md", &text, &ctx, &mut journal, None)
         .map_err(|e| e.to_string())?;
 
     // R-OB-2: one note per enrolled course, so tier-1 judgment can place a task and the model has a
@@ -766,7 +778,7 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
             "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
             safe_dump_block(&front)
         );
-        write::create(vault, &format!("courses/{}.md", c.slug), &body, &crate::commands::console_ctx(), &mut journal, None)
+        write::create(vault, &format!("courses/{}.md", c.slug), &body, &ctx, &mut journal, None)
             .map_err(|e| e.to_string())?;
     }
     Ok(())

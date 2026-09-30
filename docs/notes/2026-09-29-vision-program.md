@@ -41,5 +41,6 @@ card per event), phone access to `today.md`, the Obsidian layer.
 | 7 | Outlook / Microsoft 365, more homework platforms | spec |
 | 8 | The dedicated Knowlu calendar in Google and Outlook | spec; needs a new consent |
 
-Alongside, unchanged: HANDOFF §3's order — production parity and 0.1.1, the two-desktop stream, C5,
-C4, the pilot.
+**The order of work is `HANDOFF.md` §3, the single ordering** (the stages MVP → Pilot → Launch →
+Beyond of the cloud design's Amendment 2026-09-29, ruling 10; C4 is no longer a phase). Where this
+note names C4 or an older order, §3 wins.

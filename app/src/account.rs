@@ -914,6 +914,9 @@ pub fn attach_config_and_session(
         api_base: api_base(),
         anon_key: anon_key(),
         account_id: account_id.to_string(),
+        // Ruling 11: never read here — `write_cloud_yaml_if_absent` writes `cloud.yaml` only, and an
+        // adopted vault keeps whatever `config/actor.yaml` it has (or none: the legacy token).
+        human_actor: knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
     };
     // Only `config/cloud.yaml` is written. Nothing else in this vault is read, rewritten or moved.
     crate::scaffold::write_cloud_yaml_if_absent(vault, &plan)?;

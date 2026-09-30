@@ -151,20 +151,26 @@ pub const EDITABLE: [&str; 14] = ["title", "course", "due", "effort_hours", "imp
 /// survives as YAML; every other editable field is passed through as the literal the page sent.
 pub const QUOTED: [&str; 5] = ["title", "course", "importance_reason", "domain", "effort_confidence"];
 
-/// The one `WriteContext` constructor in `app/` — every console-originated write is `quinn` via
+/// The one `WriteContext` constructor in `app/` — every console-originated write is the student via
 /// `dashboard` (`journal::VIAS` carries it since Task 7).
-pub fn console_ctx() -> WriteContext {
+///
+/// **The student is this vault's own token** (ruling 11, plan D8): `config/actor.yaml`, read on
+/// every write so a hand fix takes effect without a restart — `student` in a vault the wizard made,
+/// the legacy token in one made before (no file). A bad file is the reader's named line, which
+/// `mutate` returns as the command's `error` with the current state; nothing is written.
+pub fn console_ctx(vault: &std::path::Path) -> Result<WriteContext, String> {
     debug_assert!(knowlu_engine::journal::VIAS.contains(&"dashboard"));
-    WriteContext::new("quinn", "dashboard")
+    let token = knowlu_engine::journal::read_human_actor(vault).map_err(|e| e.to_string())?;
+    Ok(WriteContext::new(token, "dashboard"))
 }
 
 /// The context for a `decide`d proposal's in-process execution (R-T9, Task 9 review). The
-/// DECISION (writing `status`/`decision_note`/`snooze_until`) is Quinn's and keeps
-/// `console_ctx()`; EXECUTING that decision — `process_approvals` materializing a task, applying
-/// an amendment, expanding a digest — is the system acting on Quinn's already-made decision,
-/// exactly as `cli::run`'s scheduled pass does it (actor `agent:approvals`), so it must not be
-/// journaled as a fresh human judgement: `write::write_literals`'s judge-once freeze
-/// (`journal::human_set`) reads a `create`/`set` record's `actor` field, and an `actor: quinn`
+/// DECISION (writing `status`/`decision_note`/`snooze_until`) is the student's and keeps
+/// `console_ctx(vault)`; EXECUTING that decision — `process_approvals` materializing a task,
+/// applying an amendment, expanding a digest — is the system acting on the student's already-made
+/// decision, exactly as `cli::run`'s scheduled pass does it (actor `agent:approvals`), so it must not
+/// be journaled as a fresh human judgement: `write::write_literals`'s judge-once freeze
+/// (`journal::human_set`) reads a `create`/`set` record's `actor` field, and a human-actor
 /// materialize record would wrongly freeze every field of the new task (effort_hours, importance,
 /// course, due, …) against future agent re-judgement. `via` stays `dashboard` so provenance still
 /// shows the write happened from the console, not the scheduled runner.
@@ -220,7 +226,7 @@ pub fn set_fields_inner(cs: &ConsoleState, view: &str, id: &str, fields: serde_j
             }
             literals.push((k.clone(), literal_for(k, v)?));
         }
-        let res = write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+        let res = write::write_literals(&cs.vault, id, &literals, &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
         if let Some((name, why)) = res.skipped.iter().next() { return Err(format!("{name}: {why}")); }
         Ok(())
     })
@@ -240,28 +246,31 @@ pub fn create_task_inner(cs: &ConsoleState, view: &str, fields: serde_json::Map<
         let course = fields.get("course").and_then(|v| v.as_str()).map(str::trim).filter(|c| !c.is_empty());
         let due = fields.get("due").and_then(|v| v.as_str()).map(|d| if d.len() == 10 { format!("{d}T23:59") } else { d.to_string() });
         let effort = fields.get("effort_hours").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        // Ruling 11: `created_by` and `effort_source` are the student who made it — the context's
+        // own actor, never a name.
+        let ctx = console_ctx(&cs.vault)?;
         let front = Node::map(vec![
             ("title", Node::text(title)),
             ("course", Node::opt_text(course)),
             ("domain", Node::text("school")),
             ("due", due.as_deref().map(Node::text).unwrap_or(Node::Null)),
             ("effort_hours", Node::Float(effort)),
-            ("effort_source", Node::text("quinn")),
+            ("effort_source", Node::text(&ctx.actor)),
             ("importance", Node::Int(3)),
             ("status", Node::text("active")),
             ("progress", Node::Int(0)),
-            ("created_by", Node::text("quinn")),
+            ("created_by", Node::text(&ctx.actor)),
         ]);
         let text = format!("---\n{}---\n\n", safe_dump_block(&front));
         let mut slug = slugify(title); if slug.is_empty() { slug = "task".into(); }
         let mut rel = format!("tasks/{slug}.md"); let mut n = 2;
         while cs.vault.join(&rel).exists() { rel = format!("tasks/{slug}-{n}.md"); n += 1; }
-        write::create(&cs.vault, &rel, &text, &console_ctx(), journal, None).map(|_| ()).map_err(|e| e.to_string())
+        write::create(&cs.vault, &rel, &text, &ctx, journal, None).map(|_| ()).map_err(|e| e.to_string())
     })
 }
 
 pub fn delete_note_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| write::delete(&cs.vault, id, &console_ctx(), journal).map(|_| ()).map_err(|e| e.to_string()))
+    mutate(cs, view, |journal| write::delete(&cs.vault, id, &console_ctx(&cs.vault)?, journal).map(|_| ()).map_err(|e| e.to_string()))
 }
 
 /// Approve/reject/snooze one approval, then run `process_approvals` in the same call so an
@@ -276,7 +285,7 @@ pub fn decide_inner(cs: &ConsoleState, view: &str, id: &str, verdict: &str, note
     let mut env = env; env["decision"] = decision; Ok(env)
 }
 
-/// The verdict as Quinn's write, then `process_approvals` in-process as `executor_ctx()` —
+/// The verdict as the student's write, then `process_approvals` in-process as `executor_ctx()` —
 /// `decide_inner`'s body, shared with `answer_card_inner`. Returns the `decision` summary.
 fn decide_in(cs: &ConsoleState, journal: &mut Journal, id: &str, verdict: &str, note: &str, snooze_until: Option<&str>) -> Result<Value, String> {
     if !["approved", "rejected", "snoozed"].contains(&verdict) { return Err(format!("verdict must be approved, rejected or snoozed, not {verdict:?}")); }
@@ -286,7 +295,7 @@ fn decide_in(cs: &ConsoleState, journal: &mut Journal, id: &str, verdict: &str, 
         ("decision_note".to_string(), write::to_literal(&serde_yaml_ng::Value::String(note.to_string()))),
         ("snooze_until".to_string(), snooze),
     ];
-    write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+    write::write_literals(&cs.vault, id, &literals, &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
     let now = now_in(cs);
     let r = knowlu_engine::approvals::process_approvals(&cs.vault, now.date(), now.datetime(), &executor_ctx(), journal);
     Ok(json!({ "executed": r.executed, "expired": r.expired, "woken": r.woken, "rejected": r.rejected, "warnings": r.warnings }))
@@ -305,7 +314,7 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
         knowlu_engine::commitments::check_answerable(&cs.vault, id, now_in(cs).date())?;
         // Review I1: the engine validates the answer and hands back the one-line literal to write.
         let literal = knowlu_engine::commitments::answer_literal(meets)?;
-        write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+        write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
         decision = decide_in(cs, journal, id, "approved", "", None)?;
         Ok(())
     })?;
@@ -326,19 +335,23 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
 }
 
 pub fn close_info_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| knowlu_engine::info::close_info(&cs.vault, None, Some(id), "quinn", &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
+    // Ruling 11: `closed_by` is the student who closed it — the context's own actor.
+    mutate(cs, view, |journal| {
+        let ctx = console_ctx(&cs.vault)?;
+        knowlu_engine::info::close_info(&cs.vault, None, Some(id), &ctx.actor, &ctx, Some(journal), None).map(|_| ()).map_err(|e| e.to_string())
+    })
 }
 
 pub fn open_issue_inner(cs: &ConsoleState, view: &str, target: &str, categories: Vec<String>, text: &str) -> Result<Value, String> {
     mutate(cs, view, |journal| {
         if categories.is_empty() { return Err("pick at least one category".into()); }
         let text = text.trim();
-        knowlu_engine::issues::open_issue(&cs.vault, target, &categories, (!text.is_empty()).then_some(text), &console_ctx(), Some(journal), None, None).map(|_| ()).map_err(|e| e.to_string())
+        knowlu_engine::issues::open_issue(&cs.vault, target, &categories, (!text.is_empty()).then_some(text), &console_ctx(&cs.vault)?, Some(journal), None, None).map(|_| ()).map_err(|e| e.to_string())
     })
 }
 
 pub fn resolve_issue_inner(cs: &ConsoleState, view: &str, id: &str, resolution: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
+    mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(&cs.vault)?, Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
 }
 
 /// Runs the engine's sync OUTSIDE `cs.lock` — a pull can take seconds and must not block a

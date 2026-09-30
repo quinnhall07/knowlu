@@ -2170,7 +2170,10 @@ pub fn apply(
                 }
             }
             if !changes.is_empty() && keep.is_none() {
-                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None) {
+                // Ruling 11: the card names the vault's own token, never a person. A bad
+                // `config/actor.yaml` reads as the student here: sync never fails on it (exit 0).
+                let human = crate::journal::read_human_actor(vault).unwrap_or(crate::journal::HUMAN_ACTOR);
+                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None, human) {
                     // One card, however many fields it carries — the fifteen-a-day cap the deck
                     // already applies counts cards, and so does this.
                     Ok(_) => report.cards += 1,
@@ -2764,6 +2767,8 @@ mod tests {
         let today = jiff::civil::Date::constant(2026, 8, 20);
         let now = jiff::civil::DateTime::constant(2026, 8, 20, 12, 0, 0, 0);
         let v = scratch("local-cards");
+        // Ruling 11: the console below writes as the student, which only a `student` vault takes.
+        crate::journal::create_actor_file(&v, crate::journal::HUMAN_ACTOR).unwrap();
         let runner = WriteContext::new("agent:rank", "cli");
         let console = WriteContext::new("student", "dashboard");
         let mut journal = Journal::new(&v);

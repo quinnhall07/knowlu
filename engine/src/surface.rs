@@ -1492,7 +1492,7 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
             continue;
         }
         let actor = r.get("actor").and_then(|v| v.as_str()).unwrap_or("");
-        let mark = if actor == "quinn" { "me" } else if actor.starts_with("agent:") { "agent" } else { "system" };
+        let mark = if crate::journal::is_human(actor) { "me" } else if actor.starts_with("agent:") { "agent" } else { "system" };
         let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if !by_path.contains_key(&path) {
             order.push(path.clone());
@@ -1722,7 +1722,7 @@ pub fn delta(vault: &Path, now: DateTime, seen_at: Option<&str>, journal: &mut c
     records.sort_by(|a, b| a.ts.cmp(&b.ts));
     let mut groups: BTreeMap<(String, String, String), i64> = BTreeMap::new();
     for r in &records {
-        let class = if r.actor == "quinn" { "you" } else if r.actor.starts_with("agent:") { "agent" } else { "system" };
+        let class = if crate::journal::is_human(&r.actor) { "you" } else if r.actor.starts_with("agent:") { "agent" } else { "system" };
         *groups.entry((r.op.clone(), r.field.clone().unwrap_or_default(), class.into())).or_insert(0) += 1;
     }
     let summary = groups
@@ -2598,6 +2598,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ruling 11: the action log's "me" and the delta's "you" are the vault's human under either
+    /// token; an `agent:` actor is still neither.
+    #[test]
+    fn a_student_action_reads_as_me_and_you() {
+        let dir = std::env::temp_dir().join(format!("qo-student-me-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut journal = crate::journal::Journal::new(&dir);
+        for (path, actor, field, new, ts) in [
+            ("tasks/s.md", "student", "progress", serde_json::json!(100), "2026-08-27T15:00:00.000Z"),
+            ("tasks/q.md", "quinn", "status", serde_json::json!("done"), "2026-08-27T16:00:00.000Z"),
+            ("tasks/g.md", "agent:coursework.vhl", "progress", serde_json::json!(100), "2026-08-27T17:00:00.000Z"),
+        ] {
+            let mut spec = crate::journal::NewRecord::new("set", path, actor, "dashboard");
+            spec.id = Some("task_aaaaaaaaaa");
+            spec.field = Some(field);
+            spec.new = new;
+            spec.ts = Some(ts.to_string());
+            spec.device = Some("d".to_string());
+            journal.append(&mut crate::journal::make_record(spec).unwrap()).unwrap();
+        }
+        let closed = closed_this_week(&dir, TODAY.at(9, 0, 0, 0), &mut journal);
+        assert_eq!(
+            closed.iter().map(|c| (c.path.as_str(), c.mark.as_str())).collect::<Vec<_>>(),
+            [("tasks/s.md", "me"), ("tasks/q.md", "me"), ("tasks/g.md", "agent")]
+        );
+        let d = delta(&dir, TODAY.at(9, 0, 0, 0), Some("2026-08-27T00:00:00.000Z"), &mut journal);
+        assert_eq!(d.summary, "1 progress set by agent · 1 progress set by you · 1 status set by you");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn runs_panel_says_in_words_when_nothing_ran_and_gauge_has_no_history() {
         let vault = Path::new("tests/fixtures/vault-full");
@@ -3057,6 +3087,9 @@ mod moved_tests {
         for sub in ["config", "tasks", "state"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
+        // Ruling 11: `note` and `edit` write as the student, which a vault accepts only when its
+        // `config/actor.yaml` says so (a vault with none is a legacy `quinn` vault).
+        crate::journal::create_actor_file(&dir, crate::journal::HUMAN_ACTOR).unwrap();
         let busy = "[['08:00', '17:30']]";
         std::fs::write(
             dir.join("config").join("week_template.yaml"),

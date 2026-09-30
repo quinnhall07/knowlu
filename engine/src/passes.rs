@@ -272,6 +272,17 @@ pub fn detect_external(vault: &Path, journal: &mut Journal, ctx: &WriteContext) 
         );
         return log;
     }
+    // Ruling 11: a hand edit is the student's, under the vault's own token, read once per call.
+    // A bad `config/actor.yaml` stops the pass by name BEFORE `load_index` moves the index, so no
+    // record is written and the edit is still there to pick up once the file is fixed — the same
+    // "no human write proceeds" rule `write`'s gate applies, since these records bypass `write`.
+    let human = match crate::journal::read_human_actor(vault) {
+        Ok(token) => token,
+        Err(e) => {
+            log.push(format!("detect_external skipped: {e}"));
+            return log;
+        }
+    };
 
     let mut index = load_index(vault, journal);
     for (path, meta) in notes {
@@ -290,7 +301,7 @@ pub fn detect_external(vault: &Path, journal: &mut Journal, ctx: &WriteContext) 
         // `get_mut` borrow across the else block, which needs `index` mutably too.
         if !index.contains_key(&note_id) {
             let whole = crate::yaml::to_json(&serde_yaml_ng::Value::Mapping(meta.clone()));
-            let mut spec = NewRecord::new("create", &rel_path, "quinn", "external");
+            let mut spec = NewRecord::new("create", &rel_path, human, "external");
             spec.id = Some(&note_id);
             spec.new = whole.clone();
             spec.ts = Some(ts);
@@ -329,7 +340,7 @@ pub fn detect_external(vault: &Path, journal: &mut Journal, ctx: &WriteContext) 
             if current == prior {
                 continue;
             }
-            let mut spec = NewRecord::new("set", &rel_path, "quinn", "external");
+            let mut spec = NewRecord::new("set", &rel_path, human, "external");
             spec.id = Some(&note_id);
             spec.field = Some(&field);
             spec.old = prior;
@@ -612,6 +623,57 @@ mod tests {
 
         // Nothing on a clean vault.
         assert!(detect_external(&vault, &mut Journal::new(&vault), &ctx()).is_empty());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    fn actor_file(vault: &Path, text: &str) {
+        std::fs::create_dir_all(vault.join("config")).unwrap();
+        std::fs::write(vault.join("config").join("actor.yaml"), text).unwrap();
+    }
+
+    /// Ruling 11: on a vault the app made, a hand edit is the student's, under the vault's token —
+    /// both the `set` for an edited field and the `create` for a note made outside the engine.
+    #[test]
+    fn an_external_edit_on_a_student_vault_is_journalled_as_student() {
+        let (vault, _) = make_vault("student-edit");
+        actor_file(&vault, "human_actor: student\n");
+        load_index(&vault, &mut Journal::new(&vault));
+        let path = vault.join("tasks/a.md");
+        crate::pystr::write_text(&path, &pystr_read(&path).replace("importance: 3", "importance: 5")).unwrap();
+        crate::pystr::write_text(&vault.join("tasks/hand.md"), "---\ntitle: Hand\nid: task_abcdef0123\n---\n").unwrap();
+
+        detect_external(&vault, &mut Journal::new(&vault), &ctx());
+        let recs: Vec<Record> = Journal::new(&vault)
+            .read(None, None)
+            .into_iter()
+            .filter(|r| r.get("via") == Some(&serde_json::json!("external")))
+            .collect();
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert!(recs.iter().all(|r| r.get("actor") == Some(&serde_json::json!("student"))), "{recs:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A bad `config/actor.yaml` stops the pass by name: one log line, no record, and the index is
+    /// left exactly where it was, so the edit is picked up once the file is fixed.
+    #[test]
+    fn a_bad_actor_file_skips_detect_external_by_name() {
+        let (vault, _) = make_vault("bad-actor");
+        load_index(&vault, &mut Journal::new(&vault));
+        let path = vault.join("tasks/a.md");
+        crate::pystr::write_text(&path, &pystr_read(&path).replace("importance: 3", "importance: 5")).unwrap();
+        actor_file(&vault, "human_actor: alice\n");
+        let journal_before = Journal::new(&vault).read(None, None);
+        let index_before = std::fs::read(vault.join("state").join(INDEX_NAME)).unwrap();
+
+        let log = detect_external(&vault, &mut Journal::new(&vault), &ctx());
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].starts_with("detect_external skipped: config/actor.yaml: ") && log[0].contains("\"alice\""), "{log:?}");
+        assert_eq!(Journal::new(&vault).read(None, None), journal_before, "no record");
+        assert_eq!(std::fs::read(vault.join("state").join(INDEX_NAME)).unwrap(), index_before, "the index did not advance");
+
+        actor_file(&vault, "human_actor: quinn\n");
+        let log = detect_external(&vault, &mut Journal::new(&vault), &ctx());
+        assert_eq!(log, vec!["external edit importance on tasks/a.md".to_string()], "picked up once the file is fixed");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
