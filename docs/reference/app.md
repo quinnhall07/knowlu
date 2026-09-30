@@ -4,7 +4,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-29 (the merge of
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-29 (the merge of
   the commitment model into this file's branch; the 2026-09-26 recount of C3′ into phase 2 gave the
   same)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
   the console window registers **47** (phase 2 added `answer_card`, `commitment_proposals`,

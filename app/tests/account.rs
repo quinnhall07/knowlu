@@ -195,9 +195,13 @@ impl Drop for Cleanup {
 /// it over — a read for one target has been observed to spuriously report `ERROR_NOT_FOUND` for a
 /// target no other thread ever touched, surfacing minutes later as an unrelated 10-second loopback
 /// timeout. This serializes every test that reads, writes or deletes a real credential, the same way
-/// `ENGINE_ENV_LOCK` in `tests/scheduler.rs` serializes process-global env var access.
+/// `ENGINE_ENV_LOCK` in `tests/scheduler.rs` serializes process-global env var access. The store is
+/// shared by every process as well, so this is the cross-process lock in `support/credman_lock.rs`.
 #[cfg(windows)]
-static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/credman_lock.rs"]
+mod credman_lock;
+#[cfg(windows)]
+static CREDMAN_LOCK: credman_lock::CredmanLock = credman_lock::CredmanLock::new();
 
 /// Credential Manager is real on this machine, so this test uses two targets of its own naming and
 /// removes them itself. No secret is asserted on: only the account id and the fact of the move.

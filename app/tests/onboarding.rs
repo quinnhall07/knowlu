@@ -190,6 +190,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     let vault = parent.join("Fall 2026");
     // (a) The backup folder INSIDE the vault: the one case the rule refuses, checked after the
@@ -238,19 +239,26 @@ impl Drop for Cleanup {
 /// this holds `CREDMAN_LOCK` for its whole life (the same reason `app/tests/account.rs` does) and
 /// deletes every credential it touched on drop, including on a panicking assertion: the pending
 /// entry itself, and the profile's own copy `move_session` leaves behind on success.
+///
+/// The name is shared by every process too, not only this binary's threads, so the lock is the
+/// cross-process one in `support/credman_lock.rs`
+/// (`holding_the_credman_lock_holds_the_mutex_other_test_processes_wait_on`).
 #[cfg(windows)]
-static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/credman_lock.rs"]
+mod credman_lock;
+#[cfg(windows)]
+static CREDMAN_LOCK: credman_lock::CredmanLock = credman_lock::CredmanLock::new();
 
 #[cfg(windows)]
 struct PendingSession {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: credman_lock::CredmanGuard,
     /// Whatever was already at `PENDING_TARGET` before this guard wrote over it — `(username,
     /// secret)`, read raw rather than through `load_session` so a session this process cannot even
     /// parse is still put back byte for byte. `None` means there was nothing there.
     had_previous: Option<(String, String)>,
     moved_to: Vec<String>,
-    /// The process-global `KNOWLU_API_BASE` from before this guard pointed it at a closed loopback
-    /// port, restored on drop — the same shape `app/tests/account.rs::ApiBase` uses, and covered by
+    /// The process-global `KNOWLU_API_BASE` from before this guard pointed it at its own
+    /// [`AccountStub`], restored on drop — the same shape `app/tests/account.rs::ApiBase` uses, and covered by
     /// the same `CREDMAN_LOCK` this struct already holds for its whole life (`_guard` above), so the
     /// two kinds of process-global state never race each other either.
     ///
@@ -258,11 +266,72 @@ struct PendingSession {
     /// right after `move_session` succeeds, and that reads `config/cloud.yaml`'s `api_base` — which
     /// this file's `VaultPlan` always sets from `account::api_base()`. Every test below that reaches
     /// a live `create_vault_in` would otherwise make a real request to the compiled-in project
-    /// (`DEFAULT_API_BASE`) the moment it does; a closed loopback port refuses in microseconds
-    /// instead, and `restore_into` reports that as an empty result with a warning rather than an
-    /// error (a network that is simply down is never this path's failure), so every existing
-    /// assertion here is unaffected.
+    /// (`DEFAULT_API_BASE`) the moment it does.
+    ///
+    /// **Ruling 11 (T5).** Finish now reads the account's journal before it makes anything, and a
+    /// Finish that cannot reach the account is refused (plan Q1) — so the closed loopback port this
+    /// used to point at would refuse every Finish below. It points at [`AccountStub`] instead: an
+    /// empty account (every `GET …/sync-pull` answers an empty page) whose every other call fails
+    /// with 503, so a feed's retried save still fails exactly as the closed port made it fail.
     prev_api_base: Option<std::ffi::OsString>,
+    _account: AccountStub,
+}
+
+/// A loopback account for the life of a [`PendingSession`]: an empty `/sync-pull` page for every
+/// `GET` of it, 503 for anything else. Serves itself on `127.0.0.1:0`; stops and joins on drop.
+#[cfg(windows)]
+struct AccountStub {
+    base: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+#[cfg(windows)]
+impl AccountStub {
+    fn start() -> Self {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                let mut stream = match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) { Ok(0) | Err(_) => break, Ok(n) => buf.extend_from_slice(&chunk[..n]) }
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let pull = head.starts_with("GET ") && head.contains("/sync-pull");
+                let (status, body) = if pull { ("200 OK", EMPTY_PULL_PAGE) } else { ("503 Error", "") };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        AccountStub { base: format!("http://127.0.0.1:{port}/functions/v1"), stop, handle: Some(handle) }
+    }
+}
+#[cfg(windows)]
+impl Drop for AccountStub {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() { let _ = h.join(); }
+    }
 }
 #[cfg(windows)]
 impl PendingSession {
@@ -286,8 +355,9 @@ impl PendingSession {
         knowlu::account::save_session(knowlu::account::PENDING_TARGET, account_id, &s)
             .expect("write the pending session this wizard test signs in with");
         let prev_api_base = std::env::var_os("KNOWLU_API_BASE");
-        unsafe { std::env::set_var("KNOWLU_API_BASE", closed_loopback_base()) };
-        Self { _guard: guard, had_previous, moved_to: Vec::new(), prev_api_base }
+        let account = AccountStub::start();
+        unsafe { std::env::set_var("KNOWLU_API_BASE", &account.base) };
+        Self { _guard: guard, had_previous, moved_to: Vec::new(), prev_api_base, _account: account }
     }
     /// The profile-keyed target the session moves onto once a vault named `profile_id` exists,
     /// tracked for cleanup regardless of whether the move actually happened.
@@ -442,6 +512,42 @@ fn create_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **The cross-process flake (2026-09-29).** `PENDING_TARGET` is one machine-wide name, and two
+/// processes running this file at once (two lanes, two worktrees, a workspace run beside a targeted
+/// one) used to interleave on it: one process's `create_vault_in` moved the other's pending session
+/// away, or its no-session test deleted it, and a `PendingSession` that read the other process's
+/// session as "what was here before" restored it after that process had cleaned up — leaving a test
+/// session at the real pending target. A `std::sync::Mutex` cannot see another process.
+///
+/// So holding `CREDMAN_LOCK` must also hold the named, session-wide mutex every real-store test file
+/// shares. Probed from a second thread with its own handle: a Windows mutex is owned per thread, so
+/// the probe sees exactly what another process would.
+#[cfg(windows)]
+#[test]
+fn holding_the_credman_lock_holds_the_mutex_other_test_processes_wait_on() {
+    fn probe(wait_ms: u32) -> bool {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+        std::thread::spawn(move || unsafe {
+            let h = CreateMutexW(None, false, windows::core::w!("Local\\knowlu-tests-credman")).expect("open the named mutex");
+            let r = WaitForSingleObject(h, wait_ms);
+            let got = r == WAIT_OBJECT_0 || r == WAIT_ABANDONED;
+            if got { let _ = ReleaseMutex(h); }
+            let _ = CloseHandle(h);
+            got
+        })
+        .join()
+        .expect("probe thread")
+    }
+    {
+        let _guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!probe(0), "another process could take the Credential Manager lock while this one holds it");
+    }
+    // Released on drop. Other holders (this process's other tests, another process) come and go, so
+    // this waits for its turn rather than demanding the mutex be free this instant.
+    assert!(probe(300_000), "the named mutex was never released");
+}
+
 /// Fix round 1, item 4: with nothing at the pending target, `create_vault_in` refuses — naming the
 /// sentence a friend actually sees — and creates no vault directory at all. Not a `PendingSession`
 /// test (there is deliberately no session here), but it still touches the real, shared pending
@@ -471,10 +577,11 @@ fn create_vault_without_a_pending_session_refuses_and_creates_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A loopback server that answers exactly one `GET` (`/sync-pull`) with `body` verbatim — one page,
-/// which is all H11a's restore call ever sends from a vault this fresh (`more: false` in `body`).
-/// Modelled on `engine/tests/sync_contract.rs`'s own `loopback` (same protocol:
-/// `cloudmodel::CloudClient` is the client on both sides of it).
+/// A loopback server that answers exactly two `GET`s (`/sync-pull`) with `body` verbatim — one page
+/// each, which is all a Finish on an account this small sends (`more: false` in `body`): **the
+/// token probe's (ruling 11, T5), then H11a's restore's**. Modelled on
+/// `engine/tests/sync_contract.rs`'s own `loopback` (same protocol: `cloudmodel::CloudClient` is the
+/// client on both sides of it).
 ///
 /// **I6 (fix round 1): an accept deadline**, the same nonblocking-plus-10s-poll shape
 /// `app/tests/account.rs`'s own `loopback` already uses — a request that never arrives now fails
@@ -486,7 +593,7 @@ fn restore_loopback(body: &str) -> (String, std::thread::JoinHandle<()>) {
     listener.set_nonblocking(true).expect("nonblocking listener");
     let port = listener.local_addr().expect("addr").port();
     let body = body.to_string();
-    let handle = std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || for _ in 0..2 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut stream = loop {
             match listener.accept() {
@@ -600,8 +707,8 @@ const EMPTY_PULL_PAGE: &str = r#"{"records":[],"notes":[],"record_cursor":0,"not
 /// (`ok: true`), and the envelope names what the restore found (`restored.empty == true`, nothing
 /// counted), the sentence the finish panel reads rather than an error.
 ///
-/// `PendingSession::new` already points `KNOWLU_API_BASE` at a closed loopback port so no OTHER test
-/// in this file makes a live request; this one overrides that with a server that actually answers,
+/// `PendingSession::new` already points `KNOWLU_API_BASE` at its own empty [`AccountStub`] so no
+/// OTHER test in this file makes a live request; this one overrides that with a server of its own,
 /// for the length of this test only — `PendingSession`'s own drop restores whatever came before
 /// `new()`, which is unaffected by this second, later write.
 #[cfg(windows)]
@@ -679,6 +786,149 @@ fn a_finish_whose_account_copy_has_content_writes_it_into_the_new_vault() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// -- Ruling 11 (T5): Finish decides the vault's token from the account's journal ----------------
+
+/// One journal record as `/sync-pull` carries it — `body` the record's own bytes, `record_hash`
+/// their sha256 — so the probe and the restore read exactly what an account would hold.
+#[cfg(windows)]
+fn pulled_row(actor: &str, id: &str, ts: &str) -> serde_json::Value {
+    let record = serde_json::json!({
+        "op": "create", "path": format!("tasks/{id}.md"), "actor": actor, "via": "dashboard",
+        "device": "invented", "ts": ts, "id": id, "new": { "id": id }
+    });
+    let body = knowlu_engine::ledger::dumps_value(&record);
+    serde_json::json!({ "seq": 1, "device": "aaaaaaaaaaaaaaaa", "record_hash": knowlu_engine::sync::sha256_hex(body.as_bytes()), "body": body })
+}
+
+/// One `/sync-pull` page holding `rows` and no notes.
+#[cfg(windows)]
+fn pull_page(rows: Vec<serde_json::Value>, cursor: i64, more: bool) -> String {
+    knowlu_engine::ledger::dumps_value(&serde_json::json!({ "records": rows, "notes": [], "record_cursor": cursor, "note_cursor": 0, "more": more }))
+}
+
+/// The new vault's `config/actor.yaml`, its first task and its whole journal, as Finish left them.
+#[cfg(windows)]
+fn made(home: &Path) -> (String, String, String) {
+    let v = home.join("Knowlu").join("Fall 2026");
+    let actor = knowlu_engine::pystr::read_text(&v.join("config").join("actor.yaml")).expect("config/actor.yaml");
+    let task = knowlu_engine::pystr::read_text(&v.join("tasks").join("get-to-know-knowlu.md")).expect("the first task");
+    let journal = std::fs::read_dir(v.join("state").join("journal")).unwrap().flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect::<String>();
+    (actor, task, journal)
+}
+
+#[cfg(windows)]
+#[test]
+fn a_restore_into_an_account_with_quinn_records_writes_quinn() {
+    let root = tmp("token-quinn");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-token-quinn");
+    let (base, handle) = restore_loopback(&pull_page(vec![pulled_row("quinn", "task_00000000a1", "2026-08-01T10:00:00.000Z")], 1, false));
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    assert_eq!(out["restored"]["records"], 1, "{out}");
+    let (actor, task, journal) = made(&home);
+    assert_eq!(actor, "human_actor: quinn\n");
+    assert!(task.contains("created_by: quinn") && task.contains("effort_source: quinn"), "{task}");
+    assert!(!journal.contains("\"actor\": \"student\""), "one account, one token: {journal}");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_new_account_gets_student() {
+    let root = tmp("token-new");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    // `PendingSession`'s own `AccountStub` is an empty account.
+    let mut session = PendingSession::new("acc-token-new");
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    let (actor, task, journal) = made(&home);
+    assert_eq!(actor, "human_actor: student\n");
+    assert!(task.contains("created_by: student") && task.contains("effort_source: student"), "{task}");
+    assert!(!journal.contains("quinn"), "{journal}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn an_account_with_only_agent_records_gets_student() {
+    let root = tmp("token-agents");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-token-agents");
+    let rows = vec![
+        pulled_row("agent:knowlu.enrich", "task_00000000b1", "2026-08-01T10:00:00.000Z"),
+        pulled_row("system:migration", "task_00000000b2", "2026-08-01T10:00:01.000Z"),
+    ];
+    let (base, handle) = restore_loopback(&pull_page(rows, 2, false));
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    assert_eq!(made(&home).0, "human_actor: student\n", "no human record: student");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The probe pages to the first `quinn`, wherever it is — here only on the second page, after a
+/// `student` record on the first.
+#[cfg(windows)]
+#[test]
+fn quinn_anywhere_wins_over_earlier_student_records() {
+    let root = tmp("token-pages");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-token-pages");
+    let first: &'static str = Box::leak(pull_page(vec![pulled_row("student", "task_00000000c1", "2026-08-01T10:00:00.000Z")], 1, true).into_boxed_str());
+    let second: &'static str = Box::leak(pull_page(vec![pulled_row("quinn", "task_00000000c2", "2026-08-02T10:00:00.000Z")], 2, false).into_boxed_str());
+    // The probe's two pages, then the restore's own two.
+    let (base, handle) = multi_loopback(vec![(200, first), (200, second), (200, first), (200, second)]);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    assert_eq!(made(&home).0, "human_actor: quinn\n");
+    let seen = handle.join().expect("the loopback thread did not panic");
+    assert!(seen[0].contains("records_after=0") && seen[1].contains("records_after=1"), "the probe paged on: {seen:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Plan Q1 (recommended: refuse). A Finish that cannot read the account makes nothing — no vault
+/// folder, no `actor.yaml`, no record — keeps the pending session, says so in a retryable line that
+/// never carries the bearer, and succeeds once the account answers.
+#[cfg(windows)]
+#[test]
+fn the_token_is_decided_before_anything_is_written() {
+    let root = tmp("token-first");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-token-first");
+    let dest = home.join("Knowlu").join("Fall 2026");
+    let (refusing, handle) = multi_loopback(vec![(503, "")]);
+    for base in [closed_loopback_base(), refusing] {
+        unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+        let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+        assert_eq!(out["ok"], false, "{base}: {out}");
+        let err = out["error"].as_str().unwrap();
+        assert!(err.contains("could not reach your account") && err.contains("press Finish again"), "{err}");
+        assert!(!err.contains("test-at"), "the bearer never reaches an error line: {err}");
+        assert!(!dest.exists(), "{base}: no vault folder, so no actor.yaml and no record");
+        assert!(knowlu::credentials::exists(knowlu::account::PENDING_TARGET), "the sign-in stays for the retry");
+    }
+    handle.join().expect("the loopback thread did not panic");
+
+    let (base, handle) = restore_loopback(EMPTY_PULL_PAGE);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    assert_eq!(out["ok"], true, "the same Finish, retried once the account answers: {out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    assert_eq!(made(&home).0, "human_actor: student\n");
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The vault's `config/ingest.yaml`, as `create_vault_in` left it.
 #[cfg(windows)]
 fn read_ingest(home: &Path) -> String {
@@ -699,6 +949,7 @@ fn a_feed_that_failed_at_paste_is_saved_by_the_retry_at_finish() {
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-i1-retry-ok");
     let (base, handle) = multi_loopback(vec![
+        (200, EMPTY_PULL_PAGE),           // ruling 11: the token probe, before anything is made
         (200, r#"{"kind":"lms_ics"}"#),   // `create_vault_in`'s retry, and this time it lands
         (200, EMPTY_PULL_PAGE),           // the restore's own pull, once the vault exists
     ]);
@@ -713,7 +964,8 @@ fn a_feed_that_failed_at_paste_is_saved_by_the_retry_at_finish() {
     let ingest = read_ingest(&home);
     assert!(ingest.contains("ics_url: ''\n"), "the retry landed, so the link is in the account and the vault stays empty: {ingest}");
     let seen = handle.join().expect("the loopback thread did not panic");
-    assert!(seen[0].starts_with("PUT /functions/v1/account/sources ") && seen[0].contains("\"kind\":\"lms_ics\""), "{}", seen[0]);
+    assert!(seen[0].starts_with("GET /functions/v1/sync-pull"), "the token probe comes first: {}", seen[0]);
+    assert!(seen[1].starts_with("PUT /functions/v1/account/sources ") && seen[1].contains("\"kind\":\"lms_ics\""), "{}", seen[1]);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -727,6 +979,7 @@ fn a_feed_that_fails_the_retry_too_is_kept_on_this_machine() {
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-i1-retry-fail");
     let (base, handle) = multi_loopback(vec![
+        (200, EMPTY_PULL_PAGE),  // ruling 11: the token probe, before anything is made
         (503, ""),               // `create_vault_in`'s retry fails
         (200, EMPTY_PULL_PAGE),  // the restore still runs — one feed's own save is not the account
     ]);
@@ -755,7 +1008,8 @@ fn a_feed_the_account_already_holds_is_not_sent_again_and_never_touches_the_vaul
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-n1-stored");
-    let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE)]);
+    // Ruling 11: the token probe's pull, then the restore's.
+    let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE), (200, EMPTY_PULL_PAGE)]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
     let mut plan = base_plan(false);
     plan.ics_url = Some("https://x.invalid/c.ics".to_string());
@@ -765,8 +1019,8 @@ fn a_feed_the_account_already_holds_is_not_sent_again_and_never_touches_the_vaul
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
     let seen = handle.join().expect("the loopback thread did not panic");
-    assert_eq!(seen.len(), 1, "{seen:?}");
-    assert!(seen[0].starts_with("GET /functions/v1/sync-pull"), "the only call is the restore's pull, never a second PUT: {}", seen[0]);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen.iter().all(|s| s.starts_with("GET /functions/v1/sync-pull")), "the only calls are the probe's and the restore's pulls, never a second PUT: {seen:?}");
     assert_eq!(out["restored"]["ok"], true, "{out}");
     let ingest = read_ingest(&home);
     assert!(ingest.contains("ics_url: ''\n"), "a link the account holds never reaches the vault: {ingest}");
@@ -783,7 +1037,8 @@ fn a_link_that_failed_validation_never_reaches_the_account() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-n1-rejected");
-    let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE)]);
+    // Ruling 11: the token probe's pull, then the restore's.
+    let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE), (200, EMPTY_PULL_PAGE)]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
     let mut plan = base_plan(false);
     plan.ics_url = Some("https://x.invalid/rejected.ics".to_string());
@@ -793,8 +1048,8 @@ fn a_link_that_failed_validation_never_reaches_the_account() {
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
     let seen = handle.join().expect("the loopback thread did not panic");
-    assert_eq!(seen.len(), 1, "{seen:?}");
-    assert!(seen[0].starts_with("GET /functions/v1/sync-pull"), "a rejected link is never PUT: {}", seen[0]);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen.iter().all(|s| s.starts_with("GET /functions/v1/sync-pull")), "a rejected link is never PUT: {seen:?}");
     let ingest = read_ingest(&home);
     assert!(ingest.contains("ics_url: 'https://x.invalid/rejected.ics'\n"), "{ingest}");
     let _ = std::fs::remove_dir_all(&root);
@@ -810,6 +1065,7 @@ fn a_personal_calendar_that_failed_at_paste_is_saved_by_the_retry_and_stays_out_
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-n3-personal");
     let (base, handle) = multi_loopback(vec![
+        (200, EMPTY_PULL_PAGE), // ruling 11: the token probe, before anything is made
         (200, r#"{"kind":"calendar_ics"}"#),
         (200, EMPTY_PULL_PAGE),
     ]);
@@ -822,7 +1078,8 @@ fn a_personal_calendar_that_failed_at_paste_is_saved_by_the_retry_and_stays_out_
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
     let seen = handle.join().expect("the loopback thread did not panic");
-    assert!(seen[0].starts_with("PUT /functions/v1/account/sources ") && seen[0].contains("\"kind\":\"calendar_ics\""), "{}", seen[0]);
+    assert!(seen[0].starts_with("GET /functions/v1/sync-pull"), "the token probe comes first: {}", seen[0]);
+    assert!(seen[1].starts_with("PUT /functions/v1/account/sources ") && seen[1].contains("\"kind\":\"calendar_ics\""), "{}", seen[1]);
     let ingest = read_ingest(&home);
     assert!(ingest.contains("- name: personal\n    ics_url: 'cloud:personal'\n"), "the account holds it, so the vault routes to it: {ingest}");
     assert!(!ingest.contains("personal.ics"), "the address itself stays out of the vault: {ingest}");
@@ -880,8 +1137,8 @@ fn a_webcal_personal_calendar_is_rewritten_to_https() {
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
     // Task 11 review, M2 (fixed with I1's retry-then-fallback landing): `PendingSession::new` points
-    // `KNOWLU_API_BASE` at a closed loopback, so `create_vault_in`'s own retry of the account save
-    // fails exactly as an unreachable service would, and the fallback writes the rewritten address
+    // `KNOWLU_API_BASE` at an `AccountStub` that refuses every save with 503, so `create_vault_in`'s
+    // own retry of the account save fails as a failing service would, and the fallback writes the rewritten address
     // into the vault — `create_vault_in` itself is what this test now exercises end to end, not
     // `https_from_webcal` called a second time beside it.
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();
@@ -923,7 +1180,7 @@ fn a_padded_personal_calendar_is_trimmed() {
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
-    // Task 11 review, M2: same fix as the webcal case above — the closed loopback fails the retry
+    // Task 11 review, M2: same fix as the webcal case above — the stub's 503 fails the retry
     // too, so the fallback writes the trimmed address into the vault and `create_vault_in` is what
     // this test exercises, end to end.
     let ingest = knowlu_engine::pystr::read_text(&home.join("Knowlu").join("Fall 2026").join("config").join("ingest.yaml")).unwrap();

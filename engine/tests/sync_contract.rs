@@ -845,6 +845,39 @@ fn a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge() {
 }
 
 #[test]
+fn a_sync_card_names_the_vaults_human_and_never_a_person() {
+    // Ruling 11 and CLAUDE.md rule 1: a conflict card's `**Why proposed:**` line follows the vault's
+    // own token. A vault with no `config/actor.yaml` is legacy and keeps the sentence it has always
+    // carried; a `student` vault (every vault the app now makes) names no person.
+    for (file, human, hand) in [
+        (None, "quinn", "Quinn had set them by hand"),
+        (Some("human_actor: student\n"), "student", "the student had set them by hand"),
+    ] {
+        let dir = fixture_with_id(&format!("why-{human}"));
+        if let Some(text) = file {
+            std::fs::create_dir_all(dir.join("config")).expect("config/");
+            std::fs::write(dir.join("config").join("actor.yaml"), text).expect("actor.yaml");
+        }
+        let mut journal = Journal::new(&dir);
+        let mine = knowlu_engine::write::WriteContext::new(human, "dashboard");
+        knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let mut rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
+        rec.insert("actor".to_string(), serde_json::json!(human));
+        let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+        assert_eq!(report.cards, 1, "{human}: {report:?}");
+        let card = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+            .find(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).expect("one amend card");
+        let text = knowlu_engine::pystr::read_text(&card).expect("the card");
+        assert!(text.contains(&format!("; {hand}, so this is a proposal")), "{human}: {text}");
+        if human == "student" {
+            assert!(!text.to_lowercase().contains("quinn"), "no person's name on a student's card: {text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn a_pulled_record_that_is_not_a_record_never_reaches_the_ledger() {
     // Review I7, inherited. The rows are plaintext now, which makes this MORE important rather than
     // less: a malformed record used to fail to decrypt, and now it arrives looking like data.
@@ -1574,7 +1607,7 @@ fn sync_never_settles_or_archives_a_proposal_it_did_not_file() {
         knowlu_engine::write::propose_amendment(
             &dir, &file, &meta,
             &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-            &judge, &mut journal, None, today, None,
+            &judge, &mut journal, None, today, None, knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
         ).expect("a judge-once proposal");
         let rec = if converge {
             foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z")
@@ -2454,7 +2487,7 @@ fn rejecting_a_judge_once_card_writes_no_re_assert_record() {
     let card = knowlu_engine::write::propose_amendment(
         &dir, &file, &meta,
         &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-        &judge, &mut journal, None, today, None,
+        &judge, &mut journal, None, today, None, knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
     ).expect("a judge-once proposal");
     let card_rel = knowlu_engine::ids::rel(&dir, &card);
     let count = |journal: &mut Journal| journal.read(None, None).iter()

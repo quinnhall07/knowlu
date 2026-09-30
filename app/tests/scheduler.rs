@@ -75,9 +75,13 @@ impl Drop for EnvSeam {
 /// this file's own, since `account.rs`'s is private to that crate. Windows races parallel
 /// `CredWriteW`/`CredReadW` calls (spurious `ERROR_NOT_FOUND`), so this serialises every test in this
 /// file that writes, reads or deletes a real credential, the same way it already serialises
-/// `KNOWLU_ENGINE_EXE` above.
+/// `KNOWLU_ENGINE_EXE` above. The store is shared by every process as well, so this is the
+/// cross-process lock in `support/credman_lock.rs`.
 #[cfg(windows)]
-static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/credman_lock.rs"]
+mod credman_lock;
+#[cfg(windows)]
+static CREDMAN_LOCK: credman_lock::CredmanLock = credman_lock::CredmanLock::new();
 
 /// Deletes the named Credential Manager target when the test ends, on any exit path — a passing
 /// assertion, a failing one, or a panic. The same shape as `app/tests/account.rs`'s `Cleanup`.

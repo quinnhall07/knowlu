@@ -47,7 +47,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   exits 0; no note, no card, no journal record); `--json` adds `uncovered_courses` and orders the
   proposals as the cards are. With `--confirm` (phase 2), it fetches nothing and writes the confirm
   screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
-  `--actor quinn --via dashboard`), journal first. It prints `{created, declined, warnings, window}`
+  `--actor` the vault's token, `--via dashboard`), journal first. It prints `{created, declined, warnings, window}`
   and exits 2 on unreadable input or an invalid window, having written nothing.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
@@ -64,5 +64,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
   `completion::propose_done`, matched to exactly one active task by title.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
-  items, issue notes, journaled note edits.
+  items, issue notes, journaled note edits. A human `--actor` (and `--opened-by`/`--closed-by`)
+  defaults to the vault's token (`config/actor.yaml`; absent means `quinn`); `write` refuses a human
+  actor that differs from it, and a bad file exits 2 writing nothing.
 

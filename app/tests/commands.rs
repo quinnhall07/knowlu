@@ -160,6 +160,7 @@ fn the_state_command_carries_the_first_run_block_on_a_wizard_made_vault() {
         api_base: knowlu::account::api_base(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     knowlu::scaffold::create_vault(&v, &plan).unwrap();
     assert!(!v.join("state").join("today.md").exists(), "a wizard-made vault has never been ranked");
@@ -303,6 +304,92 @@ fn set_fields_journals_a_quinn_dashboard_record_and_returns_fresh_state() {
     assert!(knowlu_engine::journal::VIAS.contains(&"dashboard"));
 }
 
+/// A `vault-full` copy that states the new token, as every vault the wizard now makes does.
+fn student_scratch(name: &str) -> PathBuf {
+    let v = scratch(name);
+    knowlu_engine::journal::create_actor_file(&v, knowlu_engine::journal::HUMAN_ACTOR).unwrap();
+    v
+}
+
+/// Ruling 11, and the 09-23 plan's deferred M-2 pin: the console's context and the engine's
+/// judge-once query agree on who the student is. A console `set` on a `student` vault is journalled
+/// as `student`, `journal::human_set` finds it, and a judged agent write is then refused over it.
+#[test]
+fn console_writes_on_a_student_vault_are_student_and_frozen_against_agents() {
+    let v = student_scratch("student-set");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-student-set-data-{}", std::process::id())));
+    let id = first_id(&cs);
+    let mut f = serde_json::Map::new(); f.insert("importance".into(), json!(1));
+    let env = set_fields_inner(&cs, "today", &id, f).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let set = journal_records(&v).into_iter().find(|r| r["field"] == "importance").expect("the console's set");
+    assert_eq!((set["actor"].as_str(), set["via"].as_str()), (Some("student"), Some("dashboard")), "{set}");
+    assert!(knowlu_engine::journal::Journal::new(&v).human_set(&id, "importance").is_some(), "judge-once sees the student's set");
+
+    let agent = knowlu_engine::write::WriteContext::new("agent:knowlu.enrich", "local-runner");
+    let opts = knowlu_engine::write::WriteOpts { judged: true, ..Default::default() };
+    let res = knowlu_engine::write::write_literals(&v, &id, &[("importance".into(), "5".into())], &agent, &mut knowlu_engine::journal::Journal::new(&v), &opts).unwrap();
+    assert!(res.written.is_empty(), "the agent must not write over the student's decision");
+    assert!(res.skipped["importance"].starts_with("judge-once: importance set by student at"), "{:?}", res.skipped);
+}
+
+#[test]
+fn console_create_task_stamps_the_vaults_token() {
+    for (v, token) in [(scratch("stamp-legacy"), "quinn"), (student_scratch("stamp-student"), "student")] {
+        let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-stamp-{token}-data-{}", std::process::id())));
+        let mut f = serde_json::Map::new(); f.insert("title".into(), json!("Invented reading"));
+        assert_eq!(create_task_inner(&cs, "today", f).unwrap()["ok"], true);
+        let text = std::fs::read_to_string(v.join("tasks/invented-reading.md")).unwrap();
+        assert!(text.contains(&format!("created_by: {token}")) && text.contains(&format!("effort_source: {token}")), "{text}");
+        let create = journal_records(&v).into_iter().find(|r| r["op"] == "create" && r["path"] == "tasks/invented-reading.md").unwrap();
+        assert_eq!(create["actor"], token, "{create}");
+    }
+}
+
+#[test]
+fn console_close_info_stamps_the_vaults_token() {
+    let v = student_scratch("close-student");
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-close-student-data-{}", std::process::id())));
+    let path = knowlu_engine::info::open_info(
+        &v,
+        &knowlu_engine::info::NewInfo { title: "Invented notice", kind: "notice", body: "", opened_by: "student", close_key: None, expires: None },
+        &console_ctx(&v).unwrap(),
+        None,
+        None,
+    ).unwrap();
+    let id = path.file_stem().unwrap().to_string_lossy().to_string();
+    assert_eq!(close_info_inner(&cs, "today", &id).unwrap()["ok"], true);
+    let closed = std::fs::read_to_string(v.join("archive").join(path.file_name().unwrap())).unwrap();
+    assert!(closed.contains("closed_by: \"student\""), "{closed}");
+}
+
+/// Ruling 11: a hand-edited `config/actor.yaml` stops the student's own writes by name — `ok: false`,
+/// the reader's line, the current state (surface is never gated) and not one byte changed.
+#[test]
+fn a_console_write_with_a_bad_actor_file_is_refused_by_name_and_writes_nothing() {
+    let v = scratch("bad-actor");
+    std::fs::write(v.join("config").join("actor.yaml"), "human_actor: alice\n").unwrap();
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-bad-actor-data-{}", std::process::id())));
+    let id = first_id(&cs);
+    let before: Vec<Vec<u8>> = ["tasks/ph-106-exam-1-prep.md"].iter().map(|p| std::fs::read(v.join(p)).unwrap()).collect();
+    let journal_before = journal_records(&v);
+    let mut f = serde_json::Map::new(); f.insert("importance".into(), json!(1));
+    let mut t = serde_json::Map::new(); t.insert("title".into(), json!("Invented reading"));
+    for env in [
+        set_fields_inner(&cs, "today", &id, f).unwrap(),
+        create_task_inner(&cs, "today", t).unwrap(),
+        delete_note_inner(&cs, "today", &id).unwrap(),
+    ] {
+        assert_eq!(env["ok"], false, "{env}");
+        let err = env["error"].as_str().unwrap();
+        assert!(err.starts_with("config/actor.yaml: ") && err.contains("\"alice\""), "{err}");
+        assert_eq!(env["state"]["schema"], 1, "a refusal still carries the current state");
+    }
+    assert_eq!(before, vec![std::fs::read(v.join("tasks/ph-106-exam-1-prep.md")).unwrap()]);
+    assert_eq!(journal_records(&v), journal_before, "no journal record");
+    assert!(!v.join("tasks/invented-reading.md").exists());
+}
+
 #[test]
 fn a_non_editable_field_is_refused_with_the_current_state_and_nothing_written() {
     let v = scratch("refuse");
@@ -432,7 +519,7 @@ fn issue_flag_needs_a_category_and_snapshots_the_object_and_info_closes() {
     knowlu_engine::info::open_info(
         &v,
         &knowlu_engine::info::NewInfo { title: "Library closes early Friday", kind: "notice", body: "", opened_by: "quinn", close_key: None, expires: None },
-        &console_ctx(),
+        &console_ctx(&v).unwrap(),
         None,
         None,
     ).unwrap();

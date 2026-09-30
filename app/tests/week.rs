@@ -97,6 +97,27 @@ fn commitment_proposals_with_no_engine_is_an_empty_list_and_a_reason() {
     assert!(env["error"].is_string(), "{env}");
 }
 
+/// Ruling 11: the confirm call passes no `--actor`, so the engine writes as the vault's own token —
+/// `student` on a vault that says so (the test below is the legacy half, on a vault with no file).
+#[test]
+fn commitments_confirm_on_a_student_vault_journals_the_student() {
+    let exe = Path::new("../target/debug/knowlu-engine.exe");
+    let len = std::fs::metadata(exe).map(|m| m.len()).unwrap_or(0);
+    assert!(len > 0, "{}: run `cargo build -p knowlu-engine -j 2` first (build.rs leaves a zero-byte placeholder)", exe.display());
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _seam = EngineExeSeam::set(exe.as_os_str());
+    let v = scratch("confirm-student");
+    knowlu_engine::journal::create_actor_file(&v, knowlu_engine::journal::HUMAN_ACTOR).unwrap();
+    let cs = open(&v, "confirm-student");
+    cs.set_test_today(Some("2026-08-28".parse().unwrap()));
+    let given = json!({ "window": "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]" });
+    let env = commitments_confirm_inner(&cs, "today", &given);
+    assert_eq!(env["ok"], true, "{env}");
+    let journal: String = std::fs::read_dir(v.join("state/journal")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+    let planning: Vec<&str> = journal.lines().filter(|l| l.contains("commitments/planning-day.md")).collect();
+    assert!(!planning.is_empty() && planning.iter().all(|l| l.contains("\"actor\": \"student\"")), "{journal}");
+}
+
 #[test]
 fn commitments_confirm_against_the_real_engine_sets_the_planning_day_as_the_student() {
     let exe = Path::new("../target/debug/knowlu-engine.exe");
