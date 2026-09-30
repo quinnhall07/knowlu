@@ -63,6 +63,15 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
   a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
   `completion::propose_done`, matched to exactly one active task by title.
+  **Gmail connect (D4, D7).** The cloud arm always probes, and the Gmail pull runs on every cloud slot
+  past the probe, whether or not the vault carries a calendar marker; the service decides (no grant is
+  the silent `no_gmail_scope`, a revoked one prints `gmail: skipped (gmail is not connected;
+  re-connect from settings)`). Every Gmail item is a proposal: `task` items file a card like
+  `borderline`, `event` and `opportunity` ones, and only approving the card makes the note, so the
+  summary reads `gmail: 0 task(s), N proposed, …`. **The transport stop** (spec Q1 (a′), which lands
+  with T8 and waits on the plan's PQ1, so it is not yet in this branch): a probe that failed in
+  transport ends the cloud arm with `judge: skipped (no network (…))` at exit 0; whether tier 1's
+  answers are still written first is what PQ1 decides. Recount this paragraph when T8 lands.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
   items, issue notes, journaled note edits. A human `--actor` (and `--opened-by`/`--closed-by`)
   defaults to the vault's token (`config/actor.yaml`; absent means `quinn`); `write` refuses a human

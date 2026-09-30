@@ -25,6 +25,25 @@ The project URL and the **anon key are public** and are compiled into the app. T
 injected into every function as `SUPABASE_SERVICE_ROLE_KEY` by the platform; nothing here reads it at import
 time, so `deno test` needs no environment at all.
 
+## Google connection (`google-connect`, `gmail-read`)
+
+- `GET google-connect?status=1` answers four keys: `connected`, `scopes`, `status` and `email`.
+  `status` is `none` (no row), or the row's `active`, `quiet` or `revoked`; `scopes` is `[]` for a
+  revoked row; `email` is the stored `email_hint` or `null`.
+- `GET google-connect?scope=calendar|gmail|reconnect` returns the consent URL. `reconnect` asks for the
+  identity scopes plus every API scope the row records, in one consent; with no row or no recorded
+  scopes it answers 400 `nothing to reconnect`.
+- `DELETE google-connect` revokes at Google first (a failed revoke answers 502 and purges nothing),
+  then calls `delete_google_grant`, which since `20260929000200_gmail_disconnect_purge.sql` deletes the
+  account's `gmail_queue` rows, its `gmail_seen` rows, and the `google_accounts` row with its Vault
+  secret. The account's `judgments` rows, `origin = 'gmail_api'` included, stay until the account is
+  deleted (Q9 (a)(ii)). Account deletion calls it too.
+- `gmail-read` reads the grant row without a status filter: no row is the silent `no_gmail_scope`, a
+  `revoked` row answers `revoked` (and marks it), any other row without the Gmail scope is
+  `no_gmail_scope`.
+- The migration and both functions reach staging before a device build with the D4 gate runs a slot
+  there (`db push --include-all`).
+
 ## Testing
 
 ```powershell
