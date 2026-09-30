@@ -345,6 +345,56 @@ fn a_run_that_finds_the_sync_run_lock_held_writes_nothing_and_says_so_at_exit_0(
     cleanup(&v);
 }
 
+// ---- an older capture never overwrites a newer one (T9 finding 2) ----
+
+fn stamped(fixture: &str, at: &str) -> String {
+    let mut b: serde_json::Value = serde_json::from_str(&bundle_text(fixture)).unwrap();
+    b["fetched_at"] = serde_json::json!(at);
+    b.to_string()
+}
+
+/// The slot captures before `sync`, `coursework` and `ingest` and applies its bundle after them. A
+/// Refresh in between applies a newer capture first, and the slot's older bundle must then change
+/// nothing: no field set back (its sets are an agent's, so judge-once would not stop them), and no
+/// `fetched_at` moved backwards. Stamps compare as instants. `…:00Z` is half a second older than
+/// `…:00.500Z` (the app's `now_ts` shape), though it sorts after it as text.
+#[test]
+fn an_older_capture_never_overwrites_a_newer_one() {
+    let v = vault("older");
+    assert!(run_text(&v, &stamped("bundle-changed.json", "2026-09-29T12:03:00.500Z")).status.success());
+    let hw3 = note_path("syn-110", "_8110004_1");
+    assert_eq!(text_field(&v, &hw3, "status").as_deref(), Some("graded"));
+    let before = vault_bytes(&v);
+    let first = records(&v).len();
+    let out = run_text(&v, &stamped("bundle-basic.json", "2026-09-29T12:03:00Z"));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout(&out).trim_end(), "grades (skipped: a newer capture is already applied)");
+    assert_eq!(records(&v).len(), first, "no journal record: {:?}", &records(&v)[first..]);
+    assert_eq!(vault_bytes(&v), before, "no note and no state/grades.json byte moves");
+    assert_eq!(field(&v, &hw3, "score").and_then(|x| x.as_f64()), Some(17.0), "the newer grade stays");
+    // a later capture applies as ever
+    let out = run_text(&v, &stamped("bundle-basic.json", "2026-09-29T12:06:00Z"));
+    assert!(stdout(&out).lines().any(|l| l == "grades: 2 courses, 3 changed items"), "{}", stdout(&out));
+    cleanup(&v);
+}
+
+/// A recorded stamp that does not read as an instant orders nothing. Nor does one later than now:
+/// if the clock once ran ahead and was put right, every capture would otherwise be refused until the
+/// clock caught up with it.
+#[test]
+fn a_recorded_stamp_that_is_unreadable_or_later_than_now_refuses_nothing() {
+    let v = vault("unordered");
+    let state = v.join("state").join("grades.json");
+    std::fs::create_dir_all(v.join("state")).unwrap();
+    std::fs::write(&state, "{\"fetched_at\": \"not a time\"}\n").unwrap();
+    let out = run(&v, "bundle-basic.json");
+    assert!(stdout(&out).lines().any(|l| l == "grades: 2 courses, 11 changed items"), "an unreadable stamp: {}", stdout(&out));
+    std::fs::write(&state, "{\"fetched_at\": \"2999-01-01T00:00:00.000Z\"}\n").unwrap();
+    let out = run(&v, "bundle-basic.json");
+    assert!(stdout(&out).lines().any(|l| l == "grades: 2 courses, 0 changed items"), "a stamp from the future: {}", stdout(&out));
+    cleanup(&v);
+}
+
 // ---- unmatched and failed courses ----
 
 #[test]

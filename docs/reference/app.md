@@ -36,7 +36,9 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   (signed out, Blackboard unreachable). A capture writes a bundle private to that run
   (`grades::slot_bundle_path`) for the engine's `grades` step, deleted afterwards. That step, the
   slot's or a Refresh's, holds `state/sync.lock` itself, so it never overlaps a sync or another
-  `grades` run; a Refresh whose step skipped answers the skip by name (`grades::step_answer`). No grade value is
+  `grades` run. It refuses a bundle older than the last one applied, so the slot's capture (taken
+  before `sync`) never undoes a Refresh made while it waited. A Refresh whose step skipped answers
+  the skip by name (`grades::step_answer`). No grade value is
   logged. No curated row carries a `policy_read` date on this branch; the date-and-bump test in
   `app/tests/grades.rs` keeps it so until privacy bump #1. Before any release that writes `grades/`,
   migration `20260929000100` must be applied to the server.

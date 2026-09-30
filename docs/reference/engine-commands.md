@@ -22,7 +22,11 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   student set. Gated like `coursework`. Holds `state/sync.lock` (`sync::RunLock`, the lock every
   sync takes) from its first read of the vault to its exit, because `grades/` is a synced folder;
   finding it held, it writes nothing and prints `grades (skipped: the vault is busy with a sync or
-  another grades run)` at exit 0. Rewrites `state/grades.json` (`fetched_at`, `host`, the
+  another grades run)` at exit 0. A bundle whose `fetched_at` is strictly older than the one
+  `state/grades.json` records (compared as instants; a recorded stamp that does not parse, or is
+  later than now, orders nothing) writes nothing and prints `grades (skipped: a newer capture is
+  already applied)` at exit 0, so the slot's early capture never undoes a Refresh made while it
+  waited. Otherwise rewrites `state/grades.json` (`fetched_at`, `host`, the
   course counts `matched`/`skipped`/`failed`; device-local, never synced). Output is counts, course
   codes, note paths and error codes only — never a column name, category or score (spec §11):
   `grades: 2 courses, 3 changed items`, `grades: <code> not matched`, `grades: <code> failed (403)`,

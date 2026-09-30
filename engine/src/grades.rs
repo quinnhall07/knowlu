@@ -593,6 +593,24 @@ fn read_bundle(input: &Path) -> Result<Bundle, String> {
 /// What a run prints, at exit 0 having written nothing, when `state/sync.lock` is already held.
 pub const BUSY: &str = "grades (skipped: the vault is busy with a sync or another grades run)";
 
+/// What a run prints, at exit 0 having written nothing, when its bundle is older than the last one
+/// applied.
+pub const OLDER: &str = "grades (skipped: a newer capture is already applied)";
+
+/// Whether the bundle stamped `bundle_at` is strictly older than the capture `state/grades.json`
+/// records (T9 finding 2). The slot captures before `sync`, `coursework` and `ingest` and applies
+/// after them, so a Refresh in between can apply a newer capture first. Both stamps are compared as
+/// instants, never as text (`…:00Z` and `…:00.500Z` both occur). A stamp on either side that does
+/// not parse orders nothing, and neither does a recorded stamp later than now. A clock that once ran
+/// ahead and was put right must not refuse every capture until it catches up.
+fn older_than_applied(vault: &Path, bundle_at: &str) -> bool {
+    let applied = fetched_at(vault).and_then(|s| s.parse::<Timestamp>().ok());
+    match (applied, bundle_at.parse::<Timestamp>()) {
+        (Some(applied), Ok(bundle)) => applied <= Timestamp::now() && bundle < applied,
+        _ => false,
+    }
+}
+
 /// A skip: the one line, also to `state/runner-log.md` with `status`; nothing else is written.
 fn skipped(vault: &Path, status: &str, line: String) -> Vec<String> {
     let _ = crate::cli::append_run_log(vault, "local", status, &line, None);
@@ -623,6 +641,9 @@ pub fn run(vault: &Path, input: &Path, via: &str, run_id: Option<&str>) -> Resul
         Ok(None) => return Ok(skipped(vault, "ok", BUSY.to_string())),
         Err(e) => return Ok(skipped(vault, "WARN", format!("grades (skipped: the vault could not be locked ({}))", e.kind()))),
     };
+    if older_than_applied(vault, &bundle.fetched_at) {
+        return Ok(skipped(vault, "ok", OLDER.to_string()));
+    }
     let mut ctx = WriteContext::new(ACTOR, via);
     ctx.run_id = run_id.map(str::to_string);
     let mut journal = Journal::new(vault);
