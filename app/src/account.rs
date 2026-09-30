@@ -1529,8 +1529,9 @@ pub fn google_disconnect(cs: tauri::State<'_, crate::state::ConsoleState>) -> Va
 /// retry of THIS request), and 503
 /// means the deployment has no Google client configured at all (`GOOGLE_NOT_CONFIGURED` on the
 /// service side) — the fix is the `calendar_ics` fallback the panel already shows, not "try again".
-/// Gmail connect (spec §4.2) adds two: 402 is `requireActiveEntitlement` refusing every
-/// `google-connect` call for a lapsed subscription, so the fix is the subscription, not Google; 502
+/// Gmail connect (spec §4.2) adds two: 402 is `requireActiveEntitlement` refusing the consent URL
+/// (Connect, Reconnect) for a lapsed subscription, so the fix is the subscription, not Google —
+/// `?status=1` and `DELETE` need only a session, so a lapsed student can still disconnect; 502
 /// is `DELETE` failing to revoke at Google, which leaves the grant and the row in place, so a retry
 /// is the right ask. Every other status keeps the generic form, which names the code but nothing
 /// more specific.

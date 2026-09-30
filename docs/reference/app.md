@@ -30,7 +30,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   else `none`). `google_connect(scope)` takes `calendar`, `gmail` or `reconnect`, opens the consent URL
   from Rust only if it passes `external_url_allowed`, and returns `{ok, error}`. `google_disconnect`
   sends a bearer `DELETE` to `google-connect` and returns `{ok, error}`. Errors: 402 "your subscription
-  is not active, so Google cannot be connected", 502 "Google could not be reached to disconnect; try
+  is not active, so Google cannot be connected" (Connect and Reconnect only: the status read and
+  Disconnect need a session, not a subscription, so a lapsed student can still disconnect), 502 "Google could not be reached to disconnect; try
   again", plus 401, 503 and the generic form. No token, URL or Google email is logged. The Settings row
   (`#set-google`, after `#set-account`) renders one state per `google_status` reply, polls every 3 s up
   to 20 times after Connect or Reconnect, and disconnects in two steps (a warning that Calendar goes

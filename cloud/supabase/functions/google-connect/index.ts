@@ -1,3 +1,5 @@
+import { requireUser } from "../_shared/auth.ts";
+import { authGetUser, restFromEnv } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
 import { revokeGoogleToken } from "../_shared/google_revoke.ts";
@@ -6,6 +8,11 @@ import type { GoogleGrant } from "./handler.ts";
 import { disconnectGrant } from "./disconnect.ts";
 
 Deno.serve(connectHandler(requireActiveEntitlement, {
+  // `?status=1` and `DELETE`: a valid session, no subscription check (handler.ts, `authenticate`).
+  async authenticate(req) {
+    const rest = restFromEnv();
+    return { account_id: (await requireUser(req, (token) => authGetUser(rest, token))).id };
+  },
   clientId: Deno.env.get("GOOGLE_CLIENT_ID") ?? "",
   redirectUri: `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/google-callback`,
   async saveState(accountId) {

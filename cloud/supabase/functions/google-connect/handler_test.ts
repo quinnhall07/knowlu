@@ -1,6 +1,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { CALENDAR_SCOPE, connectHandler, GMAIL_SCOPE, GOOGLE_NOT_CONFIGURED, IDENTITY_SCOPES } from "./handler.ts";
 import type { GoogleGrant } from "./handler.ts";
+import { requireUser } from "../_shared/auth.ts";
+import { requireActiveEntitlementWith } from "../_shared/entitlement.ts";
+import type { EntitlementStatus } from "../_shared/entitlement.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
 
@@ -11,6 +14,7 @@ function activeRow(scopes: string[]): GoogleGrant {
 
 function deps(overrides: Record<string, unknown> = {}) {
   return {
+    authenticate: OK,
     clientId: "client-id-not-a-secret",
     redirectUri: "https://ref.supabase.co/functions/v1/google-callback",
     saveState: () => Promise.resolve("state-nonce"),
@@ -261,4 +265,71 @@ Deno.test("reconnect with no row, or a row with empty scopes, answers 400 nothin
     assertEquals(await response.json(), { error: "nothing to reconnect" });
     assertEquals(minted(), 0, "a refused reconnect mints no nonce");
   }
+});
+
+// --- Whole-branch review, 2026-09-30: a lapsed account can still see and disconnect ------------
+// Only the consent URL is a paid service. D14's purge and the signed privacy sentence
+// ("Disconnecting (in Settings, at any time) …") must hold for a canceled or past_due account too,
+// as account deletion does (`account/handler.ts` gates it on `requireUser` alone).
+
+/** The real gates over a fake session and a fake `entitlements` row: `requireActiveEntitlementWith`
+ * is what production's `requireActiveEntitlement` runs; `requireUser` is authentication alone. */
+const verify = (token: string) => Promise.resolve(token === "session" ? { id: "acct-lapsed", email: null } : null);
+function lapsed(status: EntitlementStatus) {
+  const lookup = () => Promise.resolve({ plan: "monthly", status, current_period_end: null });
+  return (req: Request) => requireActiveEntitlementWith(req, { verify, lookup });
+}
+const signedIn = async (req: Request) => ({ account_id: (await requireUser(req, verify)).id });
+const withSession = (method = "GET") => ({ method, headers: { authorization: "Bearer session" } });
+
+Deno.test("a canceled or past_due account's DELETE calls disconnect and answers 200", async () => {
+  for (const status of ["canceled", "past_due"] as const) {
+    const disconnected: string[] = [];
+    const handler = connectHandler(lapsed(status), deps({
+      authenticate: signedIn,
+      disconnect: (id: string) => { disconnected.push(id); return Promise.resolve(); },
+    }));
+    const response = await handler(new Request("http://127.0.0.1/google-connect", withSession("DELETE")));
+    assertEquals(response.status, 200, status);
+    assertEquals(await response.json(), { disconnected: true });
+    assertEquals(disconnected, ["acct-lapsed"], status);
+  }
+});
+
+Deno.test("a lapsed account's ?status=1 answers its row, so Settings can offer Disconnect", async () => {
+  const handler = connectHandler(lapsed("canceled"), deps({
+    authenticate: signedIn,
+    grant: () => Promise.resolve(activeRow([CALENDAR_SCOPE, GMAIL_SCOPE])),
+  }));
+  const response = await handler(new Request("http://127.0.0.1/google-connect?status=1", withSession()));
+  assertEquals(response.status, 200);
+  assertEquals((await response.json()).status, "active");
+});
+
+Deno.test("a lapsed account's consent asks stay 402 and mint no nonce", async () => {
+  let minted = 0;
+  const handler = connectHandler(lapsed("canceled"), deps({
+    authenticate: signedIn,
+    grant: () => Promise.resolve(activeRow([CALENDAR_SCOPE])),
+    saveState: () => { minted += 1; return Promise.resolve("n"); },
+  }));
+  for (const query of ["", "?scope=calendar", "?scope=gmail", "?scope=reconnect"]) {
+    const response = await handler(new Request(`http://127.0.0.1/google-connect${query}`, withSession()));
+    assertEquals(response.status, 402, query);
+  }
+  assertEquals(minted, 0);
+});
+
+Deno.test("status and DELETE still need a valid session: 401, and nothing is purged", async () => {
+  // `OK` as the entitlement gate: these two routes must pass `authenticate`, never skip it.
+  let called = false;
+  const handler = connectHandler(OK, deps({
+    authenticate: signedIn,
+    disconnect: () => { called = true; return Promise.resolve(); },
+  }));
+  for (const init of [{ method: "DELETE" }, { method: "DELETE", headers: { authorization: "Bearer stale" } }]) {
+    assertEquals((await handler(new Request("http://127.0.0.1/google-connect", init))).status, 401);
+  }
+  assertEquals((await handler(new Request("http://127.0.0.1/google-connect?status=1"))).status, 401);
+  assertEquals(called, false);
 });

@@ -1,6 +1,7 @@
-// GET /google-connect?scope=calendar|gmail|reconnect -> the Google consent URL.
+// GET /google-connect?scope=calendar|gmail|reconnect -> the Google consent URL (entitled only).
 // GET /google-connect?status=1                       -> {connected, scopes, status, email}.
 // DELETE /google-connect                             -> revoke and forget.
+// The last two need a signed-in account and nothing more (`ConnectDeps.authenticate`).
 //
 // **One Google connect, two scopes, in a deliberate order** (cloud design §11a). The wizard's
 // first connection step is *Connect your calendars*, so the default and first ask is
@@ -81,6 +82,12 @@ export function statusFrom(row: GoogleGrant | null) {
 }
 
 export interface ConnectDeps {
+  /** Authentication alone, no subscription check: the gate `?status=1` and `DELETE` pass (the
+   * whole-branch review of 2026-09-30). Only the consent URL is a paid service. A lapsed account
+   * can still see its connection and disconnect it, so D14's purge and the privacy page's
+   * "Disconnecting (in Settings, at any time)" hold for it, as account deletion already does
+   * (`account/handler.ts` gates that on `requireUser` alone). */
+  authenticate: Entitle;
   clientId: string;
   redirectUri: string;
   /** Persists a single-use nonce bound to this account and returns it. */
@@ -95,7 +102,11 @@ export interface ConnectDeps {
 export function connectHandler(entitle: Entitle, deps: ConnectDeps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
-      const { account_id } = await entitle(req);
+      // Reading the account's own row and forgetting it need a session, not a subscription
+      // (`ConnectDeps.authenticate`); every other request, the consent URL included, is entitled.
+      const ungated = req.method === "DELETE" ||
+        (req.method === "GET" && new URL(req.url).searchParams.get("status") !== null);
+      const { account_id } = await (ungated ? deps.authenticate : entitle)(req);
       if (deps.clientId === "") {
         // C2 final review S-4: the ONE copy, in `_shared/google_scopes.ts`. The device matches it
         // exactly to tell an unconfigured deployment from an ordinary 503.

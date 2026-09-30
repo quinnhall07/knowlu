@@ -38,6 +38,9 @@ time, so `deno test` needs no environment at all.
   account's `gmail_queue` rows, its `gmail_seen` rows, and the `google_accounts` row with its Vault
   secret. The account's `judgments` rows, `origin = 'gmail_api'` included, stay until the account is
   deleted (Q9 (a)(ii)). Account deletion calls it too.
+- Only the consent URL is entitlement-gated (402 for a lapsed subscription). `?status=1` and `DELETE`
+  need a valid session and nothing more (401 without one), so a canceled or past-due account can still
+  see its connection and disconnect it, as it can delete its account.
 - `gmail-read` reads the grant row without a status filter: no row is the silent `no_gmail_scope`, a
   `revoked` row answers `revoked` (and marks it), any other row without the Gmail scope is
   `no_gmail_scope`.
