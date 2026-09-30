@@ -128,6 +128,9 @@ plan to find every test that scripts a transport-failed probe. This is the only 
   slot stops writing tier-1 answers for new tasks until the next online slot. That existing test's
   name becomes false, and it is re-pointed to assert the skip line and that the note is unwritten.
 
+**Answer (Quinn, 2026-09-30): (i), stop the network and keep tier 1.** The spec's three passages are
+amended in the same commit, each citing this answer.
+
 Either way the network cost is the same: one call, capped at `CALL_TIMEOUT`. T0 asks this; T8 does not
 start until it is answered. T6, T7a and T7b do not depend on it.
 
