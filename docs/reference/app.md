@@ -22,15 +22,32 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
   app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
   before quoting a number.
+- **Grades** (spec `docs/specs/2026-09-29-grades-design.md`; ruling 12). `grades::availability(row,
+  campus_lms)` is the one predicate: grades are available only for a curated campus row whose
+  `lms_kind` is `blackboard` and which carries a `policy_read` date, and then only on that row's own
+  `lms_host`. No `cfg`, feature or environment variable reaches it. Its four callers check it and never
+  re-derive it: `grades_status`, `grades_connect`, `grades_refresh` and the scheduler's `grades_step`.
+  A no answers with a named refusal: `not available at your school yet` (an uncurated Blackboard school,
+  or a curated row without a date) or `not a Blackboard school`; the slot records the same as
+  `grades (skipped: not available at your school yet)` / `(skipped: not a Blackboard school)`, at exit
+  0. The four commands live in `app/src/grades.rs` (`grades_forget` is never gated: it closes the
+  `lms-grades` window and deletes the kept session). The slot's other skips, in order: `no entitlement`,
+  `not connected`, `no window on this run`, the sign-in window open, then the capture's own outcomes
+  (signed out, Blackboard unreachable). A capture writes a bundle private to that run
+  (`grades::slot_bundle_path`) for the engine's `grades` step, deleted afterwards. No grade value is
+  logged. No curated row carries a `policy_read` date on this branch; the date-and-bump test in
+  `app/tests/grades.rs` keeps it so until privacy bump #1. Before any release that writes `grades/`,
+  migration `20260929000100` must be applied to the server.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
   `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
   `app/src`, and it stays.
-- A slot is `sync → coursework → ingest → judge → rank` (`scheduler::slot_argv`), each the sibling
+- A slot is `sync → coursework → ingest → grades → judge → rank` (`scheduler::slot_argv`), each the sibling
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
   named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
-  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)` —
+  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)`,
+  `grades (skipped: <why>)` (the Grades bullet below) —
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
   unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
   wizard-created vault carries both from birth.

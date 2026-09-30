@@ -224,7 +224,12 @@ in this order (gap ids from the vision program note):
    `import_id` when it resumes. **The founder's live proof** follows the merge, with Quinn at the
    machine in the Blackboard sign-in window (the proof harness cannot drive it), on a dev build from a
    proof branch that carries UA's date and is never merged ahead of bump #1; then the scratch profile
-   is cleaned up.
+   is cleaned up. **What privacy bump #1 owes from M1** (the branch touches none of it): spec §11's two
+   sentences on `site/privacy.html`, its Effective date, `PRIVACY_VERSION`, the sentence pins,
+   `PRIVACY_BUMP_1` in `app/tests/grades.rs` set to that version, and the lawyer-packet delta; the
+   Pilot's re-consent screen (R-PS-4) is still owed before a second account. UA's `policy_read` date
+   reaches `main` only in bump #1's PR or after it. `20260929000100` is applied to staging before any
+   release that writes `grades/`.
 2. **Gmail connect in the app** (P3, taken out of C4): the settings row's Connect and Disconnect (H9
    phase (b); `set_google_calendar` does not exist yet, so the command and its row are written
    together) and the Gmail step's incremental-consent button and copy. Research first (sized M; it
@@ -360,7 +365,7 @@ a spend is asked at the time.
 | Integrate | **Merge the flake-fix PR, then the token PR** | Asked one at a time at merge time, each in one line with the evidence (the contract-reviewer's verdict, green CI). §3's Integrate items 1–2. |
 | Integrate | **Go for the staging deploy** | Asked once the staging runbook is reviewed; the order is §3's Integrate item 3. The controller runs it; nothing touches production. |
 | MVP | **Sign the Gmail-connect and M2 specs** (one sitting), later the events spec | Each after its research and spec review. W1's research left 13 questions for these specs; they are asked inside the specs, not separately. |
-| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. The proof runs in the Blackboard sign-in window on a dev build from the proof branch that carries UA's date (§3's MVP lane 1). |
+| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; UA's date reaches `main` only with or after it. The proof runs in the Blackboard sign-in window on a dev build from the proof branch that carries UA's date (§3's MVP lane 1). |
 | MVP | **Record UA's university-policy read** (ruling 12) | The MVP's grades proof waits on it. If UA forbids a kept SSO session, Quinn rules again on grades; the pilot may then start without them. |
 | MVP | **Mark each P6 item do or cut** | The four items are in §3's MVP lane 5, sized as a list first. |
 | MVP | **Say "MVP reached"** | Once the parity audit re-run shows no open row and the grades proof has passed. |
