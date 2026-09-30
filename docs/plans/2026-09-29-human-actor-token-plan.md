@@ -107,6 +107,13 @@ CLAUDE.md rule 1 and does not touch rule 2.
   `console_ctx()`" becomes `console_ctx(vault)`. A line on `config/actor.yaml` belongs in the engine
   invariants. This plan writes only under `docs/`, so the main session makes both edits at merge.
 
+**Quinn's answers, 2026-09-29:**
+
+- **Q1:** refuse Finish with the named, retryable line, as built.
+- **Q2:** yes. `write` refuses a human actor that differs from the vault's token, as built in ef28570.
+- **Q3:** applied to CLAUDE.md (`console_ctx(vault)` and one engine-invariant line on
+  `config/actor.yaml`) in the commit that records these answers.
+
 ## 4. Site inventory (grep of `quinn` on `86a3431`, test code excluded)
 
 Line numbers are for orientation only. Briefs cite the function, never the line. **CL** marks a
@@ -434,7 +441,7 @@ first one fail. The reviewer checks this by reading the scanner, not by a commit
 | Agent work is not stopped by a bad file (the exit-0 contracts) | T2 | `an_agent_or_system_write_ignores_the_actor_file` |
 | A restore decides the token from the account's journal before `actor.yaml` or any human record | T5 | `the_token_is_decided_before_anything_is_written`, `a_restore_into_an_account_with_quinn_records_writes_quinn`, `quinn_anywhere_wins_over_earlier_student_records` |
 | With no human record, `student` | T1, T5 | `the_token_is_picked_from_the_accounts_records`, `a_new_account_gets_student`, `an_account_with_only_agent_records_gets_student` |
-| One account writes one token | T5, T2 (Q2) | the restore tests; `a_human_actor_other_than_the_vaults_is_refused` if Q2 is yes. If Q2 is no, this row is **partial**, held by the defaults alone |
+| One account writes one token | T5, T2 (Q2) | the restore tests; `a_human_actor_other_than_the_vaults_is_refused` (Q2 answered yes, 2026-09-29; built in ef28570). Q1 answered: Finish refuses with the named, retryable line |
 | One constant `journal::HUMAN_ACTOR` plus one legacy constant | T1, T6 | `the_two_tokens_are_the_constants_and_nothing_else`, `the_legacy_constant_is_there_exactly_once` |
 | A guard fails on the exact literal `"quinn"` in non-test code outside the constants; `quinn-ops` stays | T6 | `no_quinn_literal_outside_the_legacy_constant`, `the_scanner_is_not_vacuous` |
 | Existing vaults are unchanged | T2 (gate) | the frozen-reference, surface-oracle, sync and entitlement tests, run unchanged; Checkpoint A confirms nothing was regenerated |
