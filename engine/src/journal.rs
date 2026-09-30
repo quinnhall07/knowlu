@@ -106,14 +106,136 @@ pub fn json_path(value: &Path) -> Value {
     Value::String(value.to_string_lossy().replace('\\', "/"))
 }
 
-/// `quinn` 0, `agent` 1, `system` 2, anything else 3. Ranks on the part **before the first colon**,
-/// so `agent:ingest.blackboard` ranks as `agent`.
+/// The human (either token, ruling 11) 0, `agent` 1, `system` 2, anything else 3. Ranks on the
+/// part **before the first colon**, so `agent:ingest.blackboard` ranks as `agent`.
 pub fn actor_rank(actor: &str) -> i64 {
     match actor.split(':').next().unwrap_or("") {
-        "quinn" => 0,
+        HUMAN_ACTOR | LEGACY_HUMAN_ACTOR => 0,
         "agent" => 1,
         "system" => 2,
         _ => 3,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The human actor (cloud design, Amendment 2026-09-29, ruling 11)
+// ---------------------------------------------------------------------------
+
+/// The token a vault the app creates writes for its student: never a person's name (CLAUDE.md
+/// rule 1).
+pub const HUMAN_ACTOR: &str = "student";
+
+/// The token every vault made before ruling 11 writes, and keeps writing: its journal lines and
+/// frontmatter stay byte-identical. Every comparison reads it as the same human as
+/// [`HUMAN_ACTOR`], forever. This is the one place the spelling may appear outside tests.
+pub const LEGACY_HUMAN_ACTOR: &str = "quinn";
+
+/// Where a vault states its token: vault-relative, POSIX. Absent means [`LEGACY_HUMAN_ACTOR`].
+pub const ACTOR_FILE: &str = "config/actor.yaml";
+
+/// Is this actor the vault's human? An exact match on either token: `Quinn`, `student ` and an
+/// `agent:`/`system:` actor are not.
+pub fn is_human(actor: &str) -> bool {
+    actor == HUMAN_ACTOR || actor == LEGACY_HUMAN_ACTOR
+}
+
+/// The one key `config/actor.yaml` holds.
+const ACTOR_KEY: &str = "human_actor";
+
+/// The refusal every bad `config/actor.yaml` shares: the file, what was found, the two values.
+fn actor_file_error(found: &str) -> ActorFileError {
+    ActorFileError(format!(
+        "{ACTOR_FILE}: {found}; the file must be one line, {ACTOR_KEY}: {HUMAN_ACTOR} or {ACTOR_KEY}: {LEGACY_HUMAN_ACTOR}"
+    ))
+}
+
+/// A value as the refusal shows it: escaped (so it is one line) and clipped (so a pasted paragraph
+/// is not echoed back whole).
+fn shown(value: &str) -> String {
+    let mut clipped: String = value.chars().take(40).collect();
+    if value.chars().count() > 40 {
+        clipped.push('…');
+    }
+    format!("{clipped:?}")
+}
+
+/// Why `config/actor.yaml` cannot be used. The text names the file, the value found (clipped,
+/// escaped) and the two accepted values, and never carries more of the file than that value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorFileError(pub String);
+
+impl std::fmt::Display for ActorFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The vault's human token, from `config/actor.yaml`: [`HUMAN_ACTOR`] or [`LEGACY_HUMAN_ACTOR`].
+///
+/// **An absent file is the legacy token**, so every vault made before ruling 11 keeps writing
+/// exactly what it always wrote. Anything else the file can hold that is not one of the two tokens
+/// — a name, an `agent:` actor `provenance::is_agent` would read as an agent, an empty value, no
+/// key, not a mapping, not readable — is a named error, and no human write proceeds until the
+/// student fixes it (the gate is `write`'s). Read through `pystr` (CRLF-aware), parsed by the
+/// crate's YAML reader; nothing is cached, so a hand-edit takes effect on the next call.
+pub fn read_human_actor(vault: &Path) -> Result<&'static str, ActorFileError> {
+    let text = match crate::pystr::read_text(&vault.join(ACTOR_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LEGACY_HUMAN_ACTOR),
+        Err(e) => return Err(actor_file_error(&format!("it could not be read ({e})"))),
+    };
+    // The parser's own message is not shown: it can quote the text around the fault.
+    let Ok(serde_yaml_ng::Value::Mapping(map)) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else {
+        return Err(actor_file_error("it is not a YAML mapping"));
+    };
+    use serde_yaml_ng::Value as Y;
+    let found = match crate::yaml::get(&map, ACTOR_KEY) {
+        None => format!("{ACTOR_KEY} is missing"),
+        Some(Y::Null) => format!("{ACTOR_KEY} is empty"),
+        Some(Y::String(s)) if s.is_empty() => format!("{ACTOR_KEY} is empty"),
+        Some(Y::String(s)) if s == HUMAN_ACTOR => return Ok(HUMAN_ACTOR),
+        Some(Y::String(s)) if s == LEGACY_HUMAN_ACTOR => return Ok(LEGACY_HUMAN_ACTOR),
+        Some(Y::Sequence(_)) => format!("{ACTOR_KEY} is a list"),
+        Some(Y::Mapping(_)) => format!("{ACTOR_KEY} is a mapping"),
+        Some(Y::Tagged(_)) => format!("{ACTOR_KEY} is a tagged value"),
+        Some(other) => format!("{ACTOR_KEY} is {}", shown(&crate::yaml::text(other).unwrap_or_default())),
+    };
+    Err(actor_file_error(&found))
+}
+
+/// Create `config/actor.yaml` holding `token` — **once**. The file is opened create-new, so a
+/// second call is an error and the first file's bytes are never touched; only the two tokens can
+/// be written. One line, `human_actor: <token>`, ending in the vault's own newline
+/// (`pystr::NEWLINE`, as every file `write` and the wizard make).
+pub fn create_actor_file(vault: &Path, token: &str) -> Result<(), ActorFileError> {
+    if !is_human(token) {
+        return Err(actor_file_error(&format!("{} is not a human token", shown(token))));
+    }
+    let path = vault.join(ACTOR_FILE);
+    let io = |e: std::io::Error| actor_file_error(&format!("it could not be written ({e})"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ActorFileError(format!("{ACTOR_FILE} already exists; it is written once and never rewritten")));
+        }
+        Err(e) => return Err(io(e)),
+    };
+    use std::io::Write;
+    file.write_all(format!("{ACTOR_KEY}: {token}{}", crate::pystr::NEWLINE).as_bytes()).map_err(io)
+}
+
+/// The token an account already carries, from its journal records (ruling 11's restore rule):
+/// [`LEGACY_HUMAN_ACTOR`] if **any** record's actor is that token, otherwise [`HUMAN_ACTOR`] —
+/// including when there is no human record at all. Reads the records and nothing else; takes them
+/// in any iterable of `&Record`, so `sync::pull`'s `(device, record)` pairs map straight in.
+pub fn pick_human_actor<'a, I: IntoIterator<Item = &'a Record>>(records: I) -> &'static str {
+    if records.into_iter().any(|r| str_of(r, "actor").as_deref() == Some(LEGACY_HUMAN_ACTOR)) {
+        LEGACY_HUMAN_ACTOR
+    } else {
+        HUMAN_ACTOR
     }
 }
 
@@ -261,7 +383,8 @@ impl Journal {
             .collect()
     }
 
-    /// Did Quinn set this field? Returns the latest such record.
+    /// Did the student set this field? Returns the latest such record, under either human token
+    /// ([`is_human`]: ruling 11 reads `student` and `quinn` as the same human, forever).
     ///
     /// A human set shows up **two** ways: an explicit `op: set`, or the field arriving inside a
     /// `create` record's `new` mapping (the note was minted with the value already there, e.g. by
@@ -271,7 +394,7 @@ impl Journal {
     pub fn human_set(&mut self, note_id: &str, field: &str) -> Option<Record> {
         self.records_for(note_id, None)
             .into_iter()
-            .filter(|r| str_of(r, "actor").as_deref() == Some("quinn"))
+            .filter(|r| str_of(r, "actor").is_some_and(|a| is_human(&a)))
             .filter(|r| {
                 let op = str_of(r, "op").unwrap_or_default();
                 (op == "set" && str_of(r, "field").as_deref() == Some(field))
@@ -281,15 +404,16 @@ impl Journal {
             .next_back()
     }
 
-    /// Did Quinn **edit** this field after the note existed? The latest `op: set` record by
-    /// `quinn` for it, or `None`. Unlike [`Journal::human_set`], a `create` record never counts:
-    /// commitment change detection (§5.4) asks this, because the confirm screen mints every
-    /// confirmed note as `quinn` with the calendar's `meets`, `where` and `until` already in it —
-    /// values the calendar chose, which a later calendar change must still be able to propose.
+    /// Did the student **edit** this field after the note existed? The latest `op: set` record by
+    /// either human token ([`is_human`]) for it, or `None`. Unlike [`Journal::human_set`], a
+    /// `create` record never counts: commitment change detection (§5.4) asks this, because the
+    /// confirm screen mints every confirmed note as the student with the calendar's `meets`,
+    /// `where` and `until` already in it — values the calendar chose, which a later calendar change
+    /// must still be able to propose.
     pub fn human_edited(&mut self, note_id: &str, field: &str) -> Option<Record> {
         self.records_for(note_id, Some(field))
             .into_iter()
-            .filter(|r| str_of(r, "actor").as_deref() == Some("quinn"))
+            .filter(|r| str_of(r, "actor").is_some_and(|a| is_human(&a)))
             .filter(|r| str_of(r, "op").as_deref() == Some("set"))
             .next_back()
     }
@@ -517,6 +641,205 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("is 30 min in the future"), "{}", warnings[0]);
         assert!(warnings[0].contains("from TestPC"));
+    }
+
+    // -- ruling 11: the human token -----------------------------------------
+
+    /// A fresh scratch folder per call (never `vault()`, which one thread shares and wipes).
+    fn scratch(tag: &str) -> PathBuf {
+        static N: AtomicI64 = AtomicI64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "qo-journal-actor-{}-{}-{tag}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn actor_vault(tag: &str) -> PathBuf {
+        let dir = scratch(tag);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        dir
+    }
+
+    fn create_rec(id: &str, actor: &str, new: Value, ts: &str) -> Record {
+        let mut spec = NewRecord::new("create", "tasks/x.md", actor, "dashboard");
+        spec.id = Some(id);
+        spec.new = new;
+        spec.ts = Some(ts.to_string());
+        spec.device = Some("TestPC".into());
+        make_record(spec).unwrap()
+    }
+
+    #[test]
+    fn the_two_tokens_are_the_constants_and_nothing_else() {
+        assert_eq!(HUMAN_ACTOR, "student");
+        assert_eq!(LEGACY_HUMAN_ACTOR, "quinn");
+        assert!(is_human("student"));
+        assert!(is_human("quinn"));
+        for not in ["agent:x", "agent:knowlu.enrich", "system:migration", "Quinn", "Student", "student ", " quinn", "", "alice"] {
+            assert!(!is_human(not), "{not:?} is not the vault's human");
+        }
+    }
+
+    #[test]
+    fn actor_rank_ranks_student_with_quinn() {
+        assert_eq!(actor_rank("student"), 0);
+        assert_eq!(actor_rank("quinn"), 0);
+        assert_eq!(actor_rank("agent:ingest.blackboard"), 1);
+        assert_eq!(actor_rank("system:migration"), 2);
+        assert_eq!(actor_rank("someone-else"), 3);
+    }
+
+    #[test]
+    fn human_set_and_human_edited_count_a_student_record() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let mut set = set_rec("id1", "due", "student", "2026-08-29T12:00:00.000Z");
+        j.append(&mut set).unwrap();
+        assert!(j.human_set("id1", "due").is_some(), "a student set counts for human_set");
+        assert!(j.human_edited("id1", "due").is_some(), "…and for human_edited");
+
+        let mut created = create_rec("id2", "student", serde_json::json!({"meets": "x"}), "2026-08-29T12:00:00.000Z");
+        j.append(&mut created).unwrap();
+        assert!(j.human_set("id2", "meets").is_some(), "a student create counts for human_set");
+        assert!(j.human_edited("id2", "meets").is_none(), "a create never counts for human_edited");
+
+        // Mixed tokens in one journal: the latest human record wins, whichever token wrote it.
+        let mut q = set_rec("id3", "due", "quinn", "2026-08-29T12:00:00.000Z");
+        j.append(&mut q).unwrap();
+        let mut s = set_rec("id3", "due", "student", "2026-08-29T13:00:00.000Z");
+        j.append(&mut s).unwrap();
+        let latest = j.human_set("id3", "due").expect("a human set");
+        assert_eq!(latest.get("actor"), Some(&Value::String("student".into())));
+        assert_eq!(latest.get("ts"), Some(&Value::String("2026-08-29T13:00:00.000Z".into())));
+        let edited = j.human_edited("id3", "due").expect("a human edit");
+        assert_eq!(edited.get("ts"), Some(&Value::String("2026-08-29T13:00:00.000Z".into())));
+    }
+
+    #[test]
+    fn an_absent_actor_file_reads_as_quinn() {
+        let v = actor_vault("absent");
+        assert_eq!(read_human_actor(&v), Ok("quinn"));
+        // No `config/` at all is the same absence.
+        assert_eq!(read_human_actor(&scratch("bare")), Ok("quinn"));
+    }
+
+    #[test]
+    fn the_actor_file_accepts_only_student_or_quinn() {
+        let v = actor_vault("accepts");
+        let file = v.join("config").join("actor.yaml");
+        for (bytes, want) in [
+            ("human_actor: student\n", "student"),
+            ("human_actor: quinn\n", "quinn"),
+            ("human_actor: student\r\n", "student"),
+            ("human_actor: quinn\r\n", "quinn"),
+            ("human_actor: \"student\"\n", "student"),
+            ("human_actor: 'quinn'\n", "quinn"),
+            ("human_actor: student", "student"),
+        ] {
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(read_human_actor(&v), Ok(want), "{bytes:?}");
+        }
+
+        // Each refusal names the file and both accepted values, and says what it found.
+        let refused = |bytes: &[u8], found: &str| {
+            std::fs::write(&file, bytes).unwrap();
+            let err = read_human_actor(&v).expect_err(&format!("{bytes:?} must be refused")).to_string();
+            assert!(err.starts_with("config/actor.yaml: "), "{err}");
+            assert!(err.contains("student") && err.contains("quinn"), "names both values: {err}");
+            assert!(err.contains(found), "says what it found ({found}): {err}");
+            assert!(!err.contains("PRIVATE"), "never more of the file than the value: {err}");
+            err
+        };
+        refused(b"human_actor: alice\nnote: PRIVATE\n", "\"alice\"");
+        refused(b"human_actor: agent:knowlu.enrich\n", "\"agent:knowlu.enrich\"");
+        refused(b"human_actor: system:x\n", "\"system:x\"");
+        refused(b"human_actor: Student\n", "\"Student\"");
+        refused(b"human_actor: \"student \"\n", "\"student \"");
+        refused(b"human_actor:\n", "empty");
+        refused(b"human_actor: ''\n", "empty");
+        refused(b"human_actor: [student]\n", "a list");
+        refused(b"note: PRIVATE\n", "missing");
+        refused(b"just PRIVATE text\n", "not a YAML mapping");
+        refused(b"- PRIVATE\n", "not a YAML mapping");
+        refused(b"", "not a YAML mapping");
+        refused(b"human_actor: [unclosed PRIVATE\n", "not a YAML mapping");
+        refused(b"human_actor: \xff\xfe PRIVATE\n", "could not be read");
+        let long = refused(format!("human_actor: {}\n", "x".repeat(500)).as_bytes(), "\"xxxx");
+        assert!(long.len() < 200, "a long value is clipped: {long}");
+
+        // A directory where the file should be is unreadable, not absent.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(&file).unwrap();
+        let err = read_human_actor(&v).expect_err("a directory is not a readable file").to_string();
+        assert!(err.starts_with("config/actor.yaml: ") && err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn the_actor_file_is_written_once_and_never_rewritten() {
+        let v = actor_vault("once");
+        let file = v.join("config").join("actor.yaml");
+        create_actor_file(&v, "student").unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        // One line, in the vault's own line ending (`pystr::NEWLINE`), like every file `write` makes.
+        assert_eq!(bytes, format!("human_actor: student{}", crate::pystr::NEWLINE).into_bytes());
+        assert_eq!(crate::pystr::read_text(&file).unwrap(), "human_actor: student\n");
+        assert_eq!(read_human_actor(&v), Ok("student"));
+
+        let again = create_actor_file(&v, "quinn").expect_err("a second call never rewrites");
+        assert!(again.to_string().contains("config/actor.yaml"), "{again}");
+        assert_eq!(std::fs::read(&file).unwrap(), bytes, "the bytes are exactly as they were");
+
+        // A vault with no `config/` yet gets the folder; the legacy token is a valid file too.
+        let fresh = scratch("fresh");
+        create_actor_file(&fresh, "quinn").unwrap();
+        assert_eq!(read_human_actor(&fresh), Ok("quinn"));
+
+        // Only the two tokens can ever be written.
+        for bad in ["alice", "agent:knowlu.enrich", "system:x", "", "Student"] {
+            let dir = scratch("bad");
+            assert!(create_actor_file(&dir, bad).is_err(), "{bad:?}");
+            assert!(!dir.join("config").join("actor.yaml").exists(), "{bad:?}: nothing written");
+        }
+    }
+
+    #[test]
+    fn the_token_is_picked_from_the_accounts_records() {
+        let student = set_rec("id1", "due", "student", "2026-08-29T12:00:00.000Z");
+        let quinn = set_rec("id2", "due", "quinn", "2026-08-29T13:00:00.000Z");
+        let agent = set_rec("id3", "due", "agent:knowlu.enrich", "2026-08-29T14:00:00.000Z");
+        let system = create_rec("id4", "system:migration", serde_json::json!({"title": "x"}), "2026-08-29T15:00:00.000Z");
+        assert_eq!(pick_human_actor([&student, &quinn]), "quinn", "quinn anywhere wins, even after student");
+        assert_eq!(pick_human_actor([&quinn]), "quinn");
+        assert_eq!(pick_human_actor([&student, &agent]), "student");
+        assert_eq!(pick_human_actor(std::iter::empty::<&Record>()), "student", "no records: student");
+        assert_eq!(pick_human_actor([&agent, &system]), "student", "no human record: student");
+        // The shape `sync::pull` returns: `(device token, record)`.
+        let pulled: Vec<(String, Record)> = vec![("d".into(), student.clone()), ("d".into(), quinn.clone())];
+        assert_eq!(pick_human_actor(pulled.iter().map(|(_, r)| r)), "quinn");
+    }
+
+    #[test]
+    fn a_student_record_is_a_quinn_record_with_one_value_changed() {
+        let line = |actor: &str| {
+            let mut spec = NewRecord::new("set", "tasks/x.md", actor, "dashboard");
+            spec.id = Some("task_0123456789");
+            spec.field = Some("due");
+            spec.old = Value::Null;
+            spec.new = Value::String("2026-09-01".into());
+            spec.ts = Some("2026-08-29T12:00:00.000Z".into());
+            spec.device = Some("TestPC".into());
+            let mut rec = make_record(spec).unwrap();
+            rec.insert("seq".into(), Value::from(7));
+            crate::ledger::dumps_value(&Value::Object(rec))
+        };
+        let (q, s) = (line("quinn"), line("student"));
+        assert_ne!(q, s);
+        assert_eq!(s.replace("\"actor\": \"student\"", "\"actor\": \"quinn\""), q, "only the actor's value differs");
+        assert_eq!(s.matches("student").count(), 1);
     }
 
     #[test]
