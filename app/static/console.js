@@ -1602,7 +1602,7 @@
     var g = SET.google, busy = SET.googlePolling;
     var known = !!(g && g.ok), none = known && g.state === "none", revoked = known && g.state === "revoked";
     var live = known && !none && !revoked;
-    EL("set-google-state").textContent = googleSentence(g);
+    EL("set-google-state").textContent = busy ? GOOGLE_POLLING : googleSentence(g);
     EL("set-google-note").textContent = (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
     EL("set-google-connect").hidden = !(none || (live && !g.gmail));
     EL("set-google-reconnect").hidden = !revoked;
@@ -1628,11 +1628,11 @@
   // T9b: Connect ("gmail") and Reconnect ("reconnect"). The browser opens from Rust; the page only
   // polls google_status, every 3 s, twenty times. `mySeq` is taken on every click and Settings close
   // bumps `SET.googleSeq`, so a stale poll never repaints the row (as `WIZ.googleSeq` does).
-  var GOOGLE_POLLING = "Finish signing in to Google in your browser — this may take a moment.";
+  var GOOGLE_POLLING = "Waiting for Google… finish in your browser.";
   var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
   async function connectGoogle(scope) {
     var mySeq = ++SET.googleSeq;
-    SET.googlePolling = true; SET.googleNote = GOOGLE_POLLING;
+    SET.googlePolling = true; SET.googleNote = "";
     renderGoogleRow();
     var started = await invoke("google_connect", { scope: scope }).catch(function () { return { ok: false, error: UNREACHABLE }; });
     if (SET.googleSeq !== mySeq) { return; }

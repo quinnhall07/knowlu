@@ -1857,6 +1857,21 @@ fn the_console_invokes_the_three_google_commands_and_never_open_external_outside
     }
 }
 
+/// Gmail connect plan section 4: while polling, the state line (not the note) reads the plan's
+/// exact sentence.
+#[test]
+fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
+    let js = read("console.js");
+    assert!(js.contains("var GOOGLE_POLLING = \"Waiting for Google\u{2026} finish in your browser.\";"));
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : googleSentence(g)"), "{f}");
+    let c = js.find("function connectGoogle(").expect("connectGoogle");
+    let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
+    assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
+}
+
 /// Gmail connect T9b (spec section 8.4 item 3): the row's poll carries `SET.googleSeq`, bumped on
 /// Settings close and on every new click.
 #[test]
