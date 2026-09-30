@@ -4,14 +4,15 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-29 (the merge of
-  the commitment model into this file's branch; the 2026-09-26 recount of C3′ into phase 2 gave the
-  same)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **47** (phase 2 added `answer_card`, `commitment_proposals`,
-  `commitments_confirm`, `your_week`, `preview_window`), the vault-less picker/wizard window **29**
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (M1 grades,
+  Task 5c; the 2026-09-29 recount after the commitment model's merge gave 47 / 29 / 66)** (by script,
+  over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
+  the console window registers **51** (phase 2 added `answer_card`, `commitment_proposals`,
+  `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
+  `grades_connect`, `grades_refresh`, `grades_forget`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **66** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **70** distinct. Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
   `report.rs`, `lms_link.rs`), never all in one file. **Ten** mutate notes (`set_fields`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,

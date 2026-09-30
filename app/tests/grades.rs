@@ -13,10 +13,16 @@
 //! **Task 5b: the pure pieces** — `grades.json`, the bundle's assembly from canned responses, paging,
 //! sign-in detection and the kept session's directory. Still no window and no network: every
 //! response here is canned JSON and every host is `lms.example.test`.
+//!
+//! **Task 5c: the gated seams.** `grades_status`, `grades_connect` and `grades_refresh` are thin
+//! wrappers over seams that take the curated row as input; the window and the session are injected
+//! closures, so a refusal is shown to open no window and read no session.
 use knowlu::grades::{
-    assemble_bundle, availability, forget, is_session_dir, next_page, read_list, session_dir, signed_in, Availability,
-    CaptureHead, CourseCalls, GradesPrefs, MAX_PAGES,
+    assemble_bundle, availability, campus_of, connect_with, forget, forget_with, is_session_dir, next_page, read_list,
+    refresh_with, session_dir, set_signed_out, signed_in, status_for, Availability, CaptureHead, CourseCalls,
+    GradesPrefs, MAX_PAGES, NOT_AVAILABLE, NOT_BLACKBOARD,
 };
+use std::cell::Cell;
 use knowlu::scaffold::{create_vault, Curated, VaultPlan, CAMPUSES};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -447,4 +453,148 @@ fn the_capability_file_never_names_the_grades_window() {
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["windows"], json!(["main"]));
     assert!(v.get("webviews").is_none());
+}
+
+// ---- Task 5c: the gated seams (spec §4, §9) --------------------------------------------------
+
+/// The three cases every caller is shown against: a dated row, an undated row, an uncurated school.
+fn three_cases() -> [(Option<Curated>, &'static str); 3] {
+    [(Some(test_row("blackboard", Some("2026-10-01"))), "blackboard"), (Some(test_row("blackboard", None)), "blackboard"), (None, "blackboard")]
+}
+
+/// A vault and a profile's app data, side by side in one temp folder.
+fn vault_and_data(tag: &str) -> (PathBuf, PathBuf) {
+    let root = temp(tag);
+    let (v, d) = (root.join("vault"), root.join("data"));
+    std::fs::create_dir_all(v.join("state")).unwrap();
+    std::fs::create_dir_all(&d).unwrap();
+    (v, d)
+}
+
+#[test]
+fn campus_of_reads_unitid_and_lms_from_config_campus_yaml() {
+    let (v, _) = vault_and_data("campus");
+    assert_eq!((campus_of(&v).unitid, campus_of(&v).lms), (String::new(), String::new()), "no file is no school");
+    std::fs::create_dir_all(v.join("config")).unwrap();
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nname: 'Synthetic'\r\nstate: 'AL'\r\nlms: 'blackboard'\r\ncurated: false\r\n").unwrap();
+    assert_eq!((campus_of(&v).unitid, campus_of(&v).lms), ("999999".to_string(), "blackboard".to_string()));
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: 999999\nlms: canvas\n").unwrap();
+    assert_eq!((campus_of(&v).unitid, campus_of(&v).lms), ("999999".to_string(), "canvas".to_string()), "an unquoted id");
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: [").unwrap();
+    assert_eq!(campus_of(&v).unitid, "", "an unreadable file is no school");
+}
+
+/// `grades_status`: with a date, the connected, signed-out, host and last-fetched fields; with none,
+/// *not available* whatever session directory exists.
+#[test]
+fn grades_status_reports_the_gate_and_with_a_date_the_session() {
+    let (v, d) = vault_and_data("status");
+    std::fs::create_dir_all(session_dir(&d)).unwrap();
+    set_signed_out(&d, true);
+    std::fs::write(v.join("state").join("grades.json"), r#"{"fetched_at": "2026-09-29T14:02:11Z", "host": "lms.example.test"}"#).unwrap();
+    let [dated, undated, uncurated] = three_cases();
+    let s = status_for(dated.0.as_ref(), dated.1, &d, &v);
+    assert_eq!((&s["available"], &s["reason"], &s["host"]), (&json!(true), &Value::Null, &json!("lms.example.test")));
+    assert_eq!((&s["connected"], &s["signed_out"], &s["fetched_at"]), (&json!(true), &json!(true), &json!("2026-09-29T14:02:11Z")));
+    set_signed_out(&d, false);
+    assert_eq!(status_for(dated.0.as_ref(), dated.1, &d, &v)["signed_out"], json!(false));
+    for (row, lms) in [undated, uncurated] {
+        let s = status_for(row.as_ref(), lms, &d, &v);
+        assert_eq!((&s["available"], &s["reason"]), (&json!(false), &json!(NOT_AVAILABLE)), "{s}");
+        assert_eq!((&s["connected"], &s["signed_out"], &s["host"]), (&json!(false), &json!(false), &Value::Null), "{s}");
+    }
+    let s = status_for(None, "", &d, &v);
+    assert_eq!((&s["available"], &s["reason"]), (&json!(false), &json!(NOT_BLACKBOARD)));
+    // No session and nothing fetched yet: not connected, and no date.
+    let (v2, d2) = vault_and_data("status-empty");
+    let s = status_for(dated.0.as_ref(), dated.1, &d2, &v2);
+    assert_eq!((&s["available"], &s["connected"], &s["signed_out"], &s["fetched_at"]), (&json!(true), &json!(false), &json!(false), &Value::Null));
+}
+
+/// `grades_connect`: a refusal is exactly the slot's reason, and neither the window-opening nor the
+/// session-reading action is called. With a date both run, in that order, on the row's own host.
+#[test]
+fn grades_connect_refuses_without_a_date_and_opens_nothing() {
+    let [dated, undated, uncurated] = three_cases();
+    for (row, lms) in [undated, uncurated] {
+        let (opened, read) = (Cell::new(false), Cell::new(false));
+        let r = connect_with(row.as_ref(), lms, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({ "ok": true }) });
+        assert_eq!((&r["ok"], &r["error"]), (&json!(false), &json!("not available at your school yet")), "{r}");
+        assert!(!opened.get() && !read.get(), "a refusal opens no window and reads no session");
+    }
+    let (opened, read) = (Cell::new(false), Cell::new(false));
+    let r = connect_with(None, "", |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({}) });
+    assert_eq!((&r["error"], opened.get(), read.get()), (&json!(NOT_BLACKBOARD), false, false));
+    let order = std::cell::RefCell::new(Vec::new());
+    let r = connect_with(dated.0.as_ref(), dated.1, |h| { order.borrow_mut().push(format!("open {h}")); Ok(()) }, |h| {
+        order.borrow_mut().push(format!("read {h}"));
+        json!({ "ok": true, "error": null })
+    });
+    assert_eq!(r, json!({ "ok": true, "error": null }));
+    assert_eq!(*order.borrow(), ["open lms.example.test", "read lms.example.test"]);
+    // A window that would not open reads no session.
+    let read = Cell::new(false);
+    let r = connect_with(dated.0.as_ref(), dated.1, |_| Err("no window".into()), |_| { read.set(true); json!({}) });
+    assert_eq!((&r["ok"], &r["error"], read.get()), (&json!(false), &json!("no window"), false));
+}
+
+/// `grades_refresh`: the same gate, then `not connected` when no session was ever saved — again
+/// without opening a window. With a date and a saved session, both actions run.
+#[test]
+fn grades_refresh_refuses_without_a_date_and_reads_no_session() {
+    let (_, d) = vault_and_data("refresh");
+    std::fs::create_dir_all(session_dir(&d)).unwrap();
+    let [dated, undated, uncurated] = three_cases();
+    for (row, lms) in [undated, uncurated] {
+        let (opened, read) = (Cell::new(false), Cell::new(false));
+        let r = refresh_with(row.as_ref(), lms, &d, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({ "ok": true }) });
+        assert_eq!((&r["ok"], &r["error"]), (&json!(false), &json!("not available at your school yet")), "{r}");
+        assert!(!opened.get() && !read.get(), "a refusal opens no window and reads no session");
+    }
+    let (opened, read) = (Cell::new(0), Cell::new(0));
+    let r = refresh_with(dated.0.as_ref(), dated.1, &d, |h| { assert_eq!(h, "lms.example.test"); opened.set(1); Ok(()) }, |h| {
+        assert_eq!(h, "lms.example.test");
+        read.set(opened.get() + 1);
+        json!({ "ok": true, "error": null })
+    });
+    assert_eq!((r, opened.get(), read.get()), (json!({ "ok": true, "error": null }), 1, 2));
+    let (_, never) = vault_and_data("refresh-never");
+    let (opened, read) = (Cell::new(false), Cell::new(false));
+    let r = refresh_with(dated.0.as_ref(), dated.1, &never, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({}) });
+    assert_eq!((&r["error"], opened.get(), read.get()), (&json!("not connected"), false, false));
+}
+
+/// `grades_forget` is never gated: whatever the predicate says, the window is closed and the saved
+/// session deleted, and the signed-out mark goes with it.
+#[test]
+fn grades_forget_is_not_gated() {
+    for (i, (row, lms)) in three_cases().into_iter().enumerate() {
+        let (_, d) = vault_and_data(&format!("forget-{i}"));
+        std::fs::create_dir_all(session_dir(&d).join("Default")).unwrap();
+        set_signed_out(&d, true);
+        let _ = availability(row.as_ref(), lms);
+        let closed = Cell::new(false);
+        let r = forget_with(&d, || closed.set(true));
+        assert_eq!((&r["ok"], closed.get()), (&json!(true), true), "{r}");
+        assert!(!session_dir(&d).exists());
+        let s = status_for(three_cases()[0].0.as_ref(), "blackboard", &d, &d);
+        assert_eq!((&s["connected"], &s["signed_out"]), (&json!(false), &json!(false)));
+    }
+}
+
+/// The console window registers the four commands and no address-setting command (spec §4, §9: no
+/// address entry; the name is assembled so the plan's accept grep stays empty); the vault-less shell
+/// registers none. Only `main` hides on close, so `lms-grades` closes for real (spec §4).
+#[test]
+fn the_console_registers_the_four_grades_commands_and_hides_only_main() {
+    let main = std::fs::read_to_string("src/main.rs").unwrap();
+    let lists: Vec<&str> = main.split("generate_handler![").skip(1).map(|s| &s[..s.find(']').unwrap()]).collect();
+    assert_eq!(lists.len(), 2);
+    let (shell, console) = (lists[0], lists[1]);
+    for c in ["grades::grades_status", "grades::grades_connect", "grades::grades_refresh", "grades::grades_forget"] {
+        assert_eq!(console.matches(c).count(), 1, "{c}");
+        assert!(!shell.contains(c), "{c} in the shell");
+    }
+    assert!(!main.contains(&["grades", "set", "host"].join("_")));
+    assert!(main.contains(r#"w.label() == "main""#), "the console's close handler hides only main");
 }
