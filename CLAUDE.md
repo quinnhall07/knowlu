@@ -80,13 +80,13 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
   the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
   `write`, journal first, and exits 2 having written nothing on bad input. Judgment logs never enter
   the vault.
-- **The engine gates itself:** `coursework`, `ingest`, `judge` and `sync` do not run past the 72-hour
-  entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
+- **The engine gates itself:** `coursework`, `ingest`, `grades`, `judge` and `sync` do not run past the
+  72-hour entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
   `surface` and `write` are never gated.
 - Cloud calls from `ingest`, `coursework` and `rank` are **transport only**, never judgment. Judgment
   is `judge`'s tier 3 through `CloudModel` (`engine/src/cloudmodel.rs`); the prompt, schema and pinned
   model live server-side.
-- A slot is `sync → coursework → ingest → judge → rank`. A step that cannot run is left out and named
+- A slot is `sync → coursework → ingest → grades → judge → rank`. A step that cannot run is left out and named
   (`judge (skipped: no entitlement)`), never run-and-failed; a non-zero step means backoff and an
   amber tray.
 - `app/src/commands.rs` computes nothing; every vault write goes through the engine's `write` with
