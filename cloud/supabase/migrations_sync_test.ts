@@ -137,6 +137,37 @@ Deno.test("a note's path is checked, not trusted", async () => {
   assert(sql.includes("path !~ "), "and a path that can climb out is refused by its own check");
 });
 
+/** Commitment-model spec §10 phase 1s: the path check that made `commitments/` syncable. Read by
+ * name — it is not stamped in C3's day, so `migrations()` never sees it, and 000300's assertion
+ * above keeps pinning that file's own (superseded) six-folder check. Since the grades merge,
+ * `GRADES_PATH_CHECK` below supersedes it with the union (D10); this pins the step between. */
+const COMMITMENTS_PATH_CHECK = "20260926000100_sync_note_path_check_commitments.sql";
+
+Deno.test("the commitments note-path check names the seven phase-1s folders, and the grades check supersedes it", async () => {
+  const sql = await Deno.readTextFile(new URL(COMMITMENTS_PATH_CHECK, DIR));
+  assert(sql.includes("drop constraint sync_notes_path_check,"), "it replaces the one constraint, in place");
+  assert(sql.includes("add constraint sync_notes_path_check check ("), "and re-declares it under the same name");
+  assert(
+    sql.includes("path ~ '^(tasks|approvals|archive|courses|issues|info|commitments)/[A-Za-z0-9._ /-]+\\.md$'"),
+    "the seven folders `ids::NOTE_FOLDERS` held at phase 1s, in its order, with 000400's unbounded class",
+  );
+  assert(
+    sql.includes("char_length(regexp_replace(path, '^[a-z]+/', '')) between 4 and 303"),
+    "and 000400's separate length check (Postgres caps a bound repetition at 255)",
+  );
+  assert(!sql.includes("{1,300}"), "no bound repetition over DUPMAX");
+  // The latest `*sync_note_path_check*.sql` — the one the engine's tripwire
+  // (`the_servers_note_path_rules_name_every_note_folder`) reads — is now the grades migration, and
+  // this one sorts just before it, so the union is what a database applying them in order ends on.
+  const names: string[] = [];
+  for await (const e of Deno.readDir(DIR)) {
+    if (e.isFile && e.name.includes("sync_note_path_check") && e.name.endsWith(".sql")) names.push(e.name);
+  }
+  names.sort();
+  assertEquals(names.at(-1), GRADES_PATH_CHECK);
+  assertEquals(names.at(-2), COMMITMENTS_PATH_CHECK);
+});
+
 Deno.test("retention never deletes a record a human wrote, and the SERVER is what decides that", async () => {
   // P3's answer (Quinn, 2026-09-17), and the half that is a correctness property rather than a
   // storage one: `journal::human_set` is what judge-once reads, and it reads records. A `sync_prune`
@@ -172,8 +203,8 @@ Deno.test("the account purge names every table C3′ leaves, and no table it dro
   assert(!purge.includes('"sync_generation"'), "sync_generation is gone; purging it is a 404 every time");
 });
 
-/** Grades spec §7: the migration that widens `sync_notes_path_check` to `grades/` (and to
- * `commitments/`, which the commitment model's branch adds on its own). */
+/** Grades spec §7: the migration that widens `sync_notes_path_check` to `grades/`, restating
+ * `commitments/` from `COMMITMENTS_PATH_CHECK` above, so its group is the union (D10). */
 const GRADES_PATH_CHECK = "20260929000100_sync_note_path_check_grades.sql";
 
 /** `sql` with every `--` comment removed, so a header that quotes an older check is never read as code. */
@@ -278,8 +309,8 @@ Deno.test("the live note-path check is the grades migration, and its folder grou
   assertEquals(folderChecks.length, 1, `exactly one folder-group regex in ${name}: ${JSON.stringify(literals)}`);
   const group = folderChecks[0].slice(2, folderChecks[0].indexOf(")"));
   const serverGroup = NOTE_PATH_RE.source.slice(2, NOTE_PATH_RE.source.indexOf(")"));
-  // Every folder, in `ids::NOTE_FOLDERS` order as it reads once the commitment model's branch has
-  // merged too: `commitments` sits before `grades` (grades spec §7).
+  // Every folder, in `ids::NOTE_FOLDERS` order now the commitment model's branch has merged too:
+  // `commitments` sits before `grades` (grades spec §7).
   assertEquals(group, "tasks|approvals|archive|courses|issues|info|commitments|grades");
   assertEquals(group, serverGroup, "the column check and NOTE_PATH_RE carry the same folders, in the same order");
 

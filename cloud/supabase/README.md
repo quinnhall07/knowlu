@@ -10,6 +10,8 @@ the whole of this file:
 supabase login                                  # Quinn's own login, once
 supabase link --project-ref <the STAGING ref>   # never the prod ref from a laptop
 supabase db push                                # applies cloud/supabase/migrations/ in order
+supabase db push --include-all                  # when a new file sorts before one already applied
+                                                # (20260922120100/120200 on staging after 20260923000100)
 supabase functions deploy <name> --project-ref <the STAGING ref>
 ```
 

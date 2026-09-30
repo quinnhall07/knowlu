@@ -7,7 +7,7 @@
 --
 -- **Why `commitments` is here too.** The commitment model's phase 1 (the `p1-commitments` branch)
 -- adds `commitments/` as a note folder on its own branch, with its own migration
--- (20260926000100_sync_note_path_check_commitments.sql), which this branch does not carry. Each of
+-- (20260926000100_sync_note_path_check_commitments.sql), which merged to main before this one. Each of
 -- the two migrations drops and re-adds this same constraint, so whichever is applied LAST decides
 -- which folders the account accepts. Listing both here makes this constraint right whichever branch
 -- merges first; the group is written in `NOTE_FOLDERS` order as it reads once both have merged

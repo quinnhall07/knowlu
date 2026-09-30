@@ -47,10 +47,18 @@ const TASK_SCHEMA = {
   additionalProperties: false,
 };
 
+// CHECKPOINT J-1 (ruled 2026-09-22, design (a)): `unsure` is a fourth, first-class verdict word,
+// not an error path. Whether an event obliges a particular student is usually absent from the
+// event's own text, and forcing a choice among the other three there measurably breaks both
+// accuracy and calibration on the unanswerable slice (docs/notes/2026-09-22-jev-what-people-built.md
+// §3) — the same failure a router that always guesses shows on a benchmark's hard slice. `unsure`
+// lets the model say so honestly, and the device's `record_verdict` (`engine/src/eventledger.rs`)
+// writes it like any other verdict, so the uid is never re-asked (events spec §7's
+// one-verdict-per-uid-forever rule already does the rest).
 const EVENT_SCHEMA = {
   type: "object",
   properties: {
-    verdict: { type: "string", enum: ["obligation", "opportunity", "drop"] },
+    verdict: { type: "string", enum: ["obligation", "opportunity", "drop", "unsure"] },
     why: { type: "string" },
     confidence: { type: "number" },
   },
@@ -64,7 +72,7 @@ const EVENT_SCHEMA = {
 const EMAIL_SCHEMA = {
   type: "object",
   properties: {
-    tier: { type: "string", enum: ["task", "borderline", "event", "opportunity", "information"] },
+    tier: { type: "string", enum: ["task", "borderline", "event", "opportunity", "information", "completion"] },
     title: { type: "string" },
     course: { type: ["string", "null"] },
     due: { type: ["string", "null"] },
@@ -109,7 +117,8 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     return [
       "You decide whether one campus event is worth a student's attention.",
       "Rules:",
-      "- verdict: obligation (the student is expected there), opportunity (worth offering), or drop.",
+      "- verdict: obligation (the student is expected there), opportunity (worth offering), drop, or unsure.",
+      "- unsure: answer unsure when the event's own text does not say whether it applies to this student — do not guess the audience to force obligation, opportunity or drop.",
       "- an event aimed at faculty, staff, alumni or graduate students is a drop.",
       "- a standing exhibit, an office-hours block or a recurring drop-in is a drop.",
       "- why: one line, under 140 characters, no line breaks, no double quotes.",
@@ -117,16 +126,18 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     ].join("\n");
   }
   return [
-    "You triage one email for a university student, into exactly one of five tiers.",
+    "You triage one email for a university student, into exactly one of six tiers.",
     "Tiers:",
     "- task: it clearly creates work with a deadline the student must do.",
     "- borderline: it might create work; a human should decide.",
     "- event: it announces something happening at a stated date and time.",
     "- opportunity: an application, a scholarship, a job, a research post, a dinner worth offering.",
-    "- information: everything else, including receipts, newsletters, notifications and marketing.",
+    "- completion: this email confirms the student already submitted or finished a specific piece of work.",
+    "- information: everything else, including payment receipts, newsletters, notifications and marketing.",
     "Rules:",
-    "- title: what the resulting task or card should be called, one line, under 200 characters.",
-    '- due: the deadline as YYYY-MM-DD, or YYYY-MM-DDTHH:MM when a time is given. Resolve a relative deadline ("Friday", "next week", "end of the month") against the Date line above, in that line\'s own timezone. If you cannot resolve it to one calendar day, answer null.',
+    "- title: what the resulting task or card should be called, one line, under 200 characters; for completion, the name of that piece of work exactly as the email gives it.",
+    "- A grade or feedback being posted is not completion: missing work can be graded too.",
+    '- due: the deadline exactly as the email states it. Give the phrase as written ("Friday", "next week", "the end of the month", "tomorrow at 5pm") -- do NOT compute or resolve it yourself, that happens after you answer. Only when the email itself gives an explicit calendar date (for example "October 3" or "10/3") may you answer that date, as YYYY-MM-DD or YYYY-MM-DDTHH:MM. With no deadline stated, answer null.',
     "- effort_hours and importance: only for tier task, else null. importance is a whole number 1 to 5.",
     "- course: one of the known course slugs given below, or null.",
     "- with no message body, judge from the subject and sender alone and answer a confidence at or below 0.5.",

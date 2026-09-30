@@ -35,8 +35,11 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 ## Engine invariants
 
 - A vault is markdown + YAML frontmatter (`tasks/`, `approvals/`, `archive/`, `courses/`, `info/`,
-  `issues/`, `config/`), the single source of truth. `state/` is generated; `today.md` is rewritten
-  every run. The engine is **deterministic**: same input, same order.
+  `issues/`, `config/`, `commitments/`), the single source of truth. `state/` is generated;
+  `today.md` is rewritten every run. The engine is **deterministic**: same input, same order.
+  `commitments/` holds confirmed clock-time commitments (a class, a shift, a club), decline
+  markers and the one `planning-day` note (the day's wake-to-bed window) — a student's `propose`d
+  and undecided candidates never live here, only what they confirmed or declined.
 - **`rank` never calls a model** (Knowlu spec decision 11). Judgment is the separate `judge`
   command, which writes fields into notes before `rank` reads them; `src/judge.rs` is pure and the
   model process lives behind a trait in `src/runtime.rs`, so nothing under `cli.rs` can reach one.
@@ -48,11 +51,19 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
   `propose` it files a `kind: amend` approval instead. `judgment:` is a single-line flow mapping.
 - Approvals are capped at 15 new proposals a day; overflow is snoozed, never deleted. `proposed_at`
   is the day a proposal charges; `first_proposed_at` is set once and drives every age.
+- Commitment proposals and `state/calendar-series.json` never leave the device: a card of a kind in
+  `commitments::LOCAL_CARD_KINDS` (`commitment-ask`, `commitment-check`; both are filed, and
+  no proposal card is filed on the vault's first day — the vault-local date of its earliest journal
+  record, `commitments::vault_day`) is local by kind. `sync` (P21) keeps those cards, every record
+  about one and the series file off the wire — only a **confirmed** note in `commitments/` or a
+  decline marker syncs — and `commitments.rs`'s tripwires (`sync_keeps_every_local_card_kind_local`,
+  `the_servers_note_path_rules_name_every_note_folder`) fail if that ever stops holding.
 - All JSON the crate writes goes through `ledger::dumps_value` (Python `json.dumps` separators), so
   a new line and an old line carrying the same data are the same bytes.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
   byte-identical, never renamed.
-- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`); `provenance::is_agent` is a
+- Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`, completion detection as
+  `agent:knowlu.completion`, commitment cards as `agent:commitments`); `provenance::is_agent` is a
   `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
 
 ## Command and app contracts
@@ -61,8 +72,11 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 
 - `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no runtime, model,
   account, session, entitlement or network is a named outcome, never a failure. An empty coursework
-  parse is a failure, never an empty semester. `surface` and `coursework-discover` never write.
-  Judgment logs never enter the vault.
+  parse is a failure, never an empty semester. `surface` (`--window` included) and
+  `coursework-discover` never write. `commitments` without `--confirm` always exits 0 and writes only
+  the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
+  `write`, journal first, and exits 2 having written nothing on bad input. Judgment logs never enter
+  the vault.
 - **The engine gates itself:** `coursework`, `ingest`, `judge` and `sync` do not run past the 72-hour
   entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
   `surface` and `write` are never gated.
@@ -86,8 +100,8 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
   else, and `release.yml` never runs self-hosted.
 - **Releases are CI-only** (`release.yml` on a `v*` tag). A human runs `scripts\release.ps1` only with
   `-DryRun`; a hand-run `cargo tauri build` is unsupported and can ship a zero-byte engine.
-- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until C4
-  removes them and are not extended.
+- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until the
+  Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10) removes them and are not extended.
 - Desktop safety: a live shared desktop — never synthetic keyboard or mouse input; screenshots by
   window handle (`PrintWindow`) only. Develop and demo against scratch vaults
   (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
@@ -102,8 +116,10 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 |---|---|---|
 | `explorer` | Haiku, low | read-only search, before editing |
 | `mechanical` / `test-writer` / `console-ui` | Sonnet, low / medium / medium | specified edits / the failing test / `app/static`, `site/` |
-| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review |
-| `contract-engineer` | Opus, xhigh | the contract list |
+| `implementer` / `integrator` | Sonnet, high / Opus, high | specified feature tasks off the contract list / the merge train |
+| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review, and spec/plan review |
+| `contract-engineer` / `contract-reviewer` | Opus, xhigh | the contract list / contract-list diffs |
+| `researcher` / `docs-keeper` | Sonnet, medium / medium | read-only gap research / HANDOFF, docs/reference, ledgers |
 
 **The contract list** — cheaper agents never edit it:
 `engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
@@ -112,8 +128,8 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 **No agent fits? Ask in order:** could a silent error corrupt vault bytes, leak a credential or
 student data, move money or break a release (Opus; `xhigh` on the contract list, `high` elsewhere)?
 Is a design choice open, or more than about three files touched (Opus `high`, plan first)? Fully
-specified and checked by the compiler or a test (Sonnet, `low`/`medium`)? Read-only (Haiku, `low`)?
-Small or tied to this conversation (do it in the main session)? Use the closest agent rather than
+specified and checked by the compiler or a test (Sonnet, `low` to `high`)? Read-only (Haiku, `low`)?
+The main session orchestrates; it edits only what fits on one screen. Use the closest agent rather than
 inventing one. Subagents don't see the conversation: give them the goal, the files and the
 constraints. Anything a cheaper agent changed goes through `reviewer` before a push. Two failed
 attempts means one level up, never straight to `max`; Fable and `max` are Quinn's call.

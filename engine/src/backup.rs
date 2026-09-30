@@ -17,10 +17,10 @@ use crate::ids;
 /// cannot drift out of sync by hand; `note_folders_is_a_subset_of_backup_folders` below still
 /// checks it at runtime in case a future edit to either array quietly breaks the derivation's
 /// assumptions (e.g. reordering one without the other).
-pub const BACKUP_FOLDERS: [&str; 10] = [
+pub const BACKUP_FOLDERS: [&str; 11] = [
     ids::NOTE_FOLDERS[0], ids::NOTE_FOLDERS[1], ids::NOTE_FOLDERS[2],
     ids::NOTE_FOLDERS[3], ids::NOTE_FOLDERS[4], ids::NOTE_FOLDERS[5],
-    ids::NOTE_FOLDERS[6],
+    ids::NOTE_FOLDERS[6], ids::NOTE_FOLDERS[7],
     "state", "config", "profile",
 ];
 pub const SNAPSHOTS_KEPT: usize = 30;
@@ -301,6 +301,16 @@ mod tests {
         assert_eq!(BACKUP_FOLDERS[..n], crate::ids::NOTE_FOLDERS[..], "{BACKUP_FOLDERS:?}");
         assert_eq!(BACKUP_FOLDERS[n..], ["state", "config", "profile"], "{BACKUP_FOLDERS:?}");
         assert!(BACKUP_FOLDERS.contains(&"grades"), "{BACKUP_FOLDERS:?}");
+    }
+
+    #[test]
+    fn backup_folders_has_eleven_entries_with_commitments_then_grades_before_state() {
+        // The commitment model's pin, widened by the grades merge (M1 plan, "Merging with
+        // `p1-commitments`"): `…, info, commitments, grades, state, config, profile`.
+        assert_eq!(BACKUP_FOLDERS.len(), 11);
+        assert_eq!(BACKUP_FOLDERS[6], "commitments");
+        assert_eq!(BACKUP_FOLDERS[7], "grades");
+        assert_eq!(BACKUP_FOLDERS[8], "state");
     }
 
     #[test]

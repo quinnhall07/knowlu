@@ -24,16 +24,70 @@ export interface Scored {
  * The asymmetry is the whole point. A missed obligation is the failure this product exists to
  * prevent, and a task that reads as a newsletter is the second: both cost three times what the
  * harmless direction costs, so a model that gets "safe" by dropping everything scores worse.
+ *
+ * Every off-diagonal cell of the event 4x4 (obligation, opportunity, drop, unsure) and the email
+ * 6x6 (task, borderline, event, opportunity, information, completion) is named here — 12 + 30 = 42
+ * cells — so none fall through `cost()`'s `?? 1` default any more. Source: T0's ratification,
+ * `docs/notes/2026-09-22-cost-matrices.md` (RULED by Quinn 2026-09-22) for obligation/opportunity/
+ * drop (event §3) and task/borderline/event/opportunity/information (email §4); the `unsure` and
+ * `completion` cells the note left open were ruled by the stream controller the same day (see the
+ * note's "Rulings after T0" section for the one-line reason each cell carries).
  */
 export const COST: Record<string, number> = {
+  // --- event, 4x4 (obligation, opportunity, drop, unsure) ---
   "obligation->drop": 3,
   "obligation->opportunity": 1,
   "opportunity->drop": 1,
   "drop->opportunity": 1,
+  "opportunity->obligation": 2,
+  "drop->obligation": 2,
+  // `unsure` never surfaces to the student today, so calling an obligation `unsure` hides it
+  // exactly the way `drop` does: 3, not the 2 a merely-invented obligation would cost. Revisit to
+  // 2 once `unsure` surfaces somewhere the student can see and correct it.
+  "obligation->unsure": 3,
+  "opportunity->unsure": 1,
+  "drop->unsure": 1,
+  "unsure->obligation": 2,
+  "unsure->opportunity": 1,
+  "unsure->drop": 2,
+
+  // --- email, 6x6 (task, borderline, event, opportunity, information, completion) ---
   "task->information": 3,
   "task->borderline": 1,
   "information->borderline": 1,
   "information->task": 2,
+  "task->event": 2,
+  "task->opportunity": 2,
+  "borderline->task": 1,
+  "borderline->event": 1,
+  "borderline->opportunity": 1,
+  "borderline->information": 2,
+  "event->task": 2,
+  "event->borderline": 1,
+  "event->opportunity": 1,
+  "event->information": 2,
+  "opportunity->task": 2,
+  "opportunity->borderline": 1,
+  "opportunity->event": 1,
+  "opportunity->information": 3,
+  "information->event": 1,
+  "information->opportunity": 1,
+  // `completion` (T9): a completion email that matches no active task writes nothing (T9's
+  // `propose_done` needs a title match), the same outcome as filing it as `information` — so
+  // `completion->information` costs what `X->information` already costs for a real item, 1, not
+  // more. `task->completion` costs the same as `task->information`, 3: a real task's completion
+  // signal is itself a needle that only matters if the task was tracked, but calling a live task
+  // "already done" hides it exactly as hard as losing it to `information` does.
+  "task->completion": 3,
+  "completion->task": 2,
+  "completion->information": 1,
+  "information->completion": 2,
+  "completion->borderline": 1,
+  "completion->event": 1,
+  "completion->opportunity": 1,
+  "borderline->completion": 2,
+  "event->completion": 2,
+  "opportunity->completion": 3,
 };
 
 function cost(theirs: string, ours: string): number {

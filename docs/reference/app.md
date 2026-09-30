@@ -4,20 +4,23 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-24 (C3′ Task 12, by
-  script, over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none)**: the console
-  window registers **42**, the vault-less picker/wizard window **29** (+3 from C2's hand-off H9 phase
-  (a) — `account::google_connect_url`, `account::google_connected`, `account::open_external`; C1b's
-  H1 removed `account::sign_up` and `account::sign_in` with the password and added
-  `account::google_sign_in` to both lists) — **61** distinct. Commands live beside the module they
-  serve (`commands.rs`, `onboarding.rs`, `account.rs`, `report.rs`, `lms_link.rs`), never all in one
-  file. **Eight** mutate notes
-  (`set_fields`, `create_task`, `delete_note`, `decide`, `close_info`, `open_issue`,
-  `resolve_issue`, `sync` — the last applies another desktop's writes through `write` and can file a
-  `kind: amend` card); `backup_now` is the one command that moves the vault without writing a note;
-  `ui_event` writes the `state/events-ui/` ledger; everything else touches app data,
-  `profiles.json`, the clipboard, the process or the updater — never a note. Recount before quoting a
-  number.
+  with `console_ctx()` (`via: "dashboard"`). **Tauri commands, recounted 2026-09-29 (the merge of
+  the commitment model into this file's branch; the 2026-09-26 recount of C3′ into phase 2 gave the
+  same)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
+  the console window registers **47** (phase 2 added `answer_card`, `commitment_proposals`,
+  `commitments_confirm`, `your_week`, `preview_window`), the vault-less picker/wizard window **29**
+  (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
+  `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
+  password and added `account::google_sign_in` to both lists) — **66** distinct. Commands live
+  beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
+  `report.rs`, `lms_link.rs`), never all in one file. **Ten** mutate notes (`set_fields`,
+  `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
+  `open_issue`, `resolve_issue`, `sync` — the last applies another desktop's writes through `write`
+  and can file a `kind: amend` card); `set_fields` edits a commitment's `kind`/`level` only as
+  `commitments::check_console_edit` allows; `backup_now` is the one command that moves the vault
+  without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
+  app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
+  before quoting a number.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
@@ -81,7 +84,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   cloud.**
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
-  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). Until C4 lands, that runtime
-  code stays and is not extended.
+  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). C4 is no longer a phase:
+  that runtime code stays until the Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10)
+  removes it, and is not extended.
 - Cut day (spec §7.2) is a procedure with Quinn at the machine: the old `quinn-ops` vault is archived,
   not migrated; Quinn re-onboards into `%USERPROFILE%\Knowlu\`.

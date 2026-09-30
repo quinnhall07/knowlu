@@ -493,29 +493,34 @@ fn is_note_path_and_the_servers_regex_agree() {
     // pinned from one side rather than trusted three times. The TS source and the SQL are read, not
     // imported or applied.
     //
-    // Grades spec §7: the folder list is derived from `NOTE_FOLDERS`, never a literal, so a folder
-    // the engine gains and the server lacks fails here — against `NOTE_PATH_RE` AND against the live
-    // column check (the latest migration that re-declares it). A SUBSET, not equality: the server may
-    // already name a folder this branch does not write yet (`commitments`, which the commitment
-    // model's branch adds), so the server is right whichever of the two merges first. That the
-    // server's two sides carry the same group is `migrations_sync_test.ts`'s to pin.
+    // Commitment-model spec §10 gate 1 (plan review C2) and grades spec §7: the folder list is
+    // derived from `NOTE_FOLDERS`, never a literal, so a folder the engine gains and the server lacks
+    // fails here — against `NOTE_PATH_RE` AND against the live column check (the latest migration
+    // that re-declares it, chosen by content). Per folder first, for a precise message; then gate 1's
+    // whole group, in `NOTE_FOLDERS` order, in `NOTE_PATH_RE`. The column check is held to the union
+    // rule (D10: a subset of its group), and that the server's two sides carry the same group is
+    // `migrations_sync_test.ts`'s to pin.
     let supabase = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase");
     let ts = std::fs::read_to_string(supabase.join("functions").join("_shared").join("sync_rows.ts"))
         .expect("sync_rows.ts");
     let ts_group = group_after(&ts, "export const NOTE_PATH_RE = /^(", "sync_rows.ts");
     let (check_name, check_sql) = latest_path_check(&supabase.join("migrations"));
-    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+    let folders = knowlu_engine::ids::NOTE_FOLDERS;
+    for folder in folders {
         assert!(ts_group.iter().any(|f| f == folder), "sync_rows.ts's NOTE_PATH_RE lacks {folder}: {ts_group:?}");
     }
+    // `NOTE_PATH_RE` is a JS regex literal, which escapes its slash: the group reads `(…)\/` in the source.
+    let group = format!("({})\\/", folders.join("|"));
+    assert!(ts.contains(&group), "the server's folder list is the engine's: {group}");
     let missing = folders_missing(&check_name, &check_sql);
     assert!(missing.is_empty(), "{check_name}'s path check (the live one) lacks {missing:?}");
     assert!(ts.contains("[A-Za-z0-9._ /-]{1,300}"), "the server's character class and length are the engine's");
     let vault = std::env::temp_dir();
-    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+    for folder in folders {
         let ok = format!("{folder}/x.md");
         assert!(sync::is_note_path(&vault, &ok), "{ok}");
     }
-    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "grades/a.md"] {
+    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "commitments/cs-100.md", "grades/a.md"] {
         assert!(sync::is_note_path(&vault, ok), "{ok}");
     }
     for bad in ["state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../x.md", "tasks//x.md",
@@ -1569,7 +1574,7 @@ fn sync_never_settles_or_archives_a_proposal_it_did_not_file() {
         knowlu_engine::write::propose_amendment(
             &dir, &file, &meta,
             &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-            &judge, &mut journal, None, today,
+            &judge, &mut journal, None, today, None,
         ).expect("a judge-once proposal");
         let rec = if converge {
             foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z")
@@ -2449,7 +2454,7 @@ fn rejecting_a_judge_once_card_writes_no_re_assert_record() {
     let card = knowlu_engine::write::propose_amendment(
         &dir, &file, &meta,
         &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-        &judge, &mut journal, None, today,
+        &judge, &mut journal, None, today, None,
     ).expect("a judge-once proposal");
     let card_rel = knowlu_engine::ids::rel(&dir, &card);
     let count = |journal: &mut Journal| journal.read(None, None).iter()

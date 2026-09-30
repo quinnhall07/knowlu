@@ -320,7 +320,7 @@ The full briefing is `docs/superpowers/notes/2026-09-09-knowlu-cloud-legal-lands
 -| Legal read on scraping and minors | **Not started — highest-priority external dependency** (plan §8) |
 +| Legal read on scraping and minors | Landscape written 2026-09-09; a lawyer before the first non-founder paid sign-up |
 -| Making this repo public | **Blocked.** Requires credential rotation, then `git filter-repo`, then splitting the vault out of the code repo — in that order (plan §12) |
-+| Making the code public | `quinn-ops` stays private and archived; `knowlu` has no secrets in its history by construction (the fixtures carry the founder's coursework titles — replace them with synthetic vaults before any public release) |
++| Making the code public | `quinn-ops` stays private and archived; `knowlu` has no secrets in its history by construction (the fixtures carry the founder's coursework titles — replace them with synthetic vaults before any public release) *(amended 2026-09-29, ruling 13: public since 2026-09-29, fixtures not replaced)* |
 ```
 
 > **Amended 2026-09-16 (Quinn's ruling): see the Amendment section at the end.** (The "Cloud
@@ -342,7 +342,7 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need *(amended 2026-09-17 — see the amendment at the end)* — **reversed** |
 | R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
 | R6 | Staging Supabase project + test Stripe from day one | yes (default) |
-| R7 | Replace the three fixture vaults with synthetic ones before any public code release | later; noted in `PROVENANCE.md` |
+| R7 | Replace the three fixture vaults with synthetic ones before any public code release | later; noted in `PROVENANCE.md` *(amended 2026-09-29, ruling 13: public since 2026-09-29, fixtures not replaced)* |
 | R8 | Anthropic as the launch inference provider (zero-retention API terms; the eval suite picks the model) | yes (default) **Amended 2026-09-16 (Quinn's ruling): see the Amendment section at the end.** |
 
 ---
@@ -351,12 +351,12 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 
 | Date | Ruling (Quinn) | Consequence |
 |---|---|---|
-| 2026-09-09 | **The LMS calendar link is captured by a sign-in window, not pasted.** The wizard opens the campus LMS in a pop-up window; the student signs in there themselves (campus SSO + Duo, in their own session); the app then navigates that window to the calendar's share page itself and keeps **only the calendar link**. No credential is asked for, stored or replayed; the window's session data is discarded after capture. | Amends §4.2 step 3. C1 delivers it behind one swappable module with a feasibility spike first (Quinn present for the SSO login) and the paste-a-link path as the fallback for a campus whose pages defeat it. Standing rule unchanged: never request campus SSO credentials — the student types them into the LMS's own page, never into ours. The university-policy read (§9) must cover the flow before the pilot widens. |
+| 2026-09-09 | **The LMS calendar link is captured by a sign-in window, not pasted.** The wizard opens the campus LMS in a pop-up window; the student signs in there themselves (campus SSO + Duo, in their own session); the app then navigates that window to the calendar's share page itself and keeps **only the calendar link**. No credential is asked for, stored or replayed; the window's session data is discarded after capture. | Amends §4.2 step 3. C1 delivers it behind one swappable module with a feasibility spike first (Quinn present for the SSO login) and the paste-a-link path as the fallback for a campus whose pages defeat it. Standing rule unchanged: never request campus SSO credentials — the student types them into the LMS's own page, never into ours. The university-policy read (§9) must cover the flow before the pilot widens. *(one exception: Amendment 2026-09-29, ruling 12)* |
 | 2026-09-09 | **The personal calendar is connected first, together with the school one.** Quinn's cut-day note: the current wizard never asks for the busy-time calendar (`calendars:` in `config/ingest.yaml` stays empty) and the first page was empty until a slot ran. The C1 wizard's first connection step is *Connect your calendars*: school (the sign-in window above) and personal. | Amends §4.2: the calendar step precedes coursework logins and Gmail. **C1** delivers the personal calendar by its secret iCal address (validated on the device, stored server-side as a `sources` row of kind `calendar_ics`, written to the vault's `calendars:` so today's engine counts busy time), and every wizard finish runs the first slot at once (§4.2 step 7 — now also true of the pre-C1 app, `scheduler::needs_first_run`). **C2** adds Google sign-in for the same panel — one Google connect for `calendar.readonly` first (a *sensitive* scope: lighter verification, no CASA) and `gmail.readonly` incrementally — with the calendar fetch server-side beside `/ingest-ics`; until C2 lands, the secret address is the path. |
 | 2026-09-09 | **The first run after onboarding must land a usable page.** Quinn's first slot on the fresh vault: 28 course-less tasks, no zyBooks or VHL work, four items already past due (one from 2025). Diagnosis: (1) the wizard stores portal logins but never maps the discovered zyBook / VHL section to a course, so `coursework` skips them as "not in config"; (2) Blackboard's gradebook feed carries no course text, and the fresh vault has no `course_map` pins and no `courses/` notes, so every task is `course: null`, effort 1.0, `needs_enrichment: true` (the accepted judgment gap made visible); (3) a first ingest creates every item in the feed's window, including ones due before the vault existed. | Three rulings. **R-OB-1 (C1 + C2):** onboarding maps coursework sources to courses — after the first fetch the discovered books and sections are shown with a suggested course and confirmed by the student; an unknown book on a later run is a proposal, never a silent skip (`/ingest-coursework` reconcile). **R-OB-2 (C1):** the school sign-in window also captures the enrolled course list (Blackboard's own API for the signed-in student) and seeds `courses/` and `course_map` codes; part of the sign-in spike's go/no-go. **R-OB-3 (C2, and the device's `ingest` until then):** a first ingest never creates a task already past due — such items are recorded as seen and archived as `imported-past`, so the first page shows the future. Enrichment (C2's `/judge-task`) remains the answer to course and effort for items the map cannot place. |
 | 2026-09-09 | **The school is chosen from a searchable list of every US college and university**, not from two radio buttons. | Amends §4.2 (C1's wizard). **R-OB-4:** the list is derived from the federal IPEDS *Institutional Characteristics* file (NCES, ~6,400 Title IV institutions, public domain): `UNITID`, name, city, state, web host — bundled as a compact static asset regenerated by a script that records the source file and date; a typeahead in the wizard; "my school isn't listed" falls back to free text. The chosen school writes `campus:` (unitid, name, state) into the vault's config; `scaffold::CAMPUSES` becomes the *curated* layer (today UA and UK) that adds event feeds and the LMS kind on top of the list; an uncurated school gets no event feeds and its LMS kind from the sign-in window (or asked). Timezone is suggested from the state, the OS zone as the default. The community `university-domains-list` (MIT) may be merged later for campus e-mail domains. |
 | 2026-09-09 | **Quinn's first onboarding is reset**; he re-onboards once the C1 wizard carries R-OB-1/2/4. | The first vault and profile were archived under `%LOCALAPPDATA%\knowlu-pre-cut-2026-09-09\attempt-1\`; until then he has no daily page unless the old runner task is re-registered from its saved XML. |
-| 2026-09-09 | **Grades are wanted** from the same signed-in session, later. | Not designed. The same window could read the student's own grade pages; it waits on the policy read and on C1's link capture proving out. Listed in §13. |
+| 2026-09-09 | **Grades are wanted** from the same signed-in session, later. | Not designed. The same window could read the student's own grade pages; it waits on the policy read and on C1's link capture proving out. Listed in §13. *(amended 2026-09-29, rulings 7 and 12: designed and built before the policy read, UA's read at MVP exit; the released app never offers or uses the kept session at a school without a recorded read)* |
 | 2026-09-09 | **Cut day proceeds with the current wizard**; the account requirement arrives with C1 and existing installs are adopted in place (sign-in on first launch after C1, no re-onboarding). The current wizard's defaults become `%USERPROFILE%\Knowlu` (vault parent) and `%USERPROFILE%\Knowlu\Backups` (backups) — the folder question itself goes away in C1 (§4.1). | A one-line change on `main` before C1 branches; C1's plan gains an "adopt existing install" task. |
 
 ---
@@ -369,8 +369,8 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | **C0 — CI release** | `ci.yml`, `release.yml`, Trusted Signing + regenerated updater key in secrets, first tagged release served from Pages, the in-app updater proven end to end from a CI build | the cut |
 | **C1 — accounts and the new wizard** | Supabase project (prod + staging), Auth, Stripe subscription + webhooks + Portal + Tax, `/entitlement` with the 72 h cache, the wizard of §4.2 (no folder step, 18+ attestation, ToS/privacy acceptance), `DELETE /account` and export, telemetry ingest for (a) and (b), issue reports with the preview screen, privacy policy + ToS pages on the site, **the Google OAuth consent screen submitted for restricted-scope verification** | C0 |
 | **C2 — the judgment service** | `/judge/{task,event,email}` with pinned models and grammars, `CloudModel` in the engine, `/ingest/ics` and `/ingest/coursework` (parsers moved, oracles moved), `/events` (feeds + roster server-side, HTML sources working), the Gmail reader (`/gmail/*`; test users until verification, everyone after CASA) and the email tiers, rule promotion + the eval suite seeded from the archive; **closes the judgment gap** | C1 (needs accounts to key everything) |
-| **C3 — sync** | `/sync/push`, `/sync/pull`, journal replay, restore-from-cloud, second-device support; `history.rs`'s git removed; local snapshots kept *(amended 2026-09-17 — see the amendment at the end)* — the order from here is C3′ → C5 → C4 → the pilot | C2 |
-| **C4 — removal** | plan 3a's runtime/inference code, the settings row, the wizard offer, `SUPPORTED_RUNTIMES`, the (c)-toggle UI landing, the pilot widening checklist (lawyer sign-off, UA/UK policy read, Kentucky tax registration) | C3 |
+| **C3 — sync** | `/sync/push`, `/sync/pull`, journal replay, restore-from-cloud, second-device support; `history.rs`'s git removed; local snapshots kept *(amended 2026-09-17 — see the amendment at the end)* — the order from here is C3′ → C5 → C4 → the pilot *(amended 2026-09-29, ruling 10)* | C2 |
+| **C4 — removal** | plan 3a's runtime/inference code, the settings row, the wizard offer, `SUPPORTED_RUNTIMES`, the (c)-toggle UI landing, the pilot widening checklist (lawyer sign-off, UA/UK policy read, Kentucky tax registration) *(amended 2026-09-29, ruling 10)* | C3 |
 
 Each plan is written with the writing-plans skill from this spec, carries a fidelity ledger against §1's decisions and §10's amendments, and is executed subagent-driven in the `knowlu` repo — except the cut, which is a procedure with Quinn at the machine.
 
@@ -378,7 +378,7 @@ Each plan is written with the writing-plans skill from this spec, carries a fide
 
 ## 13. What this spec does not decide *(amended 2026-09-17 — see the amendment at the end)*
 
-The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); reading grades from the student's signed-in LMS session (wanted — §11a). (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
+The console's visual redesign (parked by Quinn 2026-09-07); mobile; email ingestion by forwarding (a Cloudflare Email Routing inbox — documented as the fallback if Google refuses verification, not built); a second campus's specifics; the co-founder question; the exact per-kind model ids (the eval suite's job); reading grades from the student's signed-in LMS session (wanted — §11a) *(decided: Amendment 2026-09-29, rulings 7 and 12; the grades spec)*. (The academic-year price and the summer pause were open when this was drafted; both were kept on 2026-09-09 — §11 R3.)
 
 ---
 
@@ -520,7 +520,7 @@ client access". The device becomes a **credential-substituting HTTPS relay**, an
 - The legal posture of D11 is unchanged: every request originates from the user's device, with the
   user's credentials, at the user's instruction; the vendor sees the student's own IP and session.
 
-**Ruling 5 — sequence: all of it ships before the pilot.** §12's order from here is: **C3′ — the
+**Ruling 5 — sequence: all of it ships before the pilot.** *(amended 2026-09-29, ruling 10: C5 and two-desktop before Launch)* §12's order from here is: **C3′ — the
 account vault** (sync without encryption on the paused branch's tables; the privacy sentences; the
 export dropped; the entitlement check in the engine; git leaves the product; `ics_url` leaves the
 vault) → **C5 — the relay fetch** (the contract above, replacing the on-device fetchers) → **C4 —
@@ -541,11 +541,14 @@ required).
 new stream order and close the parity question. Plans: `docs/plans/2026-09-14-c3-sync-plan.md` is
 superseded by a C3′ plan written from this amendment, and C5 gets its own spec section and plan.
 
-## Amendment 2026-09-29 — "What's next?": the product vision refocused (Quinn's rulings of 2026-09-29) — **for Quinn's signature**
+## Amendment 2026-09-29 — "What's next?": the product vision refocused (Quinn's rulings of 2026-09-29) — **SIGNED by Quinn, 2026-09-29**
 
 Written from a vision interview with Quinn on 2026-09-29; `VISION.md` was rewritten from it the same
-day and states the result. As with the earlier amendments, the body of this spec is not rewritten;
-this section is the correction of record, and plans argue from it once it is signed.
+day and states the result. Rulings 10–13 were added the same day, after a review of the three work
+sessions then in flight, so that the order of work, the human actor token, the grades session and the
+repository's visibility are signed together with the vision instead of after it. As with the earlier amendments, the body of this
+spec is not rewritten; this section is the correction of record, and plans argue from it once it is
+signed.
 
 1. **Desktop only, reaffirmed.** Ruling 1 of 2026-09-17 stands unchanged: Windows desktop, no web or
    mobile app, nothing building toward either.
@@ -556,6 +559,16 @@ this section is the correction of record, and plans argue from it once it is sig
    noticed → propose and wait, showing who it came from and a summary of the context. An
    authoritative source changed → apply and list it. Anything another person can see stays a
    proposal. Knowlu never invents a due date.
+   *Consequence for the registrar:* a registrar change is an authoritative-source change. The UA
+   registrar (the commitment model's phase 3) applies it and lists it under "what changed"; it does
+   not file change or end cards. The phase-3 spec
+   (`docs/specs/2026-09-26-commitment-model-phase3-design.md`, its change- and end-card rows at
+   :146-147) is revised to apply-and-list before its branch merges, in the Pilot. "Judge once" still
+   holds: no source overwrites a field the journal shows the student set by hand; that change is
+   filed as an amend card instead. "Set by hand" here is `journal::human_edited`: an `op: set` by the
+   human actor after the note exists, not the `create` that confirmed it. (p3 confirms registrar
+   rows as the human actor, so under `human_set` every registrar field would read as hand-set and no
+   registrar change would ever apply.)
 4. **The calendar.** Knowlu's own in-app calendar is the complete picture. Later, Knowlu writes a
    dedicated "Knowlu" calendar inside the student's Google or Outlook account and never edits their
    other calendars. Until that piece is specced, the commitment model's Q3 (Google Calendar stays
@@ -563,6 +576,7 @@ this section is the correction of record, and plans argue from it once it is sig
 5. **Syllabi are uploaded by the student**, at onboarding and each term: class meetings, exam dates,
    grade weights and scale, everything confirmed by the student. This amends the commitment model's
    Q2 ("login-only… typing is a last resort") to "sign-ins and syllabi"; typing stays the last resort.
+   (This holds from the syllabus phase, in Beyond; until then onboarding asks for sign-ins only.)
 6. **Audience:** undergraduates first; graduate students are served by the same product.
 7. **Grades and GPA** join the product: per-course rings, a term GPA with an uncertainty band, a
    projected cumulative GPA on request; read from the LMS grade page and homework platforms on the
@@ -574,3 +588,162 @@ this section is the correction of record, and plans argue from it once it is sig
    unchanged.
 9. **The MVP** is the founder's quinn-ops feature set plus grades from Blackboard; everything else is
    phased after it (`VISION.md`, "Build order").
+10. **Stages, from here; ruling 5 of 2026-09-17 amended.** Quinn ruled the MVP-first order in
+    principle on 2026-09-29; this ruling formalises it. The order of work is named by what the
+    student gets, in four stages: **MVP → Pilot → Launch → Beyond**. A stage's exit holds before the
+    next begins; Beyond has no stage-wide gate. The C-series closes at C3′ and stays as history: no
+    C-number is issued again and none is renumbered.
+    - **MVP:** quinn-ops parity plus grades from Blackboard (item 9), proven on a founder-owned
+      scratch profile and test account on staging, with no second person. It holds commitment-model
+      phases 1–2, M1 grades, Gmail connect in the app, events (required events become tasks; accept
+      and decline), body and profile editing, each small parity item done or cut, and UA's
+      university-policy read (ruling 12). *Exit:* the parity audit re-run shows no open row; Quinn
+      has recorded UA's read; the founder's grades proof has passed through the app's real gate on a
+      dev build from the proof branch that carries UA's date (Quinn is a UA student and the MVP's
+      only user; ruling 12's date-and-bump rule); and Quinn says "MVP reached". Exit does not need
+      UA's date on main. The MVP's grades proof therefore waits on Quinn recording UA's read.
+    - **Pilot:** a few undergraduates other than the founder, on the released app, one computer
+      each, needing nothing from anyone. It holds production parity (HANDOFF §4 less the two-desktop
+      proof); v0.1.1 built by CI; privacy bump #1 with one lawyer read and the re-consent screen
+      (R-PS-4); the UA registrar (commitment phase 3, item 3's consequence); removal of the local
+      model runtime (`runtime.rs`, `inference.rs`, `SUPPORTED_RUNTIMES`, the wizard offer); the
+      OpenRouter 402 and "source went quiet" shown as issues; `calendar.readonly` verification
+      submitted; the university-policy read for each pilot student's university other than UA,
+      whose read is done at MVP exit (ruling 12). *Entry:* Quinn sets the number of students and
+      their universities, the length, a measure drawn from VISION's successes 1, 2, 5 and 6, and
+      whether pilot students pay; if they do,
+      VISION's gate "a lawyer before the first non-founder paid sign-up" moves from Launch to Pilot
+      entry. *Gate:* no non-founder account exists before these ship: the re-consent screen (R-PS-4);
+      privacy bump #1 (`PRIVACY_VERSION` moved, with the page naming ruling 12's session and the
+      grades the account holds, after its lawyer read); and item 11. And no pilot student uses ruling
+      12's kept Blackboard session before the policy read for that student's own university is done;
+      a student whose university's read is not done joins without grades from Blackboard. The app
+      enforces this half (ruling 12): Connect is offered, and a capture runs, only where the curated
+      campus row records the read.
+    - **Launch:** any US undergraduate can pay $9.99 and use more than one desktop. It holds C5, the
+      relay fetch (its pre-flight re-run first); the two-desktop stream's Plans 1–3 and its
+      two-computer proof; privacy bump #2; `gmail.readonly` verification and CASA (or Quinn accepts
+      the 100-user cap); lawyer sign-off (unless it moved to Pilot entry), each university-policy
+      read not already done in the MVP or the Pilot (UK's, unless a pilot student is at UK), tax
+      registration, code signing and the private-repository decision (ruling 13).
+    - **Beyond:** each VISION phase that makes the morning answer better. Per feature: a signed
+      spec, a plan, a review, a merge and a live proof.
+
+    This amends ruling 5 of 2026-09-17 ("all of it ships before the pilot … C3′ → C5 → C4 → the
+    pilot"): C5 and the two-desktop stream, with its proof, move from before the pilot to before
+    Launch. C4 is not a phase any more; its rows are spread across the stages above (Gmail connect
+    to the MVP; runtime removal, re-consent, 402 and "source went quiet" to the Pilot; the
+    telemetry (c) toggle, the widening checklist (less the policy reads done in the MVP and the
+    Pilot, ruling 12) and the functions domain to Launch; the Calendar-API origin split to
+    Beyond). HANDOFF §4's step (5) two-desktop proof moves to Launch. The instruction
+    of 2026-09-26, "reach the beginning of C4", is superseded. *Why:* three orderings coexisted
+    (ruling 5, HANDOFF §3 and VISION's Build order), the one every session resumes from had no MVP,
+    and C4 held MVP and Pilot work behind C5 and two-desktop. *What it costs:* during the pilot a
+    portal markup change is repaired by a 0.1.x release through CI, not a cloud deploy. The relay's
+    benefit of keeping fetch scripts off the client (ruling 4) does not exist while the repository
+    is public. Its other threat, a repurposed copy, does not arise with a few known students on one
+    computer each.
+11. **The human actor is not a name (CLAUDE.md rule 1).** Today every human write in every vault
+    carries the actor `quinn`, and the app scaffolds every new student's first task with
+    `created_by: quinn` and `effort_source: quinn`. A second student works, because `quinn` is in
+    effect the human token, but the founder's name is written into every student's vault. From
+    here, a vault the app creates writes a neutral human token, **`student`**, everywhere it wrote
+    `quinn`; this includes the CLI's `--actor`, `--opened-by` and `--closed-by` defaults for that
+    vault. Every comparison against the human actor, in the engine, the app and the cloud, treats
+    `quinn` and `student` as the same human actor **forever**. The known sites (report D5; line
+    numbers at origin/main 86a1482 unless a branch is named): `journal.rs` `actor_rank` (:113),
+    `human_set` (:274) and `human_edited` (p2-commitments :292); `surface.rs` :1415 ("me") and :1645
+    ("you"); the writers `passes.rs` :293 and :332 and `reconcile.rs` :133; the app's `commands.rs`
+    :156, :244, :248 and :285 and `scaffold.rs` :736 and :740; the engine `main.rs` CLI defaults
+    (:171, :182, :193, :258, :273, and p3-registrar's :91). The cloud's keep rule (`not like
+    'agent:%'`) and `provenance::is_agent` already read both as human. No existing journal line or
+    note is rewritten. A vault created before this change keeps writing `quinn`, so every existing
+    vault and every frozen reference stays byte-identical. *Where the token is recorded:* a new
+    `config/actor.yaml`, one line `human_actor: student`, written once when the vault is created and
+    never rewritten; an absent file means `quinn`. The file sits in the student's vault and can be
+    edited by hand, so its reader accepts only `student` or `quinn`. Any other value (a name, or
+    one starting `agent:`, which `provenance::is_agent` would read as an agent) is a named error,
+    and no human write proceeds until the file is fixed; a test pins both the accepted values and
+    the refusal. A restore into the wizard's vault on a new desktop (C3′) decides the token before
+    the wizard writes `actor.yaml` or any human record: the token the account's journal already
+    carries (`quinn` if any human record there is `quinn`; with no human record, `student`), never
+    a new one. So the file is written once and never rewritten, and one account writes one token.
+    The token is one constant (`journal::HUMAN_ACTOR`), the legacy spelling is one other, and a test
+    fails on the exact literal `"quinn"` in non-test code outside `journal::HUMAN_ACTOR` and the
+    legacy constant (`profiles::migrate_flat_layout`'s `quinn-ops` literal is a different string
+    and stays). This is contract-list work (contract-engineer at xhigh, reviewed before merge), done
+    in Integrate.
+12. **A named exception to §11a's "keep nothing": the grades session (the grades spec's ruling
+    G1).** §11a's first ruling (2026-09-09) discards the sign-in window's session data after
+    capture. For grades from Blackboard only, Knowlu keeps a Blackboard browser session on the
+    device, so grades refresh every slot without a sign-in until the school's SSO session expires.
+    Its bounds: one persisted WebView2 profile per Knowlu profile, under the app's data folder
+    (`state::app_data_root()`), never in the vault, never synced and never sent anywhere; Windows
+    encrypts it for the Windows account (DPAPI); no password is kept, only the session the
+    student's own sign-in created; *Forget Blackboard sign-in* deletes it; the calendar-link and
+    course-list captures keep their discard-everything window unchanged; the registrar never shares
+    this profile. *Disclosure:* the privacy page names it and the grades the account holds (grades
+    spec §11) in privacy bump #1, with one lawyer read. M1 drafts those sentences in the grades
+    spec's §11, never in `site/privacy.html`; the page's text, its Effective date and
+    `PRIVACY_VERSION` then move together in one PR (as `app/src/account.rs:21-23` requires), and
+    that PR ships no later than the first release that records a `policy_read` date. A release may
+    carry M1's code before then, because without a date it offers grades nowhere. *The
+    date-and-bump rule:* M1 adds a test that fails when any curated campus row carries a
+    `policy_read` date while `PRIVACY_VERSION` is older than privacy bump #1, the version whose page
+    discloses the kept session and the grades the account holds, so a school's date reaches main
+    only in the same PR as bump #1 or after it; the founder's MVP grades proof runs on a dev build
+    from a proof branch that carries UA's date (the existing live-proof practice: dev build, scratch
+    profile), and that branch is never merged ahead of bump #1; MVP exit therefore needs UA's read
+    recorded and the proof passed on the proof branch, not UA's date on main. *Policy read:* this
+    also amends §11a's grades row of 2026-09-09 ("Not designed … it waits on the policy read"):
+    grades are designed and built in the MVP before any university-policy read, and UA's read moves
+    to MVP exit (ruling 10). Quinn is a UA student and the MVP's only user, so the founder's grades
+    proof runs through the real gate on the proof branch; the MVP's grades proof waits on Quinn
+    recording UA's read. The promise: **Knowlu's released app never offers or uses the
+    session at a school without a recorded read.** In the Pilot, each other pilot student's
+    university gains its read (ruling 10). The gate is mechanical, not operational, and no build
+    skips it: the grades spec (§2–§4 and §9–§12 as signed; the spec's text takes edits 3–5 in the
+    signing commit) puts one predicate in `app/src/grades.rs`, true only where the curated campus
+    row carries the read's date (`policy_read`), never at an uncurated school through a typed
+    address. The strip's status, Connect, a manual refresh and the scheduler all check it; Connect
+    and refresh refuse with the same named reason, and the slot records `grades (skipped: not
+    available at your school yet)` at exit 0. UK's read, unless a pilot student is at UK, stays in
+    Launch's widening checklist, which also decides how the reads cover every university Launch
+    opens to.
+    *What it costs:* one test in M1, and UA's date waits on privacy bump #1 to reach main; the MVP's
+    grades proof waits on Quinn recording UA's read. If UA's policy
+    forbids a persisted SSO session, the MVP cannot exit as item 9 defines it and Quinn rules again
+    on grades; the pilot may then start without them. The standing rule is unchanged: Knowlu never
+    asks for campus SSO credentials. Precedent: ruling 4 of 2026-09-17 already keeps each portal's cookie jar
+    on the device between slots.
+13. **The repository is public (Quinn, 2026-09-29).** §10's "Making the code public" row and R7 said
+    the fixture vaults are replaced with synthetic ones before any public release. The repository
+    has been public since 2026-09-29 without that. The fixtures and the history carry the founder's
+    real coursework titles and a few personal paths; that is accepted. No secret is in the pushed
+    history (scanned 2026-09-29; the one token is the production anon key, public by design). The
+    fixtures are not replaced for now. Whether the repository returns to private is decided at
+    Launch (ruling 10), and while it is public no self-hosted runner is registered. *What it
+    costs:* what is already public stays public, because clones keep the history; and the relay's
+    benefit of keeping fetch scripts off the client (ruling 4) is gone while it is public.
+
+**Markers.** Added in the signing commit:
+- §11a's first row (the LMS calendar link) gains *(one exception: Amendment 2026-09-29, ruling 12)*.
+- §11a's grades row of 2026-09-09 (`cloud-design:359`) gains *(amended 2026-09-29, rulings 7 and 12:
+  designed and built before the policy read, UA's read at MVP exit; the released app never offers or
+  uses the kept session at a school without a recorded read)*.
+- §10's "Making the code public" row (`:323`) and §11's R7 (`:345`) gain *(amended 2026-09-29,
+  ruling 13: public since 2026-09-29, fixtures not replaced)*.
+- Ruling 5 of 2026-09-17 gains *(amended 2026-09-29, ruling 10: C5 and two-desktop before Launch)*.
+- §12's C3 row (its "C3′ → C5 → C4 → the pilot" clause) and C4 row gain *(amended 2026-09-29,
+  ruling 10)*.
+- §13's "reading grades from the student's signed-in LMS session" gains *(decided: Amendment
+  2026-09-29, rulings 7 and 12; the grades spec)*.
+- In the same commit: `VISION.md`'s fixes (`vision-fixes.md` in this packet, Fix 1 in its
+  once-signed text) and the grades spec's edits 3–5 (`grades-spec-defaults.md`).
+
+Later, and not part of the signing commit: HANDOFF §3–§4 are rewritten from ruling 10 (drafted by the
+planner, reviewed by the reviewer); CLAUDE.md's "stay until C4" becomes "stay until the Pilot's
+runtime-removal lane" in the #18 merge; the phase-3 spec is revised when p3 resumes (apply-and-list,
+tested by `human_edited`); START-HERE v2 §2's MVP row takes UA's policy read as an exit condition,
+and its Pilot row takes ruling 10's gate and entry as written here (privacy bump #1, the policy read
+for each other pilot student's university, and whether pilot students pay).

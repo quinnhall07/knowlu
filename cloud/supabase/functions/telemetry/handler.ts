@@ -15,6 +15,7 @@
  */
 import { requireUser, VerifyToken } from "../_shared/auth.ts";
 import { fail, json, methodNotAllowed, readJson } from "../_shared/http.ts";
+import { EVENT_VERDICTS } from "../_shared/judge_validate.ts";
 
 /** `engine/src/uievents.rs`'s `ACTIONS`, in its order. `app/tests/telemetry.rs` pins the two lists
  * against each other, so a new action added to the engine fails a Rust test until it lands here. */
@@ -42,6 +43,18 @@ export const VALUED_FIELDS: readonly string[] = [
 ];
 /** Judged fields whose correction is recorded as "it changed" and nothing more: a course is content. */
 export const FLAGGED_FIELDS: readonly string[] = ["course"];
+/**
+ * F7: labels the device reports on a named judgment: an `unsure` event answered on its card
+ * (`verdict`), an `amend` card from a judged write rejected (`decision`). Accepted **only** on a row
+ * that carries a `judgment_id`, and each has a closed vocabulary, so a sentence has nowhere to hide.
+ * A label on an `email` judgment is refused outright (Gmail Limited Use: an email-derived decision
+ * never reaches the shared calibration/rules path).
+ */
+export const LABEL_FIELDS: readonly string[] = ["verdict", "decision"];
+/** The judgment kinds a `judgment_kind` may name (`judgments.kind`). */
+export const JUDGMENT_KINDS: readonly string[] = ["task", "event", "email"];
+const DECISION_KINDS: readonly string[] = ["task", "event"];
+const DECISION_OUTCOMES: readonly string[] = ["approved", "rejected"];
 
 const MAX_ROWS = 500;
 
@@ -62,6 +75,13 @@ export function isToken(s: unknown): boolean {
  * strings (including a stray sentence) as a date, and that is exactly the hiding spot this
  * endpoint exists to close. */
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A UUID, the shape of `judgments.id`, and the only thing a `judgment_id` may be. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(s: unknown): s is string {
+  return typeof s === "string" && UUID.test(s);
+}
 
 function isTimestamp(s: unknown): boolean {
   return typeof s === "string" && ISO_TIMESTAMP.test(s) && Number.isFinite(Date.parse(s));
@@ -112,12 +132,20 @@ export interface CorrectionIn {
    * consult), so this field is accepted but **always ignored**: the column stays for C2 to fill
    * once it adds the server-side lookup, and nothing sent here ever reaches it. */
   request?: Record<string, unknown> | null;
+  /** F7: the judgment a `LABEL_FIELDS` row labels: a UUID, and only on a label row. */
+  judgment_id?: string | null;
+  /** F7: that judgment's kind, one of `JUDGMENT_KINDS`, and never `email` on a label row. */
+  judgment_kind?: string | null;
 }
 
 export interface Deps {
   verify: VerifyToken;
   saveEvents: (rows: unknown[]) => Promise<void>;
   saveCorrections: (rows: unknown[]) => Promise<void>;
+  /** F7: which of `ids` are `judgments` rows of `accountId`, each mapped to its real `judgments.kind`
+   * (lowercased id → kind). Called at most once per batch, and only when the batch holds an id-bearing
+   * row; a rejection fails the whole batch before anything saves. */
+  ownedJudgments: (accountId: string, ids: string[]) => Promise<Map<string, string>>;
 }
 
 /** The last row wins, keyed on exactly the migration's own unique-constraint columns — a batch
@@ -166,12 +194,19 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     };
   });
 
-  const correctionRows = corrections.map((c) => {
+  const correctionRows = corrections.map((c): CorrectionRow => {
     if (!isTimestamp(c.ts)) throw fail(400, "a correction has no usable ts");
     if (!isToken(c.item_id) || !isToken(c.kind)) throw fail(400, "item_id and kind must be tokens, not text");
+    if (LABEL_FIELDS.includes(c.field)) return labelRow(user.id, c);
     const valued = VALUED_FIELDS.includes(c.field);
     const flagged = FLAGGED_FIELDS.includes(c.field);
     if (!valued && !flagged) throw fail(400, `field ${JSON.stringify(c.field)} is not a judged field`);
+    // F7 (review M-10): a judgment id rides only on a label row. Task field corrections keep the
+    // nightly server backfill, so this shape has no sender, and refusing it keeps the two-call split
+    // below exact and keeps a per-user email join from arriving here by accident.
+    if (c.judgment_id != null || c.judgment_kind != null) {
+      throw fail(400, `field ${JSON.stringify(c.field)} does not take a judgment_id`);
+    }
     // Fix round 1 (C1): a value that is neither number-like nor a token is free text and is nulled,
     // never 400ed — the row survives (a correction happened is still the signal), the sentence does
     // not travel.
@@ -201,7 +236,104 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     (r) => JSON.stringify([r.account_id, r.ts, r.item_id, r.field]),
   );
 
+  // F7 (review I-5, first layer): the device now supplies `judgment_id`, a new trust boundary. One
+  // lookup per batch, before anything is saved, so a failed lookup is a 5xx that saves nothing and
+  // the device retries the whole batch next slot.
+  const plain = dedupedCorrections.filter((r) => r.judgment_id === undefined);
+  const labelled = dedupedCorrections.filter((r) => r.judgment_id !== undefined);
+  // Fix round 1 (review M-1): the event card exists only for an `unsure` judgment, so a verdict row
+  // whose `ours` is anything else, or whose answer is `unsure` again, labels nothing a student
+  // corrected; it would mark a judgment wrong that nobody disagreed with. Dropped and counted as
+  // `refused`, never 400ed, for the same retry reason as `unowned` below.
+  const answerable = labelled.filter((r) =>
+    r.field !== "verdict" || (r.ours === "unsure" && r.theirs !== "unsure")
+  );
+  let owned: CorrectionRow[] = [];
+  if (answerable.length) {
+    const ids = [...new Set(answerable.map((r) => r.judgment_id as string))];
+    const mine = await deps.ownedJudgments(user.id, ids);
+    // Dropped and counted as `unowned`, never 400ed: a judgment can legitimately vanish (retention,
+    // account deletion), and a 400 would have the device resend the same batch forever.
+    // Fix round 1 (review I-1): ownership alone is not enough. The claimed kind must be the
+    // judgment's real kind, and a real `email` judgment is never labelled here, whatever the row
+    // claims (Gmail Limited Use: `promote_rules` joins on `judgment_id` and reads `j.kind` from the
+    // judgment, so a mislabelled row would carry an email-derived decision into the rules path).
+    // The saved row carries the server's kind, never the device's.
+    owned = answerable.flatMap((r) => {
+      const real = mine.get(r.judgment_id as string);
+      return real === undefined || real === "email" || real !== r.judgment_kind
+        ? []
+        : [{ ...r, judgment_kind: real }];
+    });
+  }
+
   if (dedupedEvents.length) await deps.saveEvents(dedupedEvents);
-  if (dedupedCorrections.length) await deps.saveCorrections(dedupedCorrections);
-  return json(200, { events: dedupedEvents.length, corrections: dedupedCorrections.length });
+  // F7 decision 3: two calls, never one. A `merge-duplicates` upsert sets every column the payload
+  // names, so a plain row sharing a payload with a labelled one would name `judgment_id: null` and
+  // erase the nightly backfill's id on a re-send. Plain rows never name the column at all.
+  if (plain.length) await deps.saveCorrections(plain);
+  if (owned.length) await deps.saveCorrections(owned);
+  const counts = { events: dedupedEvents.length, corrections: plain.length + owned.length };
+  // `unowned` (not the caller's judgment, or not of the kind claimed) and `refused` (a verdict row
+  // that answers nothing) appear only when the batch held a labelled row, so a batch from today's
+  // app gets exactly the response it always got.
+  const refused = labelled.length - answerable.length;
+  return json(
+    200,
+    labelled.length ? { ...counts, unowned: answerable.length - owned.length, refused } : counts,
+  );
+}
+
+/** A saved `corrections` row. `judgment_id`/`judgment_kind` are present only on a label row: a
+ * plain row must not name the columns at all (decision 3). */
+interface CorrectionRow {
+  account_id: string;
+  ts: string;
+  item_id: string;
+  field: string;
+  ours: string | null;
+  theirs: string | null;
+  kind: string;
+  request: null;
+  judgment_id?: string;
+  judgment_kind?: string;
+}
+
+/** F7 decision 2: a `LABEL_FIELDS` row, refused with 400 unless every value is from its closed
+ * vocabulary, it names a well-formed judgment, and that judgment is not an `email` one. */
+function labelRow(accountId: string, c: CorrectionIn): CorrectionRow {
+  if (c.judgment_id == null) throw fail(400, `field ${JSON.stringify(c.field)} needs a judgment_id`);
+  if (!isUuid(c.judgment_id)) throw fail(400, "judgment_id must be a UUID, not text");
+  const kind = c.judgment_kind;
+  if (typeof kind !== "string" || !JUDGMENT_KINDS.includes(kind)) {
+    throw fail(400, "judgment_kind must be one of task, event, email");
+  }
+  // Global Constraint 14 (Gmail Limited Use): an email-derived decision is never reported to the
+  // shared calibration/rules path. The device never sends one; this makes a device bug a refused
+  // batch rather than a breach.
+  if (kind === "email") throw fail(400, "an email judgment's label is not accepted");
+  const verdicts = EVENT_VERDICTS as readonly string[];
+  if (c.field === "verdict") {
+    if (kind !== "event") throw fail(400, "a verdict labels an event judgment only");
+    if (!verdicts.includes(c.ours as string) || !verdicts.includes(c.theirs as string)) {
+      throw fail(400, "a verdict must be one of the event verdicts");
+    }
+  } else {
+    if (!DECISION_KINDS.includes(kind)) throw fail(400, "a decision labels a task or event judgment only");
+    if (c.ours !== "proposed" || !DECISION_OUTCOMES.includes(c.theirs as string)) {
+      throw fail(400, "a decision is proposed, then approved or rejected");
+    }
+  }
+  return {
+    account_id: accountId,
+    ts: c.ts,
+    item_id: c.item_id,
+    field: c.field,
+    ours: c.ours as string,
+    theirs: c.theirs as string,
+    kind: c.kind,
+    request: null,
+    judgment_id: c.judgment_id.toLowerCase(),
+    judgment_kind: kind,
+  };
 }

@@ -56,6 +56,32 @@ enum Command {
         /// Override the embedded build SHA (the frozen references pin this to "pinned").
         #[arg(long = "build-sha")]
         build_sha: Option<String>,
+        /// Preview a planning window (a flow sequence shaped like the planning-day note's
+        /// `window`) on the today view, with `moved` against the current window. Writes nothing.
+        #[arg(long)]
+        window: Option<String>,
+    },
+    /// Fetch, refresh the series file, and print the current commitment proposals — the
+    /// phase-2 confirm screen's data source (spec §5.1, R14). Writes no note, no card and no
+    /// journal record; `state/calendar.md` is untouched. Always exits 0. With `--confirm`
+    /// (phase-2 spec §3) it fetches nothing: it writes the screen's answers from a JSON file,
+    /// prints `{created, declined, warnings, window}`, and exits 2 on unreadable input or an
+    /// invalid window, having written nothing.
+    Commitments {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Pin the run date (YYYY-MM-DD). Without it, the vault's zone and the system date.
+        #[arg(long)]
+        today: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// `{"mine": [{"source_uid", "level"}], "not_mine": [...], "window": "<flow sequence>"}`.
+        #[arg(long)]
+        confirm: Option<PathBuf>,
+        #[arg(long, default_value = "quinn")]
+        actor: String,
+        #[arg(long, default_value = "dashboard", value_parser = journal::VIAS)]
+        via: String,
     },
     /// Sync zyBooks + VHL coursework into tasks/. Ports `python -m engine.coursework`.
     ///
@@ -417,16 +443,63 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Surface { vault, view, today, now, seen_at, build_sha } => {
+        Command::Surface { vault, view, today, now, seen_at, build_sha, window } => {
             let Some(view) = knowlu_engine::surface::View::parse(&view) else { eprintln!("knowlu-engine: unknown view {view:?}"); return ExitCode::from(2); };
             let tz = knowlu_engine::cli::vault_zone(&vault);
             let today_date = match today { Some(t) => match t.parse::<jiff::civil::Date>() { Ok(d) => d, Err(_) => { eprintln!("knowlu-engine: bad --today {t:?}"); return ExitCode::from(2); } }, None => jiff::Zoned::now().with_time_zone(tz.clone()).date() };
             let now_zoned = match now { Some(n) => match n.parse::<jiff::civil::DateTime>().and_then(|d| d.to_zoned(tz.clone())) { Ok(z) => z, Err(_) => { eprintln!("knowlu-engine: bad --now {n:?}"); return ExitCode::from(2); } }, None => jiff::Zoned::now().with_time_zone(tz) };
-            let mut state = knowlu_engine::surface::build_state(&vault, view, today_date, &now_zoned, seen_at.as_deref());
+            let mut state = match window.as_deref() {
+                None => knowlu_engine::surface::build_state(&vault, view, today_date, &now_zoned, seen_at.as_deref()),
+                Some(w) => match knowlu_engine::surface::build_state_preview(&vault, view, today_date, &now_zoned, seen_at.as_deref(), w) { Ok(s) => s, Err(e) => { eprintln!("knowlu-engine: bad --window: {e}"); return ExitCode::from(2); } },
+            };
             if let Some(sha) = build_sha { state.topline.engine_build = Some(sha); state.revision = knowlu_engine::surface::revision_of(&state); }
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS
         }
+        // commitments command: begin
+        Command::Commitments { vault, today, json, confirm, actor, via } => {
+            if let Some(path) = confirm {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        eprintln!("knowlu-engine: --confirm {}: {err}", path.display());
+                        return ExitCode::from(2);
+                    }
+                };
+                let ctx = write::WriteContext::new(&actor, &via);
+                return match cli::commitments_confirm(&vault, today.as_deref(), &text, &ctx) {
+                    Ok(report) => {
+                        println!("{}", knowlu_engine::ledger::dumps_value(&report.to_json()));
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("knowlu-engine: {err}");
+                        ExitCode::from(2)
+                    }
+                };
+            }
+            let report = cli::commitments_report(&vault, today.as_deref());
+            if json {
+                // Plan ruling Q2-b: the screen's rows in §5.2's card order.
+                let mut ordered: Vec<&knowlu_engine::commitments::Proposal> = report.proposals.iter().collect();
+                ordered.sort_by(|a, b| knowlu_engine::commitments::card_order(a, b));
+                let value = serde_json::json!({
+                    "proposals": ordered.into_iter().map(cli::proposal_json).collect::<Vec<_>>(),
+                    "uncovered_courses": report.uncovered,
+                    "warnings": report.warnings,
+                });
+                println!("{}", knowlu_engine::ledger::dumps_value(&value));
+            } else {
+                for p in &report.proposals {
+                    println!("{}", cli::proposal_line(p));
+                }
+                for w in &report.warnings {
+                    eprintln!("warning: {w}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        // commitments command: end
         Command::Coursework { vault, dry_run, via, run_id } => {
             match coursework::main(&vault, dry_run, &via, run_id.as_deref()) {
                 0 => ExitCode::SUCCESS,

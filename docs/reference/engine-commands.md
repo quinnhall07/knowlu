@@ -5,9 +5,12 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 
 - `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]`
 - `coursework --vault <v> [--dry-run] [--via <via>] [--run-id <id>]` — zyBooks + VHL into `tasks/`.
-  Always exits 0. An empty parse is a failure, never an empty semester. Passwords come from Windows
-  Credential Manager via the vault's `credential_target`; zyBooks 403s without a `User-Agent`; VHL is
-  CAS with a one-time `lt` ticket and a dashboard on `m3a.vhlcentral.com`.
+  Always exits 0. An empty parse is a failure, never an empty semester. A vendor figure at 100%
+  (zyBooks points, VHL `percentage_complete`) files a `status: done` amend proposal as
+  `agent:knowlu.completion` (`engine/src/completion.rs`); `progress` is still never written after
+  creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
+  zyBooks 403s without a `User-Agent`; VHL is CAS with a one-time `lt` ticket and a dashboard on
+  `m3a.vhlcentral.com`.
 - `coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — read-only: the
   zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
   row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows
@@ -34,7 +37,18 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   `%LOCALAPPDATA%\knowlu\profiles\<id>\entitlement.json` and the refusal is a named line at exit 0.
   `rank`, `surface` and `write` are never gated.
 - `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
-  [--today] [--now] [--seen-at] [--build-sha]` — the read model as JSON. Never writes.
+  [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
+  Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
+  exits 2 — and reports `moved` against the current window without writing one.
+- `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`
+  — without `--confirm`, it fetches the configured calendar feeds, refreshes
+  `state/calendar-series.json`, and prints the current commitment proposals as of today
+  (`coursework-discover`'s style: read-only except for the generated series-file refresh, always
+  exits 0; no note, no card, no journal record); `--json` adds `uncovered_courses` and orders the
+  proposals as the cards are. With `--confirm` (phase 2), it fetches nothing and writes the confirm
+  screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
+  `--actor quinn --via dashboard`), journal first. It prints `{created, declined, warnings, window}`
+  and exits 2 on unreadable input or an invalid window, having written nothing.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
@@ -42,8 +56,13 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
   for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
   move server-side) — never for judgment, so `rank` never calls a model still holds.
-  `engine/src/enrich.rs`'s `run_lines_with` hosts the four cloud pulls a judge step runs in one slot:
-  the tier-3 judge pass, the events pass, the Gmail pull and the rule-decision pull.
+  `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud passes a judge step runs in one slot:
+  the tier-3 judge pass, the events pass, the Gmail pull, the rule-decision pull and the label
+  report (F8: card answers and rejections, keyed by `judgment_id`, to `/telemetry`; never an
+  `email`-kind decision).
+  The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
+  a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
+  `completion::propose_done`, matched to exactly one active task by title.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
   items, issue notes, journaled note edits.
 

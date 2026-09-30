@@ -1,0 +1,111 @@
+{
+  "success": true,
+  "assignments": [
+    {
+      "assignment_id": 9100001,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-09-03T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [
+        {"challenge_earned": 0, "chapter_number": 1, "lab_earned": 0, "participation_earned": 40.0, "section_id": 7700002, "section_number": 2},
+        {"challenge_earned": 30.0, "chapter_number": 1, "lab_earned": 0, "participation_earned": 30.0, "section_id": 7700004, "section_number": 4}
+      ],
+      "sections": [
+        {"canonical_section_id": 7700001, "chapter_number": 1, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 1, "title": "Fabricated welcome", "total_points": 0},
+        {"canonical_section_id": 7700002, "chapter_number": 1, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 2, "title": "Fabricated basics", "total_points": 40.0},
+        {"canonical_section_id": 7700003, "chapter_number": 1, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 3, "title": "Fabricated reading", "total_points": 0},
+        {"canonical_section_id": 7700004, "chapter_number": 1, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 4, "title": "Fabricated practice", "total_points": 60.0}
+      ],
+      "submission_link_available": true,
+      "title": "HW 01 Fabricated introduction",
+      "visible": true,
+      "zybook_id": 8800001
+    },
+    {
+      "assignment_id": 9100002,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-09-10T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [
+        {"challenge_earned": 20.0, "chapter_number": 2, "lab_earned": 0, "participation_earned": 30.0, "section_id": 7700011, "section_number": 1},
+        {"challenge_earned": 11.0, "chapter_number": 2, "lab_earned": 0, "participation_earned": 30.0, "section_id": 7700012, "section_number": 2}
+      ],
+      "sections": [
+        {"canonical_section_id": 7700011, "chapter_number": 2, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 1, "title": "Fabricated loops", "total_points": 50},
+        {"canonical_section_id": 7700012, "chapter_number": 2, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 2, "title": "Fabricated branches", "total_points": 50}
+      ],
+      "submission_link_available": true,
+      "title": "HW 03",
+      "visible": true,
+      "zybook_id": 8800001
+    },
+    {
+      "assignment_id": 9100003,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-10-01T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [
+        {"challenge_earned": 0, "chapter_number": 9, "lab_earned": 87.0, "participation_earned": 0, "section_id": 7700091, "section_number": 1}
+      ],
+      "sections": [
+        {"canonical_section_id": 7700091, "chapter_number": 9, "include_challenges": false, "include_labs": true, "include_participations": false, "section_number": 1, "title": "Fabricated project", "total_points": 100.0}
+      ],
+      "submission_link_available": true,
+      "title": "Project 2",
+      "visible": true,
+      "zybook_id": 8800001
+    },
+    {
+      "assignment_id": 9100004,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-09-17T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [],
+      "sections": [
+        {"canonical_section_id": 7700031, "chapter_number": 3, "include_challenges": true, "include_labs": false, "include_participations": true, "section_number": 1, "title": "Fabricated functions", "total_points": 30}
+      ],
+      "submission_link_available": true,
+      "title": "HW 04",
+      "visible": true,
+      "zybook_id": 8800001
+    },
+    {
+      "assignment_id": 9100005,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-09-04T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [
+        {"challenge_earned": 0, "chapter_number": 1, "lab_earned": 10.0, "participation_earned": 0, "section_id": 7700015, "section_number": 5}
+      ],
+      "sections": [
+        {"canonical_section_id": 7700015, "chapter_number": 1, "include_challenges": false, "include_labs": true, "include_participations": false, "section_number": 5, "title": "Fabricated lab", "total_points": 10.0}
+      ],
+      "submission_link_available": true,
+      "title": "Lab 01",
+      "visible": true,
+      "zybook_id": 8800001
+    },
+    {
+      "assignment_id": 9100006,
+      "creator_user_id": 5550001,
+      "due_dates": [{"date": "2026-09-24T04:59:00Z"}],
+      "lti_consumer_resources": [],
+      "points_recorded_in_lms": false,
+      "section_scores": [
+        {"challenge_earned": 10.0, "chapter_number": 4, "lab_earned": 0, "participation_earned": 10.0, "section_id": 7700041, "section_number": 1}
+      ],
+      "sections": [
+        {"canonical_section_id": 7700041, "chapter_number": 4, "include_challenges": false, "include_labs": false, "include_participations": true, "section_number": 1, "title": "Fabricated arrays", "total_points": 20}
+      ],
+      "submission_link_available": true,
+      "title": "HW 05",
+      "visible": true,
+      "zybook_id": 8800001
+    }
+  ]
+}

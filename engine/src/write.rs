@@ -33,6 +33,9 @@ use crate::pystr;
 pub enum WriteError {
     NoFrontmatter(String),
     AppendLine(&'static str),
+    /// A frontmatter literal carrying a line break, named by its field. Refused before anything is
+    /// journalled or written: surgery replaces one line, so a second line would be orphaned.
+    LineBreak(String),
     Exists(String),
     Id(IdError),
     Ingest(IngestError),
@@ -45,6 +48,9 @@ impl std::fmt::Display for WriteError {
         match self {
             WriteError::NoFrontmatter(p) => write!(f, "{p} has no readable frontmatter"),
             WriteError::AppendLine(why) => write!(f, "append line {why}"),
+            WriteError::LineBreak(field) => {
+                write!(f, "{field}: a frontmatter value must not contain a line break")
+            }
             WriteError::Exists(p) => write!(f, "{p} exists"),
             WriteError::Id(e) => write!(f, "{e}"),
             WriteError::Ingest(e) => write!(f, "{e}"),
@@ -230,6 +236,14 @@ pub fn write_literals(
     journal: &mut Journal,
     opts: &WriteOpts<'_>,
 ) -> Result<WriteResult, WriteError> {
+    // Every literal is one line, or nothing is written: surgery replaces exactly one line, so a
+    // literal carrying a break would orphan its tail (and a tail of `---` would close the block).
+    // Only `\n` and `\r` count: surgery splits on `\n` and `read_text` maps `\r` to `\n`. U+2028,
+    // U+2029 and U+0085 are not breaks to anything that re-reads a note, so they are written
+    // (refusing them would fail a whole coursework or enrich batch on an upstream title).
+    if let Some((name, _)) = literals.iter().find(|(_, l)| l.contains(['\n', '\r'])) {
+        return Err(WriteError::LineBreak(name.clone()));
+    }
     let path = resolve_target(vault, target)?;
     let rel_path = rel(vault, &path);
     let (_, meta) = load(&path, true)?;
@@ -351,8 +365,15 @@ pub fn write_literals(
                 // `today` is the system date, as Python's `today or date.today()` resolves it for
                 // every production caller. Nothing in the engine passes a pinned date to this path.
                 let today = jiff::Zoned::now().date();
+                // F5(b): whenever the judged write that produced this card carried the service's
+                // judgment id (`enrich`'s `inputs`), the card keeps it too — both keys or
+                // neither, read straight off `opts.inputs` rather than re-derived.
+                let judgment_ids = opts.inputs.and_then(|m| {
+                    Some((get_str(m, "judgment_id")?, get_str(m, "judgment_kind")?))
+                });
+                let judgment = judgment_ids.as_ref().map(|(id, kind)| (id.as_str(), kind.as_str()));
                 result.proposal = Some(propose_amendment(
-                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today,
+                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment,
                 )?);
             }
         }
@@ -676,6 +697,11 @@ pub fn propose_amendment(
     journal: &mut Journal,
     evidence: Option<&serde_json::Value>,
     today: jiff::civil::Date,
+    // F5(b): `(judgment_id, judgment_kind)`, whenever the judged write behind this card carried
+    // the service's own judgment id — both or neither. `None` on every write with no id (tier 1,
+    // a local run, or an older server), which renders the card exactly as before this parameter
+    // existed.
+    judgment: Option<(&str, &str)>,
 ) -> Result<PathBuf, WriteError> {
     let target_rel = rel(vault, target_path);
     let stem_of_target = target_path
@@ -715,7 +741,7 @@ pub fn propose_amendment(
             ]),
         ));
     }
-    let front = crate::yamlemit::Node::map(vec![
+    let mut front_pairs: Vec<(&str, crate::yamlemit::Node)> = vec![
         ("type", crate::yamlemit::Node::text("approval")),
         ("kind", crate::yamlemit::Node::text("amend")),
         ("title", crate::yamlemit::Node::text(&format!("Re-proposed {fields} for {title}"))),
@@ -731,8 +757,14 @@ pub fn propose_amendment(
         ("expires", crate::yamlemit::Node::Null),
         ("snooze_until", crate::yamlemit::Node::Null),
         ("created_by", crate::yamlemit::Node::text(&ctx.actor)),
-        ("changes", crate::yamlemit::Node::Map(change_block)),
-    ]);
+    ];
+    // F5(b): after `created_by`, before `changes` — both keys or neither.
+    if let Some((judgment_id, judgment_kind)) = judgment {
+        front_pairs.push(("judgment_id", crate::yamlemit::Node::text(judgment_id)));
+        front_pairs.push(("judgment_kind", crate::yamlemit::Node::text(judgment_kind)));
+    }
+    front_pairs.push(("changes", crate::yamlemit::Node::Map(change_block)));
+    let front = crate::yamlemit::Node::map(front_pairs);
     let mut why = format!(
         "{} re-judged {fields}; Quinn had set them by hand, so this is a proposal (judge-once rule).",
         ctx.actor
@@ -972,6 +1004,83 @@ mod tests {
         // never matched itself on re-read and was appended again on every pass.
         assert_eq!(single_line_problem("a\u{2028}b"), Some("must be a single line"));
         assert_eq!(single_line_problem("  --- x"), Some("must not start a frontmatter block"));
+    }
+
+    // -- dashes and line breaks in a literal --------------------------------
+
+    #[test]
+    fn a_title_carrying_dashes_is_quoted_and_the_note_survives_a_second_edit() {
+        // `a---b` and `--- x` are legitimate titles. Quoted, each is one line that is not a
+        // delimiter line, so the note must still read in full and take a later edit.
+        for title in ["a---b", "--- x", "x ---", "---"] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            assert_eq!(literal.lines().count(), 1, "{title:?}");
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal)]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("active"), "{title:?}");
+            assert_eq!(get_str(&meta, "id").as_deref(), Some("task_0123456789"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+
+            // The second edit is what the reviewer's probe broke.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+            let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+        }
+    }
+
+    #[test]
+    fn a_literal_carrying_a_line_break_is_refused_and_nothing_is_written() {
+        for raw in ["a\nb", "a\rb", "a\r\nb", "\"a\n---\nb\"", "\"a\rb\""] {
+            let v = vault();
+            let path = seed(&v);
+            let before = std::fs::read(&path).unwrap();
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done"), ("title", raw)]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{raw:?} must be refused"));
+            assert!(err.to_string().contains("title"), "{raw:?}: {err}");
+            assert!(err.to_string().contains("line break"), "{raw:?}: {err}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{raw:?}: the note must be untouched");
+            assert!(j.read(None, None).is_empty(), "{raw:?}: no journal record for a refused write");
+        }
+    }
+
+    #[test]
+    fn an_invisible_separator_is_not_a_line_break_to_the_note_and_is_written() {
+        // Surgery splits on `\n` and `read_text` maps `\r` to `\n`; nothing that re-reads a note
+        // breaks on U+2028/U+2029/U+0085. Refusing them would fail a whole coursework or enrich
+        // batch on every run for as long as an upstream title (pasted from a PDF) carries one.
+        for (title, reads_back) in [
+            ("a\u{2028}b", "a\u{2028}b"),
+            ("a\u{2029}b", "a\u{2029}b"),
+            // NEL is folded to a space by the YAML reader — lossy, pre-existing, not a break.
+            ("a\u{85}b", "a b"),
+        ] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal), ("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(reads_back), "{title:?}");
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+            assert_eq!(j.read(None, None).len(), 2, "{title:?}");
+            // ...and the note still takes a second edit.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "active")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+        }
     }
 
     // -- the ordering invariant --------------------------------------------
@@ -1386,6 +1495,84 @@ mod tests {
 
         // And the proposal is one the engine can actually apply.
         assert!(crate::approvals::validate_amendment(&v, &meta).is_ok(), "an unappliable proposal is worse than none");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F5(b): when the judged write behind the card carried the service's judgment id (as
+    /// `enrich` now passes through `opts.inputs`), the card keeps both `judgment_id` and
+    /// `judgment_kind`, placed right after `created_by` and before `changes`.
+    #[test]
+    fn an_amend_card_from_a_judged_write_carries_judgment_id_and_kind() {
+        let v = propose_vault("with-jid");
+        let mut journal = Journal::new(&v);
+        write_literals(&v, "tasks/t.md", &[("effort_hours".to_string(), "4.0".to_string())],
+            &WriteContext::new("quinn", "dashboard"), &mut journal, &WriteOpts::default()).unwrap();
+
+        let mut inputs = Mapping::new();
+        inputs.insert(Value::String("judgment_id".into()), Value::String("3fa85f64-5717-4562-b3fc-2c963f66afa6".into()));
+        inputs.insert(Value::String("judgment_kind".into()), Value::String("task".into()));
+        let res = write_literals(
+            &v, "tasks/t.md",
+            &[("effort_hours".to_string(), "2.0".to_string())],
+            &WriteContext::new("agent:knowlu.enrich", "local-runner"),
+            &mut journal,
+            &WriteOpts { judged: true, propose: true, inputs: Some(&inputs), ..Default::default() },
+        ).unwrap();
+
+        let path = res.proposal.expect("an amendment was filed");
+        let text = pystr::read_text(&path).unwrap();
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        assert_eq!(get_str(&meta, "judgment_id").as_deref(), Some("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert_eq!(get_str(&meta, "judgment_kind").as_deref(), Some("task"));
+
+        // Position: right after `created_by`, right before `changes`.
+        let lines: Vec<&str> = text.lines().collect();
+        let created_by_at = lines.iter().position(|l| l.starts_with("created_by:")).unwrap();
+        assert_eq!(lines[created_by_at + 1], "judgment_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(lines[created_by_at + 2], "judgment_kind: task");
+        assert_eq!(lines[created_by_at + 3], "changes:");
+
+        // The two extra keys do not break the card's own contract.
+        assert!(crate::approvals::validate_amendment(&v, &meta).is_ok());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// F5(b): a judged write with no id (the common case today — a local run, tier 1, or an
+    /// older server) mints a card **byte-identical** to the one before this parameter existed:
+    /// same lines, same order, no `judgment_id`/`judgment_kind` anywhere. Compared against the
+    /// exact bytes this vault produces, with only the run's own `proposed_at`/`first_proposed_at`
+    /// (today's date) and the minted approval id spliced in, since neither is pinnable from here.
+    #[test]
+    fn an_amend_card_without_one_is_byte_identical() {
+        let v = propose_vault("no-jid");
+        let mut journal = Journal::new(&v);
+        write_literals(&v, "tasks/t.md", &[("effort_hours".to_string(), "4.0".to_string())],
+            &WriteContext::new("quinn", "dashboard"), &mut journal, &WriteOpts::default()).unwrap();
+        let res = write_literals(
+            &v, "tasks/t.md",
+            &[("effort_hours".to_string(), "2.0".to_string())],
+            &WriteContext::new("agent:knowlu.enrich", "local-runner"),
+            &mut journal,
+            &WriteOpts { judged: true, propose: true, ..Default::default() },
+        ).unwrap();
+
+        let path = res.proposal.expect("an amendment was filed");
+        let text = pystr::read_text(&path).unwrap();
+        assert!(!text.contains("judgment_id"), "{text}");
+        assert!(!text.contains("judgment_kind"), "{text}");
+
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        let today = get_str(&meta, "proposed_at").unwrap();
+        let id = get_str(&meta, "id").unwrap();
+        let expected = format!(
+            "---\ntype: approval\nkind: amend\ntitle: Re-proposed effort_hours for CS 100 HW 01\n\
+             status: pending\ntarget: tasks/t.md\nproposed_at: {today}\nfirst_proposed_at: {today}\n\
+             expires: null\nsnooze_until: null\ncreated_by: agent:knowlu.enrich\nchanges:\n  \
+             effort_hours:\n    from: 4.0\n    to: 2.0\nid: {id}\n---\n\n\
+             **Why proposed:** agent:knowlu.enrich re-judged effort_hours; Quinn had set them by \
+             hand, so this is a proposal (judge-once rule).\n{AMEND_BUTTONS}"
+        );
+        assert_eq!(text, expected);
         let _ = std::fs::remove_dir_all(&v);
     }
 

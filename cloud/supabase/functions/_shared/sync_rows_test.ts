@@ -58,10 +58,20 @@ Deno.test("a note path is one of the note folders, markdown, and cannot climb ou
   }
 });
 
-Deno.test("a grade note and a commitment note are note paths; state/grades.json is not (grades spec §7)", () => {
-  // `grades/` is the engine's newest note folder. `commitments/` is accepted too, on purpose: the
-  // commitment model's branch adds that folder on its own, and a path the server refuses wedges
-  // every push (the batch is all-or-nothing), so the server takes both whichever branch merges first.
+Deno.test("a confirmed commitment or a decline marker is a note path; state/ still is not (commitment model §10, phase 1s)", () => {
+  // `commitments/` is the engine's seventh note folder (`ids::NOTE_FOLDERS`); a refused path there
+  // would wedge every push (R-C3′-exec-12). The cards about commitments never reach here at all.
+  for (const ok of ["commitments/x.md", "commitments/cs-100.md", "commitments/declined-0123456789.md"]) {
+    assert(isNotePath(ok), ok);
+  }
+  for (const bad of ["state/calendar-series.json", "state/plan.json", "state/x.md", "commitments/x.json", "commitments/"]) {
+    assert(!isNotePath(bad), `${bad} was accepted`);
+  }
+});
+
+Deno.test("a grade note is a note path; state/grades.json is not (grades spec §7)", () => {
+  // `grades/` is the engine's eighth note folder, after `commitments/` (`ids::NOTE_FOLDERS`); a path
+  // the server refuses wedges every push (the batch is all-or-nothing).
   for (const ok of ["grades/x.md", "grades/cs-100-hw-01.md", "commitments/x.md"]) {
     assert(isNotePath(ok), ok);
   }

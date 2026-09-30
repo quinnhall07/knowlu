@@ -2,8 +2,8 @@
 
 What Knowlu is and must stay, so near-term decisions don't foreclose it. **Check every design against
 this file.** It states what holds now; how each point was decided lives in
-`docs/specs/2026-09-09-knowlu-cloud-design.md` (signed, with its amendments; the rulings of 2026-09-29
-are its latest amendment), the product and business plan
+`docs/specs/2026-09-09-knowlu-cloud-design.md` (signed, with its amendments; the latest, of
+2026-09-29, signed 2026-09-29), the product and business plan
 (`docs/notes/2026-09-01-product-and-business-plan.md`, "the plan"), and git history.
 
 ## The promise
@@ -143,18 +143,18 @@ other calendars or anyone else's events; changing those stays a proposal.
 ## The product
 
 - **A Windows desktop app**, Rust + Tauri, OS-native webview. No web app and no mobile app, and
-  nothing builds toward either; the account carries a student between desktops. Base app under 50 MB,
+  nothing builds toward either. A phone may follow once the desktop product is proven; that takes a new signed amendment. The account carries a student between desktops. Base app under 50 MB,
   ideally under 20.
 - **One edition: $9.99 a month, an account required**, no free tier, a 7-day trial. An academic-year
   price is kept as an option; billing pauses June to August.
-- **Onboarding creates the vault** under `%USERPROFILE%\Knowlu\` and asks for sign-ins and syllabi,
-  nothing else. It is judged by one thing: a new student reaches "it already knows what's next" in
-  their first session.
+- **Onboarding creates the vault** under `%USERPROFILE%\Knowlu\` and asks for sign-ins, nothing
+  else; syllabus upload joins it with the syllabus and GPA phase (Build order). It is judged by one
+  thing: a new student reaches "it already knows what's next" in their first session.
 - **Minimize the AI surface.** Most capabilities need no model. Classification over generation,
   schema-constrained output on every call, and a rule-promotion loop that retires model calls into
   rules as patterns repeat. The model's job keeps shrinking to the residue rules cannot decide.
 - **Judgment is a service.** Extraction and classification run in our cloud, each kind pinned to one
-  named model at one named zero-retention host, with no fallback routing, and logged by id. Nothing
+  named model at one named zero-retention host, with no fallback routing, and logged by id. Open-weights models on hosted zero-retention APIs are preferred where they pass the evaluation. Nothing
   model-shaped ships in the app. **Fetch on device, think in the cloud:** the one thing that stays
   on the device is the fetch that needs the student's own portal sign-in.
 - **Teach once, run deterministically forever.** A browser and a model bootstrap a source once; the
@@ -195,22 +195,41 @@ Failure modes designed against: trust decay, notification fatigue, capture frict
 
 ## Build order
 
-**The MVP is everything the founder's own system (quinn-ops) did, plus grades from Blackboard:**
+Work moves in four stages, each named for what the student gets (the cloud design's Amendment
+2026-09-29, ruling 10): **MVP → Pilot → Launch → Beyond**.
+
+**The MVP is everything the founder's own system (quinn-ops) did, plus grades from Blackboard,**
+proven on the founder's own scratch profile before anyone else uses it:
 
 - today's page: the ordered list with start-by dates and slack, must-do work against the day's
   capacity, recommended work in the day's gaps, the schedule, coming-up events, and the
   ahead/behind verdict;
 - the decisions deck (approve, reject, snooze) and every task field editable, with one progress
   control per task;
+- **typed commitments** (the commitment model's phases 1–2): classes, labs, work and meetings,
+  each hard, soft or optional, confirmed by the student;
 - sources: the LMS feed, zyBooks, VHL, Google Calendar, Gmail and campus events, with judgment in
   the cloud;
 - runs and failures visible in the app;
 - **grades per course from Blackboard**, as the rings and their breakdowns.
 
-Then, in phases, each through spec, plan and review: the commitment model (in progress); the main
-page (domain strip, free time, all clear, today's schedule); syllabus upload with grade weights,
-GPA and exam prep; quick capture; nudges and lock-in; the assistant; Outlook and more homework
-platforms; the dedicated calendar in Google and Outlook.
+**The pilot** is a few undergraduates other than the founder, on the released app, one computer
+each, needing nothing from anyone. It adds the registrar where the school offers it (the
+commitment model's phase 3). No one else signs up before the privacy page names the kept
+Blackboard sign-in and the grades the account holds, a lawyer has read it, the re-consent a second
+account needs is in the app, and a new vault records its student with the neutral token `student`
+rather than the founder's name (the full gate: the cloud design's ruling 10). No student, the
+founder included, keeps a Blackboard sign-in before their own university's policy has been read:
+the app offers the Blackboard connection only at a school whose read it records (UA's is read
+before the MVP ends), so until then a pilot student joins without grades from Blackboard.
+
+**Launch** is any US undergraduate paying $9.99, on every desktop they use: the relay fetch and
+two-desktop sync ship before it.
+
+**Beyond, in phases**, each through spec, plan and review: the main page (domain strip, free time,
+all clear, today's schedule); syllabus upload with grade weights, GPA and exam prep; quick
+capture; nudges and lock-in; the assistant; Outlook and more homework platforms; the dedicated
+calendar in Google and Outlook.
 
 ## Open decisions
 
@@ -223,4 +242,4 @@ platforms; the dedicated calendar in Google and Outlook.
 | Writing the dedicated calendar (`calendar.events` on Google, the Outlook equivalent) | Later; needs a new consent and a privacy-page update |
 | Co-founder | Unowned, and the only open decision with no next action |
 | Legal read on scraping and minors | Landscape written (`docs/notes/2026-09-09-knowlu-cloud-legal-landscape.md`); a lawyer before the first non-founder paid sign-up |
-| Making the code public | Not before the fixtures are replaced with synthetic vaults; they carry real coursework titles |
+| The repository's visibility | Public since 2026-09-29 (Quinn: develop in the open now, go private later; no scrub for now; the cloud design's Amendment 2026-09-29, ruling 13). The fixtures and history carry real coursework titles and a few personal paths. Returning it to private is a Launch decision |

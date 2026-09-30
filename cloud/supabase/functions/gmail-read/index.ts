@@ -137,9 +137,12 @@ Deno.serve(readHandler(requireActiveEntitlement, {
     );
   },
   async undelivered(accountId) {
+    // F6a: `judgment_id` is already written by `enqueue` above; the device needs it back to post a
+    // label row keyed to the judgment (`/telemetry`), so it must ride along with every undelivered
+    // item, not just get stored.
     return await sharedDb().select(
-      `gmail_queue?account_id=eq.${accountId}&delivered_at=is.null&select=uid,tier,payload&order=queued_at`,
-    ) as Array<{ uid: string; tier: string; payload: Record<string, unknown> }>;
+      `gmail_queue?account_id=eq.${accountId}&delivered_at=is.null&select=uid,tier,payload,judgment_id&order=queued_at`,
+    ) as Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>;
   },
   async deliver(accountId, uids) {
     const list = uids.map((u) => `"${u}"`).join(",");

@@ -281,6 +281,19 @@ impl Journal {
             .next_back()
     }
 
+    /// Did Quinn **edit** this field after the note existed? The latest `op: set` record by
+    /// `quinn` for it, or `None`. Unlike [`Journal::human_set`], a `create` record never counts:
+    /// commitment change detection (§5.4) asks this, because the confirm screen mints every
+    /// confirmed note as `quinn` with the calendar's `meets`, `where` and `until` already in it —
+    /// values the calendar chose, which a later calendar change must still be able to propose.
+    pub fn human_edited(&mut self, note_id: &str, field: &str) -> Option<Record> {
+        self.records_for(note_id, Some(field))
+            .into_iter()
+            .filter(|r| str_of(r, "actor").as_deref() == Some("quinn"))
+            .filter(|r| str_of(r, "op").as_deref() == Some("set"))
+            .next_back()
+    }
+
     /// One warning per record timestamped more than `minutes` after `now`.
     ///
     /// The record is still honoured — the later-timestamp-wins rule needs a total order and both
@@ -434,6 +447,27 @@ mod tests {
         j.append(&mut rec).unwrap();
         assert!(j.human_set("id1", "due").is_some());
         assert!(j.human_set("id1", "missing").is_none());
+    }
+
+    #[test]
+    fn human_edited_counts_a_later_set_but_never_the_create() {
+        let v = vault();
+        let mut j = Journal::new(&v);
+        let mut spec = NewRecord::new("create", "commitments/x.md", "quinn", "dashboard");
+        spec.id = Some("id1");
+        spec.new = serde_json::json!({"meets": "x", "until": "2026-12-04"});
+        spec.ts = Some("2026-08-29T12:00:00.000Z".into());
+        let mut rec = make_record(spec).unwrap();
+        j.append(&mut rec).unwrap();
+        assert!(j.human_set("id1", "meets").is_some(), "human_set is unchanged");
+        assert!(j.human_edited("id1", "meets").is_none());
+        let mut agent = set_rec("id1", "meets", "agent:commitments", "2026-08-30T12:00:00.000Z");
+        j.append(&mut agent).unwrap();
+        assert!(j.human_edited("id1", "meets").is_none(), "an agent's set is not the student's");
+        let mut edit = set_rec("id1", "meets", "quinn", "2026-08-31T12:00:00.000Z");
+        j.append(&mut edit).unwrap();
+        assert!(j.human_edited("id1", "meets").is_some());
+        assert!(j.human_edited("id1", "until").is_none());
     }
 
     #[test]
