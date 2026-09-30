@@ -650,6 +650,13 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // the deck — stays here like the card itself. A `continue`, like the two filters above, so
         // it never advances `next` and can never wedge a page.
         if sync_cards.covers(&record) { continue; }
+        // M2 D13 (Q6 (A)): a record about a path outside the note folders — the profile's
+        // `profile/preferences.md` and `profile/interests.md` above all — stays on this computer.
+        // Every other desktop (`apply`) and every restore refuses such a record by the same
+        // `is_note_path`, so the account would keep data no computer can use. A `continue`, like the
+        // filters above, so it never advances `next` and can never wedge a page.
+        let path = record.get("path").and_then(Value::as_str).unwrap_or_default();
+        if !is_note_path(vault, path) { continue; }
         // R-C3′-exec-12 (the wedge principle): predict every refusal `sync_rows.ts::checkRecord`
         // makes and never send the row that would trigger it. `sync_rows.ts:89-93` refuses a record
         // whose body has no non-empty string `op` or `actor` — `ledger::read` itself validates only

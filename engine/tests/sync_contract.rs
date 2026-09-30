@@ -580,6 +580,126 @@ fn an_unreadable_folder_suppresses_tombstones_for_that_folder_only() {
 }
 
 // ---------------------------------------------------------------------------
+// M2 editing (spec 2026-09-29, §6.2, §7.3, D13): a body edit's record, and the profile's.
+// ---------------------------------------------------------------------------
+
+/// The app's `console_ctx(vault)`: the vault's own human token, via `dashboard`. Read from the vault,
+/// never spelt here (rule 1).
+fn vault_ctx(vault: &Path) -> knowlu_engine::write::WriteContext {
+    let token = knowlu_engine::journal::read_human_actor(vault).expect("the vault's human token");
+    knowlu_engine::write::WriteContext::new(token, "dashboard")
+}
+
+/// A batch's records, parsed back out of the canonical bodies they travel as.
+fn sent_records(batch: &sync::PushBatch) -> Vec<serde_json::Value> {
+    batch.records.iter()
+        .map(|r| serde_json::from_str(r["body"].as_str().expect("a body")).expect("a record"))
+        .collect()
+}
+
+fn is_profile_path(record: &serde_json::Value) -> bool {
+    record["path"].as_str().is_some_and(|p| p.starts_with("profile/"))
+}
+
+/// Spec test 15 (§6.2, D3): a `set_body` record holds two digests and two byte counts, never the
+/// body, so it stays small whatever the note holds. `record_is_well_formed` (which reads
+/// `journal::OPS`) takes it, and `build_push` sends it like any other record about a note.
+#[test]
+fn a_set_body_record_is_well_formed_and_small_whatever_the_body() {
+    let dir = fixture("set-body-small");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    let note = "---\nid: task_00000000aa\ntitle: Long notes\n---\n\nshort\n";
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("long-notes.md"), note).expect("a note");
+    let body = "x".repeat(100 * 1024);
+    let wrote = knowlu_engine::write::set_body(&dir, "tasks/long-notes.md", "short\n", &body, &ctx, &mut journal);
+    assert_eq!(wrote, Ok(true));
+
+    journal.invalidate();
+    let records = journal.read(None, None);
+    let record = records.iter()
+        .find(|r| r.get("op").and_then(serde_json::Value::as_str) == Some("set_body"))
+        .expect("the set_body record");
+    assert_eq!(sync::record_is_well_formed(record), Ok(()));
+    let bytes = knowlu_engine::ledger::dumps_value(&serde_json::Value::Object(record.clone()));
+    assert!(bytes.len() < 1024, "{} bytes: {bytes}", bytes.len());
+    assert!(!bytes.contains("xxxx"), "no body text in the record: {bytes}");
+    // The body D6 writes (one final newline added), measured and hashed, not the file.
+    let written = format!("{body}\n");
+    assert_eq!(record["new"]["bytes"], serde_json::json!(written.len()));
+    assert_eq!(record["new"]["sha256"], serde_json::json!(knowlu_engine::write::body_sha256(&written)));
+
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(batch.warnings.is_empty(), "{:?}", batch.warnings);
+    let sent = sent_records(&batch);
+    assert!(
+        sent.iter().any(|r| r["op"] == "set_body" && r["path"] == "tasks/long-notes.md" && r["id"] == "task_00000000aa"),
+        "{sent:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Spec test 16 (§7.3, D13, Q6 (A)): a record whose path is outside the note folders (here the
+/// profile's `create`, `set_body` and `set`) stays on this computer, since `apply` and `restore`
+/// both refuse one. The filter is a `continue`: a `tasks/` record in the same journal still goes, and
+/// later pushes neither re-send the withheld records nor stall on them.
+#[test]
+fn build_push_sends_no_record_about_a_path_outside_the_note_folders() {
+    use knowlu_engine::write;
+    let dir = fixture("profile-stays-local");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    let importance = |n: &str| [("importance".to_string(), n.to_string())];
+    // What T3's editors write: each file's `create`, a preferences `set_body`, an interests `set`...
+    write::create_profile_file(&dir, "preferences", "Mornings.\n", &ctx, &mut journal).expect("preferences");
+    let edited = write::set_body(&dir, "profile/preferences.md", "Mornings.\n", "Evenings.\n", &ctx, &mut journal);
+    assert_eq!(edited, Ok(true));
+    let interests = "---\nstrong: []\nmild: []\nnever: []\nclubs: []\n---\n";
+    write::create_profile_file(&dir, "interests", interests, &ctx, &mut journal).expect("interests");
+    let lists = [("strong".to_string(), "[AI talks]".to_string())];
+    write::write_one_line_literals(&dir, "profile/interests.md", &lists, &ctx, &mut journal, &Default::default())
+        .expect("a list");
+    // ...and, after them, a record about a note.
+    write::write_literals(&dir, "tasks/cs-100-hw-01.md", &importance("5"), &ctx, &mut journal, &Default::default())
+        .expect("a task edit");
+    journal.invalidate();
+    let journalled = journal.read(None, None);
+    let profile = journalled.iter()
+        .filter(|r| r.get("path").and_then(serde_json::Value::as_str).is_some_and(|p| p.starts_with("profile/")))
+        .count();
+    assert_eq!(profile, 4, "the setup journals four profile records: {journalled:?}");
+
+    let (first, cursor) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let sent = sent_records(&first);
+    assert!(!sent.iter().any(is_profile_path), "a profile record went up: {sent:?}");
+    assert!(!first.notes.iter().any(is_profile_path), "{:?}", first.notes);
+    let task_edit = |r: &serde_json::Value| {
+        r["op"] == "set" && r["path"] == "tasks/cs-100-hw-01.md" && r["field"] == "importance" && r["actor"] == ctx.actor.as_str()
+    };
+    assert!(sent.iter().any(|r| task_edit(r) && r["new"] == 5), "the note's record still goes: {sent:?}");
+    assert_eq!(sent.len(), 2, "the fixture's seed record and this edit, and nothing else: {sent:?}");
+
+    // A second push re-sends nothing: a withheld record is never retried.
+    let (second, cursor) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    assert_eq!(second.records.len(), 0, "{:?}", second.records);
+
+    // Nor does it stall: a later profile edit stays, a later note edit goes, and then nothing is left.
+    let edited = write::set_body(&dir, "profile/preferences.md", "Evenings.\n", "Weekends.\n", &ctx, &mut journal);
+    assert_eq!(edited, Ok(true));
+    write::write_literals(&dir, "tasks/cs-100-hw-01.md", &importance("2"), &ctx, &mut journal, &Default::default())
+        .expect("a second task edit");
+    journal.invalidate();
+    let (third, cursor) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    let sent = sent_records(&third);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(task_edit(&sent[0]) && sent[0]["new"] == 2, "{sent:?}");
+    let (fourth, _) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    assert_eq!(fourth.records.len(), 0, "{:?}", fourth.records);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // Task 6: the pull, `reconcile` with the roles reversed, and the amend card.
 // ---------------------------------------------------------------------------
 
