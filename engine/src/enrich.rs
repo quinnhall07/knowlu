@@ -2141,9 +2141,9 @@ mod tests {
     /// longer ships). The literal is the one `an_item_without_one_writes_todays_bytes` held before
     /// D7, copied verbatim.
     ///
-    /// **Compared without `id:`** — `write::create` mints a fresh opaque id into the frontmatter of
-    /// every note it creates, so a byte-for-byte comparison would fail by construction. The id is
-    /// the one line that is *supposed* to differ; everything else is the contract.
+    /// **Byte for byte** — the minted `id:` is read back from the note's own frontmatter and put
+    /// into the literal, so the trailing newline, line endings and the `id:` line's place are all
+    /// pinned; nothing is stripped.
     #[test]
     fn an_approved_gmail_card_materialises_todays_gmail_note_bytes() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
@@ -2175,14 +2175,14 @@ mod tests {
             &vault, today, jiff::civil::date(2026, 9, 9).at(9, 0, 0, 0), &ctx, &mut journal,
         );
 
-        let strip_id = |text: &str| {
-            text.lines().filter(|l| !l.starts_with("id:")).collect::<Vec<_>>().join("\n")
-        };
         let notes = crate::approvals::sorted_md(&vault.join("tasks"));
         assert_eq!(notes.len(), 1, "the approved card produced exactly one note: {notes:?}");
-        let from_card = std::fs::read_to_string(&notes[0]).unwrap();
-        // The literal `an_item_without_one_writes_todays_bytes` pinned at `:2366-2372`, verbatim,
-        // with the one `id:` line removed (both sides go through `strip_id`).
+        let from_card = crate::pystr::read_text(&notes[0]).unwrap();
+        // The id is the one minted value; read it from the note's own frontmatter, as
+        // `an_item_without_one_writes_todays_bytes` did before D7, then compare every byte.
+        let meta = crate::ids::read_meta(&notes[0]).unwrap();
+        let id = crate::yaml::opt_text(crate::yaml::get(&meta, "id")).expect("write::create mints an id");
+        // The literal `an_item_without_one_writes_todays_bytes` pinned before D7, verbatim.
         let expected = format!(
             "---\ntitle: \"PH 106 problem set 4\"\ncourse: \"ph-106\"\ndomain: school\n\
              due: 2026-09-11\neffort_hours: 2.5\neffort_confidence: low\neffort_source: inferred\n\
@@ -2190,9 +2190,9 @@ mod tests {
              status: active\nprogress: 0\ncreated_by: gmail\nsource_uid: \"gmail:m1\"\n\
              needs_enrichment: false\nid: {id}\n---\n\nFrom email. the email states a Friday \
              deadline\n",
-            id = "x"
+            id = id
         );
-        assert_eq!(strip_id(&from_card), strip_id(&expected));
+        assert_eq!(from_card, expected);
         let _ = std::fs::remove_dir_all(&vault);
     }
 
