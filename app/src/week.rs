@@ -14,8 +14,8 @@ pub fn proposals_argv(vault: &Path) -> Vec<String> {
     vec!["commitments".into(), "--vault".into(), vault.to_string_lossy().into_owned(), "--json".into()]
 }
 
-/// `--via dashboard`: the console's human context (`commands::console_ctx`); `--actor` keeps the
-/// engine's default, `quinn`.
+/// `--via dashboard`: the console's human context (`commands::console_ctx`); no `--actor`, so the
+/// engine writes as the vault's own token (`config/actor.yaml`, ruling 11).
 pub fn confirm_argv(vault: &Path, file: &Path, today: jiff::civil::Date) -> Vec<String> {
     vec![
         "commitments".into(), "--vault".into(), vault.to_string_lossy().into_owned(),

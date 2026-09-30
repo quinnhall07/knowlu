@@ -675,6 +675,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         api_base: crate::account::api_base(),
         anon_key: crate::account::anon_key(),
         account_id,
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     if let Err(e) = crate::scaffold::create_vault(&dest, &vp) {
         return json!({ "ok": false, "error": e, "profile": Value::Null });

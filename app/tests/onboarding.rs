@@ -190,6 +190,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     let vault = parent.join("Fall 2026");
     // (a) The backup folder INSIDE the vault: the one case the rule refuses, checked after the
