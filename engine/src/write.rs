@@ -785,6 +785,128 @@ pub fn set_body(
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// The profile files (M2 §6.3, §7.2, D10, D11)
+// ---------------------------------------------------------------------------
+
+/// The names [`create_profile_file`] takes, each the file `profile/<name>.md` (D11).
+const PROFILE_FILES: [&str; 2] = ["preferences", "interests"];
+
+/// M2 D11, §7.2: create `profile/<name>.md`, for `name` `preferences` or `interests` only and only
+/// when it is absent, holding `text` exactly as given. **Journal first**: one `create` record with
+/// a null `id` and `new` the frontmatter mapping `text` holds (`{}` when it has none). File second.
+/// It never stamps an id: [`create`] would mint `task_…` (`ids::kind_for`'s default) and refuses a
+/// text with no frontmatter. The caller holds the canonical texts (`profile.rs`).
+pub fn create_profile_file(
+    vault: &Path,
+    name: &str,
+    text: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
+    if !PROFILE_FILES.contains(&name) {
+        return Err(WriteError::Body("only profile/preferences.md and profile/interests.md can be created"));
+    }
+    let path = crate::ids::inside_vault(vault, &vault.join("profile").join(format!("{name}.md")))?;
+    let rel_path = rel(vault, &path);
+    // `symlink_metadata`, not `exists`: a dangling link is present, and writing through it is not
+    // creating the file.
+    if path.symlink_metadata().is_ok() {
+        return Err(WriteError::Exists(rel_path));
+    }
+    let (meta, _) = split_frontmatter(&pystr::universal_newlines(text))
+        .map_err(|_| WriteError::NoFrontmatter(rel_path.clone()))?;
+    let mut spec = NewRecord::new("create", &rel_path, &ctx.actor, &ctx.via);
+    spec.new = yaml_to_json(&Value::Mapping(meta));
+    spec.run_id = ctx.run_id.as_deref();
+    let mut record = make_record(spec).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- journal first ----
+    journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- file second ----
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| WriteError::Io(e.to_string()))?;
+    }
+    pystr::write_text(&path, text).map_err(|e| WriteError::Io(e.to_string()))?;
+    Ok(path)
+}
+
+/// M2 D10, §7.2: does `key`'s value in the frontmatter of `text` (a note's text; `\r\n` reads as
+/// `\n`) continue past its own line, so that the one-line surgery (`apply_frontmatter_fields_to_text`)
+/// would replace its first line and orphan the rest? The frontmatter is found by the writer's fence
+/// rule: it opens with `---` and closes on the first later line exactly `---`. A text with none has
+/// no value to continue, and the surgery refuses it by its own name.
+///
+/// True when the key's line (the first starting `key:`, as the surgery finds it) is followed by a
+/// non-blank line before the next line that starts at column 0 with a character other than `-`, `#`
+/// or whitespace, or before the closing fence; and when the key starts two lines. **It errs toward
+/// true**: a false true refuses an edit by name, a false false corrupts the file. So it is also true
+/// wherever the reader (`split_frontmatter`, which `events::load_interests` uses) and the surgery
+/// would disagree about the key: the reader closes on another line or cannot parse the frontmatter,
+/// or the key's line read alone does not hold the value the reader reads (a flow list continued at
+/// column 0, a key the surgery cannot find, such as a quoted one or one on the opening line).
+pub fn value_spans_lines(text: &str, key: &str) -> bool {
+    let text = pystr::universal_newlines(text);
+    if !text.starts_with("---") {
+        return false;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let close = |rule: fn(&str) -> bool| lines.iter().skip(1).position(|&l| rule(l)).map(|i| i + 1);
+    // The writer's closing line and the reader's (`split_frontmatter` strips trailing whitespace).
+    let end = match (close(|l| l == "---"), close(|l| l.trim_end() == "---")) {
+        (None, None) => return false,
+        (Some(writer), Some(reader)) if writer == reader => writer,
+        _ => return true,
+    };
+    let prefix = format!("{key}:");
+    let mut found = (1..end).filter(|&i| lines[i].starts_with(&prefix));
+    let at = found.next();
+    if found.next().is_some() {
+        return true;
+    }
+    if let Some(at) = at {
+        for line in &lines[at + 1..end] {
+            match line.chars().next() {
+                Some(c) if c != '-' && c != '#' && !c.is_whitespace() => break,
+                // Blank is YAML's blank: spaces and tabs only, so anything else counts as text.
+                _ if line.trim_matches([' ', '\t']).is_empty() => {}
+                _ => return true,
+            }
+        }
+    }
+    // Read-only parses, never re-dumped: the reader's value for the key against its line alone.
+    let Ok((meta, _)) = split_frontmatter(&text) else { return true };
+    let alone = match at {
+        None => None,
+        Some(at) => match serde_yaml_ng::from_str::<Value>(lines[at]) {
+            Ok(Value::Mapping(line)) => crate::yaml::get(&line, key).cloned(),
+            _ => return true,
+        },
+    };
+    alone.as_ref() != crate::yaml::get(&meta, key)
+}
+
+/// M2 D10, §7.2: [`write_literals`] for lists written on one line. It reads the note once and, when
+/// [`value_spans_lines`] is true for any key in `literals` (one that would not change included),
+/// refuses with `MultiLine(key)` before any record: the surgery replaces one line and would orphan
+/// the rest. Otherwise it is exactly `write_literals`, which does not change.
+pub fn write_one_line_literals(
+    vault: &Path,
+    target: &str,
+    literals: &[(String, String)],
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    opts: &WriteOpts<'_>,
+) -> Result<WriteResult, WriteError> {
+    human_gate(vault, ctx)?;
+    let path = resolve_target(vault, target)?;
+    let text = pystr::read_text(&path).map_err(|e| WriteError::Io(e.to_string()))?;
+    if let Some((key, _)) = literals.iter().find(|(key, _)| value_spans_lines(&text, key)) {
+        return Err(WriteError::MultiLine(key.clone()));
+    }
+    write_literals(vault, target, literals, ctx, journal, opts)
+}
+
 /// An already-pending `kind: amend` proposal for the same target and the same **set of fields**.
 ///
 /// Matched on the field-name set, not the values: a re-judgement that moved `due` again is still
@@ -2545,5 +2667,205 @@ mod tests {
             assert_eq!(detail_body(&v, &mut j), original, "{expected:?}");
         }
         assert_eq!(body_records(&mut j).len(), 6);
+    }
+
+    // -- M2: the profile-file primitives (T1b) -------------------------------
+
+    /// `profile/interests.md` as Knowlu creates it (§6.3); T3's `profile.rs` holds the canonical text.
+    const INTERESTS: &str = "---\nstrong: []\nmild: []\nnever: []\nclubs: []\n---\n";
+
+    #[test]
+    fn create_profile_file_makes_only_the_two_files_once_and_stamps_no_id() {
+        // The `create` record comes first: with a file where the `profile/` folder goes, the write
+        // fails after the record is in the journal.
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        std::fs::write(v.join("profile"), "").unwrap();
+        let res = create_profile_file(&v, "interests", INTERESTS, &ctx, &mut j);
+        assert!(matches!(res, Err(WriteError::Io(_))), "the file write must fail for this test to mean anything: {res:?}");
+        assert_eq!(j.read(None, None).len(), 1, "journal-first was violated");
+
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        let before = fingerprint(&v);
+        for name in ["tasks", "task", "preferences.md", "Interests", "../interests", "profile/interests", ""] {
+            let err = create_profile_file(&v, name, INTERESTS, &ctx, &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Body(_)), "{name:?}: {err}");
+        }
+        assert_eq!(fingerprint(&v), before, "another name: nothing journalled or written");
+
+        let prefs = "Mornings are best.\nNo work after 9pm.\n";
+        let interests = create_profile_file(&v, "interests", INTERESTS, &ctx, &mut j).unwrap();
+        let preferences = create_profile_file(&v, "preferences", prefs, &ctx, &mut j).unwrap();
+        assert_eq!(interests, v.join("profile").join("interests.md"));
+        assert_eq!(preferences, v.join("profile").join("preferences.md"));
+        assert_eq!(pystr::read_text(&interests).unwrap(), INTERESTS, "written as given: no id stamped");
+        assert_eq!(pystr::read_text(&preferences).unwrap(), prefs, "written as given: no frontmatter added");
+        let records = j.read(None, None);
+        assert_eq!(records.len(), 2);
+        for (rec, (path, new)) in records.iter().zip([
+            ("profile/interests.md", serde_json::json!({"strong": [], "mild": [], "never": [], "clubs": []})),
+            ("profile/preferences.md", serde_json::json!({})),
+        ]) {
+            assert_eq!(rec["op"], "create", "{rec:?}");
+            assert_eq!(rec["id"], serde_json::Value::Null, "{rec:?}");
+            assert_eq!(rec["path"], path, "{rec:?}");
+            assert_eq!(rec["new"], new, "the frontmatter mapping, or {{}} when there is none");
+            assert_eq!(rec["actor"], ctx.actor.as_str(), "{rec:?}");
+        }
+        // The event filter's own reader reads the new file as four empty lists.
+        assert_eq!(crate::events::load_interests(&interests), (crate::events::Interests::default(), Vec::new()));
+
+        // Once: an existing file is refused by name, and nothing more is journalled or written.
+        let before = fingerprint(&v);
+        for (name, text) in [("interests", "---\nstrong: [research]\n---\n"), ("preferences", "Evenings.\n")] {
+            assert_eq!(create_profile_file(&v, name, text, &ctx, &mut j), Err(WriteError::Exists(format!("profile/{name}.md"))));
+        }
+        assert_eq!(fingerprint(&v), before);
+    }
+
+    /// The four keys in the order `profile::set_interests` sends them (§7.6).
+    fn four(values: [&str; 4]) -> Vec<(String, String)> {
+        lit(&[("strong", values[0]), ("mild", values[1]), ("never", values[2]), ("clubs", values[3])])
+    }
+
+    /// `profile/interests.md` holding `text` in the vault at `v`, and the vault's human context.
+    fn interests_vault(v: &Path, text: &str) -> (PathBuf, WriteContext) {
+        let ctx = human_ctx(v);
+        std::fs::create_dir_all(v.join("profile")).unwrap();
+        let path = v.join("profile").join("interests.md");
+        pystr::write_text(&path, text).unwrap();
+        (path, ctx)
+    }
+
+    #[test]
+    fn write_one_line_literals_refuses_a_value_that_spans_lines() {
+        for (why, text, key) in [
+            ("a block list, as the fixture writes it", "---\nstrong:\n  - research\n  - AI talks\nmild: []\nnever: []\nclubs: []\n---\n", "strong"),
+            ("a list at column 0", "---\nstrong: []\nmild:\n- free food\nnever: []\nclubs: []\n---\n", "mild"),
+            ("a comment line after the key", "---\nstrong: []\nmild: []\nnever:\n# none of these\n  - recruitment\nclubs: []\n---\n", "never"),
+            ("trailing spaces after the key, then items", "---\nstrong:   \n  - research\nmild: []\nnever: []\nclubs: []\n---\n", "strong"),
+            ("a blank line inside the block", "---\nstrong: []\nmild: []\nnever: []\nclubs:\n\n  - AI Club\n\n  - Chess Club\n---\n", "clubs"),
+            ("a duplicated key", "---\nstrong: [research]\nmild: []\nnever: []\nstrong: [talks]\nclubs: []\n---\n", "strong"),
+        ] {
+            let v = vault();
+            let (_, ctx) = interests_vault(&v, text);
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = write_one_line_literals(&v, "profile/interests.md", &four(["[x]", "[y]", "[z]", "[w]"]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+            assert_eq!(err, WriteError::MultiLine(key.to_string()), "{why}");
+            assert!(err.to_string().contains("Knowlu can only edit a list written on one line"), "{why}: {err}");
+            assert_eq!(fingerprint(&v), before, "{why}: no record, and the bytes are left alone");
+        }
+
+        // A one-line or absent key is exactly `write_literals`: the same bytes and the same records
+        // on a copy of the same file. `clubs` is absent, `mild` does not change, the body is kept.
+        let text = "---\nstrong: [research]\nmild: []\n\nnever: []  # none yet\n---\n\nMy own notes.\n";
+        let literals = four(["[research, AI talks]", "[]", "[recruitment]", "[AI Club]"]);
+        let copy = std::env::temp_dir().join(format!("qo-write-copy-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&copy);
+        std::fs::create_dir_all(copy.join("state").join("journal")).unwrap();
+        let mut out = Vec::new();
+        for (v, one_line) in [(vault(), true), (copy.clone(), false)] {
+            let (path, ctx) = interests_vault(&v, text);
+            let mut j = Journal::new(&v);
+            let opts = WriteOpts::default();
+            let res = if one_line {
+                write_one_line_literals(&v, "profile/interests.md", &literals, &ctx, &mut j, &opts)
+            } else {
+                write_literals(&v, "profile/interests.md", &literals, &ctx, &mut j, &opts)
+            }
+            .unwrap();
+            let records: Vec<Record> = j.read(None, None).into_iter().map(|mut r| { r.remove("ts"); r.remove("seq"); r }).collect();
+            out.push((std::fs::read(&path).unwrap(), res.written, records, path));
+        }
+        let (one_line, plain) = (&out[0], &out[1]);
+        assert_eq!((&one_line.0, &one_line.1, &one_line.2), (&plain.0, &plain.1, &plain.2), "the bytes, the literals written and the records");
+        assert_eq!(one_line.2.len(), 3, "a record each for strong, never and clubs; none for mild");
+        let (read, warnings) = crate::events::load_interests(&one_line.3);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!((read.strong, read.mild, read.never, read.clubs), (vec!["research".to_string(), "AI talks".into()], vec![], vec!["recruitment".into()], vec!["AI Club".into()]));
+        assert!(pystr::read_text(&one_line.3).unwrap().ends_with("---\n\nMy own notes.\n"), "the body is kept");
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+
+    #[test]
+    fn profile_primitives_take_the_human_gate() {
+        use crate::journal::{HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        for (file, actor) in [
+            (Some("human_actor: alice\n".to_string()), HUMAN_ACTOR),
+            (Some(format!("human_actor: {HUMAN_ACTOR}\n")), LEGACY_HUMAN_ACTOR),
+            (None, HUMAN_ACTOR),
+        ] {
+            let v = vault();
+            std::fs::create_dir_all(v.join("profile")).unwrap();
+            pystr::write_text(&v.join("profile").join("interests.md"), INTERESTS).unwrap();
+            if let Some(text) = &file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new(actor, "dashboard");
+            let created = create_profile_file(&v, "preferences", "Mornings.\n", &ctx, &mut j).unwrap_err();
+            let written = write_one_line_literals(&v, "profile/interests.md", &lit(&[("strong", "[x]")]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+            for err in [created, written] {
+                assert!(matches!(err, WriteError::Actor(_)), "{actor} with {file:?}: {err}");
+            }
+            assert_eq!(fingerprint(&v), before, "{actor} with {file:?}: nothing journalled or written");
+        }
+        // An agent is never gated, whatever the file says.
+        let v = vault();
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        let path = create_profile_file(&v, "interests", INTERESTS, &agent, &mut j).unwrap();
+        write_one_line_literals(&v, "profile/interests.md", &lit(&[("strong", "[research]")]), &agent, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(crate::events::load_interests(&path).0.strong, ["research"]);
+        let records = j.read(None, None);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r["actor"] == "agent:knowlu.enrich"), "{records:?}");
+    }
+
+    /// T1b ruling: past §7.2's column rule, `value_spans_lines` is also true wherever the reader
+    /// (`split_frontmatter`, so `load_interests`) and the one-line surgery would disagree about the
+    /// key; and it stays false on every file Knowlu writes, so Knowlu's own lists stay editable.
+    #[test]
+    fn value_spans_lines_errs_toward_true_where_the_reader_and_the_surgery_disagree() {
+        let flow = "---\nstrong: [research,\nAI talks]\nmild: []\n---\n";
+        let read = split_frontmatter(flow).expect("the reader takes a flow list continued at column 0").0;
+        assert_eq!(crate::yaml::get(&read, "strong"), Some(&parse_literal("[research, AI talks]")), "so the surgery would orphan `AI talks]`");
+        let wrong: Vec<&str> = [
+            ("a flow list continued at column 0", flow),
+            ("a quoted key the surgery cannot find", "---\n\"strong\": [research]\n---\n"),
+            ("the key on the opening line", "---strong: [research]\nmild: []\n---\n"),
+            ("the reader closes on a spaced line before the writer's", "---\nmild: []\n--- \nBody\n---\n"),
+            ("only a spaced closing line", "---\nstrong: []\n--- \nBody\n"),
+            ("a frontmatter the reader cannot parse", "---\nstrong: [research\n---\n"),
+            ("section 7.2's own rule: a comment after a one-line value", "---\nstrong: []\n# later\nmild: []\n---\n"),
+        ]
+        .into_iter()
+        .filter(|(_, text)| !value_spans_lines(text, "strong"))
+        .map(|(why, _)| why)
+        .collect();
+        assert!(wrong.is_empty(), "false where it must be true: {wrong:?}");
+
+        let crlf = INTERESTS.replace('\n', "\r\n");
+        let mut editable: Vec<(String, &str, &str)> = [
+            ("one line, with a comment", "---\nstrong: [research]  # mine\nmild: []\n---\n"),
+            ("blank lines between the keys", "---\nstrong: [research, AI talks]\n\n\nmild: []\n\n---\n"),
+            ("an absent key", "---\nmild: []\n---\n"),
+            ("a longer key sharing the prefix", "---\nstrongest:\n  - x\nstrong: [a]\n---\n"),
+            ("list lines in the body", "---\nmild: []\n---\nstrong:\n  - x\n"),
+            ("no frontmatter: the surgery refuses the file by its own name", "Mornings.\nstrong:\n  - x\n"),
+        ]
+        .map(|(why, text)| (why.to_string(), text, "strong"))
+        .into();
+        for key in ["strong", "mild", "never", "clubs"] {
+            editable.push((format!("Knowlu's own file ({key})"), INTERESTS, key));
+            editable.push((format!("Knowlu's own file, CRLF ({key})"), crlf.as_str(), key));
+        }
+        let wrong: Vec<String> =
+            editable.into_iter().filter(|(_, text, key)| value_spans_lines(text, key)).map(|(why, ..)| why).collect();
+        assert!(wrong.is_empty(), "true where it must be false: {wrong:?}");
     }
 }
