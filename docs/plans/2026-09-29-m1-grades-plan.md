@@ -510,3 +510,9 @@ condition). Then:
 5. **A Canvas school sees the signed line** *Grades from Blackboard are not available at your school
    yet*. *Recommend* keeping it for M1 (it is the signed text and true); hiding the strip at
    non-Blackboard schools is a one-line console change if Quinn prefers it.
+6. **A row with no numeric score.** Spec §6's status table does not decide it. `column_to_fields`
+   now reads a row whose status is `Graded` and whose score is not numeric (a Complete/Incomplete or
+   letter-only column) as `graded` with `score` absent: it counts as graded, stays out of points
+   (no score) and is not pending. Only an unknown or absent status reads `in-progress`. *Recommend*
+   this, since `in-progress` would show a graded column as unfinished work indefinitely. Cost if
+   wrong: one match arm and one test in `grades.rs`, before T3 writes any note.

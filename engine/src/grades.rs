@@ -183,6 +183,8 @@ pub fn column_to_fields(column: &Value, row: Option<&Value>, zone: &TimeZone) ->
         Some(_) if score.is_some() => Status::Graded,
         Some(r) => match r["status"].as_str() {
             Some("NeedsGrading") => Status::NeedsGrading,
+            // Complete/Incomplete or letter-only column the instructor has graded: graded, no score.
+            Some("Graded") => Status::Graded,
             _ => Status::InProgress,
         },
     };
@@ -435,10 +437,20 @@ mod tests {
     }
 
     #[test]
-    fn a_row_with_no_number_and_no_known_status_is_in_progress() {
+    fn a_graded_row_with_no_number_is_graded_with_no_score() {
         let col = json!({"id": "_1_1", "name": "X"});
         let row = json!({"columnId": "_1_1", "status": "Graded", "text": "Pass"});
-        assert_eq!(column_to_fields(&col, Some(&row), &chicago()).status, Status::InProgress);
+        let f = column_to_fields(&col, Some(&row), &chicago());
+        assert_eq!((f.status, f.score), (Status::Graded, None));
+    }
+
+    #[test]
+    fn a_row_with_no_number_and_an_unknown_or_absent_status_is_in_progress() {
+        let col = json!({"id": "_1_1", "name": "X"});
+        let unknown = json!({"columnId": "_1_1", "status": "Mystery"});
+        assert_eq!(column_to_fields(&col, Some(&unknown), &chicago()).status, Status::InProgress);
+        let absent = json!({"columnId": "_1_1"});
+        assert_eq!(column_to_fields(&col, Some(&absent), &chicago()).status, Status::InProgress);
     }
 
     #[test]
