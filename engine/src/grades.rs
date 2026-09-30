@@ -531,7 +531,12 @@ pub fn apply(vault: &Path, bundle: &Bundle, ctx: &WriteContext, journal: &mut Jo
             let mut fields = column_to_fields(column, row, &zone);
             fields.category = category_title(column, course.categories.as_deref());
             let rel = note_path(&cref.slug, col_id);
-            let want = desired(&fields);
+            let mut want = desired(&fields);
+            if course.categories.is_none() {
+                // Spec 5: a refused category list says nothing about a column's category, so the
+                // note keeps what it has; only a list that no longer names the column clears it.
+                want.retain(|(name, _)| *name != "category");
+            }
             let r = if vault.join(&rel).exists() {
                 update_note(vault, &rel, &want, ctx, journal)
             } else {

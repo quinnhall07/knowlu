@@ -222,6 +222,27 @@ fn the_changed_bundle_writes_only_the_changed_fields_and_removes_the_gone_column
     cleanup(&v);
 }
 
+// ---- a refused category list is not "no category" (spec 5, 6) ----
+
+#[test]
+fn a_refused_category_list_leaves_known_categories_and_the_run_is_quiet() {
+    let v = vault("categories-refused");
+    assert!(run(&v, "bundle-basic.json").status.success());
+    let hw1 = note_path("syn-110", "_8110001_1");
+    assert_eq!(text_field(&v, &hw1, "category").as_deref(), Some("Homework"));
+    let before = vault_bytes(&v);
+    let first = records(&v).len();
+    let mut refused: serde_json::Value = serde_json::from_str(&bundle_text("bundle-basic.json")).unwrap();
+    refused["courses"][0]["categories"] = serde_json::Value::Null;
+    let out = run_text(&v, &refused.to_string());
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout(&out).lines().any(|l| l == "grades: 2 courses, 0 changed items"), "{}", stdout(&out));
+    assert_eq!(records(&v).len(), first, "no journal record: {:?}", &records(&v)[first..]);
+    assert_eq!(vault_bytes(&v), before, "nothing but the runner log may move");
+    assert_eq!(text_field(&v, &hw1, "category").as_deref(), Some("Homework"));
+    cleanup(&v);
+}
+
 // ---- judge once: a field the student set is never re-set ----
 
 /// Run basic, have the vault's human retitle the exam note (the actor `console_ctx(vault)` gives:
