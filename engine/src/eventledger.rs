@@ -73,6 +73,10 @@
 //! - it never counts after a human answer, and only a uid's first carry line counts;
 //! - a later human answer replaces a verdict a carry line set, and clears `carry` (judge-once).
 //!
+//! One exception to "the first carry line counts" (PQ5 (b2)): a later carry line whose `from:`
+//! names the first one's card replaces `carry`'s span and nothing else, so a lane date the feed
+//! moves is drawn on its new days; any other later carry line is ignored.
+//!
 //! The feed's title sits on the line right after `- <uid> · `, and [`clean_title`] maps only `·`
 //! and the two newlines, so a title starting with a field head would forge that field. The carry
 //! asks [`carried_answer_reads_back`] first, which reads the line with [`load_ledger`]'s own rules
@@ -291,9 +295,10 @@ pub struct LedgerEntry {
     /// writer consults it, and a superseding answer line never changes it (F1 decision 4).
     pub title: String,
     /// What the uid's first carry line recorded (P15): the answering card and the instance's
-    /// span. Set even when the line could not set the verdict (a confident machine word stands);
-    /// never set over a human answer; cleared when a later human answer replaces the verdict a
-    /// carry line set (judge-once). `None` on every line shape written before PQ3.
+    /// span, the span moved by each later line from that card (PQ5 (b2)). Set even when the line
+    /// could not set the verdict (a confident machine word stands); never set over a human answer;
+    /// cleared when a later human answer replaces the verdict a carry line set (judge-once).
+    /// `None` on every line shape written before PQ3.
     pub carry: Option<Carried>,
 }
 
@@ -553,7 +558,17 @@ fn read_lines<'a>(
             // span are recorded all the same, so the lane can still draw the date.
             let answered = &current.answered_by;
             let human = !answered.is_empty() && !crate::provenance::is_agent(answered);
-            if current.carry.is_some() || human {
+            if human {
+                continue;
+            }
+            if let Some(first) = &current.carry {
+                // PQ5 (b2): a later line from the first one's card moves the span, and nothing
+                // else: the word, `answered_by`, `judgment_id` and `declined` stay. A line from
+                // another card is ignored.
+                if first.from == carried.from {
+                    let moved = LedgerEntry { carry: Some(carried), ..current.clone() };
+                    entries.insert(uid.to_string(), moved);
+                }
                 continue;
             }
             let carry_by = by.unwrap_or_default();
@@ -1654,6 +1669,33 @@ mod tests {
         assert_eq!(entry.verdict.as_deref(), Some("opportunity"));
         assert_eq!(entry.answered_by, CARRY_ACTOR);
         assert_eq!(entry.carry, carry_of(CARD, at(8, 10), at(8, 15)));
+    }
+
+    #[test]
+    fn a_later_carry_line_from_the_same_card_moves_only_the_span() {
+        // PQ5 (b2), T2b.6: a later line from the first carry line's card replaces `carry`'s span,
+        // and nothing else; its word, `by` and title are not read.
+        let vault = tmp_vault("carry-moves-span");
+        judged(&vault, "e", "Career fair", "unsure", Some(J)).unwrap();
+        carried(&vault, "opportunity", CARD, at(8, 10), at(8, 15)).unwrap();
+        carried(&vault, "obligation", CARD, at(9, 0), at(11, 0)).unwrap();
+        let entry = load_ledger(&vault, None).remove("e").unwrap();
+        assert_eq!(entry.verdict.as_deref(), Some("opportunity"), "the first carry line's word stands");
+        assert_eq!((entry.answered_by.as_str(), entry.judgment_id.as_str()), (CARRY_ACTOR, J));
+        assert_eq!(entry.carry, carry_of(CARD, at(9, 0), at(11, 0)), "the last same-card line's span");
+        // A `declined` marker stays set under a later line; another card's line is still ignored.
+        record_declined(&vault, "e", WHEN).unwrap();
+        carried(&vault, "opportunity", CARD, at(12, 0), at(13, 0)).unwrap();
+        carried(&vault, "obligation", "appr_abcdefabcd", at(14, 0), at(15, 0)).unwrap();
+        let entry = load_ledger(&vault, None).remove("e").unwrap();
+        assert!(entry.declined);
+        assert_eq!(entry.carry, carry_of(CARD, at(12, 0), at(13, 0)));
+        // After a human answer, a same-card line is ignored, `carry` included (judge once).
+        record_answer(&vault, "e", "Career fair", WHEN, "drop", HUMAN_ACTOR, None).unwrap();
+        carried(&vault, "opportunity", CARD, at(16, 0), at(17, 0)).unwrap();
+        let entry = load_ledger(&vault, None).remove("e").unwrap();
+        let read = (entry.verdict.as_deref(), entry.answered_by.as_str(), entry.carry);
+        assert_eq!(read, (Some("drop"), HUMAN_ACTOR, None));
     }
 
     #[test]
