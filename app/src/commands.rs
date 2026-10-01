@@ -334,6 +334,16 @@ pub fn delete_note_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Valu
     mutate(cs, view, |journal| write::delete(&cs.vault, id, &console_ctx(&cs.vault)?, journal).map(|_| ()).map_err(|e| e.to_string()))
 }
 
+/// P17 (Quinn, Checkpoint B, 2026-10-01): "Remove from my day" on an accepted all-day date.
+/// The engine gates (only this vault's own human token), checks (a date the lane draws) and
+/// writes (one `declined` line); this computes nothing. A refusal is the engine's line.
+pub fn remove_lane_date_inner(cs: &ConsoleState, view: &str, uid: &str) -> Result<Value, String> {
+    mutate(cs, view, |_journal| {
+        knowlu_engine::eventcarry::remove_lane_date(&cs.vault, uid, now_in(cs).date(), &console_ctx(&cs.vault)?)
+            .map(|_| ())
+    })
+}
+
 /// Approve/reject/snooze one approval, then run `process_approvals` in the same call so an
 /// approved task shows up in `state` NOW — the console never waits for the next scheduled run.
 /// `decision` summarises what that pass did, marshalled to strings only (spec's envelope shape).
@@ -530,6 +540,7 @@ pub fn state_envelope(cs: &ConsoleState, sch: &Scheduler, view: &str) -> Value {
 #[tauri::command(async)] pub fn set_fields(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, fields: serde_json::Map<String, Value>) -> Value { let mut env = set_fields_inner(&cs, &view, &id, fields).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn create_task(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, fields: serde_json::Map<String, Value>) -> Value { let mut env = create_task_inner(&cs, &view, fields).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn delete_note(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = delete_note_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command(async)] pub fn remove_lane_date(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, uid: String) -> Value { let mut env = remove_lane_date_inner(&cs, &view, &uid).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn decide(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, verdict: String, note: String, snooze_until: Option<String>) -> Value { let mut env = decide_inner(&cs, &view, &id, &verdict, &note, snooze_until).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn answer_card(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, meets: Value) -> Value { let mut env = answer_card_inner(&cs, &view, &id, &meets).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn close_info(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = close_info_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
