@@ -63,7 +63,8 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 - `journal::VIAS`, run records, ledgers and note frontmatter are contracts with existing vaults:
   byte-identical, never renamed.
 - Agent actors start `agent:` (`judge` writes as `agent:knowlu.enrich`, completion detection as
-  `agent:knowlu.completion`, commitment cards as `agent:commitments`); `provenance::is_agent` is a
+  `agent:knowlu.completion`, commitment cards as `agent:commitments`, forwarded mail as
+  `agent:knowlu.mail`); `provenance::is_agent` is a
   `starts_with` test, so an actor without the prefix reads as the user and "judge once" breaks.
 - `config/actor.yaml` is written once at vault creation and accepts only `student` or `quinn`; the two
   compare equal forever, and a bad value is a named error that stops human writes (ruling 11,
@@ -86,7 +87,9 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 - Cloud calls from `ingest`, `coursework` and `rank` are **transport only**, never judgment. Judgment
   is `judge`'s tier 3 through `CloudModel` (`engine/src/cloudmodel.rs`); the prompt, schema and pinned
   model live server-side.
-- A slot is `sync → coursework → ingest → grades → judge → rank`. A step that cannot run is left out and named
+- A slot is `sync → coursework → ingest → grades → judge → rank`. Before the chain, the app runs its own
+  window steps, the grades capture and then the saved-sign-in `mail` step; neither writes the vault.
+  A step that cannot run is left out and named
   (`judge (skipped: no entitlement)`), never run-and-failed; a non-zero step means backoff and an
   amber tray.
 - `app/src/commands.rs` computes nothing; every vault write goes through the engine's `write` with

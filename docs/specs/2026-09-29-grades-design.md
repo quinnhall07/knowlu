@@ -76,7 +76,7 @@ the host comes only from the curated campus row (§4), never from the student.
 
 ## 4. The session (G1)
 
-- **The gate: one predicate decides whether grades are available** (edit 5; cloud design ruling 12).
+- **The gate: one predicate decides whether grades are available** (edit 5; cloud design ruling 12) *(suspended until 20 paying users: Amendment 2026-09-30, A13)* The `POLICY_READ_GATE` constant in `app/src/grades.rs` reads `Suspended` in every build: while it does, the predicate is true for every curated row whose `lms_kind` is `blackboard`, dated or not, and still false at an uncurated school; the rest of this bullet and the next describe the gate as it returns at the review (`Enforced`).
   The curated campus row `scaffold::Curated` gains **`policy_read`**, the date (`YYYY-MM-DD`) that
   school's university-policy read was done, absent until then. Grades are available only when the
   vault's `config/campus.yaml` `unitid` has a curated row whose `lms_kind` is `blackboard` and which
@@ -279,7 +279,7 @@ together in one PR, privacy bump #1 (M1's sentences, the registrar's and the re-
 together, one lawyer read), as `app/src/account.rs:21-23` requires: bump the constant and the page's
 date in the same commit, or the consent log points at text nobody can find. That PR ships no later
 than the first release that records a `policy_read` date (§4). A release can carry M1's code before
-then, because without a date it offers grades nowhere; §4's date-and-bump rule keeps every
+then, because without a date it offers grades nowhere (suspended until 20 paying users: with the gate suspended no release is tagged before bump #1, Amendment 2026-09-30, A13); §4's date-and-bump rule keeps every
 `policy_read` date off `main` until bump #1. M1 does not move `PRIVACY_VERSION`.
 **Consent:** the only accounts that accepted an earlier version are Quinn's (HANDOFF §1), so no
 re-consent screen is needed for them; the Pilot's re-consent screen (R-PS-4, amendment ruling 10's
@@ -317,11 +317,10 @@ uncurated Blackboard school (§4); a school gains grades only through a curated 
   `grades_connect`, `grades_refresh`, the scheduler's grades step); a refusal opens no window and
   reads no session. **The date-and-bump test** fails when any curated campus row carries a
   `policy_read` date while `PRIVACY_VERSION` is older than privacy bump #1.
-- **Live proof** (desktop safety: never synthetic input): on the founder's scratch profile, on a dev
-  build from the **proof branch** that carries UA's `policy_read` date, through the real gate (§4) —
+- **Live proof** *(suspended until 20 paying users: Amendment 2026-09-30, A13)* (desktop safety: never synthetic input): on the founder's scratch profile, on a dev build of `main` through the suspended gate (§4; no proof branch or date needed; run again at the review) —
   connect Blackboard, see the rings, run a slot and see a silent refresh, forget the sign-in and see
-  *not connected*. The same build on a profile at a school without a dated row shows *not
-  available*. The proof branch is never merged ahead of privacy bump #1. The first real capture's
+  *not connected*. The same build on a profile at an uncurated school shows *not
+  available*. The first real capture's
   bundle is **not** committed (real grades).
 
 ## 14. Coordination

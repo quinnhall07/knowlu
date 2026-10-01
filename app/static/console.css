@@ -465,7 +465,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    any author `display`) — so `[hidden]` alone would never hide it below 1180px, and `block` alone
    would let the breakpoint grid its rows apart when it is open. `.drawer` carries only the
    `[hidden]` half; it is not this rule's business to change that. */
-.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; }
+.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; max-height: calc(100vh - 2 * var(--s4)); overflow-y: auto; }
 .setpanel[hidden] { display: none; }
 .set-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--s3); }
 .set-hd h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
@@ -633,3 +633,17 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .drawer .grw .gst.st-graded { color: var(--acc); }
 .drawer .grw .gdue { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
 .drawer .gd-foot { display: flex; gap: var(--s3); align-items: center; justify-content: space-between; margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--hair); font-family: var(--mono); font-size: 11px; color: var(--t3); }
+.drawer .bodyed { margin-top: var(--s3); } .drawer .bodyta { width: 100%; box-sizing: border-box; min-height: 180px; background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r2); padding: var(--s2); font: inherit; font-size: 12.5px; resize: vertical; }
+.drawer .bodybtns { display: flex; gap: var(--s2); margin-top: var(--s2); }
+.savedtoast, .settoast { position: fixed; bottom: var(--s4); right: var(--s4); z-index: 50; background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r2); padding: var(--s2) var(--s3); font-family: var(--mono); font-size: 11.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.drawer .bodyconf { margin-top: var(--s2); color: var(--crit); font-size: 11.5px; }
+#set-prefs-ta { flex: 1 1 100%; background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; }
+#set-prefs-count.over { color: var(--crit); }
+.set-prefs-copy { flex: 1 1 100%; }
+.prefsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
+.set-int { display: flex; flex-direction: column; gap: 2px; flex: 1 1 100%; color: var(--t3); font-size: 11.5px; }
+.set-int textarea { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; }
+.intsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
+.set-sec h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }
+.notshown { margin-top: var(--s3); }
+.notshown summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }

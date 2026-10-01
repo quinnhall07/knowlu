@@ -2109,3 +2109,224 @@ fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
     let body = &js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
     assert!(body.matches("removeAttribute(\"data-grades-open\")").count() >= 2, "openDrawer clears the marker on both its found and not-found paths: {body}");
 }
+
+// M2 T5a.1 (spec tests 27 and 28, the drawer halves).
+#[test]
+fn the_drawer_saves_a_body_with_expected() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("invoke(\"set_body\"") && ed.contains("id: id") && ed.contains("expected: expected") && ed.contains("body: ta.value"), "set_body carries id, expected and body");
+    assert!(js.contains("Add notes") && js.contains("data-body-edit"), "an empty body offers Add notes");
+    assert!(ed.contains("ctrlKey") && ed.contains("Escape"), "Ctrl+Enter saves, Esc cancels");
+    assert!(ed.contains("lock(true)") && ed.contains("lock(false)"), "controls stay disabled until the envelope returns");
+    assert!(js.contains("tasks") && js.contains("BODY_FOLDERS"), "only tasks and courses are editable");
+}
+
+#[test]
+fn no_ui_event_carries_body_text() {
+    let js = read("console.js");
+    assert!(js.contains("\"edit_started\", id, \"body\"") && js.contains("\"edit_committed\", id, \"body\"") && js.contains("\"edit_cancelled\", id, \"body\""), "body events use object_kind body");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    for line in js[at..end].lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        assert!(!line.contains("ta.value") && !line.contains("expected") && !line.contains("body:"), "a ui event carries body text: {line}");
+    }
+}
+
+// M2 T5a.2 (spec tests 29 and 32, the drawer halves, and the plan's conflict test).
+#[test]
+fn a_poll_leaves_an_open_editor_alone() {
+    let js = read("console.js");
+    assert!(js.contains("data-open-editor"), "an open editor is marked");
+    let at = js.find("function refreshGradesDrawer(").expect("the one background drawer rewrite");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    assert!(js[at..end].contains("editorOpen()"), "a background repaint of the drawer skips an open editor");
+    let p = js.find("function paint(").unwrap();
+    let pe = js[p..].find("\n  }\n").map(|i| p + i).unwrap();
+    assert!(!js[p..pe].contains("openDrawer(") && !js[p..pe].contains("EL(\"drawer\").innerHTML"), "paint never rebuilds the drawer");
+    let q = js.find("function poll(").unwrap();
+    let qe = js[q..].find("\n  }\n").map(|i| q + i).unwrap();
+    assert!(!js[q..qe].contains("openDrawer("), "poll never reopens the drawer");
+}
+
+#[test]
+fn body_undo_sends_the_reread_body_as_expected() {
+    let js = read("console.js");
+    let at = js.find("function offerBodyUndo(").expect("the Saved - Undo toast");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let u = &js[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"note\"") && u.contains("expected: env.note.body") && u.contains("body: before"), "undo's expected is the re-read body, its body the pre-edit text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+    assert!(js.contains("edit_cancelled") && !u.contains("ev(\"edit_undone"), "no new telemetry action");
+}
+
+#[test]
+fn the_saved_toast_dies_with_its_drawer() {
+    let js = read("console.js");
+    assert!(js.contains("function dropSavedToast(") && js.contains(".savedtoast"), "one helper removes the toast");
+    for f in ["function openDrawer(", "function openGradesDrawer("] {
+        let at = js.find(f).unwrap();
+        let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+        assert!(js[at..end].contains("dropSavedToast()"), "{f} drops the toast of the previous note");
+    }
+    let at = js.find("function openDrawer(").unwrap();
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+    assert!(js[at..end].contains("click\", function () { dropSavedToast(); d.hidden = true;"), "closing the drawer drops the toast");
+    let u = js.find("function offerBodyUndo(").unwrap();
+    assert!(js[u..u + 600].contains("data-id") && js[u..u + 600].contains("!== id"), "a toast is only raised for the open drawer");
+}
+
+#[test]
+fn a_body_conflict_keeps_the_draft() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("env.conflict"), "a conflict envelope has its own state");
+    assert!(ed.contains("This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version."), "the spec's line");
+    assert!(ed.contains("copy_text") && ed.contains("data-body-copy") && ed.contains("data-body-reload"), "Copy and Reload");
+    assert!(ed.contains("confirm("), "Reload asks before it discards the draft");
+    let c = ed.find("env.conflict").unwrap();
+    assert!(!ed[c..c + 600].contains("ta.value = "), "the draft is never refilled");
+}
+
+// M2 T5b.1 (spec tests 27, 28 and 32, the preferences halves).
+fn prefs_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.1").expect("the preferences section");
+    let end = js[at..].find("// M2 T5b.1 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_preferences() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-prefs-ta\"") && html.contains("id=\"set-prefs-save\"") && html.contains("id=\"set-prefs-count\""), "a textarea, a counter and its own Save");
+    assert!(html.contains("Your preferences") && html.contains("How you like to work"), "the section and its part");
+    for fact in ["600 characters", "one call", "keep them", "stays on this computer"] {
+        assert!(html.contains(fact), "the copy keeps its fact: {fact}");
+    }
+    let p = prefs_js();
+    assert!(p.contains("invoke(\"profile\""), "the panel reads profile");
+    assert!(p.contains("invoke(\"set_preferences\"") && p.contains("expected: PREFS.loaded"), "Save sends expected");
+    assert!(p.contains("env.conflict") && p.contains("data-prefs-conflict") && p.contains("Your text is still here"), "a conflict keeps the draft");
+    assert!(p.contains("showRefusal("), "other refusals use showRefusal");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadPrefs("), "opening Settings loads the preferences");
+}
+
+#[test]
+fn no_settings_ui_event_carries_preferences_text() {
+    let p = prefs_js();
+    assert!(p.contains("\"edit_started\", null, \"preferences\"") && p.contains("\"edit_committed\", null, \"preferences\"") && p.contains("\"edit_cancelled\", null, \"preferences\""), "preferences events use object_kind preferences");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["ta.value", "PREFS", "before", "after", "text", "expected", "draft"] {
+            assert!(!line.contains(bad), "a ui event carries preferences text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_preferences() {
+    let p = prefs_js();
+    let at = p.find("function offerPrefsUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_preferences\"") && u.contains("expected: after") && u.contains("text: before"), "undo's expected is the text profile returned after the save");
+    assert!(p.contains("invoke(\"profile\"") && p.contains("offerPrefsUndo(before, PREFS.loaded)"), "after is the re-read text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+}
+
+// M2 T5b.2 (spec tests 27, 28 and 32, the interests halves; plan addition for D10).
+fn ints_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.2").expect("the interests section");
+    let end = js[at..].find("// M2 T5b.2 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_interests() {
+    let html = read("index.html");
+    for id in ["set-int-strong", "set-int-mild", "set-int-never", "set-int-clubs", "set-int-save"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in"] {
+        assert!(html.contains(label), "the section keeps: {label}");
+    }
+    let n = html.find("id=\"set-int-note\"").expect("the interests note");
+    let note = &html[n..n + html[n..].find("</p>").expect("note end")];
+    // Spec 9.2 / plan T5b: every fixed fact, on this line, not only on the preferences line.
+    for fact in ["600", "one call", "each event it judges", "neither we nor the model&rsquo;s host keep", "stay on this computer"] {
+        assert!(note.contains(fact), "the interests note keeps the disclosure: {fact}");
+    }
+    let p = ints_js();
+    assert!(p.contains("invoke(\"set_interests\"") && p.contains("strong:") && p.contains("mild:") && p.contains("never:") && p.contains("clubs:"), "Save sends the four lists");
+    assert!(p.contains("showRefusal("), "a refusal is shown, the draft kept");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadInterests("), "opening Settings loads the lists");
+}
+
+#[test]
+fn no_settings_ui_event_carries_interests_text() {
+    let p = ints_js();
+    assert!(p.contains("\"edit_started\", null, \"interests\"") && p.contains("\"edit_committed\", null, \"interests\"") && p.contains("\"edit_cancelled\", null, \"interests\""), "interests events use object_kind interests");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["value", "INT", "before", "after", "lists", "draft", "strong", "clubs"] {
+            assert!(!line.contains(bad), "a ui event carries interests text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_interests() {
+    let p = ints_js();
+    let at = p.find("function offerIntUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_interests\"") && u.contains("before.strong") && u.contains("before.clubs"), "undo sends the four lists held before the save");
+}
+
+#[test]
+fn interests_are_read_only_when_not_editable() {
+    let p = ints_js();
+    assert!(p.contains("interests_editable"), "the page reads the flag");
+    assert!(p.contains("readOnly") && p.contains("set-int-save"), "the lists lock and Save is disabled");
+    assert!(p.contains("Knowlu can only edit a list written on one line"), "D10's reason is shown");
+}
+
+fn notshown_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T7").expect("the Not shown section");
+    let end = js[at..].find("// M2 T7 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn coming_up_offers_a_not_shown_list_from_dropped_events() {
+    let n = notshown_js();
+    assert!(read("index.html").contains("id=\"cu-ns\""), "the container sits under Coming up");
+    assert!(n.contains("invoke(\"dropped_events\""), "the page reads dropped_events");
+    assert!(n.contains("Not shown (") && n.contains("<details"), "a collapsed list titled Not shown (N)");
+    for f in ["d.title", "d.date", "d.reason"] {
+        assert!(n.contains(&format!("h({f}")), "{f} is escaped text");
+    }
+    assert!(n.contains("!list.length") || n.contains("list.length === 0"), "an empty list renders nothing");
+    assert!(n.contains(".catch(") && n.contains("Not shown is unavailable"), "a refusal is one quiet line");
+    assert!(!n.contains("data-") && !n.contains("<button") && !n.contains("invoke(\"ui_event\""), "read-only: no write action: {n}");
+    // Fetched when Coming up renders, not on every poll.
+    let render = read("console.js");
+    let at = render.find("function renderComingUp(").unwrap();
+    let body = &render[at..at + render[at..].find("\n  }\n").unwrap()];
+    assert!(body.contains("renderNotShown("), "renderComingUp triggers it");
+    assert!(!render[render.find("function poll(").unwrap()..].split("// Task 13").next().unwrap().contains("dropped_events"), "poll does not fetch it");
+}
