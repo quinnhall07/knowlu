@@ -1231,7 +1231,7 @@
       });
       var hist = (n.history || []).map(function (r) { return "<div>" + h(r.ts.slice(0, 16).replace("T", " ")) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
       clearStaleEditing(d);
-      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + (n.body ? "<pre>" + h(n.body) + "</pre>" : "") +
+      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
         '<button class="b crit" data-del="' + h(id) + '" data-title="' + h(title) + '">Delete&hellip;</button>' +
         '<div class="hist"><b>history</b>' + hist + "</div>";
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
@@ -1239,6 +1239,38 @@
       // fill the viewport.
       d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
       d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
+      var be = d.querySelector("[data-body-edit]");
+      if (be) { be.addEventListener("click", function () { openBodyEditor(d, id, n.body || ""); }); }
+    });
+  }
+
+  // M2 9.1: only a note in tasks/ or courses/ has an editable body. The text reaches the DOM as
+  // escaped text (<pre>) or a textarea's value, never as markup, and never reaches a ui_event.
+  var BODY_FOLDERS = { tasks: 1, courses: 1 };
+  function bodyViewHtml(n) {
+    var pre = n.body ? "<pre>" + h(n.body) + "</pre>" : "";
+    if (!BODY_FOLDERS[n.folder]) { return pre; }
+    return '<div class="bodyed">' + pre + '<button class="b" data-body-edit>' + (n.body ? "Edit" : "Add notes") + "</button></div>";
+  }
+  function openBodyEditor(d, id, expected) {
+    var host = d.querySelector(".bodyed"); if (!host) { return; }
+    host.setAttribute("data-open-editor", "body");
+    host.innerHTML = '<textarea class="bodyta" rows="10"></textarea><div class="bodybtns"><button class="b" data-body-save>Save</button> <button class="b" data-body-cancel>Cancel</button></div>';
+    var ta = host.querySelector("textarea"), sv = host.querySelector("[data-body-save]"), cn = host.querySelector("[data-body-cancel]");
+    ta.value = expected; ta.focus();
+    ev("edit_started", id, "body");
+    function lock(on) { ta.disabled = on; sv.disabled = on; cn.disabled = on; }
+    function save() {
+      lock(true);
+      invoke("set_body", { view: stateView(), id: id, expected: expected, body: ta.value }).then(function (env) {
+        if (applyEnvelope(env, function (m) { lock(false); showRefusal(null, m, id, "body"); })) { ev("edit_committed", id, "body"); openDrawer(id); }
+      }).catch(function (e) { lock(false); showRefusal(null, "refused: " + e, id, "body"); });
+    }
+    function cancel() { ev("edit_cancelled", id, "body"); openDrawer(id); }
+    sv.addEventListener("click", save); cn.addEventListener("click", cancel);
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
     });
   }
 

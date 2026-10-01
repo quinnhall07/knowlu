@@ -2109,3 +2109,28 @@ fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
     let body = &js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
     assert!(body.matches("removeAttribute(\"data-grades-open\")").count() >= 2, "openDrawer clears the marker on both its found and not-found paths: {body}");
 }
+
+// M2 T5a.1 (spec tests 27 and 28, the drawer halves).
+#[test]
+fn the_drawer_saves_a_body_with_expected() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("invoke(\"set_body\"") && ed.contains("id: id") && ed.contains("expected: expected") && ed.contains("body: ta.value"), "set_body carries id, expected and body");
+    assert!(js.contains("Add notes") && js.contains("data-body-edit"), "an empty body offers Add notes");
+    assert!(ed.contains("ctrlKey") && ed.contains("Escape"), "Ctrl+Enter saves, Esc cancels");
+    assert!(ed.contains("lock(true)") && ed.contains("lock(false)"), "controls stay disabled until the envelope returns");
+    assert!(js.contains("tasks") && js.contains("BODY_FOLDERS"), "only tasks and courses are editable");
+}
+
+#[test]
+fn no_ui_event_carries_body_text() {
+    let js = read("console.js");
+    assert!(js.contains("\"edit_started\", id, \"body\"") && js.contains("\"edit_committed\", id, \"body\"") && js.contains("\"edit_cancelled\", id, \"body\""), "body events use object_kind body");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    for line in js[at..end].lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        assert!(!line.contains("ta.value") && !line.contains("expected") && !line.contains("body:"), "a ui event carries body text: {line}");
+    }
+}
