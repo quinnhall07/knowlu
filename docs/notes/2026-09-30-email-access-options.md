@@ -6,7 +6,7 @@ recommendation is MVP, §7).
 
 **Relation to signed work:** `docs/specs/2026-09-29-gmail-connect-design.md` (signed) stands. This note
 adds paths it does not cover: school Microsoft 365 mail, mail from before setup, and Gmail at scale
-before CASA. It develops the "Knowbox" idea in `2026-09-29-funding-and-seed-grant.md` §6 and the
+before CASA. It develops the "forwarding" idea in `2026-09-29-funding-and-seed-grant.md` §6 and the
 forwarding fallback in the cloud design's §13.
 
 ## 0. The problem
@@ -111,7 +111,7 @@ own sent mail coming back is one example.
 
 ## 4. Direction: five layers that make sure mail arrives
 
-1. **Forward to our own receiver (the Knowbox).**
+1. **Forward to our own receiver (the Knowlu address).**
    - One private address per student, tagged per account (`<secret>+crimson@…`).
    - Knowlu sets up forwarding in its sign-in window: automatic on M365, one phone tap on Gmail.
    - The receiver **never rejects on SPF/DKIM/DMARC** during delivery. It stores the raw MIME and the
@@ -120,9 +120,9 @@ own sent mail coming back is one example.
 2. **Backfill at setup.** In the same session, forward everything since the semester started as
    attachments: bulk on Gmail, per message on M365. Originals take the same intake path as live mail.
 3. **Canary.** At setup and then periodically, Knowlu sends a test email to each connected address and
-   expects it back at the Knowbox. A missing canary shows "this source went quiet".
+   expects it back at email forwarding to Knowlu. A missing canary shows "this source went quiet".
 4. **Reconcile.** An **opt-in saved session** (kept WebView2 profile, on the device only) lists what
-   the mailbox received (sender, date, Message-ID) and compares it with what the Knowbox got.
+   the mailbox received (sender, date, Message-ID) and compares it with what email forwarding to Knowlu got.
 5. **Recover.** The saved session forwards the missing emails as attachments, and re-enables
    forwarding if it was turned off. An expired session asks the student to sign in only when a repair
    is needed.
@@ -179,7 +179,7 @@ Result pending: how long each session survives with twice-daily use.
 - **Receiver provider:** before choosing, test each candidate with a deliberately DMARC-failing
   message. Postmark's spam threshold must be off. The others' handling is unverified.
 - **Privacy page:**
-  - the Knowbox (all forwarded mail passes through us, is judged and discarded);
+  - email forwarding to Knowlu (all forwarded mail passes through us, is judged and discarded);
   - the canary emails;
   - the saved session.
 

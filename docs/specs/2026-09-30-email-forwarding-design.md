@@ -1,6 +1,8 @@
-# Email (MVP): the Knowbox — automatic forwarding setup, receiver, claims and reconcile
+# Email (MVP): forwarding to Knowlu — automatic forwarding setup, receiver, claims and reconcile
 
-**Date:** 2026-09-30. **Status: DRAFT for Quinn's signature, revised after review and after Quinn's
+**Signed by Quinn 2026-09-30: all of §10 (A1-A13) and the signing sheet's decisions 1-8, with the rename above.** §13 is already answered.
+
+**Date:** 2026-09-30. **Status: SIGNED (2026-09-30), revised after review and after Quinn's
 answers to §13** (*Review revisions (2026-09-30)* lists every finding and what changed; the *Signing
 sheet* at the end lists what signing commits to). Nothing here is built. Quinn's answers of 2026-09-30
 to the seven questions of the research (stage, automatic, receiver, filter, backfill and change
@@ -117,8 +119,8 @@ the plan), and **more honest** (a broken source says so).
 - **F2. There is no term start anywhere.** Backfill "to the semester start" (Q5) needs a new datum (D7).
 - **F3. There is no undo.** Q5b's "undoable" is built here from the two primitives that exist (D10).
 - **F4. A separate queue avoids the Gmail Quiet trap.** The research worried that `pull_gmail_queue`
-  returning `Err(Quiet)` before reading items (Gmail spec `:967`) would hide Knowbox cards. It would only
-  if the Knowbox reused `gmail_queue`; it does not (D8).
+  returning `Err(Quiet)` before reading items (Gmail spec `:967`) would hide forwarding cards. It would only
+  if email forwarding to Knowlu reused `gmail_queue`; it does not (D8).
 
 ## 2. Stage and scope
 
@@ -127,7 +129,7 @@ scratch profile and founder-owned test mailboxes on staging, with no second pers
 carries it before privacy bump #1 (D18).
 
 **In scope:**
-- the receiver (the Knowbox): AWS SES inbound → S3 → a Supabase function, one secret address per
+- the receiver (the Knowlu address): AWS SES inbound → S3 → a Supabase function, one secret address per
   connected mailbox (D2, D3);
 - scripted setup for **school Microsoft 365** and **personal Gmail**, with a guided fallback for every
   step and for every other provider (D4–D6, §4.2–§4.4), including Gmail's server-side forwarding confirm
@@ -136,7 +138,7 @@ carries it before privacy bump #1 (D18).
 - full backfill to the term's start (D7), through the same intake as live mail;
 - claims extraction, cheapest first, and the deterministic reconcile on the device (D9–D12);
 - "From your email": what the backfill applied, with Undo per item (D10);
-- the setup canary, the periodic canary and the "source went quiet" state for Knowbox mailboxes (D14);
+- the setup canary, the periodic canary and the "source went quiet" state for forwarded mailboxes (D14);
 - the saved session, on by default with a switch: reconcile, recover, re-enable forwarding (D15);
 - Disconnect per mailbox, and account deletion (D17);
 - `ingest` honours ruling 3 for `title` and `due` (D11 (5); §13 Q7);
@@ -166,30 +168,30 @@ Each cites the answer it carries out. "Cost if wrong" is what the build or the s
 | # | Decision | Reason | Cost if wrong |
 |---|---|---|---|
 | **D1** *(Q1)* | **All of email ships in the MVP**: receiver, addresses, scripted setup for school M365 and personal Gmail with guided fallback, Gmail's server-side confirm, setup and periodic canary with "source went quiet", full backfill, reconcile and recover. **Gmail OAuth (PR #26) stays as the direct path** and is not changed except by D22. | Quinn's Q1. The pilot schools' mail is M365, unreachable any other way (E1); a mid-semester sign-up needs backfill. | The MVP exit moves out by this lane's size (§14: XL). |
-| **D2** *(Q3)* | **The receiver is AWS SES inbound on a subdomain** (MX on `in.knowlu.com`; §13 Q5). An SES receipt rule has **one action, the S3 action, with its own `TopicArn`**: it stores each message in an S3 bucket whose lifecycle expires objects after **one day** and notifies an SNS topic with a notification that carries the message's headers and recipients but never its body (SES's separate SNS action, which publishes the whole message through SNS, is never used). S3 counts a lifecycle day to the next UTC midnight, so an object left behind lives up to about two days plus AWS's own lag; every path that finishes with an object deletes it at once (§4.6, §4.7). SNS delivers over HTTPS to the Supabase function `knowbox-inbound`, which verifies the SNS signature (only the configured topic, a certificate only from `sns.<region>.amazonaws.com`) before reading anything. **No message is ever rejected at the door on SPF, DKIM or DMARC**: SES records the verdicts, and intake judges afterwards (§4.6). **Gate before any build commits to SES:** a deliberately DMARC-failing test message reaches the bucket (T0). | Quinn's Q3. SES is the only candidate confirmed not to act on the verdicts; Cloudflare Email Routing (§13's old choice) rejects DMARC failures; the apex's Cloudflare routing for `hello@`/`support@` is untouched because the MX is on the subdomain. SNS needs no AWS-side code. | If SNS proves awkward (retries, ordering, the subscription handshake), a 20-line Lambda that POSTs with a shared secret replaces it; intake is unchanged behind the same verify-then-read seam. |
+| **D2** *(Q3)* | **The receiver is AWS SES inbound on a subdomain** (MX on `in.knowlu.com`; §13 Q5). An SES receipt rule has **one action, the S3 action, with its own `TopicArn`**: it stores each message in an S3 bucket whose lifecycle expires objects after **one day** and notifies an SNS topic with a notification that carries the message's headers and recipients but never its body (SES's separate SNS action, which publishes the whole message through SNS, is never used). S3 counts a lifecycle day to the next UTC midnight, so an object left behind lives up to about two days plus AWS's own lag; every path that finishes with an object deletes it at once (§4.6, §4.7). SNS delivers over HTTPS to the Supabase function `mail-inbound`, which verifies the SNS signature (only the configured topic, a certificate only from `sns.<region>.amazonaws.com`) before reading anything. **No message is ever rejected at the door on SPF, DKIM or DMARC**: SES records the verdicts, and intake judges afterwards (§4.6). **Gate before any build commits to SES:** a deliberately DMARC-failing test message reaches the bucket (T0). | Quinn's Q3. SES is the only candidate confirmed not to act on the verdicts; Cloudflare Email Routing (§13's old choice) rejects DMARC failures; the apex's Cloudflare routing for `hello@`/`support@` is untouched because the MX is on the subdomain. SNS needs no AWS-side code. | If SNS proves awkward (retries, ordering, the subscription handshake), a 20-line Lambda that POSTs with a shared secret replaces it; intake is unchanged behind the same verify-then-read seam. |
 | **D3** | **One secret address per connected mailbox**: `<token>@<domain>`, the token 128 random bits in lower-case base32 (26 characters). The service keeps an HMAC of the token for lookup and the token itself encrypted (the `SOURCES_ENC_KEY` pattern of `_shared/crypto.ts`) so Settings can show it again. **Rotate** mints a new token for the mailbox and keeps the old one accepted until the new address's canary arrives (at most 7 days), so mail sent before forwarding is re-pointed is not lost; on Gmail the new address needs its own confirm (§4.3 steps 3–5). **Disconnect** revokes it. An account holds at most **three** live addresses and mints at most six in 30 days. | A token per mailbox binds every message to one mailbox without trusting plus-addressing through each provider's forwarding form, and lets one mailbox be revoked alone. A dump of the table is not a list of live addresses. | None structural. A student with three mailboxes has three addresses; Settings lists them. |
-| **D4** *(Q4)* | **Forward everything.** On M365: mailbox forwarding ("Enable forwarding") to the mailbox's address with **"Keep a copy of forwarded messages" on**. On Gmail: Settings → Forwarding → "Forward a copy of incoming mail to" the address, **keeping Gmail's copy in the Inbox**. No filter, and no filter import (E4 is not used). The server's cheap screen (§4.7, step 1) discards noise before any model sees it. | Quinn's Q4: coverage over a student-chosen filter. Keeping the copy means forwarding never removes mail from the student's own mailbox. | Every message transits the Knowbox, which §7 states plainly; the screen's quality decides the model cost. |
+| **D4** *(Q4)* | **Forward everything.** On M365: mailbox forwarding ("Enable forwarding") to the mailbox's address with **"Keep a copy of forwarded messages" on**. On Gmail: Settings → Forwarding → "Forward a copy of incoming mail to" the address, **keeping Gmail's copy in the Inbox**. No filter, and no filter import (E4 is not used). The server's cheap screen (§4.7, step 1) discards noise before any model sees it. | Quinn's Q4: coverage over a student-chosen filter. Keeping the copy means forwarding never removes mail from the student's own mailbox. | Every message transits email forwarding to Knowlu, which §7 states plainly; the screen's quality decides the model cost. |
 | **D5** *(Q2)* | **Setup is automatic and DOM-only.** The mail window (label `mail`, its own WebView2 profile per mailbox, no capability grant, like `lms-grades`) is visible **only** to sign in. A step script runs only while the page's origin is one of the provider's mail hosts (a fixed list per provider, compiled in with the scripts); on an SSO, consent or redirected page nothing runs and the step waits or falls back. Once the page signals a signed-in mailbox (X2's title signal, confirmed by a DOM probe), the window is hidden or moved off-screen (T0 decides which keeps the page rendering) and the scripted steps run in it, in-process, by script evaluation in the page: **never CDP, never a debugging port, never synthetic OS input.** The **main window** shows the progress view (§4.5). The mail window comes back, centred and focused, only when the site needs the student: Google's "verify it's you" popup, an MFA or SSO re-prompt, a consent page. Every scripted step verifies its own effect by reading the page after it acts; a step that cannot find its controls, or whose check fails, falls back to **guided steps** for that step only. | Quinn's Q2. X2 proved both sign-ins work in Knowlu's own WebView2; X3a/X3b proved the settings changes; CDP was the spikes' harness only. | A hidden window may stop rendering (T0); off-screen is the fallback. A page that changes breaks a script until a release (D19); guided steps cover the gap. |
 | **D6** *(Q2, §13 Q9)* | **When it runs.** The wizard's panel right after sign-in and subscription **announces it**: "Next: connect your school email", one line on what Knowlu will do, and a one-click **Not now** under which sits risk 12's sentence for a school whose rules forbid forwarding. When the console first opens after Finish, the school mail sign-in window **opens with it** and the progress view shows in the console (§4.5); personal Gmail is offered in the same view, skippable. Settings → Email offers setup at any time after: to a student who chose Not now, and to one whose install was adopted or restored. | Quinn's Q2 ("offered right after Knowlu sign-in") as Quinn confirmed it in §13 Q9: the announcement in the wizard, the sign-in and the progress at the console's first open. The wizard window has no `ConsoleState` and no profile folder until Finish (C1), and a mailbox's backfill matched against no courses would be matched again later. | The student waits until Finish to see setup start; the wizard says it comes next. |
 | **D7** *(Q5)* | **Backfill reaches the start of the current term.** The date comes from the curated campus row, which gains `terms: [(start, end), …]` for the academic year (UA's dates in the MVP). For an uncurated school, or a row with no term covering today, the setup view shows a computed default (the most recent of 5 January, 15 May and 15 August before today) **and asks the student to confirm or change it**. **No age cutoff** inside that window: an item already past due is recorded and archived as `imported-past` (R-OB-3); everything else counts. | Quinn's Q5: "relevance, not age"; the purpose is a complete picture of what changed. F2: nothing records a term today. | A wrong default reads too little or too much mail; the student sees the date before anything is read. |
-| **D8** | **Intake is two stages and a separate queue.** `knowbox-inbound` verifies, binds and splits: each original message (a live forward, or one `.eml` unwrapped from a backfill send) becomes its own S3 object under `work/` (same one-day lifecycle) and one `knowbox_work` row holding only its key, account, mailbox, phase and arrival time. A worker, `knowbox-process` (cron every minute, and kicked by intake), takes items within its wall-clock budget: parse, screen, extract claims, queue them in **`mail_claims`**, delete the object. The device pulls `mail_claims` through `mail-pull`; **`gmail_queue` is not touched** (`gmail-read` changes only by D22). **The `knowbox_seen` row is written together with the `knowbox_work` row, only after the S3 put succeeds**, so a failed put leaves nothing that would make SNS's retry look like a duplicate. | A 25 MB backfill send of ~100 originals cannot be judged in one invocation; the raw text lives only in S3 and in a worker's memory, never in a table; a separate queue keeps the Gmail path's quiet rules (F4) out of the Knowbox's. | An item not processed before its object expires is lost to that pass: the sweep counts it `expired` on the mailbox **and deletes its `knowbox_seen` row**, so the next reconcile lists it as missing and recover's re-forward is accepted (D15). |
+| **D8** | **Intake is two stages and a separate queue.** `mail-inbound` verifies, binds and splits: each original message (a live forward, or one `.eml` unwrapped from a backfill send) becomes its own S3 object under `work/` (same one-day lifecycle) and one `mail_work` row holding only its key, account, mailbox, phase and arrival time. A worker, `mail-process` (cron every minute, and kicked by intake), takes items within its wall-clock budget: parse, screen, extract claims, queue them in **`mail_claims`**, delete the object. The device pulls `mail_claims` through `mail-pull`; **`gmail_queue` is not touched** (`gmail-read` changes only by D22). **The `mail_seen` row is written together with the `mail_work` row, only after the S3 put succeeds**, so a failed put leaves nothing that would make SNS's retry look like a duplicate. | A 25 MB backfill send of ~100 originals cannot be judged in one invocation; the raw text lives only in S3 and in a worker's memory, never in a table; a separate queue keeps the Gmail path's quiet rules (F4) out of email forwarding's. | An item not processed before its object expires is lost to that pass: the sweep counts it `expired` on the mailbox **and deletes its `mail_seen` row**, so the next reconcile lists it as missing and recover's re-forward is accepted (D15). |
 | **D9** *(Q5)* | **Claims, cheapest first.** Per message: (1) the screen; (2) deterministic parsers for templated senders (Blackboard, Canvas and zyBooks notifications, as data rows beside `RECEIPT_TEMPLATES`), with the existing due resolver and course-code matching; (3) the rest to a **small model** (judge's tier 3, a new kind `mail_claim`) returning a fixed schema: up to five claims, each `{kind: new_item \| change \| course_info \| noise, course, target, field, value, evidence, confidence}`; a `new_item` also carries `effort_hours` and `importance` from fixed ranges, as a Gmail `task` verdict does, so a note made from mail is never sent to the device's task pass (§5.2). **`evidence` must occur verbatim in the message** (after whitespace folding), or the claim is refused as `incomplete`; the confidence floor is the existing 0.6. | Quinn's Q5. VISION: classification over generation, schema on every call, rules first. The evidence check is deterministic and makes a model's invented change unqueueable. | A real change worded only across a quoted reply may be refused; the student still sees the mail in their mailbox, and live mail of that shape files no card. |
-| **D10** *(Q5, Q5b)* | **Reconcile is deterministic, on the device, in `judge`.** Claims are applied oldest-first by the message's **ordering date** (its Date header, capped at the time the Knowbox received it for live mail, or at the provider's own delivery time, else the batch's opening, for backfilled and recovered mail; §4.8), then uid, then claim index; a later claim supersedes an earlier one for the same item and field, held across pulls by a per-field `mail_asof` on the note (§5.2). **A backfill or recover batch is delivered whole**, in that order, only once it has closed, and a mailbox's live claims wait behind its open batch (§4.8), so the same messages give the same vault however they arrive. **Backfill applies silently and lists; live mail proposes.** §4.9's table says, per claim kind and phase, which writes are direct agent writes and which are cards. **Undo** is per item in "From your email": a created item is deleted with `delete_note`, a changed field is set back to the journal's `old` value with `set_fields` (as the student, so judge-once then protects it). | Quinn's Q5 and Q5b. `rank` never calls a model; the reconcile needs no model, only the vault. Undo reuses two commands that exist (F3). | An Undo of a field makes it the student's, so later mail about that field becomes a card. That is the intended reading of "the student decided". |
+| **D10** *(Q5, Q5b)* | **Reconcile is deterministic, on the device, in `judge`.** Claims are applied oldest-first by the message's **ordering date** (its Date header, capped at the time email forwarding to Knowlu received it for live mail, or at the provider's own delivery time, else the batch's opening, for backfilled and recovered mail; §4.8), then uid, then claim index; a later claim supersedes an earlier one for the same item and field, held across pulls by a per-field `mail_asof` on the note (§5.2). **A backfill or recover batch is delivered whole**, in that order, only once it has closed, and a mailbox's live claims wait behind its open batch (§4.8), so the same messages give the same vault however they arrive. **Backfill applies silently and lists; live mail proposes.** §4.9's table says, per claim kind and phase, which writes are direct agent writes and which are cards. **Undo** is per item in "From your email": a created item is deleted with `delete_note`, a changed field is set back to the journal's `old` value with `set_fields` (as the student, so judge-once then protects it). | Quinn's Q5 and Q5b. `rank` never calls a model; the reconcile needs no model, only the vault. Undo reuses two commands that exist (F3). | An Undo of a field makes it the student's, so later mail about that field becomes a card. That is the intended reading of "the student decided". |
 | **D11** *(Q5)* | **A mail change never silently overrides the student or an authoritative source.** (1) **The reconciler decides card or direct itself**, for every field it touches, from `Journal::human_set(id, field)`, where a human `create` carrying the field counts (a note the student made by hand is theirs); it never relies on `write`'s judged set, which does not cover `due` (F5). (2) A change to a field the student set is a `kind: amend` card in both phases. A change to a note owned by an authoritative feed (an LMS or homework-platform item, by its `created_by`) is a card in both phases unless the note already holds the claimed value (then nothing is written); §4.9 gives the template rows. (3) **Mail cards are written by `mail.rs`'s own card writer** through `write::create`, in exactly the shape `approvals::validate_amendment` accepts (`kind: amend`, `target`, `changes: {field: {from, to}}`, `proposed_at`, `first_proposed_at`, `expires: null`, `snooze_until: null`) plus `created_by: mail` and D21's fields, and only after `write::find_pending_amendment` finds no pending card for the same note and fields (the `write_gmail_card` precedent; `propose_amendment`'s "re-judged" text would be false here). (4) **Approving a mail `kind: amend` card writes its changed fields as the vault's human actor** (`journal::read_human_actor`), not as `agent:approvals`, so the approved value is the student's and later mail about it is a card. If `read_human_actor` fails (ruling 11: a bad `config/actor.yaml`), the approval stops with that named error and the card stays pending; it never falls back to another actor. (5) **Against the feed, `ingest` honours ruling 3 for `title` and `due`** (§13 Q7, Quinn: fix it now): where `human_edited(id, field)` exists and the feed differs, it files one `kind: amend` card instead of writing (none while one is pending; a value the student rejected is not proposed again until the feed's value changes), so an approved mail value holds and a later move in the LMS is a card. A mail `kind: task` card materialises as today. | VISION commitment 5, ruling 3 ("no source overwrites a field the journal shows the student set by hand; that change is filed as an amend card instead") and Q5's judge-once. F1, F5. | `approvals.rs` and `ingest.rs` change (§8): every vault whose student hand-set an LMS item's `title` or `due` gets a card where today the feed overwrites silently, which is what ruling 3 says and what Quinn chose. |
 | **D12** *(Q5)* | **A reasoning model only for ambiguous references, batched per course.** When a change's `target` matches no note, or more than one, deterministically (§4.8), the device sends one batch per course to `mail-resolve`: the claims and the course's candidate items (id, title, due). The answer names one candidate or none for each claim, and is **stored on the claim row** so a re-pull replays the same answer. Unresolved claims become an info notice ("Knowlu could not match this to an item"), never a guess. | Quinn's Q5. Determinism under replay: the model's answer is data. | One more pinned kind (`mail_resolve`), a few calls per backfill. |
 | **D13** *(Q5)* | **Course information becomes info notices, superseding by key.** A `course_info` claim (schedule, room, instructor, office hours, policy) opens an `info/` item of kind `notice`, titled by course and topic, with `close_key: mail:<course>:<topic>`; a later claim for the same course and topic closes the earlier one and opens its own (`info.rs`'s close-by-key). Notices are written in both phases: they inform and change nothing in the plan. **The per-course digest** (a reasoning model folding a course's notices into one `info/` note) is optional: built last, behind `mail_digest: false` by default, and cut if time is short. | Quinn's Q5. Uses `info.rs` as it is; supersession is the existing key rule, so no new state. | If Quinn reads a notice as "Knowlu noticed → propose", notices become cards; the table in §4.9 changes one row. |
-| **D14** | **Canary and "source went quiet" ship in the MVP for Knowbox mailboxes.** At setup, a canary from Knowlu's own domain (DKIM-signed, a nonce in a header and the subject) is sent to the student's mailbox and must come back through forwarding; the setup waits up to three minutes. After setup a mailbox is watched passively (`last_received_at`); a periodic canary is sent only after the mailbox has gone quiet, and at least 72 hours after that mailbox's last canary (§13 Q2; §4.10). States: `active`, `quiet`, `blocked` (forwarding set and verified on, but the setup canary never arrived), `off` (the saved session found forwarding turned off or pointing elsewhere), `paused_send` (Microsoft
+| **D14** | **Canary and "source went quiet" ship in the MVP for forwarded mailboxes.** At setup, a canary from Knowlu's own domain (DKIM-signed, a nonce in a header and the subject) is sent to the student's mailbox and must come back through forwarding; the setup waits up to three minutes. After setup a mailbox is watched passively (`last_received_at`); a periodic canary is sent only after the mailbox has gone quiet, and at least 72 hours after that mailbox's last canary (§13 Q2; §4.10). States: `active`, `quiet`, `blocked` (forwarding set and verified on, but the setup canary never arrived), `off` (the saved session found forwarding turned off or pointing elsewhere), `paused_send` (Microsoft
 refused a backfill or recover send, §4.2 step 5), `lapsed` (no entitlement, §4.6 step 3), `revoked`. Each
-non-active state is a named line in the run and in Settings, and an issue in the Issues panel. | Quinn's Q1 puts the periodic canary in the MVP; VISION: silence is never ambiguous. Ruling 10 put "source went quiet" in the Pilot for Gmail; this moves the Knowbox's own to the MVP (§10, A5). | A canary to the student's own mailbox is mail Knowlu sends them; it obeys VISION's "one daily email at most" (§4.10). |
-| **D15** *(Q6)* | **The saved session is on by default for everyone, at every school, with a clear switch** (Q6; §13 Q6, Quinn: no policy-read gate for it, and ruling 12's gate for the Blackboard session suspended beside it until Knowlu has 20 paying users, D25). The mail window keeps **one WebView2 profile per connected mailbox** at `<data_dir>\mail-session-<address_id>` (never the vault, never synced, no password kept; Windows encrypts the profile's cookies with DPAPI, but the pages and mail the site caches in the profile are stored there unencrypted). It is used to **reconcile** (compare what the mailbox received in a window with what the Knowbox holds, on the device), **recover** (forward the missing messages as attachments) and **re-enable** forwarding found turned off, automatically and then with a notice, never for a mailbox the student turned off in Knowlu's own Settings (§4.11; §13 Q11). Reconcile runs once a day, revisited after the 10-08 session-lifetime spike (§13 Q3). An expired session asks the student to sign in **only when a repair is needed**. Switching it off deletes every mailbox's profile; setup still works, in a `mail-setup` profile wiped when the window closes and swept at start-up if a crash left it. A mailbox's profile is deleted on that mailbox's Disconnect, and every mail profile on Knowlu sign-out and on account deletion; a delete that fails is retried at the next start-up and named in Settings until it succeeds. Named on the privacy page. It is a second named exception to §11a's "keep nothing", beside ruling 12's (§10). | Quinn's Q6, on ruling 12's precedent. One profile per mailbox means "Disconnect Gmail" leaves no Google session behind while the school mailbox stays connected. | A saved session is full mailbox access on the device; malware running as the student can use it (§7, §11). |
+non-active state is a named line in the run and in Settings, and an issue in the Issues panel. | Quinn's Q1 puts the periodic canary in the MVP; VISION: silence is never ambiguous. Ruling 10 put "source went quiet" in the Pilot for Gmail; this moves email forwarding's own to the MVP (§10, A5). | A canary to the student's own mailbox is mail Knowlu sends them; it obeys VISION's "one daily email at most" (§4.10). |
+| **D15** *(Q6)* | **The saved session is on by default for everyone, at every school, with a clear switch** (Q6; §13 Q6, Quinn: no policy-read gate for it, and ruling 12's gate for the Blackboard session suspended beside it until Knowlu has 20 paying users, D25). The mail window keeps **one WebView2 profile per connected mailbox** at `<data_dir>\mail-session-<address_id>` (never the vault, never synced, no password kept; Windows encrypts the profile's cookies with DPAPI, but the pages and mail the site caches in the profile are stored there unencrypted). It is used to **reconcile** (compare what the mailbox received in a window with what email forwarding to Knowlu holds, on the device), **recover** (forward the missing messages as attachments) and **re-enable** forwarding found turned off, automatically and then with a notice, never for a mailbox the student turned off in Knowlu's own Settings (§4.11; §13 Q11). Reconcile runs once a day, revisited after the 10-08 session-lifetime spike (§13 Q3). An expired session asks the student to sign in **only when a repair is needed**. Switching it off deletes every mailbox's profile; setup still works, in a `mail-setup` profile wiped when the window closes and swept at start-up if a crash left it. A mailbox's profile is deleted on that mailbox's Disconnect, and every mail profile on Knowlu sign-out and on account deletion; a delete that fails is retried at the next start-up and named in Settings until it succeeds. Named on the privacy page. It is a second named exception to §11a's "keep nothing", beside ruling 12's (§10). | Quinn's Q6, on ruling 12's precedent. One profile per mailbox means "Disconnect Gmail" leaves no Google session behind while the school mailbox stays connected. | A saved session is full mailbox access on the device; malware running as the student can use it (§7, §11). |
 | **D16** *(Q7)* | **No contact with school IT.** The setup canary detects a tenant that blocks external forwarding (Microsoft's default for tenants since 2021, NDR 5.7.520, which the student never sees) and names it: "Your school is blocking forwarding to Knowlu." The setup then offers only what remains: personal Gmail, and the guided steps. | Quinn's Q7. E2 and X3a proved UA's forwarding works today. | A school that blocks later is found by the periodic canary, not in advance. |
-| **D17** | **Disconnect and deletion leave nothing that serves the connection.** Disconnect (per mailbox) turns forwarding off in the mailbox (the saved session, or a sign-in, or guided steps), revokes the address, deletes the mailbox's `knowbox_seen`, its `mail_claims` **delivered or not** (the Gmail disconnect precedent), its `knowbox_work` rows and their S3 objects (by key, read from `knowbox_work` first), its batches and canaries, and that mailbox's saved-session profile. Mail that still arrives at a revoked address is deleted **without its body ever being fetched** (§4.6 step 2). `DELETE /account` calls the same purge for each mailbox before the cascade and names every Knowbox table in its list (§4.13); the app tries to turn forwarding off with the saved session first and says so on the confirm. The account's export includes its mailboxes (provider, `mailbox_hint`, status, dates, counters) and its queued claims; never the token, its HMAC, a key or a hash. | The Gmail spec's D14 rule, applied here: delete what exists only to serve the connection. The judgment rows (no text) go with the account, as today. | A forwarding the student never turns off keeps sending mail to a black hole. The disconnect copy says so, and guided steps show how to stop it. |
-| **D18** | **This lane moves no `PRIVACY_VERSION` and edits no `site/privacy.html`.** §7 drafts the sentences; they join privacy bump #1 (Pilot), whose PR moves the page, its date and the constant together after its lawyer read. **No release is tagged from a `main` that carries the Knowbox setup, or the suspended grades gate (D25), until bump #1 has merged** (the guard the Gmail spec's D13 already put in HANDOFF, widened twice). | Ruling 12's and the Gmail spec's pattern. The MVP proof runs on a dev build against staging. Ruling 12 let a release carry M1's code before bump #1 only "because without a date it offers grades nowhere"; with the gate suspended that no longer holds (D25). | A release cut early would ship a page that does not name the Knowbox, AWS, the saved session, or a kept Blackboard session now offered at every school. |
+| **D17** | **Disconnect and deletion leave nothing that serves the connection.** Disconnect (per mailbox) turns forwarding off in the mailbox (the saved session, or a sign-in, or guided steps), revokes the address, deletes the mailbox's `mail_seen`, its `mail_claims` **delivered or not** (the Gmail disconnect precedent), its `mail_work` rows and their S3 objects (by key, read from `mail_work` first), its batches and canaries, and that mailbox's saved-session profile. Mail that still arrives at a revoked address is deleted **without its body ever being fetched** (§4.6 step 2). `DELETE /account` calls the same purge for each mailbox before the cascade and names every mail table in its list (§4.13); the app tries to turn forwarding off with the saved session first and says so on the confirm. The account's export includes its mailboxes (provider, `mailbox_hint`, status, dates, counters) and its queued claims; never the token, its HMAC, a key or a hash. | The Gmail spec's D14 rule, applied here: delete what exists only to serve the connection. The judgment rows (no text) go with the account, as today. | A forwarding the student never turns off keeps sending mail to a black hole. The disconnect copy says so, and guided steps show how to stop it. |
+| **D18** | **This lane moves no `PRIVACY_VERSION` and edits no `site/privacy.html`.** §7 drafts the sentences; they join privacy bump #1 (Pilot), whose PR moves the page, its date and the constant together after its lawyer read. **No release is tagged from a `main` that carries email forwarding to Knowlu setup, or the suspended grades gate (D25), until bump #1 has merged** (the guard the Gmail spec's D13 already put in HANDOFF, widened twice). | Ruling 12's and the Gmail spec's pattern. The MVP proof runs on a dev build against staging. Ruling 12 let a release carry M1's code before bump #1 only "because without a date it offers grades nowhere"; with the gate suspended that no longer holds (D25). | A release cut early would ship a page that does not name email forwarding to Knowlu, AWS, the saved session, or a kept Blackboard session now offered at every school. |
 | **D19** | **The step scripts are compiled into the app** (one readable JS file per provider and step, with its selectors and its check) and versioned with the release. No script is fetched from a server in the MVP. | A server-supplied script would run inside a signed-in mailbox; that needs signed delivery and its own review. The MVP's one user can take a release. | A provider's UI change breaks a step until a release; guided steps cover the gap (D5). Signed remote scripts are a Pilot or Launch item. |
 | **D20** | **Names.** Journal actor `agent:knowlu.mail` for every reconcile write; `created_by: mail` on notes and cards; uids `mail:<h>` where `<h>` is the first 32 hex of SHA-256 of the message's Message-ID (a message with none: of its Date, From and Subject), and `mail:<h>:<n>` for its *n*-th claim. `state/ingest-seen.md` records them like `gmail:` uids. | `agent:` keeps judge-once (`provenance::is_agent` is a prefix test). Hashing keeps Message-IDs, which can carry addresses, out of the vault. | None. |
 | **D21** | **Mail cards, notices and applied changes name their sender** (display name and address) and the message's date. | VISION commitment 5: "showing who it came from"; a moved deadline is judged by who moved it. | It diverges from Quinn's decision for Gmail cards (the Gmail spec's D15, decided at `gmail-connect-design:901`: no sender in the MVP). Quinn chose it (§13 Q10: mail cards show the sender) and the ruling text Quinn signs (§10) states the divergence; disclosed in §7. |
-| **D22** | **One mailbox, one path; the Knowbox wins.** When a Gmail address has an active Knowbox and is also connected by OAuth, `gmail-read` reads nothing new and answers an ordinary, **non-quiet** pull: `{items: <undelivered>, read: 0, quiet: false, more: false}`, plus a field `via_knowbox: true` that today's device ignores. Already-queued items are still delivered and acked. Calendar is untouched. **Never `quiet`:** the merged device reads every unknown quiet reason as `Revoked` ("re-connect from settings") and stops before reading items (`cloudmodel.rs:667-675`). | No cross-path dedup is needed, and the Knowbox's backfill and canary are the stronger path. Zero device change. | One small change to the merged `gmail-read` (§9), with a handler test that the answer is not quiet and carries the undelivered items. |
-| **D23** | **A one-time backfill allowance** above the daily email cap: an allowance of `mail_claim` judgments **per account per term** (held on `knowbox_accounts`, keyed by the term's start, so Disconnect and reconnect never renew it), shared by the account's mailboxes, usable within 14 days of the first setup, charged by its own RPC. Its calls' tokens are recorded through `record_tokens` like every other call's, so `monthly_spend` sees their cost, while their count is kept on `knowbox_accounts` and never in `usage_daily.calls`, so a backfill never uses up the live daily cap; while the allowance is open, `enforce_budget`'s ceiling for that account is `MONTHLY_CEILING_USD` plus the allowance's dollars, a hard per-account ceiling, and back to `MONTHLY_CEILING_USD` after. Size (§13 Q1): **2,000 `mail_claim` judgments per account per term, and $1.00 above that account's ceiling while the allowance lasts.** | Q5 asks for it sized. The screen and parsers remove most mail before the model; what is left is bounded by the window. Holding it per account means a mint-and-disconnect loop buys nothing (D3 also caps addresses). | Too small: backfill trickles over days at the daily cap. Too large: a looping bug costs more before it trips. |
+| **D22** | **One mailbox, one path; email forwarding to Knowlu wins.** When a Gmail address has an active forwarding and is also connected by OAuth, `gmail-read` reads nothing new and answers an ordinary, **non-quiet** pull: `{items: <undelivered>, read: 0, quiet: false, more: false}`, plus a field `via_forward: true` that today's device ignores. Already-queued items are still delivered and acked. Calendar is untouched. **Never `quiet`:** the merged device reads every unknown quiet reason as `Revoked` ("re-connect from settings") and stops before reading items (`cloudmodel.rs:667-675`). | No cross-path dedup is needed, and email forwarding's backfill and canary are the stronger path. Zero device change. | One small change to the merged `gmail-read` (§9), with a handler test that the answer is not quiet and carries the undelivered items. |
+| **D23** | **A one-time backfill allowance** above the daily email cap: an allowance of `mail_claim` judgments **per account per term** (held on `mail_accounts`, keyed by the term's start, so Disconnect and reconnect never renew it), shared by the account's mailboxes, usable within 14 days of the first setup, charged by its own RPC. Its calls' tokens are recorded through `record_tokens` like every other call's, so `monthly_spend` sees their cost, while their count is kept on `mail_accounts` and never in `usage_daily.calls`, so a backfill never uses up the live daily cap; while the allowance is open, `enforce_budget`'s ceiling for that account is `MONTHLY_CEILING_USD` plus the allowance's dollars, a hard per-account ceiling, and back to `MONTHLY_CEILING_USD` after. Size (§13 Q1): **2,000 `mail_claim` judgments per account per term, and $1.00 above that account's ceiling while the allowance lasts.** | Q5 asks for it sized. The screen and parsers remove most mail before the model; what is left is bounded by the window. Holding it per account means a mint-and-disconnect loop buys nothing (D3 also caps addresses). | Too small: backfill trickles over days at the daily cap. Too large: a looping bug costs more before it trips. |
 | **D24** | **Events and schedules stay the student's call.** A dated event in mail (a meeting, a club sign-up) is a `new_item` with `item_kind: event` and, **when it is still ahead**, is always a card, in both phases. An event already past when the claim is applied files no card: in the backfill it is recorded and archived `imported-past` (Q5: "recorded and archived"); live or recovered, it is counted in the run line's past count and nothing is written, since no one can accept a past event. A claim about a class meeting (moved, cancelled, new room) is a notice (D13); it never writes `commitments/`. | The events spec's D2 ("obligations are asked, never auto-created") and the commitment model (commitments are what the student confirmed). | A cancelled class still blocks its time until the student edits it; the notice tells them. |
 | **D25** *(§13 Q6)* | **Ruling 12's policy-read gate is suspended until Knowlu has 20 paying users, for both kept sessions.** The kept Blackboard session (M1 grades) and the saved mail sign-in (D15) are offered and used at every school, with no recorded university-policy read. For grades, "every school" is every curated campus row whose `lms_kind` is `blackboard`: the host still comes only from the curated row, never a typed address, so an uncurated Blackboard school still reads "not available at your school yet". For mail it is every school (§4.1). The gate stays mechanical and in one place: `grades::availability` (`app/src/grades.rs:40-50`) reads one constant, `POLICY_READ_GATE`, set to `Suspended`, the same in every build (no `cfg`, feature or environment variable). The `policy_read` field, the date-and-bump test and the named reason all stay, so restoring the gate is one constant, with the `Enforced` arm's predicate tests already written; the undated cases T19 rewrites in the command and scheduler tests go back with it, T19's diff being their record (T19). **Review trigger:** the 20th paying account, counted as an `active` paid subscription (`trialing` and founder-owned test accounts not counted); Quinn rules again before the next release tagged after it. HANDOFF's queue carries the trigger, set 2026-09-30, and the controller's count-only query checks it at each milestone update. **Disclosure first:** D18's release guard covers the suspension. | Quinn's answer to §13 Q6 (2026-09-30): "change both to allow … Once we have 20 paying users, we'll come back to this … give ourselves as much of an advantage as possible." The MVP and the Pilot prove the concept as a desktop app, and the reads would hold back the founder's own grades proof. | A school whose policy forbids a kept SSO or mail session is learned about from the school, after the fact, not from a read (§11, risk 17). The lawyer read in bump #1 still happens. |
 
@@ -203,7 +205,7 @@ non-active state is a named line in the run and in Settings, and an issue in the
    the provider from the domain's MX records (`*.mail.protection.outlook.com` is M365; Google's MX hosts
    are Google); an unknown provider is guided (§13 Q4: the curated row, else this MX lookup). Personal
    Gmail is always offered beside it, and skippable.
-2. **The address.** `POST /knowbox/addresses {provider}` mints the mailbox's address (D3) and answers it
+2. **The address.** `POST /mail/addresses {provider}` mints the mailbox's address (D3) and answers it
    with an `address_id`; a fourth live address, or a seventh mint in 30 days, is refused with a named
    reason. The address is shown in the progress view (the student may want it) and is never logged.
 3. **The binding.** After sign-in the script reads the signed-in mailbox's own address from the page and
@@ -226,20 +228,20 @@ steps below as they run.
      instead (the school inbox keeps every message), or stop. The script never replaces an existing
      forwarding address without that answer. (An inbox rule that forwards to both is untested; T0 S6
      decides whether it becomes a third choice.)
-   - **Set:** switch on, the Knowbox address, "Keep a copy of forwarded messages" on, Save. No
+   - **Set:** switch on, your Knowlu address, "Keep a copy of forwarded messages" on, Save. No
      re-authentication was needed in X3a.
    - **Check:** navigate away and back; the switch reads on, the address reads back, the copy box is on.
-4. **Test message (canary).** `POST /knowbox/canary` sends one; the progress view waits up to three
-   minutes for it at the Knowbox (X3a: about 40 s). Arrived: the mailbox is `active`. Not arrived: the
+4. **Test message (canary).** `POST /mail/canary` sends one; the progress view waits up to three
+   minutes for it at email forwarding to Knowlu (X3a: about 40 s). Arrived: the mailbox is `active`. Not arrived: the
    view says the school may be blocking forwarding (D16), shows guided checks (Junk, the setting), and
    leaves the mailbox `blocked` with Retry.
 5. **Mail since the term started** (D7). Search for mail received since the start date **in the
    mailbox's own folders, excluding Junk Email and Deleted Items**, and read the result count (the
-   list's `aria-setsize`; volume in the research note §2); `POST /knowbox/batches` opens the backfill
+   list's `aria-setsize`; volume in the research note §2); `POST /mail/batches` opens the backfill
    batch with that count as `expected`. Then the **recover routine** (§4.11) runs over that window: it
    lists the messages, compares them on the device with what the service holds, and forwards each
    missing one as an attachment, one at a time (Outlook forwards one message at a time; B-C), **oldest
-   first**, to the Knowbox address, with the batch's nonce in the subject.
+   first**, to your Knowlu address, with the batch's nonce in the subject.
    **The pace is Microsoft's, not ours.** Exchange Online allows 30 messages a minute per mailbox and
    reacts to outbound bursts by restricting the sender, which would stop the student's school account
    from sending until school IT unblocks it (Q7 rules out asking them). So the routine forwards at most
@@ -247,9 +249,9 @@ steps below as they run.
    them), and **stops at the first non-delivery report or send failure** it sees in the page, with the
    named outcome `mail: forwarding paused — Microsoft refused a send` in the view, Settings and the run
    line; nothing retries until the next day. The view shows N of M and a time left. When the last
-   forward is sent, the device closes the batch with the number it sent (`POST /knowbox/batches/<id>/sent`).
+   forward is sent, the device closes the batch with the number it sent (`POST /mail/batches/<id>/sent`).
    Each forward leaves a copy in Sent Items; **the script deletes only the copies it created** (matched
-   by the nonce and the Knowbox recipient) and the view says it will.
+   by the nonce and email forwarding to Knowlu recipient) and the view says it will.
 6. **Finish.** With the saved session on (the default, D15) the window closes and the mailbox's profile
    stays; with it off, the `mail-setup` profile is deleted. A backfill still running when the student
    quits **resumes the next time the app is open** with the saved session (it is the same recover
@@ -261,13 +263,13 @@ steps below as they run.
    "Inbox … Gmail"; the address in the title is the `mailbox_hint`.
 2. **The window steps aside.**
 3. **Add the forwarding address.** Settings → Forwarding and POP/IMAP (by hash; a hash round trip
-   re-renders a section that did not draw, research note §6), "Add a forwarding address", the Knowbox
+   re-renders a section that did not draw, research note §6), "Add a forwarding address", email forwarding to Knowlu
    address, Next, Proceed. The buttons are `<input type=button value=…>`.
    - **Google asks "verify it's you"** in a popup (X3b). The popup is allowed (T0 S1); the mail window
      comes back, centred, and the progress view says "Google wants to confirm it's you. Check your
      phone." The phone tap is the student's. The window steps aside again when the popup closes.
    - **Already forwarding elsewhere:** as §4.2 step 3.
-4. **Knowlu confirms the address** (E3). Google mails a confirmation to the Knowbox address. Intake
+4. **Knowlu confirms the address** (E3). Google mails a confirmation to your Knowlu address. Intake
    recognises it (§4.6 step 5) and completes it server-side with a cookie-less request to Google's
    confirmation page. The view polls the service until the mailbox reads `confirmed`.
 5. **Turn forwarding on.** Back in the Forwarding section: "Forward a copy of incoming mail to" the
@@ -305,7 +307,7 @@ step). Above the rows, one sentence of what is happening now. Backfill shows N o
   before 12 September was not brought in").
 - No step's text names a selector, a URL or the address's token in a log.
 
-### 4.6 Receiver intake (`knowbox-inbound`)
+### 4.6 Receiver intake (`mail-inbound`)
 
 Every arrival, in order. Each step that ends the message deletes its S3 object at once. **"Deleted
 unread"** below means deleted without the object ever being fetched: the function then holds only the
@@ -315,11 +317,11 @@ the recipients from it, and logs nothing from it.
 1. **Verify the notification** (D2): SNS signature, topic, certificate host. A subscription handshake is
    confirmed only for the configured topic. Anything else answers 403 and reads nothing.
 2. **Find the mailbox, from the notification alone.** For each address in the notification's
-   `receipt.recipients` at the Knowbox domain, look the token up by HMAC (a token retired by Rotate still
+   `receipt.recipients` at email forwarding to Knowlu domain, look the token up by HMAC (a token retired by Rotate still
    counts until its grace ends, D3). Unknown or revoked: **deleted unread** (counted globally, never per
    account).
 3. **Entitlement.** An account without an `active` or `trialing` entitlement: **deleted unread**, no
-   `knowbox_seen` row, and the mailbox marked `lapsed` with `lapsed_since` (shown in Settings). The
+   `mail_seen` row, and the mailbox marked `lapsed` with `lapsed_since` (shown in Settings). The
    server has no payment grace (the 72-hour grace is the device's cache rule, §1); instead a lapse loses
    nothing for good while the saved session works: when the account is entitled again, the next
    reconcile covers from `lapsed_since`, at most 30 days back, and recover brings in what was dropped
@@ -337,7 +339,7 @@ the recipients from it, and logs nothing from it.
      minutes from setup's step 3); its link's host and path on a fixed allow-list. The page is fetched
      cookie-less with `redirect: manual` (a redirect is refused), and its one form is submitted only when
      the form's action is on the same allow-list. Anything else is refused and counted: a stranger
-     cannot point their Gmail at a student's Knowbox.
+     cannot point their Gmail at a student's forwarding.
    - **Backfill or recover send:** the outer From is the mailbox's `mailbox_hint`, the outer message
      passes DKIM aligned with that address's domain, and the subject carries an open batch nonce for this
      mailbox. Each `message/rfc822` attachment becomes one work item with the batch's id and phase
@@ -347,7 +349,7 @@ the recipients from it, and logs nothing from it.
      never by a header a sender can write. Both must hold: (i) the highest-instance ARC set is sealed by
      the provider (`d=google.com`; for M365 the Microsoft signing domain T0 S0 records), verifies, and its
      ARC-Message-Signature's `h=` covers the binding header, which names this mailbox (Gmail's
-     `X-Forwarded-For` naming `mailbox_hint` and the Knowbox address; Microsoft's
+     `X-Forwarded-For` naming `mailbox_hint` and your Knowlu address; Microsoft's
      `X-MS-Exchange-ForwardingLoop` naming the mailbox and its `forward_hint` tenant); and (ii) SES's SPF
      verdict passes for the envelope sender, whose shape is the provider's forwarding return path for
      this mailbox (Gmail's `<local>+caf_=…@gmail.com` naming the mailbox; Microsoft's SRS address at the
@@ -369,18 +371,18 @@ the recipients from it, and logs nothing from it.
    - The words are recorded on the work item, never the headers. (E2 showed UA professor mail signed by
      `ua.edu`; T0 S0 checks an intra-school message too, and if a school's internal mail proves unsigned,
      Quinn hears the proportion before T2 fixes this rule.)
-7. **Dedup.** `knowbox_seen` (per account) holds `HMAC_k(Message-ID)` and a fingerprint
+7. **Dedup.** `mail_seen` (per account) holds `HMAC_k(Message-ID)` and a fingerprint
    `HMAC_k(sender, normalised subject)` with the message's **received minute**, where `k` is the
-   account's fingerprint key: for live mail, the Knowbox's arrival; for a backfilled or recovered
+   account's fingerprint key: for live mail, email forwarding's arrival; for a backfilled or recovered
    original, the provider's delivery time from its own topmost `Received` header, else its Date. Keyed
    hashes, so a stolen table cannot confirm a guessed message. A Message-ID already there: deleted, done.
    This is what makes recover idempotent and drops a message that reached two mailboxes.
 8. **Hand off.** Put the original as its own object under `work/`; **only after the put succeeds**,
-   insert its `knowbox_work` row and its `knowbox_seen` row in one transaction; delete the `inbound/`
+   insert its `mail_work` row and its `mail_seen` row in one transaction; delete the `inbound/`
    object; update `last_received_at` (live items that passed step 6 only); answer 200. A failed put
    answers 500 with no row written, so SNS's retry is processed as new.
 
-### 4.7 Claims extraction (`knowbox-process`)
+### 4.7 Claims extraction (`mail-process`)
 
 Per work item, within the worker's wall-clock budget, oldest arrival first:
 
@@ -411,8 +413,8 @@ Per work item, within the worker's wall-clock budget, oldest arrival first:
 5. **Charge, before the model.** A `backfill` item charges the account's allowance (D23); a `live` or
    `recover` item charges the daily cap of `mail_claim`; then `enforce_budget` (with D23's raised
    ceiling while the allowance is open) must pass. Capped or over budget: no model call; the item waits
-   in `knowbox_work` until the next UTC day, at most three attempts, and when its object expires first
-   it is counted `expired` and its `knowbox_seen` row is deleted (D8).
+   in `mail_work` until the next UTC day, at most three attempts, and when its object expires first
+   it is counted `expired` and its `mail_seen` row is deleted (D8).
 6. **Queue and forget.** One `mail_claims` row per message that has any non-noise claim: the uid, the
    message's Date and its ordering date (§4.8), the sender's display name and address, the phase and
    batch id, the authenticity word, the claims and the judgment id. **Every final path deletes the work
@@ -424,7 +426,7 @@ Per work item, within the worker's wall-clock budget, oldest arrival first:
 The `judge` step gains a mail pass after the Gmail pull, entitlement-gated like the rest of `judge`.
 
 1. **Pull** `POST /mail-pull {ack}`. Every answer is in (ordering date, uid) order, where a message's
-   **ordering date** is the earlier of its Date header and its received time (the Knowbox's arrival for
+   **ordering date** is the earlier of its Date header and its received time (email forwarding's arrival for
    live mail; the provider's delivery time, else the batch's opening, for backfilled and recovered
    mail), so a message dated in the future cannot outrank later mail. The service delivers:
    - a mailbox's live claims as they are queued, while it has no open batch;
@@ -469,7 +471,7 @@ pulls. The model's only inputs to the device are claims and stored resolutions, 
 step 6): an `unaligned` backfilled original's direct rows become cards. "Card" is a proposal through the
 normal path: charged to the 15-a-day budget, overflow snoozed, never deleted, and on the vault's first
 day snoozed to day 2 (§4.8). **Live** is mail forwarded after setup and mail recovered after setup
-(recover brings in live mail the Knowbox missed); the recover batches that finish an interrupted
+(recover brings in live mail email forwarding to Knowlu missed); the recover batches that finish an interrupted
 backfill are backfill. Card or direct is decided by the reconciler from `Journal::human_set` (D11).
 
 | Claim, and what it touches | Backfill (mail since term start) | Live (forwarded, or recovered after setup) |
@@ -511,7 +513,7 @@ the task as today, as `agent:approvals`.
   back on and then says so (Q6, §13 Q11), unless the student turned that mailbox off in Knowlu's
   Settings; found pointing elsewhere, it changes nothing and asks the student. A setup canary that
   never arrives sets `blocked` (D16).
-- **Limits:** `POST /knowbox/canary` sends only to a `mailbox_hint` whose domain fits the mailbox's
+- **Limits:** `POST /mail/canary` sends only to a `mailbox_hint` whose domain fits the mailbox's
   provider (the campus row's `mail_domain` or the MX check for school mail; `gmail.com` or
   `googlemail.com` for Gmail), at most three canaries per address per UTC day, so the endpoint cannot
   make Knowlu's domain mail third parties at will.
@@ -544,14 +546,14 @@ Per mailbox, with the mailbox's own kept profile:
    asked to sign in only when a repair is needed, by a heads-up item and the Settings row, and signing
    in opens the visible window.
 2. **Read the forwarding setting.**
-   - On, to this mailbox's Knowbox address: nothing to do.
+   - On, to this mailbox's forwarding address: nothing to do.
    - **Off, and the student turned this mailbox off in Knowlu's Settings** (its `address_id` is in
      `mail.json`'s `turned_off`, written first at §4.12): nothing is done, now or ever; the step skips a
      listed mailbox before step 1 opens its profile. Knowlu never re-enables what the student turned
      off in its own Settings (§13 Q11).
    - **Off, otherwise:** the mailbox is `off`; the step turns forwarding back on with setup's step
      script, automatically (Q6, §13 Q11), sends a canary, and reports it (`POST
-     /knowbox/addresses/<id>/state {state: reenabled}`, which stamps `reenabled_at`). The next mail pass
+     /mail/addresses/<id>/state {state: reenabled}`, which stamps `reenabled_at`). The next mail pass
      opens a heads-up item for that mailbox (`close_key: mail-reenabled:<address_id>`) whose text is
      exactly: "Email forwarding was off; Knowlu turned it back on. Turn off email in Settings to stop
      this." Its title names the mailbox (school email or Gmail); the student dismisses it.
@@ -559,7 +561,7 @@ Per mailbox, with the mailbox's own kept profile:
      the student's answer). The mailbox is `off` (reported `{state: elsewhere}`), and a heads-up item
      asks "Forwarding in your school mail now goes to another address. Forward to Knowlu instead?"; only
      a yes acts, through the visible progress view.
-3. **Reconcile, on the device.** `POST /knowbox/reconcile {address_id, since, until}` answers the
+3. **Reconcile, on the device.** `POST /mail/reconcile {address_id, since, until}` answers the
    fingerprints the service **holds** for the window (each an `HMAC_k(sender, normalised subject)` with
    its received minute, §4.6 step 7) and the key `k`. The device lists what the mailbox received in the
    window (sender, subject, received time; T0 S2 records which form of the sender each provider's list
@@ -588,7 +590,7 @@ already added stays in your plan."
 1. Turn forwarding off (and on Gmail, remove the address from the list; no re-authentication, X3b), with
    the saved session; if signed out, the visible window for a sign-in; if that is declined or a step
    fails, the guided steps, with the address shown so the student can find it.
-2. `DELETE /knowbox/addresses/<id>`: revoke and purge (D17). Allowed for a lapsed or canceled account
+2. `DELETE /mail/addresses/<id>`: revoke and purge (D17). Allowed for a lapsed or canceled account
    (sign-in only, §6.3).
 3. Close the mail window and delete that mailbox's `mail-session-<address_id>` profile; a delete that
    fails is retried at the next start-up and named in Settings until it succeeds (D15).
@@ -597,11 +599,11 @@ already added stays in your plan."
 
 `delete_my_data` gains one step before its server call: for each mailbox, try to turn forwarding off with
 the saved session (hidden, bounded to a minute each). Then `DELETE /account` as today. Its purge now
-calls `delete_knowbox_address` for each mailbox first (the `work/` objects deleted by the keys
-`knowbox_work` holds, since the IAM user cannot list the bucket; an `inbound/` object lives only for one
-intake call and its one-day rule catches a straggler), then names all seven Knowbox
-tables in its list (`knowbox_accounts`, `knowbox_addresses`, `knowbox_batches`, `knowbox_canaries`,
-`knowbox_seen`, `knowbox_work`, `mail_claims`) whether or not the cascade would reach them, as the list
+calls `delete_mail_address` for each mailbox first (the `work/` objects deleted by the keys
+`mail_work` holds, since the IAM user cannot list the bucket; an `inbound/` object lives only for one
+intake call and its one-day rule catches a straggler), then names all seven forwarding
+tables in its list (`mail_accounts`, `mail_addresses`, `mail_batches`, `mail_canaries`,
+`mail_seen`, `mail_work`, `mail_claims`) whether or not the cascade would reach them, as the list
 does for every table that holds the student's data. `exportAll` gains the rows D17 names. Then the mail
 windows are closed before `delete_local_data` removes the profile folder and every kept mail profile with
 it. The confirm adds one sentence: "If Knowlu cannot turn forwarding off, your mail keeps going to
@@ -629,23 +631,23 @@ read-only engine command (§6.1); the app computes nothing.
 
 ### 5.1 Cloud
 
-One new migration, `<date>_knowbox.sql`, stamped after every existing one; no applied migration is
+One new migration, `<date>_mail.sql`, stamped after every existing one; no applied migration is
 edited. Every table has RLS on and no grant to `anon` or `authenticated`: only the service role reads
 them, as `google_accounts` does. Every `account_id` references `accounts(id) on delete cascade`.
 
 | Table | Holds | Kept |
 |---|---|---|
-| `knowbox_accounts` | `account_id`; the per-account fingerprint key, encrypted; `digest` (D13, default false); the allowance (D23): `allowance_term_start`, `allowance_left`, `allowance_usd`, `allowance_until`; `mints_30d` (D3) | until the account goes |
-| `knowbox_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `reenabled_at` (§4.11 step 2); `confirm_until`; `term_start`; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired` | until Disconnect (then the row is deleted) or the account goes |
-| `knowbox_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
-| `knowbox_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
-| `knowbox_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `knowbox_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |
-| `knowbox_work` | `id`, `account_id`, `address_id`, `batch_id`, the S3 key, `phase`, the authenticity word, `arrived_at`, `attempts`, `next_attempt_at` | until processed, or until its object expires (then counted `expired`) |
+| `mail_accounts` | `account_id`; the per-account fingerprint key, encrypted; `digest` (D13, default false); the allowance (D23): `allowance_term_start`, `allowance_left`, `allowance_usd`, `allowance_until`; `mints_30d` (D3) | until the account goes |
+| `mail_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `reenabled_at` (§4.11 step 2); `confirm_until`; `term_start`; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired` | until Disconnect (then the row is deleted) or the account goes |
+| `mail_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
+| `mail_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
+| `mail_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `mail_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |
+| `mail_work` | `id`, `account_id`, `address_id`, `batch_id`, the S3 key, `phase`, the authenticity word, `arrived_at`, `attempts`, `next_attempt_at` | until processed, or until its object expires (then counted `expired`) |
 | `mail_claims` | `id`, `account_id`, `address_id`, `batch_id`, `uid`, `message_date`, `ordering_date`, `sender_name`, `sender_addr`, `phase`, `authenticity`, `claims` (jsonb, below), `judgment_id`, `queued_at`, `delivered_at` | delivered: 7 days; undelivered: 30 days, then deleted and counted; all of a mailbox's rows on its Disconnect |
 
 **Changes to existing objects, in the same migration, constraint by constraint** (§1's list; each is
 pinned by test 14):
-- `judgments.origin` gains `knowbox`; `judgments.kind` (`:70`) gains `mail_claim`, `mail_resolve`,
+- `judgments.origin` gains `forward`; `judgments.kind` (`:70`) gains `mail_claim`, `mail_resolve`,
   `mail_digest`.
 - `models.kind` (`:39`) and `usage_daily.kind` (`:155`) gain the same three, so `models` takes their rows
   and `charge_call` and `record_tokens` can count them. Without `usage_daily`, `charge_call` answers
@@ -653,23 +655,23 @@ pinned by test 14):
 - **Not widened, deliberately:** `corrections.judgment_kind` (`:102-103`), `rules.kind` (`:113`), both
   eval tables (`20260911000700_eval.sql:9`, `:31`) and `telemetry/handler.ts`'s `JUDGMENT_KINDS`. Mail
   judgments never become rules, corrections or eval rows: `promote_rules` and
-  `backfill_correction_judgments` are redefined to read only `origin <> 'knowbox'` (otherwise
+  `backfill_correction_judgments` are redefined to read only `origin <> 'forward'` (otherwise
   `judgment_features` would offer a `mail_claim` feature and the `rules` insert would abort the whole
   nightly promotion for every account), and the device never reports a label on a mail card
   (`labels_to_report` already passes over every kind but `task` and `event`; test 28b pins it).
-- `export_training_rows` is redefined to exclude `knowbox` beside `gmail_api` and `events`; the
+- `export_training_rows` is redefined to exclude `forward` beside `gmail_api` and `events`; the
   assertion at `migrations_test.ts:826` moves to the new last definition and checks
-  `origin not in ('gmail_api', 'events', 'knowbox')`, naming all three origins, so it is stronger, never
+  `origin not in ('gmail_api', 'events', 'forward')`, naming all three origins, so it is stronger, never
   looser.
 - `enforce_budget` takes D23's raised ceiling while an account's allowance is open; `DAILY_CAP` gains
   `mail_claim` and `mail_resolve` (the allowance is 2,000 judgments and $1.00 per account per term, §13
   Q1; the daily caps start at email's 120 for `mail_claim` and 20 for `mail_resolve`).
-- RPCs: `charge_allowance(p_account)` (one statement, like `charge_call`); `delete_knowbox_address(p_address)`
-  (revoke, then delete the mailbox's `knowbox_seen`, `knowbox_work`, all its `mail_claims`, batches
+- RPCs: `charge_allowance(p_account)` (one statement, like `charge_call`); `delete_mail_address(p_address)`
+  (revoke, then delete the mailbox's `mail_seen`, `mail_work`, all its `mail_claims`, batches
   and canaries, then the row; `security definer`, pinned `search_path`). Its callers (Disconnect and
-  the account purge) first read the mailbox's `work/` keys from `knowbox_work` and delete those objects.
-- Cron (pg_net, the Vault token, as the existing jobs): `knowbox-process` every minute;
-  `knowbox-canary` hourly; `knowbox-sweep` nightly (expire work and delete the expired items' seen rows,
+  the account purge) first read the mailbox's `work/` keys from `mail_work` and delete those objects.
+- Cron (pg_net, the Vault token, as the existing jobs): `mail-process` every minute;
+  `mail-canary` hourly; `mail-sweep` nightly (expire work and delete the expired items' seen rows,
   close timed-out batches, prune seen, sweep claims, batches and canaries).
 
 **A claim** (the `claims` array's element; validated server-side, re-checked for shape on the device):
@@ -697,9 +699,9 @@ whole message through SNS; never "stop" or "bounce"); an S3 bucket with public a
 encryption at rest, and a one-day expiry on `inbound/` and `work/` (up to about two days in practice,
 §7); an SNS topic with one HTTPS subscription; one IAM user limited to get, put and delete on that
 bucket (no list). Function secrets, named only:
-`KNOWBOX_DOMAIN`, `KNOWBOX_ADDRESS_KEY`, `KNOWBOX_ENC_KEY`, `KNOWBOX_BUCKET`, `KNOWBOX_SNS_TOPIC_ARN`,
+`MAIL_DOMAIN`, `MAIL_ADDRESS_KEY`, `MAIL_ENC_KEY`, `MAIL_BUCKET`, `MAIL_SNS_TOPIC_ARN`,
 `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. `config.toml` sets `verify_jwt = false` for
-`knowbox-inbound` only (SNS cannot send a bearer; the signature is its check).
+`mail-inbound` only (SNS cannot send a bearer; the signature is its check).
 
 ### 5.2 Vault
 
@@ -805,7 +807,7 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
 
   | Command | Does |
   |---|---|
-  | `mail_status` | the mailboxes (from `GET /knowbox/addresses`), each state, backfill progress, `keep_session` |
+  | `mail_status` | the mailboxes (from `GET /mail/addresses`), each state, backfill progress, `keep_session` |
   | `mail_setup_start(provider)` | starts setup on a background thread; one at a time |
   | `mail_setup_progress` | the step rows for the progress view (polled) |
   | `mail_setup_answer(choice)` | a needs-you answer: replace forwarding, stop, the term date |
@@ -846,13 +848,13 @@ the vault. CLAUDE.md's slot line gains that sentence (§10, A12).
 
 | Function | Auth | Does |
 |---|---|---|
-| `knowbox-inbound` | SNS signature (`verify_jwt = false`) | §4.6 |
-| `knowbox-process` | the cron's Vault token | §4.7 |
-| `knowbox` | **sign-in only** (`requireUser`, as google-connect's status and disconnect) for `GET /addresses` and `DELETE /addresses/<id>`, so a lapsed or canceled account can always see and disconnect its mailboxes; **session + `requireActiveEntitlement`** for every other route | `GET /addresses`, `DELETE /addresses/<id>`, `POST /addresses` (D3's caps), `POST /addresses/<id>/rotate`, `POST /canary` (§4.10's limits), `POST /batches` (opens a backfill or recover batch and answers its nonce), `POST /batches/<id>/sent`, `POST /reconcile` (answers held fingerprints and the key, §4.11), `POST /addresses/<id>/state` (`off`, `elsewhere` or `reenabled` from the mail step, §4.11 step 2), `GET /provider?domain=` (MX lookup through `Deno.resolveDns`; §13 Q4) |
-| `knowbox-canary` | the cron's Vault token | §4.10's periodic canary |
+| `mail-inbound` | SNS signature (`verify_jwt = false`) | §4.6 |
+| `mail-process` | the cron's Vault token | §4.7 |
+| `mail` | **sign-in only** (`requireUser`, as google-connect's status and disconnect) for `GET /addresses` and `DELETE /addresses/<id>`, so a lapsed or canceled account can always see and disconnect its mailboxes; **session + `requireActiveEntitlement`** for every other route | `GET /addresses`, `DELETE /addresses/<id>`, `POST /addresses` (D3's caps), `POST /addresses/<id>/rotate`, `POST /canary` (§4.10's limits), `POST /batches` (opens a backfill or recover batch and answers its nonce), `POST /batches/<id>/sent`, `POST /reconcile` (answers held fingerprints and the key, §4.11), `POST /addresses/<id>/state` (`off`, `elsewhere` or `reenabled` from the mail step, §4.11 step 2), `GET /provider?domain=` (MX lookup through `Deno.resolveDns`; §13 Q4) |
+| `mail-canary` | the cron's Vault token | §4.10's periodic canary |
 | `mail-pull` | session + entitlement | undelivered `mail_claims` by §4.8 step 1's rules; ack |
 | `mail-resolve` | session + entitlement | D12; one call per course batch; stores each answer on its claim |
-| `account` (changed) | as today | the purge of §4.13 (each mailbox by `delete_knowbox_address`, objects by key first; all seven tables named); `exportAll` gains D17's rows |
+| `account` (changed) | as today | the purge of §4.13 (each mailbox by `delete_mail_address`, objects by key first; all seven tables named); `exportAll` gains D17's rows |
 | `gmail-read` (changed) | as today | D22's non-quiet empty read |
 
 Every function follows the house rules: no body, header or address token in any log line; errors name a
@@ -909,11 +911,11 @@ so in plain words, and no release carries either sign-in before it does (D18).
 forwarding was off; Knowlu turned it back on. Turn off email in Settings to stop this." A mailbox
 turned off in Knowlu's own Settings is never turned back on (§13 Q11).
 
-**Telemetry and training.** No Knowbox content in telemetry, ever; no new telemetry row shape. `knowbox`
+**Telemetry and training.** No Forwarded-mail content in telemetry, ever; no new telemetry row shape. `forward`
 judgments are excluded from the training export, the rules and the corrections back-fill (§5.1), and a
 note made from mail is never re-judged on the device (§5.2), so no judgment of any origin carries mail
 text into training. Google's Limited Use policy does not bind mail
-that arrives by forwarding, since it is not obtained through Google's API; the Knowbox is held to the
+that arrives by forwarding, since it is not obtained through Google's API; email forwarding to Knowlu is held to the
 same rules anyway.
 
 **Sub-processor:** Amazon Web Services (SES, S3, SNS) joins the list, "receives the email you forward to
@@ -927,7 +929,7 @@ in HANDOFF (T13), beside M1's and the Gmail spec's drafts, for its one lawyer re
    section, the table's rows as prose, the mailbox actions, the canary and the saved sign-in.
 3. "What we collect" gains *Email you forward to Knowlu, if you set it up*, and *Your forwarding
    addresses*.
-4. "How long we keep it" gains the Knowbox's bullets: until read, at most about two days in Amazon's
+4. "How long we keep it" gains email forwarding's bullets: until read, at most about two days in Amazon's
    storage (plus its expiry lag), 180 days for the keyed hashes, the mailbox's own address until
    Disconnect, 7 or 30 days for what was found before it reaches the vault.
 5. The sub-processor line for AWS.
@@ -935,7 +937,7 @@ in HANDOFF (T13), beside M1's and the Gmail spec's drafts, for its one lawyer re
    that neither waits on a school's policy read until Knowlu has 20 paying users (D25).
 7. `:85` stays true of Gmail; the new section says what is kept from forwarded mail (the quote).
 
-The lawyer packet gains: the Knowbox and AWS; the mailbox actions done with a saved session (Microsoft's
+The lawyer packet gains: email forwarding to Knowlu and AWS; the mailbox actions done with a saved session (Microsoft's
 and Google's terms on automated access, which the research flagged); the saved mail sign-in; and the
 suspended university-policy reads (D25): both kept sign-ins on at every school, no school's policy read,
 until 20 paying users. **`PRIVACY_VERSION` does not move here**, and the release guard of
@@ -956,7 +958,7 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
 | The oracle, sync and entitlement tests | **Unchanged, and must stay green.** `rank` and `surface` see no new input on a vault without mail notes. |
 | `engine/tests/fixtures/**` | **Not touched.** Every engine test builds its vault in a temporary directory; every test message is synthetic. |
 | Note frontmatter | Additive only: `mail_asof` on tasks; `from`, `mail_date`, `evidence` on cards. No existing note is rewritten. |
-| `cloud/supabase/migrations/migrations_test.ts` | The export-filter assertion (`:826`) moves to the new definition and names all three origins (stronger, never looser); new assertions pin RLS and grants on every Knowbox table and each constraint decision of §5.1. |
+| `cloud/supabase/migrations/migrations_test.ts` | The export-filter assertion (`:826`) moves to the new definition and names all three origins (stronger, never looser); new assertions pin RLS and grants on every mail table and each constraint decision of §5.1. |
 
 **Frozen references:** none is regenerated, and none may be. No fixture vault holds a mail note, so
 `golden-today-*.md` and the three `surface-today-*.json` stay byte-identical.
@@ -968,7 +970,7 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
   bump-#1 list. D22 is one small change to the merged `gmail-read`, a non-quiet empty read, because the
   merged device reads any unknown quiet reason as "re-connect from settings". The wizard keeps #26's
   **Connect Gmail** button on the Gmail panel as "Connect Gmail directly (Google testers only)"; the
-  Knowbox announcement is its own panel after sign-in (D6). Settings shows the Google row (#26) and the
+  forwarding announcement is its own panel after sign-in (D6). Settings shows the Google row (#26) and the
   Email row (this) side by side. The release guard is one rule for both. #26's D15 (no sender) and this
   spec's D21 differ, and Quinn chose that (§13 Q10).
 - **Events.** No shared behaviour: mail events are task-shaped cards (D24). `approvals.rs` is shared with
@@ -996,13 +998,13 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
 ## 10. The amendment Quinn signs
 
 Signing this spec signs the text below. The signing commit appends the ruling to the cloud design as
-**"Amendment 2026-09-30 — the Knowbox"**, adds the markers, and makes the VISION, Gmail-spec,
+**"Amendment 2026-09-30 — email forwarding to Knowlu"**, adds the markers, and makes the VISION, Gmail-spec,
 grades-spec and CLAUDE.md edits in the same commit, as the earlier amendments did. Each item quotes the
 current text.
 
 **The ruling (appended to the cloud design):**
 
-> **Email has two paths (Quinn's rulings of 2026-09-30).** (1) **The Knowbox:** each connected mailbox
+> **Email has two paths (Quinn's rulings of 2026-09-30).** (1) **Email forwarding to Knowlu:** each connected mailbox
 > forwards everything to a private Knowlu address; AWS SES receives it, S3 holds it until it is read
 > (its one-day rule removes anything left within about two days), and our service screens it, extracts
 > claims and queues them; it never rejects mail at the door for SPF, DKIM or DMARC. Knowlu sets the
@@ -1012,7 +1014,7 @@ current text.
 > and new item after setup, and watches each mailbox with a canary. Mail cards, notices and applied
 > changes name their sender and date, unlike Gmail cards in the MVP (the Gmail spec's D15). (2) **Gmail
 > OAuth** stays the direct path for testers, and for everyone after CASA; a Gmail address with an
-> active Knowbox is read by the Knowbox only. **A second named exception to §11a's "keep nothing"**
+> active forwarding is read by email forwarding to Knowlu only. **A second named exception to §11a's "keep nothing"**
 > joins ruling 12's: a saved mail sign-in, one WebView2 profile per connected mailbox under the app's
 > data folder, never in the vault, never synced, never sent, its cookies DPAPI-encrypted, no password
 > kept; **on by default for everyone, at every school, with no university-policy read until Knowlu
@@ -1020,44 +1022,44 @@ current text.
 > forwarding (re-enabled automatically and then announced, never for a mailbox the student turned off
 > in Knowlu's Settings); deleted when switched off, on that mailbox's Disconnect, on Knowlu sign-out
 > and on account deletion; named on the privacy page in bump #1. Ruling 10's MVP gains email by the
-> Knowbox, including its own "source went quiet", and its exit gains the Knowbox's live proof. No
+> forwarding, including its own "source went quiet", and its exit gains email forwarding's live proof. No
 > release carries it before privacy bump #1.
 
 **A1. D12** (`cloud-design:24`). Now: "**Email ingestion is Gmail OAuth (`gmail.readonly`),
 server-side.** Quinn chose it over forwarding on 2026-09-09 knowing the cost…". Gains the marker
-*(amended 2026-09-30: two paths, the Knowbox and Gmail OAuth; see the amendment at the end)*.
+*(amended 2026-09-30: two paths, email forwarding to Knowlu and Gmail OAuth; see the amendment at the end)*.
 
 **A2. §13** (`:381`). Now: "email ingestion by forwarding (a Cloudflare Email Routing inbox — documented
 as the fallback if Google refuses verification, not built)". Becomes: "email ingestion by forwarding
-*(decided: Amendment 2026-09-30; the Knowbox, on AWS SES, because Cloudflare Email Routing rejects DMARC
+*(decided: Amendment 2026-09-30; email forwarding to Knowlu, on AWS SES, because Cloudflare Email Routing rejects DMARC
 failures)*".
 
 **A3. §3.1** (`:71`). After the row "| Gmail read (OAuth) | **cloud** (`/gmail/*`) | D12; …|", a new row:
-"| Email by forwarding (the Knowbox) | **cloud** receives, screens and judges; **device** sets up
+"| Email by forwarding (the Knowlu address) | **cloud** receives, screens and judges; **device** sets up
 forwarding and, with the saved sign-in, reconciles | Amendment 2026-09-30 |".
 
 **A4. §5.3's campus line** (`:164`). Now: "**Campus accounts:** a Workspace admin can block third-party
 apps for `@crimson.ua.edu`; the wizard recommends the personal account (which is where Crimson mail
 already lands for anyone who forwards it)…". Gains *(amended 2026-09-30: the pilot schools' student mail
-is Microsoft 365, read through the Knowbox; see the amendment)*.
+is Microsoft 365, read through email forwarding to Knowlu; see the amendment)*.
 
 **A5. Ruling 10.** The MVP list (`:596-601`) now reads "It holds commitment-model phases 1–2, M1 grades,
 Gmail connect in the app, events (…), body and profile editing, each small parity item done or cut, and
 UA's university-policy read (ruling 12)." It gains, after "Gmail connect in the app": "email by the
-Knowbox (the receiver, automatic setup for school Microsoft 365 and personal Gmail, backfill to the
-term's start, the canary and "source went quiet" for Knowbox mailboxes, and the saved sign-in's
+forwarding (the receiver, automatic setup for school Microsoft 365 and personal Gmail, backfill to the
+term's start, the canary and "source went quiet" for forwarded mailboxes, and the saved sign-in's
 reconcile and recover)". Its *Exit* (`:601-605`) gains, after the founder's grades proof: "the
-founder's Knowbox proof (the email spec's §12.6) has passed on a dev build against staging;". The
+founder's forwarding proof (the email spec's §12.6) has passed on a dev build against staging;". The
 Pilot list's "the OpenRouter 402 and "source went quiet" shown as issues" becomes "…and Gmail's "source
-went quiet" shown as issues (the Knowbox's is the MVP's)". **Ruling 9** (`:589`): "The MVP is the
+went quiet" shown as issues (email forwarding's is the MVP's)". **Ruling 9** (`:589`): "The MVP is the
 founder's quinn-ops feature set plus grades from Blackboard" becomes "…plus grades from Blackboard and
-email by the Knowbox". Marker on both: *(amended 2026-09-30, the Knowbox)*.
+email by email forwarding to Knowlu". Marker on both: *(amended 2026-09-30, email forwarding to Knowlu)*.
 
 **A6. The Gmail spec, §5** (`gmail-connect-design:430-431`). Now: "**Before Launch, nothing else is
 used.** There is no email forwarding inbox (cloud design §13's fallback, not built), no `gmail.metadata`
 and no local reading." Becomes: "**Before Launch, nothing else is used for Gmail by OAuth:** no
-`gmail.metadata` and no local reading. Forwarded mail is the Knowbox's
-(`2026-09-30-email-knowbox-design.md`), a separate path; a Gmail address with an active Knowbox is not
+`gmail.metadata` and no local reading. Forwarded mail is email forwarding's
+(`2026-09-30-email-forwarding-design.md`), a separate path; a Gmail address with an active forwarding is not
 read here (that spec's D22)."
 
 **A7. VISION, "Where it gets its information"** (`VISION.md:89`). Now: "- **Calendars and email**:
@@ -1090,7 +1092,7 @@ gains the marker *(amended 2026-09-30: the backfill exception)*.
 
 **A11. VISION, Build order** (`:211-212`). Now: "- sources: the LMS feed, zyBooks, VHL, Google Calendar,
 Gmail and campus events, with judgment in the cloud;". Becomes: "- sources: the LMS feed, zyBooks, VHL,
-Google Calendar, email (school Microsoft 365 and personal Gmail through the Knowbox, and Gmail directly)
+Google Calendar, email (school Microsoft 365 and personal Gmail through email forwarding to Knowlu, and Gmail directly)
 and campus events, with judgment in the cloud;". And Beyond (`:231`): "Outlook and more homework
 platforms" becomes "the Outlook calendar and more homework platforms" (HANDOFF `:331` likewise).
 
@@ -1207,7 +1209,7 @@ HANDOFF's lanes, queue and bump-#1 list.
 | 3 | **A provider changes its pages** and a step script breaks. | Certain over time. | Each step checks its own effect and falls back to guided steps (D5); scripts are versioned with the release (D19); the controller's live smoke runs before each release that carries them. |
 | 4 | **The WebView2 host cannot do what the spikes did through CDP**: a hidden window stops rendering, Google's popup is not allowed, Outlook's protocol prompt is not suppressible, or a script's result cannot come back without IPC. | Unverified (research: "Tauri 2 popup and new-window hook not verified"). Blocks the automatic path. | T0's spikes S1–S4 before any app task; off-screen instead of hidden; a title channel instead of a returned value; if popups cannot be allowed, Gmail's step 3 is guided. |
 | 5 | **The saved sign-in**: full mailbox access on the device; Microsoft's and Google's terms on automated access; a school's policy on kept sessions. | Real; a trust and legal risk more than a technical one. | One profile per mailbox, deleted on its Disconnect, on Knowlu sign-out and on account deletion, with a retried delete; DPAPI for the cookies and an honest sentence about the cached pages (§7); one switch; three named actions only; the privacy page and the lawyer read in bump #1; on at every school by Quinn's ruling (D25), whose own risk is 17. |
-| 6 | **Silent loss on the path** (8 sent, 1 arrived, research note §3). | Observed with Gmail as the last hop. | The Knowbox is the last hop; the canary; reconcile and recover by fingerprint. |
+| 6 | **Silent loss on the path** (8 sent, 1 arrived, research note §3). | Observed with Gmail as the last hop. | Email forwarding to Knowlu is the last hop; the canary; reconcile and recover by fingerprint. |
 | 7 | **The receiver drops real mail**: a DMARC failure rejected, or a sender's IP on SES's block list. | Unverified for SES with real failures. | T0's DMARC-failing gate (Q3); a receipt rule that never stops or bounces; the `unauthenticated` counter is watched in the live proof. |
 | 8 | **The retention promise breaks**: S3's expiry runs late, a log line carries text, the work table holds a body. | Low if built as specified; bad if it happens. | Delete on processing; text only in S3 and memory; a test that no log line carries a message's text (§12.1, 15); §7 states the expiry lag honestly. |
 | 9 | **Cost**: a backfill burst, a noisy mailbox, a mint-and-disconnect loop, a capped item retried. | Bounded. | The screen and the templates first; charge and `enforce_budget` before every model call, a capped item waits a day (§4.7); one allowance per account per term, its spend in `usage_daily` under a hard per-account ceiling (D23); three live addresses and six mints in 30 days (D3); canaries capped per address (§4.10); `MONTHLY_CEILING_USD` stays the runaway guard outside the allowance. |
@@ -1218,7 +1220,7 @@ HANDOFF's lanes, queue and bump-#1 list.
 | 14 | **Two desktops** both pull or both repair. | Launch only. | One desktop per student until the lease (§9); a claim already applied on the other desktop is a no-op once its note has synced (§4.8 step 4). |
 | 15 | **Microsoft restricts the student's school account** for sending: backfill and recover forward hundreds of messages to an external address, and Exchange Online's outbound-spam policy can block a sender that bursts. | Plausible at 30 a minute; bad, because the student cannot send school mail until school IT unblocks them, and Q7 rules out contacting IT. | At most 10 a minute and 600 a mailbox a day (provisional); stop at the first non-delivery report or send failure with a named outcome, nothing retried that day (§4.2 step 5); T0 S6 measures a few hundred forwards on a Microsoft 365 test tenant, never a real school account, before any build commits to the numbers (§13 Q8). |
 | 17 | **The suspended policy-read gate (D25)**: both kept sign-ins run at every school with no school's policy read; a school whose IT or acceptable-use policy forbids a kept SSO session, a kept mail session or automated forwarding learns of it from a student, or Knowlu learns of it from the school. | Unknown per school; until 20 paying users the student count is small, but a school's complaint lands on the student's account as well as Knowlu's. | Quinn's ruling, bounded: a **review trigger at the 20th paying account** (an `active` paid subscription), checked by the controller's count-only query at each milestone HANDOFF update, with Quinn's ruling before the next release; restoring the gate is one constant with its tests written (T19); D18 keeps every release behind privacy bump #1, which says plainly that no school's policy has been read (§7); the lawyer read still happens; risk 12's sentence on the wizard's announcement; Turn off email and Forget Blackboard sign-in delete each session on the device. |
-| 16 | **Recovery re-forwards what the Knowbox holds**, or a lapse loses mail. | Without one agreed time field, intake's and reconcile's fingerprints would rarely match. | Keyed fingerprints on one received minute, diffed on the device within 15 minutes (§4.6 step 7, §4.11); `seen` written only with the work row; an expired item's `seen` deleted; a lapse writes no `seen` and reconcile reaches back to `lapsed_since`. |
+| 16 | **Recovery re-forwards what email forwarding to Knowlu holds**, or a lapse loses mail. | Without one agreed time field, intake's and reconcile's fingerprints would rarely match. | Keyed fingerprints on one received minute, diffed on the device within 15 minutes (§4.6 step 7, §4.11); `seen` written only with the work row; an expired item's `seen` deleted; a lapse writes no `seen` and reconcile reaches back to `lapsed_since`. |
 
 ## 12. Test plan, test first
 
@@ -1253,12 +1255,12 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
    action is off the allow-list.
 6. Canary: a matching nonce marks it arrived and records `forward_hint`; a replay changes nothing; a
    wrong sender domain is unbound. `POST /canary` refuses a hint outside the provider's domains and a
-   fourth canary for one address in a UTC day. `knowbox-canary` (§13 Q2) sends none to a mailbox with
+   fourth canary for one address in a UTC day. `mail-canary` (§13 Q2) sends none to a mailbox with
    bound mail inside 24 hours on a weekday (48 over a weekend), none within 72 hours of that mailbox's
    last canary, and none on a day the student had a Knowlu email; a mailbox quiet past both is sent one.
 7. Dedup: one Message-ID twice makes one work item; a message with none dedups on Date, From and Subject.
    `msg_hash` and `fp_hash` are HMACs under the account's key (the same Message-ID under two accounts
-   hashes differently). A failed S3 put answers 500 and writes neither `knowbox_work` nor `knowbox_seen`,
+   hashes differently). A failed S3 put answers 500 and writes neither `mail_work` nor `mail_seen`,
    so the retry is processed; an item swept as `expired` loses its `seen` row, and a later recover of
    the same message is accepted (D8).
 8. Screen: bulk mail from a sender off the allow-list is `noise` with **zero** model calls (a spy model);
@@ -1281,12 +1283,12 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
     mailbox's live claims queued during its open batch come after it; ack marks delivered; an ack
     outside the `mail:` shape is dropped.
 13. Resolve: the stored answer is replayed on a re-pull; an id outside the batch reads as none.
-14. Migrations: RLS on and no `anon`/`authenticated` grant on every Knowbox table; `models.kind`,
+14. Migrations: RLS on and no `anon`/`authenticated` grant on every mail table; `models.kind`,
     `usage_daily.kind` and `judgments.kind` accept the three mail kinds and `charge_call(…, 'mail_claim',
     120)` succeeds; `corrections.judgment_kind`, `rules.kind` and both eval tables still refuse them;
-    `promote_rules` and `backfill_correction_judgments` pass over a `knowbox` judgment and the nightly job
+    `promote_rules` and `backfill_correction_judgments` pass over a `forward` judgment and the nightly job
     still promotes another account's rules; the last `export_training_rows` checks `origin not in
-    ('gmail_api', 'events', 'knowbox')`; `delete_knowbox_address` deletes exactly one mailbox's rows,
+    ('gmail_api', 'events', 'forward')`; `delete_mail_address` deletes exactly one mailbox's rows,
     delivered claims included; account deletion purges every mailbox and its objects by key, names all
     seven tables, and the export carries D17's rows and never a token, key or hash.
 15. Logs: an intake and a process run over a message carrying a marker string print no line containing it.
@@ -1295,8 +1297,8 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
     template-only, unauthenticated, expired, unbound, revoked), the fake bucket's `inbound/` and `work/`
     are empty.
 16b. Entitlement: `GET /addresses` and `DELETE /addresses/<id>` succeed for a canceled account (402 never
-    blocks a disconnect, as 89c4042 did for google-connect); every other `knowbox` route answers 402.
-16c. `gmail-read` (D22): an account whose Gmail address has an active Knowbox gets a non-quiet answer with
+    blocks a disconnect, as 89c4042 did for google-connect); every other `mail` route answers 402.
+16c. `gmail-read` (D22): an account whose Gmail address has an active forwarding gets a non-quiet answer with
     its undelivered items, `read: 0`, and no Gmail API call.
 17. The pin's check: before `mail_claim` and `mail_resolve` are pinned, the controller runs about twenty
     synthetic messages (a due-date move, a new assignment, a room change, an announcement with no
@@ -1458,7 +1460,7 @@ it as inert text, and a static check fails if any mail-derived field reaches the
 - **S4, session lifetime.** The 10-08 `sessions.log` is read; Quinn revisits §13 Q3's once-a-day
   reconcile with it (keep it if sessions survive a week of daily use; repair-only if they die within
   two days).
-- **S5 (optional).** Whether an Outlook inbox rule can forward to the Knowbox beside an existing
+- **S5 (optional).** Whether an Outlook inbox rule can forward to email forwarding to Knowlu beside an existing
   forwarding address (§4.2 step 3's third choice).
 - **S6, Microsoft's sending pace.** A few hundred forwards-as-attachment, at the provisional 10 a
   minute, from a mailbox on a Microsoft 365 test tenant Quinn creates for it (§13 Q8), never a real
@@ -1487,7 +1489,7 @@ mailbox and a founder-owned test Gmail account, Quinn at the machine for each si
    Turn off email in Settings to stop this.", and the message sent meanwhile is recovered. Point
    forwarding at another founder-owned address: the step changes nothing and asks.
 7. Turn off email for both mailboxes in Settings (Disconnect); the controller's count-only query shows
-   no Knowbox rows for the account; forwarding is off in both mailboxes, and the next slot turns
+   no mail rows for the account; forwarding is off in both mailboxes, and the next slot turns
    neither back on (§13 Q11).
 8. Clean up per the standing rule: the scratch profile, its vault, credentials and autostart; restore the
    school mailbox's forwarding to what it was before the proof.
@@ -1667,11 +1669,11 @@ in `docs/reports/`.
 **The plan splits the large rows.** T2, T3, T5, T9 and T10 are each well over about 80 lines of edits.
 The plan breaks each into tasks of about 80 lines or fewer, with disjoint files and a roster label on
 every one; this sketch names the seams, the plan fixes them:
-- T2 → `_shared/sns.ts`, `_shared/s3.ts`, `_shared/mime.ts`, a new `_shared/knowbox_bind.ts` (binding
-  and authenticity, §4.6 steps 5–6), then the `knowbox-inbound` handler (all cloud-engineer).
+- T2 → `_shared/sns.ts`, `_shared/s3.ts`, `_shared/mime.ts`, a new `_shared/mail_bind.ts` (binding
+  and authenticity, §4.6 steps 5–6), then the `mail-inbound` handler (all cloud-engineer).
 - T3 → `_shared/mail_templates.ts`; **one task owns each shared judge file**
   (`judge_validate.ts`'s `mail_claim` region; `judge_prompts.ts` and `judge_caps.ts` together), so no two
-  tasks edit the same file; then `knowbox-process` (all cloud-engineer).
+  tasks edit the same file; then `mail-process` (all cloud-engineer).
 - T5 → `engine/src/mailreconcile/` as new files (`mod.rs` with the action type and test 18;
   `resolve.rs` for §4.8 step 2; `rules.rs` for §4.9's table), each contract-engineer, in that order.
 - T9 → the window and runner, and the session directories with `forget` and the sweep, as two new files
@@ -1682,10 +1684,10 @@ every one; this sketch names the seams, the plan fixes them:
 | Task | Agent, and why | Files | Tests (§12) |
 |---|---|---|---|
 | **T0** Gates S0–S6 | **main session**: AWS secrets, a live mailbox and Quinn's sign-ins are the controller's; a report in `docs/reports/` (headers only, never a body) | none in the repo | S0–S6 |
-| **T1** Schema | **cloud-engineer** (Opus, high): `cloud/` is theirs; a wrong grant leaks every student's mail metadata | new `migrations/<date>_knowbox.sql`; `migrations/migrations_test.ts` | 14 |
-| **T2** Intake | **cloud-engineer**: student mail, signatures and secrets; after T1 and S0 | `functions/knowbox-inbound/**`; new `_shared/{sns,s3,mime}.ts` | 1–7, 15, 16 |
-| **T3** Claims | **cloud-engineer**: the screen and the model path; after T2 | `functions/knowbox-process/**`; new `_shared/mail_templates.ts`; the `mail_claim` regions of `_shared/judge_{validate,prompts,caps}.ts` | 8–11, 17 |
-| **T4** Endpoints | **cloud-engineer**: after T1 | `functions/{knowbox,knowbox-canary,mail-pull,mail-resolve}/**`; `functions/account/**` (the purge and the export) | 6 (canary limits), 11 (address caps), 12, 13, 14 (purge, export), 16b |
+| **T1** Schema | **cloud-engineer** (Opus, high): `cloud/` is theirs; a wrong grant leaks every student's mail metadata | new `migrations/<date>_mail.sql`; `migrations/migrations_test.ts` | 14 |
+| **T2** Intake | **cloud-engineer**: student mail, signatures and secrets; after T1 and S0 | `functions/mail-inbound/**`; new `_shared/{sns,s3,mime}.ts` | 1–7, 15, 16 |
+| **T3** Claims | **cloud-engineer**: the screen and the model path; after T2 | `functions/mail-process/**`; new `_shared/mail_templates.ts`; the `mail_claim` regions of `_shared/judge_{validate,prompts,caps}.ts` | 8–11, 17 |
+| **T4** Endpoints | **cloud-engineer**: after T1 | `functions/{mail,mail-canary,mail-pull,mail-resolve}/**`; `functions/account/**` (the purge and the export) | 6 (canary limits), 11 (address caps), 12, 13, 14 (purge, export), 16b |
 | **T4b** D22 | **cloud-engineer**: one branch in the merged `gmail-read`; after T1 | `functions/gmail-read/handler.ts`, its test | 16c |
 | **T5** The reconciler | **contract-engineer** (Opus, xhigh): off the list, but a silent error changes a student's plan with no card; the events spec routed its series carry the same way. Its **first commit** is the action type and test 18 alone | new `engine/src/mailreconcile/**` | 18–24, 22b–22d, 26 |
 | **T6** The mail pass | **implementer** (Sonnet, high): specified, off the list, checked by tests; starts from T5's first commit | new `engine/src/mail.rs` (with its card writer); `engine/src/cloudmodel.rs` (two calls); one call in `engine/src/enrich.rs`; `engine/src/lib.rs` (`mod` lines) | 21 (the writer's half), 22e, 25, 27, 28, 28b, 28c, 30 |
@@ -1696,7 +1698,7 @@ every one; this sketch names the seams, the plan fixes them:
 | **T10** Steps and scripts | **implementer** (Sonnet, high): pure step machines and DOM scripts against synthetic pages | new `app/src/mail_steps.rs`; new `app/assets/mail/**` and their Deno tests | 32 (steps), 35 |
 | **T11** Commands and the slot | **implementer**: after T9 and T10 | the commands appended to `app/src/mail.rs`; `app/src/scheduler.rs` | 36, 37 |
 | **T12** Deletion and sign-out | **contract-engineer** (Opus, xhigh): `account.rs` is on the list | `app/src/account.rs`; `app/tests/account.rs` | 38 |
-| **T13** Docs | **docs-keeper** (Sonnet, medium) | `HANDOFF.md` (the lane, Quinn's queue, bump #1's list, the release guard widened for the Knowbox and the suspended gate, A13's review trigger at 20 paying users, UA's policy read moved out of the MVP rows (`:167`, `:260`, `:383`) and the Pilot and Launch read rows (`:220`, `:230`, `:300`, `:331`) marked suspended, production parity's migration and functions); `docs/reference/{app,engine-commands}.md`; `cloud/supabase/README.md` (the AWS runbook); the legal note's two lines | — |
+| **T13** Docs | **docs-keeper** (Sonnet, medium) | `HANDOFF.md` (the lane, Quinn's queue, bump #1's list, the release guard widened for email forwarding to Knowlu and the suspended gate, A13's review trigger at 20 paying users, UA's policy read moved out of the MVP rows (`:167`, `:260`, `:383`) and the Pilot and Launch read rows (`:220`, `:230`, `:300`, `:331`) marked suspended, production parity's migration and functions); `docs/reference/{app,engine-commands}.md`; `cloud/supabase/README.md` (the AWS runbook); the legal note's two lines | — |
 | **T14** Campus rows and the offer | **mechanical** (Sonnet, low): two struct fields and a marker, fully specified; UA's term dates come from the main session (a public calendar read) | `app/src/scaffold.rs` (`Curated` gains `mail_provider`, `mail_domain`, `terms`); `app/src/onboarding.rs` (the marker); `app/tests/scaffold.rs` | the rows' shape |
 | **T15** The page | **console-ui** (Sonnet, medium): `app/static` is theirs | `app/static/{index.html,console.js,console.css}`; `app/tests/static_assets.rs`; `scripts/{settings,wizard}-check.py` | §12.4 |
 | **T16** The digest *(optional, last, cuttable)* | **cloud-engineer** | `functions/mail-digest/**` and its `models` row | its own |
@@ -1723,14 +1725,14 @@ about one L; the page one M. It is the largest MVP lane, and it moves the MVP's 
 - The signing commit applies §10: the cloud design's Amendment 2026-09-30 and its markers (A13's on
   ruling 12, ruling 10 and §11a's grades row included), the Gmail spec's §5 line, the grades spec's
   markers, VISION's seven edits (A7–A12 and A13's), and CLAUDE.md's slot and actor lines.
-- HANDOFF (T13): an MVP lane "Email: the Knowbox" after Gmail connect; Quinn's queue gains, one at a time,
-  the AWS account (a spend), the receiving domain's MX in Cloudflare DNS (`in.knowlu.com`), the Knowbox
+- HANDOFF (T13): an MVP lane "Email: email forwarding to Knowlu" after Gmail connect; Quinn's queue gains, one at a time,
+  the AWS account (a spend), the receiving domain's MX in Cloudflare DNS (`in.knowlu.com`), email forwarding to Knowlu
   secrets on staging, UA's mail fields and term dates for the curated row, and an M365 test tenant for
   S6 (§13 Q8); "Record UA's university-policy read" leaves the MVP queue, and A13's review trigger (the
   20th paying account) joins it; bump #1's list gains §7's drafts; the Pilot gate's release guard names
-  the Knowbox and the suspended grades gate.
+  email forwarding to Knowlu and the suspended grades gate.
 - `docs/notes/2026-09-29-vision-program.md` gains the email row as an MVP item.
-- Production parity, when the Pilot reaches it: the Knowbox migration in step (1)'s ordered list, its
+- Production parity, when the Pilot reaches it: email forwarding to Knowlu migration in step (1)'s ordered list, its
   functions in step (2), its secrets and production's own AWS receiving domain in step (3).
 
 ## Review revisions (2026-09-30)
@@ -1766,7 +1768,7 @@ is open, outside the slot cadence and the 30-a-slot cap; a closed batch drains p
 for a run now; §0 and §4.11 say how long a backfill takes (about an hour for a few hundred messages,
 days for a large mailbox at the daily ceiling, which R11 imposes).
 
-**R6** (important; §4.6, §4.7, D8). *Accepted.* The `knowbox_seen` row is written with the work row,
+**R6** (important; §4.6, §4.7, D8). *Accepted.* The `mail_seen` row is written with the work row,
 after the S3 put; the sweep deletes an expired item's `seen` row so reconcile lists it and recover is
 accepted. D8's "cost if wrong" corrected; test 7.
 
@@ -1820,7 +1822,7 @@ reconcile after the lapse reaches back to it (at most 30 days), so recover bring
 **R17** (minor; D21). *Accepted.* The ruling text in §10 now states the divergence from the Gmail spec's
 D15, and **§13 Q10** asks it, so Quinn's signature covers it.
 
-**R18** (minor; A5, A11). *Accepted.* A5 adds the Knowbox proof to ruling 10's *Exit* and amends ruling 9
+**R18** (minor; A5, A11). *Accepted.* A5 adds email forwarding to Knowlu proof to ruling 10's *Exit* and amends ruling 9
 (`:589`); A11 cites VISION `:211-212`.
 
 **R19** (minor; §14). *Accepted.* §14 tells the plan to split T2, T3, T5, T9 and T10 into tasks of about
@@ -1871,7 +1873,7 @@ Forwarding pointing **elsewhere** is not "turned off": a hidden step never chang
 **R26** (important; §5.1 constraints). *Accepted* (every constraint re-read). §5.1 names each one:
 `models.kind` and `usage_daily.kind` widened with `judgments.kind`; `corrections.judgment_kind`,
 `rules.kind`, the eval tables and telemetry's list deliberately not; `promote_rules` and
-`backfill_correction_judgments` restricted to `origin <> 'knowbox'`. Test 14 pins each; test 28b pins
+`backfill_correction_judgments` restricted to `origin <> 'forward'`. Test 14 pins each; test 28b pins
 that the device never reports a mail label (`labels_to_report` already skips it).
 
 **R27** (important; training export). *Accepted.* The claim schema's `new_item` gains `effort_hours` and
@@ -1879,14 +1881,14 @@ that the device never reports a mail label (`labels_to_report` already skips it)
 are written `needs_enrichment: false`, as Gmail notes are, so no `device`-origin judgment is ever made
 from mail text (D9, §5.1's claim, §5.2, §7, test 28c).
 
-**R28** (important; cost). *Accepted.* (a) The allowance is per account per term on `knowbox_accounts`,
+**R28** (important; cost). *Accepted.* (a) The allowance is per account per term on `mail_accounts`,
 Disconnect cannot renew it, three live addresses and six mints in 30 days; its tokens reach
 `monthly_spend` and its count never touches the live cap, under a hard per-account ceiling (D3, D23,
 §13 Q1). (b) Charge and `enforce_budget` run before the model; a capped item waits a day, at most three
 attempts (§4.7). (c) `POST /canary` only to a hint fitting the provider, at most three a day per address
 (§4.10). Test 11, test 6; risk 9.
 
-**R29** (important; `knowbox` auth). *Accepted.* `GET /addresses` and `DELETE /addresses/<id>` are
+**R29** (important; `mail` auth). *Accepted.* `GET /addresses` and `DELETE /addresses/<id>` are
 sign-in only, like google-connect's; the rest stay entitled (§6.3, §4.12, test 16b).
 
 **R30** (important; retention and SNS). *Accepted.* "At most a day" became "until read, otherwise up to
@@ -1909,7 +1911,7 @@ sender form both sides use. Risk 16.
 **R33** (important; future Date). *Accepted.* Ordering is by the ordering date, the earlier of the Date
 header and the received time (D10, §4.8 step 1, §5.2's `mail_asof`); tests 12 and 19.
 
-**R34** (important; deletion and export). *Accepted.* The account purge calls `delete_knowbox_address`
+**R34** (important; deletion and export). *Accepted.* The account purge calls `delete_mail_address`
 per mailbox (objects by key first) and names all seven tables; Disconnect deletes delivered claims too;
 the export gains the mailboxes and claims and never a token, key or hash (D17, §4.13, §5.1, §6.3, test 14).
 
@@ -1919,7 +1921,7 @@ the export gains the mailboxes and claims and never a token, key or hash (D17, �
 
 **R36** (minor; stale citations). *Accepted.* §1's `enrich.rs`, `gmail-read` and `migrations_test.ts`
 lines are re-verified at `199cd1f`; the moved assertion checks
-`origin not in ('gmail_api', 'events', 'knowbox')`, naming all three origins, so it is stronger, never
+`origin not in ('gmail_api', 'events', 'forward')`, naming all three origins, so it is stronger, never
 looser (§5.1, §8).
 
 **R37** (minor; `field: cancelled`). *Accepted.* A `cancelled` claim is always a `kind: amend` card
@@ -1933,10 +1935,10 @@ mail origins (D5, §6.2, test 33); every mail-derived string goes through `h()`,
 test (§5.2, §12.4); one label, `mail`, everywhere (D5, §5.4); Rotate keeps the old token accepted until
 the new address's canary arrives (at most 7 days), and Gmail re-confirms (D3, test 2).
 
-**R40** (found by the reviser at `199cd1f`; D22). The drafted `quiet: true, reason: "via_knowbox"` would
+**R40** (found by the reviser at `199cd1f`; D22). The drafted `quiet: true, reason: "via_forward"` would
 not be silent: the merged device reads any unknown quiet reason as `Revoked`, "re-connect from settings",
 and returns before reading queued items (`cloudmodel.rs:667-675`). D22 now answers a non-quiet empty read
-with the undelivered items and a `via_knowbox` field the device ignores; no device change; T4b, test 16c.
+with the undelivered items and a `via_forward` field the device ignores; no device change; T4b, test 16c.
 
 **R41** (important; T19, §6.2, tests 39–41; second review, after Quinn's answers). *Accepted, option A.*
 The callers call `availability` directly (`grades.rs:355-356`, `:382`, `:400`; `scheduler.rs:428`), so
@@ -1952,17 +1954,17 @@ sentence stands" is read with the heading marker.
 
 ## Signing sheet
 Signing this spec signs the amendment items of §10 and the decisions below, in plain words.
-- **A1** Cloud design D12: email has two paths, the Knowbox and Gmail OAuth (a marker).
+- **A1** Cloud design D12: email has two paths, email forwarding to Knowlu and Gmail OAuth (a marker).
 - **A2** Cloud design §13: email by forwarding is decided, on AWS SES rather than Cloudflare Email Routing.
 - **A3** Cloud design §3.1: a new row, email by forwarding, judged in the cloud and set up on the device.
-- **A4** Cloud design §5.3: the pilot schools' student mail is Microsoft 365, read through the Knowbox (a marker).
-- **A5** Rulings 9 and 10: the MVP gains email by the Knowbox; its exit gains the founder's Knowbox proof.
-- **A6** Gmail spec §5: forwarded mail is the Knowbox's; a Gmail address with a Knowbox is not read by OAuth.
+- **A4** Cloud design §5.3: the pilot schools' student mail is Microsoft 365, read through email forwarding to Knowlu (a marker).
+- **A5** Rulings 9 and 10: the MVP gains email by email forwarding to Knowlu; its exit gains the founder's forwarding proof.
+- **A6** Gmail spec §5: forwarded mail is email forwarding's; a Gmail address with a forwarding is not read by OAuth.
 - **A7** VISION's sources: email from any mailbox that can forward, and Gmail directly.
 - **A8** VISION's "Knowlu reads": Knowlu may change forwarding in the student's own mailbox, and sends nothing to anyone else.
 - **A9** VISION's data minimisation: what cannot be narrowed is screened before any model reads it; Knowlu keeps findings, never mail.
 - **A10** VISION commitment 5 and ruling 3: the one-time backfill is applied and listed with Undo; later mail is proposed.
-- **A11** VISION's build order and Beyond: email by the Knowbox; "Outlook" becomes "the Outlook calendar".
+- **A11** VISION's build order and Beyond: email by email forwarding to Knowlu; "Outlook" becomes "the Outlook calendar".
 - **A12** VISION's telemetry and CLAUDE.md: no forwarded-mail content in telemetry; the app's mail step before the chain; `agent:knowlu.mail`.
 - **A13** Ruling 12, with rulings 10, §11a, the grades spec and VISION: the policy-read gate suspended for both kept sign-ins until 20 paying users; the MVP's grades proof runs on `main` and waits on no read.
 
