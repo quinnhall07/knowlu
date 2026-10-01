@@ -14,7 +14,9 @@
 //! `eventledger::record_carried_answer`, by `agent:knowlu.carry`, `from:` the answering card's id,
 //! with the series' real verdict and the date's span as the feed gave it. When a later fetch moves
 //! an accepted lane date (a carried one, or one its card lists) to another lane span, the carry
-//! appends one more line of that shape with the new span (PQ5 (b2), [`follow_moves`]).
+//! appends one more line of that shape with the new span (PQ5 (b2), [`follow_moves`]). A carried
+//! lane date moved to clock hours is booked at its new hours and gets that line with its timed
+//! span (PQ7 (c)); a card-listed one stays drawn where it was.
 //!
 //! **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
 //! passes `eventroster::read_roster`'s events. Their `series_uid` is their own uid and their span
@@ -250,7 +252,8 @@ fn shown_on_a_card(vault: &Path) -> BTreeSet<String> {
 ///      no usable `id:` books its dates and writes no line, with one warning naming it.
 /// 3. **A moved lane span** (PQ5 (b2)): over the same events and the map with step 2's lines, one
 ///    more carry line for each accepted lane date the feed moved to another lane span starting
-///    today or later ([`follow_moves`]). A date carried as a lane date is never booked (`book`).
+///    today or later ([`follow_moves`]), and for each carried lane date it moved to clock hours,
+///    which step 2 booked at those hours (PQ7 (c)).
 ///
 /// A `source: "roster"` event is never carried (the module doc says why).
 ///
@@ -416,9 +419,12 @@ fn accepted_series(
 }
 
 /// One carried date's booking step: `event`'s commitment at `level`, unless its uid is in the
-/// ever-written set (`written`), the student turned it down on its own, or its `carry` span is
-/// lane-shaped (PQ5 (b2)). A lane-shaped event has no commitment. A failed create is a warning,
-/// and the next `rank` retries.
+/// ever-written set (`written`) or the student turned it down on its own. A lane-shaped event has
+/// no commitment. A failed create is a warning, and the next `rank` retries.
+///
+/// A carried lane date the feed moves to clock hours is booked here at its new hours, like any
+/// timed date; [`follow_moves`] then records its timed span, so the lane stops drawing it (PQ7 (c),
+/// Quinn, 2026-10-01).
 #[allow(clippy::too_many_arguments)]
 fn book(
     vault: &Path,
@@ -431,10 +437,7 @@ fn book(
     journal: &mut Journal,
     warnings: &mut Vec<String>,
 ) {
-    // PQ5 (b2), lane to lane only: a date carried as a lane date stays one. A feed that moves it to
-    // clock hours is not followed (`follow_moves`), so it stays drawn where it was, and unbooked.
-    let lane_date = |entry: &LedgerEntry| entry.carry.as_ref().is_some_and(|c| shape(c.start, c.end).lane().is_some());
-    if written.contains(&event.uid) || ledger.get(&event.uid).is_some_and(|e| turned_down(e) || lane_date(e)) {
+    if written.contains(&event.uid) || ledger.get(&event.uid).is_some_and(turned_down) {
         return;
     }
     let Some(commitment) = commitment_for(&Instance::from_event(event), level) else { return };
@@ -507,21 +510,28 @@ fn append_line(
 }
 
 /// PQ5 (b2) (Quinn, 2026-10-01): one more carry line for each accepted lane date the feed has
-/// moved to another lane span, so the lane draws it on its new days. `events` are [`run`]'s, in its
-/// order and never the roster's; `ledger` holds T2b.5's lines of this run. Returns the uids given a
-/// line. A fetched event, each uid once, gets a line when its series is accepted and:
+/// moved to another lane span, so the lane draws it on its new days; and, by PQ7 (c) (Quinn,
+/// 2026-10-01), for a carried lane date the feed moved to clock hours, so the lane stops drawing
+/// it. `events` are [`run`]'s, in its order and never the roster's; `ledger` holds T2b.5's lines
+/// of this run. Returns the uids given a line. A fetched event, each uid once, gets a line when its
+/// series is accepted and:
 /// - it is an accepted lane date: its entry has `carry`, or its uid is on the `instances:` of its
 ///   series' answering card ([`card_spans`]); the span it is drawn with (the `carry` span, else the
-///   card's) is lane-shaped (`eventaccept::shape`);
-/// - the fetched span differs from that span at the second, is lane-shaped too (lane to lane only:
-///   a date moved to clock hours stays where it is drawn), and starts today or later;
+///   card's) is lane-shaped (`eventaccept::shape`), so a carried timed date is never followed;
+/// - the fetched span differs from that span at the second, and starts today or later;
+/// - the fetched span is lane-shaped too, unless the uid is a carried date: an entry with `carry`
+///   whose uid the series' card does not list, which `run`'s step 2 booked (`book`). Lane to lane
+///   only holds for a card-listed date, `carry` or not: the carry never books one, so a timed line
+///   would leave it out of the lane and unbooked. It stays drawn where it is (PQ5's *Not covered*);
 /// - it has no `declined` line and no human answer (judge once);
 /// - a `carry` it has names the series' card: `load_ledger` reads a later line only from the first
 ///   one's card, so a line from another would be written again on every `rank`;
 /// - [`append_line`]'s rules hold: a card id, and a line the ledger reads back as written.
 ///
-/// Nothing else is written: no commitment, no journal record. A write failure is a warning, and the
-/// next `rank` retries.
+/// The line is the only write here: no commitment and no journal record. `book` made the booking
+/// of a date moved to clock hours, before this step, and a failed booking does not hold the line
+/// back (the next `rank` books it, and finds the line written). A write failure is a warning, and
+/// the next `rank` retries.
 fn follow_moves(
     vault: &Path,
     events: &[&DiscoveredEvent],
@@ -554,7 +564,10 @@ fn follow_moves(
             }
         };
         let fetched = (second(event.start()), second(event.end()));
-        let is_move = drawn.is_some_and(|drawn| drawn != fetched && lane(drawn) && lane(fetched));
+        // PQ7 (c): a carried date, which step 2's `book` booked, may move to clock hours. A
+        // card-listed one may not, even with a `carry` from a lane move: the carry never books it.
+        let carried = carry.is_some() && !series.listed.contains(&event.uid);
+        let is_move = drawn.is_some_and(|drawn| drawn != fetched && lane(drawn) && (lane(fetched) || carried));
         if !is_move || event.start().date() < today || carry.is_some_and(|c| c.from != series.id) {
             continue;
         }
@@ -1874,24 +1887,45 @@ mod tests {
         crate::eventroster::write_roster(&path, &moved, &load_ledger(&roster, None), &config, TODAY, &[]).unwrap();
         let read_back = crate::eventroster::read_roster(&path);
         assert!(read_back.iter().any(|e| e.uid == "lx:77:3"), "the roster lists the moved date: {read_back:?}");
-        // To clock hours, Sat 10:00 to 15:00; and to a span that starts before today.
-        let (timed, _) = pq5_vault("pq5-moved-timed");
-        let hours = instance("lx:77:3", "lx:77", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        // A span that starts before today.
         let (past, _) = pq5_vault("pq5-moved-past");
         let wednesday = instance("lx:77:3", "lx:77", at(9, 30, 0, 0), at(10, 1, 0, 0));
-        let cases = [
-            (&declined, moved.clone()),
-            (&roster, read_back),
-            (&timed, vec![listed.clone(), hours]),
-            (&past, vec![listed, wednesday]),
-        ];
+        let cases = [(&declined, moved.clone()), (&roster, read_back), (&past, vec![listed.clone(), wednesday])];
         for (vault, events) in cases {
             let before = (ledger_bytes(vault), journal_text(vault));
             let (lines, warnings, _) = carry(vault, &events);
             assert_eq!((lines, warnings), (0, Vec::<String>::new()), "{}", vault.display());
             assert_eq!((ledger_bytes(vault), journal_text(vault)), before, "{}", vault.display());
+            assert_eq!(booked(vault), Vec::<(String, String)>::new(), "{}: no commitment either", vault.display());
         }
-        assert_eq!(booked(&timed), Vec::<(String, String)>::new(), "clock hours: no commitment either");
+
+        // PQ7 (c), in its own vault: moved to clock hours, Sat 10:00 to 15:00. One line with the
+        // timed span, and the date booked at its new hours, at the series' level, journal first.
+        let (timed, _) = pq5_vault("pq5-moved-timed");
+        let hours = instance("lx:77:3", "lx:77", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let to_hours = vec![listed.clone(), hours.clone()];
+        let (lines, warnings, ledger) = carry(&timed, &to_hours);
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        let both = [carry_line(&fri_sat, "opportunity", ID_A), carry_line(&hours, "opportunity", ID_A)];
+        assert_eq!(lines_for(&timed, "lx:77:3"), both, "one more line, in the carry's shape");
+        let read = load_ledger(&timed, None);
+        let entry = &read["lx:77:3"];
+        assert_eq!(entry.carry, the_carry(ID_A, &hours), "the timed span, from the same card");
+        assert_eq!((entry.verdict.as_deref(), entry.answered_by.as_str()), (Some("opportunity"), CARRY_ACTOR));
+        assert_eq!(ledger, read, "the map reads as `load_ledger` reads the file");
+        assert_eq!(booked(&timed), [row("lx:77:3", "soft")], "one commitment, at its new hours");
+        let records = Journal::new(&timed).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)], "one journal `create`");
+        // The same feed again, then moved back to Fri to Sat all-day: nothing either time. A carried
+        // timed date is not followed (PQ5's *Not covered*), and its note is ever written.
+        let (commitments, before) = (notes(&timed, crate::commitments::FOLDER), (ledger_bytes(&timed), journal_text(&timed)));
+        for feed in [to_hours, vec![listed, fri_sat.clone()]] {
+            let (lines, warnings, _) = carry(&timed, &feed);
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+            assert_eq!((ledger_bytes(&timed), journal_text(&timed)), before);
+            assert_eq!(notes(&timed, crate::commitments::FOLDER), commitments, "nothing booked");
+        }
     }
 
     /// An executed `event-accept` card in `archive/` in the emitter's shape, `instances:` included,
@@ -1972,6 +2006,63 @@ mod tests {
         assert_eq!(ledger_bytes(&check), before);
         assert_eq!(carry(&control, std::slice::from_ref(&fair_sat)).0, 1, "the control");
         assert_eq!(carry_lines(&control), [carry_line(&fair_sat, "obligation", ID_B)]);
+    }
+
+    // --- T2b.6b: PQ7 (c), a carried lane date moved to clock hours is booked and followed -------
+
+    #[test]
+    fn a_card_listed_date_moved_to_clock_hours_gets_no_line() {
+        // The carry never books a card-listed date (its card's settlement does), so a timed line
+        // would leave it out of the lane and unbooked. It stays drawn where it was (PQ5's *Not
+        // covered*, narrowed by PQ7 (c) to card-listed dates), and P17's removal is the answer.
+        let (fri, sat) = (all_day("lx:88:1", "lx:88", 9, 1), all_day("lx:88:1", "lx:88", 10, 1));
+        let hours = instance("lx:88:1", "lx:88", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let vault = tmp("pq7-card-listed-hours");
+        accept_card_with_instances(&vault, "event-open-day-2026-10-09.md", "obligation", "lx:88", &[&fri], ID_A);
+        record_verdict(&vault, "lx:88:1", &fri.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+        let nothing = |vault: &Path, label: &str| {
+            let before = ledger_bytes(vault);
+            let (lines, warnings, _) = carry(vault, std::slice::from_ref(&hours));
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()), "{label}");
+            assert_eq!(ledger_bytes(vault), before, "{label}: no line");
+            assert_eq!(journal_text(vault), "", "{label}: no journal record");
+            assert!(!vault.join(crate::commitments::FOLDER).exists(), "{label}: no commitment");
+        };
+        nothing(&vault, "as the card has it");
+        // The same once a lane move gave it a carry line (T2b.6): a `carry` on a card-listed date
+        // does not make the date the carry's to book, so clock hours still get no line.
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&sat));
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()), "T2b.6's line");
+        nothing(&vault, "after a lane move");
+        assert_eq!(load_ledger(&vault, None)["lx:88:1"].carry, the_carry(ID_A, &sat), "still drawn on Sat");
+    }
+
+    #[test]
+    fn a_failed_booking_still_follows_the_move() {
+        // PQ7 (c)'s timed move with the create failing, as in
+        // `a_failed_booking_still_gets_its_line_and_is_rebooked_next_run`: the line is written all
+        // the same, and the next run books the date and writes no second line.
+        let (vault, fri_sat) = pq5_vault("pq7-failed-booking");
+        let hours = instance("lx:77:3", "lx:77", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let fault = break_the_journal(&vault);
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&hours));
+        assert_eq!(lines, 1, "the line");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("carry: lx:77:3 not booked ("), "{warnings:?}");
+        let both = [carry_line(&fri_sat, "opportunity", ID_A), carry_line(&hours, "opportunity", ID_A)];
+        assert_eq!(lines_for(&vault, "lx:77:3"), both);
+        assert_eq!(booked(&vault), Vec::<(String, String)>::new(), "no commitment");
+
+        // The fault gone: booked, journal record first, and no second line.
+        fs::remove_file(&fault).unwrap();
+        let before = ledger_bytes(&vault);
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&hours));
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(booked(&vault), [row("lx:77:3", "soft")]);
+        let records = Journal::new(&vault).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)]);
+        assert_eq!(ledger_bytes(&vault), before, "no second line");
     }
 
     /// What a second desktop sees (W's finding 2, plan §8). Two desktops on one account each run
