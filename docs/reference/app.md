@@ -4,18 +4,19 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (the merge of M1 grades into
-  Gmail connect; the 2026-09-29 recount after the commitment model's merge gave 47 / 29 / 66)** (by script,
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (M2 editing, after Gmail connect and M1 grades merged in; the
+  merge-time recount gave 54 / 29 / 73, the 2026-09-29 one 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **54** (phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **59** (phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
   `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
-  `account::google_connect` and `account::google_disconnect`), the vault-less picker/wizard window **29**
+  `account::google_connect` and `account::google_disconnect`; M2 added `set_body`, `profile`, `set_preferences`, `set_interests` and
+  `dropped_events`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **73** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **78** distinct. Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
-  `report.rs`, `lms_link.rs`), never all in one file. **Ten** mutate notes (`set_fields`,
+  `report.rs`, `lms_link.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
   `open_issue`, `resolve_issue`, `sync` — the last applies another desktop's writes through `write`
   and can file a `kind: amend` card); `set_fields` edits a commitment's `kind`/`level` only as
@@ -23,6 +24,40 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
   app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
   before quoting a number.
+- **M2 editing: bodies and the profile** (spec `docs/specs/2026-09-29-m2-editing-design.md`). Five
+  console commands in `app/src/commands.rs`, each an `_inner` function plus a thin wrapper, none in the
+  wizard's list. `set_body_inner(view, id, expected, body)` refuses a non-id before the engine is
+  asked, then refuses any note whose folder is outside `BODY_EDITABLE_FOLDERS` (`tasks`, `courses`),
+  then calls `write::set_body` with `console_ctx(vault)`; the envelope is `{ok, error, state}` plus
+  `conflict: true` only when the refusal was a stale `expected` (`WriteError::Conflict`), so the page
+  keeps the draft. `profile_inner` returns `profile::read` (preferences body, the four interest lists,
+  `interests_editable`, warnings) and writes nothing. `set_preferences_inner(view, expected, text)`
+  calls `profile::set_preferences`; `set_interests_inner(view, strong, mild, never, clubs)` calls
+  `profile::set_interests`, which refuses a block-style list by name (`write::value_spans_lines`)
+  before any record. `dropped_events_inner` returns `eventroster::read_dropped` and writes nothing.
+  `commands.rs` hashes, parses and decides nothing.
+- **`set_body`'s record holds no text.** `write::set_body` journals first, then replaces the body
+  after the head and its separator. The record is `op: set_body`, `field: null`, with `old` and `new`
+  each `{sha256, bytes}` (`write::body_sha256`, lowercase hex over the body's UTF-8 bytes); the body is
+  normalised (`
+` to `
+`, outer newlines trimmed, one final `
+`) so the next edit's hash chains.
+  An unchanged body is a no-op that writes no record. `surface::describe` reads it as `<path>: body
+  edited (<who>)`. A stale `expected` is `WriteError::Conflict` and the note is untouched.
+- **Two `profile/` files, local only.** `profile/preferences.md` (a free-text body, created empty) and
+  `profile/interests.md` (four one-line flow lists `strong`, `mild`, `never`, `clubs`), made on the
+  student's first save by `write::create_profile_file` and read by `profile::read`. They are not in
+  `NOTE_FOLDERS`, so `ids` never stamps them and `sync::build_push` never pushes them: a journal record
+  about a path that fails `sync::is_note_path` stays on this computer (D13, the `continue` in
+  `build_push`). Only the task's or course's own `set_body` record and note go up. The settings page
+  tells the student which text the judge reads (the first 600 characters, for one call, not kept).
+- **Not shown (N)** under *Coming up* is read-only: `dropped_events` is called when *Coming up*
+  renders, not on every poll. `eventroster::read_dropped` reads the audit section of
+  `state/events.md` and lists only filtered, declined and judged-not-relevant events, each with its
+  reason; unjudged events never appear (Quinn's PQ2 = no). An event whose verdict is outside
+  `RELEVANT_VERDICTS`, `unsure` included, currently reads "judged not relevant"; whether to match only
+  `drop` is an open ruling for Quinn.
 - **Google connection from Settings (Gmail connect).** Three console commands in `app/src/account.rs`,
   each reading the profile's session from `cfg.session_credential_target` (the wizard's
   `google_connect_url`, `google_connected` and `open_external` keep `PENDING_TARGET`, and call the same
