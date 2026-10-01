@@ -17,9 +17,24 @@ delivered by the spec's D3).
 PQ1–PQ4 of 2026-09-30 (§11), for the second review's four findings (§10, second round), and for
 Quinn's final PQ3 answer: (b-prime), which replaced (c), with the carried date's span on the carry's
 line (§11, item 3). All four answers are applied to the tasks. PQ3 is built by T2b.4, T2b.5 and T4c
-under P15 and P16 (§3). No question is open. One consequence goes to Quinn with Checkpoint B: P16
-runs the carry before series inheritance in `rank`, the reverse of the order spec §6.1 signed.
-Nothing here is built yet.
+under P15 and P16 (§3). Revised again for Quinn's two answers at Checkpoint B (2026-10-01, §12):
+- P16 is **accepted**: in `rank` the carry runs before series inheritance, reversing spec §6.1's
+  signed order. It is recorded in a dated spec note (T8), and T4 is built as planned.
+- The lane trade-off is **not** accepted: the student must be able to remove a stale accepted lane
+  date in the MVP. P17 is the removal path. It writes the existing `declined` line through one
+  engine function (T4d), called by one new Tauri command (H2). T4c reads the line, T5 adds the
+  button, and T7 tests the command end to end.
+
+Revised again for the fifth review (2026-10-01, §10 fifth round). **Two questions are open (§13):**
+- **PQ5, a moved event.** Quinn's answer names a date a later fetch drops because it was cancelled
+  *or moved*. P17 covers a cancellation, but only half covers a move. PQ5 is asked before T4c is
+  dispatched, and it gates T4c and T4d.
+- **PQ6, Undo or confirm.** VISION commitment 5 says a change the student asked for acts at once,
+  with undo. PQ6 is asked after PQ5, and at the latest with B2's report. It gates T5, and it gates
+  T4d only if Quinn asks for a real undo before T4d runs.
+
+T0 through T3.2 are built and were read at Checkpoint B. Nothing from T4 on is built. T4 and T4b
+do not wait on either question.
 
 ## 1. Goal, and what must not move
 
@@ -47,15 +62,22 @@ These must not change:
   `record_answer` keeps its signature, refusals and bytes, and every existing line reads as it does
   today. Quinn's PQ3 answer adds one shape, the carry's answer line (P15): an answer line by
   `agent:knowlu.carry` with three new fields, `from:`, `start:` and `end:`. It is additive and
-  appended like every ledger line. No existing line is rewritten (T2b.4).
+  appended like every ledger line. No existing line is rewritten (T2b.4). The removal path (P17)
+  adds no shape: it appends the existing `declined` line through `record_declined`, and
+  `eventledger.rs` is not edited for it. This holds unless Quinn answers PQ5 (c) or PQ6 (c) (§13).
+  Each of those adds one line shape, built by `contract-engineer` at xhigh.
 - **The existing settlement arms.** The digest, `calendar-event`, `task`, `amend`,
   `commitment-check`, `commitment-ask` and `event-check` (without `instances:`) arms behave
   byte-for-byte as today. The digest arms stay forever.
 - **`rank` never calls a model,** and the same input gives the same bytes. No new JSON is written.
 - **Rule 1.** No new `"quinn"` or `"student"` literal anywhere, tests included.
   `engine/tests/human_actor_literal.rs` stays green.
-- **No new command, flag or handler.** Neither `generate_handler!` list in `app/src/main.rs`
-  changes. `app/src/commands.rs` is not edited.
+- **No new engine command or flag, and one new Tauri command (P17).** Quinn's removal path at
+  Checkpoint B widens spec §6.3's "No new Tauri command" by exactly one: `remove_lane_date`. It is
+  added to the console window's `generate_handler!` list; the wizard's list does not change. Both
+  files are single-owner (HANDOFF §2), so the controller applies them as hand-off H2 after M, with
+  the code given in §7. The command computes nothing: it calls one engine function with
+  `console_ctx(vault)`, and the engine gates, checks and writes.
 - **Privacy.** `site/` is not edited and `PRIVACY_VERSION` does not move (spec §7). No new
   telemetry row shape (D12).
 - **The cloud.** No migration, no function. B1 (T9) runs a harness on `j-events` and changes nothing
@@ -157,13 +179,25 @@ two fix rounds. `arms.ts`' `deviceRecorded` records a refused reply as `unsure`,
 | Lane | Shares with events | Events task | Resolution |
 |---|---|---|---|
 | `m2-editing` | `app/static/console.js`, `app/tests/static_assets.rs`, `app/tests/commands.rs` (its T4a, T4b), `engine/src/surface.rs` (`describe` only), `engine/src/lib.rs` (`pub mod profile;`), `engine/src/eventroster.rs` (its `read_dropped`; events does not edit this file) | T5, T7, T4b, T4c, H1 | Per M2's plan §6, events takes M2 in after M2 merges: T5 and T7 wait for it (P12). The engine tasks touch other functions, so they run now. |
-| `gmail-connect` (merged, #26, `199cd1f`; already in `events` at `2d5298a`) | `app/static/console.js`, `app/tests/static_assets.rs`, `engine/src/enrich.rs` (D4, D7 and the transport stop; events adds only test 24 to its test module), `app/src/main.rs` (its three commands; events adds none) | T5, T4 (test 24) | Nothing left to take in. Every events task starts on a base that has Gmail's code, so test 24 is written against `enrich.rs` as Gmail left it. |
+| `gmail-connect` (merged, #26, `199cd1f`; already in `events` at `2d5298a`) | `app/static/console.js`, `app/tests/static_assets.rs`, `engine/src/enrich.rs` (D4, D7 and the transport stop; events adds only test 24 to its test module), `app/src/main.rs` (its three commands; events adds one, `remove_lane_date`, through H2 after M) | T5, T4 (test 24), H2 | Nothing left to take in. Every events task starts on a base that has Gmail's code, so test 24 is written against `enrich.rs` as Gmail left it. |
 | `p3-registrar` (Pilot) | `engine/src/commitments.rs` (`create_confirmed_as`' body branch), `engine/src/cli.rs`, `console.js`, `static_assets.rs` | T1b, T4, T5 | Unchanged from spec §9: p3 rebases after events, keeping both body arms (events' `kind: event` arm tested first), both `cli.rs` passes and both label switches. |
 | `two-desktop` (Launch) | its spec's producer table | none | Hand-off only (spec §9). |
+| `email-forwarding` (MVP; sub-branches `email-engine`, `email-app`, `email-cloud`; unmerged) | `app/src/main.rs` (the console's `generate_handler!` list: email's H5 adds ten names, events' H2 adds one); `app/static/console.js` and `app/tests/static_assets.rs` (email's T15.1–T15.5); `app/src/commands.rs` (email puts its commands in `app/src/mail.rs`, so no shared function is expected; T0's diff confirms it); `app/tests/handler_lists.rs` (if email's test 37 lands there); `engine/src/approvals.rs` CL (email's T8); `engine/src/cli.rs` (email's H2 dispatch line) | H2, T5, T7, T3.1a–T3.2, T4 | Neither lane is later in the program, so the rule in email's §10 R2 applies: **the second of the two to merge takes the other in** (events by merge, P12; email as its plan says). The handler list and `lib.rs`/`main.rs` conflicts go to the main session: both sides' names kept, the wizard's list unchanged, and both lists recounted by script. `console.js` and `static_assets.rs` conflicts go to `console-ui`, with both sides kept and every static test re-run. `approvals.rs` conflicts go to `contract-engineer`. A `cli.rs` conflict goes to the main session in the dispatch, or to `contract-engineer` if it touches T4's events pass. |
 
-`app/src/main.rs` and `app/src/lib.rs` need **no** hand-off from this lane. Gmail moved the console's
-list from 47 to 50 and M2 adds five more; events adds none. Gmail's `app/tests/handler_lists.rs`
-pins the count and is already in the `events` branch (`2d5298a`), so every gate runs it (§7).
+`app/src/lib.rs` needs **no** hand-off from this lane. `app/src/main.rs` and `app/src/commands.rs`
+need one, H2 (P17, §7): one command in `commands.rs` and its name in the console's list. Gmail moved
+the console's list from 47 to 50, M2 added five more, and email-forwarding's H5 adds ten. Events
+adds one, after M. Which of these lines `main` holds when H2 lands depends on merge order. So no
+count is quoted here, and H2 states its result as names (§7). Gmail's
+`app/tests/handler_lists.rs` is already in the `events` branch (`2d5298a`), so every gate runs it.
+It pins names, not a count (checked on `main`: it asserts two lists and the three Google commands'
+places). T7 adds a test in it for `remove_lane_date`'s place (§7).
+
+**The email-forwarding plan's §10 R2 table does not list events yet** for `app/src/{lib,main}.rs`.
+It was written when events added no Tauri command. T0 has the main session tell the email lane's
+controller, so its R2 table gains the matching rows (`app/src/main.rs`, `console.js`,
+`static_assets.rs`, and `handler_lists.rs` if shared), with the same rule and resolvers. This plan
+does not edit the email plan.
 
 ## 3. Decisions this plan makes
 
@@ -289,7 +323,8 @@ pins the count and is already in the `events` branch (`2d5298a`), so every gate 
     - `write_roster` and Coming up, which list the date like any judged event;
     - `surface`'s lane, which draws a lane-shaped date from the line's span on each day it covers,
       whatever the roster holds (T4c), including after a later successful fetch drops it (§4,
-      PQ3's trade-offs);
+      PQ3's trade-offs), until the student removes it with "Remove from my day", which writes a
+      `declined` line (P17);
     - Coming up's provenance label, whose date is read from the card `from:` names (T4c).
 
     `state/` never syncs (`sync`'s note scan skips it), so the line is device-local like every
@@ -304,11 +339,78 @@ pins the count and is already in the `events` branch (`2d5298a`), so every gate 
     and the carry's line gives one or both. It still answers what the carry does not reach:
     instances that started before today and are still running (`prefilter_events` keeps them),
     series whose card has no `instances:`, and rejected `event-check` series.
-  - *For Quinn:* this reverses the order spec §6.1's `cli.rs` row signed ("series inheritance,
-    then … the carry"). It follows from PQ1 (a) and PQ3 together and needs no write, so the plan
-    builds it (T4) and records it in a dated spec note (T8). The controller brings it to Quinn with
-    Checkpoint B. If Quinn keeps the signed order, those dates keep the inherited line, and their
-    all-day instances leave the lane.
+  - *Accepted by Quinn at Checkpoint B (2026-10-01).* This reverses the order spec §6.1's `cli.rs`
+    row signed ("series inheritance, then … the carry"). It follows from PQ1 (a) and PQ3 together
+    and needs no write. T4 builds it as planned, and T8 records it in a dated spec note.
+- **P17. The removal path: "Remove from my day" writes the existing `declined` line (Quinn,
+  Checkpoint B, 2026-10-01).** Quinn did not accept the lane trade-off (§4, PQ3). When a student
+  accepted an all-day or multi-day event that a later fetch drops (cancelled or moved), they must be
+  able to remove the stale lane date in the MVP.
+  - *What is removable.* Every accepted lane date, from either source: a carried date (a carry
+    line whose span is lane-shaped, T4c) or a date on an executed card's `instances:` (T4b). The
+    console offers it whether or not the feed still has the event. It cannot tell reliably: the
+    roster gate's three faults are in §10's fourth round. A student who changes their mind gets
+    the same control.
+  - *The write.* One `declined` line for the uid, `- <uid> · declined <today>`, through the
+    existing `eventledger::record_declined`. This is the line a card's Decline writes (spec §4.3).
+    No new line shape, no new verdict word, and `eventledger.rs` is not edited.
+  - *The entry point.* `eventcarry::remove_lane_date(vault, uid, today, ctx)` (T4d,
+    contract-engineer). In order:
+    1. It refuses any actor but the vault's own human token: an `agent:` or `system:` actor, and a
+       human actor that `journal::read_human_actor` does not name, each by name. It writes nothing.
+       This is `write`'s gate made stricter, because an agent may never remove a date. `write`'s
+       `human_gate` is private and on the contract list, so this gate is restated here and is not
+       shared.
+    2. It refuses a uid the ledger cannot read back (`ledger_reads`).
+    3. It writes nothing for a uid already `declined`, and returns `Ok(false)`.
+    4. It refuses a uid that is not one of the accepted lane dates. That list comes from T4c's
+       `surface::accepted_events`, now `pub(crate)`, so the lane and the removal read one
+       definition.
+    5. It appends the line and returns `Ok(true)`.
+  - *The command.* `remove_lane_date(view, uid)` (H2) runs inside `mutate`, which takes the
+    console's locks and returns the new state. It passes `now_in(cs).date()` and
+    `console_ctx(&cs.vault)?`. `commands.rs` computes nothing.
+  - *Why the existing readers suffice.* `load_ledger` sets `declined` whatever the verdict.
+    `relevant_events` drops a declined uid, so Coming up and `today.md` drop it. Never-ask-twice
+    skips it. The carry's `carry_line` and `turned_down` skip it, so `rank` never writes a second
+    line or rebooks it. M2's *Not shown* lists it as "you declined it" while the roster still holds
+    it. T4c's reader already leaves out a carried date with a `declined` line. P17 adds one read
+    rule there: it also leaves out a card-listed lane date with one.
+  - *Why not the student's `drop` answer.* `record_answer(… "drop", <human actor>)` would credit the
+    student on the line. But under `load_ledger`'s rules (F1, T2b.4) it settles only a uid whose
+    verdict is `unsure`, unset, or set by a carry line. Two kinds of date fall outside that:
+    - a card-listed date, whose verdict is confident or already the student's `obligation`;
+    - a carried date a model judged confidently before the answer.
+
+    For those the line is ignored and the lane keeps drawing the date. Covering them needs a human
+    answer to replace a confident verdict. `a_human_answer_never_replaces_a_confident_verdict` pins
+    the opposite (F1's invariant), and a pinned assertion may not change.
+  - *No journal record.* A ledger line is not a note, `journal::OPS` has no op for one, and P15
+    records that no ledger line has a journal record: a record shape would be a `journal.rs`
+    contract change. So "journal first" has nothing to apply to here. The human gate (step 1) is
+    what makes the write the student's.
+  - *Two open questions for Quinn (§13), not plan decisions.* The fifth review (§10) found that
+    each one either contradicts a design commitment or only half answers Quinn:
+    - **PQ5: a moved event.** If the campus moves an accepted lane date and keeps its uid, the lane
+      still draws the old day. A carried date's span is frozen at its first carry line (P15), and a
+      card-listed date's span is frozen on the card. Removing the stale day declines the uid, so the
+      real new date also leaves Coming up for good. Quinn's "moved" case is therefore only half
+      answered. T4c and T4d wait on PQ5.
+    - **PQ6: undo, or a confirm.** As drafted, the button asks once ("Remove <title> from your day?
+      Knowlu won't show it again.") and offers no Undo. That follows Delete…'s precedent
+      (`console.js`' `confirmDelete`). But VISION commitment 5 says a change the student asked for
+      acts at once, with undo, and M2 keeps that commitment for edits (`offerBodyUndo`,
+      `offerPrefsUndo`). A planner cannot depart from that alone. T5 waits on PQ6.
+  - *Two trade-offs named for Quinn with B2, for information:*
+    - **Device-local, and not credited to anyone on the line.** The `declined` line has no `by`
+      and no journal record, like a card's Decline line. Like every ledger line, it never syncs. A
+      card's Decline survives a restore because D9 rebuilds it from the synced card. A removal has
+      no card, so a restored vault draws a card-listed or still-fetched date again until the
+      student removes it again. Keeping a removal across a restore needs a note, which is a new
+      vault file; that is not built.
+    - **On its own day only.** The console draws today's lane alone (`the_day` is built once, for
+      today), so a cancelled future date is removable on the day or days it is drawn, which are
+      the only days it shows.
 
 ## 4. Open questions, and Quinn's answers (2026-09-30)
 
@@ -439,7 +541,7 @@ rounds: (c), then (b-prime), then (b-prime) with the span on the carry's line, w
     roster. So the lane draws a carried date on each day it covers, through a feed-failure run, with
     no other write.
   - **Trade-offs the plan decides, named for Quinn with Checkpoint B:**
-    - P16's order (above).
+    - P16's order (above). *Accepted at Checkpoint B (2026-10-01).*
     - An instance a model judged confidently before the answer keeps that verdict (F1's rule).
       Its line still records the span and provenance, so a confident `drop` is booked or drawn but
       not listed in Coming up. The alternative is to let a carry line override any machine verdict.
@@ -464,6 +566,12 @@ rounds: (c), then (b-prime), then (b-prime) with the span on the carry's line, w
       this for the MVP, or ask for a removal path (for example, a Dismiss on a lane entry that
       writes a `declined` line). That path is a further write and a new console action, so the
       plan does not build it; it is the one open item this trade-off leaves (§10, fourth round).
+      **Answered at Checkpoint B (2026-10-01): a removal path.** Quinn did not accept the
+      trade-off. A dropped date is still drawn after the fetch, but the student can now remove it
+      with "Remove from my day". That writes the existing `declined` line, which takes the date
+      out of the lane and Coming up for good (P17; T4c, T4d, H2, T5, T7). The rejected roster gate
+      stays rejected. Two questions this answer raises are open: PQ5 (a moved event) and PQ6
+      (undo), §13.
     - A timed date whose booking failed is listed as accepted, without its block, until the next
       run books it (P15's *When*).
     - A lane-shaped instance that has already started when its series is first carried is not
@@ -532,22 +640,24 @@ rounds: (c), then (b-prime), then (b-prime) with the span on the carry's line, w
 | T3.2 | `contract-engineer` (Opus, xhigh) | — | `engine/src/approvals.rs` CL | T3.1b |
 | B | `contract-reviewer` (Opus, xhigh) | checkpoint | `docs/reports/…-events-contract-review.md` | T3.2 |
 | R1 | `reviewer` (Opus, high), beside B | — | `docs/reports/…-events-sonnet-review-1.md` | T3.2 |
-| T4 | `contract-engineer` (Opus, xhigh) | P16 (to Quinn with B) | `engine/src/cli.rs`; test 24 in `engine/src/enrich.rs`' test module | B, R1 |
+| T4 | `contract-engineer` (Opus, xhigh) | P16 (accepted at B, 2026-10-01) | `engine/src/cli.rs`; test 24 in `engine/src/enrich.rs`' test module | B, R1 |
 | T4b | `implementer` (Sonnet, high) | — | `engine/src/surface.rs` (`Loaded`, `load_with`, `the_day`, `coming_up`, `ComingUp`, one new private reader) | T4 |
-| T4c | `implementer` (Sonnet, high) | PQ3 (answered) | `engine/src/surface.rs` (T4b's reader, `the_day`, `coming_up`, `ComingUp`) | T4b |
-| B2 | `contract-reviewer` (Opus, xhigh) on T4 + `reviewer` (Opus, high) on T4b and T4c | — | `docs/reports/…-events-review-2.md` | T4c |
+| T4c | `implementer` (Sonnet, high) | PQ3 (answered), P17 (B), **PQ5 (open)** | `engine/src/surface.rs` (T4b's reader, `the_day`, `TheDay`, `coming_up`, `ComingUp`) | T4b, PQ5 answered |
+| T4d | `contract-engineer` (Opus, xhigh) | P17 (B), **PQ5 (open)**; PQ6 only if answered (c) before T4d | `engine/src/eventcarry.rs` (`remove_lane_date`); one rank-level test in `engine/src/cli.rs`' test module; plus `engine/src/eventledger.rs` if PQ5 or PQ6 is answered (c) | T4c |
+| B2 | `contract-reviewer` (Opus, xhigh) on T4 and T4d + `reviewer` (Opus, high) on T4b and T4c | — | `docs/reports/…-events-review-2.md` | T4d |
 | M | main session | push go | `main` merged into `events` | B2, and M2 merged (Gmail is already in) |
-| T5 | `console-ui` (Sonnet, medium) | — | `app/static/console.js`, `app/tests/static_assets.rs` | M |
+| H2 | main session | P17 (B) | `app/src/commands.rs`, `app/src/main.rs` (console list) | M |
+| T5 | `console-ui` (Sonnet, medium) | **PQ6 (open)** | `app/static/console.js`, `app/tests/static_assets.rs` | H2, PQ6 answered |
 | T6 | `mechanical` (Sonnet, low) | — | `app/assets/campus/{none,university-of-alabama}.yaml`, `app/tests/scaffold.rs` | M |
-| T7 | `test-writer` (Sonnet, medium) | — | `app/tests/commands.rs` | M |
-| T8 | `docs-keeper` (Sonnet, medium) | — | `docs/surface/anatomy.md`, `docs/reference/engine-commands.md`, `docs/notes/2026-09-29-vision-program.md`, spec §12 note | T7 |
+| T7 | `test-writer` (Sonnet, medium) | — | `app/tests/commands.rs`, `app/tests/handler_lists.rs` | H2 |
+| T8 | `docs-keeper` (Sonnet, medium) | — | `docs/surface/anatomy.md`, `docs/reference/engine-commands.md`, `docs/reference/app.md`, `docs/notes/2026-09-29-vision-program.md`, spec §12 note | T7 |
 | T9 | `cloud-engineer` (Opus, high), on `j-events` | PQ4 (answered) | `docs/reports/…-events-b1.md` (harness run, not edited) | any time before T10 |
 | W | `reviewer` (Opus, high) + `contract-reviewer` (Opus, xhigh) | checkpoint | `docs/reports/…-events-whole-branch-review.md` | T8 |
 | T10 | main session | merge word | none (scratch profile) | W, T9, staging |
 
 T2a and T2b interleave as the spec orders (T2b's first commit, then T2a, then the rest of T2b),
-but serially, because one implementer runs at a time in the worktree. T5, T6 and T7 touch disjoint
-files and run one after another after M.
+but serially, because one implementer runs at a time in the worktree. After M, the controller
+applies H2. T5, T6 and T7 then touch disjoint files and run one after another.
 
 **PQ3 (b-prime), with its span, is built in three tasks plus clauses in three others.**
 - T2b.4: the line's shape and read rules in `eventledger.rs`. It goes to `contract-engineer` at
@@ -560,6 +670,17 @@ files and run one after another after M.
 T2b.2 and T2b.2b write no answer line, and no test in them asserts on the accept carry's ledger
 lines: T2b.5 adds the line, and a test's assertion may not change later.
 
+**P17 (Quinn's removal path, Checkpoint B) is built in five steps, each on its own file set:**
+- T4c: the read side. The lane and the reader leave out a `declined` uid from either source, and
+  `the_day` names each accepted lane date by uid (`implementer`).
+- T4d: the write. `eventcarry::remove_lane_date`, gated, checked, one `declined` line
+  (`contract-engineer`, xhigh).
+- H2: the Tauri command and its place in the console's list (the controller, single-owner files).
+- T5: the button and its confirm (`console-ui`).
+- T7: the command end to end and its handler-list place (`test-writer`).
+
+T8 documents it.
+
 ### T0. Preflight (main session)
 
 **Why the main session:** git state, sibling-lane checks and Quinn's answers are the controller's.
@@ -568,11 +689,17 @@ lines: T2b.5 adds the line, and a test's assertion may not change later.
   the tree. Record the base in a new SDD ledger,
   `.superpowers/sdd/2026-09-29-ultracode/events-progress.md`.
 - Run `git merge-tree --write-tree` of `events` (at `2d5298a`) against `m2-editing`,
-  `p3-registrar` and `j-events`, and `git diff --name-only main...<branch>` for each (Gmail is
-  merged and already in `events`). Record that
-  the engine tasks (T1a–T4c) share only the files §2's table names, `eventledger.rs` included
-  (T2b.4). Repeat before M and before the
-  merge (spec §9).
+  `p3-registrar`, `j-events` and each `email-forwarding` branch (`email-engine`, `email-app`, and
+  the lane branch once it exists). Also run `git diff --name-only main...<branch>` for each. Gmail
+  is merged and already in `events`. Record that the engine tasks (T1a–T4d) share only the files
+  §2's table names, `eventledger.rs` included (T2b.4). Record whether email's diff touches
+  `app/src/commands.rs` and `app/tests/handler_lists.rs`, and correct §2's email row if it does.
+  Repeat before M and before the merge (spec §9).
+- Tell the email-forwarding lane's controller about §2's email row: events' H2 adds
+  `remove_lane_date` to the console list in `app/src/main.rs`, and T5 edits `console.js` and
+  `static_assets.rs`. The second of the two lanes to merge takes the other in, and the main
+  session resolves the handler list. Ask them to add the matching rows to their §10 R2 table.
+  Record in the ledger that they were told.
 - Record Quinn's answers of 2026-09-30 (§4):
   - PQ1 (a);
   - PQ2 (the all-day lane);
@@ -581,8 +708,11 @@ lines: T2b.5 adds the line, and a test's assertion may not change later.
 
   Also record P16 (the carry before inheritance) as the plan's consequence of PQ1 and PQ3, to be
   brought to Quinn with Checkpoint B.
+- Record Quinn's Checkpoint B answers (§12), and that PQ5 and PQ6 are open (§13). Bring PQ5 to
+  Quinn before T4c is dispatched. Bring PQ6 next, one at a time, and before T5 at the latest.
 
-**Done when:** the ledger records the base, the overlap check and the four answers.
+**Done when:** the ledger records the base, the overlap check (email-forwarding included), the
+note to the email controller, the four answers, and the two open questions.
 
 ### T0c. The Alabama shape count (researcher, off the critical path)
 
@@ -1210,6 +1340,19 @@ If Quinn keeps the signed order, T4 keeps it, and the planner rewrites T4's `eve
 before T4 is written. T2b.5's unit tests call `run` alone, so they hold either way. T4 starts when
 this report and R1's have no open Critical or Important finding.
 
+**Quinn's answers at Checkpoint B (2026-10-01).**
+- P16 is accepted, so T4 is built as written.
+- The lane trade-off is not accepted, and Quinn asked for a removal path. The planner revised the
+  plan before T4c was written:
+  - new P17;
+  - T4c's tests and reader: `a_dropped_lane_date_stays_drawn_and_unlisted` is replaced by
+    `a_dropped_lane_date_is_drawn_with_its_uid_until_removed`, and the lane names each accepted
+    date by uid;
+  - new tasks T4d and H2;
+  - T5's button, T7's end-to-end tests, and T8, B2, W, T10, §6–§9.
+
+The record is §12.
+
 ### R1. Review of the Sonnet-written engine commits (beside Checkpoint B)
 
 **Agent:** `reviewer` (Opus, high). **Why:** CLAUDE.md and spec §13: anything a cheaper agent
@@ -1279,7 +1422,8 @@ module (no code change there).
   row (`proposed` → `rejected`) for a rejected card with a `judgment_id`; none for an executed one;
   an `event-check` still gives its `verdict` row.
 
-**Behaviour.** Spec §6.1's `cli.rs` row, with P16's order. Inside the existing
+**Behaviour.** Spec §6.1's `cli.rs` row, with P16's order (accepted by Quinn at Checkpoint B,
+2026-10-01). Inside the existing
 `if events_config.sources…` block, in this order:
 1. `eventcarry::run`: D9's rebuild, then the carry and its lines (T2b.5), its warnings into
    `ledger:` lines. It is passed the same `candidates` as every later step, so on a run built from
@@ -1326,8 +1470,9 @@ reads a carry line.
 - One new private reader, `accepted_events(vault) -> AcceptedEvents`, reads `archive/` for
   `executed` `event-accept` and `event-check` cards with `instances:`, and `commitments/` for
   `kind: event` source uids. It returns the accepted uid set and the lane-shape instances (all-day,
-  multi-day and zero-length, by `eventaccept::shape`; title, first day, last day). An unreadable note
-  is skipped. A carried instance is on no card; T4c adds carried dates from the ledger.
+  multi-day and zero-length, by `eventaccept::shape`; uid, title, first day, last day). The uid is
+  kept for T4c, which names each lane date by it for P17's removal. An unreadable note is skipped.
+  A carried instance is on no card; T4c adds carried dates from the ledger.
 - `load_with` calls it once and keeps both in new `Loaded` fields, for `the_day`.
 - `coming_up(vault, today, now)` keeps its signature (it never receives a `Loaded`) and calls
   `accepted_events(vault)` itself for the uid set. That is one more read of `archive/` and
@@ -1335,7 +1480,8 @@ reads a carry line.
   calls neither `coming_up` nor `load_with` directly at `4aa6560`; the implementer re-checks with a
   search) and M2's edits to `describe` are unaffected.
 - `the_day` appends each lane instance covering `today` to `all_day`, after the calendar's own, in
-  `(first day, title)` order. Capacity is not touched (anatomy §3.7).
+  `(first day, title, uid)` order. The uid breaks a tie between two dates with one title, so the
+  order is total. Capacity is not touched (anatomy §3.7).
 - `ComingUp` gains `accepted: bool` with `#[serde(skip_serializing_if = …)]` for false;
   `coming_up` sets it from the uid set.
 - No write, and `render` is untouched.
@@ -1347,11 +1493,15 @@ unchanged.
 
 **Agent:** `implementer` (Sonnet, high). **Why:** read-only, like T4b: an error misdraws a lane or
 a label but never changes vault bytes. `reviewer` reads it in B2. **Files:** `engine/src/surface.rs`
-(T4b's `accepted_events`, `load_with`, `the_day`, `ComingUp`, `coming_up`). **Answer applied:**
-PQ3, (b-prime) with the span (P15).
+(T4b's `accepted_events`, `load_with`, `the_day`, `TheDay`, `ComingUp`, `coming_up`). **Answers
+applied:** PQ3, (b-prime) with the span (P15); and the read side of Quinn's removal path (P17,
+Checkpoint B, 2026-10-01). T4d writes the removal's line, and this task only reads it.
+**Waits on PQ5 (§13).** The tests below are written for PQ5 (a). Under (b) or (c), §13 says what
+changes, and the controller re-briefs this task before dispatch.
 
 **Tests first.** Vaults are built by hand: carry lines through
-`eventledger::record_carried_answer`, and the roster through `eventroster::write_roster`, as
+`eventledger::record_carried_answer`, a removal's line through `eventledger::record_declined` (the
+line T4d's `remove_lane_date` writes), and the roster through `eventroster::write_roster`, as
 `rank` writes it.
 - `a_carried_lane_date_is_drawn_on_each_day_it_covers`. Carry lines for three dates: a two-day
   all-day date, a zero-length date, and a Fri 5pm–Sun 2pm date. No card lists them, and there is
@@ -1370,40 +1520,77 @@ PQ3, (b-prime) with the span (P15).
   `accepted: true` and `provenance: "Accepted · from your answer to the series on Thu 9/24"`.
 - `a_provenance_without_its_card_has_no_date`: when the card is gone, `provenance` is
   `"Accepted · from your answer to the series"`.
-- `a_declined_or_human_answered_date_is_neither_listed_nor_drawn`. Three cases:
+- `a_declined_or_human_answered_date_is_neither_listed_nor_drawn`. Four cases:
   - a declined series' instances (`declined` lines, no carry line);
   - a carry line followed by a `declined` line;
-  - a carry line followed by a human `drop` answer (actor from `journal::read_human_actor`).
+  - a carry line followed by a human `drop` answer (actor from `journal::read_human_actor`);
+  - (P17) a one-day all-day date on an executed `event-accept` card's `instances:`, with a
+    confident `obligation` verdict and in the roster's relevant section, followed by a `declined`
+    line.
 
-  None is in `coming_up`, and none of the lane-shaped ones is in `all_day`.
+  None is in `coming_up`, and none of the lane-shaped ones is in `all_day` or among
+  `accepted_events`' lane instances.
 - `a_confidently_judged_carried_date_keeps_its_listing_and_gains_the_label`:
   - a machine `opportunity`, then a carry line: listed, with the provenance;
   - a machine `drop`, then a carry line, lane-shaped: in `all_day`, not in `coming_up` (§4, PQ3's
     trade-offs).
-- `a_dropped_lane_date_stays_drawn_and_unlisted` (§4, PQ3's trade-offs; review, fourth round).
-  The vault holds a carry line for a two-day all-day date and for a timed date, and an executed
-  `event-accept` card whose `instances:` lists a one-day all-day date. The roster is written by
-  `write_roster` as a successful fetch leaves it, holding another event but none of the three.
-  - `the_day` draws the two all-day dates on each day they cover, as before the fetch.
-  - `coming_up` lists none of the three, and neither the lane entries nor anything else carries a
-    label that claims the feed still has them.
-  - Writing a human `drop` answer for the carried all-day uid removes it from `all_day` (the path
-    exists in the ledger, though no MVP surface writes it).
-- `provenance_is_absent_from_the_json_when_none`: the serialised `ComingUp` of an event with no
-  carry line has no `provenance` key (nor `accepted`, P8).
-- `surface_writes_nothing_and_reads_the_same_twice`: every file's bytes in the vault are unchanged
-  after `load`, `the_day` and `coming_up`. Two calls give equal results, with `all_day` in
-  `(first day, title)` order.
+- `a_dropped_lane_date_is_drawn_with_its_uid_until_removed` (P17; replaces
+  `a_dropped_lane_date_stays_drawn_and_unlisted`, whose trade-off Quinn did not accept at
+  Checkpoint B). The vault holds:
+  - a carry line for a two-day all-day date and one for a timed date;
+  - an executed `event-accept` card whose `instances:` lists a one-day all-day date.
 
-**Behaviour.** P8's third source and P15's *Used by*.
-- **The reader.** `accepted_events(vault, &ledger)` is T4b's reader, now given the ledger. It adds:
+  The roster is written by `write_roster` as a successful fetch leaves it, holding another event
+  but none of the three.
+  - Before the removal, `the_day` draws the two all-day dates on each day they cover, as before the
+    fetch, each named by its uid in `all_day_uids`, so the console can offer "Remove from my day".
+    `coming_up` lists none of the three.
+  - A `declined` line for the carried all-day uid takes it out of `all_day` and `all_day_uids` on
+    both its days. A `declined` line for the card-listed uid takes it out of both on its day. A
+    vault-wide check confirms each removed uid is gone from `accepted_events`' lane instances and
+    accepted set.
+  - The timed date is untouched by either line.
+- `the_lane_names_each_accepted_date_by_uid` (P17). One day carries a calendar all-day event, a
+  carried lane date and a card-listed lane date.
+  - `all_day_uids` has `all_day`'s length.
+  - It holds `None` at the calendar entry's index, and each accepted date's uid at that date's
+    index, in `all_day`'s order.
+  - On a day with only calendar all-day events, `all_day_uids` is empty.
+  - On a day with no all-day entry at all, `all_day_uids` is empty.
+- `provenance_is_absent_from_the_json_when_none`. The serialised `ComingUp` of an event with no
+  carry line has no `provenance` key (nor `accepted`, P8). The serialised `TheDay` of a day with no
+  accepted lane date has no `all_day_uids` key (P17). So `surface_oracle.rs`' references stay
+  byte-identical.
+- `surface_writes_nothing_and_reads_the_same_twice`: every file's bytes in the vault are unchanged
+  after `load`, `the_day` and `coming_up`. Two calls give equal results, with `all_day` and
+  `all_day_uids` in `(first day, title, uid)` order.
+
+**Behaviour.** P8's third source, P15's *Used by*, and P17's read side.
+- **The reader.** `accepted_events(vault, &ledger)` is T4b's reader, now given the ledger, and
+  `pub(crate)` together with its result type. T4d's `eventcarry::remove_lane_date` checks a uid
+  against its lane instances, so the lane and the removal read one definition. Its doc says so. It
+  adds:
   - every uid whose entry has `carry` and no `declined` line, to the accepted set;
   - each such entry whose span `eventaccept::shape` classifies as all-day, multi-day or
-    zero-length, to the lane instances, whatever its verdict. The title comes from the entry's
-    `title`, and the first and last day from the shape. Lane instances are de-duplicated by uid
+    zero-length, to the lane instances, whatever its verdict. The uid and title come from the
+    entry, and the first and last day from the shape. Lane instances are de-duplicated by uid
     against the cards' instances;
   - from its own `archive/` scan, the `executed_at` date of every executed card whose `id:` passes
     `ids::is_id`, keyed by id.
+
+  It also applies one rule to T4b's card-listed instances (P17): a uid whose ledger entry is
+  `declined` is neither accepted nor a lane instance, whichever source named it. A carried date
+  already follows that rule (above), so after this a `declined` line removes a date from the lane
+  whatever its source.
+- **The lane's uids (P17).** `TheDay` gains `all_day_uids: Vec<Option<String>>`, with
+  `#[serde(skip_serializing_if = "Vec::is_empty")]`.
+  - It is empty when no accepted lane date covers the day.
+  - Otherwise it has `all_day`'s length: `None` for each calendar entry, and the uid for each
+    accepted lane date `the_day` appended.
+  - It is a parallel array, not a change to `all_day`. Spec test 22a asserts accepted dates *in*
+    `all_day`, which stays a `Vec<String>`, and the references' `all_day` stays byte-identical.
+  - `the_day` is the only constructor of `TheDay` in the engine; the implementer re-checks
+    `app/src` with a search.
 - **The ledger read.** `load_with` loads the ledger once (`eventledger::load_ledger(vault, None)`)
   and passes it in. `coming_up` passes the one it already loads.
 - **The label.** `ComingUp` gains `provenance: Option<String>`, with
@@ -1411,25 +1598,112 @@ PQ3, (b-prime) with the span (P15).
   is "Accepted · from your answer to the series on <Ddd> <M/D>", the same day format as `when`. It
   drops " on …" when the card or its `executed_at` cannot be read. `accepted` is true for that uid
   too.
-- **What reads what.** Coming up still lists only what `relevant_events` keeps (P8). The lane
-  reads the ledger; the listing reads the roster. This task writes nothing, and `render` and
-  `today.md` are untouched.
+- **What reads what.** Coming up still lists only what `relevant_events` keeps (P8), which already
+  drops a `declined` uid. The lane reads the ledger; the listing reads the roster. This task writes
+  nothing, and `render` and `today.md` are untouched.
 - **The read-model references.** No fixture holds a carry line or an event card (checked: no
   `instances:`, `kind: event-check`, `kind: event-accept` or `agent:knowlu.carry` under
   `engine/tests/fixtures/`). So `surface_oracle.rs`' three references stay byte-identical. If a
   fixture ever held one, console spec §4.6's rule would apply: regenerate only in a commit whose
   diff shows the change and whose message says why.
 
-**Done when:** the nine tests pass, and T4b's tests, `surface_oracle.rs` and every `surface.rs`
+**Done when:** the ten tests pass, and T4b's tests, `surface_oracle.rs` and every `surface.rs`
 test pass unchanged.
 
-### B2. Review of T4, T4b and T4c (before the first push)
+### T4d. P17: the student removes an accepted lane date (`eventcarry.rs`)
 
-**Agents:** `contract-reviewer` (Opus, xhigh) over T4's commit, and `reviewer` (Opus, high) over
-T4b's and T4c's.
+**Agent:** `contract-engineer` (Opus, xhigh).
+
+**Why:** it writes into the record of the student's answers on the student's click, through a
+human gate of its own outside `write.rs`. A wrong gate lets an agent remove a date the student
+accepted. A wrong check declines an event the student never saw in their lane. And this plan gives
+`eventcarry.rs` to contract-engineer (T2b).
+
+**Files:**
+- `engine/src/eventcarry.rs`: the function, its unit tests, and one sentence in the module doc;
+- one rank-level test appended to `engine/src/cli.rs`' test module, with no code change there (as
+  T4's test 24 in `enrich.rs`).
+
+**Answer applied:** P17 (Quinn, Checkpoint B, 2026-10-01). **Waits on PQ5 (§13).** The tests
+below are written for PQ5 (a) or (b). Under PQ5 (c), or PQ6 (c) if it is answered before this task
+runs, the line shape changes and §13 says how.
+
+**Tests first.** They go in `eventcarry.rs`' test module unless named otherwise. The student's
+context is `WriteContext::new(journal::read_human_actor(&vault)?, "dashboard")`, never a literal.
+- `removing_a_carried_lane_date_appends_one_declined_line`. The vault holds an executed
+  `event-accept` card with an `id:`, and a carry line for a later two-day all-day `lx:77:3`.
+  - `remove_lane_date(vault, "lx:77:3", today, &student)` returns `Ok(true)`.
+  - The ledger's bytes are the old bytes, then exactly `- lx:77:3 · declined <today>` and
+    `NEWLINE`.
+  - `load_ledger` gives `lx:77:3` `declined: true`, with its verdict, `answered_by` and `carry` as
+    before.
+  - Every other file in the vault is byte-identical, and no journal file is created or changed.
+- `removing_a_card_listed_lane_date_appends_one_declined_line`: the same, for a one-day all-day
+  instance on an executed `event-accept` card's `instances:`. A second vault does it for one on an
+  executed `event-check` card's `instances:` (D11).
+- `a_second_removal_writes_nothing`: a second call returns `Ok(false)` and leaves the ledger's bytes
+  unchanged.
+- `only_the_student_removes_a_date`. Four calls are each refused, with an error naming why and no
+  file changed in any vault:
+  - an `agent:` actor;
+  - a `system:` actor;
+  - a human actor that is not the vault's own token, built as `write.rs`' own gate tests build
+    one, with no literal;
+  - any actor, in a vault whose `config/actor.yaml` is invalid (the reader's named line).
+- `only_an_accepted_lane_date_is_removed`. Each of these is refused by name, with no file changed:
+  - a carried timed date;
+  - a uid with only a machine verdict;
+  - a uid no source names;
+  - a lane date on a `rejected` card, and one on an `expired` card;
+  - a uid the ledger cannot read back: `"a b"`, and one holding `verdict:`.
+- `rank_never_brings_a_removed_date_back`, in `cli.rs`' test module, through full `rank` runs as
+  T4's rank-level tests are. The vault holds an accepted `event-accept` series whose later two-day
+  all-day instance is in the feed.
+  - One `rank` writes the instance's carry line, and `remove_lane_date` then removes it.
+  - Two more `rank`s run with the feed unchanged, and a third with every feed failing. The vault
+    holds nothing else for `rank` to write, so none of the three changes the ledger's bytes from
+    what they were after the removals: no second carry line, no answer line and no second
+    `declined` line for either uid.
+  - No card names the uid. `the_day` for each of its days does not draw it, and `coming_up` does
+    not list it.
+  - The same holds for a card-listed lane date of a second series in the same vault.
+- `removal_is_deterministic_and_leaves_existing_vaults_alone`.
+  - The same removal over two copies of one vault gives byte-identical ledgers (P14: the line holds
+    only the uid and the day).
+  - Take a copy of `vault-full`, made first and never used in place. It has no accepted lane date,
+    so a call with any uid from its ledger is refused, and no byte of the copy changes.
+
+**Behaviour.** P17's *The entry point*.
+- `pub fn remove_lane_date(vault: &Path, uid: &str, today: Date, ctx: &WriteContext) ->
+  Result<bool, String>` runs in P17's order:
+  1. the gate;
+  2. `ledger_reads`;
+  3. already `declined`: `Ok(false)`;
+  4. the uid must be among the lane instances of
+     `crate::surface::accepted_events(vault, &load_ledger(vault, None))`;
+  5. `record_declined(vault, uid, today)`, then `Ok(true)`.
+
+  Each refusal is one line naming the uid and the reason. The console shows it as the command's
+  `error`.
+- The gate is stricter than `write`'s private `human_gate`: it also refuses an `agent:` or
+  `system:` actor, because only the student removes a date. Its doc names `write::human_gate` as
+  the rule it restates, so a change to one is seen beside the other.
+- It writes nothing else: no note, no journal record (P17), no other ledger line. `rank` never
+  calls it.
+- The module doc gains one sentence: the student's removal of an accepted lane date is the one
+  write in this module made on the student's click.
+
+**Done when:** the seven tests pass, and every `eventcarry.rs`, `eventledger.rs`, `surface.rs` and
+`cli.rs` test passes unchanged.
+
+### B2. Review of T4, T4b, T4c and T4d (before the first push)
+
+**Agents:** `contract-reviewer` (Opus, xhigh) over T4's and T4d's commits, and `reviewer` (Opus,
+high) over T4b's and T4c's.
 
 **Why:** spec §13 puts T4's `cli.rs` change (the order of the vault-writing passes and each pass's
-budget) under contract-reviewer, though `cli.rs` is not on the contract list. T4b and T4c are
+budget) under contract-reviewer, though `cli.rs` is not on the contract list. T4d writes into the
+event ledger on the student's click, through a gate of its own (P17). T4b and T4c are
 Sonnet-written and must be reviewed before a push.
 
 **Report:** `docs/reports/<date>-events-review-2.md`, one section per agent.
@@ -1439,31 +1713,66 @@ Sonnet-written and must be reviewed before a push.
   - each emitter's budget, and the switch-off path that keeps the golden;
   - the feed-failure no-op, ledger included;
   - that tests 19 and 20a at `rank` level assert what spec §11 states;
-  - that `rank_gives_each_carried_date_the_carrys_line_and_lists_it` asserts one line per date.
+  - that `rank_gives_each_carried_date_the_carrys_line_and_lists_it` asserts one line per date;
+  - reading T4d's commit alone (P17):
+    - the only write is one existing-shape `declined` line through `record_declined`;
+      `eventledger.rs`, `journal.rs` and `write.rs` are unchanged;
+    - the gate refuses every actor but the vault's own human token, an agent's included;
+    - a uid is removed only when `accepted_events` draws it in the lane, and a second call writes
+      nothing;
+    - `rank_never_brings_a_removed_date_back` asserts the ledger's bytes, not only the read model,
+      over a vault that holds nothing else for `rank` to write.
 - *Reviewer* checks:
   - T4b against P8 and the `accepted_events` reader: no public signature changed, `accepted`
     absent when false, no write;
-  - T4c against P15's *Used by*: the lane drawn from the ledger alone, `provenance` absent when
-    `None`, no write, and the read-model references untouched; and that
-    `a_dropped_lane_date_stays_drawn_and_unlisted` pins what Quinn ruled at Checkpoint B.
+  - T4c against P15's *Used by* and P17's read side:
+    - the lane is drawn from the ledger alone;
+    - `provenance` is absent when `None`, and `all_day_uids` is absent when empty;
+    - `all_day_uids` stays parallel to `all_day`;
+    - a `declined` uid leaves the lane whatever its source;
+    - no write, and the read-model references untouched;
+    - `a_dropped_lane_date_is_drawn_with_its_uid_until_removed` pins what Quinn ruled at
+      Checkpoint B.
 
-Fixes go to `contract-engineer` and `implementer` respectively, serially.
+Fixes go to `contract-engineer` (T4, T4d) and `implementer` (T4b, T4c), serially.
 **Done when:** no open Critical or Important finding. Then the controller asks Quinn's go to push
-`events` (P12).
+`events` (P12). If PQ6 is still open, the controller asks it with this report (§13). T5 does not
+start until it is answered.
 
 ### M. Take `main` in after M2 merges (main session)
 
 **Why the main session:** it is a merge that keeps the reviewed commits' hashes (P12). Gmail is
 already in the branch (`2d5298a`). When `m2-editing` has merged to `main`, re-run T0's overlap
-check, merge `main` into
-`events`, resolve any textual conflict in `surface.rs`, `enrich.rs`'s test module or `lib.rs` (both
-sides' lines kept), and run the gate. T5, T6 and T7 start from that commit. M and later commits are
-not pushed until W closes.
+check, `email-forwarding` included, and merge `main` into `events`. Resolve any textual conflict in
+`surface.rs`, `enrich.rs`'s test module or `lib.rs`, keeping both sides' lines, and run the gate. If
+any email-forwarding branch has merged to `main` first, M also takes in its H5 handler names, its
+`console.js` and `static_assets.rs` changes and its `approvals.rs` and `cli.rs` changes. Each
+conflict goes where §2's email row says. H2 then lands on a list that already holds email's names.
+H2 is applied on M's commit, and T5, T6 and T7 start from H2's. M and later commits are not pushed
+until W closes.
 
-### T5. Deck labels and the "Accepted" tag (`console.js`)
+### H2. The `remove_lane_date` command (main session, after M)
+
+**Why the main session:** `app/src/commands.rs` and `app/src/main.rs` are single-owner files
+(HANDOFF §2). The controller applies a lane's hand-off with the exact code its plan gives (§7).
+**Answer applied:** P17 (Quinn, Checkpoint B, 2026-10-01). **After** M, so it lands on M2's
+`commands.rs` and its console list.
+- Add §7's H2 code to `app/src/commands.rs`, beside `delete_note_inner` and `delete_note`.
+- Add `commands::remove_lane_date` to the console window's `generate_handler!` list in
+  `app/src/main.rs` (the list that names `commands::dropped_events`), right after
+  `commands::delete_note`. The wizard's list does not change.
+- Run the gate. `app/tests/handler_lists.rs`' existing tests pass unchanged; T7 adds the test for
+  this command's place.
+- One commit. `reviewer` reads it in W, as code in `app/src` that no reviewer has read yet.
+
+### T5. Deck labels, the "Accepted" tag and "Remove from my day" (`console.js`)
 
 **Agent:** `console-ui` (Sonnet, medium). **Why:** `app/static` is its lane.
 **Files:** `app/static/console.js`, `app/tests/static_assets.rs`.
+**Waits on PQ6 (§13).** The last test below is written for PQ6 (a), a confirm with no Undo. Under
+(b) or (c), the controller replaces it with §13's test before dispatch. **Shared with
+email-forwarding** (its T15.1–T15.5): if email has merged first, T5 starts from M's merged
+`console.js`. If email merges after events, it takes T5's lines in (§2).
 
 **Tests first** (spec test 26, plus P8's renderer):
 - `event_cards_read_accept_and_decline_and_send_the_same_verdicts` (26): on `event-accept` and
@@ -1475,11 +1784,30 @@ not pushed until W closes.
 - `coming_up_shows_the_carrys_provenance` (PQ3, T4c): an entry with a `provenance` string renders
   that string as escaped text, in place of the plain "Accepted" tag. An entry without one is
   unchanged.
+- `the_lane_offers_remove_on_accepted_dates_only` (P17, T4c).
+  - `renderTheDay` reads `the_day.all_day_uids`.
+  - An `all_day` entry whose uid is set renders a "Remove from my day" button. The button carries
+    the uid and the title as escaped `data-` attributes.
+  - An entry whose uid is `null` renders as today, `(all day) <title>`, with no button. So does
+    every entry of a state with no `all_day_uids` key.
+- `remove_from_my_day_confirms_then_invokes_remove_lane_date` (P17, H2).
+  - The click asks `window.confirm("Remove \"<title>\" from your day? Knowlu won't show it
+    again.")`.
+  - Only on OK does it invoke `remove_lane_date` with `{ view: stateView(), uid: <uid> }`.
+  - It hands the envelope to `applyEnvelope`, which shows a refusal's `error` and the state it
+    carries.
+  - There is no Undo toast (PQ6 (a), if Quinn chooses it).
 
-**Behaviour.** Spec §6.3. The per-kind label switch follows the existing `commitment-ask` switch.
-The tag is plain text beside the event's time, styled with an existing class. The provenance is
-shown exactly as `surface` gives it: the console composes no label text of its own. No new invoke.
-**Done when:** the three tests pass, and every existing static test passes unchanged.
+**Behaviour.** Spec §6.3, and P17 for the lane's button.
+- The per-kind label switch follows the existing `commitment-ask` switch.
+- The tag is plain text beside the event's time, styled with an existing class. The provenance is
+  shown exactly as `surface` gives it: the console composes no label text of its own.
+- The button uses an existing class. Its click goes through the existing delegated handler, as
+  `data-del` does.
+- One new invoke, `remove_lane_date` (H2). It sends no `ui_event` of its own (D12: no new
+  telemetry row).
+
+**Done when:** the five tests pass, and every existing static test passes unchanged.
 
 ### T6. Presets (`app/assets/campus/`)
 
@@ -1493,17 +1821,34 @@ line saying what it switches. The engine never writes `events.yaml`.
 **Done when:** the test passes, and `the_campus_preset_is_the_shape_the_engine_already_reads` and the
 other scaffold tests pass unchanged.
 
-### T7. `decide` end to end (`app/tests/commands.rs`)
+### T7. `decide` and `remove_lane_date` end to end (`app/tests/`)
 
-**Agent:** `test-writer` (Sonnet, medium). **Why:** a test only, over a finished engine.
-**Files:** `app/tests/commands.rs`.
-**Test** (spec test 28): `decide_accepting_an_event_card_books_it_before_returning`. A scaffolded
-vault with a hand-built `event-accept` card (spec §5.1's shape); `decide_inner(…, "approved", …)`
-returns the card in `decision.executed`, and the `commitments/` note exists before the call
-returns. The card's `status` record has an actor `provenance::is_agent` rejects; the commitment's
-`create` record has one it accepts. The test names no human token.
-**Done when:** the test passes (it may pass first: it pins T3.1a through the app), and the file's
-existing tests pass unchanged.
+**Agent:** `test-writer` (Sonnet, medium). **Why:** tests only, over a finished engine and H2's
+command. **Files:** `app/tests/commands.rs`, `app/tests/handler_lists.rs`. **After:** H2.
+**Tests:**
+- (spec test 28) `decide_accepting_an_event_card_books_it_before_returning`. A scaffolded vault
+  with a hand-built `event-accept` card (spec §5.1's shape); `decide_inner(…, "approved", …)`
+  returns the card in `decision.executed`, and the `commitments/` note exists before the call
+  returns. The card's `status` record has an actor `provenance::is_agent` rejects; the commitment's
+  `create` record has one it accepts.
+- (P17) `remove_lane_date_takes_the_date_off_the_day_before_returning`, in `commands.rs`. The
+  vault is scaffolded, and the console's day is pinned through `ConsoleState::test_today`, as the
+  file's other tests pin it. It holds an archived executed `event-accept` card with an `id:`, and a
+  carry line, written through `eventledger::record_carried_answer`, for a one-day all-day date on
+  the pinned day.
+  - Before the call, `state.the_day` holds the title in `all_day` and its uid in `all_day_uids`.
+  - `remove_lane_date_inner(&cs, view, uid)` returns `ok: true`. Its `state.the_day.all_day` no
+    longer holds the title, and it has no `all_day_uids` key.
+  - The ledger holds exactly one `declined` line for the uid, after the carry line.
+  - A second call returns `ok: true` and changes no byte of the ledger.
+  - A uid that is not an accepted lane date returns `ok: false`, with the engine's error and the
+    current state, and writes nothing.
+- (P17) `the_console_list_names_remove_lane_date_and_the_wizard_list_does_not`, in
+  `handler_lists.rs`, through the file's own parser.
+
+No test names a human token.
+**Done when:** the three tests pass, and both files' existing tests pass unchanged. The tests may
+pass on their first run, because they pin T3.1a, T4d and H2 through the app.
 
 ### T8. Reference documents
 
@@ -1522,9 +1867,21 @@ existing tests pass unchanged.
     Capacity is not touched. A lane-shaped instance that had already started when its series was
     first carried is not drawn (§4, PQ3's trade-offs). An accepted lane date from either source
     stays drawn on its day or days after a later fetch drops it (cancelled, or gone from the feed),
-    while Coming up no longer lists it. Say plainly that the student cannot remove such a date in
-    the MVP (no commitment, no card, and no event-check is filed for an answered uid), and that it
-    passes with its days; or, if Quinn ruled a removal path at Checkpoint B, name that path.
+    while Coming up no longer lists it.
+
+    Name the removal path Quinn ruled at Checkpoint B (P17):
+    - Every accepted lane date carries its uid in `the_day.all_day_uids`, a parallel array that is
+      absent when no such date covers the day. The console offers "Remove from my day" on it.
+    - The button asks once, then calls `remove_lane_date`. That writes one existing-shape
+      `declined` line through `eventcarry::remove_lane_date`, which only the vault's own human
+      token may call.
+    - The date then leaves the lane and Coming up for good, from either source. `rank` never
+      brings it back: the carry, never-ask-twice and `relevant_events` all read `declined`.
+    - Name what Quinn answered for PQ5 (a moved event) and PQ6 (undo or confirm), as §13 records
+      them, and P17's two remaining trade-offs:
+      - the line is device-local and carries no `by`, so a restored vault draws a card-listed or
+        still-fetched date again;
+      - the console draws today's lane only, so a date is removable on the day or days it shows.
   - §3.9, the deck: event cards, Accept and Decline on both event kinds, and expiry. Also, beside
     the existing note on `event-check`'s human answer line: the carry writes one answer line per
     carried date, by `agent:knowlu.carry`, with `from:`, `start:` and `end:`. A later human answer
@@ -1536,6 +1893,8 @@ existing tests pass unchanged.
     - An instance a model judged confidently keeps its verdict and gains the label, so a confident
       `drop` stays unlisted.
     - `today.md` lists carried dates without the label.
+    - A date the student removed (P17) is not listed. M2's *Not shown* lists it as "you declined
+      it" while the roster still holds it.
 - `docs/reference/engine-commands.md`: one paragraph in `rank`'s entry. It covers the events
   pass's order (the carry before series inheritance, P16), `event_cards`, the carry over accepted
   `event-accept` and `event-check` series, and its one ledger line per carried date (P15);
@@ -1549,12 +1908,26 @@ existing tests pass unchanged.
   (b-prime) without the span. The note also records what that answer widens:
   - §5.4: the carry's answer line, its `by:agent:knowlu.carry`, `from:`, `start:` and `end:`
     fields, `opportunity` on it, and `load_ledger`'s read rules (P15);
-  - §6.1's `surface.rs` row: carried lane dates and the provenance label;
-  - §6.1's `cli.rs` row: the carry before series inheritance (P16), as Quinn ruled at Checkpoint
-    B.
+  - §6.1's `surface.rs` row: carried lane dates and the provenance label.
 
-  The signed text above the note is not rewritten;
-- `docs/reference/app.md`, only if it lists the campus presets' keys.
+  A second dated note records Quinn's two answers at Checkpoint B (2026-10-01):
+  - P16 accepted. §6.1's `cli.rs` row runs the carry before series inheritance, reversing the
+    signed order.
+  - The removal path (P17). It widens four places:
+    - §6.3, by one Tauri command, `remove_lane_date`, in the console's list, computing nothing;
+    - §6.1's `eventcarry.rs` row, by `remove_lane_date`, the student's removal of an accepted lane
+      date: gated to the vault's own human token, one `declined` line;
+    - §6.1's `surface.rs` row, by `the_day`'s `all_day_uids`, and by the rule that a `declined`
+      uid leaves the lane whatever its source;
+    - §4.3, which gains the removal as a second writer of `declined`.
+
+    §5.4's "no new line shape" still holds unless PQ5 or PQ6 was answered (c). The note records
+    both answers and P17's two remaining trade-offs.
+
+  The signed text above both notes is not rewritten;
+- `docs/reference/app.md`: `remove_lane_date` in the console's command list, beside `delete_note`
+  (what it takes, what it writes, that the engine gates it). Also the campus presets' keys, if the
+  file lists them.
 
 HANDOFF is not edited (P11). **Done when:** each claim cites a function, not a line, and matches the
 branch.
@@ -1595,7 +1968,11 @@ in particular:
   and order, card bytes without `id:` lines, `proposed` ledger lines; journal timestamps and `id:`
   values left out), and no deterministic id introduced anywhere;
 - no new `"quinn"` or `"student"` literal; `human_actor_literal.rs` green;
-- `app/src/` unchanged; no handler list changed;
+- `app/src/` changed only by H2 (P17):
+  - one command, `remove_lane_date`, which computes nothing, calls `eventcarry::remove_lane_date`
+    with `console_ctx(vault)` and runs inside `mutate`;
+  - one name added to the console's `generate_handler!` list, and the wizard's list unchanged
+    (`handler_lists.rs` green, T7's test included);
 - `site/` and `PRIVACY_VERSION` unchanged; no new telemetry row;
 - the fixtures diff empty and both oracles green;
 - `surface::delta` unchanged (20c green);
@@ -1606,9 +1983,17 @@ in particular:
     new file);
   - `record_answer` and every existing ledger line byte-identical;
   - a human answer never overridden by a carry line;
-  - the lane drawn from the ledger alone, and a dropped lane date handled as Quinn ruled at
-    Checkpoint B;
-  - P16's order as Quinn ruled at Checkpoint B.
+  - the lane drawn from the ledger alone;
+  - P16's order, as Quinn accepted at Checkpoint B.
+- P17, the removal path Quinn ruled at Checkpoint B:
+  - a dropped lane date is drawn with its uid until the student removes it;
+  - the removal writes one existing-shape `declined` line and nothing else, only for the vault's
+    own human token, and only for a date the lane draws;
+  - no `rank` brings a removed date back;
+  - a moved event behaves as Quinn answered PQ5, and the console's confirm or Undo is what Quinn
+    answered for PQ6 (§13);
+- the overlap with email-forwarding (§2): if it merged first, both lanes' handler names, both
+  lanes' `console.js` lines and their static tests are all present after M.
 
 Fixes go to the task's own agent, and the reviewer re-reads them. The controller brings Quinn the
 report before T10 (spec §13's third checkpoint). **Done when:** no open Critical or Important
@@ -1621,7 +2006,8 @@ finding.
 the J functions redeployed), since the proof's verdicts come from staging's `judge-event`.
 - **Gate:** the workspace build and tests with 0 other warnings; `scripts/ci/eol-check.ps1`; the
   fixtures diff empty; the four ignores in place; `human_actor_literal.rs` green; the handler lists
-  unchanged, by running `app/tests/handler_lists.rs` (in the branch since `2d5298a`) as part of the
+  as H2 left them (the console's grown by `remove_lane_date`, the wizard's unchanged), by running
+  `app/tests/handler_lists.rs` (in the branch since `2d5298a`, with T7's test) as part of the
   workspace tests.
 - **Live proof** (spec §11.4), under the standing solo-proof approval (dev build, DOM driver, OTP,
   never OS input), on a scratch profile against staging, Alabama preset:
@@ -1633,17 +2019,29 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
      Coming up entry with the provenance label, for either series kind (PQ1 (a), PQ3). Check its
      one `agent:knowlu.carry` line in `state/events-seen.md`. If the feed has no such series, the
      proof records that, and T4's and T4c's tests stand for it;
-  4. run one more `rank` and confirm nothing is re-asked and no second carry line is written.
+  4. run one more `rank` and confirm nothing is re-asked and no second carry line is written;
+  5. (P17) where the day shows an accepted all-day date, click "Remove from my day" and confirm
+     (DOM only):
+     - the date leaves the lane and Coming up;
+     - `state/events-seen.md` gains one `declined` line for its uid;
+     - one more `rank` brings nothing back.
+
+     If no accepted all-day date falls on the proof's day, the proof records that, and T4d's and
+     T7's tests stand for it.
 
   Then remove the scratch profile (profile, vault, credentials, autostart).
+- **Before the PR: the pre-merge overlap check.** Re-run T0's check against every sibling,
+  `email-forwarding` included. If an email branch merged to `main` after M, take `main` in again
+  under M's rules before the PR. Conflicts go where §2's email row says, the gate and this task's
+  handler-list check are re-run, and `reviewer` reads the resolution.
 - **Then:** the PR, CI green, and Quinn's word to merge. At the MVP's parity audit, Quinn marks P4.
 
 ## 6. Order, parallelism and checkpoints
 
 - **Order:** T0 → H1a → T1a → T1b → H1b → T2b.1 → T2a.1a → T2a.1b → T2a.2 → T2b.2 → T2b.2b →
-  T2b.3 → T2b.4 → T2b.5 → T3.1a → T3.1b → T3.2 → (Checkpoint B ∥ R1) → T4 → T4b → T4c → B2 →
-  first push (Quinn's go) → (M2 merges; Gmail is already in at `2d5298a`) → M → T5 → T6 → T7 → T8 →
-  W → push → T10.
+  T2b.3 → T2b.4 → T2b.5 → T3.1a → T3.1b → T3.2 → (Checkpoint B ∥ R1) → T4 → T4b → T4c → T4d →
+  B2 → first push (Quinn's go) → (M2 merges; Gmail is already in at `2d5298a`) → M → H2 → T5 → T6
+  → T7 → T8 → W → push → T10.
 - **Off the line:** T0c any time before T10 (read-only, no worktree). T9 any time before T10, in the
   `j-events` worktree, so it may run beside the engine tasks.
 - **One implementer at a time** in the `events` worktree. Reviews run beside the next task only when
@@ -1651,28 +2049,59 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **Pushes (P12):** nothing is pushed before B2 closes; every Sonnet-written commit has then had a
   `reviewer` pass (R1 or B2). Commits after B2 are pushed only after W closes. Each push is a code
   push and needs Quinn's go.
-- **Waits on Quinn:** PQ1–PQ4 were answered on 2026-09-30 and wait on nothing. P16's order goes to
-  Quinn with Checkpoint B, and T4 waits for that word. Also waiting on Quinn: the two checkpoints
-  (B and W), the push go after B2 and after W, and the merge word in T10.
+- **Waits on Quinn:** PQ1–PQ4 were answered on 2026-09-30, and P16 and the removal path at
+  Checkpoint B on 2026-10-01. Two questions are open (§13), asked one at a time:
+  - **PQ5** (a moved event), before T4c is dispatched. It gates T4c and T4d.
+  - **PQ6** (undo or confirm), after PQ5, and at the latest with B2's report. It gates T5. If
+    Quinn answers (c) before T4d runs, T4d builds the un-remove with the removal.
+
+  Also still waiting on Quinn: W's checkpoint, the push go after B2 and after W, and the merge
+  word in T10. P17's two remaining trade-offs (device-local; today's lane only) go to Quinn with
+  B2's report, for information.
 - **Opus starts:** T0, H1a, H1b, T2b.1, T2b.2, T2b.2b, T2b.3, T2b.4, T2b.5, T3.1a, T3.1b, T3.2, B,
-  R1, T4, B2, T9, W, M, T10.
+  R1, T4, T4d, B2, T9, W, M, H2, T10.
   Every other task starts on Sonnet, and a second failed attempt moves it to Opus at high.
-- **Quinn's checkpoints (spec §13):** at signing (done, 2026-09-29); after Checkpoint B, with the
-  carry's (its ledger line included) and the settlement's diffs, PQ3's trade-offs and P16; before
-  T10, with W's report.
-- **Sibling lanes:** the overlap check runs at T0, at M, and before the merge.
+- **Quinn's checkpoints (spec §13):** at signing (done, 2026-09-29); after Checkpoint B (done,
+  2026-10-01: P16 accepted, a removal path asked for, §12); PQ5 before T4c; PQ6 before T5 (with
+  B2's report at the latest), together with P17's two remaining trade-offs for information; and
+  before T10, with W's report.
+- **Sibling lanes:** the overlap check runs at T0, at M, and before the merge (T10). Each time it
+  covers `m2-editing` (until merged), `p3-registrar`, `j-events` and `email-forwarding`.
 
 ## 7. Controller hand-offs (main session)
 
 - **H1a**, before T1a: `pub mod eventaccept;` in `engine/src/lib.rs`, beside `eventemit`, and the
   module file with its doc line.
 - **H1b**, before T2b.1: `pub mod eventcarry;`, likewise.
-- **`app/src/main.rs` and `app/src/lib.rs`: none.** No command is added, so neither
-  `generate_handler!` list changes. Gmail's `app/tests/handler_lists.rs` is in the branch since
-  `2d5298a`, so every gate runs it and no hand count is needed. The one fallback is M: if M2's
-  merge changes the lists and `handler_lists.rs` does not yet pin M2's count, the controller counts
-  both `generate_handler!` lists in `app/src/main.rs` by hand after M, compares them with `main`'s,
-  and records both counts in the SDD ledger.
+- **H2**, after M and before T5 (P17, Quinn at Checkpoint B). `app/src/lib.rs` needs nothing.
+  - In `app/src/commands.rs`, beside `delete_note_inner`:
+
+    ```rust
+    /// P17 (Quinn, Checkpoint B, 2026-10-01): "Remove from my day" on an accepted all-day date.
+    /// The engine gates (only this vault's own human token), checks (a date the lane draws) and
+    /// writes (one `declined` line); this computes nothing. A refusal is the engine's line.
+    pub fn remove_lane_date_inner(cs: &ConsoleState, view: &str, uid: &str) -> Result<Value, String> {
+        mutate(cs, view, |_journal| {
+            knowlu_engine::eventcarry::remove_lane_date(&cs.vault, uid, now_in(cs).date(), &console_ctx(&cs.vault)?)
+                .map(|_| ())
+        })
+    }
+    ```
+
+  - In the same file, beside the `delete_note` command (one line, as its neighbours):
+
+    ```rust
+    #[tauri::command(async)] pub fn remove_lane_date(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, uid: String) -> Value { let mut env = remove_lane_date_inner(&cs, &view, &uid).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+    ```
+
+  - In `app/src/main.rs`, the console window's `generate_handler!` list (the one that names
+    `commands::dropped_events`): `commands::remove_lane_date,` right after
+    `commands::delete_note,`. The wizard's list is unchanged.
+  - `handler_lists.rs` pins names, not a count, so no number is quoted. If the gate needs one,
+    the controller counts both lists by script after H2 and records them in the SDD ledger. The
+    console's list holds every name that was in it at M (M2's, and email's H5 names if email
+    merged first), plus `remove_lane_date`. The wizard's list is unchanged. If email merges after
+    events, its controller adds its names to a list that already holds `remove_lane_date` (§2).
 - **`engine/src/lib.rs` at M:** M2's `pub mod profile;` and these two lines are kept side by side.
 
 ## 8. Risks
@@ -1703,14 +2132,27 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
     today has;
   - `the_frozen_ledger_reads_as_before` and `an_existing_vaults_ledger_bytes_are_unchanged`;
   - the fixtures diff.
-- **A carried date is listed or drawn wrongly.** Three cases: a date shown as accepted after the
-  student deleted its commitment; a confident `drop` that is drawn but not listed; and a lane date
-  a later fetch dropped, still drawn, unlisted and not removable by the student. All three are
-  named trade-offs (§4, PQ3), the third brought to Quinn by itself at Checkpoint B, and are
-  documented in anatomy §3.7 and §3.11 (T8). T4c's tests pin each case.
-- **P16 is not what Quinn wants.** It reverses a signed order. The controller brings it to Quinn
-  with Checkpoint B, before T4 is written. If Quinn keeps the signed order, only T4's
-  `event-check` clauses change.
+- **A carried date is listed or drawn wrongly.** Three cases:
+  - a date shown as accepted after the student deleted its commitment;
+  - a confident `drop` that is drawn but not listed;
+  - a lane date a later fetch dropped, still drawn and unlisted.
+
+  The first two are named trade-offs (§4, PQ3). The third went to Quinn at Checkpoint B, who asked
+  for a removal path (P17): the date is drawn with its uid until the student removes it. All three
+  are documented in anatomy §3.7 and §3.11 (T8), and T4c's tests pin each case.
+- **The removal declines the wrong date, or is made by someone other than the student (P17).**
+  Guarded by:
+  - `remove_lane_date`'s gate, which refuses every actor but the vault's own human token;
+  - its check against the lane's own reader (`accepted_events`), so only a date the lane draws can
+    be removed;
+  - the confirm in the console;
+  - T4d's seven tests and T7's end-to-end test;
+  - contract-engineer at xhigh, and B2's contract-reviewer reading T4d's commit alone.
+
+  The write is the existing `declined` line, so no reader changes meaning, and `rank` never brings
+  the date back (`rank_never_brings_a_removed_date_back`).
+- **P16 is not what Quinn wants.** *Closed:* Quinn accepted it at Checkpoint B (2026-10-01). T4
+  builds it as written, and T8 records it in a dated spec note.
 - **An older engine reads a carry line.** It reads it as a human answer: as a first line it
   settles the uid, and over an `unsure` it takes effect only with `obligation`. It ignores `from:`,
   `start:` and `end:`. This is harmless, and the MVP is single-engine (spec §6.1's tolerance).
@@ -1732,7 +2174,15 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **`event-4` ships through an out-of-order migration.** PQ4: a fresh timestamp and its own PR.
 - **The proof runs against a staging that does not match the repo.** T10 waits on START-HERE §3.
 - **Merge friction with M2.** Gmail is already in (`2d5298a`). The engine tasks avoid M2's
-  functions; T5 and T7 wait for M; the overlap check runs three times.
+  functions; H2, T5 and T7 wait for M, so H2's command lands on M2's `commands.rs` and console
+  list; the overlap check runs three times.
+- **Merge friction with email-forwarding.** Both MVP lanes add to the console's
+  `generate_handler!` list and edit `console.js`, `static_assets.rs`, `approvals.rs` and `cli.rs`.
+  Guarded by §2's email row: the second lane to merge takes the other in, and each conflict goes to
+  a named resolver (the main session for the handler list). Also guarded by the overlap check at
+  T0, M and T10, and by the note to email's controller so its §10 R2 table matches.
+- **The removal path ships a half-answer to Quinn's "moved" case, or departs from VISION's undo
+  commitment, unasked.** Guarded by PQ5 gating T4c and T4d, and PQ6 gating T5 (§13).
 - **An older engine** warns `unknown kind:` on an approved `event-accept` card. Accepted by the spec
   (single desktop, single engine in the MVP); two-desktop's hand-off is spec §9's.
 
@@ -1763,26 +2213,26 @@ numbers are spec §11's. Plan-only tests are named.
 | §4.1: title and why paragraph; no Obsidian buttons | T2a.1b, T2a.2 | tests 1, 2 |
 | §4.2: commitment fields; actor `agent:commitments`; task under the pass's context; body line | T1a, T1b, T3.1a, T7 | tests 8, 9, 28; `a_kind_event_commitment_says_it_was_accepted` |
 | §4.2: a failed write leaves the card `approved`; a retry duplicates nothing | T3.1a | test 12 |
-| §4.3: Decline writes one `declined` line per uid and leaves Coming up | T3.1b | test 13 |
+| §4.3: Decline writes one `declined` line per uid and leaves Coming up; widened by P17 for a second writer of the same line, the student's removal of an accepted lane date | T3.1b, T4d | test 13; T4d's seven tests |
 | §4.4: snooze unchanged; expiry dates | T2a.1b, T2a.2, T3.1b | tests 7, 14 |
 | §4.5: the carry beside `inherit_series_answers`, whose code is unchanged (P16 moves its call after the carry); `delta` not edited | T2b.2, T2b.5, T4 | tests 20, 20b, 20c; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; W checks `delta`'s diff |
 | §4.5: the display cap and the `seen_at` gap are named, not fixed | T8 | anatomy §3.2 (the delta line) |
 | §5.1: the card's fields and file name; `events:` keeps its shape | T2a.1b | tests 1, 5 |
 | §5.2: new `event-check` cards gain `instances:` and the new closing | T2a.1b | `new_event_check_cards_carry_instances_and_the_new_closing` |
 | §5.3: the ever-written set (commitments, tasks, archive; approvals left out) | T2b.2, T3.1a | `the_ever_written_set_reads_commitments_tasks_and_archive`; test 12 |
-| §5.4: no new verdict word; Decline writes `declined` lines; widened by PQ3 for one additive line shape, the carry's (P15) | T3.1b, T2b.2, T2b.4, T2b.5, B, W | test 13; `VALID_VERDICTS` and `ANSWER_VERDICTS` unchanged; T2b.4's eleven tests (`the_carry_line_is_byte_exact`, `the_frozen_ledger_reads_as_before` and the read rules); `an_existing_vaults_ledger_bytes_are_unchanged`; Checkpoint B and W check `record_answer` is unchanged |
+| §5.4: no new verdict word; Decline writes `declined` lines; widened by PQ3 for one additive line shape, the carry's (P15); P17 adds no shape (the removal writes the existing `declined` line) | T3.1b, T2b.2, T2b.4, T2b.5, T4d, B, B2, W | test 13; `removing_a_carried_lane_date_appends_one_declined_line` (the line's exact bytes); `VALID_VERDICTS` and `ANSWER_VERDICTS` unchanged; T2b.4's eleven tests (`the_carry_line_is_byte_exact`, `the_frozen_ledger_reads_as_before` and the read rules); `an_existing_vaults_ledger_bytes_are_unchanged`; Checkpoint B and W check `record_answer` is unchanged |
 | §5.5: `event_cards` read as a boolean; both presets carry it | T1b, T6 | `event_cards_reads_true_or_1_and_anything_else_is_off`; test 27 |
 | §6.1 `eventemit.rs` row | T2a.1a, T2a.1b, T2a.2 | tests 1–7; the refactor's pinning test |
-| §6.1 `eventcarry.rs` row, one `answered_series`, the `judge_roster` call site | T2b.1–T2b.3 | T2b.1's tests; tests 19, 20, 20a, 21 |
+| §6.1 `eventcarry.rs` row, one `answered_series`, the `judge_roster` call site; widened by P17 for `remove_lane_date` | T2b.1–T2b.3, T4d | T2b.1's tests; tests 19, 20, 20a, 21; T4d's seven tests |
 | §6.1 `eventaccept.rs` row | T1a | test 8's tests |
-| §6.1 `surface.rs` row: all-day lane, "Accepted"; widened by PQ3 for carried dates and the provenance label | T4b, T4c, T5 | test 22a; P8's three tests; T4c's nine tests; `coming_up_shows_the_carrys_provenance` |
+| §6.1 `surface.rs` row: all-day lane, "Accepted"; widened by PQ3 for carried dates and the provenance label, and by P17 for `all_day_uids` and a `declined` uid leaving the lane from either source | T4b, T4c, T5 | test 22a; P8's three tests; T4c's ten tests; `coming_up_shows_the_carrys_provenance`; `the_lane_offers_remove_on_accepted_dates_only` |
 | §6.1 `approvals.rs` row (CL) | T3.1a, T3.1b, T3.2, B | tests 9–17; Checkpoint B |
 | §6.1 `commitments.rs` row | T1b | `a_kind_event_commitment_says_it_was_accepted` |
 | §6.1 `events.rs` row | T1b, T2b.3 | the loader test; test 21 |
-| §6.1 `cli.rs` row: the pass order and budgets; the carry before series inheritance (P16, to Quinn at B) | T4, B2 | test 18; tests 19 and 20a at `rank` level; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; B2's contract-reviewer section |
+| §6.1 `cli.rs` row: the pass order and budgets; the carry before series inheritance (P16, accepted by Quinn at B, 2026-10-01) | T4, B2 | test 18; tests 19 and 20a at `rank` level; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; B2's contract-reviewer section |
 | §6.1 invariants: no model in `rank`; deterministic bytes; no new JSON | T2a.2, T4 | test 4 compared as P14 says; W's determinism check |
 | §6.2: no new command or flag; `engine-commands.md`'s `rank` entry | T8 | T8's paragraph; W |
-| §6.3: no new Tauri command; `decide` settles in-process; Accept/Decline labels | T5, T7 | tests 26, 28; the handler-list recount (§7) |
+| §6.3: `decide` settles in-process; Accept/Decline labels; "no new Tauri command" widened by P17 for exactly one, `remove_lane_date`, in the console's list, computing nothing | T5, H2, T7, W | tests 26, 28; `remove_lane_date_takes_the_date_off_the_day_before_returning`; `the_console_list_names_remove_lane_date_and_the_wizard_list_does_not`; W's `app/src` check |
 | §7: no new data class; `PRIVACY_VERSION` and `site/` unchanged | every task | W checks the diff |
 | §8: `approvals.rs` by contract-engineer, reviewed by contract-reviewer; other contracts untouched | T3.1a, T3.1b, T3.2, B, W | Checkpoint B; W's diff check |
 | §8: frozen references and oracles unchanged | every task | test 23; the fixtures diff at every gate |
@@ -1795,16 +2245,17 @@ numbers are spec §11's. Plan-only tests are named.
 | §14: ruling 10 reworded at signing (done); P4 row updated | T8 | the vision-program row |
 | Reviews land in `docs/reports/` | B, R1, B2, W, T9 | the five reports |
 
-**Quinn's plan-stage answers (2026-09-30).** Each widens or settles a signed section, so each has
-its own row.
+**Quinn's plan-stage answers (2026-09-30) and Checkpoint B answers (2026-10-01).** Each widens or
+settles a signed section, so each has its own row.
 
 | Answer | Task | What proves it |
 |---|---|---|
 | PQ1 (a): an executed `event-check` card with `instances:` carries its series; `accepted_check_series`; the accept carry over the union; `answered_series`' edge rule unchanged | T2b.1, T2b.2b, T4, B, T8 | `an_accepted_event_check_series_books_a_later_instance_once`, `an_event_check_card_without_instances_carries_nothing`, `a_rejected_or_pre_lane_check_card_blocks_its_series`; T2b.1's `an_event_check_card_is_not_counted`; 20a's `event-check` case at `rank` level; Checkpoint B; the spec §12 note |
 | PQ2: a zero-length event is drawn in the all-day lane with no commitment | T1a, T3.2, T4b, T8 | `a_zero_length_event_gives_the_lane_marker`; test 16's zero-length clause; test 22a's zero-length clause; anatomy §3.7 |
 | PQ2, held on a feed-failure run: no card or `instances:` entry is built from `read_roster`'s lossy events (second review) | T2a.1b, T2a.2, T4 | `a_roster_read_event_files_no_event_accept_card_and_no_instances`, `a_roster_read_opportunity_files_no_card`, the card clause of `a_rank_on_the_roster_alone_carries_nothing` |
-| PQ3, final: (b-prime) with the span (replaced (c), then (b-prime) without it). One answer line per carried date, timed and all-day, by `agent:knowlu.carry`, with `from:` the answering card, the series' real verdict (`opportunity` accepted) and the feed's `start:`/`end:`. Judge-once: a later human answer wins, and the carry never overwrites one. Coming up lists the date with its provenance. The all-day lane draws carried all-day, multi-day and zero-length dates on each day they cover, independent of the roster. No other write | T2b.1, T2b.2b (the card id), T2b.4, T2b.5, T4 (P16), T4c, T5, T8, B, B2, W | T2b.4's eleven tests; T2b.5's nine; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; T4c's nine; `coming_up_shows_the_carrys_provenance`; anatomy §3.7, §3.9 and §3.11; the spec §12 note; Checkpoint B's and W's checks |
-| P16: the carry before series inheritance in `rank` (follows from PQ1 (a) and PQ3; reverses spec §6.1's signed order) | T4, B, T8 | the `event-check` clauses of 20a and `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; Quinn's word at Checkpoint B; the spec §12 note |
+| PQ3, final: (b-prime) with the span (replaced (c), then (b-prime) without it). One answer line per carried date, timed and all-day, by `agent:knowlu.carry`, with `from:` the answering card, the series' real verdict (`opportunity` accepted) and the feed's `start:`/`end:`. Judge-once: a later human answer wins, and the carry never overwrites one. Coming up lists the date with its provenance. The all-day lane draws carried all-day, multi-day and zero-length dates on each day they cover, independent of the roster. No other write | T2b.1, T2b.2b (the card id), T2b.4, T2b.5, T4 (P16), T4c, T5, T8, B, B2, W | T2b.4's eleven tests; T2b.5's nine; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; T4c's ten; `coming_up_shows_the_carrys_provenance`; anatomy §3.7, §3.9 and §3.11; the spec §12 note; Checkpoint B's and W's checks |
+| P16: the carry before series inheritance in `rank` (follows from PQ1 (a) and PQ3; reverses spec §6.1's signed order); accepted by Quinn at Checkpoint B, 2026-10-01 | T4, B, T8 | the `event-check` clauses of 20a and `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; Quinn's word at Checkpoint B (§12); the spec §12 note |
+| P17 (Quinn at Checkpoint B, 2026-10-01): the student can remove a stale accepted lane date. "Remove from my day" on every accepted lane date writes one existing-shape `declined` line through `eventcarry::remove_lane_date`, gated to the vault's own human token and checked against the lane's own reader; one new Tauri command; the date leaves the lane and Coming up for good, and no `rank` brings it back | T4b (the uid), T4c, T4d, H2, T5, T7, T8, B2, W, T10 | T4c's `a_dropped_lane_date_is_drawn_with_its_uid_until_removed`, `the_lane_names_each_accepted_date_by_uid` and the fourth case of `a_declined_or_human_answered_date_is_neither_listed_nor_drawn`; T4d's seven (`rank_never_brings_a_removed_date_back` among them); T5's two; T7's two; anatomy §3.7 and §3.11; the spec §12 note; T10's step 5 |
 | PQ4: B1 runs as it stands on `j-events` after the frozen `event-3` check; report in `docs/reports/`; `event-4` ships only through its own cloud PR | T9 | the B1 report, its precondition's result first |
 
 **Plan-only tests.** `event_cards_reads_true_or_1_and_anything_else_is_off`,
@@ -1823,8 +2274,21 @@ PQ3's tests are plan-only too:
 - T2b.4's eleven;
 - T2b.5's nine;
 - `rank_gives_each_carried_date_the_carrys_line_and_lists_it`;
-- T4c's nine;
+- T4c's ten;
 - `coming_up_shows_the_carrys_provenance`.
+
+P17's tests (Checkpoint B) are plan-only too:
+- T4c's `a_dropped_lane_date_is_drawn_with_its_uid_until_removed`,
+  `the_lane_names_each_accepted_date_by_uid`, and the fourth case of
+  `a_declined_or_human_answered_date_is_neither_listed_nor_drawn` (all among T4c's ten);
+- T4d's seven;
+- T5's `the_lane_offers_remove_on_accepted_dates_only` and
+  `remove_from_my_day_confirms_then_invokes_remove_lane_date`;
+- T7's `remove_lane_date_takes_the_date_off_the_day_before_returning` and
+  `the_console_list_names_remove_lane_date_and_the_wizard_list_does_not`.
+
+`a_dropped_lane_date_stays_drawn_and_unlisted` was removed at Checkpoint B (§12). Quinn did not
+accept what it pinned, and it had not been written.
 
 `the_accept_carry_writes_no_ledger_line` was removed with (c) (§11, item 3), because PQ3's line
 inverts it. Each plan-only test pins a spec requirement that had no test of its own, a plan
@@ -1979,6 +2443,40 @@ are unchanged.
      passes with its days, or names the path Quinn rules;
    - the ledger's T4c counts.
 
+   *Superseded 2026-10-01 (§12):* Quinn asked for a removal path at Checkpoint B. P17 builds it.
+   `a_dropped_lane_date_stays_drawn_and_unlisted` is replaced by
+   `a_dropped_lane_date_is_drawn_with_its_uid_until_removed`, and T8 names the path.
+
+### Fifth round (2026-10-01)
+
+Three findings, all accepted. Quinn's Checkpoint B answers (§12) are unchanged.
+
+1. **Email-forwarding shares the app files that H2 and T5 now edit (Important).** Confirmed
+   against `docs/plans/2026-09-30-email-forwarding-plan.md`:
+   - its H5 adds ten names to the console's `generate_handler!` list in `app/src/main.rs`;
+   - its T15.1–T15.5 edit `console.js` and `static_assets.rs`;
+   - its §10 R2 table lists `app/src/{lib,main}.rs` as shared with `p3-registrar` only.
+
+   Not confirmed: the finding's `commands.rs` overlap. Email's T11.4 puts its commands in
+   `app/src/mail.rs`. The row still names `commands.rs`, so T0's diff can settle it. Also found:
+   `approvals.rs` (email's T8 against T3.x) and `cli.rs` (email's H2 against T4), which email's R2
+   already lists against `j-events`. *Changed:*
+   - §2 gains an email-forwarding row and a note to email's controller, and drops the "plus one"
+     count;
+   - T0 adds email to the overlap check and sends the note;
+   - M and T10 gain the pre-merge check and email's conflict routes;
+   - T5's header names the shared file, H2 (§7) states the list by names, and W, §6 and §8 follow.
+2. **"Removal by uid" only half answers Quinn's "moved" (Important).** Confirmed. A move that keeps
+   the uid leaves the lane drawing the old day, because the span is frozen at the first carry line
+   (P15) or on the card. Removing that stale day also drops the real new date from Coming up.
+   *Changed:* it is no longer a trade-off for information. It is PQ5 (§13), asked before T4c, and
+   it gates T4c and T4d. *Also found:* the finding's option (b), the roster's current span, cannot
+   give a lane span. §13 records why, and offers a variant.
+3. **No Undo contradicts VISION commitment 5 (Important).** Confirmed: VISION's table gives "the
+   student asked" the row "It acts at once, with undo", and M2 keeps it for edits. *Changed:* it is
+   PQ6 (§13), and it gates T5. If Quinn answers it before T4d runs, a real undo is built with the
+   removal, not after. The claim that it "blocks no task" is removed from P17, §6 and §12.
+
 ## 11. Quinn's answers (2026-09-30)
 
 Quinn answered the four open questions on 2026-09-30. Each answer is recorded under its question in
@@ -2042,3 +2540,188 @@ read_roster, relevant_events}`, `eventledger::{LedgerEntry, load_ledger, record_
   `roster_read_events_carry_nothing` and built as `read_roster` builds events.
 - **T8 placed the delta under anatomy §3.11, which is Coming up.** The delta line is §3.2.
   *Changed:* T8's anatomy bullet is split by section, and the §4.5 ledger row now cites §3.2.
+
+## 12. Quinn's Checkpoint B answers (2026-10-01)
+
+Quinn read Checkpoint B on 2026-10-01: the carry's and the settlement's diffs, PQ3's trade-offs and
+P16. Quinn answered its two questions. Before the plan changed, each answer was checked against
+code.
+
+On the `events` worktree:
+- `eventledger::{load_ledger, read_lines, record_answer, record_declined, LedgerEntry}`, and the
+  module's pinned tests, `a_human_answer_never_replaces_a_confident_verdict` among them;
+- `eventcarry::{run, carry_line, book, turned_down, ledger_reads}` and
+  `eventroster::relevant_events`;
+- `surface::{the_day, TheDay, coming_up}`, `write::human_gate`, `journal::{OPS, read_human_actor}`
+  and `eventaccept::Shape`.
+
+On `main`, where M2 is merged:
+- `app/src/commands.rs`' `mutate`, `console_ctx`, `delete_note_inner` and `dropped_events_inner`;
+- `eventroster::read_dropped`;
+- the console's `generate_handler!` list in `app/src/main.rs`, and `app/tests/handler_lists.rs`;
+- `console.js`' `renderTheDay` and its `confirmDelete`.
+
+1. **P16: accepted.** The carry runs before series inheritance in `rank`, reversing spec §6.1's
+   signed order.
+   - *Changed:* P16's last bullet, §4's trade-off line, T4's table row and behaviour line,
+     Checkpoint B's record, §6, §8 (the risk is closed), the P16 and `cli.rs` ledger rows, and
+     T8's second spec note.
+   - T4 is built as written.
+2. **The lane trade-off: not accepted. Quinn asked for a removal path.** When a student accepted an
+   all-day or multi-day event that a later fetch drops (cancelled or moved), they must be able to
+   remove the stale lane date in the MVP.
+   - *What the plan builds (P17).* The smallest write that fits the existing contracts: the
+     existing `declined` line, through `eventledger::record_declined`. One new engine function
+     writes it, `eventcarry::remove_lane_date` (T4d, contract-engineer), gated to the vault's own
+     human token and checked against the lane's own reader. One new Tauri command calls it,
+     `remove_lane_date` (H2, the controller). The button is T5's, and T7 tests the command end to
+     end.
+   - *What was weighed first, and not taken: the student's `drop` answer through
+     `record_answer`.* It would put the student's actor on the line. But `load_ledger` lets a human
+     answer settle only an `unsure` verdict, a verdict the carry set, or no verdict. So the answer
+     is ignored for a card-listed lane date and for a carried date a model judged confidently. For
+     those, the lane would keep drawing the date. Covering them needs a human answer to replace a
+     confident verdict, which `a_human_answer_never_replaces_a_confident_verdict` pins against. The
+     `declined` line covers every source with no change to `eventledger.rs`: `load_ledger` sets it
+     whatever the verdict, and every reader the removal needs already honours it.
+   - *What it does not need.* No new ledger line shape or verdict word. No journal record: no
+     ledger line has one, and `journal::OPS` has no op for one. No vault file or folder, and no
+     sync change. No edit to `eventledger.rs`, `journal.rs`, `write.rs` or any contract-list file.
+     It needs one Tauri command, which widens spec §6.3's "No new Tauri command" by exactly one;
+     T8's spec note records it.
+   - *Changed:*
+     - the status line, §1 (the ledger and command bullets), §2 (the sibling table and its
+       paragraph), new P17, and §4's lane trade-off;
+     - the §5 table (T4c, new T4d, B2, new H2, T5, T7, T8) and its notes;
+     - T4b: each lane instance keeps its uid, and the lane is ordered `(first day, title, uid)`;
+     - T4c: its header and the fourth declined case; the replaced test, and
+       `the_lane_names_each_accepted_date_by_uid`; `all_day_uids` and its JSON rule; the reader,
+       now `pub(crate)`, with its `declined` rule for card-listed dates. It has ten tests;
+     - new T4d, with seven tests;
+     - Checkpoint B's record, B2 (T4d under contract-reviewer, and T4c's new checks) and M;
+     - new H2;
+     - T5 (two tests), T7 (two tests, and `handler_lists.rs`), and T8 (anatomy §3.7 and §3.11,
+       `app.md`, the spec note);
+     - W, T10 (the gate, and proof step 5), §6, §7 (H2's code), §8 and §9.
+   - *Trade-offs, to Quinn with B2 (P17):*
+     - no Undo, a confirm instead;
+     - the removal is by uid, so a moved event that kept its uid leaves Coming up too;
+     - the line is device-local and carries no `by`, so a restored vault draws a card-listed or
+       still-fetched date again;
+     - the console draws today's lane only.
+
+     *Superseded 2026-10-01 by the fifth review (§10, §13).* The first two are not trade-offs the
+     plan may decide. They are now open questions PQ5 and PQ6, and they gate T4c, T4d and T5. The
+     last two stay named for information with B2.
+
+**Also found while re-reading, and corrected:**
+- **`app/tests/handler_lists.rs` pins names, not a count.** It asserts two lists and the three
+  Google commands' places. §2 and §7 said it pinned the count. *Changed:* §2 and §7 say what it
+  pins, and T7 adds `remove_lane_date`'s place to it.
+- **T4b's lane order had no tiebreak.** Two accepted lane dates with one first day and one title
+  had no defined order, and `all_day_uids` makes the order visible. *Changed:* T4b orders by
+  `(first day, title, uid)`, and T4c's determinism test checks that order.
+
+## 13. Open questions for Quinn (fifth review, 2026-10-01)
+
+Two questions, asked one at a time, each with its context. Neither changes Quinn's Checkpoint B
+answers: P16 stands, and the student must be able to remove a stale lane date in the MVP. These
+questions ask *how* that removal behaves in two cases Quinn named or VISION governs. Until they are
+answered, `needs_quinn` is these two, not none.
+
+### PQ5. An accepted all-day event that the campus moves (asked before T4c)
+
+*Context.* Quinn's answer covers a date a later fetch drops because it was "cancelled or moved". A
+campus feed usually keeps an event's uid when it reschedules it. Example: an accepted all-day fair
+moves from Fri to Sat, with the same uid. As P17 stands:
+- the lane draws Fri, because a carried date's span is its first carry line's (P15, and the carry
+  writes no second line for a uid), and a card-listed date's span is the card's `instances:` entry;
+- Sat's lane draws nothing, though Coming up lists Sat through the roster;
+- "Remove from my day" on Fri writes `declined` for the uid, so Sat also leaves Coming up for good.
+
+So the student must choose between a stale Fri and losing the real event. A cancellation works as
+Quinn asked; a move does not.
+
+*Options.*
+- **(a) Accept it as named.** No change. T8 documents it. Cost: Quinn's "moved" case stays half
+  answered.
+- **(b) The lane draws the roster's current span.** As the review proposed it, this cannot be
+  built. The roster (`state/events.md`) stores one `HH:MM–HH:MM` line on one day. `read_roster`
+  reads an all-day event back as a one-hour `00:00–01:00` event and cannot hold a multi-day span
+  (§2). The line format is pinned by the frozen reference `vault-full/state/events.md` (rule 2).
+  So the roster cannot give a lane span.
+- **(b2) The carry re-records a moved span.** This is (b)'s intent, built from the fetch instead of
+  the roster. When a fetch holds an accepted lane-shaped uid whose span differs from the span the
+  lane draws, the carry appends a carry line in the existing shape with the new `start:` and
+  `end:`. This covers a card-listed date too: its line's `from:` is the card's id. `load_ledger`
+  then reads the last carry line's span, and T4c's reader prefers a carry line's span to the
+  card's. There is no new line shape, and no write when the span is unchanged. A move then fixes
+  itself on the next successful fetch, and removal is needed only for a cancellation.
+  - *Cost:* it reopens two reviewed contract tasks. A new **T2b.6** (`contract-engineer`, xhigh;
+    `eventledger.rs` and `eventcarry.rs`) runs before T4c. B2's contract-reviewer reads it alone.
+  - *First check:* `contract-engineer` confirms that no pinned assertion says "a uid never gets a
+    second carry line" for an unchanged feed. If one forbids a changed span too, (b2) is blocked
+    and comes back to Quinn.
+  - *Tests:*
+    - `the_carry_records_a_moved_lane_span_once` (T2b.6): one moved fetch gives one new line, and a
+      second identical fetch gives none;
+    - `a_card_listed_date_moved_by_the_feed_gets_a_carry_line` (T2b.6);
+    - `a_moved_lane_date_is_drawn_on_its_new_day_only` (T4c).
+  - *Not covered:* a moved *timed* date. Its commitment stays at the old time, and the student can
+    delete it, as today.
+- **(c) Remove by uid and span.** "Remove from my day" writes a new line shape, for example
+  `- <uid> · removed <today> · start:<…> · end:<…>`. The lane leaves out only that span, and Coming
+  up keeps the uid.
+  - *Cost:* a new shape in `eventledger.rs` (`contract-engineer`, xhigh), a T4d rewrite, and a
+    check of how an older engine reads the line.
+  - *What it does not fix:* the lane still draws nothing on Sat. It only keeps Sat in Coming up.
+
+*Recommendation:* **(b2).** It is the only option that puts the moved date in the lane. It adds no
+line shape. Its cost is one contract-engineer task and one re-read in B2. If its first check blocks
+it, the plan recommends (a) over (c), because (c) adds a shape and still leaves Sat out of the lane.
+
+*What each answer changes:*
+- (a): T4c and T4d as written; T8 names the moved case.
+- (b2): new T2b.6 before T4c; T4c gains its test and the span rule; B2 and W check it; §9 gains a
+  row.
+- (c): T4d writes the new shape; T4c reads it; T7's removal test asserts the new line; B2 adds the
+  shape to the contract-reviewer's list.
+
+### PQ6. Undo, or a confirm, for "Remove from my day" (asked after PQ5; before T5 at the latest)
+
+*Context.* VISION's design commitment 5 says that when the student asked, Knowlu "acts at once,
+with undo". M2 keeps that for edits (`console.js`' `offerBodyUndo`, `offerPrefsUndo`). P17 as
+drafted asks once and offers no Undo. That follows Delete…'s precedent (`console.js`'
+`confirmDelete`), because a `declined` line is terminal: `load_ledger` never clears it.
+
+*Options.*
+- **(a) A confirm, no Undo, as drafted.** Delete…'s precedent. Cost: none to build, but it departs
+  from commitment 5.
+- **(b) A console-only Undo.** The date leaves the lane at once, and a "Removed · Undo" toast shows
+  for 10 seconds. The console calls `remove_lane_date` only when the toast closes, and Undo cancels
+  the call.
+  - *What it needs:* no line shape and no engine change; only T5 changes.
+  - *Costs:* the console must keep the date hidden across `state` polls while it waits. A window
+    closed inside the 10 seconds loses the removal, which is the safe direction: the date shows
+    again and the student removes it again.
+- **(c) A real undo.** The removal writes at once, and Undo writes an un-remove line.
+  - *What it needs:* a new line shape in `eventledger.rs` (`contract-engineer`, xhigh), read by
+    `load_ledger` and by every reader that honours `declined`. It also needs a second engine
+    function in T4d and a second Tauri command in H2 (two names in the console list, and T7 tests
+    both).
+  - *Risk:* a card's Decline also writes `declined`. If the un-remove line could reverse it, a
+    student's Decline could be undone through the lane. So the removal's own line must be told
+    apart, which means a removal shape too. This overlaps PQ5 (c).
+  - *Timing:* if Quinn answers (c) after T4d is built, T4d is reopened.
+
+*Recommendation:* **(b).** It keeps commitment 5's "at once, with undo" on screen, needs no
+contract change, and its one failure mode puts the date back rather than losing an event. (c) is
+the faithful undo, at the cost of two shapes and a second command.
+
+*What each answer changes:*
+- (a): T5 as written.
+- (b): T5's last test becomes `remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes`
+  and `undo_within_the_toast_never_calls_remove_lane_date`. Also, the hidden date survives a
+  `state` poll. W's and T10's step 5 wait for the toast.
+- (c): T4d gains the un-remove function and its tests, and H2 gains a second command. T5's Undo
+  calls it, T7 tests it end to end, and B2's contract-reviewer reads both shapes.
