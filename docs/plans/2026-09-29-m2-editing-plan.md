@@ -82,8 +82,8 @@ spec's line numbers have drifted.
   - "filtered by your interests" for a line marked `· filtered`;
   - "you declined it" when the event ledger (`eventledger::load_ledger`, read-only) marks the uid
     declined;
-  - "judged not relevant" when the ledger holds a verdict outside `RELEVANT_VERDICTS`, followed by
-    the ledger's `why` when there is one.
+  - "judged not relevant" when the ledger holds a `drop` verdict, followed by
+    the ledger's `why` when there is one. Ruled 2026-09-30 (Quinn): unsure is not listed.
 
   An unjudged line is not a drop and is left out (PQ2). The read never writes, adds no key to the
   state and changes no oracle. An absent file reads as an empty list.
@@ -458,6 +458,7 @@ to PQ2.
   P2's three reasons.
 - `read_dropped_skips_unjudged_and_continuation_lines`. This holds under PQ2's recommendation; if
   Quinn says yes to PQ2, unjudged lines instead get the reason "not judged yet".
+- `read_dropped_skips_unsure` (ruled 2026-09-30, Quinn: an unsure verdict is not listed).
 - `read_dropped_of_an_absent_roster_is_empty`.
 
 **Behaviour:** P2. The function reads `state/events.md` and the event ledger and writes nothing. It

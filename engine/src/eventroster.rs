@@ -335,7 +335,8 @@ static AUDIT_LINE: LazyLock<Regex> = LazyLock::new(|| {
 /// Read-only: `state/events.md` and the event ledger are read, nothing is written. The reason is
 /// "filtered by your interests" for a `· filtered` line, else "you declined it" when the ledger
 /// marks the uid declined, else "judged not relevant" (with the ledger's `why`, when it has one)
-/// for a verdict outside [`RELEVANT_VERDICTS`]. An unjudged line, a relevant verdict, a
+/// for a `drop` verdict only (ruled 2026-09-30, Quinn: an `unsure` verdict is not listed, it may
+/// still have an open card asking the student). An unjudged line, an unsure or relevant verdict, a
 /// continuation line and everything under *Coming up* are not drops and are left out (PQ2 = no).
 /// Date and time stay the text the line carries. An absent or unreadable roster is empty.
 pub fn read_dropped(vault: &Path) -> Vec<DroppedEvent> {
@@ -363,7 +364,7 @@ pub fn read_dropped(vault: &Path) -> Vec<DroppedEvent> {
             "you declined it".to_string()
         } else {
             match entry.and_then(|e| e.verdict.as_deref().map(|v| (v, &e.why))) {
-                Some((verdict, why)) if !RELEVANT_VERDICTS.contains(&verdict) => {
+                Some(("drop", why)) => {
                     if why.is_empty() {
                         "judged not relevant".to_string()
                     } else {
@@ -835,6 +836,25 @@ mod tests {
         assert!(text.contains("Unjudged Thing") && text.contains("      A long description"));
         let titles: Vec<String> = read_dropped(&vault).into_iter().map(|d| d.title).collect();
         assert_eq!(titles, vec!["Filtered Thing"]);
+    }
+
+    #[test]
+    fn read_dropped_skips_unsure() {
+        // Ruled 2026-09-30 (Quinn): only a "drop" verdict is "judged not relevant"; an "unsure"
+        // event may still have an open card asking the student, so it is not listed.
+        let vault = scratch_vault("dropped-unsure");
+        let events = [ev("uns", "Unsure Thing", 2), ev("irr", "Irrelevant Thing", 3)];
+        let when = SEPT_1;
+        eventledger::record_verdict(&vault, "uns", "Unsure Thing", when, "unsure", "", "maybe", "")
+            .unwrap();
+        eventledger::record_verdict(&vault, "irr", "Irrelevant Thing", when, "drop", "", "", "")
+            .unwrap();
+        let ledger = eventledger::load_ledger(&vault, None);
+        write_roster(&roster_path(&vault), &events, &ledger, &config(), SEPT_1, &[]).unwrap();
+        assert!(read(&roster_path(&vault)).contains("Unsure Thing"), "the roster still lists it");
+        let got: Vec<(String, String)> =
+            read_dropped(&vault).into_iter().map(|d| (d.title, d.reason)).collect();
+        assert_eq!(got, vec![("Irrelevant Thing".to_string(), "judged not relevant".to_string())]);
     }
 
     #[test]

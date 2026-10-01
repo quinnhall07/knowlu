@@ -52,9 +52,9 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - **Not shown (N)** under *Coming up* is read-only: `dropped_events` is called when *Coming up*
   renders, not on every poll. `eventroster::read_dropped` reads the audit section of
   `state/events.md` and lists only filtered, declined and judged-not-relevant events, each with its
-  reason; unjudged events never appear (Quinn's PQ2 = no). An event whose verdict is outside
-  `RELEVANT_VERDICTS`, `unsure` included, currently reads "judged not relevant"; whether to match only
-  `drop` is an open ruling for Quinn.
+  reason; unjudged events never appear (Quinn's PQ2 = no). Only a `drop` verdict reads "judged not
+  relevant"; an `unsure` verdict is not listed, as it may still have an open card asking the student
+  (ruled 2026-09-30, Quinn).
 - **Google connection from Settings (Gmail connect).** Three console commands in `app/src/account.rs`,
   each reading the profile's session from `cfg.session_credential_target` (the wizard's
   `google_connect_url`, `google_connected` and `open_external` keep `PENDING_TARGET`, and call the same
