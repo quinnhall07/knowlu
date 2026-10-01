@@ -1,10 +1,15 @@
 import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
+import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 import {
   forDevice,
   type GmailApi,
+  type GrantRow,
   type ListPage,
+  lookupFromRow,
+  type LookupSources,
+  lookupToken,
   MAX_LIST_PAGES,
   pagedList,
   PER_CALL_MS,
@@ -334,6 +339,90 @@ Deno.test("no Google client configured on this deployment is a 503, never quiet 
   })(post());
   assertEquals(response.status, 503);
   assertEquals(revoked, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gmail connect T1 (spec §4.1, §8.3 items 1–2) — the row lookup is `lookupFromRow`, read without a
+// status filter, so an account that never connected Google answers the silent `no_gmail_scope`
+// rather than `revoked`, and only a row that says `revoked` reads as a dead grant.
+// ---------------------------------------------------------------------------------------------
+
+function sources(row: GrantRow | null, clientConfigured = true) {
+  const calls = { row: 0, token: 0 };
+  const src: LookupSources = {
+    clientConfigured,
+    row: () => {
+      calls.row += 1;
+      return Promise.resolve(row);
+    },
+    token: () => {
+      calls.token += 1;
+      return Promise.resolve({ token: "access-token-not-a-secret" });
+    },
+  };
+  return { src, calls };
+}
+
+/** `readHandler` over `lookupToken`, with a spy on `markRevoked`. */
+async function readThrough(src: LookupSources) {
+  const { deps } = fakes([]);
+  let marks = 0;
+  const response = await readHandler(OK, {
+    ...deps,
+    accessTokenFor: (accountId) => lookupToken(accountId, src),
+    markRevoked: () => {
+      marks += 1;
+      return Promise.resolve();
+    },
+  })(post());
+  return { response, marks: () => marks };
+}
+
+Deno.test("lookupFromRow: no row reads as a missing scope and marks nothing", async () => {
+  assertEquals(lookupFromRow(null), { missing: "scope" });
+  const { src, calls } = sources(null);
+  const { response, marks } = await readThrough(src);
+  assertEquals((await response.json()).reason, "no_gmail_scope");
+  assertEquals(marks(), 0, "an account that never connected Google is not a revoked grant");
+  assertEquals(calls.token, 0, "no row means no token path");
+});
+
+Deno.test("lookupFromRow: a revoked row reads as a missing grant", () => {
+  assertEquals(lookupFromRow({ status: "revoked", scopes: [GMAIL_SCOPE] }), { missing: "grant" });
+  assertEquals(lookupFromRow({ status: "revoked", scopes: [] }), { missing: "grant" });
+});
+
+Deno.test("lookupFromRow: an active row without the Gmail scope reads as a missing scope", () => {
+  assertEquals(lookupFromRow({ status: "active", scopes: [CALENDAR_SCOPE] }), { missing: "scope" });
+  assertEquals(lookupFromRow({ status: "active", scopes: [] }), { missing: "scope" });
+  // "Any other row": a `quiet` calendar-only grant is still not a dead one.
+  assertEquals(lookupFromRow({ status: "quiet", scopes: [CALENDAR_SCOPE] }), { missing: "scope" });
+});
+
+Deno.test("lookupFromRow: an active row with the Gmail scope takes the token path", async () => {
+  assertEquals(lookupFromRow({ status: "active", scopes: [CALENDAR_SCOPE, GMAIL_SCOPE] }), { tokenPath: true });
+  const { src, calls } = sources({ status: "active", scopes: [GMAIL_SCOPE] });
+  assertEquals(await lookupToken("acct-1", src), { token: "access-token-not-a-secret" });
+  assertEquals(calls.token, 1);
+});
+
+Deno.test("readHandler: no client configured still answers 503", async () => {
+  const { src, calls } = sources(null, false);
+  const { response, marks } = await readThrough(src);
+  assertEquals(response.status, 503);
+  assertEquals(marks(), 0);
+  assertEquals(calls.row, 0, "an unconfigured deployment is decided before any row read");
+  assertEquals(calls.token, 0);
+});
+
+Deno.test("readHandler: an account with no google_accounts row answers quiet no_gmail_scope", async () => {
+  const { src } = sources(null);
+  const { response, marks } = await readThrough(src);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), {
+    items: [], read: 0, quiet: true, reason: "no_gmail_scope", more: false,
+  });
+  assertEquals(marks(), 0, "no mark is made for an account with no row");
 });
 
 // ---------------------------------------------------------------------------------------------

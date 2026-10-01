@@ -4,15 +4,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (M1 grades,
-  Task 5c; the 2026-09-29 recount after the commitment model's merge gave 47 / 29 / 66)** (by script,
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (the merge of M1 grades into
+  Gmail connect; the 2026-09-29 recount after the commitment model's merge gave 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **51** (phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **54** (phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
-  `grades_connect`, `grades_refresh`, `grades_forget`), the vault-less picker/wizard window **29**
+  `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
+  `account::google_connect` and `account::google_disconnect`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **70** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **73** distinct. Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
   `report.rs`, `lms_link.rs`), never all in one file. **Ten** mutate notes (`set_fields`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
@@ -22,6 +23,22 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
   app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
   before quoting a number.
+- **Google connection from Settings (Gmail connect).** Three console commands in `app/src/account.rs`,
+  each reading the profile's session from `cfg.session_credential_target` (the wizard's
+  `google_connect_url`, `google_connected` and `open_external` keep `PENDING_TARGET`, and call the same
+  cores). `google_status` returns `{ok, state, calendar, gmail, email, error}` (`state` is `none`,
+  `active`, `quiet` or `revoked`; an older server's reply without `status` reads `active` when connected,
+  else `none`). `google_connect(scope)` takes `calendar`, `gmail` or `reconnect`, opens the consent URL
+  from Rust only if it passes `external_url_allowed`, and returns `{ok, error}`. `google_disconnect`
+  sends a bearer `DELETE` to `google-connect` and returns `{ok, error}`. Errors: 402 "your subscription
+  is not active, so Google cannot be connected" (Connect and Reconnect only: the status read and
+  Disconnect need a session, not a subscription, so a lapsed student can still disconnect), 502 "Google could not be reached to disconnect; try
+  again", plus 401, 503 and the generic form. No token, URL or Google email is logged. The Settings row
+  (`#set-google`, after `#set-account`) renders one state per `google_status` reply, polls every 3 s up
+  to 20 times after Connect or Reconnect, and disconnects in two steps (a warning that Calendar goes
+  too and that undelivered Gmail proposals are deleted, then **Yes, disconnect**). The wizard's Gmail
+  step has a **Connect Gmail** button (`#wiz-gmail-connect`) and never blocks Next. Spec:
+  `docs/specs/2026-09-29-gmail-connect-design.md` §4.2 and §4.4.
 - **Grades** (spec `docs/specs/2026-09-29-grades-design.md`; ruling 12). `grades::availability(row,
   campus_lms)` is the one predicate: grades are available only for a curated campus row whose
   `lms_kind` is `blackboard` and which carries a `policy_read` date, and then only on that row's own
