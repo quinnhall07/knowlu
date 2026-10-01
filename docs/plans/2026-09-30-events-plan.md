@@ -674,7 +674,7 @@ rounds: (c), then (b-prime), then (b-prime) with the span on the carry's line, w
 | T4d | `contract-engineer` (Opus, xhigh) | P17 (B), PQ5 (b2) | `engine/src/eventcarry.rs` (`remove_lane_date`); one rank-level test in `engine/src/cli.rs`' test module | T4c |
 | B2 | `contract-reviewer` (Opus, xhigh) on T4, T2b.6 and T4d + `reviewer` (Opus, high) on T4b and T4c | — | `docs/reports/…-events-review-2.md` | T4d |
 | M | main session | push go | `main` merged into `events` | B2, and M2 merged (Gmail is already in) |
-| H2 | main session | P17 (B) | `app/src/commands.rs`, `app/src/main.rs` (console list) | M |
+| H2 | main session | P17 (B) | `app/src/commands.rs`, `app/src/main.rs` (console list) | M, and T4d landed (the command calls `eventcarry::remove_lane_date`) |
 | T5 | `console-ui` (Sonnet, medium) | PQ6 (b), answered 2026-10-01 | `app/static/console.js`, `app/tests/static_assets.rs` | H2 |
 | T6 | `mechanical` (Sonnet, low) | — | `app/assets/campus/{none,university-of-alabama}.yaml`, `app/tests/scaffold.rs` | M |
 | T7 | `test-writer` (Sonnet, medium) | — | `app/tests/commands.rs`, `app/tests/handler_lists.rs` | H2 |
@@ -1914,12 +1914,22 @@ conflict goes where §2's email row says. H2 then lands on a list that already h
 H2 is applied on M's commit, and T5, T6 and T7 start from H2's. M and later commits are not pushed
 until W closes.
 
-### H2. The `remove_lane_date` command (main session, after M)
+*M was taken in early (2026-10-01, `b04641d`), before B2 closed.* §5 makes M wait for B2, and B2's
+first pass closed nothing (it needs T4c and T4d). Treat `b04641d` as taken in early and keep it
+unpushed, as every M commit is until W closes. It does not make H2 ready: H2 also waits for T4d (see
+below). If T4c or T4d change `surface.rs` or `engine/src/lib.rs` after the merge, re-run M's gate
+(the workspace suite, then the engine build after the app build) on the commit that holds them.
+
+### H2. The `remove_lane_date` command (main session, after M and T4d)
 
 **Why the main session:** `app/src/commands.rs` and `app/src/main.rs` are single-owner files
 (HANDOFF §2). The controller applies a lane's hand-off with the exact code its plan gives (§7).
 **Answer applied:** P17 (Quinn, Checkpoint B, 2026-10-01). **After** M, so it lands on M2's
-`commands.rs` and its console list.
+`commands.rs` and its console list, **and after T4d**, because §7's code calls
+`eventcarry::remove_lane_date`, which T4d builds (T4d waits for T4c, which waits for PQ7). Before
+T4d lands the call does not compile, and a stub would ship a "Remove from my day" button that
+removes nothing. Dispatch H2 as a child of T4d's commit (M is already an ancestor, `b04641d`), never
+before. T5 and T7 stay behind H2.
 - Add §7's H2 code to `app/src/commands.rs`, beside `delete_note_inner` and `delete_note`.
 - Add `commands::remove_lane_date` to the console window's `generate_handler!` list in
   `app/src/main.rs` (the list that names `commands::dropped_events`), right after
@@ -2232,6 +2242,7 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   `j-events` worktree, so it may run beside the engine tasks.
 - **One implementer at a time** in the `events` worktree. Reviews run beside the next task only when
   that task does not build on the reviewed code: T4 waits for Checkpoint B and R1; M waits for B2.
+  (M was taken in early at `b04641d`, unpushed; H2 waits for T4d regardless, as a child of its commit.)
 - **Pushes (P12):** nothing is pushed before B2 closes; every Sonnet-written commit has then had a
   `reviewer` pass (R1 or B2). Commits after B2 are pushed only after W closes. Each push is a code
   push and needs Quinn's go. One push already departed from this rule: the controller's push at
