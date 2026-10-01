@@ -1279,6 +1279,13 @@ fn transition_note(
             result.warnings.extend(warnings);
         } else if kind == "event-check" {
             settle_event_check(vault, meta, "drop", today, journal)?;
+        } else if kind == "event-accept" {
+            // Events spec §4.3: one `declined` line per uid the card's `events:` lists, before the
+            // move, so a failed ledger write leaves the card `rejected` for the next run. These are
+            // the uids the carry's D9 rebuild reads from the archived card. No note, no new word.
+            for uid in crate::eventemit::card_event_uids(meta) {
+                record_declined(vault, &uid, today).map_err(|e| WriteError::Io(e.to_string()))?;
+            }
         } else if kind == COMMITMENT_CHECK {
             // P13 (§5.2, §5.4): the decline marker(s) first, so a failed write leaves the card
             // `rejected` for the next run rather than archived with the question left open.
@@ -4413,6 +4420,114 @@ mod tests {
             let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
             assert_eq!(source, Some("lx:3:1"));
             assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        // --- T3.1b: the rejected arm and expiry (spec tests 13–14; §4.3, §4.4, D8) ------------
+
+        fn ledger_text(vault: &Path) -> String {
+            pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap_or_default()
+        }
+
+        /// The ledger's `declined` lines, in file order.
+        fn declined_lines(vault: &Path) -> Vec<String> {
+            let text = ledger_text(vault);
+            pystr::splitlines(&text).into_iter().filter(|l| l.contains(" · declined ")).map(str::to_string).collect()
+        }
+
+        #[test]
+        fn rejecting_writes_one_declined_line_per_listed_uid() {
+            // One `declined` line per uid the card's `events:` lists, in its order, then the card
+            // archived `rejected`. Nothing else: no note, no task, no `create` record.
+            let v = vault();
+            let deadline = Some(Date::constant(2026, 8, 23));
+            let series = [
+                registered(event("lx:7:1", "lx:7", "Resume clinic", 25), deadline),
+                registered(event("lx:7:2", "lx:7", "Resume clinic", 27), deadline),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            assert_eq!(crate::eventemit::card_event_uids(&front(&card)), vec!["lx:7:1", "lx:7:2"]);
+            assert_eq!(crate::eventroster::relevant_events(&series, &load_ledger(&v, None)).len(), 2);
+            let journaled = journal_records(&v).len();
+
+            let result = decide(&v, &card, "rejected");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(declined_lines(&v), vec!["- lx:7:1 · declined 2026-08-20", "- lx:7:2 · declined 2026-08-20"]);
+            let after = load_ledger(&v, None);
+            assert!(crate::eventroster::relevant_events(&series, &after).is_empty(), "both leave Coming up");
+            assert!(!card.exists());
+            assert_eq!(field(&archived(&v, &card), "status"), "rejected");
+            assert_eq!(result.rejected, vec![stem_of(&card)]);
+            assert!(result.executed.is_empty());
+            assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(since, vec!["set", "delete"], "the console's status, then the move");
+
+            // D9's rebuild reads the same archived card and finds every line written.
+            let before = ledger_text(&v);
+            let (mut ledger, mut journal) = (after, Journal::new(&v));
+            let carried = crate::eventcarry::run(&v, &series, &mut ledger, TODAY, &default_ctx(), &mut journal);
+            assert_eq!(carried, (0, Vec::new()));
+            assert_eq!(ledger_text(&v), before);
+        }
+
+        #[test]
+        fn a_failed_decline_leaves_the_card_rejected_for_the_next_pass() {
+            // The ledger first, the move second: a ledger that cannot be appended to leaves the
+            // card `rejected` in `approvals/`, and the next pass settles it.
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            let seen = v.join("state").join("events-seen.md");
+            let aside = v.join("state").join("events-seen-aside.md");
+            std::fs::rename(&seen, &aside).unwrap();
+            std::fs::create_dir_all(&seen).unwrap();
+            let result = decide(&v, &card, "rejected");
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert!(result.rejected.is_empty());
+            assert_eq!(field(&card, "status"), "rejected");
+
+            std::fs::remove_dir(&seen).unwrap();
+            std::fs::rename(&aside, &seen).unwrap();
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(declined_lines(&v), vec!["- ics:fair-1 · declined 2026-08-20"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "rejected");
+            assert_eq!(result.rejected, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn an_expired_event_accept_card_writes_nothing() {
+            // D8: expiry is not an answer. Each card is stamped `expired` and archived, and nothing
+            // else is written: no ledger line, no note, no task. The events stay in Coming up, and
+            // the carry sees no answered series. The digest's expiry still declines, by contrast
+            // (`a_rejected_or_expired_digest_declines_every_event`, unchanged).
+            let v = vault();
+            let fair = registered(event("ics:fair-1", "", "Career fair", 25), Some(Date::constant(2026, 8, 23)));
+            let talk = event("ics:talk-1", "", "Engineering talk", 26);
+            let fair_card = file_card(&v, std::slice::from_ref(&fair), "obligation");
+            let talk_card = file_card(&v, std::slice::from_ref(&talk), "opportunity");
+            assert_eq!(field(&fair_card, "expires"), "2026-08-25");
+            assert_eq!(field(&talk_card, "expires"), "2026-08-26");
+            let before = ledger_text(&v);
+            let journaled = journal_records(&v).len();
+
+            let day = Date::constant(2026, 8, 27);
+            let result = run_at(&v, day, day.at(9, 0, 0, 0));
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.expired, vec![stem_of(&fair_card), stem_of(&talk_card)]);
+            assert!(result.rejected.is_empty() && result.executed.is_empty());
+            for card in [&fair_card, &talk_card] {
+                assert!(!card.exists());
+                assert_eq!(field(&archived(&v, card), "status"), "expired");
+            }
+            assert_eq!(ledger_text(&v), before, "no ledger line");
+            assert!(declined_lines(&v).is_empty());
+            assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(since, vec!["set", "delete", "set", "delete"], "each card's stamp, then its move");
+            let events = [fair, talk];
+            let relevant = crate::eventroster::relevant_events(&events, &load_ledger(&v, None));
+            assert_eq!(relevant.len(), 2, "both stay in Coming up");
+            assert!(crate::eventcarry::answered_series(&v).is_empty(), "an expired card answers nothing");
         }
     }
 
