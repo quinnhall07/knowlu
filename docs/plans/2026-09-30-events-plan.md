@@ -14,9 +14,11 @@ at signing: required events enter the plan as a one-off commitment).
 `docs/notes/2026-09-29-vision-program.md`, and P6 (c) (the 14-day expiry of opportunity proposals,
 delivered by the spec's D3).
 **Status:** draft, revised for the plan review's nine findings (§10), for Quinn's answers to
-PQ1–PQ4 of 2026-09-30 (§11), and for the second review's four findings (§10, second round). PQ1, PQ2 and PQ4 are applied to the tasks. PQ3's answer, (c), cannot
-be built as approved without a new write, so no task builds it; it waits on Quinn (§4, PQ3).
-Nothing here is built yet.
+PQ1–PQ4 of 2026-09-30 (§11), for the second review's four findings (§10, second round), and for
+Quinn's final PQ3 answer, (b-prime), which replaced (c) (§11, item 3). PQ1, PQ2 and PQ4 are applied
+to the tasks. PQ3 (b-prime) cannot be built as approved: the all-day lane cannot draw a carried
+all-day date from the carry's ledger line plus what is stored, and Quinn ruled that no further write
+be invented. So no task builds it, and it waits on Quinn (§4, PQ3). Nothing here is built yet.
 
 ## 1. Goal, and what must not move
 
@@ -41,7 +43,9 @@ These must not change:
   `wincred.rs`, `reconcile.rs`, `app/src/{credentials,account,updates}.rs`. The one contract-list
   file this lane edits is `engine/src/approvals.rs` (spec §8).
 - **The ledger contract.** `state/events-seen.md` gains no line shape; `VALID_VERDICTS` and
-  `ANSWER_VERDICTS` (`eventledger.rs`) are unchanged.
+  `ANSWER_VERDICTS` (`eventledger.rs`) are unchanged. Quinn's PQ3 answer, (b-prime), would add one
+  optional `from:` field to a carry-written answer line. It is blocked (§4), so no task edits
+  `eventledger.rs` until Quinn rules.
 - **The existing settlement arms.** The digest, `calendar-event`, `task`, `amend`,
   `commitment-check`, `commitment-ask` and `event-check` (without `instances:`) arms behave
   byte-for-byte as today. The digest arms stay forever.
@@ -117,9 +121,10 @@ The spec was verified on `97dc27b`. This plan re-read every file and function it
   no "Accepted" mark can show for it. A timed one still has its commitment's block on its day. An
   instance judged confidently before the answer is still listed. A later instance of an answered
   `event-check` series differs: `inherit_series_answers` gives it the series' answer line, so it is
-  listed, and under PQ1 (a) the carry also books it. Quinn's PQ3 answer, (c), would list the
-  `event-accept` kind at read time, but the read model cannot see what that needs (§4, PQ3).
-  (`eventledger::record_answer` takes only `obligation` or `drop`, which bounded PQ3's option (b).)
+  listed, and under PQ1 (a) the carry also books it. Quinn's final PQ3 answer, (b-prime), gives
+  each carried date an answer line attributed to the carry, which would list the `event-accept`
+  kind too; its all-day lane half is blocked (§4, PQ3). (`eventledger::record_answer` takes only
+  `obligation` or `drop`; (b-prime) widens that for the carry's line.)
 - **`commitments::create_confirmed_as` picks its body from a `&'static str`.** The `kind: event`
   arm needs a computed line for the past-midnight true end. P6 says how it is passed.
 - **`emit_event_checks`' window is not `horizon_start`.** It asks about `unsure` events starting in
@@ -206,7 +211,7 @@ pins the count and is already in the `events` branch (`2d5298a`), so every gate 
   in Coming up and was booked by the carry: one judged confidently before its series was answered,
   or (PQ1 (a)) a later timed instance of an accepted `event-check` series, which Coming up lists
   through its inherited answer line. A carried `event-accept` instance with no verdict is not in
-  Coming up (§2), so the mark never reaches it. PQ3 (c) would list it, and is blocked (§4).
+  Coming up (§2), so the mark never reaches it. PQ3 (b-prime) would list it, and is blocked (§4).
   `ComingUp` gains `accepted: bool`, serialised only when true, so every existing reference and
   `today.md` are byte-identical. `render::coming_up` (the page) is not changed.
 - **P9. The carry writes commitments only.** Spec §4.2: a series writes one register task, for its
@@ -243,7 +248,7 @@ pins the count and is already in the `events` branch (`2d5298a`), so every gate 
 
 Asked one at a time, each with its context, and answered by Quinn on 2026-09-30. Each answer is
 recorded under its question; the options are kept as they were asked. One item is open: PQ3's
-answer cannot be built as approved, and its blocker goes back to Quinn.
+final answer, (b-prime), cannot be built as approved, and its blocker goes back to Quinn.
 
 - **PQ1. Does an accepted `event-check` series carry, too?** D11 makes an `event-check` Approve an
   Accept when the card carries `instances:`, so the listed instances get commitments. But D4's carry
@@ -300,77 +305,108 @@ answer cannot be built as approved, and its blocker goes back to Quinn.
   - *Cost of (b):* about 15 lines and two tests in T2b.2 (contract-engineer), and one more case in
     T4's rank-level test.
   - *Before:* T2b.2 (the carry is where (b) lands); T4b and T8 read the answer.
-  - **Answered 2026-09-30: (c), a new option.** A carried instance with no verdict of its own,
-    whose series the student answered, is listed in Coming up at read time by the read model
-    (`surface`, and `rank` for `today.md`), under that series answer and labelled with its
-    provenance (for example "Accepted · from your answer to the series on <date>"). No new vault
-    write and no synthetic answer line. The obligation or opportunity kind is kept. It covers timed
-    and all-day instances, and all-day ones go in the all-day lane too. It is deterministic, and
-    `surface` never writes.
-  - **Blocked as approved (found 2026-09-30).** Checked against the code on the `events` worktree
-    and on `main` (`199cd1f`). Without a new write, the read model cannot see what (c) needs:
-    1. **No file links an instance to its series.** A carried instance's series key exists only in
-       `rank`'s memory, on `DiscoveredEvent::series_uid` as `eventfeed::parse_localist` sets it
-       (the ICS and Engage readers leave it equal to the uid). No persisted store keeps it.
-       `write_roster` writes uid, title, times, organizer and location, never a series key, and its
-       bytes for `vault-full` are pinned by the frozen `vault-full/state/events.md`. `read_roster`
-       hands back `series_uid` equal to the uid. The ledger has no series field and no line for a
-       carried instance. The carry's `kind: event` note (`commitments::create_confirmed_as`) holds
-       `source_uid`, `title`, `meets`, `where`, `from`/`until`, `level` and `confirmed_at` (the
-       carry's run date), but no series key and no reference to the card. The card lists only its
-       own instances. A series cannot be derived from a uid either: Localist's `<series>:<instance>`
-       shape is not a contract, and `sanitize_uid` keeps `:`, which ICS UIDs may contain.
-    2. **So the answer's date and kind are out of reach.** Without the link, `surface` cannot find
-       the answering card, and so has neither its `executed_at` (the provenance date) nor its
-       `verdict:` (the kind). The note's `level` cannot stand in for the kind: the student can edit
-       it, and it is always `hard` for an `event-check` series (P7).
-    3. **A carried all-day instance is invisible.** It gets no note (P4) and is on no card. The
-       roster holds it only as an unjudged audit line, with a start and no end, inside
-       `roster_window_days`, and `read_roster` does not parse that line. Neither the instance nor
-       its span reaches `surface`. The same holds for an all-day later instance of an accepted
-       `event-check` series under PQ1 (a): Coming up lists it through its inherited answer line, but
-       the lane cannot draw it.
-    4. **`rank` alone is not enough.** `rank` holds the series keys in memory, but `surface` reads
-       the disk, and anatomy §3.11 requires the console and `today.md` to show the same five.
-  - **Open, for Quinn: how to unblock (c).** The missing pieces are an instance-to-series link and,
-    for all-day instances, the span, both persisted. Given the link, the provenance date and the
-    kind are read from the answering card at read time. Every way to persist them is a write:
-    - *Recommend:* the roster. `rank` already rewrites `state/events.md` every run, and the file
-      is generated, device-local and never synced; it is neither a note nor a ledger line. Its
-      Coming-up section would list each carried instance with its series key and span. `today.md`
-      and `surface` would both read them there, and `read_roster` would keep them on a feed-failure
-      run. *Cost:* a format change to a writer whose `vault-full` bytes are frozen. Those bytes stay
-      identical, because `vault-full` has no carried series. `read_roster` must read the new lines
-      without taking a series segment for the organizer. This is contract-engineer work. Two more
-      costs (second review, checked on `2d5298a`):
-      1. *The feed-failure rule.* `read_roster` is also `rank`'s candidate source when every feed
-         fails (§2). If it hands back carried instances with their series keys, the carry and
-         `inherit_series_answers` act on a roster run, and the plan's "a roster run carries
-         nothing" rule (T2b.2) flips. Either `read_roster` keeps returning `series_uid` equal to the
-         uid and a separate reader takes the carried lines for the read model only (the rule and
-         its two tests, `roster_read_events_carry_nothing` and
-         `a_rank_on_the_roster_alone_carries_nothing`, stand), or the rule changes on purpose and
-         both tests are rewritten with the ruling cited. *Recommend the separate reader.*
-      2. *`relevant_events` changes too.* Coming up keeps only what
-         `eventroster::relevant_events` keeps (a confident verdict, no `declined` line), and that one
-         function serves three callers: `write_roster`'s relevant section, `rank`'s Coming up for
-         `today.md`, and `surface::coming_up`. Listing carried instances means a sibling function, or
-         a change to `relevant_events` that admits a carried uid with its series' answer, used by
-         all three so the console and `today.md` show the same five (anatomy §3.11). The frozen
-         references cannot move: `vault-full` has no `event-accept` card, so no carried instance,
-         and `golden-today-{s1,full}.md`, `vault-full/state/events.md` and the three
-         `surface-today-*.json` stay byte-identical; test 23 and the fixtures diff prove it at
-         every gate. Any vault that has a carried instance will see `today.md` and `state/events.md`
-         change, by design.
-    - *Alternative:* a new generated Markdown file under `state/` (spec §6.1 rules out new JSON),
-      written by `rank` each run and read by `surface`. It is cleaner to keep apart, but it is a new
-      file, and it too must survive a feed-failure run, when `rank` holds no series keys. It shares
-      cost 2 (the `relevant_events` change) and avoids cost 1, since `read_roster` is untouched.
-    - *Not enough alone:* `series_uid` on the carried note, which covers timed instances only.
-    - *Fallback:* (a), with the gap named in anatomy.
+  - **Answered 2026-09-30, final: (b-prime).** Quinn first answered (c): list a carried instance at
+    read time, with its provenance and no new write. (c) was blocked as approved, because nothing
+    stored links a carried instance to its series and a carried all-day instance is stored nowhere.
+    Quinn then replaced it with (b-prime):
+    - For each carried date, timed and all-day, the carry writes **one** event-ledger answer line
+      attributed to the carry, not the student: `by:agent:knowlu.carry` (the `agent:` prefix, so
+      judge-once treats it as non-user), `from:<the answering card's id>` (the card holds the
+      answer, its date and the series) and the series' real verdict (an accepted opportunity stays
+      `opportunity`, so `record_answer` is widened to accept it).
+    - Additive: one new optional field on a ledger line; every existing line stays byte-identical.
+    - Coming up lists such a date like any judged event, labelled with its provenance (for example
+      "Accepted · from your answer to the series on <date>", the date read from the card).
+    - If the all-day lane still cannot draw a carried all-day date from that line plus what is
+      stored, no further write is invented: the planner stops and reports it to Quinn as a blocker.
+  - **What (b-prime) needs, checked against the code** (the `events` worktree at `8698e8d`):
+    1. *The line shape* lives in `eventledger.rs`. `record_answer` writes
+       `- <uid> · <title> · verdict:<w> · by:<actor>[ · jid:<uuid>] · answered <date>`, and
+       `load_ledger` reads `by:`, `jid:` and `answered` from the line with its quoted `why:` removed.
+       The carry's line would add ` · from:<id>` before `answered`. A card id is `appr_` plus ten hex
+       characters (`ids::new_id`), safe unquoted. A new `FROM` pattern and a new `LedgerEntry`
+       field would read it; every `LedgerEntry` literal in the crate ends `..Default::default()`, so
+       none breaks.
+    2. *The widening.* `record_answer` refuses `opportunity`, and two existing tests pin that for a
+       human `by` (`record_answer_refuses_a_bad_word_actor_or_jid`,
+       `an_answer_shaped_line_with_a_non_answer_word_does_not_supersede`). So the widening would be
+       one entry point sharing `record_answer`'s line builder that takes `obligation` or
+       `opportunity` only with the carry's actor and a `from:` id. `record_answer`'s own checks,
+       `ANSWER_VERDICTS` and both tests stay unchanged.
+    3. *Judge-once needs a read rule.* `load_ledger` lets an answer line supersede only an `unsure`
+       verdict, and only with `obligation` or `drop`; its `answered_by` is not prefix-aware. So a
+       carry line read first would hold against a later human answer for that uid, and a carry
+       `opportunity` line would not settle an `unsure` instance. "A later human answer wins" and an
+       `opportunity` carry over `unsure` would each need one new case in `load_ledger`
+       (contract-engineer, xhigh).
+    4. *Journal first.* No ledger line has a journal record. `journal::OPS` are note operations, and
+       `record_answer`, `record_declined` and `inherit_series_answers` append to
+       `state/events-seen.md` directly (`state/` never syncs). The carry can write a timed date's
+       commitment journal first and its line after it. The line itself has no journal record unless
+       a new record shape is added, which would be a further write and a `journal.rs` contract change.
+    5. *Who calls it, and who reads it.* `eventcarry::run`'s accept carry would write the line for a
+       carried instance that has no verdict, or an unanswered `unsure` one (`inherit_series_answers`'
+       rule), after its commitment. `rank` runs the carry before `write_roster` (T4, step 2), so the
+       same run's roster and `today.md` list the date. `surface::coming_up` reads the roster and the
+       ledger, and would follow `from:` through `ids::build_index` to the archived card for its
+       `executed_at` date. All of this can be built without a further write.
+    6. *Dates carried from an `event-check` series already have a line, credited to the student.*
+       Under PQ1 (a), `rank` runs `inherit_series_answers` before the carry (T4, step 1). For each
+       instance of an executed `event-check` series with no verdict, or an unanswered `unsure` one,
+       it writes an `obligation` line through `record_answer`, with `by` taken by `settled_series`
+       from the ledger entry of the card's own `source_uid` (the student's actor, else `unknown`) and
+       no `from:` (`eventemit.rs`, `settled_series` and `inherit_series_answers`). Item 5's rule then
+       finds a verdict, so the carry writes nothing for those dates. With §4.5's row standing
+       ("`inherit_series_answers`, which is unchanged", §9), the `agent:knowlu.carry` line, its
+       `from:` and the provenance label reach dates carried from `event-accept` series only. A date
+       carried from an `event-check` series stays credited to the student, with no `from:`, which is
+       not "each carried date ... attributed to the carry, not the student". A label for such a date
+       cannot follow `from:`; reading it through `settled_series`' card needs a stored link from the
+       instance to its series, and the (c) check found none (the timed commitment holds only the
+       instance's `source_uid`, T1a). The plan does not settle this; it is in the open choice below.
+  - **Blocked as approved (found 2026-09-30): the all-day lane cannot draw a carried all-day date.**
+    The lane needs the date's span, its first and last day. From the carry's line plus what is
+    stored:
+    1. **The line holds no event date.** Its `answered` date is the carry's run day.
+    2. **The answering card does not list it.** `from:` leads to a card whose `events:` and
+       `instances:` hold only its own instances, and a carried instance is by definition one the
+       card did not list.
+    3. **No note holds it.** A lane shape (all-day, multi-day, zero-length) gets no commitment (P4,
+       Q1b, PQ2), so nothing in `commitments/` carries its dates.
+    4. **The roster holds part of it, and not reliably.** Once the line gives the uid a verdict,
+       `write_roster` writes it in the relevant section as one `HH:MM–HH:MM` line under its start
+       day (`00:00–00:00` for an all-day day). That is not enough:
+       - the section keeps only events that start today or later, so a multi-day event's second
+         and later days are in no file once its first day has passed;
+       - the line holds no end date, so a multi-day event's last day is lost even on its first day,
+         and an end at or before the start cannot tell a zero-length event (the lane) from a
+         past-midnight one (a commitment) or a multi-day timed one (the lane on each day);
+       - a feed-failure run rebuilds the roster from `read_roster`, which turns `00:00–00:00` into
+         `00:00–01:00`; after that, even a one-day all-day date reads as a timed hour.
+    So the most the lane could draw is a one-day all-day carried date, on its own day, from the
+    roster's raw line, until the next feed-failure run. Drawing a carried lane-shaped date on each of
+    its days needs its span persisted, which is a further write, and Quinn ruled that out. The
+    planner stops here and designs nothing around it. The same holds for an all-day later instance
+    of an accepted `event-check` series under PQ1 (a). That series also has the attribution overlap
+    in item 6, which is separate from the lane.
+  - **Open, for Quinn.** Items 1–5 above (the line, the widening, the read rules, the call and the
+    Coming-up provenance) can be built as approved; the lane half cannot. Either:
+    - *(i)* build items 1–5 and leave carried lane-shaped dates out of the lane, with the gap named
+      in anatomy §3.7. *Recommended:* every carried date gets its Coming-up listing, and recurring
+      all-day campus events are rare. As item 6 shows, (i) gives the carry's line and provenance to
+      dates carried from `event-accept` series only; or
+    - *(ii)* Quinn names a write that persists a carried date's span.
+    - *And, separately (item 6), for dates carried from an `event-check` series:* either accept the
+      split, where they keep `inherit_series_answers`' line, credited to the student with no `from:`
+      (and with no provenance label unless a stored instance-to-series link is found), or let the
+      carry's line replace the inherited one for those series, which changes
+      `inherit_series_answers`, a signed behaviour (§4.5's row, §9). The plan does not choose.
+      *Before:* T2b.2b if the carry's line replaces the inherited one, otherwise with the (i)/(ii)
+      ruling's task.
     - *Before:* T2b.2 if the ruling changes what the carry writes, otherwise before T4b. If it is
-      still open at T2b.2, T2b.2 runs as planned, since it writes nothing for (c) either way. The
-      ruling's task is then added after T4b and before B2. No task builds (c) until Quinn rules.
+      still open at T2b.2, T2b.2 runs as planned: it writes no answer line for a carried date, and
+      no test in it pins either way (§5, T2b.2's scope). The ruling's task is then added after T4b and before
+      B2. No task builds (b-prime) until Quinn rules.
 - **PQ4. B1's base, and shipping `event-4` if it wins.** B1 (T9) is signed (Q5 (c)) and makes paid
   OpenRouter calls through the key in Credential Manager `knowlu/dev/openrouter`.
   - *Recommend:* run the harness on `j-events` as it stands. Its `event-3` arm is frozen in
@@ -411,7 +447,7 @@ answer cannot be built as approved, and its blocker goes back to Quinn.
 
 | Task | Agent (model, effort) | Quinn | Files | After |
 |---|---|---|---|---|
-| T0 | main session | PQ1–PQ4 answered; PQ3's blocker asked | none (git, ledger) | — |
+| T0 | main session | PQ1–PQ4 answered; PQ3 (b-prime)'s blocker asked | none (git, ledger) | — |
 | T0c | `researcher` (Sonnet, medium) | — | none (returns counts) | any time before T10 |
 | H1a | main session | — | `engine/src/lib.rs`, `engine/src/eventaccept.rs` (stub) | T0 |
 | T1a | `implementer` (Sonnet, high) | PQ2 (answered) | `engine/src/eventaccept.rs` | H1a |
@@ -430,7 +466,7 @@ answer cannot be built as approved, and its blocker goes back to Quinn.
 | B | `contract-reviewer` (Opus, xhigh) | checkpoint | `docs/reports/…-events-contract-review.md` | T3.2 |
 | R1 | `reviewer` (Opus, high), beside B | — | `docs/reports/…-events-sonnet-review-1.md` | T3.2 |
 | T4 | `contract-engineer` (Opus, xhigh) | — | `engine/src/cli.rs`; test 24 in `engine/src/enrich.rs`' test module | B, R1 |
-| T4b | `implementer` (Sonnet, high) | — (PQ3 (c) not here) | `engine/src/surface.rs` (`Loaded`, `load_with`, `the_day`, `coming_up`, `ComingUp`, one new private reader) | T4 |
+| T4b | `implementer` (Sonnet, high) | — (PQ3 (b-prime) not here) | `engine/src/surface.rs` (`Loaded`, `load_with`, `the_day`, `coming_up`, `ComingUp`, one new private reader) | T4 |
 | B2 | `contract-reviewer` (Opus, xhigh) on T4 + `reviewer` (Opus, high) on T4b | — | `docs/reports/…-events-review-2.md` | T4b |
 | M | main session | push go | `main` merged into `events` | B2, and M2 merged (Gmail is already in) |
 | T5 | `console-ui` (Sonnet, medium) | — | `app/static/console.js`, `app/tests/static_assets.rs` | M |
@@ -445,9 +481,13 @@ T2a and T2b interleave as the spec orders (T2b's first commit, then T2a, then th
 but serially, because one implementer runs at a time in the worktree. T5, T6 and T7 touch disjoint
 files and run one after another after M.
 
-**PQ3 (c) has no task.** As approved, it cannot be built (§4, PQ3). When Quinn rules on the
-blocker, the planner adds its task (tests first, an agent named) where §4 says, and the ledger
-(§9) gains its row. Until then, no task writes or reads anything for it.
+**PQ3 (b-prime) has no task.** As approved, it cannot be built (§4, PQ3). When Quinn rules on its
+blocker, the planner adds its tasks where §4 says, tests first, and the ledger (§9) gains their
+rows. The agents are fixed now: the ledger-line change in `eventledger.rs` (the carry's entry point,
+the `from:` field and `load_ledger`'s new read cases) goes to `contract-engineer` at xhigh, as Quinn
+directed; the carry's call in `eventcarry.rs` to `contract-engineer` (Opus, xhigh); the provenance
+read in `surface.rs` to `implementer`. Until then, no task writes or reads anything for it, and no
+test pins whether the accept carry writes an answer line (T2b.2, T2b.2b).
 
 ### T0. Preflight (main session)
 
@@ -461,12 +501,12 @@ blocker, the planner adds its task (tests first, an agent named) where §4 says,
   merged and already in `events`). Record that
   the engine tasks (T1a–T4b) share only the files §2's table names. Repeat before M and before the
   merge (spec §9).
-- Record Quinn's answers of 2026-09-30 (§4): PQ1 (a), PQ2 (the all-day lane), PQ3 (c) and PQ4 (as
-  recommended). Bring Quinn PQ3's blocker and its options (§4, PQ3), with its context, before
-  T2b.2.
+- Record Quinn's answers of 2026-09-30 (§4): PQ1 (a), PQ2 (the all-day lane), PQ3 (b-prime), which
+  replaced (c), and PQ4 (as recommended). Bring Quinn (b-prime)'s blocker and the open choice (§4,
+  PQ3), with its context, before T2b.2.
 
-**Done when:** the ledger records the base, the overlap check, the four answers and PQ3's
-blocker, and later Quinn's ruling on it.
+**Done when:** the ledger records the base, the overlap check, the four answers and PQ3
+(b-prime)'s blocker, and later Quinn's ruling on it.
 
 ### T0c. The Alabama shape count (researcher, off the critical path)
 
@@ -697,8 +737,10 @@ live only when `config.event_cards` is true. `emit_event_accepts` takes the verd
 student's plan with no card in front of it. A wrong set brings back a note the student deleted; a
 wrong carry books or declines a whole series silently (spec §13).
 **Files:** `engine/src/eventcarry.rs`. **Scope:** `event-accept` series only; PQ1 (a)'s
-`event-check` series are T2b.2b, its own commit. PQ3 (c) adds nothing here: the carry writes no
-answer line, and no task builds (c) until Quinn rules on its blocker (§4).
+`event-check` series are T2b.2b, its own commit. PQ3 (b-prime) adds nothing here until Quinn rules
+on its blocker (§4): this task writes no answer line for a carried date, and no test in it asserts
+either way on the accept carry's ledger lines, because the ruling decides them and a test's
+assertion may not change later.
 
 **Tests first** (spec tests 19, 20, 20a at the carry's entry point, P13; plus the set's units):
 - `the_ever_written_set_reads_commitments_tasks_and_archive` (§5.3): a uid on a live commitment, a
@@ -711,14 +753,11 @@ answer line, and no task builds (c) until Quinn rules on its blocker (§4).
 - `an_accepted_series_books_a_later_instance_once` (20, accept half): one commitment, `level` from
   the card's `verdict:`, `source_uid` the instance's uid; a second call writes nothing, no journal
   record included. An instance starting before today is not booked. No register task is written
-  (P9). An all-day instance writes nothing and warns nothing.
+  (P9). An all-day instance gets no commitment and no warning. (No clause here reads
+  `state/events-seen.md` after an accept: PQ3's ruling decides it, §4.)
 - `a_deleted_carried_note_stays_deleted` (20a): carry, delete the commitment through
   `write::delete` (it lands in `archive/`), call twice more: no note and no journal record for that
   uid. Delete the primary's register task the same way: never re-created.
-- `the_accept_carry_writes_no_ledger_line` (spec §5.4; PQ3's answer allows no synthetic answer
-  line): a later, unjudged instance is carried for an accepted `event-accept` series.
-  `state/events-seen.md` is byte-identical to before the call, and the returned ledger map has no
-  entry for the uid.
 - `roster_read_events_carry_nothing` (the feed-failure run, §2): events built as `read_roster`
   builds them, each with its `series_uid` equal to its uid (`DiscoveredEvent::new`). Archived is an
   `executed` `event-accept` card for series `lx:77` listing `lx:77:1`. The event `lx:77:3` writes
@@ -738,8 +777,10 @@ answer line, and no task builds (c) until Quinn rules on its blocker (§4).
     `eventaccept::commitment_for` goes through `commitments::create_confirmed` (actor
     `agent:commitments`, journal first). The level comes from the card's `verdict:`. The accepted
     set is built in one private helper, so T2b.2b widens it in one place.
-  - The ledger map is updated as `load_ledger` would read the new lines. The accept carry writes no
-    ledger line (spec §5.4; PQ3's answer).
+  - The ledger map is updated as `load_ledger` would read the new `declined` lines. The accept
+    carry writes no ledger line in this task, as spec §5.4 says. PQ3 (b-prime) would add one answer
+    line per carried date and is blocked (§4); if Quinn's ruling builds it, its own task adds the
+    line and its tests here.
 - **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
   passes `read_roster`'s events, whose `series_uid` is their own uid (§2). The carry then reaches no
   later instance and writes nothing; the next run that fetches the feeds carries as usual. This is
@@ -749,7 +790,7 @@ answer line, and no task builds (c) until Quinn rules on its blocker (§4).
 - No edit to `surface::delta`. Every carried note is a journal `create` in the `rank` run, which is
   what lists it (spec §4.5).
 
-**Done when:** the seven tests pass, and T2b.1's and T2a's tests pass unchanged.
+**Done when:** the six tests pass, and T2b.1's and T2a's tests pass unchanged.
 
 ### T2b.2b. PQ1 (a): an accepted `event-check` series carries (`eventcarry.rs`)
 
@@ -763,9 +804,9 @@ Split from T2b.2 by the second review so its diff is small and Checkpoint B read
   in `archive/` carrying `instances:` (series `lx:9`, listing `lx:9:1`), and events holding
   `lx:9:1` and a later timed `lx:9:2`. One commitment, for `lx:9:2`, with `level: hard` (P7) and
   `source_uid: "lx:9:2"`; none for `lx:9:1`, which the card listed. A second call writes nothing,
-  no journal record included, no register task is written (P9), and `state/events-seen.md` is
-  byte-identical to before the first call (no ledger line, spec §5.4). `answered_series` still
-  does not count the card. A hand edit can make an archived `rejected` `event-accept` card answer
+  no journal record included, and no register task is written (P9). (No clause reads
+  `state/events-seen.md`: PQ3's ruling decides the accept carry's ledger lines, §4.)
+  `answered_series` still does not count the card. A hand edit can make an archived `rejected` `event-accept` card answer
   `lx:9` too; then nothing is booked for the series, because `answered_series`' answer wins.
   Built as `read_roster` builds events (series equal to uid), a one-instance `ics:fair` whose
   executed `event-check` card lists it writes nothing.
@@ -881,7 +922,8 @@ and checks in particular:
 - reading T2b.2b's commit alone: that `accepted_check_series` feeds only the accept carry, never
   the decline carry, the emitter or `judge_roster`; that a cross-reader overlap goes to
   `answered_series`; and that an `event-check` card with no `instances:` carries nothing;
-- that the accept carry writes no ledger line (spec §5.4, PQ3's answer);
+- that the accept carry writes no ledger line (spec §5.4): nothing for PQ3 (b-prime) is built
+  before Quinn rules on its blocker (§4), and `eventledger.rs` is unchanged;
 - that the ever-written set leaves out approval cards and includes `archive/`;
 - that every note is written journal first, through `write::create`, by an `agent:` actor;
 - that a failure leaves the card `approved` and a retry duplicates nothing;
@@ -924,7 +966,8 @@ module (no code change there).
   no card for them. A second series in the same vault is an accepted `event-check` series (PQ1
   (a)). Its later timed instance gets its inherited `obligation` line from step 1 and one
   commitment from step 2, and once deleted it stays deleted. The test makes no Coming up
-  assertion: PQ3 (c) is blocked (§4), and the task that builds it brings its own tests.
+  assertion and reads no ledger line for the `event-accept` series: PQ3 (b-prime) is blocked (§4),
+  and the task that builds it brings its own tests.
 - `a_rank_on_the_roster_alone_carries_nothing` (feed-failure run): every feed fails, the roster
   holds a later instance of an accepted series and an unasked obligation; `rank` writes no
   commitment and no ledger line for the instance and files no `event-accept` card for the
@@ -972,9 +1015,9 @@ is what keeps `golden-today-full.md` byte-identical. `surface::delta` is not edi
 
 **Agent:** `implementer` (Sonnet, high). **Why:** read-only: `surface` never writes, so an error
 misdraws a lane but never changes vault bytes. **Files:** `engine/src/surface.rs` (`Loaded`,
-`load_with`, `the_day`, `ComingUp`, `coming_up`, and one new private reader). **PQ3:** (c) is not
-built here. It is blocked (§4), and no reader in this task looks for carried instances that have
-no verdict.
+`load_with`, `the_day`, `ComingUp`, `coming_up`, and one new private reader). **PQ3:** (b-prime)
+is not built here. It is blocked (§4): no reader in this task reads a `from:` field or a carry's
+answer line, or looks for carried instances that have no verdict.
 
 **Tests first** (spec test 22a, plus P8's):
 - `an_accepted_two_day_event_is_in_the_all_day_lane_on_each_day` (22a): after Accept of an all-day
@@ -1085,14 +1128,18 @@ existing tests pass unchanged.
     `seen_at` gap and the 200-record cap named (spec §4.5).
   - §3.7, the day: accepted all-day, multi-day and zero-length (PQ2) events are in the all-day lane,
     read from executed cards' `instances:`. A carried all-day instance is not drawn, whether its
-    series was answered on an `event-accept` or an `event-check` card.
+    series was answered on an `event-accept` or an `event-check` card: nothing stored holds its
+    span (PQ3 (b-prime)'s blocker, §4). If Quinn's ruling on that blocker lands a task before T8,
+    this section describes what it built instead.
   - §3.9, the deck: event cards, Accept and Decline on both event kinds, and expiry.
   - §3.11, Coming up: the "Accepted" mark (P8). A later instance of an accepted `event-check`
     series is listed through its inherited answer and, timed, booked and marked (PQ1 (a)). A later
     instance of an accepted `event-accept` series that has no verdict of its own is not listed,
-    though a timed one has its block on its day. Quinn chose to list it at read time (PQ3 (c), 2026-09-30);
-    that is blocked pending a ruling (§4). If a task for it lands before T8, this section describes
-    what that task built instead, with the provenance label it shows.
+    though a timed one has its block on its day. Quinn's answer is to list it through one answer
+    line the carry writes, attributed to the carry and pointing at the answering card, with its
+    provenance shown (PQ3 (b-prime), 2026-09-30); that is blocked pending a ruling (§4). If a task
+    for it lands before T8, this section describes what that task built instead, with the
+    provenance label it shows.
 - `docs/reference/engine-commands.md`: one paragraph in `rank`'s entry (the events pass's order,
   `event_cards`, the carry over accepted `event-accept` and `event-check` series);
 - `docs/notes/2026-09-29-vision-program.md`: the P4 row points at the spec and this plan; P6 (c)
@@ -1100,8 +1147,11 @@ existing tests pass unchanged.
 - `docs/specs/2026-09-29-events-design.md` §12: T0c's count in the Q1 note, dated; and one dated
   note recording the plan-stage answers of 2026-09-30. PQ1 (a) widens §4.5 and §6.1's
   `eventcarry.rs` row: the accept carry also reads executed `event-check` cards with `instances:`
-  through `accepted_check_series`. PQ2 puts a zero-length event in the all-day lane (§4.2). PQ3 (c)
-  is recorded with its blocker. The signed text above the note is not rewritten;
+  through `accepted_check_series`. PQ2 puts a zero-length event in the all-day lane (§4.2). PQ3's
+  final answer, (b-prime), is recorded with its blocker and with the (c) answer it replaced. If
+  Quinn's ruling builds (b-prime), the note also records §5.4's widening: the carry's answer line,
+  its `by:agent:knowlu.carry` and `from:` fields, and `opportunity` on it. The signed text above
+  the note is not rewritten;
 - `docs/reference/app.md`, only if it lists the campus presets' keys.
 
 HANDOFF is not edited (P11). **Done when:** each claim cites a function, not a line, and matches the
@@ -1149,8 +1199,8 @@ in particular:
 - `surface::delta` unchanged (20c green);
 - one `answered_series`, one shape classifier, and `accepted_check_series` read only by the accept
   carry (PQ1 (a));
-- PQ3 (c): built and tested as Quinn's ruling on its blocker says, or, if unruled, absent with its
-  gap named in anatomy §3.11 and nothing half-built.
+- PQ3 (b-prime): built and tested as Quinn's ruling on its blocker says, or, if unruled, absent
+  with its gap named in anatomy §3.7 and §3.11, `eventledger.rs` unchanged and nothing half-built.
 
 Fixes go to the task's own agent, and the reviewer re-reads them. The controller brings Quinn the
 report before T10 (spec §13's third checkpoint). **Done when:** no open Critical or Important
@@ -1172,8 +1222,8 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   3. check the schedule (the commitment's block, or the all-day lane) and Coming up ("Accepted",
      the declined event gone). A carried later instance has its block on its day. A later
      instance of an accepted `event-check` series is listed and marked (PQ1 (a)). A carried
-     `event-accept` instance with no verdict is listed only if PQ3 (c)'s blocker was ruled and
-     built; otherwise the proof records it as absent, as anatomy §3.11 says;
+     `event-accept` instance with no verdict is listed only if PQ3 (b-prime)'s blocker was ruled
+     and built; otherwise the proof records it as absent, as anatomy §3.11 says;
   4. run one more `rank` and confirm nothing is re-asked.
 
   Then remove the scratch profile (profile, vault, credentials, autostart).
@@ -1183,8 +1233,9 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 
 - **Order:** T0 → H1a → T1a → T1b → H1b → T2b.1 → T2a.1a → T2a.1b → T2a.2 → T2b.2 → T2b.2b →
   T2b.3 → T3.1a → T3.1b → T3.2 → (Checkpoint B ∥ R1) → T4 → T4b → B2 → first push (Quinn's go) →
-  (M2 merges; Gmail is already in at `2d5298a`) → M → T5 → T6 → T7 → T8 → W → push → T10. PQ3 (c)'s
-  task, if Quinn's ruling adds one, goes where §4 says (before T2b.2, or after T4b and before B2).
+  (M2 merges; Gmail is already in at `2d5298a`) → M → T5 → T6 → T7 → T8 → W → push → T10. PQ3
+  (b-prime)'s tasks, if Quinn's ruling adds them, go where §4 says (before T2b.2, or after T4b and
+  before B2).
 - **Off the line:** T0c any time before T10 (read-only, no worktree). T9 any time before T10, in the
   `j-events` worktree, so it may run beside the engine tasks.
 - **One implementer at a time** in the `events` worktree. Reviews run beside the next task only when
@@ -1192,8 +1243,8 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **Pushes (P12):** nothing is pushed before B2 closes; every Sonnet-written commit has then had a
   `reviewer` pass (R1 or B2). Commits after B2 are pushed only after W closes. Each push is a code
   push and needs Quinn's go.
-- **Waits on Quinn:** PQ1, PQ2 and PQ4 were answered on 2026-09-30 and wait on nothing. PQ3 (c)'s
-  blocker (§4) is wanted before T2b.2, and T2b.2 does not wait for it. Also the two checkpoints
+- **Waits on Quinn:** PQ1, PQ2 and PQ4 were answered on 2026-09-30 and wait on nothing. PQ3
+  (b-prime)'s blocker (§4) is wanted before T2b.2, and T2b.2 does not wait for it. Also the two checkpoints
   (B and W), the push go after B2 and after W, and the merge word in T10.
 - **Opus starts:** T0, H1a, H1b, T2b.1, T2b.2, T2b.2b, T2b.3, T3.1a, T3.1b, T3.2, B, R1, T4, B2, T9, W, M, T10.
   Every other task starts on Sonnet, and a second failed attempt moves it to Opus at high.
@@ -1228,10 +1279,14 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **A card books an hour the feed never claimed.** On a feed-failure run the emitters read
   `read_roster`'s lossy events (§2). Guarded by the source rule in T2a.1b and T2a.2, their two
   roster tests, the rank-level clause in `a_rank_on_the_roster_alone_carries_nothing`, and R1.
-- **PQ3 (c) is not delivered.** As approved it cannot be built (§4). If Quinn has not ruled by B2,
-  the branch ships with the gap: a carried `event-accept` instance with no verdict is absent from
-  Coming up, and a carried all-day instance from the lane. Anatomy §3.11 names the gap (T8), and
-  W checks that nothing is half-built.
+- **PQ3 (b-prime) is not delivered.** As approved it cannot be built (§4). If Quinn has not ruled
+  by B2, the branch ships with the gap: a carried `event-accept` instance with no verdict is absent
+  from Coming up, and a carried all-day instance from the lane. Anatomy §3.7 and §3.11 name the gap
+  (T8), and W checks that nothing is half-built and `eventledger.rs` is unchanged.
+- **A ledger line attributed to no one who answered.** If Quinn's ruling builds (b-prime), the carry
+  writes answer lines no human gave. Guarded, in that ruling's tasks, by the `agent:` actor and the
+  `from:` card, by `load_ledger`'s new rule that a human answer wins over a carry line, and by
+  contract-engineer at xhigh on `eventledger.rs` (§4, PQ3, items 1–3).
 - **A deleted note comes back.** Guarded by the ever-written set reading `archive/` (T2b.2), test
   20a at the carry and at `rank` level (T4), and test 12's retry case.
 - **`rank` runs its passes in the wrong order.** Guarded by tests 19 and 20a at `rank` level (T4)
@@ -1288,7 +1343,7 @@ numbers are spec §11's. Plan-only tests are named.
 | §5.1: the card's fields and file name; `events:` keeps its shape | T2a.1b | tests 1, 5 |
 | §5.2: new `event-check` cards gain `instances:` and the new closing | T2a.1b | `new_event_check_cards_carry_instances_and_the_new_closing` |
 | §5.3: the ever-written set (commitments, tasks, archive; approvals left out) | T2b.2, T3.1a | `the_ever_written_set_reads_commitments_tasks_and_archive`; test 12 |
-| §5.4: no new ledger line shape or verdict word | T3.1b, T2b.2 | W checks `eventledger.rs` is unchanged; `the_accept_carry_writes_no_ledger_line` |
+| §5.4: no new ledger line shape or verdict word | T3.1b, T2b.2, B, W | Checkpoint B checks the accept carry writes no ledger line; W checks `eventledger.rs` is unchanged. PQ3 (b-prime) would widen §5.4 and is blocked (§4); if Quinn's ruling builds it, this row is rewritten with that task's tests |
 | §5.5: `event_cards` read as a boolean; both presets carry it | T1b, T6 | `event_cards_reads_true_or_1_and_anything_else_is_off`; test 27 |
 | §6.1 `eventemit.rs` row | T2a.1a, T2a.1b, T2a.2 | tests 1–7; the refactor's pinning test |
 | §6.1 `eventcarry.rs` row, one `answered_series`, the `judge_roster` call site | T2b.1–T2b.3 | T2b.1's tests; tests 19, 20, 20a, 21 |
@@ -1321,7 +1376,7 @@ its own row.
 | PQ1 (a): an executed `event-check` card with `instances:` carries its series; `accepted_check_series`; the accept carry over the union; `answered_series`' edge rule unchanged | T2b.1, T2b.2b, T4, B, T8 | `an_accepted_event_check_series_books_a_later_instance_once`, `an_event_check_card_without_instances_carries_nothing`; T2b.1's `an_event_check_card_is_not_counted`; 20a's `event-check` case at `rank` level; Checkpoint B; the spec §12 note |
 | PQ2: a zero-length event is drawn in the all-day lane with no commitment | T1a, T3.2, T4b, T8 | `a_zero_length_event_gives_the_lane_marker`; test 16's zero-length clause; test 22a's zero-length clause; anatomy §3.7 |
 | PQ2, held on a feed-failure run: no card or `instances:` entry is built from `read_roster`'s lossy events (second review) | T2a.1b, T2a.2, T4 | `a_roster_read_event_files_no_event_accept_card_and_no_instances`, `a_roster_read_opportunity_files_no_card`, the card clause of `a_rank_on_the_roster_alone_carries_nothing` |
-| PQ3 (c): carried instances with no verdict listed in Coming up at read time, with provenance, no new write, timed and all-day | **none: blocked** (§4) | Not met. The blocker and its options go to Quinn at T0; `the_accept_carry_writes_no_ledger_line` holds the "no synthetic answer line" part; anatomy §3.11 names the gap (T8); W checks nothing is half-built |
+| PQ3 (b-prime), final (replaced (c)): one answer line per carried date, timed and all-day, by `agent:knowlu.carry`, with `from:` the answering card and the series' real verdict; Coming up lists the date with its provenance; the all-day lane draws a carried all-day date; no further write | **none: blocked** (§4) | Not met. The Coming-up half can be built; the lane half cannot without a further write, which Quinn ruled out. The blocker and the open choice go to Quinn at T0; anatomy §3.7 and §3.11 name the gap (T8); W checks nothing is half-built and `eventledger.rs` is unchanged |
 | PQ4: B1 runs as it stands on `j-events` after the frozen `event-3` check; report in `docs/reports/`; `event-4` ships only through its own cloud PR | T9 | the B1 report, its precondition's result first |
 
 **Plan-only tests.** `event_cards_reads_true_or_1_and_anything_else_is_off`,
@@ -1332,10 +1387,11 @@ its own row.
 `a_rank_on_the_roster_alone_carries_nothing`, `an_accepted_event_is_marked_in_coming_up`,
 `accepted_is_absent_from_the_json_when_false`, `coming_up_shows_accepted_events`,
 `an_accepted_event_check_series_books_a_later_instance_once`,
-`an_event_check_card_without_instances_carries_nothing`, `the_accept_carry_writes_no_ledger_line`,
+`an_event_check_card_without_instances_carries_nothing`,
 `a_roster_read_event_files_no_event_accept_card_and_no_instances` and
 `a_roster_read_opportunity_files_no_card`.
-PQ3 (c) has no test until its blocker is ruled. Each pins a spec requirement that had no test of
+PQ3 (b-prime) has no test until its blocker is ruled; `the_accept_carry_writes_no_ledger_line` was
+removed with (c) (§11, item 3). Each pins a spec requirement that had no test of
 its own, a plan decision (§3) or one of Quinn's answers; none changes a spec test's assertion. Spec test 4's "identical bytes"
 is read as P14 states; that is the one interpretation of a spec assertion this plan makes.
 
@@ -1424,12 +1480,34 @@ moved.
    change, and states that no frozen or read-model reference can move (`vault-full` has no carried
    instance; test 23 and the fixtures diff prove it). The alternative is marked as sharing the
    second cost only. Quinn's answer (c) is unchanged; the blocker still waits on Quinn.
+   *Superseded 2026-09-30:* Quinn replaced (c) with (b-prime), and the roster option went with
+   (c)'s blocker (§4, PQ3; §11, item 3).
 4. **T2b.2 was oversized with PQ1 in it (Important).** *Changed:* PQ1 (a) moved to a new task,
    T2b.2b (contract-engineer, its own commit after T2b.2): `accepted_check_series`, the union, the
    overlap rule, and its two tests, which now also carry the `event-check` halves of the
    no-ledger-line and roster-run checks. T2b.2 keeps seven tests over `event-accept` series and
    builds the accepted set in one helper for T2b.2b to widen. P1, §5's table, T2b.1's note,
-   Checkpoint B (reads T2b.2b alone), §6, §8 and the PQ1 ledger row follow.
+   Checkpoint B (reads T2b.2b alone), §6, §8 and the PQ1 ledger row follow. *Changed again
+   2026-09-30 (PQ3 (b-prime)):* the no-ledger-line test and clause were removed from T2b.2 and
+   T2b.2b, so T2b.2 now has six tests (§11, item 3).
+
+### Third round (2026-09-30)
+
+One finding on the (b-prime) section; accepted, not refuted. Checked against
+`engine/src/eventemit.rs` in the `events` worktree (`settled_series`, `inherit_series_answers`).
+Quinn's answers in §4 are unchanged.
+
+1. **Dates carried from an `event-check` series keep a line credited to the student
+   (Important).** Confirmed: `settled_series` copies `by` from the ledger entry of the card's own
+   `source_uid` (else `unknown`), and `inherit_series_answers` writes an `obligation` line through
+   `record_answer` with that `by` and no `from:`, before the carry runs (T4, step 1). Item 5's rule
+   then skips those dates. *Changed:* PQ3 gains item 6 under "What (b-prime) needs"; the blocker's
+   last sentence separates this overlap from the lane gap; the open choice states that (i) reaches
+   `event-accept` series only and adds a separate choice for Quinn (accept the split, or let the
+   carry's line replace the inherited one, which changes the signed `inherit_series_answers`). Also
+   found: a provenance label for such a date read through `settled_series`' card needs a stored
+   instance-to-series link, which the (c) check found absent; item 6 says so. The plan does not
+   choose.
 
 ## 11. Quinn's answers (2026-09-30)
 
@@ -1452,15 +1530,28 @@ read_roster, relevant_events}`, `eventledger::{LedgerEntry, load_ledger, record_
    `event-check` case at `rank` level, which proves the pass order for PQ1 as P13 does for the rest.
    T4b's P8 test gains the carried `event-check` instance. Also changed: P8, §2, Checkpoint B, W,
    §8, T8 (the spec §12 note, anatomy §3.11) and a ledger row.
-3. **PQ3: (c), listed at read time, with provenance, and no new write.** *Blocked as approved.*
-   The read model cannot see a carried instance's series. Without it, the read model has neither
-   the answer's date nor its kind, and a carried all-day instance cannot be seen at all (§4, PQ3,
-   items 1–4). *Changed:* no task builds (c). The PQ3 (a) and (b) branches are removed from T2b.2,
-   T4, T4b, T8 and T10. T2b.2 keeps one test that (c) itself requires,
-   `the_accept_carry_writes_no_ledger_line` (no synthetic answer line, which is also spec §5.4).
-   §4 states the blocker, the options and a recommendation for Quinn. §5 notes that (c) has no task
-   yet, §6 and §8 say when it is wanted and what ships if it is unruled, and the ledger row marks it
-   not met.
+3. **PQ3: (b-prime), Quinn's final answer, which replaced (c).** Quinn first answered (c), listing
+   carried instances at read time with no new write. It was blocked as approved: nothing stored
+   links a carried instance to its series, and a carried all-day instance is stored nowhere. Quinn
+   then answered (b-prime): one answer line per carried date, by `agent:knowlu.carry`, with `from:`
+   the answering card and the series' real verdict, and no further write invented. Checked against
+   the `events` worktree at `8698e8d`: `eventledger::{record_answer, load_ledger, LedgerEntry}`,
+   `eventroster::{write_roster, read_roster, relevant_events}`,
+   `eventemit::{settled_series, inherit_series_answers}`, `approvals::settle_event_check`,
+   `surface::{coming_up, the_day, load_with}`, `ids::{new_id, build_index}`, `journal::OPS`, `sync`'s
+   note-path rule and `rank`'s events pass. *Blocked as approved* in its all-day half: the lane
+   cannot draw a carried all-day date from the line plus what is stored (§4, PQ3). The rest can be
+   built, but needs a sibling of `record_answer`, two new read cases in `load_ledger`, and a line
+   with no journal record of its own (§4, PQ3, items 1–5); and dates carried from an `event-check`
+   series keep `inherit_series_answers`' student-credited line (item 6, added by §10's third
+   round). *Changed:* §4's (c) answer, blocker and
+   unblocking options are replaced by (b-prime), what it needs, its blocker and the open choice. No
+   task builds it; §5's note names the agents its tasks will take. `the_accept_carry_writes_no_ledger_line`
+   is removed from T2b.2 and the matching clause from T2b.2b, because (b-prime) would invert both
+   and a test's assertion may not change later. T2b.2's all-day clause now asserts no commitment
+   and no warning, without reading the ledger. Also changed: the status line, §1, §2, P8, T0, T4's
+   20a, T4b, Checkpoint B, T8 (anatomy §3.7 and §3.11, the spec §12 note), W, T10, §6, §8 (a new
+   risk) and the ledger (the §5.4 and PQ3 rows, the plan-only list).
 4. **PQ4: as recommended.** *Changed:* T9 makes the frozen `event-3` check a precondition: no paid
    call when it fails. The report leads with it, and `event-4` ships only through its own cloud PR,
    opened by the controller with Quinn.
