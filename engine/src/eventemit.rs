@@ -366,6 +366,33 @@ own listing whether it is meant for you.";
 const CLOSING: &str = "Approve if it applies to you: it joins Coming up as something you're \
 expected at. Reject and it's dropped. Either way you won't be asked again.";
 
+/// One row of the verdict-to-card table (P10): the ledger verdict that earns a question, the card
+/// kind it files, the start window the event must sit in, the closing sentence and the cap on
+/// cards first proposed in a day. [`select_cards`] reads every row the same way.
+struct CardRow {
+    verdict: &'static str,
+    kind: &'static str,
+    /// `(event, today, last day)`: is the event inside this kind's window?
+    window: fn(&DiscoveredEvent, Date, Date) -> bool,
+    closing: &'static str,
+    cap: i64,
+}
+
+/// `unsure` keeps `emit_event_checks`' window: a start in `[today, today + propose_horizon_days]`.
+fn start_window(event: &DiscoveredEvent, today: Date, last_day: Date) -> bool {
+    let day = event.start().date();
+    day >= today && day <= last_day
+}
+
+/// The table's one row today: `unsure` → `event-check`.
+const EVENT_CHECK_ROW: CardRow = CardRow {
+    verdict: "unsure",
+    kind: EVENT_CHECK,
+    window: start_window,
+    closing: CLOSING,
+    cap: EVENT_CHECKS_PER_DAY,
+};
+
 /// A settled series card's answer: `verdict` is `obligation` (the card was executed) or `drop`
 /// (rejected); `by` is who answered it, read from the ledger's answer line for `source_uid`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +469,11 @@ pub fn what_and_when(event: &DiscoveredEvent) -> String {
 
 /// `(meta, file name)` of every `kind: event-check` approval in `folder`, in file-name order.
 fn event_check_cards(vault: &Path, folder: &str) -> Vec<(serde_yaml_ng::Mapping, String)> {
+    cards_of_kind(vault, folder, EVENT_CHECK)
+}
+
+/// `(meta, file name)` of every `kind: <kind>` approval in `folder`, in file-name order.
+fn cards_of_kind(vault: &Path, folder: &str, kind: &str) -> Vec<(serde_yaml_ng::Mapping, String)> {
     let mut out = Vec::new();
     let dir = vault.join(folder);
     if !dir.is_dir() {
@@ -450,7 +482,7 @@ fn event_check_cards(vault: &Path, folder: &str) -> Vec<(serde_yaml_ng::Mapping,
     for path in crate::approvals::sorted_md(&dir) {
         let Ok(text) = pystr::read_text(&path) else { continue };
         let Ok((meta, _)) = split_frontmatter(&text) else { continue };
-        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_CHECK {
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != kind {
             continue;
         }
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -562,8 +594,9 @@ pub fn inherit_series_answers(
     (written, warnings)
 }
 
-/// Does this event qualify for an `event-check` question today? See [`emit_event_checks`].
+/// Does this event qualify for a question of `row`'s kind today? See [`emit_event_checks`].
 fn needs_check(
+    row: &CardRow,
     event: &DiscoveredEvent,
     ledger: &BTreeMap<String, LedgerEntry>,
     first_day: Date,
@@ -572,15 +605,14 @@ fn needs_check(
     asked_series: &BTreeSet<String>,
 ) -> bool {
     let Some(entry) = ledger.get(&event.uid) else { return false };
-    if entry.verdict.as_deref() != Some("unsure")
+    if entry.verdict.as_deref() != Some(row.verdict)
         || !entry.answered_by.is_empty()
         || entry.declined
         || entry.proposed
     {
         return false;
     }
-    let day = event.start().date();
-    if day < first_day || day > last_day {
+    if !(row.window)(event, first_day, last_day) {
         return false;
     }
     !asked_uids.contains(&event.uid) && !asked_series.contains(&event.series_uid)
@@ -594,7 +626,7 @@ fn card_slug(title: &str) -> String {
 
 /// The card's body: the question (the paragraph the console shows as the card's `why`), the
 /// facts, the other instances of a series, what each answer does, and the buttons.
-fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String {
+fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent], closing: &str) -> String {
     let mut facts = vec![when_label(primary)];
     for extra in [&primary.location, &primary.organizer] {
         let extra = crate::judge::one_line(extra, 120);
@@ -611,7 +643,7 @@ fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String 
         let days: Vec<String> = others.iter().map(|e| when_label(e)).collect();
         lines.push(format!("Also on: {}", days.join(", ")));
     }
-    lines.extend([String::new(), CLOSING.to_string(), String::new(), BUTTONS.to_string(), String::new()]);
+    lines.extend([String::new(), closing.to_string(), String::new(), BUTTONS.to_string(), String::new()]);
     lines.join("\n")
 }
 
@@ -619,6 +651,7 @@ fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String 
 /// failed.
 fn write_check(
     vault: &Path,
+    row: &CardRow,
     primary: &DiscoveredEvent,
     others: &[&DiscoveredEvent],
     ledger: &BTreeMap<String, LedgerEntry>,
@@ -634,7 +667,7 @@ fn write_check(
     let jid = ledger.get(&primary.uid).map(|e| e.judgment_id.clone()).unwrap_or_default();
     let mut pairs = vec![
         ("type", Node::text("approval")),
-        ("kind", Node::text(EVENT_CHECK)),
+        ("kind", Node::text(row.kind)),
         ("title", Node::text(&title)),
         ("status", Node::text("pending")),
         ("source_uid", Node::text(&primary.uid)),
@@ -666,13 +699,14 @@ fn write_check(
     let text = format!(
         "---\n{}---\n\n{}",
         crate::yamlemit::safe_dump_block(&front),
-        check_body(primary, others)
+        check_body(primary, others, row.closing)
     );
 
     let folder = vault.join("approvals");
     std::fs::create_dir_all(&folder).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
     let stem = format!(
-        "event-check-{}-{}",
+        "{}-{}-{}",
+        row.kind,
         card_slug(&primary.title),
         primary.start().date().strftime("%Y-%m-%d")
     );
@@ -708,11 +742,45 @@ pub fn emit_event_checks(
     journal: &mut Journal,
 ) -> (Vec<PathBuf>, usize) {
     let mut filed: Vec<PathBuf> = Vec::new();
+    let row = &EVENT_CHECK_ROW;
+    let groups = select_cards(vault, row, events, ledger, config, today, budget);
+    for (primary, others) in &groups {
+        let Ok(path) = write_check(vault, row, primary, others, ledger, today, ctx, journal) else {
+            break;
+        };
+        // Card first, ledger second, as the digest does.
+        for event in std::iter::once(primary).chain(others.iter()) {
+            let _ = record_proposed(vault, &event.uid, today);
+        }
+        filed.push(path);
+    }
+    let count = filed.len();
+    (filed, count)
+}
+
+/// One card's worth of events: the primary (the soonest) and the rest of its series.
+type Group<'a> = (&'a DiscoveredEvent, Vec<&'a DiscoveredEvent>);
+
+/// The selection behind every event card: which groups of `events` get a `row.kind` card today.
+///
+/// Eligibility (`row.verdict`, nobody answered, neither declined nor proposed), `row.window`,
+/// never-ask-twice, the day's cap (`min(budget, row.cap − cards of this kind first proposed
+/// today)`), the order (primary start, primary uid) and the series grouping (up to
+/// [`SERIES_LIST_CAP`] instances a card). The returned groups are already cut to the allowance.
+fn select_cards<'a>(
+    vault: &Path,
+    row: &CardRow,
+    events: &'a [DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    config: &EventsConfig,
+    today: Date,
+    budget: i64,
+) -> Vec<Group<'a>> {
     let mut asked_series: BTreeSet<String> = BTreeSet::new();
     let mut listed_uids: BTreeSet<String> = BTreeSet::new();
     let mut first_proposed_today: i64 = 0;
     for folder in ["approvals", "archive"] {
-        for (meta, _) in event_check_cards(vault, folder) {
+        for (meta, _) in cards_of_kind(vault, folder, row.kind) {
             // A live card, or one the student answered, closes its series. One closed without an
             // answer (expired, or deleted from the app) closes only the instances it listed.
             let answered = matches!(card_text(&meta, "status").as_str(), "executed" | "rejected");
@@ -726,9 +794,9 @@ pub fn emit_event_checks(
             }
         }
     }
-    let allowance = budget.min(EVENT_CHECKS_PER_DAY - first_proposed_today).max(0) as usize;
+    let allowance = budget.min(row.cap - first_proposed_today).max(0) as usize;
     if allowance == 0 {
-        return (filed, 0);
+        return Vec::new();
     }
     let mut asked_uids = crate::approvals::existing_source_uids(vault);
     asked_uids.extend(listed_uids);
@@ -738,13 +806,13 @@ pub fn emit_event_checks(
 
     let mut qualifying: Vec<&DiscoveredEvent> = events
         .iter()
-        .filter(|e| needs_check(e, ledger, today, last_day, &asked_uids, &asked_series))
+        .filter(|e| needs_check(row, e, ledger, today, last_day, &asked_uids, &asked_series))
         .collect();
     qualifying.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
     qualifying.dedup_by(|a, b| a.uid == b.uid);
     // Grouped in (start, uid) order, so each group's first member is its primary and the groups
     // themselves come out in (primary start, primary uid) order.
-    let mut groups: Vec<(&DiscoveredEvent, Vec<&DiscoveredEvent>)> = Vec::new();
+    let mut groups: Vec<Group<'a>> = Vec::new();
     for event in qualifying {
         match groups.iter_mut().find(|(primary, _)| primary.series_uid == event.series_uid) {
             Some((_, others)) => {
@@ -755,19 +823,8 @@ pub fn emit_event_checks(
             None => groups.push((event, Vec::new())),
         }
     }
-
-    for (primary, others) in groups.iter().take(allowance) {
-        let Ok(path) = write_check(vault, primary, others, ledger, today, ctx, journal) else {
-            break;
-        };
-        // Card first, ledger second, as the digest does.
-        for event in std::iter::once(primary).chain(others.iter()) {
-            let _ = record_proposed(vault, &event.uid, today);
-        }
-        filed.push(path);
-    }
-    let count = filed.len();
-    (filed, count)
+    groups.truncate(allowance);
+    groups
 }
 
 #[cfg(test)]
@@ -1511,6 +1568,89 @@ mod tests {
             for e in &events {
                 assert!(ledger[&e.uid].proposed, "{}", e.uid);
             }
+        }
+
+        /// T2a.1a's pin: what `emit_event_checks` selects, written green on the code before the
+        /// selection moved into the shared function. It pins the selection, not the card bytes, so
+        /// it stays true when T2a.1b adds `instances:` and the new closing.
+        #[test]
+        fn the_selection_refactor_keeps_what_event_checks_select() {
+            let vault = vault("pin");
+            let events = [
+                // Fed out of order: the cards come out in (primary start, primary uid) order.
+                on("ics:d", "Dance night", 10, 4, 20, 0, 22, 0), // a fourth group: past the cap of 3
+                in_series(on("lx:5:2", "Weekly circle", 10, 9, 19, 0, 21, 0), "lx:5"),
+                on("ics:c", "Charity run", 10, 3, 8, 0, 9, 0),
+                in_series(on("lx:5:1", "Weekly circle", 10, 2, 19, 0, 21, 0), "lx:5"),
+                on("ics:a", "Alpha mixer", 10, 1, 10, 0, 11, 0),
+            ];
+            for e in &events {
+                let jid = (e.uid == "ics:a").then_some(JID_A);
+                unsure(&vault, &e.uid, &e.title, jid);
+            }
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 3);
+            let names: Vec<String> = paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "event-check-alpha-mixer-2026-10-01.md",
+                    "event-check-weekly-circle-2026-10-02.md",
+                    "event-check-charity-run-2026-10-03.md",
+                ]
+            );
+            // The same cards are what the folder holds, and nothing else.
+            let mut by_name = paths.clone();
+            by_name.sort();
+            assert_eq!(cards(&vault, "approvals"), by_name);
+
+            let expect: [(&str, &str, &str, &[&str], &str); 3] = [
+                ("Alpha mixer · Thu 1 Oct 10–11am", "ics:a", "ics:a", &["ics:a"], "2026-10-01"),
+                (
+                    "Weekly circle · Fri 2 Oct 7–9pm · +1 more",
+                    "lx:5:1",
+                    "lx:5",
+                    &["lx:5:1", "lx:5:2"],
+                    "2026-10-02",
+                ),
+                ("Charity run · Sat 3 Oct 8–9am", "ics:c", "ics:c", &["ics:c"], "2026-10-03"),
+            ];
+            for (path, (title, source, series, listed, expires)) in paths.iter().zip(expect) {
+                let (meta, _) = note(path);
+                assert_eq!(field(&meta, "title").as_deref(), Some(title));
+                assert_eq!(field(&meta, "source_uid").as_deref(), Some(source));
+                assert_eq!(field(&meta, "series_uid").as_deref(), Some(series));
+                assert_eq!(event_uids(&meta), listed);
+                assert_eq!(field(&meta, "expires").as_deref(), Some(expires));
+                assert_eq!(date_field(&meta, "first_proposed_at"), Some(DAY));
+                assert_eq!(date_field(&meta, "proposed_at"), Some(DAY));
+                assert_eq!(field(&meta, "status").as_deref(), Some("pending"));
+            }
+            assert_eq!(
+                field(&note(&paths[0]).0, "judgment_id").as_deref(),
+                Some(JID_A),
+                "a card carries its primary's judgment id"
+            );
+            assert_eq!(field(&note(&paths[1]).0, "judgment_id"), None);
+
+            // The `proposed` lines, in the order the cards were filed; the fourth group has none.
+            let proposed: Vec<String> = seen(&vault)
+                .lines()
+                .filter(|l| l.contains(" · proposed "))
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                proposed,
+                [
+                    "- ics:a · proposed 2026-09-28",
+                    "- lx:5:1 · proposed 2026-09-28",
+                    "- lx:5:2 · proposed 2026-09-28",
+                    "- ics:c · proposed 2026-09-28",
+                ]
+            );
         }
 
         fn five(vault: &Path, first_day: i8) -> Vec<DiscoveredEvent> {
