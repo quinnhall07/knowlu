@@ -2262,7 +2262,8 @@ fn settings_reads_and_saves_interests() {
     }
     let n = html.find("id=\"set-int-note\"").expect("the interests note");
     let note = &html[n..n + html[n..].find("</p>").expect("note end")];
-    for fact in ["600", "one call", "each event it judges"] {
+    // Spec 9.2 / plan T5b: every fixed fact, on this line, not only on the preferences line.
+    for fact in ["600", "one call", "each event it judges", "neither we nor the model&rsquo;s host keep", "stay on this computer"] {
         assert!(note.contains(fact), "the interests note keeps the disclosure: {fact}");
     }
     let p = ints_js();
