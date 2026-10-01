@@ -2257,8 +2257,13 @@ fn settings_reads_and_saves_interests() {
     for id in ["set-int-strong", "set-int-mild", "set-int-never", "set-int-clubs", "set-int-save"] {
         assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
     }
-    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in", "one call", "judges"] {
+    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in"] {
         assert!(html.contains(label), "the section keeps: {label}");
+    }
+    let n = html.find("id=\"set-int-note\"").expect("the interests note");
+    let note = &html[n..n + html[n..].find("</p>").expect("note end")];
+    for fact in ["600", "one call", "each event it judges"] {
+        assert!(note.contains(fact), "the interests note keeps the disclosure: {fact}");
     }
     let p = ints_js();
     assert!(p.contains("invoke(\"set_interests\"") && p.contains("strong:") && p.contains("mild:") && p.contains("never:") && p.contains("clubs:"), "Save sends the four lists");
