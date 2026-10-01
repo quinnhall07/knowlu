@@ -1687,6 +1687,8 @@ fn describe(r: &crate::ledger::Record) -> DeltaRecord {
     let text = match (op.as_str(), field.as_deref()) {
         ("set", Some(f)) => format!("{path}: {f} {} → {} ({who})", crate::ledger::dumps_value(&old), crate::ledger::dumps_value(&new)),
         ("supersede", Some(f)) => format!("{path}: {f} — {} won over {} ({who})", crate::ledger::dumps_value(&new), crate::ledger::dumps_value(&old)),
+        // M2 §7.4: a body replace carries two digests and no text, so the line names the edit only.
+        ("set_body", _) => format!("{path}: body edited ({who})"),
         (op, _) => format!("{path}: {op} ({who})"),
     };
     DeltaRecord { ts: s("ts").unwrap_or_default(), op, field, path, id: s("id"), actor, via, old, new, run_id: s("run_id"), text }
@@ -2869,6 +2871,31 @@ mod tests {
         assert!(!d2.records.is_empty(), "the fixture journal has records after 2026-08-01");
         assert!(d2.records.iter().all(|r| !r.text.is_empty()));
         assert!(!d2.summary.is_empty());
+    }
+
+    /// M2 §7.4, spec test 22: a `set_body` record reads as a sentence, and its digests stay in the
+    /// record for the page's own logic but are never part of the text.
+    #[test]
+    fn a_set_body_record_reads_body_edited() {
+        let who = (crate::journal::HUMAN_ACTOR, "dashboard");
+        let mut spec = crate::journal::NewRecord::new("set_body", "tasks/stats-hw-4.md", who.0, who.1);
+        spec.old = serde_json::json!({"sha256": crate::write::body_sha256(""), "bytes": 0});
+        spec.new = serde_json::json!({"sha256": crate::write::body_sha256("Read ch. 4\n"), "bytes": 11});
+        let record = crate::journal::make_record(spec).unwrap();
+        let d = describe(&record);
+        assert_eq!(d.text, format!("tasks/stats-hw-4.md: body edited ({} via {})", who.0, who.1));
+        assert_eq!((d.op.as_str(), d.field.as_deref()), ("set_body", None));
+        assert_eq!(d.old["bytes"], 0);
+        assert_eq!(d.new["sha256"], crate::write::body_sha256("Read ch. 4\n"));
+        assert!(!d.text.contains(&crate::write::body_sha256("Read ch. 4\n")), "the page never prints the digests");
+        // An Obsidian hand-edit names itself the same way as every other record does.
+        let mut external = crate::journal::NewRecord::new("set_body", "tasks/a.md", who.0, "external");
+        external.new = serde_json::Value::Null;
+        let d = describe(&crate::journal::make_record(external).unwrap());
+        assert_eq!(d.text, "tasks/a.md: body edited (an Obsidian edit)");
+        // The generic reading is untouched for the ops that have none of their own.
+        let other = crate::journal::NewRecord::new("create", "tasks/a.md", who.0, who.1);
+        assert!(describe(&crate::journal::make_record(other).unwrap()).text.starts_with("tasks/a.md: create ("));
     }
 
     /// R21: `seen_at` is caller-supplied (Task 9's `--seen-at`, Task 10's persisted per-device
