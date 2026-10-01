@@ -817,6 +817,49 @@ fn build_push_sends_no_record_about_a_path_outside_the_note_folders() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The merge of main (M1 grades #25, Gmail connect #26) into M2: main made `grades` the eighth
+/// `ids::NOTE_FOLDERS` folder while M2's D13 `continue` began holding back every record whose path
+/// fails `is_note_path`. On main a record went up whatever its path; now it goes up only if its
+/// folder is on that list. So a `create` in EVERY note folder (derived from the list, never spelt,
+/// so a folder the engine gains is covered the day it lands) and a grade note made the way
+/// `grades::create_note` makes one (`agent:knowlu.grades`, `type: grade`, at `grades::note_path`)
+/// still go up, record and note both, beside the profile's `create`, which stays.
+#[test]
+fn a_record_about_a_note_in_every_note_folder_still_goes_up_beside_the_withheld_profile() {
+    use knowlu_engine::write;
+    let dir = fixture("every-note-folder-goes-up");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    write::create_profile_file(&dir, "preferences", "Mornings.\n", &ctx, &mut journal).expect("preferences");
+    let mut made = Vec::new();
+    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+        let rel = format!("{folder}/merge-pin.md");
+        write::create(&dir, &rel, "---\ntitle: Merge pin\n---\n", &ctx, &mut journal, None).expect(&rel);
+        made.push(rel);
+    }
+    let grades = write::WriteContext::new("agent:knowlu.grades", "local-runner");
+    let grade = knowlu_engine::grades::note_path("cs-100", "_4686399_1");
+    let text = "---\ntype: grade\ntitle: HW 1\ncourse: cs-100\n---\n";
+    write::create(&dir, &grade, text, &grades, &mut journal, None).expect("a grade note");
+    made.push(grade);
+    journal.invalidate();
+
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(batch.warnings.is_empty(), "{:?}", batch.warnings);
+    let sent = sent_records(&batch);
+    for rel in &made {
+        let went = sent.iter().any(|r| r["op"] == "create" && r["path"] == rel.as_str());
+        assert!(went, "{rel}'s record stayed on this computer: {sent:?}");
+        assert!(batch.notes.iter().any(|n| n["path"] == rel.as_str()), "{rel} stayed: {:?}", batch.notes);
+    }
+    assert!(sent.iter().any(|r| r["actor"] == "agent:knowlu.grades"), "{sent:?}");
+    assert!(!sent.iter().any(is_profile_path), "a profile record went up: {sent:?}");
+    assert!(!batch.notes.iter().any(is_profile_path), "{:?}", batch.notes);
+    // The fixture's seed record, one `create` per note folder and the grade note's; nothing else.
+    assert_eq!(sent.len(), 1 + knowlu_engine::ids::NOTE_FOLDERS.len() + 1, "{sent:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // Task 6: the pull, `reconcile` with the roles reversed, and the amend card.
 // ---------------------------------------------------------------------------
