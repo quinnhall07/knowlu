@@ -382,9 +382,11 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// Paying the model for it is waste that F9's paging multiplies by about 30, so `pending` is drawn
 /// from `eventfilter::prefilter_events`'s survivors — the SAME call `rank` makes, never a copy, so
 /// the two commands' idea of "the roster" cannot drift apart. A new instance of an already-settled
-/// series (`eventemit::settled_series`) is excluded too: `rank`'s series inheritance answers it on
-/// the very next run, so judging it first would be waste, and a confident machine verdict would
-/// block the student's own answer (F1's supersede-`unsure`-only rule).
+/// series is excluded too: an answered `event-check` series (`eventemit::settled_series`) is
+/// answered by `rank`'s series inheritance on the very next run, and an answered `event-accept`
+/// series (`eventcarry::answered_series`) by `rank`'s carry (spec §6.1). Judging it first would be
+/// waste, and a confident machine verdict would block the student's own answer (F1's
+/// supersede-`unsure`-only rule).
 ///
 /// **Writes only the ledger.** Nothing here writes `state/events.md` — `rank` regenerates it a few
 /// seconds later, and by then the verdicts are in the ledger it reads.
@@ -454,12 +456,16 @@ pub fn judge_roster(
     // F10 decision 2 (review I-1, the `judge` side): a new instance of an already-settled series
     // is answered by `rank`'s series inheritance on its next run (F2) — paying the model for it
     // first would be waste, and a confident machine verdict would block the student's own answer
-    // (F1's supersede-`unsure`-only rule).
-    let settled = crate::eventemit::settled_series(vault);
+    // (F1's supersede-`unsure`-only rule). Spec §6.1: the same holds for a series an
+    // `event-accept` card answered (`rank`'s carry books or declines it), so the skip is the union
+    // of `settled_series` and `eventcarry::answered_series`, the one union the emitter uses too.
+    let mut settled: std::collections::BTreeSet<String> =
+        crate::eventemit::settled_series(vault).into_keys().collect();
+    settled.extend(crate::eventcarry::answered_series(vault).into_keys());
     let pending: Vec<&DiscoveredEvent> = candidates
         .iter()
         .filter(|e| ledger.get(&e.uid).and_then(|entry| entry.verdict.as_ref()).is_none())
-        .filter(|e| !settled.contains_key(&e.series_uid))
+        .filter(|e| !settled.contains(&e.series_uid))
         .collect();
     let left_for_cap = pending.len().saturating_sub(cap);
     let batch: Vec<&DiscoveredEvent> = pending.into_iter().take(cap).collect();
@@ -1235,6 +1241,62 @@ mod tests {
         let ledger = crate::eventledger::load_ledger(&dir, None);
         assert!(ledger.get("localist:77:2").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spec test 21 (§6.1): the same skip for a series an `event-accept` card answered. An
+    /// `executed` card's series is carried by `rank` (accept) and a `rejected` one's is declined,
+    /// so a new instance of either is never sent to the model. The skip is the union of
+    /// `eventemit::settled_series` and `eventcarry::answered_series`, as the emitter's.
+    #[test]
+    fn judge_roster_does_not_judge_a_new_instance_of_an_accepted_series() {
+        for status in ["executed", "rejected"] {
+            let dir = std::env::temp_dir()
+                .join(format!("knowlu-t2b3-{status}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+            std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+            std::fs::create_dir_all(dir.join("archive")).expect("scratch vault");
+            std::fs::write(
+                dir.join("config").join("events.yaml"),
+                "sources:\n  - name: campus\n    type: localist\n    url: https://example.invalid/localist\n    enabled: true\n",
+            )
+            .expect("write events.yaml");
+            let card = format!(
+                "---\ntype: approval\nkind: event-accept\ntitle: \"Worth a look · Weekly Standup\"\n\
+                 status: {status}\nverdict: opportunity\nsource_uid: \"localist:77:1\"\n\
+                 series_uid: \"localist:77\"\nevents:\n- \"localist:77:1\"\n\
+                 proposed_at: 2026-08-20\nfirst_proposed_at: 2026-08-20\nexpires: 2026-08-24\n\
+                 snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+            );
+            std::fs::write(dir.join("archive").join("event-weekly.md"), card).expect("write card");
+            // A NEW instance (id 2) of series `localist:77`, on no card and in no ledger line.
+            let payload = "{\"events\": [{\"event\": {\"id\": 77, \"title\": \"Weekly Standup\", \
+                \"filters\": {\"event_target_audience\": [{\"name\": \"Students\"}]}, \
+                \"event_instances\": [{\"event_instance\": {\"id\": 2, \
+                    \"start\": \"2026-08-29T10:00:00-05:00\", \"end\": \"2026-08-29T11:00:00-05:00\"}}]}}]}"
+                .to_string();
+            let fetch = |_: &str| Ok(payload.clone());
+
+            struct NeverCalled<'a>(&'a std::cell::RefCell<Vec<String>>);
+            impl crate::judge::EventModel for NeverCalled<'_> {
+                fn judge_event(
+                    &self,
+                    item: &crate::judge::EventItem,
+                ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                    self.0.borrow_mut().push(item.uid.clone());
+                    Ok(verdict("opportunity", "should never be reached"))
+                }
+            }
+            let seen = std::cell::RefCell::new(Vec::new());
+            let model = NeverCalled(&seen);
+
+            let lines = judge_roster(&dir, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+            assert!(seen.borrow().is_empty(), "{status}: a new instance of an answered event-accept series must not reach the model: {:?}", seen.borrow());
+            assert!(lines.iter().any(|l| l.starts_with("events: 0 judged")), "{status}: {lines:?}");
+            let ledger = crate::eventledger::load_ledger(&dir, None);
+            assert!(ledger.get("localist:77:2").is_none(), "{status}: no ledger line for the new instance");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// F10 decision 1 (review I-3, the `judge` side): `started` moves above the feed load, so
