@@ -73,6 +73,11 @@
 //! - it never counts after a human answer, and only a uid's first carry line counts;
 //! - a later human answer replaces a verdict a carry line set, and clears `carry` (judge-once).
 //!
+//! The feed's title sits on the line right after `- <uid> · `, and [`clean_title`] maps only `·`
+//! and the two newlines, so a title starting with a field head would forge that field. The carry
+//! asks [`carried_answer_reads_back`] first, which reads the line with [`load_ledger`]'s own rules
+//! before it is written, and writes no line the reader would misread.
+//!
 //! A human answer is an answer-shaped line whose `by` is *not* an agent's. Any other answer-shaped
 //! line with an agent `by` (no card, no span that parses, or a word outside [`CARRY_VERDICTS`]) is
 //! an ordinary verdict line: first verdict wins, it supersedes nothing, and `answered_by` stays
@@ -457,7 +462,6 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
     if !path.exists() {
         return BTreeMap::new();
     }
-    let mut entries: BTreeMap<String, LedgerEntry> = BTreeMap::new();
     let text = match read_text(&path) {
         Ok(text) => text,
         Err(err) => {
@@ -467,7 +471,18 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
             return BTreeMap::new();
         }
     };
-    for line in splitlines(&text) {
+    read_lines(splitlines(&text), warnings)
+}
+
+/// [`load_ledger`]'s per-line rules, over `lines` in order: the whole reader but the file. Split
+/// out (review of T2b.5) so [`carried_answer_reads_back`] reads a line not yet written with exactly
+/// these rules; `load_ledger` reads exactly as before.
+fn read_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    mut warnings: Option<&mut Vec<String>>,
+) -> BTreeMap<String, LedgerEntry> {
+    let mut entries: BTreeMap<String, LedgerEntry> = BTreeMap::new();
+    for line in lines {
         if let Some(caps) = PROPOSED.captures(line) {
             if !line.contains("verdict:") {
                 let uid = caps.name("uid").unwrap().as_str();
@@ -829,14 +844,60 @@ pub fn record_carried_answer(
     if !(crate::ids::is_id(from) && from.starts_with("appr_")) {
         return Err(VerdictError::BadField("from"));
     }
-    let clean = clean_title(title);
-    let line = format!(
-        "- {uid} · {clean} · verdict:{verdict} · by:{CARRY_ACTOR} · from:{from} · start:{} · end:{} · answered {}",
+    let line = carried_line(uid, title, when, verdict, from, start, end);
+    append(vault, &line).map_err(|e| VerdictError::Io(e.to_string()))
+}
+
+/// The line [`record_carried_answer`] appends, built in this one place so
+/// [`carried_answer_reads_back`] reads exactly those bytes.
+fn carried_line(
+    uid: &str,
+    title: &str,
+    when: Date,
+    verdict: &str,
+    from: &str,
+    start: DateTime,
+    end: DateTime,
+) -> String {
+    format!(
+        "- {uid} · {} · verdict:{verdict} · by:{CARRY_ACTOR} · from:{from} · start:{} · end:{} · answered {}",
+        clean_title(title),
         start.strftime(SPAN_FORMAT),
         end.strftime(SPAN_FORMAT),
         when.strftime("%Y-%m-%d"),
-    );
-    append(vault, &line).map_err(|e| VerdictError::Io(e.to_string()))
+    )
+}
+
+/// Would [`load_ledger`] read the carry's line for these arguments back exactly as written: one
+/// entry, for `uid`, with `verdict`, [`CARRY_ACTOR`] as `answered_by`, the cleaned title, card
+/// `from` and the span `start`..`end`, and no `strength`, `why` or `jid`? Pure: it builds the line
+/// [`record_carried_answer`] would append and reads it with the reader's own rules
+/// ([`read_lines`], after the same newline translation and `splitlines`).
+///
+/// The uid, the span and the feed's title all sit on the line unchecked by the writer (review of
+/// T2b.5). A uid outside the head's class, a span year that is no `\d{4}`, a title holding a line
+/// boundary, or a title that starts with a field head (`verdict:`, `by:`, `from:`, …, which the
+/// reader's leftmost search then takes for the field) all read back wrong. The carry writes no
+/// line for any of them, since it would be misread, or re-written on every `rank`.
+pub(crate) fn carried_answer_reads_back(
+    uid: &str,
+    title: &str,
+    when: Date,
+    verdict: &str,
+    from: &str,
+    start: DateTime,
+    end: DateTime,
+) -> bool {
+    let text = universal_newlines(&carried_line(uid, title, when, verdict, from, start, end));
+    let expected = LedgerEntry {
+        uid: uid.to_string(),
+        verdict: Some(verdict.to_string()),
+        answered_by: CARRY_ACTOR.to_string(),
+        title: clean_title(title),
+        carry: Some(Carried { from: from.to_string(), start, end }),
+        ..Default::default()
+    };
+    read_lines(splitlines(&text), None) == BTreeMap::from([(uid.to_string(), expected)])
 }
 
 /// Append a `proposed` marker. Carries no verdict — the guard in [`load_ledger`] depends on that.
@@ -1641,6 +1702,51 @@ mod tests {
         assert_eq!(entry.verdict.as_deref(), Some("unsure"));
         assert_eq!(entry.carry, None, "the why field must not forge a carry");
         assert_eq!(entry.answered_by, "", "the why field must not forge by:");
+    }
+
+    #[test]
+    fn the_carry_line_reads_back_only_as_written() {
+        // Review of T2b.5: `carried_answer_reads_back` builds the line `record_carried_answer`
+        // writes and reads it with `load_ledger`'s own rules. Each case is also written to a vault
+        // and read by `load_ledger`, and the check must agree with that read.
+        let day = Date::constant(2026, 10, 1);
+        let (start, end) = (at(8, 10), at(8, 15));
+        let year = |y: i16| jiff::civil::date(y, 1, 1).at(0, 0, 0, 0);
+        let jid_title = format!("jid:{J2} Career fair");
+        let cases: [(&str, &str, DateTime, bool); 17] = [
+            ("e", "Career fair", end, true),
+            ("e", "Career fair · verdict:tbd", end, true), // `·` is cleaned: no field head
+            ("e", "proposed Career fair", end, true),
+            ("e", "answered 2026-01-01 Career fair", end, true),
+            ("e", "task:lab Career fair", end, true), // no reader reads a `task:` field
+            ("e", "verdict:tbd Career fair", end, false),
+            ("e", "verdict:drop Career fair", end, false),
+            ("e", "strength:strong Career fair", end, false),
+            ("e", "why:\"x\" Career fair", end, false),
+            ("e", "by:appointment Career fair", end, false),
+            ("e", &jid_title, end, false),
+            ("e", "from:appr_abcdefabcd Career fair", end, false),
+            ("e", "start:2026-01-01T00:00:00 Career fair", end, false),
+            ("e", "Career\u{2028}fair", end, false),
+            ("e", "Career fair", year(-1), false), // `-0001-…` is no `\d{4}` year
+            ("lx 77", "Career fair", end, false),
+            ("lx:77:verdict:2", "Career fair", end, true), // a uid's own `verdict:` breaks nothing
+        ];
+        for (i, (uid, title, end, reads)) in cases.into_iter().enumerate() {
+            let check = carried_answer_reads_back(uid, title, day, "opportunity", CARD, start, end);
+            assert_eq!(check, reads, "{uid:?} {title:?}");
+            let vault = tmp_vault(&format!("carry-reads-back-only-{i}"));
+            record_carried_answer(&vault, uid, title, day, "opportunity", CARD, start, end).unwrap();
+            let entry = load_ledger(&vault, None).remove(uid);
+            let as_written = entry.as_ref().is_some_and(|e| {
+                e.verdict.as_deref() == Some("opportunity")
+                    && (e.strength.as_str(), e.why.as_str(), e.judgment_id.as_str()) == ("", "", "")
+                    && e.answered_by == CARRY_ACTOR
+                    && e.carry == carry_of(CARD, start, end)
+                    && e.title == clean_title(title)
+            });
+            assert_eq!(as_written, reads, "{uid:?} {title:?}: load_ledger gave {entry:?}");
+        }
     }
 
     #[test]

@@ -114,7 +114,12 @@ pub fn pending_digest_uids(vault: &Path) -> BTreeSet<String> {
     uids
 }
 
-/// Judged-relevant, unproposed, undeclined, and inside the horizon.
+/// Judged-relevant, unproposed, undeclined, uncarried, and inside the horizon.
+///
+/// A carried date (a `carry` on its entry, PQ3, P15) is an instance of a series the student
+/// accepted: it is booked and its answer is the series', so the digest never asks about it again
+/// (never ask twice, spec §11.1 item 5), whether the carry set its `opportunity` or a machine
+/// judged it so before the answer (review of T2b.5). No line written before PQ3 has a carry.
 pub fn eligible_events(
     events: &[DiscoveredEvent],
     ledger: &BTreeMap<String, LedgerEntry>,
@@ -129,7 +134,7 @@ pub fn eligible_events(
         if entry.verdict.as_deref() != Some("opportunity") {
             continue;
         }
-        if entry.proposed || entry.declined {
+        if entry.proposed || entry.declined || entry.carry.is_some() {
             continue;
         }
         if pending_uids.contains(&event.uid) {

@@ -1085,6 +1085,20 @@ writes no line.
 **Done when:** the nine tests pass, and T2b.1's, T2b.2's, T2b.2b's and T2b.4's tests pass
 unchanged.
 
+**Review fix (one commit; it also touches `eventledger.rs` and `eventemit.rs`).**
+- The carry writes a date's line only when `eventledger::carried_answer_reads_back` reads it back
+  exactly as written. The check builds the line as `record_carried_answer` does and reads it with
+  `load_ledger`'s own per-line rules (`read_lines`, split out of `load_ledger` unchanged).
+- A date gets no line and the same warning, and is booked all the same, when the line would not
+  read back: a feed title that starts with a field head (`verdict:tbd`, `by:appointment`, `from:`,
+  …) or holds a line boundary, a uid outside the head's class, or a span year that is no `\d{4}`.
+- `eventemit::eligible_events` skips an entry with a `carry`, so T4's digest (step 5,
+  `event_cards` off) never proposes a carried date again.
+- Tests: `a_title_the_ledger_cannot_read_back_gets_no_carry_line` and
+  `a_carried_opportunity_date_is_never_in_the_digest` (`eventcarry.rs`), and
+  `the_carry_line_reads_back_only_as_written` (`eventledger.rs`).
+- *Checkpoint B reads this fix with T2b.5.*
+
 ### T3.1a. The approved `event-accept` arm and the retry (`approvals.rs`)
 
 **Agent:** `contract-engineer` (Opus, xhigh). **Why:** `approvals.rs` is on the contract list. A
@@ -1176,6 +1190,8 @@ D1–D11, Quinn's PQ1 (a) and PQ3 (P15), and checks in particular:
   - none over a human answer, a `declined` line or an earlier carry line;
   - a roster-built run writes none;
   - no write besides the line: no journal record shape and no other file;
+  - with its review fix, no line the reader would misread (the feed's title included), and no
+    carried date in the digest;
 - that the ever-written set leaves out approval cards and includes `archive/`;
 - that every note is written journal first, through `write::create`, by an `agent:` actor;
 - that a failure leaves the card `approved` and a retry duplicates nothing;

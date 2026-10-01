@@ -29,7 +29,9 @@ use serde_yaml_ng::Mapping;
 
 use crate::commitments::{create_confirmed, Level};
 use crate::eventaccept::{commitment_for, Instance};
-use crate::eventledger::{load_ledger, record_carried_answer, record_declined, LedgerEntry};
+use crate::eventledger::{
+    carried_answer_reads_back, load_ledger, record_carried_answer, record_declined, LedgerEntry,
+};
 use crate::events::DiscoveredEvent;
 use crate::journal::Journal;
 use crate::models::split_frontmatter;
@@ -348,14 +350,9 @@ fn decline(
 /// Does `load_ledger` read a marker line for `uid` back? Its uid class is `[A-Za-z0-9_.:@+-]`, and
 /// a uid holding `verdict:` breaks its own marker line (`eventledger`'s module doc).
 fn ledger_reads(uid: &str) -> bool {
-    uid_reads(uid) && !uid.contains("verdict:")
-}
-
-/// Does `load_ledger` read the head of any line for `uid` (`- <uid> · `) back? Its uid class is
-/// `[A-Za-z0-9_.:@+-]`. A `verdict:` inside the uid does not break a verdict or answer line, whose
-/// own `· verdict:` field comes first.
-fn uid_reads(uid: &str) -> bool {
-    !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || "_.:@+-".contains(c))
+    !uid.is_empty()
+        && uid.chars().all(|c| c.is_ascii_alphanumeric() || "_.:@+-".contains(c))
+        && !uid.contains("verdict:")
 }
 
 /// One accepted series, as the accept carry books it and writes its lines.
@@ -443,8 +440,11 @@ fn book(
 /// date as the student, and the carry never could after that. No line for a uid that already has a
 /// carry line, a human answer or a `declined` line (judge once). A card with no usable `id:` books
 /// its dates but cannot name itself on a line: one warning per card (`unlisted` holds the files
-/// warned about). A line the ledger could not read back would be written again on every `rank`, so
-/// it is not written and a warning says why. The line has no journal record, as no ledger line has
+/// warned about). A line the ledger could not read back exactly as written
+/// (`eventledger::carried_answer_reads_back`: a uid or span outside its classes, or a feed title
+/// that splits the line or starts with a field head such as `verdict:` or `by:`) would be misread
+/// or written again on every `rank`, so it is not written and a warning says why. The date is
+/// booked all the same. The line has no journal record, as no ledger line has
 /// one. A write failure is a warning, and the next `rank` retries.
 fn carry_line(
     vault: &Path,
@@ -466,12 +466,11 @@ fn carry_line(
         }
         return false;
     }
-    let span_reads = [event.start(), event.end()].iter().all(|at| (0..=9999).contains(&at.year()));
-    if !uid_reads(&event.uid) || !span_reads {
+    let (start, end) = (event.start(), event.end());
+    if !carried_answer_reads_back(&event.uid, &event.title, today, series.word, &series.id, start, end) {
         warnings.push(format!("carry: no line for {:?}: the ledger cannot read it back", event.uid));
         return false;
     }
-    let (start, end) = (event.start(), event.end());
     let written = record_carried_answer(vault, &event.uid, &event.title, today, series.word, &series.id, start, end);
     if let Err(err) = written {
         warnings.push(format!("carry: no line for {} ({err})", event.uid));
@@ -1608,5 +1607,95 @@ mod tests {
         let (lines, warnings, _) = carry(&vault, &events);
         assert_eq!((lines, &warnings), (0, &warned));
         assert_eq!(ledger_text(&vault), before);
+    }
+
+    #[test]
+    fn a_title_the_ledger_cannot_read_back_gets_no_carry_line() {
+        // Review of T2b.5: the feed's title sits right after `- <uid> · `, so a title that starts
+        // with a field head forges that field (`load_ledger` reads each field's leftmost match),
+        // and a line boundary in it splits the line. Written anyway, such a line reads as no entry
+        // (re-written on every `rank`), as a machine's `drop`, as a human answer by `appointment`
+        // (judge-once broken), or with another card or span. A title that forges nothing is carried.
+        let vault = tmp("pq3-forged-title");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let titled = |day: i8, title: &str| {
+            let mut event = instance(&format!("lx:77:{day}"), "lx:77", at(10, day, 19, 0), at(10, day, 21, 0));
+            event.title = title.to_string();
+            event
+        };
+        let events = [
+            titled(10, "verdict:tbd Weekly meeting"),
+            titled(11, "verdict:drop Weekly meeting"),
+            titled(12, "by:appointment Advising hours"),
+            titled(13, "from:appr_abcdef0123 Weekly meeting"),
+            titled(14, "end:2026-01-01T00:00:00 Weekly meeting"),
+            titled(15, "Weekly\u{2028}meeting"),
+            titled(20, "Weekly · verdict:tbd"), // the `·` is cleaned to `-`: no field head
+            titled(21, "proposed Weekly meeting"),
+            titled(22, "task:lab Weekly meeting"), // no reader reads a `task:` field
+        ];
+        let refused = ["lx:77:10", "lx:77:11", "lx:77:12", "lx:77:13", "lx:77:14", "lx:77:15"];
+        let warned: Vec<String> =
+            refused.iter().map(|uid| format!("carry: no line for {uid:?}: the ledger cannot read it back")).collect();
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (3, &warned));
+        for uid in refused {
+            assert_eq!(lines_for(&vault, uid), Vec::<String>::new(), "{uid}: no line");
+            assert!(!ledger.contains_key(uid), "{uid}: no entry");
+        }
+        assert_eq!(carry_lines(&vault).len(), 3, "the three controls' lines");
+        for event in &events[6..] {
+            let entry = &ledger[&event.uid];
+            assert_eq!(entry.verdict.as_deref(), Some("opportunity"), "{}", event.uid);
+            assert_eq!(entry.answered_by, CARRY_ACTOR, "{}", event.uid);
+            assert_eq!(entry.carry, the_carry(ID_A, event), "{}", event.uid);
+        }
+        assert_eq!(ledger, load_ledger(&vault, None));
+        assert_eq!(booked(&vault).len(), events.len(), "every date is booked all the same");
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (0, &warned), "a second run writes nothing");
+        assert_eq!(ledger_text(&vault), before);
+    }
+
+    #[test]
+    fn a_carried_opportunity_date_is_never_in_the_digest() {
+        // Review of T2b.5: with `event_cards` off, T4's `rank` files the digest after the carry,
+        // over the map the carry updated. A carried date of an accepted `opportunity` series reads
+        // `verdict:opportunity` with no `proposed` marker, and the digest must not ask about it
+        // again (never ask twice, spec §11.1 item 5). Nor about one a machine judged `opportunity`
+        // before the answer, whose carry stands beside its verdict. An unanswered opportunity is
+        // the control.
+        let vault = tmp("pq3-digest");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let judged = instance("lx:77:3", "lx:77", at(10, 9, 19, 0), at(10, 9, 21, 0));
+        let mut fair = instance("lx:5:1", "lx:5", at(10, 10, 12, 0), at(10, 10, 14, 0));
+        fair.title = "Career fair".to_string();
+        for event in [&judged, &fair] {
+            record_verdict(&vault, &event.uid, &event.title, date(2026, 9, 30), "opportunity", "", "", "").unwrap();
+        }
+        let events = [
+            instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0)),
+            instance("lx:77:2", "lx:77", at(10, 8, 19, 0), at(10, 8, 21, 0)),
+            judged,
+            fair,
+        ];
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (2, Vec::<String>::new()), "the carry's lines for :2 and :3");
+        assert_eq!(ledger["lx:77:3"].answered_by, "", "a confident machine verdict stands under its carry");
+        let config = crate::events::EventsConfig::default();
+        let eligible = crate::eventemit::eligible_events(&events, &ledger, &config, TODAY, &BTreeSet::new());
+        let uids: Vec<&str> = eligible.iter().map(|e| e.uid.as_str()).collect();
+        assert_eq!(uids, ["lx:5:1"], "the control alone");
+        let mut journal = Journal::new(&vault);
+        let (digest, count) =
+            crate::eventemit::emit_digest(&vault, &events, &ledger, &config, TODAY, None, None, &mut journal);
+        assert_eq!(count, 1, "the control alone");
+        let text = pystr::read_text(&digest.unwrap()).unwrap();
+        assert!(text.contains("uid: \"lx:5:1\"") && !text.contains("lx:77:"), "{text}");
+        for uid in ["lx:77:2", "lx:77:3"] {
+            let proposed = lines_for(&vault, uid).iter().filter(|l| l.contains(" · proposed ")).count();
+            assert_eq!(proposed, 0, "{uid}: never proposed");
+        }
     }
 }
