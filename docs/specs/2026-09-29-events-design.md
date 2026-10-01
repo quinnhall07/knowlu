@@ -306,8 +306,8 @@ source_uid: "localist:77:1"    # the primary instance
 series_uid: "localist:77"
 events: ["localist:77:1"]      # every listed uid, as event-check writes them
 instances:                     # one mapping per listed uid, for the settlement (D10)
-  - {uid: "localist:77:1", title: "Career fair", start: 2026-10-01T10:00, end: 2026-10-01T15:00,
-     location: "Ferguson Center", registration: false, registration_deadline: null}
+  - {uid: "localist:77:1", title: "Career fair", start: '2026-10-01T10:00:00',
+     end: '2026-10-01T15:00:00', location: "Ferguson Center", registration: false, registration_deadline: null}
 judgment_id: "…"               # when the ledger holds one
 judgment_kind: event
 proposed_at: 2026-09-24
@@ -320,8 +320,12 @@ created_by: events
 
 `events:` keeps the shape `card_event_uids` already reads (`eventemit.rs:468`), so every
 never-ask-twice reader covers the new kind unchanged. `instances:` is new and read only by the
-settlement. Its `start` and `end` are formatted from real datetimes. The digest's payload has the
-same property, and it is why preserved defect 15 cannot reach it (`eventemit.rs:18-22`).
+settlement. Its `start` and `end` are formatted from real datetimes, to the second
+(`%Y-%m-%dT%H:%M:%S`, no zone): that is the carry line's own span format
+(`eventledger::record_carried_answer`), so a card and a carry line for one instance agree. A
+seconds string matches YAML 1.1's timestamp pattern, so `yamlemit` quotes it, and those quotes are
+the bytes. A card written in minutes (`2026-10-01T10:00`, plain) still reads as the same instance.
+The digest's payload has the same property, and it is why preserved defect 15 cannot reach it (`eventemit.rs:18-22`).
 `title`, `location` and the other free-text fields are clipped with `judge::one_line`.
 
 ### 5.2 The `event-check` card, extended

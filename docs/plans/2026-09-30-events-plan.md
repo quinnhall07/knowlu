@@ -253,7 +253,9 @@ does not edit the email plan.
     day (PQ2, answered 2026-09-30: Knowlu invents no hours).
 - **P5. `instances:` entries carry `url`.** Each mapping is `uid`, `title`, `start`, `end`,
   `location`, `url`, `registration`, `registration_deadline`, free text through `judge::one_line`
-  (title 200, location 120, url 500). The register task's body needs the URL (spec §4.2), and the
+  (title 200, location 120, url 500). `start` and `end` are stored to the second and quoted by the
+  emitter (`start: '2026-10-01T10:00:00'`), the carry line's span format; a minute card still
+  reads (R1 minor 2; spec §5.1). The register task's body needs the URL (spec §4.2), and the
   card's own payload is the only input the settlement has (D10).
 - **P6. The past-midnight true end is passed in the commitment mapping.** The builder adds an
   `ends:` key holding the clock label (`1am the next day`, or `midnight`). Only the `kind: event`

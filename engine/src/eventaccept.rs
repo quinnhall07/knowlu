@@ -651,6 +651,23 @@ mod tests {
     }
 
     #[test]
+    fn an_instance_stores_start_and_end_to_the_second_quoted_and_a_minute_card_still_reads() {
+        // Spec §5.1's bytes: a seconds string matches YAML 1.1's timestamp pattern, so the
+        // emitter quotes it; the minute spelling an older card holds reads as the same instance.
+        let inst = instance(at(10, 1, 10, 0), at(10, 1, 15, 0));
+        let bytes = safe_dump_block(&inst.to_node());
+        assert!(bytes.contains("\nstart: '2026-10-01T10:00:00'\n"), "{bytes}");
+        assert!(bytes.contains("\nend: '2026-10-01T15:00:00'\n"), "{bytes}");
+        let stored = Instance::from_yaml(&crate::yaml::mapping_of(&bytes)).expect("reads back");
+        assert_eq!((stored.start, stored.end), (inst.start, inst.end));
+        let minutes = bytes
+            .replace("'2026-10-01T10:00:00'", "2026-10-01T10:00")
+            .replace("'2026-10-01T15:00:00'", "2026-10-01T15:00");
+        let old = Instance::from_yaml(&crate::yaml::mapping_of(&minutes)).expect("a minute card reads");
+        assert_eq!((old.start, old.end), (inst.start, inst.end));
+    }
+
+    #[test]
     fn a_malformed_instance_entry_reads_as_none() {
         let good = crate::yaml::mapping_of(
             "uid: a:1\ntitle: T\nstart: 2026-10-01T10:00\nend: 2026-10-01T11:00\nlocation: ''\nurl: ''\n\
