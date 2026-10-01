@@ -166,7 +166,7 @@ The dev app is Quinn's live staging profile (`Test`), left as it is until cut da
 | Stage | The student gets | Exit (all must hold) |
 |---|---|---|
 | **Integrate** | Nothing new: one trunk that every later build comes from. | #17, #11, #12, #14, #16 and #18 merged with CI green on `main` and 0 other warnings; the Credential Manager flake fixed; ruling 11's human token in place; staging's applied migrations equal the repo's list and the staging smokes pass; Amendment 2026-09-29 signed; §3–§4 in stages. |
-| **MVP** | Everything the founder's quinn-ops did, plus grades from Blackboard, proven on a founder-owned scratch profile and test account on staging, with no second person. | The parity audit re-run shows no open row; Quinn has recorded UA's university-policy read; the founder's grades proof has passed through the app's real gate on a dev build from the proof branch that carries UA's date; Quinn says "MVP reached". UA's date on `main` is not needed. |
+| **MVP** | Everything the founder's quinn-ops did, plus grades from Blackboard, proven on a founder-owned scratch profile and test account on staging, with no second person. | The parity audit re-run shows no open row; the founder's grades proof has passed through the app's real gate on a dev build of `main` (the policy-read gate is suspended until 20 paying users: Amendment 2026-09-30, A13; no read or date is needed); Quinn says "MVP reached". |
 | **Pilot** | A few undergraduates other than the founder, on the released app, one computer each, needing nothing from anyone. | Everything under "Pilot" below has shipped, and the measure Quinn sets at entry is met (proposed by the controller; ruling 10 names no exit, an open question below). |
 | **Launch** | Any US undergraduate can pay $9.99 and use Knowlu on more than one desktop. | Everything under "Launch" below is done (proposed by the controller; ruling 10 names no Launch exit, an open question below). |
 | **Beyond** | Each VISION phase that makes the morning answer better. | No stage-wide gate. Per feature: a signed spec, a plan, a review, a merge and a live proof. |
@@ -224,13 +224,13 @@ in this order (gap ids from the vision program note):
    `site/privacy.html`, and never moves `PRIVACY_VERSION`. Grades keep `ids::derived_id`
    (path-deterministic, so every desktop derives the same id); two-desktop may move them onto its
    `import_id` when it resumes. **The founder's live proof** follows the merge, with Quinn at the
-   machine in the Blackboard sign-in window (the proof harness cannot drive it), on a dev build from a
-   proof branch that carries UA's date and is never merged ahead of bump #1; then the scratch profile
+   machine in the Blackboard sign-in window (the proof harness cannot drive it), on a dev build of
+   `main` that waits on no policy read (A13: the gate is suspended); then the scratch profile
    is cleaned up. **What privacy bump #1 owes from M1** (the branch touches none of it): spec §11's two
    sentences on `site/privacy.html`, its Effective date, `PRIVACY_VERSION`, the sentence pins,
    `PRIVACY_BUMP_1` in `app/tests/grades.rs` set to that version, and the lawyer-packet delta; the
-   Pilot's re-consent screen (R-PS-4) is still owed before a second account. UA's `policy_read` date
-   reaches `main` only in bump #1's PR or after it. `20260929000100` is applied to staging before any
+   Pilot's re-consent screen (R-PS-4) is still owed before a second account. No `policy_read` date is
+   recorded while A13's suspension holds. `20260929000100` is applied to staging before any
    release that writes `grades/`.
 2. **Gmail connect in the app** (P3, taken out of C4): the settings row's Connect and Disconnect (H9
    phase (b); `set_google_calendar` does not exist yet, so the command and its row are written
@@ -248,6 +248,9 @@ in this order (gap ids from the vision program note):
    stop (T8, on PQ1's answer), the staging deploy (the controller's), the founder's live proof and the
    whole-branch review; merge needs Quinn's word and the code push is asked. No release is cut from
    this branch before privacy bump #1 (the Pilot's release gate).
+2a. **Email: email forwarding to Knowlu** (spec `docs/specs/2026-09-30-email-forwarding-design.md`,
+   signed 2026-09-30, amendments A1-A13; plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built
+   in its own worktrees; no release is cut from a `main` carrying it before privacy bump #1 (D18).
 3. **M2, body and profile editing** (P5): a body write through `write`, the drawer's body editor, and
    profile editing (interests, preferences). Sized M/L, not small: the engine can only append a body
    line today, so replacing a body is new `write` and journal semantics, and a journal record that
@@ -260,9 +263,9 @@ in this order (gap ids from the vision program note):
 5. **P6, the small parity items:** a producer for Good to know items, conflict flags, opportunity
    proposals expiring after 14 days, the dropped-event audit list. Sized as a list; Quinn marks each do
    or cut; small "do" items go to `mechanical`.
-6. **UA's university-policy read** (ruling 12), recorded by Quinn. The MVP's grades proof waits on it.
-   If UA's policy forbids a kept SSO session, the MVP cannot exit as item 9 defines it, and Quinn
-   rules again on grades.
+6. **UA's university-policy read leaves the MVP** (ruling 12, suspended until 20 paying users:
+   Amendment 2026-09-30, A13). The grades proof waits on no read. A13's review trigger is the 20th
+   paying account (§4).
 
 **This session's cut line** (focus report §5): M1 merged is a must; Gmail connect and M2 are should
 (Gmail first if time is short); the events spec (signed, not built), P6's sized list and the rewritten
@@ -300,12 +303,14 @@ It holds:
   attribution and the model's reason, no sender; storing and showing the sender's display name lands
   with privacy bump #1, whose page then adds "and who the message was from" (spec §6 item 5).
 - **`calendar.readonly` verification submitted** (a sensitive scope: lighter review, no CASA).
-- **The university-policy read for each other pilot student's university.** Until it is recorded,
-  that student joins without grades from Blackboard; the app enforces this.
+- **The university-policy read for each other pilot student's university: SUSPENDED until 20 paying
+  users** (Amendment 2026-09-30, A13). While it holds, the kept Blackboard session is offered at every
+  curated Blackboard school; the review at the 20th paying account decides.
 
 **Gate:** no non-founder account exists before the re-consent screen, privacy bump #1 (after its
-lawyer read) and ruling 11's token have shipped; the token is done in Integrate. No pilot student
-uses the kept Blackboard session before their own university's read is recorded.
+lawyer read) and ruling 11's token have shipped; the token is done in Integrate. The
+condition that no pilot student uses the kept Blackboard session before their own university's read
+is recorded is suspended until 20 paying users (A13).
 **Release gate:** no release is cut from a `main` carrying the Gmail settings row, email forwarding to
 Knowlu, or the suspended grades gate (`POLICY_READ_GATE = Suspended`, which offers the kept Blackboard
 session at every curated Blackboard school) until privacy bump #1 merges (Gmail connect spec, Q8,
@@ -333,9 +338,9 @@ It holds:
   file stamped after every existing one and restates the full union, so Plan 2's `000200` re-stamps.
 - **Privacy bump #2.**
 - **`gmail.readonly` verification and the annual CASA**, or Quinn accepts the 100-user cap.
-- **Lawyer sign-off** (unless it moved to Pilot entry); each university-policy read not done in the MVP
-  or the Pilot (UK's, unless a pilot student is at UK) and the widening checklist that decides how
-  reads cover every university Launch opens to; tax registration; code signing (Azure, §4); the
+- **Lawyer sign-off** (unless it moved to Pilot entry); each university-policy read and the widening checklist that decides how
+  reads cover every university Launch opens to (suspended until 20 paying users: Amendment
+  2026-09-30, A13); tax registration; code signing (Azure, §4); the
   private-repository decision (ruling 13; the laptop runner comes back only once it is private).
 - **From C4:** the telemetry class-(c) toggle UI (the eval seed stays empty until it ships), and a
   custom functions domain or a redirect to a page on `knowlu.com` for the Google callback's pages
@@ -384,8 +389,8 @@ a spend is asked at the time.
 | Integrate | **Merge the flake-fix PR, then the token PR** | Asked one at a time at merge time, each in one line with the evidence (the contract-reviewer's verdict, green CI). §3's Integrate items 1–2. |
 | Integrate | **Go for the staging deploy** | Asked once the staging runbook is reviewed; the order is §3's Integrate item 3. The controller runs it; nothing touches production. |
 | MVP | **Sign the Gmail-connect and M2 specs** (one sitting), later the events spec | Each after its research and spec review. W1's research left 13 questions for these specs; they are asked inside the specs, not separately. |
-| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; UA's date reaches `main` only with or after it. The proof runs in the Blackboard sign-in window on a dev build from the proof branch that carries UA's date (§3's MVP lane 1). |
-| MVP | **Record UA's university-policy read** (ruling 12) | The MVP's grades proof waits on it. If UA forbids a kept SSO session, Quinn rules again on grades; the pilot may then start without them. |
+| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; The proof runs in the Blackboard sign-in window on a dev build of `main` and waits on no policy read (A13; §3's MVP lane 1). |
+| Review | **A13's review at the 20th paying account** | Ruling 12's policy-read gate is suspended until then (A13); the controller checks a count-only query at each milestone and asks. "Record UA's university-policy read" has left the MVP queue. |
 | MVP | **Mark each P6 item do or cut** | The four items are in §3's MVP lane 5, sized as a list first. |
 | MVP | **Say "MVP reached"** | Once the parity audit re-run shows no open row and the grades proof has passed. |
 | Pilot entry | **The pilot's shape** | Ruling 10: the number of students and their universities, the length, a measure from VISION's successes 1, 2, 5 and 6, and whether pilot students pay (if they do, the lawyer gate moves from Launch to Pilot entry). Also the Pilot's and Launch's exits, which ruling 10 leaves unnamed (§3). |
