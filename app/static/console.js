@@ -1915,8 +1915,93 @@
       maybeUpgrade(s);
     }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
+  // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
+  // the `expected` of a save. Events carry the object kind only, never the text (D15).
+  var PREFS = { loaded: "", started: false };
+  function prefsDirty() { return EL("set-prefs-ta").value !== PREFS.loaded; }
+  function prefsCount() {
+    var n = Array.from(EL("set-prefs-ta").value).length, c = EL("set-prefs-count");
+    c.textContent = n + " / 600";
+    c.classList.toggle("over", n > 600);
+  }
+  function prefsFill(p) {
+    PREFS.loaded = p.preferences || ""; PREFS.started = false;
+    EL("set-prefs-ta").value = PREFS.loaded; prefsCount();
+    var c = document.querySelector("[data-prefs-conflict]"); if (c) { c.remove(); }
+  }
+  function loadPrefs() {
+    if (prefsDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !prefsDirty()) { prefsFill(env.profile); }
+    }).catch(function () {});
+  }
+  function prefsLock(on) { EL("set-prefs-ta").disabled = on; EL("set-prefs-save").disabled = on; EL("set-prefs-cancel").disabled = on; }
+  function prefsConflict() {
+    if (document.querySelector("[data-prefs-conflict]")) { return; }
+    var c = document.createElement("div"); c.setAttribute("data-prefs-conflict", ""); c.className = "prefsconf";
+    c.innerHTML = "<p>This changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+      '<button class="b" data-prefs-copy>Copy</button> <button class="b" data-prefs-reload>Reload</button>';
+    EL("set-prefs").appendChild(c);
+    c.querySelector("[data-prefs-copy]").addEventListener("click", function () { invoke("copy_text", { text: EL("set-prefs-ta").value }).catch(function () {}); });
+    c.querySelector("[data-prefs-reload]").addEventListener("click", function () {
+      if (prefsDirty() && !confirm("Reload and discard your text?")) { return; }
+      ev("edit_cancelled", null, "preferences");
+      invoke("profile", {}).then(function (env) { if (env.ok && env.profile) { prefsFill(env.profile); } }).catch(function () {});
+    });
+  }
+  function savePrefs() {
+    var before = PREFS.loaded;
+    prefsLock(true);
+    invoke("set_preferences", { view: stateView(), expected: PREFS.loaded, text: EL("set-prefs-ta").value }).then(function (env) {
+      if (env.conflict) { applyEnvelope(env, function () {}); prefsLock(false); prefsConflict(); return; }
+      if (!applyEnvelope(env, function (m) { prefsLock(false); showRefusal(null, m, null, "preferences"); })) { return; }
+      ev("edit_committed", null, "preferences");
+      return invoke("profile", {}).then(function (p) {
+        prefsLock(false);
+        if (!p.ok || !p.profile) { return; }
+        prefsFill(p.profile); offerPrefsUndo(before, PREFS.loaded);
+      });
+    }).catch(function (e) { prefsLock(false); showRefusal(null, "refused: " + e, null, "preferences"); });
+  }
+  function offerPrefsUndo(before, after) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-prefs-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-prefs-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-prefs-undo]").disabled = true;
+      invoke("set_preferences", { view: stateView(), expected: after, text: before }).then(function (r) {
+        if (applyEnvelope(r, function (m) {
+          showRefusal(null, m, null, "preferences");
+          t.innerHTML = '<button class="b" data-prefs-prev>Copy previous text</button>';
+          t.querySelector("[data-prefs-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+          setTimeout(function () { t.remove(); }, 10000);
+        })) {
+          t.remove(); ev("edit_committed", null, "preferences");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { prefsFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  EL("set-prefs-ta").addEventListener("input", function () {
+    var first = !PREFS.started;
+    PREFS.started = true;
+    if (first) { ev("edit_started", null, "preferences"); }
+    prefsCount();
+  });
+  EL("set-prefs-save").addEventListener("click", savePrefs);
+  EL("set-prefs-cancel").addEventListener("click", function () {
+    if (prefsDirty()) { ev("edit_cancelled", null, "preferences"); }
+    EL("set-prefs-ta").value = PREFS.loaded; PREFS.started = false; prefsCount();
+  });
+  EL("set-prefs-ta").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); savePrefs(); }
+  });
+  // M2 T5b.1 end
   function openSettings() {
     EL("settings").hidden = false;
+    loadPrefs();
     checkAccount();
     gradesStatus();
     invoke("settings_context", {}).then(function (c) {

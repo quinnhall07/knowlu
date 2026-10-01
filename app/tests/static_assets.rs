@@ -2192,3 +2192,53 @@ fn a_body_conflict_keeps_the_draft() {
     let c = ed.find("env.conflict").unwrap();
     assert!(!ed[c..c + 600].contains("ta.value = "), "the draft is never refilled");
 }
+
+// M2 T5b.1 (spec tests 27, 28 and 32, the preferences halves).
+fn prefs_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.1").expect("the preferences section");
+    let end = js[at..].find("// M2 T5b.1 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_preferences() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-prefs-ta\"") && html.contains("id=\"set-prefs-save\"") && html.contains("id=\"set-prefs-count\""), "a textarea, a counter and its own Save");
+    assert!(html.contains("Your preferences") && html.contains("How you like to work"), "the section and its part");
+    for fact in ["600 characters", "one call", "keep them", "stays on this computer"] {
+        assert!(html.contains(fact), "the copy keeps its fact: {fact}");
+    }
+    let p = prefs_js();
+    assert!(p.contains("invoke(\"profile\""), "the panel reads profile");
+    assert!(p.contains("invoke(\"set_preferences\"") && p.contains("expected: PREFS.loaded"), "Save sends expected");
+    assert!(p.contains("env.conflict") && p.contains("data-prefs-conflict") && p.contains("Your text is still here"), "a conflict keeps the draft");
+    assert!(p.contains("showRefusal("), "other refusals use showRefusal");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadPrefs("), "opening Settings loads the preferences");
+}
+
+#[test]
+fn no_settings_ui_event_carries_preferences_text() {
+    let p = prefs_js();
+    assert!(p.contains("\"edit_started\", null, \"preferences\"") && p.contains("\"edit_committed\", null, \"preferences\"") && p.contains("\"edit_cancelled\", null, \"preferences\""), "preferences events use object_kind preferences");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["ta.value", "PREFS", "before", "after", "text", "expected", "draft"] {
+            assert!(!line.contains(bad), "a ui event carries preferences text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_preferences() {
+    let p = prefs_js();
+    let at = p.find("function offerPrefsUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_preferences\"") && u.contains("expected: after") && u.contains("text: before"), "undo's expected is the text profile returned after the save");
+    assert!(p.contains("invoke(\"profile\"") && p.contains("offerPrefsUndo(before, PREFS.loaded)"), "after is the re-read text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+}
