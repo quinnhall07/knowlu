@@ -633,7 +633,7 @@ mod tests {
         let carry = crate::eventledger::load_ledger(&vault, None)["a:1"].carry.clone().expect("a carry line");
         assert_eq!((carry.start, carry.end), (inst.start, inst.end));
         let _ = std::fs::remove_dir_all(&vault);
-        // A card written in minutes (the spec's own example) still reads.
+        // Cards are written to the second; a card an older build wrote in minutes still reads.
         let minutes = crate::yaml::mapping_of("uid: a:1\nstart: 2026-10-01T10:30\nend: 2026-10-01T15:00\n");
         assert_eq!(Instance::from_yaml(&minutes).unwrap().start, at(10, 1, 10, 30));
     }

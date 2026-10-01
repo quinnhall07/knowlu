@@ -291,6 +291,8 @@ reshaped.
 
 ### 5.1 The `event-accept` card
 
+(amended 2026-10-01: instance times keep seconds, matching the carry line's span format; accepted by Quinn)
+
 `approvals/event-<slug≤40>-<primary date>.md`, with `-2`, `-3` on a collision. It is created whole
 through `write::create`; its frontmatter goes through `yamlemit::safe_dump_block`, as `write_check`
 does (`eventemit.rs:620-686`). Fields, not exact bytes:
@@ -797,6 +799,8 @@ is not rewritten; these answers widen it in the places named.
   date: one line, one commitment, one journal `create`, not drawn in the lane. A card-listed lane
   date moved to clock hours stays drawn on its old day and is never booked (the carry never books a
   card-listed date); the student removes it.
+- **§5.1: instance times keep seconds.** `instances:` `start` and `end` are quoted
+  `%Y-%m-%dT%H:%M:%S`, matching `eventledger::SPAN_FORMAT`; a minute-only card still reads. Accepted by Quinn.
 - **§5.4's "no new line shape" holds.** PQ5 and PQ7 write more lines of the carry's one shape, and
   P17's `declined` line is the existing one.
 
