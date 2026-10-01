@@ -168,7 +168,10 @@ fn ci_jobs_run_self_hosted_only_behind_the_switch_and_release_never_does() {
 fn the_eval_gate_job_exists_is_pull_request_only_and_names_both_its_secrets() {
     let c = workflow("ci.yml");
     let job = job_block(&c, "eval-gate");
-    assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate must run only on pull_request: {job}");
+    assert!(
+        job.contains("if: ${{ !cancelled() && github.event_name == 'pull_request' }}"),
+        "eval-gate must run only on pull_request: {job}"
+    );
     assert!(job.contains("secrets.OPENROUTER_API_KEY"), "eval-gate must reference secrets.OPENROUTER_API_KEY");
     assert!(
         job.contains("secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"),
@@ -214,4 +217,45 @@ jobs:
 ";
     let job = job_block(last, "eval-gate");
     assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate as the last job must still be read to EOF: {job:?}");
+}
+
+/// The docs-only deadlock: `paths-ignore` on the triggers meant a document-only PR never reported the
+/// three REQUIRED checks (branch protection names `test`, `cloud`, `eval-gate`), so it could never
+/// merge. The triggers now carry no path filter; a first `changes` job decides, with plain git, whether
+/// anything outside the document paths changed, and the heavy steps of the three required jobs skip
+/// on `needs.changes.outputs.code` while the jobs themselves always run and succeed. A job-level `if`
+/// that names `changes` (or any `if` on `test`/`cloud`) would skip the check again and reopen the
+/// deadlock; `eval-gate`'s one job-level `if` is its pull-request-only trigger and nothing else.
+///
+/// The gate must also never fail open (a skipped job reads as a pass to a required check). Two holes
+/// are closed here: `git diff --name-only` pairs a rename into one destination path, so a source file
+/// moved into `docs/` would read as a document-only change (`--no-renames` lists the deleted source
+/// too); and a failed `changes` job would skip every job that `needs` it. So each of the three jobs
+/// carries exactly one job-level `if`, `!cancelled()` (plus `eval-gate`'s pull-request trigger), which
+/// runs it even when `changes` failed, and every step condition reads `code != 'false'` or
+/// `code == 'false'`, never `== 'true'`, so a missing output runs everything.
+#[test]
+fn docs_only_changes_still_report_the_three_required_checks() {
+    let c = workflow("ci.yml");
+    assert!(!c.contains("paths-ignore"), "ci.yml must not use paths-ignore: a docs-only PR would never report the required checks");
+    let changes = job_block(&c, "changes");
+    assert!(changes.contains("git diff --no-renames --name-only"), "`changes` must decide with plain git and without rename detection: {changes}");
+    assert!(changes.contains("outputs:") && changes.contains("code:"), "`changes` must publish a `code` output: {changes}");
+    assert!(changes.contains("0000000000000000000000000000000000000000"), "`changes` must treat the zero before-sha as code changed");
+    for job in ["test", "cloud", "eval-gate"] {
+        let block = job_block(&c, job);
+        assert!(block.contains("changes"), "{job}: must depend on the `changes` job");
+        let job_ifs: Vec<&str> = block.lines().filter(|l| l.starts_with("    if:")).collect();
+        match job {
+            "eval-gate" => assert_eq!(
+                job_ifs,
+                ["    if: ${{ !cancelled() && github.event_name == 'pull_request' }}"],
+                "eval-gate's only job-level if is its trigger, behind !cancelled()"
+            ),
+            _ => assert_eq!(job_ifs, ["    if: ${{ !cancelled() }}"], "{job}: the only job-level if is !cancelled(), so a failed `changes` cannot skip it"),
+        }
+        assert!(!block.contains("outputs.code == 'true'"), "{job}: a step keyed on `== 'true'` fails open when `changes` fails: {block}");
+        assert!(!block.contains("code != 'true'"), "{job}: `!= 'true'` runs the no-op when the output is missing: {block}");
+        assert!(block.contains("needs.changes.outputs.code"), "{job}: heavy steps must key on needs.changes.outputs.code");
+    }
 }
