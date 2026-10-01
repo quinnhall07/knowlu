@@ -279,6 +279,13 @@ pub fn set_preferences_inner(cs: &ConsoleState, view: &str, expected: &str, text
     Ok(with_conflict(env, conflict))
 }
 
+/// `eventroster::read_dropped` under `cs.lock`, as `note_inner` does; it writes nothing. The page lists
+/// these under *Not shown* (M2 spec P6(d), PQ2 = no: an unjudged event is never among them).
+pub fn dropped_events_inner(cs: &ConsoleState) -> Result<Value, String> {
+    let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
+    Ok(envelope(serde_json::to_value(knowlu_engine::eventroster::read_dropped(&cs.vault)).map_err(|e| e.to_string()), "dropped"))
+}
+
 pub fn set_interests_inner(cs: &ConsoleState, view: &str, strong: Vec<String>, mild: Vec<String>, never: Vec<String>, clubs: Vec<String>) -> Result<Value, String> {
     mutate(cs, view, |journal| {
         let lists = knowlu_engine::events::Interests { strong, mild, never, clubs };
@@ -514,6 +521,7 @@ pub fn state_envelope(cs: &ConsoleState, sch: &Scheduler, view: &str) -> Value {
 #[tauri::command(async)] pub fn resolve_issue(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, resolution: String) -> Value { let mut env = resolve_issue_inner(&cs, &view, &id, &resolution).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn set_body(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, expected: String, body: String) -> Value { let mut env = set_body_inner(&cs, &view, &id, &expected, &body).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command] pub fn profile(cs: State<'_, ConsoleState>) -> Value { profile_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "profile": Value::Null })) }
+#[tauri::command] pub fn dropped_events(cs: State<'_, ConsoleState>) -> Value { dropped_events_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "dropped": Value::Null })) }
 #[tauri::command(async)] pub fn set_preferences(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, expected: String, text: String) -> Value { let mut env = set_preferences_inner(&cs, &view, &expected, &text).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn set_interests(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, strong: Vec<String>, mild: Vec<String>, never: Vec<String>, clubs: Vec<String>) -> Value { let mut env = set_interests_inner(&cs, &view, strong, mild, never, clubs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn sync(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { let mut env = sync_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }

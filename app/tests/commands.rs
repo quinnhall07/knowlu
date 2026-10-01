@@ -4,7 +4,7 @@ use knowlu::state::{resolve_vault, ConsoleState};
 use knowlu::commands::{
     answer_card_inner, backup_now_inner, close_info_inner, console_ctx, create_task_inner, decide_inner,
     delete_note_inner, get_settings_inner, mark_seen_inner, note_inner, open_issue_inner,
-    profile_inner, resolve_issue_inner, set_body_inner, set_fields_inner, set_interests_inner,
+    dropped_events_inner, profile_inner, resolve_issue_inner, set_body_inner, set_fields_inner, set_interests_inner,
     set_preferences_inner, set_settings_inner, state_inner, sync_inner, ui_event_inner,
 };
 use knowlu::scheduler::{lock, LiveSlot, RunSummary, Scheduler};
@@ -1105,4 +1105,33 @@ fn profile_commands_round_trip() {
     assert_eq!(env["ok"], false, "{env}");
     assert!(env["state"].is_object());
     assert_eq!((std::fs::read(v2.join("profile/interests.md")).unwrap(), journal_records(&v2).len()), (file, before));
+}
+
+/// Every file under `dir` with its bytes, in path order: the whole vault, to prove a read wrote nothing.
+fn tree_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() { out.extend(tree_bytes(&p)); } else { out.push((p.clone(), std::fs::read(&p).unwrap())); }
+    }
+    out.sort();
+    out
+}
+
+/// M2 plan T4b: the roster's audit drops come back as `{ok, dropped}`, Coming up is not among them,
+/// and the vault's bytes (the journal included) are the same afterwards.
+#[test]
+fn dropped_events_lists_the_audit_drops_and_writes_nothing() {
+    let (v, cs) = open_scratch("dropped-events");
+    let roster = v.join("state/events.md");
+    let text = std::fs::read_to_string(&roster).unwrap().replace(
+        "- Nothing else in the window.",
+        "- Fri 2026-09-04 18:30 · Pep Rally · Spirit Club · @ Gym `localist:pep` · filtered",
+    );
+    std::fs::write(&roster, text).unwrap();
+    let before = tree_bytes(&v);
+    let env = dropped_events_inner(&cs).unwrap();
+    assert_eq!((env["ok"].clone(), env["error"].clone()), (json!(true), json!(null)), "{env}");
+    assert_eq!(env["dropped"], json!([{ "uid": "localist:pep", "title": "Pep Rally", "date": "2026-09-04", "time": "18:30", "reason": "filtered by your interests" }]), "{env}");
+    assert_eq!(tree_bytes(&v), before, "nothing was written");
 }
