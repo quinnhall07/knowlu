@@ -2302,3 +2302,30 @@ fn interests_are_read_only_when_not_editable() {
     assert!(p.contains("readOnly") && p.contains("set-int-save"), "the lists lock and Save is disabled");
     assert!(p.contains("Knowlu can only edit a list written on one line"), "D10's reason is shown");
 }
+
+fn notshown_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T7").expect("the Not shown section");
+    let end = js[at..].find("// M2 T7 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn coming_up_offers_a_not_shown_list_from_dropped_events() {
+    let n = notshown_js();
+    assert!(read("index.html").contains("id=\"cu-ns\""), "the container sits under Coming up");
+    assert!(n.contains("invoke(\"dropped_events\""), "the page reads dropped_events");
+    assert!(n.contains("Not shown (") && n.contains("<details"), "a collapsed list titled Not shown (N)");
+    for f in ["d.title", "d.date", "d.reason"] {
+        assert!(n.contains(&format!("h({f}")), "{f} is escaped text");
+    }
+    assert!(n.contains("!list.length") || n.contains("list.length === 0"), "an empty list renders nothing");
+    assert!(n.contains(".catch(") && n.contains("Not shown is unavailable"), "a refusal is one quiet line");
+    assert!(!n.contains("data-") && !n.contains("<button") && !n.contains("invoke(\"ui_event\""), "read-only: no write action: {n}");
+    // Fetched when Coming up renders, not on every poll.
+    let render = read("console.js");
+    let at = render.find("function renderComingUp(").unwrap();
+    let body = &render[at..at + render[at..].find("\n  }\n").unwrap()];
+    assert!(body.contains("renderNotShown("), "renderComingUp triggers it");
+    assert!(!render[render.find("function poll(").unwrap()..].split("// Task 13").next().unwrap().contains("dropped_events"), "poll does not fetch it");
+}

@@ -332,7 +332,22 @@
     var cu = state.coming_up;
     EL("cu-n").textContent = cu.length ? cu.length + " accepted" : "";
     EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
+    renderNotShown();
   }
+
+  // M2 T7: Not shown (N) under Coming up, read-only, from dropped_events (events the engine dropped, each with its reason).
+  function renderNotShown() {
+    var box = EL("cu-ns");
+    return invoke("dropped_events", {}).then(function (r) {
+      var list = (r && r.ok && r.dropped) || null;
+      if (!r || !r.ok) { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; return; }
+      if (!list || !list.length) { box.innerHTML = ""; return; }
+      box.innerHTML = '<details class="notshown"><summary>Not shown (' + list.length + ")</summary>" + list.map(function (d) {
+        return '<div class="ln"><span class="k lp">' + h(d.date) + "</span><span>" + h(d.title) + '</span><span class="rt">' + h(d.reason) + "</span></div>";
+      }).join("") + "</details>";
+    }).catch(function () { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; });
+  }
+  // M2 T7 end
 
   function renderGoodToKnow(state) {
     var g = state.good_to_know;
