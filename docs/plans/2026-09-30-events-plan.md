@@ -2192,6 +2192,18 @@ Fixes go to the task's own agent, and the reviewer re-reads them. The controller
 report before T10 (spec §13's third checkpoint). **Done when:** no open Critical or Important
 finding.
 
+*W's first pass (2026-10-01) ran before T8, so it is not W.* Its three findings, verified:
+1. *Scope:* T4c, T4d, H2, T5, T7 and T8 are not built, and PQ7 is open. This is B2's finding,
+   still blocked on Quinn's PQ7 answer (§13). W runs again over the whole branch after T8.
+2. *Two desktops:* recorded as §8's risk and pinned by `a883710`. Its recommended fix, a
+   deterministic id per uid, is not taken: spec §9 hands it to the two-desktop stream, and W's own
+   determinism check asks for no deterministic id on this branch. It goes to Quinn at W.
+3. *The routing gate on `approvals.rs`:* its premise does not hold. Checkpoint B's
+   `contract-reviewer` read T3.1a, T3.1b and T3.2 one commit at a time (0/0/5; `run.md` and the
+   SDD ledger at `10071f6`), and `approvals.rs` is unchanged since `10071f6`. No report file was
+   committed, though, so W's `contract-reviewer` pass reads `approvals.rs` again rather than closing
+   a report that is not on disk.
+
 ### T10. Gate, live proof, PR and merge (main session, with Quinn)
 
 **Why the main session:** it needs a staging session by OTP and a desktop; neither is delegated.
@@ -2401,6 +2413,20 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
     shows again, the safe direction.
 - **An older engine** warns `unknown kind:` on an approved `event-accept` card. Accepted by the spec
   (single desktop, single engine in the MVP); two-desktop's hand-off is spec §9's.
+- **Two desktops on one account book a carried date twice** (W's first pass, finding 2,
+  2026-10-01). `eventcarry::book` runs in each desktop's `rank` over its own fetch, and
+  `create_confirmed` mints a random `cmt_` id, so two desktops in one slot each book the date before
+  either syncs. The ever-written set stops a third only once a sync has passed.
+  - *One file name on both:* a pull keeps each desktop's own copy (`sync.rs`, `exact_case_exists`).
+    Two ids sit at one path: the two-desktop spec's I2, as the events digest already has on `main`.
+  - *Two names* (another note took the name first on one desktop): both copies land on both
+    desktops. `commitments::load` counts the lowest id and warns once (commitment-model §2.5), no
+    `rank` books a third, and the student deletes the date once per copy.
+  - *Pinned by* `eventcarry::tests::a_date_two_desktops_carry_is_counted_once` (`a883710`).
+  - *Accepted by* the cloud design's stages (the Pilot is one computer each; more than one desktop
+    is Launch, with the two-desktop stream) and by spec §9's signed hand-off: deterministic ids for
+    D4's notes come with that stream's producer table. This branch adds no deterministic id (W's
+    determinism check). *For Quinn at W:* the reviewer asked that this be brought before merge.
 
 ## 9. Fidelity ledger
 
