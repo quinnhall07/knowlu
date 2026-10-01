@@ -248,15 +248,29 @@
     bindTracks(host);
   }
 
+  var pendingLaneRemovals = {};
   function renderTheDay(state) {
     var d = state.the_day;
     EL("dayopen").textContent = fmtH(d.open_hours) + " open";
-    EL("allday").innerHTML = d.all_day.map(function (t) { return "<div>(all day) " + h(t) + "</div>"; }).join("");
+    // P17: an accepted lane date carries its uid in `all_day_uids` (same index); a pending removal
+    // is skipped while its Undo toast shows.
+    var uids = d.all_day_uids || [];
+    EL("allday").innerHTML = d.all_day.map(function (t, i) {
+      var uid = uids[i];
+      if (uid && pendingLaneRemovals[uid]) { return ""; }
+      return "<div>(all day) " + h(t) + (uid ? ' <button class="b" type="button" data-lane-remove="' + h(uid) + '" data-title="' + h(t) + '">Remove from my day</button>' : "") + "</div>";
+    }).join("");
     EL("theday").innerHTML = d.blocks.map(function (b) {
       var takes = b.takes.map(function (t) { return '<span class="sl"><span>' + h(t.title) + "</span><span>" + h(fmtH(t.hours)) + (t.of_hours - t.hours > 0.005 ? " of " + h(fmtH(t.of_hours)) : "") + "</span></span>"; }).join("");
       return '<div class="blk ' + h(b.kind) + '"><span class="t">' + h(b.start) + "–" + h(b.end) + '</span><span class="w">' + h(b.label) + '</span><span class="h">' + h(fmtH(b.hours)) + "</span>" + takes + "</div>";
     }).join("") + (d.empty_text ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     EL("commitments").innerHTML = d.commitments.map(function (c) { return '<div class="commit"><span>' + h(c.name) + " · recurring</span><span>" + h(fmtH(c.hours)) + "</span></div>"; }).join("");
+  }
+
+  // Spec §6.3: an event card reads Accept and Decline; the verdicts sent are unchanged.
+  function verdictLabels(kind) {
+    if (kind === "event-accept" || kind === "event-check") { return { pri: "Accept", sec: "Decline" }; }
+    return { pri: "Approve", sec: "Reject" };
   }
 
   function renderDeck(state) {
@@ -304,9 +318,9 @@
     var tomorrow = state.ahead.buckets[1].date;
     d.cards.slice(0, 1).forEach(function (c) {
       // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
-      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">Approve</button>';
+      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button>';
       deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + "</div>" +
-        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
+        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
     if (newCard && prevId && newCard.getAttribute("data-id") === prevId) {
@@ -331,7 +345,7 @@
   function renderComingUp(state) {
     var cu = state.coming_up;
     EL("cu-n").textContent = cu.length ? cu.length + " accepted" : "";
-    EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
+    EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + (e.provenance ? ' <span class="k lp">' + h(e.provenance) + "</span>" : (e.accepted ? ' <span class="k lp">' + h("Accepted") + "</span>" : "")) + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
     renderNotShown();
   }
 
@@ -517,7 +531,7 @@
           '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(meta.join(" · ")) + "</span>" +
           '<div class="why">' + h(c.why) + "</div>" + changes + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Note (optional)" value="' + h(notes[c.id] || "") + '">' +
-          '<button class="b pri y" data-verdict="approved">Approve</button><button class="b n" data-verdict="rejected">Reject</button>' +
+          '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button><button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button>' +
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
       }).join("") + (d.empty_text && !d.cards.length ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     });
@@ -1337,6 +1351,29 @@
     }).catch(function () {});
   }
 
+  // P17, PQ6 (b): "Remove from my day" acts at once in the UI; the engine call waits for the
+  // 10-second Removed - Undo toast to close. Undo cancels it, so nothing is sent and the date returns.
+  function removeFromMyDay(uid, title) {
+    if (pendingLaneRemovals[uid]) { return; }
+    pendingLaneRemovals[uid] = true;
+    if (current.state) { renderTheDay(current.state); }
+    var t = document.createElement("div"); t.className = "savedtoast";
+    t.innerHTML = '<span>Removed</span> &middot; <button class="b" data-lane-undo>Undo</button>';
+    document.body.appendChild(t);
+    var timer = setTimeout(function () {
+      t.remove();
+      invoke("remove_lane_date", { view: stateView(), uid: uid }).then(function (env) {
+        delete pendingLaneRemovals[uid];
+        applyEnvelope(env, function (m) { showRefusal(null, m); });
+      }).catch(function () { delete pendingLaneRemovals[uid]; if (current.state) { renderTheDay(current.state); } });
+    }, 10000);
+    t.querySelector("[data-lane-undo]").addEventListener("click", function () {
+      clearTimeout(timer); t.remove();
+      delete pendingLaneRemovals[uid];
+      if (current.state) { renderTheDay(current.state); }
+    });
+  }
+
   // ----- writes (Knowlu plan 1, Task 13). Every mutating call returns the fresh state; paint it
   // with force — a write's return is never held as a reorder (F19).
   // Task 15: fire-and-forget interaction logging — ids only (`app/src/uievents.rs` refuses free
@@ -1707,6 +1744,7 @@
   document.addEventListener("click", function (e) {
     var a = e.target.closest("#navlinks a"); if (a) { e.preventDefault(); location.hash = a.getAttribute("href"); return; }
     var nt = e.target.closest("#newtask"); if (nt) { renderNewTaskRow(); return; }
+    var rml = e.target.closest("[data-lane-remove]"); if (rml) { removeFromMyDay(rml.getAttribute("data-lane-remove"), rml.getAttribute("data-title")); return; }
     var del = e.target.closest("[data-del]"); if (del) { confirmDelete(del.getAttribute("data-del"), del.getAttribute("data-title")); return; }
     // [data-flag]/[data-close-info] route before the .row[data-id] drawer branch below — a flag
     // or close click must never also open the drawer underneath it.
