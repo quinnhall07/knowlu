@@ -218,9 +218,10 @@ in this order (gap ids from the vision program note):
    semantic updates no conflict shows: `migrations_sync_test.ts`'s newest-migration assertion and the
    backup-folder count test), the grades spec's signed edits 3–5, Tasks 2–8, then Task 9's whole-branch
    review at xhigh. **Merge** on that review, green CI and Quinn's word; then `20260929000100` goes to
-   staging (applied 2026-09-30). Ruling 12 binds the lane: one predicate in `app/src/grades.rs` gates Connect, refresh and
-   the slot on a curated campus row's `policy_read` date; the date-and-bump test keeps every date off
-   `main` until privacy bump #1; M1 drafts its privacy sentences in the grades spec's §11, never in
+   staging (applied 2026-09-30). Ruling 12's gate is suspended until 20 paying users (A13). The one predicate in
+   `app/src/grades.rs` still gates Connect, refresh and the slot, and while `POLICY_READ_GATE` is
+   `Suspended` it admits every curated Blackboard row, dated or not. The date-and-bump test still keeps
+   any date off `main` until privacy bump #1; M1 drafts its privacy sentences in the grades spec's §11, never in
    `site/privacy.html`, and never moves `PRIVACY_VERSION`. Grades keep `ids::derived_id`
    (path-deterministic, so every desktop derives the same id); two-desktop may move them onto its
    `import_id` when it resumes. **The founder's live proof** follows the merge, with Quinn at the
@@ -287,8 +288,10 @@ It holds:
   `ShellExecuteW`; the app build blanking `target\<profile>\knowlu-engine.exe`.
 - **Privacy bump #1, with one lawyer read:** the page names ruling 12's kept Blackboard session and
   the grades the account holds; its text, its Effective date and `PRIVACY_VERSION` move in one PR
-  (`app/src/account.rs` requires it), no later than the first release that records a `policy_read`
-  date. **The re-consent screen** for a `privacy_version` change (R-PS-4) ships with it.
+  (`app/src/account.rs` requires it), no later than the first release from a main carrying the
+  suspended grades gate, the Gmail row or email forwarding (the release guard below). The page text
+  also covers spec §7's "kept sign-ins at every school, for now" paragraph, part of bump #1's §7
+  drafts, which T13a still owes. **The re-consent screen** for a `privacy_version` change (R-PS-4) ships with it.
 - **The UA registrar** (the commitment model's phase 3; draft PR #19, `p3-registrar`): its spec
   (`docs/specs/2026-09-26-commitment-model-phase3-design.md`, on the branch) revised to apply-and-list
   (ruling 3's consequence, tested by `journal::human_edited`), the R0 spike with Quinn at the machine,
