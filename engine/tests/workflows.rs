@@ -215,3 +215,30 @@ jobs:
     let job = job_block(last, "eval-gate");
     assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate as the last job must still be read to EOF: {job:?}");
 }
+
+/// The docs-only deadlock: `paths-ignore` on the triggers meant a document-only PR never reported the
+/// three REQUIRED checks (branch protection names `test`, `cloud`, `eval-gate`), so it could never
+/// merge. The triggers now carry no path filter; a first `changes` job decides, with plain git, whether
+/// anything outside the document paths changed, and the heavy steps of the three required jobs skip
+/// on `needs.changes.outputs.code` while the jobs themselves always run and succeed. A job-level `if`
+/// that names `changes` (or any `if` on `test`/`cloud`) would skip the check again and reopen the
+/// deadlock; `eval-gate`'s one job-level `if` is its pull-request-only trigger and nothing else.
+#[test]
+fn docs_only_changes_still_report_the_three_required_checks() {
+    let c = workflow("ci.yml");
+    assert!(!c.contains("paths-ignore"), "ci.yml must not use paths-ignore: a docs-only PR would never report the required checks");
+    let changes = job_block(&c, "changes");
+    assert!(changes.contains("git diff --name-only"), "`changes` must decide with plain git: {changes}");
+    assert!(changes.contains("outputs:") && changes.contains("code:"), "`changes` must publish a `code` output: {changes}");
+    assert!(changes.contains("0000000000000000000000000000000000000000"), "`changes` must treat the zero before-sha as code changed");
+    for job in ["test", "cloud", "eval-gate"] {
+        let block = job_block(&c, job);
+        assert!(block.contains("changes"), "{job}: must depend on the `changes` job");
+        let job_ifs: Vec<&str> = block.lines().filter(|l| l.starts_with("    if:")).collect();
+        match job {
+            "eval-gate" => assert_eq!(job_ifs, ["    if: github.event_name == 'pull_request'"], "eval-gate's only job-level if is its trigger"),
+            _ => assert!(job_ifs.is_empty(), "{job}: a job-level `if` would skip the required check: {job_ifs:?}"),
+        }
+        assert!(block.contains("needs.changes.outputs.code"), "{job}: heavy steps must key on needs.changes.outputs.code");
+    }
+}

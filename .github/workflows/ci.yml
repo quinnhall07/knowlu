@@ -1,12 +1,13 @@
 name: ci
 on:
-  # Documents never change what the gate tests, and every run here is a Windows job billed at
-  # twice its wall-clock minutes: a document-only push runs nothing.
+  # No path filter on either trigger: branch protection REQUIRES the checks `test`, `cloud` and
+  # `eval-gate`, and a workflow a path filter skips never reports them, so a document-only PR could
+  # never merge. Instead the `changes` job below decides whether anything outside the document paths
+  # changed, and the three required jobs always run and succeed, skipping their heavy steps when it
+  # did not (every run here is a Windows job billed at twice its wall-clock minutes).
   push:
     branches: [main]
-    paths-ignore: ["docs/**", "HANDOFF.md", "VISION.md", "PROVENANCE.md"]
   pull_request:
-    paths-ignore: ["docs/**", "HANDOFF.md", "VISION.md", "PROVENANCE.md"]
 permissions: { contents: read }
 env:
   RUSTFLAGS: "-D warnings"
@@ -21,16 +22,67 @@ env:
 # requirement, not a workflow one. release.yml never reads this switch: its signing and publish
 # secrets stay on GitHub-hosted runners.
 jobs:
-  test:
-    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'windows-latest' }}
-    timeout-minutes: 60
+  # Plain git, no third-party action. `code` is `true` unless every changed file is a document
+  # (`docs/**`, HANDOFF.md, VISION.md, PROVENANCE.md). Anything it cannot work out (the first push of
+  # a branch, a zero or force-pushed-away before sha, a failed diff) counts as code changed. The
+  # three required jobs `need` this one and key their steps on its output, never the job itself on an
+  # `if:` - a skipped required job would never report.
+  changes:
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0 }
+      - name: did anything outside the documents change?
+        id: diff
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          code=true
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$BASE_SHA...HEAD"
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero" ]; then
+            range="$BEFORE_SHA $HEAD_SHA"
+          else
+            range=""
+          fi
+          if [ -n "$range" ] && files=$(git diff --name-only $range); then
+            code=false
+            for f in $files; do
+              case "$f" in
+                docs/*|HANDOFF.md|VISION.md|PROVENANCE.md) ;;
+                *) code=true ;;
+              esac
+            done
+          fi
+          echo "code=$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'windows-latest' }}
+    needs: changes
+    timeout-minutes: 60
+    steps:
+      - name: no code changed, nothing to run (this check still reports)
+        if: needs.changes.outputs.code != 'true'
+        run: echo "only documents changed; skipping the heavy steps"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: needs.changes.outputs.code == 'true'
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+        if: needs.changes.outputs.code == 'true'
         with: { toolchain: "1.98.0-x86_64-pc-windows-gnu" }
       - run: .\scripts\ci\toolchain.ps1
+        if: needs.changes.outputs.code == 'true'
         shell: pwsh
       - name: assert gnu host toolchain
+        if: needs.changes.outputs.code == 'true'
         shell: pwsh
         run: |
           $v = (rustc -vV | Out-String)
@@ -40,10 +92,13 @@ jobs:
       # purpose is to go red: every fix-up round would start from a cold build of the entire
       # dependency graph (R-C0-20).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        if: needs.changes.outputs.code == 'true'
         with: { cache-on-failure: true }
       - run: ./scripts/ci/eol-check.ps1
+        if: needs.changes.outputs.code == 'true'
         shell: pwsh
       - name: test (workspace, 0 warnings)
+        if: needs.changes.outputs.code == 'true'
         shell: pwsh
         env:
           CARGO_TERM_COLOR: never
@@ -64,7 +119,7 @@ jobs:
           if ($other.Count -gt 0) { $other | ForEach-Object { $_.Line }; exit 1 }
           if ($code -ne 0) { exit $code }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: failure()
+        if: failure() && needs.changes.outputs.code == 'true'
         with: { name: test-log, path: test.log }
 
   # The cloud codebase (Supabase Edge Functions, Deno). A separate job: nothing in it is Windows-specific
@@ -72,16 +127,24 @@ jobs:
   # job (R-X-7) — nothing adds a second `cloud` job.
   cloud:
     runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
+    needs: changes
     timeout-minutes: 10
     steps:
+      - name: no code changed, nothing to run (this check still reports)
+        if: needs.changes.outputs.code != 'true'
+        run: echo "only documents changed; skipping the heavy steps"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: needs.changes.outputs.code == 'true'
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        if: needs.changes.outputs.code == 'true'
         with: { deno-version: "2.x" }
       # `cloud/eval/` is C2's and sits outside `cloud/supabase/`, so every path is named explicitly
       # (hand-off H8 part 1, C2 Task 13; the `eval-gate` job is Task 14's, added in its own commit).
       - name: deno check
+        if: needs.changes.outputs.code == 'true'
         run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts cloud/eval/*.ts
       - name: deno lint
+        if: needs.changes.outputs.code == 'true'
         run: deno lint --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
       # --allow-net=127.0.0.1 is needed from C2 Task 0 on, and only from then: `judge_anthropic_test.ts`
       # exercises the model client against a listener bound to 127.0.0.1:0 inside the test. No egress,
@@ -95,6 +158,7 @@ jobs:
       # `cloud/eval/.tmp-<random>/` (git-ignored by `cloud/eval/.gitignore`) rather than the OS temp
       # root, precisely so this grant can stay scoped to the one directory that needs it.
       - name: deno test
+        if: needs.changes.outputs.code == 'true'
         run: deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
 
   # §5.4 measure 2's deploy blocker (hand-off H8, part 2; C2 Task 14): the eval suite replays
@@ -133,7 +197,7 @@ jobs:
   # 2026-09-16) — well under a dollar — and the run prints its own case count before each kind's loop.
   eval-gate:
     runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
-    needs: cloud
+    needs: [changes, cloud]
     if: github.event_name == 'pull_request'
     timeout-minutes: 20
     # A-6: the staging project's host, named once at job level and referenced twice below (the
@@ -147,7 +211,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: { fetch-depth: 0 }
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        if: needs.changes.outputs.code == 'true'
         with: { deno-version: "2.x" }
+      # On a document-only change `changes` says `code=false`, the touched-check below finds no prompt,
+      # schema or pin, and `run` stays `no`: the job reports success without spending anything.
       - name: does this PR touch a prompt, a schema, or the model pins?
         id: touched
         shell: bash
@@ -187,7 +254,7 @@ jobs:
       # still compiled into the runner (the `cloud` job's own comment explains why) and its
       # constructor reads them unconditionally even when no Anthropic call is ever made.
       - name: eval suite
-        if: steps.touched.outputs.run == 'yes'
+        if: needs.changes.outputs.code == 'true' && steps.touched.outputs.run == 'yes'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SUPABASE_URL: https://${{ env.STAGING_HOST }}
