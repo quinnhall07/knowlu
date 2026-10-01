@@ -1,10 +1,11 @@
 # Events (MVP): required events enter the plan, with accept and decline (implementation plan)
 
 **Date:** 2026-09-30. **Base:** branch `events`, worktree `.claude/worktrees/events`, cut from `main`
-at `4aa6560`. The base carries #23 (ruling 11's `student` token: `journal::HUMAN_ACTOR`,
-`console_ctx(vault)`, `write`'s human gate, `engine/tests/human_actor_literal.rs`) and #25 (M1
-grades), as well as #12 (the `unsure` word and the `event-check` card) and #14/#16 (the commitment
-model's phases 1–2).
+at `4aa6560`, now at `2d5298a` ("Merge origin/main (Gmail connect #26) into events"), which already
+contains `main`'s `199cd1f` and so `app/tests/handler_lists.rs`. The base carries #23 (ruling 11's
+`student` token: `journal::HUMAN_ACTOR`, `console_ctx(vault)`, `write`'s human gate,
+`engine/tests/human_actor_literal.rs`), #25 (M1 grades) and #26 (Gmail connect), as well as #12 (the
+`unsure` word and the `event-check` card) and #14/#16 (the commitment model's phases 1–2).
 **Governs:** `docs/specs/2026-09-29-events-design.md`, signed by Quinn on 2026-09-29 with every
 recommendation accepted: Q1 (c), Q1a (i), Q1b (i), Q2 (a), Q3 (a), Q4 (a), Q5 (c). Above it: the
 cloud design's Amendment 2026-09-29, ruling 10 (the MVP holds events; its parenthetical was reworded
@@ -12,7 +13,10 @@ at signing: required events enter the plan as a one-off commitment).
 **Stage:** MVP, HANDOFF §3 item 4. **Implements:** parity row P4 of
 `docs/notes/2026-09-29-vision-program.md`, and P6 (c) (the 14-day expiry of opportunity proposals,
 delivered by the spec's D3).
-**Status:** draft, revised for the plan review's nine findings (§10). Nothing here is built yet.
+**Status:** draft, revised for the plan review's nine findings (§10), for Quinn's answers to
+PQ1–PQ4 of 2026-09-30 (§11), and for the second review's four findings (§10, second round). PQ1, PQ2 and PQ4 are applied to the tasks. PQ3's answer, (c), cannot
+be built as approved without a new write, so no task builds it; it waits on Quinn (§4, PQ3).
+Nothing here is built yet.
 
 ## 1. Goal, and what must not move
 
@@ -54,8 +58,8 @@ These must not change:
 ## 2. What changed since the spec was written
 
 The spec was verified on `97dc27b`. This plan re-read every file and function it names on the
-`events` worktree (`4aa6560`) and on `j-events` (`fcad6d4`). Briefs cite functions, never line
-numbers.
+`events` worktree (`4aa6560`, and again at `2d5298a` after `main`'s `199cd1f` was merged in) and on
+`j-events` (`fcad6d4`). Briefs cite functions, never line numbers.
 
 **Merged since the spec (its §9 rows are met):**
 - `human-actor` (#23). `console_ctx(vault)` now returns `Result<WriteContext, String>`, and every
@@ -87,17 +91,35 @@ numbers.
   `HH:MM–HH:MM` on one day and never a series key. So `surface` can learn of an accepted all-day
   event only from an archived card's `instances:`. A carried all-day instance (D4) is on no card.
   On a run where every feed fails, `rank` swaps its candidates for `read_roster`'s (the
-  `feeds_failed` branch in `rank`'s events pass), so that run's events carry no `series_uid`, and
-  neither `inherit_series_answers` nor the carry matches a series (T2b.2 states this as intended).
-- **A carried instance has no verdict, so it is not in Coming up.** Coming up lists only what
-  `eventroster::relevant_events` keeps: a uid with an `obligation` or `opportunity` verdict and no
-  `declined` line. A later instance of an answered `event-accept` series is never judged
-  (T2b.3 stops `judge_roster` from judging it). `inherit_series_answers` reads only
-  `settled_series`, which counts `event-check` cards only, and the carry writes ledger lines only
-  for declines. So a carried instance, timed or all-day, is absent from Coming up, and no
-  "Accepted" mark can show for it. A timed one still has its commitment's block on its day. An
-  instance of the series that was judged confidently before the answer is still listed: PQ3.
-  (`eventledger::record_answer` takes only `obligation` or `drop`, which bounds PQ3's option (b).)
+  `feeds_failed` branch in `rank`'s events pass). `read_roster` builds each event through
+  `DiscoveredEvent::normalized`, so its `series_uid` is its own uid, not a series key. A later
+  instance (`localist:77:3`) then matches no answered series (`localist:77`), and an event whose
+  series is its own uid is the uid its card already lists. So neither `inherit_series_answers` nor
+  the carry acts on a later instance on that run (T2b.2 states this as intended). *Corrected
+  2026-09-30:* an earlier draft said these events carry no `series_uid`.
+- **The roster's read-back is lossy, and on a feed-failure run the card emitters read it.** In
+  `rank`'s events pass, `candidates = read_roster(…)` replaces the candidates when every feed failed
+  and nothing was pre-filtered in, and that same `candidates` is then passed to
+  `inherit_series_answers`, `write_roster`, `emit_digest`, `emit_event_checks` and
+  `relevant_events` (checked on `2d5298a`). `read_roster` rebuilds each event from one
+  `HH:MM–HH:MM` line on one day with `source: "roster"`: an `end <= start` becomes `start + 1h`, so a
+  zero-length event, a past-midnight event (10pm–1am reads back as 10pm–11pm) and an all-day one
+  (00:00–00:00 reads back as 00:00–01:00) all come back as a one-hour timed event, and `url`,
+  `registration` and `registration_deadline` come back empty. A card's `instances:` built from such
+  an event would book an hour the feed never claimed, or the wrong hour, and never-ask-twice makes
+  that card the only one the event gets. So no `event-accept` card and no `instances:` entry is ever
+  built from a `source: "roster"` event (T2a.1b, T2a.2).
+- **A carried instance of an `event-accept` series has no verdict, so it is not in Coming up.**
+  Coming up lists only what `eventroster::relevant_events` keeps: a uid with an `obligation` or
+  `opportunity` verdict and no `declined` line. A later instance of an answered `event-accept`
+  series is never judged (T2b.3 stops `judge_roster` from judging it), and the carry writes ledger
+  lines only for declines. So a carried instance, timed or all-day, is absent from Coming up, and
+  no "Accepted" mark can show for it. A timed one still has its commitment's block on its day. An
+  instance judged confidently before the answer is still listed. A later instance of an answered
+  `event-check` series differs: `inherit_series_answers` gives it the series' answer line, so it is
+  listed, and under PQ1 (a) the carry also books it. Quinn's PQ3 answer, (c), would list the
+  `event-accept` kind at read time, but the read model cannot see what that needs (§4, PQ3).
+  (`eventledger::record_answer` takes only `obligation` or `drop`, which bounded PQ3's option (b).)
 - **`commitments::create_confirmed_as` picks its body from a `&'static str`.** The `kind: event`
   arm needs a computed line for the past-midnight true end. P6 says how it is passed.
 - **`emit_event_checks`' window is not `horizon_start`.** It asks about `unsure` events starting in
@@ -126,14 +148,13 @@ two fix rounds. `arms.ts`' `deviceRecorded` records a refused reply as `unsure`,
 | Lane | Shares with events | Events task | Resolution |
 |---|---|---|---|
 | `m2-editing` | `app/static/console.js`, `app/tests/static_assets.rs`, `app/tests/commands.rs` (its T4a, T4b), `engine/src/surface.rs` (`describe` only), `engine/src/lib.rs` (`pub mod profile;`), `engine/src/eventroster.rs` (its `read_dropped`; events does not edit this file) | T5, T7, T4b, H1 | Per M2's plan §6, events takes M2 in after M2 merges: T5 and T7 wait for it (P12). The engine tasks touch other functions, so they run now. |
-| `gmail-connect` | `app/static/console.js`, `app/tests/static_assets.rs`, `engine/src/enrich.rs` (D4, D7 and the transport stop; events adds only test 24 to its test module), `app/src/main.rs` (its three commands; events adds none) | T5, T4 (test 24) | Gmail is expected to merge before M2. T5 waits for both. Test 24 is appended at the end of `enrich.rs`'s test module, so a conflict there is textual and local. |
+| `gmail-connect` (merged, #26, `199cd1f`; already in `events` at `2d5298a`) | `app/static/console.js`, `app/tests/static_assets.rs`, `engine/src/enrich.rs` (D4, D7 and the transport stop; events adds only test 24 to its test module), `app/src/main.rs` (its three commands; events adds none) | T5, T4 (test 24) | Nothing left to take in. Every events task starts on a base that has Gmail's code, so test 24 is written against `enrich.rs` as Gmail left it. |
 | `p3-registrar` (Pilot) | `engine/src/commitments.rs` (`create_confirmed_as`' body branch), `engine/src/cli.rs`, `console.js`, `static_assets.rs` | T1b, T4, T5 | Unchanged from spec §9: p3 rebases after events, keeping both body arms (events' `kind: event` arm tested first), both `cli.rs` passes and both label switches. |
 | `two-desktop` (Launch) | its spec's producer table | none | Hand-off only (spec §9). |
 
-`app/src/main.rs` and `app/src/lib.rs` need **no** hand-off from this lane. Gmail moves the console's
+`app/src/main.rs` and `app/src/lib.rs` need **no** hand-off from this lane. Gmail moved the console's
 list from 47 to 50 and M2 adds five more; events adds none. Gmail's `app/tests/handler_lists.rs`
-will pin the count, but it is not on `main` at `4aa6560`; until Gmail merges, the count is taken by
-hand (§7).
+pins the count and is already in the `events` branch (`2d5298a`), so every gate runs it (§7).
 
 ## 3. Decisions this plan makes
 
@@ -145,7 +166,9 @@ hand (§7).
     T2a.1b (obligation cards, `instances:` on both kinds, never-ask-twice across both) and T2a.2
     (opportunity cards behind the switch, their order and expiry).
   - T2b becomes T2b.1 (`answered_series` alone, the spec's "first commit"), T2b.2 (the
-    ever-written set, D9's rebuild and the carry) and T2b.3 (the `judge_roster` call site).
+    ever-written set, D9's rebuild and the carry over `event-accept` series), T2b.2b (PQ1 (a):
+    `accepted_check_series` and the carry over the union, its own commit) and T2b.3 (the
+    `judge_roster` call site).
   - T3 becomes T3.1a (the approved `event-accept` arm and the retry), T3.1b (the rejected arm and
     the expiry test) and T3.2 (the extended `event-check` arm and the shapes).
 - **P2. T0's count is measured off the critical path.** Q1, Q1a and Q1b are signed, and Q1b's
@@ -165,7 +188,8 @@ hand (§7).
   - **past-midnight**: `end` on the next day at or before `start`'s time of day, including an end at
     exactly 00:00 the next day (a 10pm–12am event): a commitment to 23:59;
   - **timed one-day**: `start < end` on one day;
-  - **zero-length** (`end <= start` on one day): no commitment, drawn in the all-day lane (PQ2).
+  - **zero-length** (`end <= start` on one day): no commitment, drawn in the all-day lane on its
+    day (PQ2, answered 2026-09-30: Knowlu invents no hours).
 - **P5. `instances:` entries carry `url`.** Each mapping is `uid`, `title`, `start`, `end`,
   `location`, `url`, `registration`, `registration_deadline`, free text through `judge::one_line`
   (title 200, location 120, url 500). The register task's body needs the URL (spec §4.2), and the
@@ -180,8 +204,9 @@ hand (§7).
   `executed` card's `instances:` (`event-accept`, or `event-check` with `instances:`), or is the
   `source_uid` of a `kind: event` note in `commitments/`. The second test is for an instance that is
   in Coming up and was booked by the carry: one judged confidently before its series was answered,
-  or, if PQ3 is (b), every carried timed instance. Under PQ3 (a) a carried instance with no verdict
-  is not in Coming up at all (§2), so the mark never applies to it.
+  or (PQ1 (a)) a later timed instance of an accepted `event-check` series, which Coming up lists
+  through its inherited answer line. A carried `event-accept` instance with no verdict is not in
+  Coming up (§2), so the mark never reaches it. PQ3 (c) would list it, and is blocked (§4).
   `ComingUp` gains `accepted: bool`, serialised only when true, so every existing reference and
   `today.md` are byte-identical. `render::coming_up` (the page) is not changed.
 - **P9. The carry writes commitments only.** Spec §4.2: a series writes one register task, for its
@@ -214,10 +239,11 @@ hand (§7).
   comparison, and the test says so in a comment. This is how spec test 4's "identical bytes" is
   read; the assertion is not weakened anywhere else.
 
-## 4. Open questions (each with a recommendation)
+## 4. Open questions, and Quinn's answers (2026-09-30)
 
-Ask them one at a time, in T0's order (PQ2, PQ1, PQ3, then PQ4 at T9), each with its context. None blocks T1a; each names the task
-it must be answered before.
+Asked one at a time, each with its context, and answered by Quinn on 2026-09-30. Each answer is
+recorded under its question; the options are kept as they were asked. One item is open: PQ3's
+answer cannot be built as approved, and its blocker goes back to Quinn.
 
 - **PQ1. Does an accepted `event-check` series carry, too?** D11 makes an `event-check` Approve an
   Accept when the card carries `instances:`, so the listed instances get commitments. But D4's carry
@@ -233,14 +259,26 @@ it must be answered before.
     never booked.
   - *Cost of (a):* one more reader and two tests in T2b.2 (contract-engineer). It widens a signed
     section, so it needs Quinn's word. *Before:* T2b.2.
+  - **Answered 2026-09-30: (a), carry it.** An executed `event-check` card that carries
+    `instances:` carries its series as an accepted `event-accept` card does. `eventcarry` gains
+    `accepted_check_series`, the accept carry runs over the union, and `answered_series` keeps its
+    edge rule (an `event-check` card is not counted). Applied in T2b.2b (split out of T2b.2 by the
+    second review); the widened spec sections (§4.5, §6.1's `eventcarry.rs` row) get a dated note
+    in T8.
 - **PQ2. A zero-length event (`end <= start` on one day).** The spec writes a commitment only when
   `start < end`, and names no fallback for this shape. The ICS reader already gives a missing
   `DTEND` one hour, so this comes from Localist, Engage or a scraped page.
   - *Recommend:* the all-day lane, with no commitment, as for an all-day event: Knowlu invents no
-    hours. `rank`'s own roster read-back gives such an event one hour, but that is display only.
+    hours. `rank`'s own roster read-back gives such an event one hour. *Corrected 2026-09-30
+    (second review):* an earlier draft called that hour "display only". It is not: on a
+    feed-failure run the read-back events are the candidates every card emitter files from (§2). So
+    no `event-accept` card and no `instances:` entry is built from a `source: "roster"` event
+    (T2a.1b, T2a.2), which keeps the read-back's invented hour off every card.
   - *Alternative:* a one-hour commitment from its start. It blocks an hour the feed never claimed.
   - *Before:* T1a. If unanswered, T1a builds the recommendation; the other answer changes one arm
     of `shape`.
+  - **Answered 2026-09-30: the all-day lane, no commitment.** Knowlu invents no hours. Applied in
+    P4, T1a's shape arm and test, T3.2's test 16 and T4b's test 22a.
 - **PQ3. Carried instances, timed and all-day, are absent from Coming up.** A later instance of an
   accepted `event-accept` series is never judged (T2b.3), and nothing gives it a verdict:
   `inherit_series_answers` reads `event-check` cards only, and the carry writes ledger lines only
@@ -262,6 +300,77 @@ it must be answered before.
   - *Cost of (b):* about 15 lines and two tests in T2b.2 (contract-engineer), and one more case in
     T4's rank-level test.
   - *Before:* T2b.2 (the carry is where (b) lands); T4b and T8 read the answer.
+  - **Answered 2026-09-30: (c), a new option.** A carried instance with no verdict of its own,
+    whose series the student answered, is listed in Coming up at read time by the read model
+    (`surface`, and `rank` for `today.md`), under that series answer and labelled with its
+    provenance (for example "Accepted · from your answer to the series on <date>"). No new vault
+    write and no synthetic answer line. The obligation or opportunity kind is kept. It covers timed
+    and all-day instances, and all-day ones go in the all-day lane too. It is deterministic, and
+    `surface` never writes.
+  - **Blocked as approved (found 2026-09-30).** Checked against the code on the `events` worktree
+    and on `main` (`199cd1f`). Without a new write, the read model cannot see what (c) needs:
+    1. **No file links an instance to its series.** A carried instance's series key exists only in
+       `rank`'s memory, on `DiscoveredEvent::series_uid` as `eventfeed::parse_localist` sets it
+       (the ICS and Engage readers leave it equal to the uid). No persisted store keeps it.
+       `write_roster` writes uid, title, times, organizer and location, never a series key, and its
+       bytes for `vault-full` are pinned by the frozen `vault-full/state/events.md`. `read_roster`
+       hands back `series_uid` equal to the uid. The ledger has no series field and no line for a
+       carried instance. The carry's `kind: event` note (`commitments::create_confirmed_as`) holds
+       `source_uid`, `title`, `meets`, `where`, `from`/`until`, `level` and `confirmed_at` (the
+       carry's run date), but no series key and no reference to the card. The card lists only its
+       own instances. A series cannot be derived from a uid either: Localist's `<series>:<instance>`
+       shape is not a contract, and `sanitize_uid` keeps `:`, which ICS UIDs may contain.
+    2. **So the answer's date and kind are out of reach.** Without the link, `surface` cannot find
+       the answering card, and so has neither its `executed_at` (the provenance date) nor its
+       `verdict:` (the kind). The note's `level` cannot stand in for the kind: the student can edit
+       it, and it is always `hard` for an `event-check` series (P7).
+    3. **A carried all-day instance is invisible.** It gets no note (P4) and is on no card. The
+       roster holds it only as an unjudged audit line, with a start and no end, inside
+       `roster_window_days`, and `read_roster` does not parse that line. Neither the instance nor
+       its span reaches `surface`. The same holds for an all-day later instance of an accepted
+       `event-check` series under PQ1 (a): Coming up lists it through its inherited answer line, but
+       the lane cannot draw it.
+    4. **`rank` alone is not enough.** `rank` holds the series keys in memory, but `surface` reads
+       the disk, and anatomy §3.11 requires the console and `today.md` to show the same five.
+  - **Open, for Quinn: how to unblock (c).** The missing pieces are an instance-to-series link and,
+    for all-day instances, the span, both persisted. Given the link, the provenance date and the
+    kind are read from the answering card at read time. Every way to persist them is a write:
+    - *Recommend:* the roster. `rank` already rewrites `state/events.md` every run, and the file
+      is generated, device-local and never synced; it is neither a note nor a ledger line. Its
+      Coming-up section would list each carried instance with its series key and span. `today.md`
+      and `surface` would both read them there, and `read_roster` would keep them on a feed-failure
+      run. *Cost:* a format change to a writer whose `vault-full` bytes are frozen. Those bytes stay
+      identical, because `vault-full` has no carried series. `read_roster` must read the new lines
+      without taking a series segment for the organizer. This is contract-engineer work. Two more
+      costs (second review, checked on `2d5298a`):
+      1. *The feed-failure rule.* `read_roster` is also `rank`'s candidate source when every feed
+         fails (§2). If it hands back carried instances with their series keys, the carry and
+         `inherit_series_answers` act on a roster run, and the plan's "a roster run carries
+         nothing" rule (T2b.2) flips. Either `read_roster` keeps returning `series_uid` equal to the
+         uid and a separate reader takes the carried lines for the read model only (the rule and
+         its two tests, `roster_read_events_carry_nothing` and
+         `a_rank_on_the_roster_alone_carries_nothing`, stand), or the rule changes on purpose and
+         both tests are rewritten with the ruling cited. *Recommend the separate reader.*
+      2. *`relevant_events` changes too.* Coming up keeps only what
+         `eventroster::relevant_events` keeps (a confident verdict, no `declined` line), and that one
+         function serves three callers: `write_roster`'s relevant section, `rank`'s Coming up for
+         `today.md`, and `surface::coming_up`. Listing carried instances means a sibling function, or
+         a change to `relevant_events` that admits a carried uid with its series' answer, used by
+         all three so the console and `today.md` show the same five (anatomy §3.11). The frozen
+         references cannot move: `vault-full` has no `event-accept` card, so no carried instance,
+         and `golden-today-{s1,full}.md`, `vault-full/state/events.md` and the three
+         `surface-today-*.json` stay byte-identical; test 23 and the fixtures diff prove it at
+         every gate. Any vault that has a carried instance will see `today.md` and `state/events.md`
+         change, by design.
+    - *Alternative:* a new generated Markdown file under `state/` (spec §6.1 rules out new JSON),
+      written by `rank` each run and read by `surface`. It is cleaner to keep apart, but it is a new
+      file, and it too must survive a feed-failure run, when `rank` holds no series keys. It shares
+      cost 2 (the `relevant_events` change) and avoids cost 1, since `read_roster` is untouched.
+    - *Not enough alone:* `series_uid` on the carried note, which covers timed instances only.
+    - *Fallback:* (a), with the gap named in anatomy.
+    - *Before:* T2b.2 if the ruling changes what the carry writes, otherwise before T4b. If it is
+      still open at T2b.2, T2b.2 runs as planned, since it writes nothing for (c) either way. The
+      ruling's task is then added after T4b and before B2. No task builds (c) until Quinn rules.
 - **PQ4. B1's base, and shipping `event-4` if it wins.** B1 (T9) is signed (Q5 (c)) and makes paid
   OpenRouter calls through the key in Credential Manager `knowlu/dev/openrouter`.
   - *Recommend:* run the harness on `j-events` as it stands. Its `event-3` arm is frozen in
@@ -272,6 +381,10 @@ it must be answered before.
     anywhere), then the review and the deploy. If it loses, the branch is closed as its header
     plans.
   - *Before:* T9. The spend is small (the harness has 26 seed cases, two arms).
+  - **Answered 2026-09-30: as recommended.** B1 runs as it stands on `j-events`, after checking
+    that its frozen `event-3` arm (`event3_frozen.ts`) matches `main`'s live event row. The result
+    goes in `docs/reports/`. If `event-4` wins, it ships only through its own cloud PR. Applied in
+    T9.
 
 ## 5. Tasks
 
@@ -298,32 +411,33 @@ it must be answered before.
 
 | Task | Agent (model, effort) | Quinn | Files | After |
 |---|---|---|---|---|
-| T0 | main session | PQ1–PQ3 asked | none (git, ledger) | — |
+| T0 | main session | PQ1–PQ4 answered; PQ3's blocker asked | none (git, ledger) | — |
 | T0c | `researcher` (Sonnet, medium) | — | none (returns counts) | any time before T10 |
 | H1a | main session | — | `engine/src/lib.rs`, `engine/src/eventaccept.rs` (stub) | T0 |
-| T1a | `implementer` (Sonnet, high) | PQ2 | `engine/src/eventaccept.rs` | H1a |
+| T1a | `implementer` (Sonnet, high) | PQ2 (answered) | `engine/src/eventaccept.rs` | H1a |
 | T1b | `implementer` (Sonnet, high) | — | `engine/src/events.rs` (`EventsConfig`, loader), `engine/src/commitments.rs` (`create_confirmed_as`' body) | T1a |
 | H1b | main session | — | `engine/src/lib.rs`, `engine/src/eventcarry.rs` (stub) | T1b |
 | T2b.1 | `contract-engineer` (Opus, xhigh) | — | `engine/src/eventcarry.rs` | H1b |
 | T2a.1a | `implementer` (Sonnet, high) | — | `engine/src/eventemit.rs` | T2b.1 |
 | T2a.1b | `implementer` (Sonnet, high) | — | `engine/src/eventemit.rs` | T2a.1a |
 | T2a.2 | `implementer` (Sonnet, high) | — | `engine/src/eventemit.rs` | T2a.1b |
-| T2b.2 | `contract-engineer` (Opus, xhigh) | PQ1, PQ3 | `engine/src/eventcarry.rs` | T2a.2 |
-| T2b.3 | `contract-engineer` (Opus, xhigh) | — | `engine/src/events.rs` (`judge_roster` only) | T2b.2 |
+| T2b.2 | `contract-engineer` (Opus, xhigh) | — | `engine/src/eventcarry.rs` | T2a.2 |
+| T2b.2b | `contract-engineer` (Opus, xhigh) | PQ1 (a) | `engine/src/eventcarry.rs` | T2b.2 |
+| T2b.3 | `contract-engineer` (Opus, xhigh) | — | `engine/src/events.rs` (`judge_roster` only) | T2b.2b |
 | T3.1a | `contract-engineer` (Opus, xhigh) | — | `engine/src/approvals.rs` CL | T2b.3 |
 | T3.1b | `contract-engineer` (Opus, xhigh) | — | `engine/src/approvals.rs` CL | T3.1a |
 | T3.2 | `contract-engineer` (Opus, xhigh) | — | `engine/src/approvals.rs` CL | T3.1b |
 | B | `contract-reviewer` (Opus, xhigh) | checkpoint | `docs/reports/…-events-contract-review.md` | T3.2 |
 | R1 | `reviewer` (Opus, high), beside B | — | `docs/reports/…-events-sonnet-review-1.md` | T3.2 |
 | T4 | `contract-engineer` (Opus, xhigh) | — | `engine/src/cli.rs`; test 24 in `engine/src/enrich.rs`' test module | B, R1 |
-| T4b | `implementer` (Sonnet, high) | PQ3 read | `engine/src/surface.rs` (`Loaded`, `load_with`, `the_day`, `coming_up`, `ComingUp`, one new private reader) | T4 |
+| T4b | `implementer` (Sonnet, high) | — (PQ3 (c) not here) | `engine/src/surface.rs` (`Loaded`, `load_with`, `the_day`, `coming_up`, `ComingUp`, one new private reader) | T4 |
 | B2 | `contract-reviewer` (Opus, xhigh) on T4 + `reviewer` (Opus, high) on T4b | — | `docs/reports/…-events-review-2.md` | T4b |
-| M | main session | push go | `main` merged into `events` | B2, and M2 and Gmail merged |
+| M | main session | push go | `main` merged into `events` | B2, and M2 merged (Gmail is already in) |
 | T5 | `console-ui` (Sonnet, medium) | — | `app/static/console.js`, `app/tests/static_assets.rs` | M |
 | T6 | `mechanical` (Sonnet, low) | — | `app/assets/campus/{none,university-of-alabama}.yaml`, `app/tests/scaffold.rs` | M |
 | T7 | `test-writer` (Sonnet, medium) | — | `app/tests/commands.rs` | M |
 | T8 | `docs-keeper` (Sonnet, medium) | — | `docs/surface/anatomy.md`, `docs/reference/engine-commands.md`, `docs/notes/2026-09-29-vision-program.md`, spec §12 note | T7 |
-| T9 | `cloud-engineer` (Opus, high), on `j-events` | PQ4 | `docs/reports/…-events-b1.md` (harness run, not edited) | any time before T10 |
+| T9 | `cloud-engineer` (Opus, high), on `j-events` | PQ4 (answered) | `docs/reports/…-events-b1.md` (harness run, not edited) | any time before T10 |
 | W | `reviewer` (Opus, high) + `contract-reviewer` (Opus, xhigh) | checkpoint | `docs/reports/…-events-whole-branch-review.md` | T8 |
 | T10 | main session | merge word | none (scratch profile) | W, T9, staging |
 
@@ -331,19 +445,28 @@ T2a and T2b interleave as the spec orders (T2b's first commit, then T2a, then th
 but serially, because one implementer runs at a time in the worktree. T5, T6 and T7 touch disjoint
 files and run one after another after M.
 
+**PQ3 (c) has no task.** As approved, it cannot be built (§4, PQ3). When Quinn rules on the
+blocker, the planner adds its task (tests first, an agent named) where §4 says, and the ledger
+(§9) gains its row. Until then, no task writes or reads anything for it.
+
 ### T0. Preflight (main session)
 
 **Why the main session:** git state, sibling-lane checks and Quinn's answers are the controller's.
-- Confirm the worktree is at `4aa6560` with a clean tree, and record the base in a new SDD ledger,
+- Confirm the worktree is at `2d5298a` (or a later commit of this branch) with a clean tree, that
+  `git merge-base --is-ancestor 199cd1f HEAD` succeeds, and that `app/tests/handler_lists.rs` is in
+  the tree. Record the base in a new SDD ledger,
   `.superpowers/sdd/2026-09-29-ultracode/events-progress.md`.
-- Run `git merge-tree --write-tree` of `events` against `gmail-connect`, `m2-editing`,
-  `p3-registrar` and `j-events`, and `git diff --name-only main...<branch>` for each. Record that
+- Run `git merge-tree --write-tree` of `events` (at `2d5298a`) against `m2-editing`,
+  `p3-registrar` and `j-events`, and `git diff --name-only main...<branch>` for each (Gmail is
+  merged and already in `events`). Record that
   the engine tasks (T1a–T4b) share only the files §2's table names. Repeat before M and before the
   merge (spec §9).
-- Ask Quinn PQ2, PQ1 and PQ3, one at a time with their context. PQ2 is due before T1a, PQ1 and PQ3
-  before T2b.2. PQ4 is asked when T9 is dispatched.
+- Record Quinn's answers of 2026-09-30 (§4): PQ1 (a), PQ2 (the all-day lane), PQ3 (c) and PQ4 (as
+  recommended). Bring Quinn PQ3's blocker and its options (§4, PQ3), with its context, before
+  T2b.2.
 
-**Done when:** the ledger records the base, the overlap check and each answer as it arrives.
+**Done when:** the ledger records the base, the overlap check, the four answers and PQ3's
+blocker, and later Quinn's ruling on it.
 
 ### T0c. The Alabama shape count (researcher, off the critical path)
 
@@ -364,7 +487,8 @@ warning. One commit.
 
 **Agent:** `implementer` (Sonnet, high). **Why:** pure functions, no I/O, off the list, checked by
 the compiler and tests. It writes nothing to a vault.
-**Files:** `engine/src/eventaccept.rs`. **Before it:** PQ2 (or its recommendation).
+**Files:** `engine/src/eventaccept.rs`. **PQ2:** answered 2026-09-30: a zero-length event goes in
+the all-day lane with no commitment.
 
 **Tests first** (spec test 8, split so each shape is its own test, plus P5's payload):
 - `a_timed_one_day_event_gives_the_commitment_mapping`: `kind: event`, `level` from the verdict
@@ -376,7 +500,9 @@ the compiler and tests. It writes nothing to a vault.
 - `an_all_day_or_multi_day_event_gives_the_lane_marker_and_no_commitment`: one all-day day, three
   all-day days, and a Fri 5pm–Sun 2pm event each give the all-day shape with their first and last
   day (an end at 00:00 belongs to the day before).
-- `a_zero_length_event_gives_the_lane_marker` (PQ2).
+- `a_zero_length_event_gives_the_lane_marker` (PQ2): a 3pm–3pm event, and a 3pm–2pm event on
+  one day, each give the lane shape with first day = last day = their date, and `commitment_for`
+  returns `None` for both, at either level. Neither is read as past-midnight.
 - `the_register_task_is_due_at_the_deadline_at_2359`: `registration: true` with a deadline gives
   §4.2 step 2's fields, `due: "<deadline>T23:59"`, `source_uid: "register:<uid>"`.
 - `the_register_task_without_a_deadline_is_undated_and_names_the_start_as_an_upper_bound`: `due` is
@@ -441,7 +567,9 @@ case.
 - `an_expired_or_other_status_answers_nothing` (ruling G1), including a `pending` card left in
   `archive/` by hand.
 - `a_card_with_a_missing_or_empty_series_uid_answers_no_series`.
-- `an_event_check_card_is_not_counted`.
+- `an_event_check_card_is_not_counted`. PQ1 (a) leaves this rule unchanged: accepted `event-check`
+  series reach the carry through their own reader, `accepted_check_series` (T2b.2b), never through
+  `answered_series`.
 - `two_cards_for_one_series_the_lowest_file_name_wins`.
 - `only_archive_is_read`: an `executed` card in `approvals/` answers nothing.
 
@@ -504,8 +632,21 @@ and output do not change. No new card kind, no `instances:` yet.
 - `event_accept_is_not_a_local_card_kind_and_its_notes_sync` (25): `event-accept` is not in
   `commitments::LOCAL_CARD_KINDS`; `ids::NOTE_FOLDERS` contains `commitments` and `tasks`.
   Membership only, never length or order.
+- `a_roster_read_event_files_no_event_accept_card_and_no_instances` (second review; PQ2, §2): the
+  events are built as `read_roster` builds them (`source: "roster"`), among them a zero-length
+  obligation read back as 15:00–16:00. `emit_event_accepts` files no card and writes no `proposed`
+  line for any of them, so the next fetched run can still ask. An `unsure` roster event still gets
+  its `event-check` card exactly as today, with no `instances:` key, so its Approve records the
+  answer only (D11's without-`instances:` path) and books nothing. The same events with any other
+  `source` file their cards as tests 1 and 5 say.
 
 **Behaviour.** Spec §4.1, §5.1, §5.2, D5, D7 and P10.
+- **No card is built from the roster's read-back** (§2). `emit_event_accepts` skips every event
+  whose `source` is `"roster"`, and `emit_event_checks` adds `instances:` only for events whose
+  `source` is not `"roster"`. The skip is by source, not by `rank`'s `feeds_failed`, so the emitter
+  needs no new argument. The trade-off: an obligation is asked on the next run that fetches it
+  while it is still in its window, so one whose date passes during a whole outage is never asked.
+  The digest (switch off) and `emit_event_checks`' selection keep reading roster events as today.
 - T2a.1a's table gains its second row, `obligation` → `event-accept` (P10's window). T2a.2 adds
   the third. `event-check` cards gain `instances:` and §5.2's closing.
 - Never-ask-twice reads both kinds. Its answered-series test is the union of `settled_series` and
@@ -519,7 +660,7 @@ and output do not change. No new card kind, no `instances:` yet.
   `write::create`; frontmatter through `yamlemit::safe_dump_block`.
 - `expires` for an obligation card is its primary's date.
 
-**Done when:** the six tests pass and every existing `eventemit.rs` test passes unchanged.
+**Done when:** the seven tests pass and every existing `eventemit.rs` test passes unchanged.
 
 ### T2a.2. Opportunity cards behind the switch (`eventemit.rs`)
 
@@ -541,18 +682,23 @@ and output do not change. No new card kind, no `instances:` yet.
 - `expiry_is_the_event_date_or_fourteen_days_for_an_opportunity` (7): an obligation card expires on
   its primary's date; an opportunity card on the earlier of that date and
   `first_proposed_at + 14`.
+- `a_roster_read_opportunity_files_no_card` (second review; §2): with the switch on, an opportunity
+  built as `read_roster` builds it (`source: "roster"`, a past-midnight event read back as
+  22:00–23:00) files no card and no `proposed` line; the same event with a feed `source` files one.
 
 **Behaviour.** Spec §4.4, D3, D6, D7. The table's third row, `opportunity` → `event-accept`, is
 live only when `config.event_cards` is true. `emit_event_accepts` takes the verdict to file, so
 `rank` can size obligations and opportunities separately (T4).
-**Done when:** the four tests pass, and T2a.1a's and T2a.1b's tests pass unchanged.
+**Done when:** the five tests pass, and T2a.1a's and T2a.1b's tests pass unchanged.
 
 ### T2b.2. The ever-written set, D9's rebuild and the series carry (`eventcarry.rs`)
 
 **Agent:** `contract-engineer` (Opus, xhigh). **Why:** this is the one place that writes into a
 student's plan with no card in front of it. A wrong set brings back a note the student deleted; a
 wrong carry books or declines a whole series silently (spec §13).
-**Files:** `engine/src/eventcarry.rs`. **Before it:** PQ1 and PQ3.
+**Files:** `engine/src/eventcarry.rs`. **Scope:** `event-accept` series only; PQ1 (a)'s
+`event-check` series are T2b.2b, its own commit. PQ3 (c) adds nothing here: the carry writes no
+answer line, and no task builds (c) until Quinn rules on its blocker (§4).
 
 **Tests first** (spec tests 19, 20, 20a at the carry's entry point, P13; plus the set's units):
 - `the_ever_written_set_reads_commitments_tasks_and_archive` (§5.3): a uid on a live commitment, a
@@ -569,15 +715,14 @@ wrong carry books or declines a whole series silently (spec §13).
 - `a_deleted_carried_note_stays_deleted` (20a): carry, delete the commitment through
   `write::delete` (it lands in `archive/`), call twice more: no note and no journal record for that
   uid. Delete the primary's register task the same way: never re-created.
-- If PQ1 is (a): `an_accepted_event_check_series_books_a_later_instance_once` and
-  `an_event_check_card_without_instances_carries_nothing`.
-- If PQ3 is (b): `a_carried_instance_gets_the_series_answer_and_is_relevant` (an unjudged carried
-  instance gets one `obligation` answer line, `relevant_events` then keeps it, a second call writes
-  nothing) and `a_carried_instance_with_a_confident_verdict_keeps_it` (no line written).
-- If PQ3 is (a): `a_carried_instance_writes_no_ledger_line` pins the gap (the accept carry writes
-  only notes; Coming up does not list an unjudged carried instance).
-- `events_with_no_series_uid_carry_nothing`: events whose `series_uid` is empty (as `read_roster`
-  gives them) match no answered series, and the call writes nothing.
+- `the_accept_carry_writes_no_ledger_line` (spec §5.4; PQ3's answer allows no synthetic answer
+  line): a later, unjudged instance is carried for an accepted `event-accept` series.
+  `state/events-seen.md` is byte-identical to before the call, and the returned ledger map has no
+  entry for the uid.
+- `roster_read_events_carry_nothing` (the feed-failure run, §2): events built as `read_roster`
+  builds them, each with its `series_uid` equal to its uid (`DiscoveredEvent::new`). Archived is an
+  `executed` `event-accept` card for series `lx:77` listing `lx:77:1`. The event `lx:77:3` writes
+  nothing: its series is its own uid.
 
 **Behaviour.** Spec §4.5, §5.3, D4, D9, with P9.
 - `ever_written(vault) -> BTreeSet<String>`: `source_uid` from every note in `commitments/`,
@@ -585,26 +730,65 @@ wrong carry books or declines a whole series silently (spec §13).
 - `pub fn run(vault, events, ledger, today, ctx, journal) -> (Lines, Vec<String>)`, the one entry
   point `rank` calls (T4). In order: D9's rebuild (a `rejected` card's uids that have no `declined`
   line get one, through `eventledger::record_declined`), then the carry over every instance in
-  `events` whose series is in `answered_series` and which that card did not list, in
-  `(start, uid)` order. Declined series: `record_declined` for each instance not yet declined.
-  Accepted series: for each instance starting today or later, unless its uid is in the ever-written
-  set, the commitment from `eventaccept::commitment_for` through `commitments::create_confirmed`
-  (actor `agent:commitments`, journal first). The ledger map is updated as `load_ledger` would read
-  the new lines.
-- If PQ3 is (b), after an accepted instance's commitment (or, for an all-day one, in its place):
-  `record_answer(…, "obligation", by, jid)` when the instance has no verdict or an `unsure` one and
-  no answer, exactly as `inherit_series_answers` decides; `by` follows `settled_series`' rule. The
-  ledger map is updated as for the declines.
+  `events` that its series' card did not list, in `(start, uid)` order.
+  - Declined series (`answered_series`, rejected; unchanged): `record_declined` for each instance
+    not yet declined.
+  - Accepted series (`answered_series`' executed entries): for each instance starting today or
+    later, unless its uid is in the ever-written set, the commitment from
+    `eventaccept::commitment_for` goes through `commitments::create_confirmed` (actor
+    `agent:commitments`, journal first). The level comes from the card's `verdict:`. The accepted
+    set is built in one private helper, so T2b.2b widens it in one place.
+  - The ledger map is updated as `load_ledger` would read the new lines. The accept carry writes no
+    ledger line (spec §5.4; PQ3's answer).
 - **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
-  passes `read_roster`'s events, which carry no `series_uid` (§2). The carry then matches no series
-  and writes nothing; the next run that fetches the feeds carries as usual. This is intended: the
-  carry reads series only from fetched events, never from the roster, the ledger or any other
-  store. The module doc says so, so that a later change does not "fix" it.
+  passes `read_roster`'s events, whose `series_uid` is their own uid (§2). The carry then reaches no
+  later instance and writes nothing; the next run that fetches the feeds carries as usual. This is
+  intended: the carry reads series only from fetched events, never from the roster, the ledger or
+  any other store. The module doc says so, so that a later change does not "fix" it.
 - A write failure is a warning, and the next `rank` retries. Nothing here panics.
 - No edit to `surface::delta`. Every carried note is a journal `create` in the `rank` run, which is
   what lists it (spec §4.5).
 
-**Done when:** the tests pass, and T2b.1's and T2a's tests pass unchanged.
+**Done when:** the seven tests pass, and T2b.1's and T2a's tests pass unchanged.
+
+### T2b.2b. PQ1 (a): an accepted `event-check` series carries (`eventcarry.rs`)
+
+**Agent:** `contract-engineer` (Opus, xhigh). **Why:** it widens the silent booking path to a
+second card kind, and a wrong reader hard-books a series the student only said applies (§8).
+Split from T2b.2 by the second review so its diff is small and Checkpoint B reads it alone.
+**Files:** `engine/src/eventcarry.rs`. **Answer applied:** PQ1 (a), Quinn, 2026-09-30.
+
+**Tests first:**
+- `an_accepted_event_check_series_books_a_later_instance_once`: an `executed` `event-check` card
+  in `archive/` carrying `instances:` (series `lx:9`, listing `lx:9:1`), and events holding
+  `lx:9:1` and a later timed `lx:9:2`. One commitment, for `lx:9:2`, with `level: hard` (P7) and
+  `source_uid: "lx:9:2"`; none for `lx:9:1`, which the card listed. A second call writes nothing,
+  no journal record included, no register task is written (P9), and `state/events-seen.md` is
+  byte-identical to before the first call (no ledger line, spec §5.4). `answered_series` still
+  does not count the card. A hand edit can make an archived `rejected` `event-accept` card answer
+  `lx:9` too; then nothing is booked for the series, because `answered_series`' answer wins.
+  Built as `read_roster` builds events (series equal to uid), a one-instance `ics:fair` whose
+  executed `event-check` card lists it writes nothing.
+- `an_event_check_card_without_instances_carries_nothing`: an `executed` `event-check` card with
+  no `instances:` key (as filed before this lane), and its series' later instance in the events: no
+  commitment and no journal record. The same holds for a `rejected` and an `expired` `event-check`
+  card that carries `instances:`.
+
+**Behaviour.** PQ1 (a), P7.
+- `accepted_check_series(vault) -> BTreeMap<String, CheckAccept>`: reads `archive/` only, through
+  `approvals::sorted_md`, for `type: approval`, `kind: event-check`, `status: executed` cards with
+  an `instances:` sequence. The value holds the card's file name and the uids its `events:` lists.
+  A card with a missing or empty `series_uid` answers no series, and the lowest file name wins. Any
+  other status answers nothing here: a `rejected` `event-check` series already has `drop` lines
+  through `inherit_series_answers`. It reads no ledger.
+- T2b.2's accepted-set helper becomes the union of `answered_series`' executed entries and
+  `accepted_check_series`. Where one series is in both readers, which only a hand edit can make,
+  `answered_series` wins, so a series declined on an `event-accept` card is never booked. The level
+  is `hard` for an `event-check` series.
+- Only the accept carry calls it: not the decline carry, the emitter or `judge_roster`, which keep
+  the union of `settled_series` and `answered_series`.
+
+**Done when:** both tests pass, and T2b.1's and T2b.2's tests pass unchanged.
 
 ### T2b.3. `judge_roster` skips a settled series of either kind (`events.rs`)
 
@@ -676,7 +860,8 @@ silent error here writes the wrong note into a student's vault, or none.
 - `an_event_check_with_instances_records_the_answer_then_books_it` (15): the `record_answer` line as
   today, then a `level: hard` commitment (P7). Without `instances:`, the settlement's journal and
   ledger bytes equal today's for the same card.
-- `an_all_day_instance_stands_with_no_commitment_and_no_warning` (16), and
+- `an_all_day_instance_stands_with_no_commitment_and_no_warning` (16), with a zero-length
+  instance alongside that also stands with no commitment and no warning (PQ2), and
   `a_past_midnight_instance_books_to_2359_with_its_true_end_in_the_body` (16).
 - `the_calendar_event_and_digest_arms_are_unchanged` (17): their existing tests pass unedited; this
   named test settles one approved digest and one rejected digest beside an `event-accept` card in
@@ -690,8 +875,13 @@ when `instances:` is present, the same accept settlement as T3.1a at `level: har
 
 **Agent:** `contract-reviewer` (Opus, xhigh). **Report:**
 `docs/reports/<date>-events-contract-review.md`. It reads, one commit at a time, T2b.1, T2b.2,
-T2b.3, T3.1a, T3.1b and T3.2 against spec §4, §5, §6.1, §8 and D1–D11, and checks in particular:
+T2b.2b, T2b.3, T3.1a, T3.1b and T3.2 against spec §4, §5, §6.1, §8, D1–D11 and Quinn's PQ1 (a),
+and checks in particular:
 - that `answered_series` has one definition and the emitter has no copy;
+- reading T2b.2b's commit alone: that `accepted_check_series` feeds only the accept carry, never
+  the decline carry, the emitter or `judge_roster`; that a cross-reader overlap goes to
+  `answered_series`; and that an `event-check` card with no `instances:` carries nothing;
+- that the accept carry writes no ledger line (spec §5.4, PQ3's answer);
 - that the ever-written set leaves out approval cards and includes `archive/`;
 - that every note is written journal first, through `write::create`, by an `agent:` actor;
 - that a failure leaves the card `approved` and a retry duplicates nothing;
@@ -708,7 +898,8 @@ changed goes through `reviewer` before a push. **Report:**
 `docs/reports/<date>-events-sonnet-review-1.md`. It reads H1a, T1a, T1b, H1b, T2a.1a, T2a.1b and
 T2a.2, one commit at a time, against spec §4.1, §4.2, §5.1, §5.2, §5.5, D5–D8 and P4–P6, P10,
 P14, and checks in particular: one shape classifier; free text through `judge::one_line`; every
-card through `write::create` with its `proposed` line after it; never-ask-twice reads both kinds
+card through `write::create` with its `proposed` line after it; no `event-accept` card and no
+`instances:` entry built from a `source: "roster"` event (§2); never-ask-twice reads both kinds
 through `eventcarry::answered_series` with no copy; test 4 compares as P14 says and no
 deterministic id was introduced; no `"quinn"` or `"student"` literal. It runs beside Checkpoint B
 (both are read-only and neither builds on the other). Fixes go back to `implementer`, and the
@@ -730,12 +921,14 @@ module (no code change there).
 - `rank_twice_never_rebooks_a_deleted_carried_note` (20a): a `rank` carries a later instance of an
   accepted series; the commitment is deleted through `write::delete`, and so is the primary's
   register task; two more `rank` runs write no note and no journal record for either uid, and file
-  no card for them. Before the delete, it asserts PQ3's answer through `surface::coming_up`: under
-  (a) the carried instance is absent; under (b) it is listed with `accepted` set (once T4b lands;
-  until then, listed).
+  no card for them. A second series in the same vault is an accepted `event-check` series (PQ1
+  (a)). Its later timed instance gets its inherited `obligation` line from step 1 and one
+  commitment from step 2, and once deleted it stays deleted. The test makes no Coming up
+  assertion: PQ3 (c) is blocked (§4), and the task that builds it brings its own tests.
 - `a_rank_on_the_roster_alone_carries_nothing` (feed-failure run): every feed fails, the roster
-  holds a later instance of an accepted series; `rank` writes no commitment and no ledger line for
-  it. The next `rank` with a working feed carries it.
+  holds a later instance of an accepted series and an unasked obligation; `rank` writes no
+  commitment and no ledger line for the instance and files no `event-accept` card for the
+  obligation (§2). The next `rank` with a working feed carries the instance and files the card.
 - `rank_files_the_right_event_cards_within_the_budget` (18): a vault with an obligation, an
   opportunity, an `unsure` event and a three-instance series, `event_cards: true`: the right cards,
   the pending count raised by their number, the budget respected (seed same-day proposals so it
@@ -779,25 +972,30 @@ is what keeps `golden-today-full.md` byte-identical. `surface::delta` is not edi
 
 **Agent:** `implementer` (Sonnet, high). **Why:** read-only: `surface` never writes, so an error
 misdraws a lane but never changes vault bytes. **Files:** `engine/src/surface.rs` (`Loaded`,
-`load_with`, `the_day`, `ComingUp`, `coming_up`, and one new private reader). **Reads:** PQ3's
-answer (asked before T2b.2).
+`load_with`, `the_day`, `ComingUp`, `coming_up`, and one new private reader). **PQ3:** (c) is not
+built here. It is blocked (§4), and no reader in this task looks for carried instances that have
+no verdict.
 
 **Tests first** (spec test 22a, plus P8's):
 - `an_accepted_two_day_event_is_in_the_all_day_lane_on_each_day` (22a): after Accept of an all-day
   two-day event, `the_day` for each day lists it in `all_day`, `open_hours` equals the value before
-  the Accept, and the day after lists nothing.
+  the Accept, and the day after lists nothing. An accepted zero-length event (PQ2) is in `all_day`
+  on its own day only, and `open_hours` does not move.
 - `an_accepted_event_is_marked_in_coming_up` (P8): an accepted timed event and an accepted all-day
-  event (each on an `executed` card's `instances:`, each with a confident verdict), and an instance
-  judged confidently and then booked by the carry (a `kind: event` note in `commitments/`), carry
-  `accepted: true`; an unanswered one carries none.
+  event (each on an `executed` card's `instances:`, each with a confident verdict) carry
+  `accepted: true`. So do an instance judged confidently and then booked by the carry, and a later
+  instance of an accepted `event-check` series with its inherited `obligation` line and its carried
+  commitment (PQ1 (a)), each a `kind: event` note in `commitments/`. An unanswered one carries none.
 - `accepted_is_absent_from_the_json_when_false` (P8): the serialised `ComingUp` of an unaccepted
   event has no `accepted` key, so `surface_oracle.rs` stays byte-identical.
 
 **Behaviour.** Spec §4.2's lane, Q1b (i), §6.1's `surface.rs` row, P4, P8.
 - One new private reader, `accepted_events(vault) -> AcceptedEvents`, reads `archive/` for
   `executed` `event-accept` and `event-check` cards with `instances:`, and `commitments/` for
-  `kind: event` source uids. It returns the accepted uid set and the lane-shape instances (title,
-  first day, last day). An unreadable note is skipped.
+  `kind: event` source uids. It returns the accepted uid set and the lane-shape instances (all-day,
+  multi-day and zero-length, by `eventaccept::shape`; title, first day, last day). An unreadable note
+  is skipped. A carried instance is on no card, so a carried all-day one is not in the lane (§4,
+  PQ3).
 - `load_with` calls it once and keeps both in new `Loaded` fields, for `the_day`.
 - `coming_up(vault, today, now)` keeps its signature (it never receives a `Loaded`) and calls
   `accepted_events(vault)` itself for the uid set. That is one more read of `archive/` and
@@ -828,10 +1026,11 @@ false, no write). Fixes go to `contract-engineer` and `implementer` respectively
 **Done when:** no open Critical or Important finding. Then the controller asks Quinn's go to push
 `events` (P12).
 
-### M. Take `main` in after M2 and Gmail merge (main session)
+### M. Take `main` in after M2 merges (main session)
 
-**Why the main session:** it is a merge that keeps the reviewed commits' hashes (P12). When
-`m2-editing` and `gmail-connect` have merged to `main`, re-run T0's overlap check, merge `main` into
+**Why the main session:** it is a merge that keeps the reviewed commits' hashes (P12). Gmail is
+already in the branch (`2d5298a`). When `m2-editing` has merged to `main`, re-run T0's overlap
+check, merge `main` into
 `events`, resolve any textual conflict in `surface.rs`, `enrich.rs`'s test module or `lib.rs` (both
 sides' lines kept), and run the gate. T5, T6 and T7 start from that commit. M and later commits are
 not pushed until W closes.
@@ -880,17 +1079,29 @@ existing tests pass unchanged.
 ### T8. Reference documents
 
 **Agent:** `docs-keeper` (Sonnet, medium). **Why:** reference text only. **Files:**
-- `docs/surface/anatomy.md`: §3.7 (accepted all-day and multi-day events in the all-day lane, and
-  that a carried all-day instance is not drawn), §3.9 (event cards in the deck, Accept and Decline,
-  expiry, "Accepted" in Coming up; and, under PQ3 (a), that a carried instance with no verdict is
-  not in Coming up though a timed one has its block on its day, or, under (b), that carried
-  instances are listed and timed ones marked "Accepted"), §3.11 (the series carry listed in the delta, with the `seen_at` gap and the 200-record
-  cap named);
+- `docs/surface/anatomy.md`, by its own headings. (Corrected 2026-09-30: an earlier draft put the
+  delta under §3.11, which is Coming up; the delta line is §3.2.)
+  - §3.2, the delta line: carried notes are listed as the carrying run's `create` records, with the
+    `seen_at` gap and the 200-record cap named (spec §4.5).
+  - §3.7, the day: accepted all-day, multi-day and zero-length (PQ2) events are in the all-day lane,
+    read from executed cards' `instances:`. A carried all-day instance is not drawn, whether its
+    series was answered on an `event-accept` or an `event-check` card.
+  - §3.9, the deck: event cards, Accept and Decline on both event kinds, and expiry.
+  - §3.11, Coming up: the "Accepted" mark (P8). A later instance of an accepted `event-check`
+    series is listed through its inherited answer and, timed, booked and marked (PQ1 (a)). A later
+    instance of an accepted `event-accept` series that has no verdict of its own is not listed,
+    though a timed one has its block on its day. Quinn chose to list it at read time (PQ3 (c), 2026-09-30);
+    that is blocked pending a ruling (§4). If a task for it lands before T8, this section describes
+    what that task built instead, with the provenance label it shows.
 - `docs/reference/engine-commands.md`: one paragraph in `rank`'s entry (the events pass's order,
-  `event_cards`, the carry);
+  `event_cards`, the carry over accepted `event-accept` and `event-check` series);
 - `docs/notes/2026-09-29-vision-program.md`: the P4 row points at the spec and this plan; P6 (c)
   marked delivered by D3;
-- `docs/specs/2026-09-29-events-design.md` §12: T0c's count in the Q1 note, dated;
+- `docs/specs/2026-09-29-events-design.md` §12: T0c's count in the Q1 note, dated; and one dated
+  note recording the plan-stage answers of 2026-09-30. PQ1 (a) widens §4.5 and §6.1's
+  `eventcarry.rs` row: the accept carry also reads executed `event-check` cards with `instances:`
+  through `accepted_check_series`. PQ2 puts a zero-length event in the all-day lane (§4.2). PQ3 (c)
+  is recorded with its blocker. The signed text above the note is not rewritten;
 - `docs/reference/app.md`, only if it lists the campus presets' keys.
 
 HANDOFF is not edited (P11). **Done when:** each claim cites a function, not a line, and matches the
@@ -899,14 +1110,25 @@ branch.
 ### T9. B1 (cloud-engineer, on `j-events`)
 
 **Agent:** `cloud-engineer` (Opus, high). **Why:** cloud-side, a paid model run, and it needs the
-OpenRouter key from Credential Manager. Q5 (c) is Quinn's go for the run; PQ4 settles the base.
+OpenRouter key from Credential Manager. Q5 (c) is Quinn's go for the run. PQ4, answered
+2026-09-30, settles the base: the harness runs as it stands on `j-events`.
 **Files:** none edited on `j-events`; a report, `docs/reports/<date>-events-b1.md`, committed on
 `main` by docs-keeper (the controller pushes docs).
-- Before running, compare the event row `model_row.ts` reads from the branch's migrations with
-  `main`'s current pin; record both. A difference is reported, not fixed.
-- Run `deno test` in `scripts/experiments/e1-decomposition/`, then `run.ts`, in the foreground.
-- Report: both arms' credit and recorded credit, the paired CI, the sign test, B1's verdict, and
-  each arm's refusal rate (which is the rate of `unsure` cards on the device).
+- **The precondition (PQ4).** Before any paid call, check that the harness's frozen `event-3` arm
+  (`event3_frozen.ts`) and the event row `model_row.ts` reads from the branch's migrations match
+  `main`'s live event row: the row `main`'s migrations pin, at `main`'s current head. A read of
+  staging's deployed row, if one is wanted, is the controller's. Record the rows compared and the
+  result. **If they differ, do not run.** Report the difference, and the controller brings it to
+  Quinn. Nothing is fixed on the branch.
+- When they match: run `deno test` in `scripts/experiments/e1-decomposition/`, then `run.ts`, in the
+  foreground.
+- Report: the precondition's result; both arms' credit and recorded credit, the paired CI, the sign
+  test, B1's verdict, and each arm's refusal rate (which is the rate of `unsure` cards on the
+  device).
+- **If `event-4` wins,** nothing ships from this lane or this task. It ships only through its own
+  cloud PR (PQ4): after staging's pending `db push`, `main` merged into `j-events`, the migration
+  renamed to a fresh timestamp, then review and deploy. That PR is opened by the controller with
+  Quinn, not here. If it loses, the branch is closed as its header plans.
 **Done when:** the report is written and the controller has brought Quinn the verdict, before T10.
 
 ### W. Whole-branch review (Quinn's checkpoint)
@@ -925,7 +1147,10 @@ in particular:
 - `site/` and `PRIVACY_VERSION` unchanged; no new telemetry row;
 - the fixtures diff empty and both oracles green;
 - `surface::delta` unchanged (20c green);
-- one `answered_series`, one shape classifier.
+- one `answered_series`, one shape classifier, and `accepted_check_series` read only by the accept
+  carry (PQ1 (a));
+- PQ3 (c): built and tested as Quinn's ruling on its blocker says, or, if unruled, absent with its
+  gap named in anatomy §3.11 and nothing half-built.
 
 Fixes go to the task's own agent, and the reviewer re-reads them. The controller brings Quinn the
 report before T10 (spec §13's third checkpoint). **Done when:** no open Critical or Important
@@ -938,15 +1163,17 @@ finding.
 the J functions redeployed), since the proof's verdicts come from staging's `judge-event`.
 - **Gate:** the workspace build and tests with 0 other warnings; `scripts/ci/eol-check.ps1`; the
   fixtures diff empty; the four ignores in place; `human_actor_literal.rs` green; the handler lists
-  unchanged (`app/tests/handler_lists.rs` if Gmail has merged by then; if not, the controller counts
-  both `generate_handler!` lists in `app/src/main.rs` by hand, compares them with `main`'s, and
-  records both counts in the SDD ledger).
+  unchanged, by running `app/tests/handler_lists.rs` (in the branch since `2d5298a`) as part of the
+  workspace tests.
 - **Live proof** (spec §11.4), under the standing solo-proof approval (dev build, DOM driver, OTP,
   never OS input), on a scratch profile against staging, Alabama preset:
   1. one real slot against the Alabama feeds;
   2. accept one obligation card and one opportunity card; decline one;
   3. check the schedule (the commitment's block, or the all-day lane) and Coming up ("Accepted",
-     the declined event gone; a carried instance as PQ3's answer says);
+     the declined event gone). A carried later instance has its block on its day. A later
+     instance of an accepted `event-check` series is listed and marked (PQ1 (a)). A carried
+     `event-accept` instance with no verdict is listed only if PQ3 (c)'s blocker was ruled and
+     built; otherwise the proof records it as absent, as anatomy §3.11 says;
   4. run one more `rank` and confirm nothing is re-asked.
 
   Then remove the scratch profile (profile, vault, credentials, autostart).
@@ -954,9 +1181,10 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 
 ## 6. Order, parallelism and checkpoints
 
-- **Order:** T0 → H1a → T1a → T1b → H1b → T2b.1 → T2a.1a → T2a.1b → T2a.2 → T2b.2 → T2b.3 →
-  T3.1a → T3.1b → T3.2 → (Checkpoint B ∥ R1) → T4 → T4b → B2 → first push (Quinn's go) →
-  (M2 and Gmail merge) → M → T5 → T6 → T7 → T8 → W → push → T10.
+- **Order:** T0 → H1a → T1a → T1b → H1b → T2b.1 → T2a.1a → T2a.1b → T2a.2 → T2b.2 → T2b.2b →
+  T2b.3 → T3.1a → T3.1b → T3.2 → (Checkpoint B ∥ R1) → T4 → T4b → B2 → first push (Quinn's go) →
+  (M2 merges; Gmail is already in at `2d5298a`) → M → T5 → T6 → T7 → T8 → W → push → T10. PQ3 (c)'s
+  task, if Quinn's ruling adds one, goes where §4 says (before T2b.2, or after T4b and before B2).
 - **Off the line:** T0c any time before T10 (read-only, no worktree). T9 any time before T10, in the
   `j-events` worktree, so it may run beside the engine tasks.
 - **One implementer at a time** in the `events` worktree. Reviews run beside the next task only when
@@ -964,9 +1192,10 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **Pushes (P12):** nothing is pushed before B2 closes; every Sonnet-written commit has then had a
   `reviewer` pass (R1 or B2). Commits after B2 are pushed only after W closes. Each push is a code
   push and needs Quinn's go.
-- **Waits on Quinn:** PQ2 before T1a (or its recommendation is built), PQ1 and PQ3 before T2b.2,
-  PQ4 at T9; the two checkpoints (B and W); the push go after B2 and after W; the merge word in T10.
-- **Opus starts:** T0, H1a, H1b, T2b.1–T2b.3, T3.1a, T3.1b, T3.2, B, R1, T4, B2, T9, W, M, T10.
+- **Waits on Quinn:** PQ1, PQ2 and PQ4 were answered on 2026-09-30 and wait on nothing. PQ3 (c)'s
+  blocker (§4) is wanted before T2b.2, and T2b.2 does not wait for it. Also the two checkpoints
+  (B and W), the push go after B2 and after W, and the merge word in T10.
+- **Opus starts:** T0, H1a, H1b, T2b.1, T2b.2, T2b.2b, T2b.3, T3.1a, T3.1b, T3.2, B, R1, T4, B2, T9, W, M, T10.
   Every other task starts on Sonnet, and a second failed attempt moves it to Opus at high.
 - **Quinn's checkpoints (spec §13):** at signing (done, 2026-09-29); after Checkpoint B, with the
   carry's and the settlement's diffs; before T10, with W's report.
@@ -978,11 +1207,11 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   module file with its doc line.
 - **H1b**, before T2b.1: `pub mod eventcarry;`, likewise.
 - **`app/src/main.rs` and `app/src/lib.rs`: none.** No command is added, so neither
-  `generate_handler!` list changes. At merge the controller recounts both lists against
-  `app/tests/handler_lists.rs` and confirms the count is what `main` already holds. That test is
-  Gmail's and is not on `main` at `4aa6560`: if Gmail has not merged by T10, the controller counts
-  both `generate_handler!` lists in `app/src/main.rs` by hand and records the count in the SDD
-  ledger.
+  `generate_handler!` list changes. Gmail's `app/tests/handler_lists.rs` is in the branch since
+  `2d5298a`, so every gate runs it and no hand count is needed. The one fallback is M: if M2's
+  merge changes the lists and `handler_lists.rs` does not yet pin M2's count, the controller counts
+  both `generate_handler!` lists in `app/src/main.rs` by hand after M, compares them with `main`'s,
+  and records both counts in the SDD ledger.
 - **`engine/src/lib.rs` at M:** M2's `pub mod profile;` and these two lines are kept side by side.
 
 ## 8. Risks
@@ -990,6 +1219,19 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
 - **The carry hard-books or declines a whole series silently.** Guarded by one `answered_series`
   with its edge tests (T2b.1), the carry's tests 20 and 20a, Opus at xhigh for T2b, and Checkpoint B
   reading each commit alone.
+- **PQ1 (a) books an `event-check` series as hard that the student did not mean.** The student
+  answered "this applies to me", which D11 already treats as an Accept for the listed instances.
+  Guarded by `accepted_check_series`' own edge rules (executed, with `instances:`, archive only),
+  `answered_series` winning an overlap, the two PQ1 tests in T2b.2b (its own commit), the
+  rank-level case in 20a, and Checkpoint B's check, on that commit alone, that the reader feeds
+  only the accept carry.
+- **A card books an hour the feed never claimed.** On a feed-failure run the emitters read
+  `read_roster`'s lossy events (§2). Guarded by the source rule in T2a.1b and T2a.2, their two
+  roster tests, the rank-level clause in `a_rank_on_the_roster_alone_carries_nothing`, and R1.
+- **PQ3 (c) is not delivered.** As approved it cannot be built (§4). If Quinn has not ruled by B2,
+  the branch ships with the gap: a carried `event-accept` instance with no verdict is absent from
+  Coming up, and a carried all-day instance from the lane. Anatomy §3.11 names the gap (T8), and
+  W checks that nothing is half-built.
 - **A deleted note comes back.** Guarded by the ever-written set reading `archive/` (T2b.2), test
   20a at the carry and at `rank` level (T4), and test 12's retry case.
 - **`rank` runs its passes in the wrong order.** Guarded by tests 19 and 20a at `rank` level (T4)
@@ -1007,8 +1249,8 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   Guarded by the rule that tests read the actor from the vault (§5).
 - **`event-4` ships through an out-of-order migration.** PQ4: a fresh timestamp and its own PR.
 - **The proof runs against a staging that does not match the repo.** T10 waits on START-HERE §3.
-- **Merge friction with M2 and Gmail.** The engine tasks avoid their functions; T5 and T7 wait for
-  M; the overlap check runs three times.
+- **Merge friction with M2.** Gmail is already in (`2d5298a`). The engine tasks avoid M2's
+  functions; T5 and T7 wait for M; the overlap check runs three times.
 - **An older engine** warns `unknown kind:` on an approved `event-accept` card. Accepted by the spec
   (single desktop, single engine in the MVP); two-desktop's hand-off is spec §9's.
 
@@ -1028,7 +1270,7 @@ numbers are spec §11's. Plan-only tests are named.
 | Q1a (i): the register task is undated without a deadline; body names the start as an upper bound | T1a, T3.1a | test 8 (`…undated_and_names_the_start…`), test 11 |
 | Q1b (i): all-day and multi-day in the all-day lane; past midnight to 23:59 with its true end | T1a, T1b, T3.2, T4b | test 8's shape tests; tests 16, 22a; `a_kind_event_commitment_says_it_was_accepted` |
 | D2, Q2 (a): obligations are asked, never auto-created | T2a.1b, T3.1b | test 1 (a card, no note); test 14 |
-| D4, Q4 (a): an answer covers the series both ways; the carry never rewrites an ever-written uid; every carried note listed | T2b.2, T4, B2 | tests 20, 20a (unit, and `rank_twice_never_rebooks_a_deleted_carried_note`), 20b, 20c; `events_with_no_series_uid_carry_nothing`, `a_rank_on_the_roster_alone_carries_nothing` |
+| D4, Q4 (a): an answer covers the series both ways; the carry never rewrites an ever-written uid; every carried note listed | T2b.2, T4, B2 | tests 20, 20a (unit, and `rank_twice_never_rebooks_a_deleted_carried_note`), 20b, 20c; `roster_read_events_carry_nothing`, `a_rank_on_the_roster_alone_carries_nothing` |
 | D5: a new card kind `event-accept`, filed by the same path as `event-check` | T2a.1a, T2a.1b | test 1; the shared selection |
 | D7: caps of 3 + 3 beside the checks' 3; order obligations, checks, opportunities; opportunity sort | T2a.1b, T2a.2, T4 | tests 3, 4, 18 |
 | D8: expiry writes nothing; only the card's own instances close | T2a.1b, T3.1b | tests 5, 14 |
@@ -1042,11 +1284,11 @@ numbers are spec §11's. Plan-only tests are named.
 | §4.3: Decline writes one `declined` line per uid and leaves Coming up | T3.1b | test 13 |
 | §4.4: snooze unchanged; expiry dates | T2a.1b, T2a.2, T3.1b | tests 7, 14 |
 | §4.5: the carry beside `inherit_series_answers`, which is unchanged; `delta` not edited | T2b.2, T4 | tests 20, 20b, 20c; W checks `delta`'s diff |
-| §4.5: the display cap and the `seen_at` gap are named, not fixed | T8 | anatomy §3.11 |
+| §4.5: the display cap and the `seen_at` gap are named, not fixed | T8 | anatomy §3.2 (the delta line) |
 | §5.1: the card's fields and file name; `events:` keeps its shape | T2a.1b | tests 1, 5 |
 | §5.2: new `event-check` cards gain `instances:` and the new closing | T2a.1b | `new_event_check_cards_carry_instances_and_the_new_closing` |
 | §5.3: the ever-written set (commitments, tasks, archive; approvals left out) | T2b.2, T3.1a | `the_ever_written_set_reads_commitments_tasks_and_archive`; test 12 |
-| §5.4: no new ledger line shape or verdict word | T3.1b, T2b.2 | W checks `eventledger.rs` is unchanged; PQ3 (b), if chosen, uses `record_answer`'s existing line |
+| §5.4: no new ledger line shape or verdict word | T3.1b, T2b.2 | W checks `eventledger.rs` is unchanged; `the_accept_carry_writes_no_ledger_line` |
 | §5.5: `event_cards` read as a boolean; both presets carry it | T1b, T6 | `event_cards_reads_true_or_1_and_anything_else_is_off`; test 27 |
 | §6.1 `eventemit.rs` row | T2a.1a, T2a.1b, T2a.2 | tests 1–7; the refactor's pinning test |
 | §6.1 `eventcarry.rs` row, one `answered_series`, the `judge_roster` call site | T2b.1–T2b.3 | T2b.1's tests; tests 19, 20, 20a, 21 |
@@ -1071,15 +1313,30 @@ numbers are spec §11's. Plan-only tests are named.
 | §14: ruling 10 reworded at signing (done); P4 row updated | T8 | the vision-program row |
 | Reviews land in `docs/reports/` | B, R1, B2, W, T9 | the five reports |
 
+**Quinn's plan-stage answers (2026-09-30).** Each widens or settles a signed section, so each has
+its own row.
+
+| Answer | Task | What proves it |
+|---|---|---|
+| PQ1 (a): an executed `event-check` card with `instances:` carries its series; `accepted_check_series`; the accept carry over the union; `answered_series`' edge rule unchanged | T2b.1, T2b.2b, T4, B, T8 | `an_accepted_event_check_series_books_a_later_instance_once`, `an_event_check_card_without_instances_carries_nothing`; T2b.1's `an_event_check_card_is_not_counted`; 20a's `event-check` case at `rank` level; Checkpoint B; the spec §12 note |
+| PQ2: a zero-length event is drawn in the all-day lane with no commitment | T1a, T3.2, T4b, T8 | `a_zero_length_event_gives_the_lane_marker`; test 16's zero-length clause; test 22a's zero-length clause; anatomy §3.7 |
+| PQ2, held on a feed-failure run: no card or `instances:` entry is built from `read_roster`'s lossy events (second review) | T2a.1b, T2a.2, T4 | `a_roster_read_event_files_no_event_accept_card_and_no_instances`, `a_roster_read_opportunity_files_no_card`, the card clause of `a_rank_on_the_roster_alone_carries_nothing` |
+| PQ3 (c): carried instances with no verdict listed in Coming up at read time, with provenance, no new write, timed and all-day | **none: blocked** (§4) | Not met. The blocker and its options go to Quinn at T0; `the_accept_carry_writes_no_ledger_line` holds the "no synthetic answer line" part; anatomy §3.11 names the gap (T8); W checks nothing is half-built |
+| PQ4: B1 runs as it stands on `j-events` after the frozen `event-3` check; report in `docs/reports/`; `event-4` ships only through its own cloud PR | T9 | the B1 report, its precondition's result first |
+
 **Plan-only tests.** `event_cards_reads_true_or_1_and_anything_else_is_off`,
 `a_kind_event_commitment_says_it_was_accepted`, `an_instance_payload_round_trips`,
 `a_zero_length_event_gives_the_lane_marker`, `the_selection_refactor_keeps_what_event_checks_select`,
 `new_event_check_cards_carry_instances_and_the_new_closing`,
-`the_ever_written_set_reads_commitments_tasks_and_archive`, `events_with_no_series_uid_carry_nothing`,
+`the_ever_written_set_reads_commitments_tasks_and_archive`, `roster_read_events_carry_nothing`,
 `a_rank_on_the_roster_alone_carries_nothing`, `an_accepted_event_is_marked_in_coming_up`,
-`accepted_is_absent_from_the_json_when_false`, `coming_up_shows_accepted_events`, PQ1 (a)'s two
-tests and PQ3's test(s) for the chosen answer. Each pins a spec requirement that had no test of its
-own, or a plan decision (§3); none changes a spec test's assertion. Spec test 4's "identical bytes"
+`accepted_is_absent_from_the_json_when_false`, `coming_up_shows_accepted_events`,
+`an_accepted_event_check_series_books_a_later_instance_once`,
+`an_event_check_card_without_instances_carries_nothing`, `the_accept_carry_writes_no_ledger_line`,
+`a_roster_read_event_files_no_event_accept_card_and_no_instances` and
+`a_roster_read_opportunity_files_no_card`.
+PQ3 (c) has no test until its blocker is ruled. Each pins a spec requirement that had no test of
+its own, a plan decision (§3) or one of Quinn's answers; none changes a spec test's assertion. Spec test 4's "identical bytes"
 is read as P14 states; that is the one interpretation of a spec assertion this plan makes.
 
 ## 10. Review revisions (2026-09-30)
@@ -1129,4 +1386,90 @@ on the `events` worktree (`4aa6560`) before the plan changed.
 9. **`app/tests/handler_lists.rs` is not on `main` (Minor).** Confirmed: no such file at
    `4aa6560`. *Changed:* §2, §7 and T10's gate say the controller counts both `generate_handler!`
    lists in `app/src/main.rs` by hand and records the count in the SDD ledger if Gmail has not
-   merged by T10.
+   merged by T10. *Superseded by the second round's finding 1:* the branch has had the test since
+   `2d5298a`.
+
+### Second round (2026-09-30)
+
+Four findings from the second review of the revised plan; all accepted, none refuted. Each was
+checked against the `events` worktree at `2d5298a` (read from the worktree's files and git refs)
+before the plan changed. Quinn's answers in §4 are unchanged; only the plan's own text around them
+moved.
+
+1. **The base was misstated (Important).** Confirmed: `refs/heads/events` is `2d5298a`, whose
+   reflog entry is the merge of `origin/main`, made after the plan commit `6352411` on `4aa6560`;
+   `app/tests/handler_lists.rs` is in the worktree. *Changed:* the header, §2's opening and its
+   sibling table (Gmail merged and in), T0 (confirms `2d5298a` and the ancestry, drops the "take
+   `main` in" step, drops Gmail from the overlap check), M (waits on M2 only), §6's order, §7 (the
+   hand count kept only as a fallback at M), T10's gate (runs `handler_lists.rs` directly), §8, and
+   finding 9 above marked superseded. §11's bullet "`main` moved to `199cd1f`" is removed: the
+   correction it recorded was itself wrong.
+2. **The roster read-back's invented hour is not display only (Important).** Confirmed on
+   `2d5298a`: `rank`'s events pass sets `candidates = read_roster(…)` when every feed failed, then
+   passes `candidates` to `emit_digest`, `emit_event_checks` and the rest; `read_roster` turns
+   `end <= start` into `start + 1h`. Also found: the same read-back turns a past-midnight event and
+   an all-day one into one-hour timed events and drops `url` and the registration fields, so the
+   rule is by source, not by shape. *Changed:* a new §2 fact; PQ2's recommendation sentence
+   corrected with a dated note (Quinn's answer untouched); T2a.1b gains the source rule and
+   `a_roster_read_event_files_no_event_accept_card_and_no_instances`, T2a.2 gains
+   `a_roster_read_opportunity_files_no_card`; T4's `a_rank_on_the_roster_alone_carries_nothing`
+   gains the card clause; R1, §8 and the ledger follow. Choice made here, for Quinn at Checkpoint B:
+   the skip is by `source: "roster"` in the emitter, not by a `feeds_failed` argument, and an
+   `unsure` roster event still gets its `event-check` card, without `instances:`, so its Approve
+   books nothing. The cost is that an event whose date passes during a whole outage is never asked.
+3. **PQ3's roster option understated its cost (Important).** Confirmed: `read_roster` is the
+   feed-failure candidate source, and `relevant_events` serves `write_roster`, `rank`'s Coming up
+   and `surface::coming_up`. *Changed:* the roster option in §4 names both costs, recommends a
+   separate reader so the feed-failure rule and its two tests stand, names the `relevant_events`
+   change, and states that no frozen or read-model reference can move (`vault-full` has no carried
+   instance; test 23 and the fixtures diff prove it). The alternative is marked as sharing the
+   second cost only. Quinn's answer (c) is unchanged; the blocker still waits on Quinn.
+4. **T2b.2 was oversized with PQ1 in it (Important).** *Changed:* PQ1 (a) moved to a new task,
+   T2b.2b (contract-engineer, its own commit after T2b.2): `accepted_check_series`, the union, the
+   overlap rule, and its two tests, which now also carry the `event-check` halves of the
+   no-ledger-line and roster-run checks. T2b.2 keeps seven tests over `event-accept` series and
+   builds the accepted set in one helper for T2b.2b to widen. P1, §5's table, T2b.1's note,
+   Checkpoint B (reads T2b.2b alone), §6, §8 and the PQ1 ledger row follow.
+
+## 11. Quinn's answers (2026-09-30)
+
+Quinn answered the four open questions on 2026-09-30. Each answer is recorded under its question in
+§4. Before the plan changed, each was checked against the code on the `events` worktree and on
+`main` (`199cd1f`): `surface::coming_up`, `the_day`, `load_with`, `eventroster::{write_roster,
+read_roster, relevant_events}`, `eventledger::{LedgerEntry, load_ledger, record_answer}`,
+`eventemit::{settled_series, inherit_series_answers}`, `commitments::create_confirmed_as`,
+`eventfeed::parse_localist`, `DiscoveredEvent::normalized` and `rank`'s events pass.
+
+1. **PQ2: the all-day lane, no commitment.** *Changed:* P4's zero-length arm. T1a's PQ2 test is
+   now concrete: two shapes, `commitment_for` gives `None`, neither is read as past-midnight. Test
+   16 (T3.2) and test 22a (T4b) gain zero-length clauses, T4b's reader names the lane shapes, T8's
+   §3.7 bullet covers it, and a ledger row was added.
+2. **PQ1: (a), carry it.** *Changed (moved to T2b.2b by the second review):* T2b.2 gains
+   `accepted_check_series` (behaviour, edge rules,
+   and the rule that `answered_series` wins an overlap), the accept carry runs over the union, and
+   the level for an `event-check` series is `hard` (P7). Its two tests are named, with the
+   contract-engineer as before. T2b.1's edge test is annotated as unchanged. T4's 20a gains an
+   `event-check` case at `rank` level, which proves the pass order for PQ1 as P13 does for the rest.
+   T4b's P8 test gains the carried `event-check` instance. Also changed: P8, §2, Checkpoint B, W,
+   §8, T8 (the spec §12 note, anatomy §3.11) and a ledger row.
+3. **PQ3: (c), listed at read time, with provenance, and no new write.** *Blocked as approved.*
+   The read model cannot see a carried instance's series. Without it, the read model has neither
+   the answer's date nor its kind, and a carried all-day instance cannot be seen at all (§4, PQ3,
+   items 1–4). *Changed:* no task builds (c). The PQ3 (a) and (b) branches are removed from T2b.2,
+   T4, T4b, T8 and T10. T2b.2 keeps one test that (c) itself requires,
+   `the_accept_carry_writes_no_ledger_line` (no synthetic answer line, which is also spec §5.4).
+   §4 states the blocker, the options and a recommendation for Quinn. §5 notes that (c) has no task
+   yet, §6 and §8 say when it is wanted and what ships if it is unruled, and the ledger row marks it
+   not met.
+4. **PQ4: as recommended.** *Changed:* T9 makes the frozen `event-3` check a precondition: no paid
+   call when it fails. The report leads with it, and `event-4` ships only through its own cloud PR,
+   opened by the controller with Quinn.
+
+**Also found while re-reading, and corrected:**
+- **`read_roster`'s events carry `series_uid` equal to their uid, not an empty one.**
+  `DiscoveredEvent::normalized` sets it. Review finding 8 (§10) said otherwise. The feed-failure
+  no-op still holds: a later instance's own uid matches no answered series, and a one-instance
+  event is the uid its card lists. *Changed:* §2, T2b.2's behaviour, and its test, renamed
+  `roster_read_events_carry_nothing` and built as `read_roster` builds events.
+- **T8 placed the delta under anatomy §3.11, which is Coming up.** The delta line is §3.2.
+  *Changed:* T8's anatomy bullet is split by section, and the §4.5 ledger row now cites §3.2.
