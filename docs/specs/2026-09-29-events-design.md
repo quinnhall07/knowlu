@@ -639,6 +639,9 @@ shape is not measured.** This revision was written offline, and no file on disk 
 (§13) counts them from the Alabama preset's feeds before Q1 is asked, so Quinn sees the number.
 Q1b is the fallback, and it stands whatever the count is. (Quinn signed before T0's count existed,
 on that basis; T0's number is still recorded when it is measured.)
+*Note, 2026-10-01 (T8):* the plan's T0c count (the Alabama preset's six feeds, next 60 days, by
+shape) has not been measured: the progress ledger holds no count, and a figure is not written from
+memory. It is recorded here when T0c runs ("measured 2026-…: …").
 
 **Q1a. When the feed says "registration required" but gives no deadline, how is the Register task
 dated?**
@@ -744,6 +747,58 @@ accepted, and none was rejected:
 - **One `answered_series` (§4.1, §6.1, §13).** Confirmed: T2a would have had to copy T2b's
   predicate. The predicate now has one definition in `eventcarry.rs`, with its edge rules written
   down. T2b lands it first, and T2a, the carry and `judge_roster` all call it.
+
+**Note of 2026-09-30: Quinn's plan-stage answers (events plan §4, PQ1–PQ4).** The signed text above
+is not rewritten; these answers widen it in the places named.
+- **PQ1 (a): an accepted `event-check` series carries.** §4.5 and §6.1's `eventcarry.rs` row widen:
+  the accept carry also reads executed `event-check` cards that have `instances:`, through
+  `eventcarry::accepted_check_series`, at the hard level (P7), beside `answered_series`.
+- **PQ2: a zero-length event goes to the all-day lane**, with no commitment (§4.2).
+- **PQ3, final: (b-prime) with the span.** The carry writes one ledger line per carried date, by
+  `agent:knowlu.carry`, with `from:` (the answering card's id) and the date's own `start:` and `end:`,
+  and the series' real verdict. It replaced two earlier answers, (c) (a read-time label, no line) and
+  (b-prime) without the span. It widens:
+  - §5.4: the carry's answer line and its `by:agent:knowlu.carry`, `from:`, `start:` and `end:`
+    fields, `opportunity` on it, and `load_ledger`'s read rules (the first carry line sets the span;
+    a later human answer replaces it; a carry line never overrides a human one; P15);
+  - §6.1's `surface.rs` row: carried lane dates drawn from the carry's span, and the provenance
+    label "Accepted · from your answer to the series on <date>".
+- **PQ4: B1 runs as it stands on `j-events`** (a precondition check on `event-3`'s row first; if
+  `event-4` wins it ships only through its own cloud PR).
+
+**Note of 2026-10-01: Quinn's Checkpoint B answers and the rulings after it.**
+- **P16 accepted.** §6.1's `cli.rs` row runs the carry before series inheritance, which reverses
+  the order the signed text gave. Inheritance then skips every date the carry answered.
+- **P17: the removal path.** A student can take an accepted lane date off the day. It widens four
+  places:
+  - §6.3: one Tauri command, `remove_lane_date`, in the console's list, computing nothing;
+  - §6.1's `eventcarry.rs` row: `remove_lane_date`, gated to the vault's own human token, which
+    writes one `declined` line;
+  - §6.1's `surface.rs` row: `the_day.all_day_uids`, and the rule that a `declined` uid leaves the
+    lane whatever its source;
+  - §4.3: the removal is a second writer of `declined`, beside Decline.
+  Two trade-offs remain: the line is device-local and carries no `by`, so a restored vault draws a
+  card-listed or still-fetched date again; and the console draws today's lane only, so a date is
+  removable on the day or days it shows.
+- **PQ5 (b2): a moved lane date fixes itself.** When a successful fetch gives an accepted
+  lane-shaped uid a span that differs from the drawn span, the carry appends one more carry line in
+  the existing shape with the new `start:` and `end:` (no write when unchanged; a card-listed date
+  too, `from:` its card's id). `load_ledger` reads the last same-card carry line's span, and the lane
+  prefers a carry line's span to the card's. A line from another card is still ignored.
+  *Not covered:* an `event-check` card's own uid (it holds a human answer line, which a carry line
+  never overrides), and a card-listed date moved to clock hours (PQ7, below).
+- **PQ6 (b): a console-only Undo.** "Remove from my day" hides the date at once and shows a
+  "Removed · Undo" toast for 10 seconds; `remove_lane_date` is sent only when the toast closes.
+  Undo sends nothing. A window closed inside the 10 seconds loses the removal, and the date shows
+  again.
+- **PQ7 (c): a carried lane date moved to clock hours is booked and followed.** The `lane_date`
+  guard T2b.6 added in `eventcarry::book` is reverted, and `follow_moves` appends a carry line with
+  the timed span when the entry already has a carry. The date then behaves like any carried timed
+  date: one line, one commitment, one journal `create`, not drawn in the lane. A card-listed lane
+  date moved to clock hours stays drawn on its old day and is never booked (the carry never books a
+  card-listed date); the student removes it.
+- **§5.4's "no new line shape" holds.** PQ5 and PQ7 write more lines of the carry's one shape, and
+  P17's `declined` line is the existing one.
 
 ## 13. Task sketch
 
