@@ -6,7 +6,8 @@
 //! all call it and none restates it, so one `rank` cannot both carry a series and ask about it.
 //!
 //! [`run`] is the one entry point `rank` calls: D9's rebuild of `declined` lines from archived
-//! `rejected` cards, then the carry over every fetched instance its series' card did not list.
+//! `rejected` cards, then the carry over every fetched instance of an answered series that no event
+//! card names.
 //!
 //! **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
 //! passes `eventroster::read_roster`'s events. Their `series_uid` is their own uid and their span
@@ -32,6 +33,9 @@ use crate::{ids, pystr, yaml};
 
 /// The card kind whose answers [`answered_series`] reads.
 const EVENT_ACCEPT: &str = "event-accept";
+
+/// The other event card kind. [`shown_on_a_card`] reads its uids; [`answered_series`] does not.
+const EVENT_CHECK: &str = "event-check";
 
 /// The `source` `eventroster::read_roster` gives every event it reads back (spec §2).
 const ROSTER_SOURCE: &str = "roster";
@@ -121,6 +125,35 @@ pub fn ever_written(vault: &Path) -> BTreeSet<String> {
     written
 }
 
+/// The shown set: every uid an event card of either kind names, as `source_uid` or in `events:`,
+/// in `approvals/` or `archive/`, whatever its status. These are the folders and kinds the
+/// emitter's never-ask-twice reads. The carry acts on none of them.
+///
+/// An answer covers the instances its own card lists and the series' instances that no card has
+/// shown. An instance another card showed belongs to that card. While the card is live, its own
+/// answer is still to come. Once it has expired, the instance stays unanswered: D8 keeps it in
+/// Coming up and out of the plan. A later card of the series never lists it (ruling G1), so that
+/// card's answer does not cover it either (review finding on T2b.2). Unreadable cards are skipped.
+fn shown_on_a_card(vault: &Path) -> BTreeSet<String> {
+    let mut shown = BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+            let kind = card_text(&meta, "kind");
+            if card_text(&meta, "type") != "approval" || (kind != EVENT_ACCEPT && kind != EVENT_CHECK) {
+                continue;
+            }
+            let uid = card_text(&meta, "source_uid");
+            if !uid.is_empty() {
+                shown.insert(uid);
+            }
+            shown.extend(crate::eventemit::card_event_uids(&meta));
+        }
+    }
+    shown
+}
+
 /// D9's rebuild, then the series carry (spec §4.5, D4, D9): the one entry point `rank` calls.
 /// Returns `(ledger lines written, warnings)`, and updates `ledger` as `load_ledger` would read
 /// every new line.
@@ -129,8 +162,8 @@ pub fn ever_written(vault: &Path) -> BTreeSet<String> {
 ///    unless it has one: the archived card is the record of the answer, and it syncs where the
 ///    ledger does not. An `executed` card needs nothing here.
 /// 2. **The carry**, over each fetched instance in `events` whose series a card answered
-///    ([`answered_series`]) and whose uid that card did not list, in `(start, uid)` order, each uid
-///    once:
+///    ([`answered_series`]) and whose uid no event card names (`shown_on_a_card`: not the
+///    answering card, and not an expired or live one), in `(start, uid)` order, each uid once:
 ///    - a declined series gives the instance a `declined` line unless it has one;
 ///    - an accepted series books an instance starting today or later, one carried date at a time
 ///      (`book`): the commitment `eventaccept::commitment_for` gives at the level the card's
@@ -158,11 +191,12 @@ pub fn run(
     let answered = answered_series(vault);
     let accepted = accepted_series(&answered, &mut warnings);
     let written = ever_written(vault);
+    let shown = shown_on_a_card(vault);
     let mut ordered: Vec<&DiscoveredEvent> = events.iter().filter(|e| e.source != ROSTER_SOURCE).collect();
     ordered.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for event in ordered {
-        if !seen.insert(event.uid.as_str()) {
+        if !seen.insert(event.uid.as_str()) || shown.contains(&event.uid) {
             continue;
         }
         if let Some(series) = answered.get(&event.series_uid).filter(|s| !s.accepted) {
@@ -828,6 +862,55 @@ mod tests {
         let booked: Vec<String> =
             notes(&vault, crate::commitments::FOLDER).iter().map(|(_, m)| card_text(m, "source_uid")).collect();
         assert_eq!(booked, ["lx:77:4"]);
+    }
+
+    #[test]
+    fn an_instance_another_card_showed_is_never_carried() {
+        // Review finding on T2b.2 (D8 against D4, §4.5): a later card's answer does not reach an
+        // instance an earlier card showed. Expired, that card left it unanswered: it stays in Coming
+        // up and out of the plan (D8). The emitter never puts it on the later card (ruling G1).
+        let vault = tmp("shown-elsewhere");
+        answered_card(&vault, "event-weekly-2026-10-06.md", "expired", "opportunity", "lx:77", &["lx:77:1"], "appr_00000000b2");
+        answered_card(&vault, "event-weekly-2026-10-13.md", "executed", "opportunity", "lx:77", &["lx:77:2"], "appr_00000000b3");
+        answered_card(&vault, "event-film-2026-10-06.md", "expired", "opportunity", "lx:78", &["lx:78:1"], "appr_00000000b4");
+        answered_card(&vault, "event-film-2026-10-13.md", "rejected", "opportunity", "lx:78", &["lx:78:2"], "appr_00000000b5");
+        // Either event kind, any status, either folder, named in `events:` or as `source_uid` alone.
+        let shown = |folder: &str, name: &str, kind: &str, status: &str, uid: &str, in_events: bool| {
+            let events = if in_events { format!("events:\n- \"{uid}\"\n") } else { String::new() };
+            let text = format!(
+                "---\ntype: approval\nkind: {kind}\nstatus: {status}\nsource_uid: \"{uid}\"\n\
+                 series_uid: \"{}\"\n{events}---\n\nbody\n",
+                &uid[..5]
+            );
+            fs::create_dir_all(vault.join(folder)).unwrap();
+            pystr::write_text(&vault.join(folder).join(name), &text).unwrap();
+        };
+        shown("archive", "event-check-a.md", "event-check", "expired", "lx:77:3", true);
+        shown("approvals", "event-weekly-b.md", EVENT_ACCEPT, "pending", "lx:77:4", true);
+        shown("archive", "event-check-c.md", "event-check", "expired", "lx:78:3", false);
+        shown("approvals", "event-check-d.md", "event-check", "pending", "lx:78:4", true);
+        // `:5` of each series is on no card: the controls, carried as before.
+        let events: Vec<DiscoveredEvent> = ["lx:77", "lx:78"]
+            .iter()
+            .flat_map(|series| {
+                [(1, 10, 6), (2, 10, 13), (3, 10, 20), (4, 10, 27), (5, 11, 3)].map(|(n, month, day)| {
+                    instance(&format!("{series}:{n}"), series, at(month, day, 19, 0), at(month, day, 21, 0))
+                })
+            })
+            .collect();
+
+        // No assertion on `run`'s line count: an accepted series carries here (the T2b.2 note above).
+        let (_, warnings, ledger) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let booked: Vec<String> =
+            notes(&vault, crate::commitments::FOLDER).iter().map(|(_, m)| card_text(m, "source_uid")).collect();
+        assert_eq!(booked, ["lx:77:5"], "no instance another card showed is booked");
+        let expected = [format!("- lx:78:2 · {DECLINED_ON}"), format!("- lx:78:5 · {DECLINED_ON}")];
+        assert_eq!(declined_lines(&vault), expected, "D9 for the card's own, the carry for the control");
+        assert_eq!(ledger, load_ledger(&vault, None));
+        for uid in ["lx:77:1", "lx:78:1", "lx:78:3", "lx:78:4"] {
+            assert!(!ledger.contains_key(uid), "{uid}: no line, so it stays in Coming up (D8)");
+        }
     }
 
     #[test]
