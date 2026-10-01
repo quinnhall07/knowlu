@@ -1468,6 +1468,13 @@ fn transition_note(
             // F3: the student's "yes, this applies to me". Ledger first, so a failed answer leaves
             // the card `approved` for the next run rather than archived with nothing written.
             settle_event_check(vault, meta, "obligation", today, journal)?;
+            // Events D11 (§5.2), P7: on a card that carries `instances:`, that answer is an Accept,
+            // so its dates are booked as `event-accept`'s are, at `level: hard` (the answer word is
+            // `obligation`), before the stamp. A failed write leaves the card `approved`; the retry
+            // answers again (harmless, as today) and books nothing twice (the ever-written set). A
+            // card with no `instances:` (filed before D11, or from the roster) writes nothing more.
+            let booked = settle_event_accept(vault, meta, crate::commitments::Level::Hard, today, ctx, journal)?;
+            result.warnings.extend(booked.unwrap_or_default().into_iter().map(|w| format!("{name}: {w}")));
             let literals = vec![
                 ("status".to_string(), "executed".to_string()),
                 ("executed_at".to_string(), stamped),
@@ -1759,6 +1766,8 @@ fn settle_event_check(
 
 /// Write the notes an accepted event card books (events spec §4.2, D1, D10), from the card's own
 /// `instances:`. `process_approvals` runs with no feed at hand, so the payload is the only input.
+/// Two arms call it: an approved `event-accept` card at its verdict's level, and an approved
+/// `event-check` card at `Hard`, after the student's answer is recorded (D11, P7).
 ///
 /// For each entry (`eventaccept::Instance::from_yaml`) whose uid is not in
 /// `eventcarry::ever_written`, the commitment `eventaccept::commitment_for` gives at `level`
@@ -4528,6 +4537,302 @@ mod tests {
             let relevant = crate::eventroster::relevant_events(&events, &load_ledger(&v, None));
             assert_eq!(relevant.len(), 2, "both stay in Coming up");
             assert!(crate::eventcarry::answered_series(&v).is_empty(), "an expired card answers nothing");
+        }
+
+        // --- T3.2: the extended event-check arm (spec tests 15–17; §5.2, D11, Q1b, P7, PQ2) ----
+
+        /// The one `event-check` card the emitter files for `events`, each judged `unsure` first. It
+        /// carries `instances:` (T2a.1b) unless its events are read back from the roster (§2).
+        fn file_check(vault: &Path, events: &[DiscoveredEvent]) -> PathBuf {
+            for e in events {
+                record_judged_verdict(vault, &e.uid, &e.title, TODAY, "unsure", WHY, Some(J)).unwrap();
+            }
+            let ledger = load_ledger(vault, None);
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(vault);
+            let (paths, count) = crate::eventemit::emit_event_checks(
+                vault, events, &ledger, &EventsConfig::default(), TODAY, 15, &ctx, &mut journal,
+            );
+            assert_eq!(count, 1, "{paths:?}");
+            paths[0].clone()
+        }
+
+        /// [`event`]'s campus event, from `start` to `end`.
+        fn spanning(uid: &str, series: &str, title: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+            DiscoveredEvent { start: Some(start), end: Some(end), ..event(uid, series, title, start.date().day()) }
+        }
+
+        fn on(day: i8, hour: i8, minute: i8) -> DateTime {
+            Date::constant(2026, 8, day).at(hour, minute, 0, 0)
+        }
+
+        /// The ledger's answer lines, in file order.
+        fn answer_lines(vault: &Path) -> Vec<String> {
+            let text = ledger_text(vault);
+            pystr::splitlines(&text).into_iter().filter(|l| l.contains(" · by:")).map(str::to_string).collect()
+        }
+
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().map(Result::unwrap) {
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), &target).unwrap();
+                }
+            }
+        }
+
+        /// Every journal record, in order, without its wall-clock `ts` and its per-process `seq`
+        /// (P14): the stamps an append adds, not the data a settlement writes.
+        fn untimed(vault: &Path) -> Vec<crate::ledger::Record> {
+            let unstamped = |mut r: crate::ledger::Record| {
+                r.remove("ts");
+                r.remove("seq");
+                r
+            };
+            journal_records(vault).into_iter().map(unstamped).collect()
+        }
+
+        /// A note's text without its opaque `id:` line (P14).
+        fn without_id(path: &Path) -> String {
+            pystr::splitlines(&read(path)).into_iter().filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>().join("\n")
+        }
+
+        #[test]
+        fn an_event_check_with_instances_records_the_answer_then_books_it() {
+            // D11, P7: "this applies to me" on a card that carries `instances:` is an Accept. The
+            // student's `record_answer` line first, as today, then the date booked at `level: hard`
+            // (the answer word is `obligation`), then the stamp and the move.
+            let v = vault();
+            let card = file_check(&v, &[event("ics:fair-1", "", "Career fair", 25)]);
+            assert!(crate::yaml::get(&front(&card), "instances").is_some());
+            let card_rel = rel_path(&v, &card);
+
+            // The answer goes first: with the ledger unwritable, nothing is booked and the card waits.
+            let seen = v.join("state").join("events-seen.md");
+            let aside = v.join("state").join("events-seen-aside.md");
+            std::fs::rename(&seen, &aside).unwrap();
+            std::fs::create_dir_all(&seen).unwrap();
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert_eq!(field(&card, "status"), "approved");
+            assert!(files(&v, "commitments").is_empty() && creates(&v, "commitments").is_empty());
+            std::fs::remove_dir(&seen).unwrap();
+            std::fs::rename(&aside, &seen).unwrap();
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let human = crate::journal::read_human_actor(&v).unwrap();
+            assert_eq!(
+                answer_lines(&v),
+                vec![format!("- ics:fair-1 · Career fair · verdict:obligation · by:{human} · jid:{J} · answered 2026-08-20")]
+            );
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            let note = v.join("commitments").join("career-fair.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "hard"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:fair-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Hard);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(19, 0), end: at(21, 0) }]);
+            assert!(files(&v, "tasks").is_empty(), "no registration, no task");
+            let records = journal_records(&v);
+            let index = |wanted: &dyn Fn(&crate::ledger::Record) -> bool| {
+                records.iter().position(wanted).expect("the record is journaled")
+            };
+            let created = index(&|r| text(r, "op") == "create" && text(r, "path") == "commitments/career-fair.md");
+            let stamped = index(&|r| text(r, "op") == "set" && text(r, "path") == card_rel && text(r, "new") == "executed");
+            let moved = index(&|r| text(r, "op") == "delete" && text(r, "path") == card_rel);
+            assert!(created < stamped && stamped < moved, "{created} {stamped} {moved}");
+            assert_eq!(text(&records[created], "actor"), CARD_ACTOR);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            // Without `instances:` (a card read back from the roster, or filed before D11), the
+            // settlement's journal and ledger bytes equal today's. Today's arm (the answer, the
+            // stamp, the move) is replayed by hand on a copy of the same vault.
+            let v = vault();
+            let fair = DiscoveredEvent { source: "roster".into(), ..event("ics:fair-1", "", "Career fair", 25) };
+            let card = file_check(&v, std::slice::from_ref(&fair));
+            assert!(crate::yaml::get(&front(&card), "instances").is_none());
+            mark(&v, &card, "approved");
+            let twin = vault();
+            copy_tree(&v, &twin);
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            let rel = rel_path(&v, &card);
+            let (ctx, mut journal) = (default_ctx(), Journal::new(&twin));
+            settle_event_check(&twin, &front(&twin.join(&rel)), "obligation", TODAY, &mut journal).unwrap();
+            let literals = vec![
+                ("status".to_string(), "executed".to_string()),
+                ("executed_at".to_string(), format!("\"{}\"", now().strftime("%Y-%m-%d %H:%M"))),
+            ];
+            write_literals(&twin, &rel, &literals, &ctx, &mut journal, &WriteOpts::default()).unwrap();
+            delete(&twin, &rel, &ctx, &mut journal).unwrap();
+
+            assert_eq!(answer_lines(&v).len(), 1);
+            assert_eq!(ledger_text(&v), ledger_text(&twin));
+            assert_eq!(untimed(&v), untimed(&twin));
+            assert_eq!(read(&archived(&v, &card)), read(&archived(&twin, &card)));
+            assert!(!v.join("commitments").exists() && !v.join("tasks").exists());
+        }
+
+        #[test]
+        fn an_all_day_instance_stands_with_no_commitment_and_no_warning() {
+            // Q1b, PQ2: the answer stands for every listed date, and a lane shape books nothing. An
+            // all-day or multi-day date has no hours to take, and Knowlu invents none for a
+            // zero-length one. The timed date beside them is booked, so the settlement ran and
+            // skipped only the lane shapes. The archived card keeps `instances:`, which the
+            // all-day lane reads.
+            let v = vault();
+            let series = [
+                spanning("lx:4:1", "lx:4", "Club fair", on(24, 0, 0), on(25, 0, 0)),
+                spanning("lx:4:2", "lx:4", "Club fair", on(26, 15, 0), on(26, 15, 0)),
+                spanning("lx:4:3", "lx:4", "Club fair", on(27, 19, 0), on(27, 21, 0)),
+                spanning("lx:4:4", "lx:4", "Club fair", on(28, 17, 0), on(30, 14, 0)),
+            ];
+            let uids = ["lx:4:1", "lx:4:2", "lx:4:3", "lx:4:4"];
+            let card = file_check(&v, &series);
+            assert_eq!(crate::eventemit::card_event_uids(&front(&card)), uids);
+            let journaled = journal_records(&v).len();
+
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "nothing warns: {:?}", result.warnings);
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+            let ledger = load_ledger(&v, None);
+            let human = crate::journal::read_human_actor(&v).unwrap();
+            for uid in uids {
+                assert_eq!(ledger[uid].verdict.as_deref(), Some("obligation"), "{uid}");
+                assert_eq!(ledger[uid].answered_by, human, "{uid}");
+            }
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:4:3"), "only the timed date is booked");
+            assert!(files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(
+                since,
+                vec!["set", "create", "set", "set", "delete"],
+                "the console's status, the one booking, the stamp's two fields, the move"
+            );
+            let archived = archived(&v, &card);
+            assert_eq!(field(&archived, "status"), "executed");
+            match crate::yaml::get(&front(&archived), "instances") {
+                Some(Value::Sequence(entries)) => assert_eq!(entries.len(), 4),
+                other => panic!("the archived card keeps its instances: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_past_midnight_instance_books_to_2359_with_its_true_end_in_the_body() {
+            // Q1b, P6: a 10pm–1am date books its start day to 23:59 at `level: hard`, and the note's
+            // body gives the true end. The `ends` label never reaches the frontmatter.
+            let v = vault();
+            let late = spanning("ics:late-1", "", "Night market", on(25, 22, 0), on(26, 1, 0));
+            let card = file_check(&v, std::slice::from_ref(&late));
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(load_ledger(&v, None)["ics:late-1"].verdict.as_deref(), Some("obligation"));
+            assert_eq!(files(&v, "commitments"), vec!["night-market.md"]);
+            let note = v.join("commitments").join("night-market.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "hard"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:late-1"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            assert!(crate::yaml::get(&front(&note), "ends").is_none());
+            let body = read(&note);
+            assert!(
+                body.ends_with("\n\nYou accepted this from your campus events. Ends at 1am the next day.\n"),
+                "{body}"
+            );
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(22, 0), end: at(23, 59) }]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        /// A rejected digest beside `digest`'s approved one: its own name and uids.
+        const REJECTED_DIGEST: &str = "type: approval\nkind: events-digest\ntitle: \"Events — 2026-08-20\"\n\
+             status: rejected\nproposed_at: 2026-08-20\nexpires: 2026-09-03\n\
+             snooze_until: null\ncreated_by: events\nevents:\n\
+             \x20 - uid: \"engage:3\"\n    summary: \"Robotics Demo\"\n\
+             \x20   start: 2026-09-05T18:00\n    end: 2026-09-05T19:00\n    location: \"Lloyd 40\"\n\
+             \x20 - uid: \"localist:4\"\n    summary: \"Study Abroad Fair\"\n\
+             \x20   start: 2026-09-06T12:00\n    end: 2026-09-06T14:00\n    location: \"Ferguson Center\"";
+
+        #[test]
+        fn the_calendar_event_and_digest_arms_are_unchanged() {
+            // One approved digest, one rejected digest and an approved `calendar-event` card, settled
+            // in one pass beside an approved `event-accept` card and an approved `event-check` card
+            // with `instances:`, give what they give alone. Two vaults built the same way, the event
+            // cards only in the first; every note compared without its `id:` line (P14).
+            let build = |with_event_cards: bool| -> PathBuf {
+                let v = vault();
+                if with_event_cards {
+                    let accept = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+                    let check = file_check(&v, &[event("ics:club-1", "", "Club night", 26)]);
+                    mark(&v, &accept, "approved");
+                    mark(&v, &check, "approved");
+                }
+                digest(&v, "approved", &["engage:1"]);
+                let lines = "- [ ] Sat 9/5 18:00 · Robotics Demo · `engage:3`\n\
+                             - [ ] Sun 9/6 12:00 · Study Abroad Fair · `localist:4`\n";
+                proposal(&v, "events-digest-2026-08-20.md", REJECTED_DIGEST, lines);
+                let calendar = PENDING.replace("kind: task", "kind: calendar-event").replace("status: pending", "status: approved");
+                proposal(&v, "calendar-event-a.md", &calendar, "");
+                v
+            };
+            let (beside, alone) = (build(true), build(false));
+            let a = run_at(&beside, DIGEST_TODAY, digest_now());
+            let b = run_at(&alone, DIGEST_TODAY, digest_now());
+
+            assert!(a.warnings.is_empty() && b.warnings.is_empty(), "{:?} {:?}", a.warnings, b.warnings);
+            assert_eq!(files(&beside, "commitments"), vec!["career-fair.md", "club-night.md"], "the event cards settled too");
+            let digests = |r: &ApprovalsResult| -> Vec<String> {
+                r.executed.iter().filter(|s| s.starts_with("events-digest")).cloned().collect()
+            };
+            assert_eq!(digests(&a), vec!["events-digest-2026-08-21 (1 events)"]);
+            assert_eq!(digests(&a), digests(&b));
+            assert_eq!(a.rejected, vec!["events-digest-2026-08-20"]);
+            assert_eq!(a.rejected, b.rejected);
+            assert_eq!((a.awaiting_calendar, b.awaiting_calendar), (1, 1));
+            assert_eq!(calendar_notes(&beside), vec!["calendar-event-a.md", "calendar-event-ai-club-kickoff.md"]);
+            assert_eq!(calendar_notes(&beside), calendar_notes(&alone));
+            for name in calendar_notes(&beside) {
+                let rel = format!("approvals/{name}");
+                assert_eq!(without_id(&beside.join(&rel)), without_id(&alone.join(&rel)), "{name}");
+            }
+            for name in ["events-digest-2026-08-20.md", "events-digest-2026-08-21.md"] {
+                let rel = format!("archive/{name}");
+                assert_eq!(without_id(&beside.join(&rel)), without_id(&alone.join(&rel)), "{name}");
+            }
+            let digest_lines = |vault: &Path| -> Vec<String> {
+                let text = ledger_text(vault);
+                let uids = ["- engage:1 ", "- localist:2 ", "- engage:3 ", "- localist:4 "];
+                pystr::splitlines(&text).into_iter().filter(|l| uids.iter().any(|u| l.contains(u))).map(str::to_string).collect()
+            };
+            assert_eq!(digest_lines(&beside).len(), 3, "{:?}", digest_lines(&beside));
+            assert_eq!(digest_lines(&beside), digest_lines(&alone));
         }
     }
 
