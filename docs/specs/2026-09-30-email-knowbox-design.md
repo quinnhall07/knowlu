@@ -1,11 +1,14 @@
 # Email (MVP): the Knowbox — automatic forwarding setup, receiver, claims and reconcile
 
-**Date:** 2026-09-30. **Status: DRAFT for Quinn's signature, revised after review** (the last section,
-*Review revisions (2026-09-30)*, lists every finding and what changed). Nothing here is built. Quinn's answers
-of 2026-09-30 to the seven questions of the research (stage, automatic, receiver, filter, backfill and
-change tracking, surfacing, saved session, school IT) are binding on this spec and are cited as
-**Q1–Q7** (Q5b for surfacing). §13 keeps only what those answers left open. §10 is the amendment text
-Quinn signs with it.
+**Date:** 2026-09-30. **Status: DRAFT for Quinn's signature, revised after review and after Quinn's
+answers to §13** (*Review revisions (2026-09-30)* lists every finding and what changed; the *Signing
+sheet* at the end lists what signing commits to). Nothing here is built. Quinn's answers of 2026-09-30
+to the seven questions of the research (stage, automatic, receiver, filter, backfill and change
+tracking, surfacing, saved session, school IT) are binding on this spec and are cited as **Q1–Q7** (Q5b
+for surfacing). Quinn's answers of the same day to the eleven questions §13 raised are binding too and
+are cited as **§13 Q1–Q11**; §13 keeps each question beside its answer. §10 is the amendment text Quinn
+signs with it, including **A13**: ruling 12's university-policy-read gate suspended, for the kept
+Blackboard session and the saved mail sign-in alike, until Knowlu has 20 paying users.
 
 **Authority.** `docs/specs/2026-09-09-knowlu-cloud-design.md` and its amendments; this spec amends D12,
 §13 and ruling 10 (§10). Then `VISION.md`, `CLAUDE.md`'s two overriding rules, and the signed Gmail
@@ -38,8 +41,10 @@ approval (E1), and Gmail's API covers only personal Gmail, for at most 100 teste
 
 After this spec:
 
-- **Right after sign-in, Knowlu offers to set up email.** The student signs in to their school mail,
-  and to their personal Gmail if they want it, in a Knowlu window. That window is only for signing in.
+- **Right after sign-in, Knowlu says email comes next.** The wizard's panel after sign-in reads "Next:
+  connect your school email", and when Knowlu's main window first opens, the school mail sign-in opens
+  with it (§13 Q9). The student signs in to their school mail, and to their personal Gmail if they
+  want it, in a Knowlu window. That window is only for signing in.
   Once they are signed in it gets out of the way, and Knowlu's own window shows each step as it
   happens: forwarding turned on, a test message received, mail since the term started brought in.
   The window comes back only if the mail site needs the student (Google's "verify it's you", an MFA
@@ -100,8 +105,8 @@ the plan), and **more honest** (a broken source says so).
   (`ingest.rs:684-696`), so judge-once never applies to it, whoever set the field. A due date moved by a
   professor's email but not in Blackboard is reverted at the next slot, even when the student approved
   it, and even if it was written as the student. Ruling 3 already says a source must not overwrite a
-  hand-set field; making `ingest` honour it is a change to every existing vault's behaviour, so it is
-  §13 Q7. D11 is written so that either answer is coherent.
+  hand-set field; making `ingest` honour it changes every existing vault's behaviour, so it went to
+  Quinn as §13 Q7. Quinn's answer: fix it now (D11 (5), T8b).
 - **F5. Judge-once does not cover `due`.** `write`'s judge-once is limited to the six judged task fields
   (`provenance.rs:52-59`); `due` and `title` are not among them. A mail pass that relied on `write`'s
   judged set would overwrite a due date the student typed, with no card. The reconciler therefore
@@ -134,7 +139,9 @@ carries it before privacy bump #1 (D18).
 - the setup canary, the periodic canary and the "source went quiet" state for Knowbox mailboxes (D14);
 - the saved session, on by default with a switch: reconcile, recover, re-enable forwarding (D15);
 - Disconnect per mailbox, and account deletion (D17);
-- if Quinn answers §13 Q7 (a): `ingest` honours ruling 3 for `title` and `due` (D11);
+- `ingest` honours ruling 3 for `title` and `due` (D11 (5); §13 Q7);
+- ruling 12's policy-read gate suspended until Knowlu has 20 paying users, for the kept Blackboard
+  session of M1 grades and the saved mail sign-in alike (D25; §10, A13; T19);
 - the privacy sentences for bump #1 (§7) and the amendments (§10).
 
 **Out of scope, each with its home:**
@@ -159,31 +166,32 @@ Each cites the answer it carries out. "Cost if wrong" is what the build or the s
 | # | Decision | Reason | Cost if wrong |
 |---|---|---|---|
 | **D1** *(Q1)* | **All of email ships in the MVP**: receiver, addresses, scripted setup for school M365 and personal Gmail with guided fallback, Gmail's server-side confirm, setup and periodic canary with "source went quiet", full backfill, reconcile and recover. **Gmail OAuth (PR #26) stays as the direct path** and is not changed except by D22. | Quinn's Q1. The pilot schools' mail is M365, unreachable any other way (E1); a mid-semester sign-up needs backfill. | The MVP exit moves out by this lane's size (§14: XL). |
-| **D2** *(Q3)* | **The receiver is AWS SES inbound on a subdomain** (MX on `in.knowlu.com` or the domain Q5 decides). An SES receipt rule has **one action, the S3 action, with its own `TopicArn`**: it stores each message in an S3 bucket whose lifecycle expires objects after **one day** and notifies an SNS topic with a notification that carries the message's headers and recipients but never its body (SES's separate SNS action, which publishes the whole message through SNS, is never used). S3 counts a lifecycle day to the next UTC midnight, so an object left behind lives up to about two days plus AWS's own lag; every path that finishes with an object deletes it at once (§4.6, §4.7). SNS delivers over HTTPS to the Supabase function `knowbox-inbound`, which verifies the SNS signature (only the configured topic, a certificate only from `sns.<region>.amazonaws.com`) before reading anything. **No message is ever rejected at the door on SPF, DKIM or DMARC**: SES records the verdicts, and intake judges afterwards (§4.6). **Gate before any build commits to SES:** a deliberately DMARC-failing test message reaches the bucket (T0). | Quinn's Q3. SES is the only candidate confirmed not to act on the verdicts; Cloudflare Email Routing (§13's old choice) rejects DMARC failures; the apex's Cloudflare routing for `hello@`/`support@` is untouched because the MX is on the subdomain. SNS needs no AWS-side code. | If SNS proves awkward (retries, ordering, the subscription handshake), a 20-line Lambda that POSTs with a shared secret replaces it; intake is unchanged behind the same verify-then-read seam. |
+| **D2** *(Q3)* | **The receiver is AWS SES inbound on a subdomain** (MX on `in.knowlu.com`; §13 Q5). An SES receipt rule has **one action, the S3 action, with its own `TopicArn`**: it stores each message in an S3 bucket whose lifecycle expires objects after **one day** and notifies an SNS topic with a notification that carries the message's headers and recipients but never its body (SES's separate SNS action, which publishes the whole message through SNS, is never used). S3 counts a lifecycle day to the next UTC midnight, so an object left behind lives up to about two days plus AWS's own lag; every path that finishes with an object deletes it at once (§4.6, §4.7). SNS delivers over HTTPS to the Supabase function `knowbox-inbound`, which verifies the SNS signature (only the configured topic, a certificate only from `sns.<region>.amazonaws.com`) before reading anything. **No message is ever rejected at the door on SPF, DKIM or DMARC**: SES records the verdicts, and intake judges afterwards (§4.6). **Gate before any build commits to SES:** a deliberately DMARC-failing test message reaches the bucket (T0). | Quinn's Q3. SES is the only candidate confirmed not to act on the verdicts; Cloudflare Email Routing (§13's old choice) rejects DMARC failures; the apex's Cloudflare routing for `hello@`/`support@` is untouched because the MX is on the subdomain. SNS needs no AWS-side code. | If SNS proves awkward (retries, ordering, the subscription handshake), a 20-line Lambda that POSTs with a shared secret replaces it; intake is unchanged behind the same verify-then-read seam. |
 | **D3** | **One secret address per connected mailbox**: `<token>@<domain>`, the token 128 random bits in lower-case base32 (26 characters). The service keeps an HMAC of the token for lookup and the token itself encrypted (the `SOURCES_ENC_KEY` pattern of `_shared/crypto.ts`) so Settings can show it again. **Rotate** mints a new token for the mailbox and keeps the old one accepted until the new address's canary arrives (at most 7 days), so mail sent before forwarding is re-pointed is not lost; on Gmail the new address needs its own confirm (§4.3 steps 3–5). **Disconnect** revokes it. An account holds at most **three** live addresses and mints at most six in 30 days. | A token per mailbox binds every message to one mailbox without trusting plus-addressing through each provider's forwarding form, and lets one mailbox be revoked alone. A dump of the table is not a list of live addresses. | None structural. A student with three mailboxes has three addresses; Settings lists them. |
 | **D4** *(Q4)* | **Forward everything.** On M365: mailbox forwarding ("Enable forwarding") to the mailbox's address with **"Keep a copy of forwarded messages" on**. On Gmail: Settings → Forwarding → "Forward a copy of incoming mail to" the address, **keeping Gmail's copy in the Inbox**. No filter, and no filter import (E4 is not used). The server's cheap screen (§4.7, step 1) discards noise before any model sees it. | Quinn's Q4: coverage over a student-chosen filter. Keeping the copy means forwarding never removes mail from the student's own mailbox. | Every message transits the Knowbox, which §7 states plainly; the screen's quality decides the model cost. |
 | **D5** *(Q2)* | **Setup is automatic and DOM-only.** The mail window (label `mail`, its own WebView2 profile per mailbox, no capability grant, like `lms-grades`) is visible **only** to sign in. A step script runs only while the page's origin is one of the provider's mail hosts (a fixed list per provider, compiled in with the scripts); on an SSO, consent or redirected page nothing runs and the step waits or falls back. Once the page signals a signed-in mailbox (X2's title signal, confirmed by a DOM probe), the window is hidden or moved off-screen (T0 decides which keeps the page rendering) and the scripted steps run in it, in-process, by script evaluation in the page: **never CDP, never a debugging port, never synthetic OS input.** The **main window** shows the progress view (§4.5). The mail window comes back, centred and focused, only when the site needs the student: Google's "verify it's you" popup, an MFA or SSO re-prompt, a consent page. Every scripted step verifies its own effect by reading the page after it acts; a step that cannot find its controls, or whose check fails, falls back to **guided steps** for that step only. | Quinn's Q2. X2 proved both sign-ins work in Knowlu's own WebView2; X3a/X3b proved the settings changes; CDP was the spikes' harness only. | A hidden window may stop rendering (T0); off-screen is the fallback. A page that changes breaks a script until a release (D19); guided steps cover the gap. |
-| **D6** *(Q2)* | **When it runs.** The wizard **offers** email setup on the panel right after sign-in and subscription ("Set up your email next — Knowlu does it for you"; Yes is the default, Skip is one click). It **runs** at the console's first open after Finish, which is the first moment it has what it needs: the vault and its `courses/`, the profile's data folder for the saved session, and the console's commands. Settings → Email offers it at any time after, and to a student whose install was adopted or restored. | Quinn's Q2 ("offered right after Knowlu sign-in"). The wizard window has no `ConsoleState` and no profile folder until Finish (C1), and a mailbox's backfill matched against no courses would be matched again later. This reading of "offered" is the drafter's; §13 Q9 asks Quinn to confirm it. | The student waits until Finish to see setup start. The wizard copy says when it will run. |
+| **D6** *(Q2, §13 Q9)* | **When it runs.** The wizard's panel right after sign-in and subscription **announces it**: "Next: connect your school email", one line on what Knowlu will do, and a one-click **Not now** under which sits risk 12's sentence for a school whose rules forbid forwarding. When the console first opens after Finish, the school mail sign-in window **opens with it** and the progress view shows in the console (§4.5); personal Gmail is offered in the same view, skippable. Settings → Email offers setup at any time after: to a student who chose Not now, and to one whose install was adopted or restored. | Quinn's Q2 ("offered right after Knowlu sign-in") as Quinn confirmed it in §13 Q9: the announcement in the wizard, the sign-in and the progress at the console's first open. The wizard window has no `ConsoleState` and no profile folder until Finish (C1), and a mailbox's backfill matched against no courses would be matched again later. | The student waits until Finish to see setup start; the wizard says it comes next. |
 | **D7** *(Q5)* | **Backfill reaches the start of the current term.** The date comes from the curated campus row, which gains `terms: [(start, end), …]` for the academic year (UA's dates in the MVP). For an uncurated school, or a row with no term covering today, the setup view shows a computed default (the most recent of 5 January, 15 May and 15 August before today) **and asks the student to confirm or change it**. **No age cutoff** inside that window: an item already past due is recorded and archived as `imported-past` (R-OB-3); everything else counts. | Quinn's Q5: "relevance, not age"; the purpose is a complete picture of what changed. F2: nothing records a term today. | A wrong default reads too little or too much mail; the student sees the date before anything is read. |
 | **D8** | **Intake is two stages and a separate queue.** `knowbox-inbound` verifies, binds and splits: each original message (a live forward, or one `.eml` unwrapped from a backfill send) becomes its own S3 object under `work/` (same one-day lifecycle) and one `knowbox_work` row holding only its key, account, mailbox, phase and arrival time. A worker, `knowbox-process` (cron every minute, and kicked by intake), takes items within its wall-clock budget: parse, screen, extract claims, queue them in **`mail_claims`**, delete the object. The device pulls `mail_claims` through `mail-pull`; **`gmail_queue` is not touched** (`gmail-read` changes only by D22). **The `knowbox_seen` row is written together with the `knowbox_work` row, only after the S3 put succeeds**, so a failed put leaves nothing that would make SNS's retry look like a duplicate. | A 25 MB backfill send of ~100 originals cannot be judged in one invocation; the raw text lives only in S3 and in a worker's memory, never in a table; a separate queue keeps the Gmail path's quiet rules (F4) out of the Knowbox's. | An item not processed before its object expires is lost to that pass: the sweep counts it `expired` on the mailbox **and deletes its `knowbox_seen` row**, so the next reconcile lists it as missing and recover's re-forward is accepted (D15). |
 | **D9** *(Q5)* | **Claims, cheapest first.** Per message: (1) the screen; (2) deterministic parsers for templated senders (Blackboard, Canvas and zyBooks notifications, as data rows beside `RECEIPT_TEMPLATES`), with the existing due resolver and course-code matching; (3) the rest to a **small model** (judge's tier 3, a new kind `mail_claim`) returning a fixed schema: up to five claims, each `{kind: new_item \| change \| course_info \| noise, course, target, field, value, evidence, confidence}`; a `new_item` also carries `effort_hours` and `importance` from fixed ranges, as a Gmail `task` verdict does, so a note made from mail is never sent to the device's task pass (§5.2). **`evidence` must occur verbatim in the message** (after whitespace folding), or the claim is refused as `incomplete`; the confidence floor is the existing 0.6. | Quinn's Q5. VISION: classification over generation, schema on every call, rules first. The evidence check is deterministic and makes a model's invented change unqueueable. | A real change worded only across a quoted reply may be refused; the student still sees the mail in their mailbox, and live mail of that shape files no card. |
 | **D10** *(Q5, Q5b)* | **Reconcile is deterministic, on the device, in `judge`.** Claims are applied oldest-first by the message's **ordering date** (its Date header, capped at the time the Knowbox received it for live mail, or at the provider's own delivery time, else the batch's opening, for backfilled and recovered mail; §4.8), then uid, then claim index; a later claim supersedes an earlier one for the same item and field, held across pulls by a per-field `mail_asof` on the note (§5.2). **A backfill or recover batch is delivered whole**, in that order, only once it has closed, and a mailbox's live claims wait behind its open batch (§4.8), so the same messages give the same vault however they arrive. **Backfill applies silently and lists; live mail proposes.** §4.9's table says, per claim kind and phase, which writes are direct agent writes and which are cards. **Undo** is per item in "From your email": a created item is deleted with `delete_note`, a changed field is set back to the journal's `old` value with `set_fields` (as the student, so judge-once then protects it). | Quinn's Q5 and Q5b. `rank` never calls a model; the reconcile needs no model, only the vault. Undo reuses two commands that exist (F3). | An Undo of a field makes it the student's, so later mail about that field becomes a card. That is the intended reading of "the student decided". |
-| **D11** *(Q5)* | **A mail change never silently overrides the student or an authoritative source.** (1) **The reconciler decides card or direct itself**, for every field it touches, from `Journal::human_set(id, field)`, where a human `create` carrying the field counts (a note the student made by hand is theirs); it never relies on `write`'s judged set, which does not cover `due` (F5). (2) A change to a field the student set is a `kind: amend` card in both phases. A change to a note owned by an authoritative feed (an LMS or homework-platform item, by its `created_by`) is a card in both phases unless the note already holds the claimed value (then nothing is written); §4.9 gives the template rows. (3) **Mail cards are written by `mail.rs`'s own card writer** through `write::create`, in exactly the shape `approvals::validate_amendment` accepts (`kind: amend`, `target`, `changes: {field: {from, to}}`, `proposed_at`, `first_proposed_at`, `expires: null`, `snooze_until: null`) plus `created_by: mail` and D21's fields, and only after `write::find_pending_amendment` finds no pending card for the same note and fields (the `write_gmail_card` precedent; `propose_amendment`'s "re-judged" text would be false here). (4) **Approving a mail `kind: amend` card writes its changed fields as the vault's human actor** (`journal::read_human_actor`), not as `agent:approvals`, so the approved value is the student's and later mail about it is a card. If `read_human_actor` fails (ruling 11: a bad `config/actor.yaml`), the approval stops with that named error and the card stays pending; it never falls back to another actor. (5) **Against the feed, §13 Q7 decides.** Under (a), recommended, `ingest` honours ruling 3 for `title` and `due`: where `human_edited(id, field)` exists and the feed differs, it files one `kind: amend` card instead of writing (none while one is pending; a value the student rejected is not proposed again until the feed's value changes), so an approved mail value holds and a later move in the LMS is a card. Under (b), `ingest` is unchanged, and a mail amend card on an LMS item says in its text that the next Blackboard update will replace the value. A mail `kind: task` card materialises as today. | VISION commitment 5, ruling 3 ("no source overwrites a field the journal shows the student set by hand; that change is filed as an amend card instead") and Q5's judge-once. F1, F5. | `approvals.rs` changes (§8). Under Q7 (a), `ingest.rs` changes too: every vault whose student hand-set an LMS item's `due` gets a card where today the feed overwrites silently, which is what ruling 3 says and why it is Quinn's call. |
+| **D11** *(Q5)* | **A mail change never silently overrides the student or an authoritative source.** (1) **The reconciler decides card or direct itself**, for every field it touches, from `Journal::human_set(id, field)`, where a human `create` carrying the field counts (a note the student made by hand is theirs); it never relies on `write`'s judged set, which does not cover `due` (F5). (2) A change to a field the student set is a `kind: amend` card in both phases. A change to a note owned by an authoritative feed (an LMS or homework-platform item, by its `created_by`) is a card in both phases unless the note already holds the claimed value (then nothing is written); §4.9 gives the template rows. (3) **Mail cards are written by `mail.rs`'s own card writer** through `write::create`, in exactly the shape `approvals::validate_amendment` accepts (`kind: amend`, `target`, `changes: {field: {from, to}}`, `proposed_at`, `first_proposed_at`, `expires: null`, `snooze_until: null`) plus `created_by: mail` and D21's fields, and only after `write::find_pending_amendment` finds no pending card for the same note and fields (the `write_gmail_card` precedent; `propose_amendment`'s "re-judged" text would be false here). (4) **Approving a mail `kind: amend` card writes its changed fields as the vault's human actor** (`journal::read_human_actor`), not as `agent:approvals`, so the approved value is the student's and later mail about it is a card. If `read_human_actor` fails (ruling 11: a bad `config/actor.yaml`), the approval stops with that named error and the card stays pending; it never falls back to another actor. (5) **Against the feed, `ingest` honours ruling 3 for `title` and `due`** (§13 Q7, Quinn: fix it now): where `human_edited(id, field)` exists and the feed differs, it files one `kind: amend` card instead of writing (none while one is pending; a value the student rejected is not proposed again until the feed's value changes), so an approved mail value holds and a later move in the LMS is a card. A mail `kind: task` card materialises as today. | VISION commitment 5, ruling 3 ("no source overwrites a field the journal shows the student set by hand; that change is filed as an amend card instead") and Q5's judge-once. F1, F5. | `approvals.rs` and `ingest.rs` change (§8): every vault whose student hand-set an LMS item's `title` or `due` gets a card where today the feed overwrites silently, which is what ruling 3 says and what Quinn chose. |
 | **D12** *(Q5)* | **A reasoning model only for ambiguous references, batched per course.** When a change's `target` matches no note, or more than one, deterministically (§4.8), the device sends one batch per course to `mail-resolve`: the claims and the course's candidate items (id, title, due). The answer names one candidate or none for each claim, and is **stored on the claim row** so a re-pull replays the same answer. Unresolved claims become an info notice ("Knowlu could not match this to an item"), never a guess. | Quinn's Q5. Determinism under replay: the model's answer is data. | One more pinned kind (`mail_resolve`), a few calls per backfill. |
 | **D13** *(Q5)* | **Course information becomes info notices, superseding by key.** A `course_info` claim (schedule, room, instructor, office hours, policy) opens an `info/` item of kind `notice`, titled by course and topic, with `close_key: mail:<course>:<topic>`; a later claim for the same course and topic closes the earlier one and opens its own (`info.rs`'s close-by-key). Notices are written in both phases: they inform and change nothing in the plan. **The per-course digest** (a reasoning model folding a course's notices into one `info/` note) is optional: built last, behind `mail_digest: false` by default, and cut if time is short. | Quinn's Q5. Uses `info.rs` as it is; supersession is the existing key rule, so no new state. | If Quinn reads a notice as "Knowlu noticed → propose", notices become cards; the table in §4.9 changes one row. |
-| **D14** | **Canary and "source went quiet" ship in the MVP for Knowbox mailboxes.** At setup, a canary from Knowlu's own domain (DKIM-signed, a nonce in a header and the subject) is sent to the student's mailbox and must come back through forwarding; the setup waits up to three minutes. After setup a mailbox is watched passively (`last_received_at`); a periodic canary is sent only when the mailbox has been silent (cadence: §13 Q2). States: `active`, `quiet`, `blocked` (forwarding set and verified on, but the setup canary never arrived), `off` (the saved session found forwarding turned off or pointing elsewhere), `paused_send` (Microsoft
+| **D14** | **Canary and "source went quiet" ship in the MVP for Knowbox mailboxes.** At setup, a canary from Knowlu's own domain (DKIM-signed, a nonce in a header and the subject) is sent to the student's mailbox and must come back through forwarding; the setup waits up to three minutes. After setup a mailbox is watched passively (`last_received_at`); a periodic canary is sent only after the mailbox has gone quiet, and at least 72 hours after that mailbox's last canary (§13 Q2; §4.10). States: `active`, `quiet`, `blocked` (forwarding set and verified on, but the setup canary never arrived), `off` (the saved session found forwarding turned off or pointing elsewhere), `paused_send` (Microsoft
 refused a backfill or recover send, §4.2 step 5), `lapsed` (no entitlement, §4.6 step 3), `revoked`. Each
 non-active state is a named line in the run and in Settings, and an issue in the Issues panel. | Quinn's Q1 puts the periodic canary in the MVP; VISION: silence is never ambiguous. Ruling 10 put "source went quiet" in the Pilot for Gmail; this moves the Knowbox's own to the MVP (§10, A5). | A canary to the student's own mailbox is mail Knowlu sends them; it obeys VISION's "one daily email at most" (§4.10). |
-| **D15** *(Q6)* | **The saved session is on by default for everyone, with a clear switch** (Q6; §13 Q6 puts ruling 12's policy-read promise beside it for Quinn, and this row follows Quinn's answer there). The mail window keeps **one WebView2 profile per connected mailbox** at `<data_dir>\mail-session-<address_id>` (never the vault, never synced, no password kept; Windows encrypts the profile's cookies with DPAPI, but the pages and mail the site caches in the profile are stored there unencrypted). It is used to **reconcile** (compare what the mailbox received in a window with what the Knowbox holds, on the device), **recover** (forward the missing messages as attachments) and **re-enable** forwarding found turned off (§4.11). Cadence after the 10-08 session-lifetime spike (§13 Q3). An expired session asks the student to sign in **only when a repair is needed**. Switching it off deletes every mailbox's profile; setup still works, in a `mail-setup` profile wiped when the window closes and swept at start-up if a crash left it. A mailbox's profile is deleted on that mailbox's Disconnect, and every mail profile on Knowlu sign-out and on account deletion; a delete that fails is retried at the next start-up and named in Settings until it succeeds. Named on the privacy page. It is a second named exception to §11a's "keep nothing", beside ruling 12's (§10). | Quinn's Q6, on ruling 12's precedent. One profile per mailbox means "Disconnect Gmail" leaves no Google session behind while the school mailbox stays connected. | A saved session is full mailbox access on the device; malware running as the student can use it (§7, §11). |
+| **D15** *(Q6)* | **The saved session is on by default for everyone, at every school, with a clear switch** (Q6; §13 Q6, Quinn: no policy-read gate for it, and ruling 12's gate for the Blackboard session suspended beside it until Knowlu has 20 paying users, D25). The mail window keeps **one WebView2 profile per connected mailbox** at `<data_dir>\mail-session-<address_id>` (never the vault, never synced, no password kept; Windows encrypts the profile's cookies with DPAPI, but the pages and mail the site caches in the profile are stored there unencrypted). It is used to **reconcile** (compare what the mailbox received in a window with what the Knowbox holds, on the device), **recover** (forward the missing messages as attachments) and **re-enable** forwarding found turned off, automatically and then with a notice, never for a mailbox the student turned off in Knowlu's own Settings (§4.11; §13 Q11). Reconcile runs once a day, revisited after the 10-08 session-lifetime spike (§13 Q3). An expired session asks the student to sign in **only when a repair is needed**. Switching it off deletes every mailbox's profile; setup still works, in a `mail-setup` profile wiped when the window closes and swept at start-up if a crash left it. A mailbox's profile is deleted on that mailbox's Disconnect, and every mail profile on Knowlu sign-out and on account deletion; a delete that fails is retried at the next start-up and named in Settings until it succeeds. Named on the privacy page. It is a second named exception to §11a's "keep nothing", beside ruling 12's (§10). | Quinn's Q6, on ruling 12's precedent. One profile per mailbox means "Disconnect Gmail" leaves no Google session behind while the school mailbox stays connected. | A saved session is full mailbox access on the device; malware running as the student can use it (§7, §11). |
 | **D16** *(Q7)* | **No contact with school IT.** The setup canary detects a tenant that blocks external forwarding (Microsoft's default for tenants since 2021, NDR 5.7.520, which the student never sees) and names it: "Your school is blocking forwarding to Knowlu." The setup then offers only what remains: personal Gmail, and the guided steps. | Quinn's Q7. E2 and X3a proved UA's forwarding works today. | A school that blocks later is found by the periodic canary, not in advance. |
 | **D17** | **Disconnect and deletion leave nothing that serves the connection.** Disconnect (per mailbox) turns forwarding off in the mailbox (the saved session, or a sign-in, or guided steps), revokes the address, deletes the mailbox's `knowbox_seen`, its `mail_claims` **delivered or not** (the Gmail disconnect precedent), its `knowbox_work` rows and their S3 objects (by key, read from `knowbox_work` first), its batches and canaries, and that mailbox's saved-session profile. Mail that still arrives at a revoked address is deleted **without its body ever being fetched** (§4.6 step 2). `DELETE /account` calls the same purge for each mailbox before the cascade and names every Knowbox table in its list (§4.13); the app tries to turn forwarding off with the saved session first and says so on the confirm. The account's export includes its mailboxes (provider, `mailbox_hint`, status, dates, counters) and its queued claims; never the token, its HMAC, a key or a hash. | The Gmail spec's D14 rule, applied here: delete what exists only to serve the connection. The judgment rows (no text) go with the account, as today. | A forwarding the student never turns off keeps sending mail to a black hole. The disconnect copy says so, and guided steps show how to stop it. |
-| **D18** | **This lane moves no `PRIVACY_VERSION` and edits no `site/privacy.html`.** §7 drafts the sentences; they join privacy bump #1 (Pilot), whose PR moves the page, its date and the constant together after its lawyer read. **No release is tagged from a `main` that carries the Knowbox setup until bump #1 has merged** (the guard the Gmail spec's D13 already put in HANDOFF, widened). | Ruling 12's and the Gmail spec's pattern. The MVP proof runs on a dev build against staging. | A release cut early would ship a page that does not name the Knowbox, AWS or the saved session. |
+| **D18** | **This lane moves no `PRIVACY_VERSION` and edits no `site/privacy.html`.** §7 drafts the sentences; they join privacy bump #1 (Pilot), whose PR moves the page, its date and the constant together after its lawyer read. **No release is tagged from a `main` that carries the Knowbox setup, or the suspended grades gate (D25), until bump #1 has merged** (the guard the Gmail spec's D13 already put in HANDOFF, widened twice). | Ruling 12's and the Gmail spec's pattern. The MVP proof runs on a dev build against staging. Ruling 12 let a release carry M1's code before bump #1 only "because without a date it offers grades nowhere"; with the gate suspended that no longer holds (D25). | A release cut early would ship a page that does not name the Knowbox, AWS, the saved session, or a kept Blackboard session now offered at every school. |
 | **D19** | **The step scripts are compiled into the app** (one readable JS file per provider and step, with its selectors and its check) and versioned with the release. No script is fetched from a server in the MVP. | A server-supplied script would run inside a signed-in mailbox; that needs signed delivery and its own review. The MVP's one user can take a release. | A provider's UI change breaks a step until a release; guided steps cover the gap (D5). Signed remote scripts are a Pilot or Launch item. |
 | **D20** | **Names.** Journal actor `agent:knowlu.mail` for every reconcile write; `created_by: mail` on notes and cards; uids `mail:<h>` where `<h>` is the first 32 hex of SHA-256 of the message's Message-ID (a message with none: of its Date, From and Subject), and `mail:<h>:<n>` for its *n*-th claim. `state/ingest-seen.md` records them like `gmail:` uids. | `agent:` keeps judge-once (`provenance::is_agent` is a prefix test). Hashing keeps Message-IDs, which can carry addresses, out of the vault. | None. |
-| **D21** | **Mail cards, notices and applied changes name their sender** (display name and address) and the message's date. | VISION commitment 5: "showing who it came from"; a moved deadline is judged by who moved it. | It diverges from Quinn's decision for Gmail cards (the Gmail spec's D15, decided at `gmail-connect-design:901`: no sender in the MVP). The divergence is in the ruling text Quinn signs (§10) and is §13 Q10, so the signature covers it; disclosed in §7. |
+| **D21** | **Mail cards, notices and applied changes name their sender** (display name and address) and the message's date. | VISION commitment 5: "showing who it came from"; a moved deadline is judged by who moved it. | It diverges from Quinn's decision for Gmail cards (the Gmail spec's D15, decided at `gmail-connect-design:901`: no sender in the MVP). Quinn chose it (§13 Q10: mail cards show the sender) and the ruling text Quinn signs (§10) states the divergence; disclosed in §7. |
 | **D22** | **One mailbox, one path; the Knowbox wins.** When a Gmail address has an active Knowbox and is also connected by OAuth, `gmail-read` reads nothing new and answers an ordinary, **non-quiet** pull: `{items: <undelivered>, read: 0, quiet: false, more: false}`, plus a field `via_knowbox: true` that today's device ignores. Already-queued items are still delivered and acked. Calendar is untouched. **Never `quiet`:** the merged device reads every unknown quiet reason as `Revoked` ("re-connect from settings") and stops before reading items (`cloudmodel.rs:667-675`). | No cross-path dedup is needed, and the Knowbox's backfill and canary are the stronger path. Zero device change. | One small change to the merged `gmail-read` (§9), with a handler test that the answer is not quiet and carries the undelivered items. |
-| **D23** | **A one-time backfill allowance** above the daily email cap: an allowance of `mail_claim` judgments **per account per term** (held on `knowbox_accounts`, keyed by the term's start, so Disconnect and reconnect never renew it), shared by the account's mailboxes, usable within 14 days of the first setup, charged by its own RPC. Its calls' tokens are recorded through `record_tokens` like every other call's, so `monthly_spend` sees their cost, while their count is kept on `knowbox_accounts` and never in `usage_daily.calls`, so a backfill never uses up the live daily cap; while the allowance is open, `enforce_budget`'s ceiling for that account is `MONTHLY_CEILING_USD` plus the allowance's dollars, a hard per-account ceiling, and back to `MONTHLY_CEILING_USD` after. Size: §13 Q1. | Q5 asks for it sized. The screen and parsers remove most mail before the model; what is left is bounded by the window. Holding it per account means a mint-and-disconnect loop buys nothing (D3 also caps addresses). | Too small: backfill trickles over days at the daily cap. Too large: a looping bug costs more before it trips. |
+| **D23** | **A one-time backfill allowance** above the daily email cap: an allowance of `mail_claim` judgments **per account per term** (held on `knowbox_accounts`, keyed by the term's start, so Disconnect and reconnect never renew it), shared by the account's mailboxes, usable within 14 days of the first setup, charged by its own RPC. Its calls' tokens are recorded through `record_tokens` like every other call's, so `monthly_spend` sees their cost, while their count is kept on `knowbox_accounts` and never in `usage_daily.calls`, so a backfill never uses up the live daily cap; while the allowance is open, `enforce_budget`'s ceiling for that account is `MONTHLY_CEILING_USD` plus the allowance's dollars, a hard per-account ceiling, and back to `MONTHLY_CEILING_USD` after. Size (§13 Q1): **2,000 `mail_claim` judgments per account per term, and $1.00 above that account's ceiling while the allowance lasts.** | Q5 asks for it sized. The screen and parsers remove most mail before the model; what is left is bounded by the window. Holding it per account means a mint-and-disconnect loop buys nothing (D3 also caps addresses). | Too small: backfill trickles over days at the daily cap. Too large: a looping bug costs more before it trips. |
 | **D24** | **Events and schedules stay the student's call.** A dated event in mail (a meeting, a club sign-up) is a `new_item` with `item_kind: event` and, **when it is still ahead**, is always a card, in both phases. An event already past when the claim is applied files no card: in the backfill it is recorded and archived `imported-past` (Q5: "recorded and archived"); live or recovered, it is counted in the run line's past count and nothing is written, since no one can accept a past event. A claim about a class meeting (moved, cancelled, new room) is a notice (D13); it never writes `commitments/`. | The events spec's D2 ("obligations are asked, never auto-created") and the commitment model (commitments are what the student confirmed). | A cancelled class still blocks its time until the student edits it; the notice tells them. |
+| **D25** *(§13 Q6)* | **Ruling 12's policy-read gate is suspended until Knowlu has 20 paying users, for both kept sessions.** The kept Blackboard session (M1 grades) and the saved mail sign-in (D15) are offered and used at every school, with no recorded university-policy read. For grades, "every school" is every curated campus row whose `lms_kind` is `blackboard`: the host still comes only from the curated row, never a typed address, so an uncurated Blackboard school still reads "not available at your school yet". For mail it is every school (§4.1). The gate stays mechanical and in one place: `grades::availability` (`app/src/grades.rs:40-50`) reads one constant, `POLICY_READ_GATE`, set to `Suspended`, the same in every build (no `cfg`, feature or environment variable). The `policy_read` field, the date-and-bump test and the named reason all stay, so restoring the gate is one constant, with the `Enforced` arm's predicate tests already written; the undated cases T19 rewrites in the command and scheduler tests go back with it, T19's diff being their record (T19). **Review trigger:** the 20th paying account, counted as an `active` paid subscription (`trialing` and founder-owned test accounts not counted); Quinn rules again before the next release tagged after it. HANDOFF's queue carries the trigger, set 2026-09-30, and the controller's count-only query checks it at each milestone update. **Disclosure first:** D18's release guard covers the suspension. | Quinn's answer to §13 Q6 (2026-09-30): "change both to allow … Once we have 20 paying users, we'll come back to this … give ourselves as much of an advantage as possible." The MVP and the Pilot prove the concept as a desktop app, and the reads would hold back the founder's own grades proof. | A school whose policy forbids a kept SSO or mail session is learned about from the school, after the fact, not from a read (§11, risk 17). The lawyer read in bump #1 still happens. |
 
 ## 4. The flows
 
@@ -193,7 +201,8 @@ non-active state is a named line in the run and in Settings, and an issue in the
    gains `mail_provider` (`m365`, `google`, `other`) and `mail_domain` (UA: `m365`; its student domain).
    For an uncurated school, the setup asks once for the school email address and the service decides
    the provider from the domain's MX records (`*.mail.protection.outlook.com` is M365; Google's MX hosts
-   are Google). §13 Q4. Personal Gmail is always offered beside it, and skippable.
+   are Google); an unknown provider is guided (§13 Q4: the curated row, else this MX lookup). Personal
+   Gmail is always offered beside it, and skippable.
 2. **The address.** `POST /knowbox/addresses {provider}` mints the mailbox's address (D3) and answers it
    with an `address_id`; a fourth live address, or a seventh mint in 30 days, is refused with a named
    reason. The address is shown in the progress view (the student may want it) and is never logged.
@@ -493,13 +502,15 @@ the task as today, as `agent:approvals`.
   Knowlu's account mail; subject "Knowlu delivery check — no need to open this", a nonce in a header and
   the subject; one sentence of body saying what it is and where to turn it off.
 - **At setup:** always, per mailbox (§4.2 step 4).
-- **After setup:** the mailbox is watched by `last_received_at`. A canary is sent only when the mailbox
-  has been silent past the threshold and has had no canary inside the minimum gap (§13 Q2), and never
-  when the student has had any Knowlu email that day (VISION: one daily email at most).
+- **After setup:** the mailbox is watched by `last_received_at`. A canary is sent **only after the
+  mailbox has gone quiet** (no bound mail for 24 hours on a weekday, 48 over a weekend) and **at least
+  72 hours after that mailbox's last canary** (§13 Q2), and never when the student has had any Knowlu
+  email that day (VISION: one daily email at most).
 - **Missing:** a canary not back within two hours sets the mailbox `quiet`; with the saved session on,
   the next slot's mail step checks the forwarding setting (§4.11): found off, it sets `off`, turns it
-  back on (Q6) and says so; found pointing elsewhere, it changes nothing and asks the student. A setup
-  canary that never arrives sets `blocked` (D16).
+  back on and then says so (Q6, §13 Q11), unless the student turned that mailbox off in Knowlu's
+  Settings; found pointing elsewhere, it changes nothing and asks the student. A setup canary that
+  never arrives sets `blocked` (D16).
 - **Limits:** `POST /knowbox/canary` sends only to a `mailbox_hint` whose domain fits the mailbox's
   provider (the campus row's `mail_domain` or the MX check for school mail; `gmail.com` or
   `googlemail.com` for Gmail), at most three canaries per address per UTC day, so the endpoint cannot
@@ -516,7 +527,7 @@ child-process loop starts with `sync` (`scheduler.rs:845-922`). The engine never
 step never writes the vault. Running first also gives mail it recovers a few minutes to reach
 `mail_claims` before `judge` pulls; what has not arrived by then is pulled at the next slot. It adds one
 `RunSummary` row named `mail`, or a named skip at exit 0: `mail (skipped: saved sign-in off)`,
-`mail (skipped: not due)` (cadence, §13 Q3), `mail (skipped: no entitlement)` (the slot's existing
+`mail (skipped: not due)` (reconcile runs once a day, §13 Q3), `mail (skipped: no entitlement)` (the slot's existing
 `est`). It has its own one-window lock; the grades capture and the mail step run one after the other,
 never at once.
 
@@ -534,13 +545,20 @@ Per mailbox, with the mailbox's own kept profile:
    in opens the visible window.
 2. **Read the forwarding setting.**
    - On, to this mailbox's Knowbox address: nothing to do.
-   - **Off:** the mailbox is `off`; turn it back on with setup's step script (Q6), send a canary, and
-     keep a heads-up item: "Knowlu turned forwarding back on in your school mail. If you turned it off
-     on purpose, disconnect it in Settings → Email." (§13 Q11 asks whether to ask first instead.)
+   - **Off, and the student turned this mailbox off in Knowlu's Settings** (its `address_id` is in
+     `mail.json`'s `turned_off`, written first at §4.12): nothing is done, now or ever; the step skips a
+     listed mailbox before step 1 opens its profile. Knowlu never re-enables what the student turned
+     off in its own Settings (§13 Q11).
+   - **Off, otherwise:** the mailbox is `off`; the step turns forwarding back on with setup's step
+     script, automatically (Q6, §13 Q11), sends a canary, and reports it (`POST
+     /knowbox/addresses/<id>/state {state: reenabled}`, which stamps `reenabled_at`). The next mail pass
+     opens a heads-up item for that mailbox (`close_key: mail-reenabled:<address_id>`) whose text is
+     exactly: "Email forwarding was off; Knowlu turned it back on. Turn off email in Settings to stop
+     this." Its title names the mailbox (school email or Gmail); the student dismisses it.
    - **Pointing to any other address:** never changed in a hidden step (§4.2 step 3's rule, which needs
-     the student's answer). The mailbox is `off`, and a heads-up item asks "Forwarding in your school mail
-     now goes to another address. Forward to Knowlu instead?"; only a yes acts, through the visible
-     progress view.
+     the student's answer). The mailbox is `off` (reported `{state: elsewhere}`), and a heads-up item
+     asks "Forwarding in your school mail now goes to another address. Forward to Knowlu instead?"; only
+     a yes acts, through the visible progress view.
 3. **Reconcile, on the device.** `POST /knowbox/reconcile {address_id, since, until}` answers the
    fingerprints the service **holds** for the window (each an `HMAC_k(sender, normalised subject)` with
    its received minute, §4.6 step 7) and the key `k`. The device lists what the mailbox received in the
@@ -560,10 +578,13 @@ backfill resumes by itself.
 
 ### 4.12 Disconnect
 
-Settings → Email → a mailbox → **Disconnect**, two steps like *Delete my data*. The confirm says what
-happens: "Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to
-serve it. What it already added stays in your plan."
+Settings → Email → a mailbox → **Turn off email** (the control the re-enable notice names, §4.11 step
+2; called Disconnect below), two steps like *Delete my data*. The confirm says what happens: "Knowlu
+turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it
+already added stays in your plan."
 
+0. Record the mailbox's `address_id` in `mail.json`'s `turned_off`, before anything else, so no later
+   step, slot or retry ever turns its forwarding back on, even if a step below fails (§13 Q11).
 1. Turn forwarding off (and on Gmail, remove the address from the list; no re-authentication, X3b), with
    the saved session; if signed out, the visible window for a sign-in; if that is declined or a step
    fails, the guided steps, with the address shown so the student can find it.
@@ -615,7 +636,7 @@ them, as `google_accounts` does. Every `account_id` references `accounts(id) on 
 | Table | Holds | Kept |
 |---|---|---|
 | `knowbox_accounts` | `account_id`; the per-account fingerprint key, encrypted; `digest` (D13, default false); the allowance (D23): `allowance_term_start`, `allowance_left`, `allowance_usd`, `allowance_until`; `mints_30d` (D3) | until the account goes |
-| `knowbox_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `confirm_until`; `term_start`; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired` | until Disconnect (then the row is deleted) or the account goes |
+| `knowbox_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `reenabled_at` (§4.11 step 2); `confirm_until`; `term_start`; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired` | until Disconnect (then the row is deleted) or the account goes |
 | `knowbox_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
 | `knowbox_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
 | `knowbox_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `knowbox_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |
@@ -641,8 +662,8 @@ pinned by test 14):
   `origin not in ('gmail_api', 'events', 'knowbox')`, naming all three origins, so it is stronger, never
   looser.
 - `enforce_budget` takes D23's raised ceiling while an account's allowance is open; `DAILY_CAP` gains
-  `mail_claim` and `mail_resolve` (§13 Q1 sizes the allowance; the daily caps start at email's 120 and
-  20).
+  `mail_claim` and `mail_resolve` (the allowance is 2,000 judgments and $1.00 per account per term, §13
+  Q1; the daily caps start at email's 120 for `mail_claim` and 20 for `mail_resolve`).
 - RPCs: `charge_allowance(p_account)` (one statement, like `charge_call`); `delete_knowbox_address(p_address)`
   (revoke, then delete the mailbox's `knowbox_seen`, `knowbox_work`, all its `mail_claims`, batches
   and canaries, then the row; `security definer`, pinned `search_path`). Its callers (Disconnect and
@@ -726,8 +747,9 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
   the window closes; start-up sweeps a `mail-setup` a crash left, and retries any profile delete that
   failed before.
 - `<data_dir>\mail.json`: `{keep_session: true, last_reconcile: {<address_id>: <ts>}, pending_deletes:
-  […]}`, a file beside `settings.json` and never a field in it (the precedent of `grades.json`,
-  `grades.rs:59-63`).
+  […], turned_off: [<address_id>, …]}`, a file beside `settings.json` and never a field in it (the
+  precedent of `grades.json`, `grades.rs:59-63`). `turned_off` only grows; the mail step never
+  re-enables a listed mailbox (§4.11 step 2, §4.12 step 0).
 - **One window label, `mail`** (D5 and every section use it), visible or hidden, with no capability
   grant; one mail window at a time.
 - No new Credential Manager target. Knowlu writes the address to no file and no log of its own; it
@@ -755,12 +777,17 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
 - **New read-only command `knowlu-engine mail-applied --vault <v> [--since <ts>]`.** Prints JSON: every
   journal record by `agent:knowlu.mail` since the backfill began, joined to the note's current value
   (§4.14). It never writes, and is never entitlement-gated (like `surface`).
-- **`engine/src/ingest.rs`, only if Quinn answers §13 Q7 (a):** in `sync_tasks`' update branch, for
-  `title` and `due`, when `Journal::human_edited(id, field)` finds a record and the feed differs, file one
-  `kind: amend` card through `write::propose_amendment` (actor `agent:ingest.blackboard`, so the card says
-  who) instead of writing, none while `find_pending_amendment` finds one, and none for a value the student
-  already rejected on a card for that note and field; the run line says `proposed <stem>: due`. Under (b)
-  it is unchanged.
+- **`engine/src/ingest.rs` (§13 Q7: ruling 3 now):** in `sync_tasks`' update branch
+  (`ingest.rs:676-703`), for `title` and `due`, when `Journal::human_edited(id, field)` finds a record and
+  the feed differs, file one `kind: amend` card instead of writing; none while
+  `write::find_pending_amendment` finds one; none for a value the student already rejected on a card for
+  that note and field (until the feed's value changes); a field no human edited is written exactly as
+  today. The card goes through `write::create` in the shape `approvals::validate_amendment` accepts, as
+  the ingest actor, with its own "Why proposed" line ("Blackboard now says <to>; you set <from> by hand,
+  so this is a proposal"), **never through `write::propose_amendment`**, whose "re-judged … (judge-once
+  rule)" line would be false for a feed change (R20's reason, applied here). The run line says
+  `proposed <stem>: due`. Approving it writes as today's executor; the field stays human-edited in the
+  journal, so a later feed move is a card again.
 - **Unchanged:** `rank` (it never calls a model and never sees a claim), `surface`, `write`, the `gmail`
   pass, every frozen reference. `judge` still exits 0 on every failure shape.
 
@@ -795,9 +822,18 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
   backfill's runner is setup's background thread, not the scheduler.
 - **`account.rs`:** `delete_my_data`'s pre-step and `sign_out`'s profile deletion (§4.13). Contract
   list (§8).
-- **The wizard:** the offer on the panel after sign-in and subscription (D6) writes a marker in the
-  profile's data folder (the `onboarding::offer_marker` precedent); the console's first open reads it and
-  opens the progress view.
+- **The wizard:** the announcement on the panel after sign-in and subscription (D6, §13 Q9: "Next:
+  connect your school email") writes a marker in the profile's data folder (the
+  `onboarding::offer_marker` precedent) unless the student chose Not now; the console's first open reads
+  it, opens the school mail sign-in window and shows the progress view.
+- **`app/src/grades.rs` (D25, T19):** a new pure `availability_with(gate, row, lms)` holds the predicate,
+  with the one branch the gate decides; `availability(row, lms)` keeps its signature and returns
+  `availability_with(POLICY_READ_GATE, row, lms)`. While the constant is `Suspended`, a curated
+  `blackboard` row is `Available` with or without `policy_read`. Its four callers (`grades_status`'s
+  seam, `connect_with`, `refresh_with`, `scheduler::grades_step`) are unchanged, take no gate parameter
+  and still never re-derive it, so they always see `Suspended`: the `Enforced` arm is tested only at
+  `availability_with` (test 39), and the caller tests' undated cases change to the `Suspended`
+  expectation (tests 40–41). Nothing else in M1 changes.
 - **`app/static`:** the progress view, Settings → Email (one row per mailbox: state, address with Copy,
   Resume, Rotate, Disconnect, the saved-sign-in switch), "From your email", the wizard's offer, and the
   card's `from`, `mail_date` and `evidence` on the deck.
@@ -812,7 +848,7 @@ the vault. CLAUDE.md's slot line gains that sentence (§10, A12).
 |---|---|---|
 | `knowbox-inbound` | SNS signature (`verify_jwt = false`) | §4.6 |
 | `knowbox-process` | the cron's Vault token | §4.7 |
-| `knowbox` | **sign-in only** (`requireUser`, as google-connect's status and disconnect) for `GET /addresses` and `DELETE /addresses/<id>`, so a lapsed or canceled account can always see and disconnect its mailboxes; **session + `requireActiveEntitlement`** for every other route | `GET /addresses`, `DELETE /addresses/<id>`, `POST /addresses` (D3's caps), `POST /addresses/<id>/rotate`, `POST /canary` (§4.10's limits), `POST /batches` (opens a backfill or recover batch and answers its nonce), `POST /batches/<id>/sent`, `POST /reconcile` (answers held fingerprints and the key, §4.11), `GET /provider?domain=` (MX lookup through `Deno.resolveDns`; §13 Q4) |
+| `knowbox` | **sign-in only** (`requireUser`, as google-connect's status and disconnect) for `GET /addresses` and `DELETE /addresses/<id>`, so a lapsed or canceled account can always see and disconnect its mailboxes; **session + `requireActiveEntitlement`** for every other route | `GET /addresses`, `DELETE /addresses/<id>`, `POST /addresses` (D3's caps), `POST /addresses/<id>/rotate`, `POST /canary` (§4.10's limits), `POST /batches` (opens a backfill or recover batch and answers its nonce), `POST /batches/<id>/sent`, `POST /reconcile` (answers held fingerprints and the key, §4.11), `POST /addresses/<id>/state` (`off`, `elsewhere` or `reenabled` from the mail step, §4.11 step 2), `GET /provider?domain=` (MX lookup through `Deno.resolveDns`; §13 Q4) |
 | `knowbox-canary` | the cron's Vault token | §4.10's periodic canary |
 | `mail-pull` | session + entitlement | undelivered `mail_claims` by §4.8 step 1's rules; ack |
 | `mail-resolve` | session + entitlement | D12; one call per course batch; stores each answer on its claim |
@@ -861,6 +897,18 @@ cookies for the student's Windows account; the pages and mail the mail site keep
 stored in the same folder without that encryption. A program running as the student could use either.
 It is on by default (Q6) and the switch is in Settings → Email.
 
+**Kept sign-ins at every school, for now (D25, A13).** Until Knowlu has 20 paying users, two kept
+sign-ins are on at every school, and **no school's policy on them has been read first**: the saved
+mail sign-in, at every school, and the kept Blackboard sign-in for grades, at every school Knowlu has a
+curated row for (an uncurated school still has no grades). Before this, ruling 12 promised the released
+app would never offer or use the Blackboard sign-in at a school without a recorded read. That promise
+is suspended, not withdrawn: Quinn rules on it again when the 20th paying account exists. The page says
+so in plain words, and no release carries either sign-in before it does (D18).
+
+**Turning it off.** If forwarding is found off, Knowlu turns it back on and then says so: "Email
+forwarding was off; Knowlu turned it back on. Turn off email in Settings to stop this." A mailbox
+turned off in Knowlu's own Settings is never turned back on (§13 Q11).
+
 **Telemetry and training.** No Knowbox content in telemetry, ever; no new telemetry row shape. `knowbox`
 judgments are excluded from the training export, the rules and the corrections back-fill (§5.1), and a
 note made from mail is never re-judged on the device (§5.2), so no judgment of any origin carries mail
@@ -883,12 +931,14 @@ in HANDOFF (T13), beside M1's and the Gmail spec's drafts, for its one lawyer re
    storage (plus its expiry lag), 180 days for the keyed hashes, the mailbox's own address until
    Disconnect, 7 or 30 days for what was found before it reaches the vault.
 5. The sub-processor line for AWS.
-6. The kept sign-ins paragraph that ruling 12 adds for Blackboard names the mail sign-in too.
+6. The kept sign-ins paragraph that ruling 12 adds for Blackboard names the mail sign-in too, and says
+   that neither waits on a school's policy read until Knowlu has 20 paying users (D25).
 7. `:85` stays true of Gmail; the new section says what is kept from forwarded mail (the quote).
 
 The lawyer packet gains: the Knowbox and AWS; the mailbox actions done with a saved session (Microsoft's
 and Google's terms on automated access, which the research flagged); the saved mail sign-in; and the
-university-policy question of §13 Q6. **`PRIVACY_VERSION` does not move here**, and the release guard of
+suspended university-policy reads (D25): both kept sign-ins on at every school, no school's policy read,
+until 20 paying users. **`PRIVACY_VERSION` does not move here**, and the release guard of
 D18 is the line T13 adds to HANDOFF's Pilot gate.
 
 ## 8. Contract-list impact
@@ -896,7 +946,8 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
 | Contract | Impact |
 |---|---|
 | `engine/src/approvals.rs` | **Changed (D11):** a `kind: amend` card with `created_by: mail`, when approved, applies its changes with the vault's human actor (`journal::read_human_actor`), not the executor's; when that read fails, the card stays pending and the run names ruling 11's error, never another actor. Every other card kind and every other amend executes exactly as today. contract-engineer, reviewed by contract-reviewer. |
-| `engine/src/ingest.rs` (not on the list) | **Changed only under §13 Q7 (a)** (§6.1): ruling 3's amend card for a hand-edited `title` or `due`. It changes behaviour in every existing vault, so contract-engineer, reviewed by contract-reviewer; the oracle and golden references must stay byte-identical (no fixture vault holds a hand-set LMS `due` that the feed contradicts; T8b's first step checks that before any code). |
+| `engine/src/ingest.rs` (not on the list) | **Changed (§13 Q7; §6.1):** ruling 3's amend card for a hand-edited `title` or `due`, written through `write::create`, not `propose_amendment`. It changes behaviour in every existing vault, so contract-engineer, reviewed by contract-reviewer; the oracle and golden references must stay byte-identical (no fixture vault holds a hand-set LMS `due` that the feed contradicts; T8b's first step checks that before any code). |
+| `app/src/grades.rs` (not on the list) | **Changed (D25, T19):** the `POLICY_READ_GATE` constant, the pure `availability_with` seam with the one branch the gate decides, and `availability` delegating to it; its callers unchanged. No contract-list file, test or fixture changes; the tests that pinned "an undated Blackboard row is not available" change with the ruling, each named in T19. |
 | `app/src/account.rs` | **Changed (§4.13):** `delete_my_data`'s forwarding-off pre-step, which calls into `mail.rs` and never blocks the deletion, and `sign_out`'s deletion of the mail profiles. `PRIVACY_VERSION` is not touched (D18). contract-engineer. |
 | `write.rs`, `journal.rs` (`VIAS`), `yamlemit.rs`, `yaml.rs`, `pystr.rs`, `ledger.rs`, `ids.rs`, `provenance.rs` | **Used, not changed.** Every write goes through `write`; the new actor starts `agent:`; no new `via`; no new id kind (`task_` and `info_` exist). `JUDGED_FIELDS_TASK` is **not** widened to `due`: that would change judge-once in every vault, and the reconciler's own journal check (D11) makes it unnecessary. `mail_asof` is written the way `judgment:` is; if that needs a `write` mode that does not exist, the task stops and goes to contract-engineer. |
 | `sync.rs` | **Not changed.** No new note folder, so the two tripwires stay true; mail cards are not local kinds and sync like Gmail cards; `mail_asof` is note text. |
@@ -917,18 +968,20 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
   bump-#1 list. D22 is one small change to the merged `gmail-read`, a non-quiet empty read, because the
   merged device reads any unknown quiet reason as "re-connect from settings". The wizard keeps #26's
   **Connect Gmail** button on the Gmail panel as "Connect Gmail directly (Google testers only)"; the
-  Knowbox offer is its own panel after sign-in (D6). Settings shows the Google row (#26) and the Email
-  row (this) side by side. The release guard is one rule for both. #26's D15 (no sender, Quinn's
-  decision) and this spec's D21 differ; §13 Q10 puts that in front of Quinn.
+  Knowbox announcement is its own panel after sign-in (D6). Settings shows the Google row (#26) and the
+  Email row (this) side by side. The release guard is one rule for both. #26's D15 (no sender) and this
+  spec's D21 differ, and Quinn chose that (§13 Q10).
 - **Events.** No shared behaviour: mail events are task-shaped cards (D24). `approvals.rs` is shared with
   the events lane's T3: whichever merges second rebases its arm, and D11's change is a separate arm.
-  Under §13 Q7 (a), `ingest.rs`'s change touches only `sync_tasks`' update branch.
+  `ingest.rs`'s change (§13 Q7) touches only `sync_tasks`' update branch.
 - **M2 editing.** This lane only appends body lines, a primitive that exists. M2's body replacement does
   not affect it.
 - **M1 grades.** The kept-session pattern is reused, not shared: each `mail-session-<address_id>` is its
   own profile, with its own window label and its own one-at-a-time lock; the slot runs the grades capture
   and then the `mail` step, both before the engine chain. The registrar never shares any of these
-  profiles.
+  profiles. **One change reaches M1:** D25 suspends its policy-read gate (T19, `app/src/grades.rs`), so
+  the founder's grades proof no longer needs UA's read or a proof branch carrying UA's date; it runs on
+  a dev build of `main` once T19 merges (T19 may merge ahead of the rest of this lane, §14).
 - **Two desktops (Launch).** `mail_claims` are pulled once per account; until the fetch-turn lease, two
   awake desktops can both pull. A claim applied on one desktop is a no-op on the other once its note has
   synced (§4.8 step 4: the synced `source_uid` is checked before any create), as well as being bounded by
@@ -943,8 +996,9 @@ D18 is the line T13 adds to HANDOFF's Pilot gate.
 ## 10. The amendment Quinn signs
 
 Signing this spec signs the text below. The signing commit appends the ruling to the cloud design as
-**"Amendment 2026-09-30 — the Knowbox"**, adds the markers, and makes the VISION, Gmail-spec and
-CLAUDE.md edits in the same commit, as the earlier amendments did. Each item quotes the current text.
+**"Amendment 2026-09-30 — the Knowbox"**, adds the markers, and makes the VISION, Gmail-spec,
+grades-spec and CLAUDE.md edits in the same commit, as the earlier amendments did. Each item quotes the
+current text.
 
 **The ruling (appended to the cloud design):**
 
@@ -961,12 +1015,13 @@ CLAUDE.md edits in the same commit, as the earlier amendments did. Each item quo
 > active Knowbox is read by the Knowbox only. **A second named exception to §11a's "keep nothing"**
 > joins ruling 12's: a saved mail sign-in, one WebView2 profile per connected mailbox under the app's
 > data folder, never in the vault, never synced, never sent, its cookies DPAPI-encrypted, no password
-> kept; **on by default for everyone** *[if Quinn answers §13 Q6 (b): "…for everyone except a school
-> mailbox at a school without a recorded university-policy read, where it is off by default"]* with a
-> switch in Settings; used only to reconcile, recover and re-enable forwarding; deleted when switched
-> off, on that mailbox's Disconnect, on Knowlu sign-out and on account deletion; named on the privacy
-> page in bump #1. Ruling 10's MVP gains email by the Knowbox, including its own "source went quiet",
-> and its exit gains the Knowbox's live proof. No release carries it before privacy bump #1.
+> kept; **on by default for everyone, at every school, with no university-policy read until Knowlu
+> has 20 paying users (A13)**, with a switch in Settings; used only to reconcile, recover and re-enable
+> forwarding (re-enabled automatically and then announced, never for a mailbox the student turned off
+> in Knowlu's Settings); deleted when switched off, on that mailbox's Disconnect, on Knowlu sign-out
+> and on account deletion; named on the privacy page in bump #1. Ruling 10's MVP gains email by the
+> Knowbox, including its own "source went quiet", and its exit gains the Knowbox's live proof. No
+> release carries it before privacy bump #1.
 
 **A1. D12** (`cloud-design:24`). Now: "**Email ingestion is Gmail OAuth (`gmail.readonly`),
 server-side.** Quinn chose it over forwarding on 2026-09-09 knowing the cost…". Gains the marker
@@ -1016,8 +1071,9 @@ vault is its own dedicated calendar, behind a scope the student grants for that 
 **Knowlu reads.** Outside the vault it writes only its own dedicated calendar, behind a scope the
 student grants for that purpose, and, in the student's own mailbox, what brings their mail to Knowlu:
 forwarding turned on at setup with the student present, older or missed mail forwarded to Knowlu's own
-address (whose Sent copies it removes), and forwarding turned back on with the saved sign-in the student
-allowed. It never sends anything to anyone else."
+address (whose Sent copies it removes), and forwarding turned back on, and then announced, with the
+saved sign-in the student allowed, never for a mailbox the student turned off in Knowlu's Settings. It
+never sends anything to anyone else."
 
 **A9. VISION, data minimisation** (`:181`). Now: "- **Data minimization is a rule:** collect the least
 that answers the question." Gains: "Where a source cannot be narrowed (forwarded mail arrives whole), the
@@ -1044,6 +1100,98 @@ content derived from the Gmail API or from forwarded mail". **CLAUDE.md:** the s
 chain, the app runs its own window steps, the grades capture and then the saved-sign-in `mail` step;
 neither writes the vault." The actor list gains "forwarded mail as `agent:knowlu.mail`".
 
+**A13. Ruling 12 of Amendment 2026-09-29: the policy-read gate suspended until 20 paying users**
+(§13 Q6; D25). Quinn's words (2026-09-30): "change both to allow. We'll keep the school sign-in and mail
+sign-in for now. Once we have 20 paying users, we'll come back to this." Ruling 12's current text, in the
+five passages that change (`cloud-design:690-691`, `:695-698`, `:703-711`, `:699-703` and `:714-717`);
+every other sentence of ruling 12 stands, read with the heading marker below:
+
+> "A release may carry M1's code before then, because without a date it offers grades nowhere."
+
+> "the founder's MVP grades proof runs on a dev build from a proof branch that carries UA's date (the
+> existing live-proof practice: dev build, scratch profile), and that branch is never merged ahead of
+> bump #1; MVP exit therefore needs UA's read recorded and the proof passed on the proof branch, not
+> UA's date on main."
+
+> "The promise: **Knowlu's released app never offers or uses the session at a school without a
+> recorded read.** In the Pilot, each other pilot student's university gains its read (ruling 10). The
+> gate is mechanical, not operational, and no build skips it: the grades spec (§2–§4 and §9–§12 as
+> signed; the spec's text takes edits 3–5 in the signing commit) puts one predicate in
+> `app/src/grades.rs`, true only where the curated campus row carries the read's date (`policy_read`),
+> never at an uncurated school through a typed address. The strip's status, Connect, a manual refresh
+> and the scheduler all check it; Connect and refresh refuse with the same named reason, and the slot
+> records `grades (skipped: not available at your school yet)` at exit 0."
+
+> (*Policy read*, from "and UA's read moves") "and UA's read moves to MVP exit (ruling 10). Quinn is a
+> UA student and the MVP's only user, so the founder's grades proof runs through the real gate on the
+> proof branch; the MVP's grades proof waits on Quinn recording UA's read."
+
+> (*What it costs*) "one test in M1, and UA's date waits on privacy bump #1 to reach main; the MVP's
+> grades proof waits on Quinn recording UA's read. If UA's policy forbids a persisted SSO session, the
+> MVP cannot exit as item 9 defines it and Quinn rules again on grades; the pilot may then start
+> without them."
+
+The replacements, in order:
+
+> "No release is tagged from a `main` that carries M1's code with the gate suspended until privacy
+> bump #1 has merged, because with the gate suspended it offers grades at every curated Blackboard
+> school."
+
+> "the founder's MVP grades proof runs on a dev build of `main` with the gate suspended (dev build,
+> scratch profile); no proof branch and no `policy_read` date are needed."
+
+> "The promise, suspended: **until Knowlu has 20 paying users, Knowlu's released app offers and uses
+> the session at every school without a recorded read, as it does the saved mail sign-in (the email
+> spec's D15).** The reads (UA's at MVP exit, each pilot student's university in the Pilot, Launch's
+> widening checklist) wait for the review below. The gate stays mechanical, not operational, and no
+> build skips it: the predicate in `app/src/grades.rs` stays the one place that decides, and one
+> constant there, `POLICY_READ_GATE`, reads `Suspended`, the same in every build (no `cfg`, feature or
+> environment variable). While it does, the predicate is true for every curated campus row whose
+> `lms_kind` is `blackboard`, dated or not, and still never at an uncurated school through a typed
+> address. The strip's status, Connect, a manual refresh and the scheduler all still check it; an
+> uncurated Blackboard school still refuses with the same named reason, and the slot records `grades
+> (skipped: not available at your school yet)` at exit 0. The `policy_read` field and the
+> date-and-bump test stay. *Review trigger (set 2026-09-30):* when Knowlu has its 20th paying account
+> (an `active` paid subscription; `trialing` and founder-owned test accounts are not counted), Quinn
+> rules again before the next release: restore the gate (`POLICY_READ_GATE` back to `Enforced`, with a
+> read recorded for each school whose students use either session) or keep it suspended with a new
+> trigger."
+
+> "and UA's read waits, with every other school's, for the review at 20 paying users (the promise
+> below). Quinn is a UA student and the MVP's only user, so the founder's grades proof runs through the
+> suspended gate on a dev build of `main`; the MVP's grades proof waits on no read."
+
+> "one test in M1, and any school's `policy_read` date still waits on privacy bump #1 to reach main
+> (the date-and-bump test). The MVP's grades proof waits on no read, and the MVP's exit does not depend
+> on what UA's policy says. If a read taken after the review finds that a school's policy forbids a
+> persisted SSO session, Quinn rules again on grades at that school."
+
+Ruling 12's heading gains *(suspended 2026-09-30 until 20 paying users, for the Blackboard session and
+the saved mail sign-in alike: Amendment 2026-09-30, A13; wherever this ruling says a read, a date or a
+proof branch is needed before grades are offered or proved, that need is suspended with it)*. The same
+marker, shortened to *(suspended until 20 paying users: Amendment 2026-09-30, A13)*, goes on:
+- **ruling 10** (`:596-605`, `:611-613`, `:619-623`, `:627-628`): the MVP list's "and UA's
+  university-policy read (ruling 12)"; the MVP *Exit*'s "Quinn has recorded UA's read" and "from the
+  proof branch that carries UA's date", and its last sentence ("The MVP's grades proof therefore waits
+  on Quinn recording UA's read"), which are struck; the Pilot list's "the university-policy read for
+  each pilot student's university other than UA"; the Pilot *Gate*'s "And no pilot student uses ruling
+  12's kept Blackboard session before the policy read for that student's own university is done … only
+  where the curated campus row records the read"; and Launch's "each university-policy read not
+  already done in the MVP or the Pilot";
+- **§11a's grades row** (`:359`), whose 2026-09-29 marker ends "the released app never offers or uses
+  the kept session at a school without a recorded read";
+- **the grades spec**, §4 (`grades-design:80-92`) and its proof lines (`:281-283`, `:319-321`).
+
+**VISION** (`VISION.md:218-224`). Now: "No one else signs up before the privacy page names the kept
+Blackboard sign-in and the grades the account holds, … No student, the founder included, keeps a
+Blackboard sign-in before their own university's policy has been read: the app offers the Blackboard
+connection only at a school whose read it records (UA's is read before the MVP ends), so until then a
+pilot student joins without grades from Blackboard." Becomes: "No one else signs up before the privacy
+page names the kept Blackboard sign-in, the saved mail sign-in and the grades the account holds, … Until
+Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every
+school without waiting for that school's policy to be read; at the 20th paying user the founder rules on
+the reads again (the cloud design's Amendment 2026-09-30, A13)."
+
 **Not amended, and why.** VISION commitment 3 (the AI never produces what the student sends to someone
 else): every send here is to Knowlu's own address and carries the student's own mail, not AI output. The
 standing rule "one daily email at most" holds: the canary obeys it (§4.10). **Corrections that need no
@@ -1058,17 +1206,18 @@ HANDOFF's lanes, queue and bump-#1 list.
 | 2 | **A school blocks external forwarding**, now or later. | Microsoft's default for new tenants; UA forwards today (E2, X3a). Bad for that school's students. | The setup canary names it (D16); the periodic canary finds a later block; personal Gmail and guided steps remain; no IT contact (Q7). |
 | 3 | **A provider changes its pages** and a step script breaks. | Certain over time. | Each step checks its own effect and falls back to guided steps (D5); scripts are versioned with the release (D19); the controller's live smoke runs before each release that carries them. |
 | 4 | **The WebView2 host cannot do what the spikes did through CDP**: a hidden window stops rendering, Google's popup is not allowed, Outlook's protocol prompt is not suppressible, or a script's result cannot come back without IPC. | Unverified (research: "Tauri 2 popup and new-window hook not verified"). Blocks the automatic path. | T0's spikes S1–S4 before any app task; off-screen instead of hidden; a title channel instead of a returned value; if popups cannot be allowed, Gmail's step 3 is guided. |
-| 5 | **The saved sign-in**: full mailbox access on the device; Microsoft's and Google's terms on automated access; a school's policy on kept sessions. | Real; a trust and legal risk more than a technical one. | One profile per mailbox, deleted on its Disconnect, on Knowlu sign-out and on account deletion, with a retried delete; DPAPI for the cookies and an honest sentence about the cached pages (§7); one switch; three named actions only; the privacy page and the lawyer read in bump #1; §13 Q6 puts ruling 12's promise beside Q6 for Quinn. |
+| 5 | **The saved sign-in**: full mailbox access on the device; Microsoft's and Google's terms on automated access; a school's policy on kept sessions. | Real; a trust and legal risk more than a technical one. | One profile per mailbox, deleted on its Disconnect, on Knowlu sign-out and on account deletion, with a retried delete; DPAPI for the cookies and an honest sentence about the cached pages (§7); one switch; three named actions only; the privacy page and the lawyer read in bump #1; on at every school by Quinn's ruling (D25), whose own risk is 17. |
 | 6 | **Silent loss on the path** (8 sent, 1 arrived, research note §3). | Observed with Gmail as the last hop. | The Knowbox is the last hop; the canary; reconcile and recover by fingerprint. |
 | 7 | **The receiver drops real mail**: a DMARC failure rejected, or a sender's IP on SES's block list. | Unverified for SES with real failures. | T0's DMARC-failing gate (Q3); a receipt rule that never stops or bounces; the `unauthenticated` counter is watched in the live proof. |
 | 8 | **The retention promise breaks**: S3's expiry runs late, a log line carries text, the work table holds a body. | Low if built as specified; bad if it happens. | Delete on processing; text only in S3 and memory; a test that no log line carries a message's text (§12.1, 15); §7 states the expiry lag honestly. |
 | 9 | **Cost**: a backfill burst, a noisy mailbox, a mint-and-disconnect loop, a capped item retried. | Bounded. | The screen and the templates first; charge and `enforce_budget` before every model call, a capped item waits a day (§4.7); one allowance per account per term, its spend in `usage_daily` under a hard per-account ceiling (D23); three live addresses and six mints in 30 days (D3); canaries capped per address (§4.10); `MONTHLY_CEILING_USD` stays the runaway guard outside the allowance. |
 | 10 | **Abuse of the address**: it leaks, a stranger forges a forward to it, or a stranger's Gmail asks to forward to it. | Low (128 bits), but a leaked token plus a forged `X-Forwarded-For` would otherwise write notices, hide a quiet mailbox and spend the cap. | Binding only by the provider hop's ARC seal and SPF-passing return path for this mailbox, never by a header alone; authenticity only from that hop's record (§4.6 steps 5–6); requester must exactly equal the mailbox for Gmail's confirm; Rotate in Settings. |
 | 11 | **Instructions inside mail** (prompt injection). | Present in any mail-reading product. | Claims are data under a fixed schema; nothing in a message can trigger an action; the evidence check; conflicts are cards; VISION: "content from emails is data, never instructions". |
-| 12 | **Policy for the student**: a school whose rules forbid forwarding, or a student who is also an employee. | Unknown per school. | One sentence on the offer: "If your school's rules don't allow forwarding your school email, skip this." |
+| 12 | **Policy for the student**: a school whose rules forbid forwarding, or a student who is also an employee. | Unknown per school. | One sentence on the wizard's announcement, under Not now (D6): "If your school's rules don't allow forwarding your school email, skip this." No school's policy is read first (D25, risk 17). |
 | 13 | **Deleting Sent copies** touches the student's mailbox. | Low. | Only copies the script created, matched by nonce and recipient; tested against fixtures; said in the progress view. |
 | 14 | **Two desktops** both pull or both repair. | Launch only. | One desktop per student until the lease (§9); a claim already applied on the other desktop is a no-op once its note has synced (§4.8 step 4). |
-| 15 | **Microsoft restricts the student's school account** for sending: backfill and recover forward hundreds of messages to an external address, and Exchange Online's outbound-spam policy can block a sender that bursts. | Plausible at 30 a minute; bad, because the student cannot send school mail until school IT unblocks them, and Q7 rules out contacting IT. | At most 10 a minute and 600 a mailbox a day (provisional); stop at the first non-delivery report or send failure with a named outcome, nothing retried that day (§4.2 step 5); T0 S6 measures a few hundred forwards on a mailbox whose restriction harms nobody before any build commits to the numbers (§13 Q8). |
+| 15 | **Microsoft restricts the student's school account** for sending: backfill and recover forward hundreds of messages to an external address, and Exchange Online's outbound-spam policy can block a sender that bursts. | Plausible at 30 a minute; bad, because the student cannot send school mail until school IT unblocks them, and Q7 rules out contacting IT. | At most 10 a minute and 600 a mailbox a day (provisional); stop at the first non-delivery report or send failure with a named outcome, nothing retried that day (§4.2 step 5); T0 S6 measures a few hundred forwards on a Microsoft 365 test tenant, never a real school account, before any build commits to the numbers (§13 Q8). |
+| 17 | **The suspended policy-read gate (D25)**: both kept sign-ins run at every school with no school's policy read; a school whose IT or acceptable-use policy forbids a kept SSO session, a kept mail session or automated forwarding learns of it from a student, or Knowlu learns of it from the school. | Unknown per school; until 20 paying users the student count is small, but a school's complaint lands on the student's account as well as Knowlu's. | Quinn's ruling, bounded: a **review trigger at the 20th paying account** (an `active` paid subscription), checked by the controller's count-only query at each milestone HANDOFF update, with Quinn's ruling before the next release; restoring the gate is one constant with its tests written (T19); D18 keeps every release behind privacy bump #1, which says plainly that no school's policy has been read (§7); the lawyer read still happens; risk 12's sentence on the wizard's announcement; Turn off email and Forget Blackboard sign-in delete each session on the device. |
 | 16 | **Recovery re-forwards what the Knowbox holds**, or a lapse loses mail. | Without one agreed time field, intake's and reconcile's fingerprints would rarely match. | Keyed fingerprints on one received minute, diffed on the device within 15 minutes (§4.6 step 7, §4.11); `seen` written only with the work row; an expired item's `seen` deleted; a lapse writes no `seen` and reconcile reaches back to `lapsed_since`. |
 
 ## 12. Test plan, test first
@@ -1104,7 +1253,9 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
    action is off the allow-list.
 6. Canary: a matching nonce marks it arrived and records `forward_hint`; a replay changes nothing; a
    wrong sender domain is unbound. `POST /canary` refuses a hint outside the provider's domains and a
-   fourth canary for one address in a UTC day.
+   fourth canary for one address in a UTC day. `knowbox-canary` (§13 Q2) sends none to a mailbox with
+   bound mail inside 24 hours on a weekday (48 over a weekend), none within 72 hours of that mailbox's
+   last canary, and none on a day the student had a Knowlu email; a mailbox quiet past both is sent one.
 7. Dedup: one Message-ID twice makes one work item; a message with none dedups on Date, From and Subject.
    `msg_hash` and `fp_hash` are HMACs under the account's key (the same Message-ID under two accounts
    hashes differently). A failed S3 put answers 500 and writes neither `knowbox_work` nor `knowbox_seen`,
@@ -1117,7 +1268,9 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
 10. Validation: evidence not in the text is refused `incomplete`; an unknown course is null; an
     unresolvable due is null; a sixth claim is dropped; below 0.6 is refused; a `new_item` without
     `effort_hours` or `importance` in range is refused.
-11. Allowance and cost: a backfill item charges the account's allowance, not the daily cap; the charge
+11. Allowance and cost: the allowance opens at 2,000 judgments and $1.00 above the account's ceiling
+    (§13 Q1), and the 2,001st backfill item waits for the daily cap; a backfill item charges the
+    account's allowance, not the daily cap; the charge
     and `enforce_budget` run **before** the spy model, and a capped or over-budget item makes zero model
     calls, waits to the next UTC day, at most three attempts, then expires with its `seen` row deleted;
     Disconnect and reconnect do not renew the allowance; a fourth live address and a seventh mint in 30
@@ -1195,12 +1348,13 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
 31. *(contract-engineer, `approvals.rs`)* An approved `created_by: mail` amend writes its fields as
     the human actor; with a bad `config/actor.yaml` it stops with ruling 11's named error and the card
     stays pending; a non-mail amend executes exactly as today.
-31b. *(contract-engineer, `ingest.rs`; only under §13 Q7 (a))* After an approved mail amend moved `due`
-    to Fri, an `ingest` whose feed says Wed files **one** `kind: amend` card (Fri → Wed) and leaves `due`
-    at Fri; a second ingest files no second card; after the student rejects it, the same feed value is
-    not proposed again, and a new feed value is; a `due` no human edited is still overwritten by the feed
-    exactly as today. Under (b), the test instead pins today's overwrite and the warning in the mail
-    card's text.
+31b. *(contract-engineer, `ingest.rs`; §13 Q7)* After an approved mail amend moved `due` to Fri, an
+    `ingest` whose feed says Wed files **one** `kind: amend` card (Fri → Wed) and leaves `due` at Fri; a
+    second ingest files no second card; after the student rejects it, the same feed value is not
+    proposed again, and a new feed value is; a `title` the student `set` by hand behaves the same; a
+    `due` no human edited is still overwritten by the feed exactly as today. The card passes
+    `approvals::validate_amendment`, carries the ingest actor and its own "Why proposed" line, and never
+    the text "re-judged"; approving it moves `due` to Wed and a later feed move is a card again.
 
 `oracle.rs`, `surface_oracle.rs` and every sync and entitlement test pass unchanged.
 
@@ -1222,13 +1376,57 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
     the named "not found" that triggers guided steps; the M365 switch is read by `checked`.
 36. The scheduler: in `run_slot_with`, the grades capture, then the `mail` step, then the child-process
     loop starting with `sync`; `slot_argv` is unchanged; the `mail` `RunSummary` row and each named
-    skip at exit 0; no entitlement is a skip. A forwarding found off is re-enabled with a heads-up; a
+    skip at exit 0; no entitlement is a skip; reconcile runs at most once a day (§13 Q3). **Re-enable
+    (§13 Q11):** a forwarding found off is turned back on and reported `reenabled`, and the next mail
+    pass opens one heads-up whose text is exactly "Email forwarding was off; Knowlu turned it back on.
+    Turn off email in Settings to stop this."; a mailbox in `mail.json`'s `turned_off` is never turned
+    back on, including when Disconnect's server call or profile delete failed after step 0; a
     forwarding pointing elsewhere is left unchanged and asked about.
 37. The ten commands are in the console list and not in the wizard's.
 38. *(contract-engineer, `account.rs`)* `delete_my_data` runs the forwarding-off pre-step, a failing
     pre-step never blocks the deletion, and the mail windows close before `delete_local_data`;
     `sign_out` deletes every `mail-session-*` and `mail-setup` profile of that Knowlu profile and
     leaves the other profiles' alone.
+39. *(T19, `app/tests/grades.rs`; D25)* **The predicate, both arms, at the pure seam.**
+    `POLICY_READ_GATE` is `Suspended`. The six predicate tests that call `availability` today
+    (`a_dated_blackboard_row_is_available_with_its_own_host`, `an_undated_blackboard_row_is_not_available_yet`,
+    `an_uncurated_blackboard_school_is_not_available_yet`, `a_curated_canvas_row_is_not_a_blackboard_school`,
+    `no_school_is_not_a_blackboard_school`, `no_real_campus_is_available_on_this_branch`) make each of
+    today's assertions against `availability_with(Gate::Enforced, ..)`, unchanged, so restoring the gate
+    needs no new predicate test; this is the only place the `Enforced` arm is reached. Each also asserts
+    the `Suspended` arm through `availability` (which is `availability_with(POLICY_READ_GATE, ..)`): an
+    undated curated `blackboard` row is `Available` with its own `lms_host`, as a dated one is; every real
+    curated `blackboard` row in `CAMPUSES` is `Available` with its own host and every other real row is
+    not; an uncurated Blackboard school is still `NotAvailableYet`; a curated `canvas` row and no school
+    are still `NotBlackboard`. A test may be renamed to say both arms (the undated and real-campus ones
+    must be, since their names state the `Enforced` result); none is deleted. A source test fails if
+    `cfg`, a feature or `std::env` reaches the gate.
+40. *(T19, `app/tests/grades.rs`)* **The command seams, `Suspended` only.** They call `availability`
+    and take no gate, so their undated cases are rewritten to the suspension, and every other case keeps
+    today's assertion unchanged. `grades_connect_refuses_without_a_date_and_opens_nothing`: the undated
+    row now opens the window and reads the session on its own host, in that order, as the dated row does;
+    the uncurated school still refuses with `not available at your school yet` and opens nothing; the
+    `NotBlackboard` and failed-window cases are unchanged. `grades_refresh_refuses_without_a_date_and_reads_no_session`:
+    the undated row with a saved session opens and reads; the uncurated school still refuses and opens
+    nothing; the `not connected` case is unchanged. `grades_status_reports_the_gate_and_with_a_date_the_session`:
+    the undated row reports `available: true` with the session fields, as the dated row does; the
+    uncurated school still reports `not available` with no session fields; `NotBlackboard` unchanged. The
+    three tests are renamed to drop "without a date"/"with a date" where it is no longer true; none is
+    deleted.
+41. *(T19, `app/tests/scheduler.rs`)* **The scheduler, `Suspended` only**, the same way:
+    `the_grades_decision_asks_the_predicate_and_never_rederives_it`: the undated row captures, as the
+    dated row does (the capture count becomes 2); the uncurated Blackboard school still skips with
+    `grades (skipped: not available at your school yet)` and writes no bundle; the `canvas` and no-school
+    skips are unchanged. `the_skip_order_is_school_then_availability_then_entitlement_then_session_then_window`:
+    the "not available yet beats no entitlement" pair uses the uncurated Blackboard school (`None`,
+    `"blackboard"`) instead of the undated row; every other pair is unchanged.
+    `the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step`: the named-skip half
+    (skip at exit 0, `engine_ok`, no capture, the runner-log `ok` line) runs with an uncurated Blackboard
+    school; if `GradesSeam` cannot express one without a new field, the skip half asserts a canvas row's
+    `grades (skipped: not a Blackboard school)` instead and the uncurated skip stays pinned by
+    `grades_step` above (no seam field is added); the dated half is unchanged. The date-and-bump tests
+    (`a_dated_row_fails_while_bump_1_has_not_happened` and its neighbours) and
+    `no_curated_row_carries_a_policy_read_date` pass unchanged.
 
 ### 12.4 Page (console-ui)
 
@@ -1257,12 +1455,14 @@ it as inert text, and a static check fails if any mail-derived field reaches the
   email links" prompt is suppressed. **No app window task starts until S1–S3 pass.**
 - **S2 also records** what each provider's message list exposes for the sender (display name or
   address) and the received time, which fixes the fingerprint's sender form (§4.6 step 7, §4.11).
-- **S4, session lifetime.** The 10-08 `sessions.log` is read; its answer goes to §13 Q3.
+- **S4, session lifetime.** The 10-08 `sessions.log` is read; Quinn revisits §13 Q3's once-a-day
+  reconcile with it (keep it if sessions survive a week of daily use; repair-only if they die within
+  two days).
 - **S5 (optional).** Whether an Outlook inbox rule can forward to the Knowbox beside an existing
   forwarding address (§4.2 step 3's third choice).
 - **S6, Microsoft's sending pace.** A few hundred forwards-as-attachment, at the provisional 10 a
-  minute, from an M365 mailbox whose restriction harms nobody (§13 Q8), never the founder's own school
-  account; records any throttling, non-delivery report or restriction, and sets the pace and the daily
+  minute, from a mailbox on a Microsoft 365 test tenant Quinn creates for it (§13 Q8), never a real
+  school account; records any throttling, non-delivery report or restriction, and sets the pace and the daily
   ceiling of §4.2 step 5. **No backfill code is merged with numbers S6 has not confirmed.**
 
 ### 12.6 Exit: the live proof (main session, on staging)
@@ -1270,31 +1470,36 @@ it as inert text, and a static check fails if any mail-derived field reaches the
 A dev build of the merged branch, a scratch profile, a staging session by OTP, a founder-owned school
 mailbox and a founder-owned test Gmail account, Quinn at the machine for each sign-in and phone tap.
 
-1. Onboard the scratch profile; the wizard offers email; at the console's first open the progress view
-   starts.
+1. Onboard the scratch profile; the wizard's panel after sign-in reads "Next: connect your school
+   email"; at the console's first open the school mail sign-in window opens and the progress view
+   shows in the console (§13 Q9). Grades (D25): with UA's curated row carrying no `policy_read`,
+   Blackboard Connect is offered and the slot's grades step runs instead of skipping.
 2. School M365: sign-in; the window steps aside; forwarding set and checked; the canary arrives; the
    backfill counts N and forwards; Sent copies removed; "From your email" lists what was applied.
 3. Undo one created item and one changed field; the next slot does not re-create or re-change them.
 4. Gmail: sign-in; the popup and phone tap; the server-side confirm; forwarding on; canary; backfill.
 5. Live mail: a synthetic "due date moved" message sent from another founder-owned account becomes an
    amend card at the next slot (snoozed to day 2 if it is still the vault's first day); approving it
-   writes `due` as the student; the next `ingest` then behaves as Quinn's §13 Q7 answer says (under (a),
-   the feed's differing date is a card and `due` holds).
+   writes `due` as the student; at the next `ingest` the feed's differing date is a card and `due`
+   holds (§13 Q7).
 6. Turn forwarding off by hand; the next canary misses; the mailbox reads `quiet`, then `off`; the slot's
-   `mail` step turns it back on, keeps the heads-up saying so, and recovers the message sent meanwhile.
-   Point forwarding at another founder-owned address: the step changes nothing and asks.
-7. Disconnect both mailboxes; the controller's count-only query shows no Knowbox rows for the account;
-   forwarding is off in both mailboxes.
+   `mail` step turns it back on, the heads-up reads "Email forwarding was off; Knowlu turned it back on.
+   Turn off email in Settings to stop this.", and the message sent meanwhile is recovered. Point
+   forwarding at another founder-owned address: the step changes nothing and asks.
+7. Turn off email for both mailboxes in Settings (Disconnect); the controller's count-only query shows
+   no Knowbox rows for the account; forwarding is off in both mailboxes, and the next slot turns
+   neither back on (§13 Q11).
 8. Clean up per the standing rule: the scratch profile, its vault, credentials and autostart; restore the
    school mailbox's forwarding to what it was before the proof.
 
 Pass means every step as written. Quinn's word closes the MVP row.
 
-## 13. Open questions for Quinn
+## 13. Questions for Quinn (all answered 2026-09-30)
 
-What Q1–Q7 left open, and the concerns review raised against two of those answers (Q6 and Q11 here),
-which stay as answered until Quinn says otherwise. Each changes what gets built; each has a
-recommendation. Ask them one at a time.
+What Q1–Q7 left open, and the concerns review raised against two of those answers (Q6 and Q11 here).
+Each question is kept as it was asked, with its options and recommendation; **Quinn's answer of
+2026-09-30 follows each one, is binding, and is folded into the decisions, flows, data model, privacy,
+risks, tests and tasks above.** Nothing in §13 is open now.
 
 **Q1. The backfill allowance (D23).** The research note's volumes: one personal Gmail took 959 messages
 in six weeks (680 without promotions and social); one school mailbox took 75 conversations in two weeks.
@@ -1309,6 +1514,9 @@ of a cent; at twice those sizes, about $0.0003.
 - (c) No allowance: the backfill trickles at 120 a day (240 on the first two days) and a mid-term setup
   takes a week.
 
+**Answered 2026-09-30: (a).** 2,000 judgments per account per term, raising that account's spending
+ceiling by $1 while it lasts (D23, §5.1, test 11).
+
 **Q2. The periodic canary's cadence (D14).** Every canary is an email in the student's inbox, and VISION
 allows one Knowlu email a day.
 - (a) **Only when a mailbox has been silent: 24 hours on a weekday (48 over a weekend), at least 72
@@ -1317,6 +1525,9 @@ allows one Knowlu email a day.
   never sees one.
 - (b) A fixed weekly canary per mailbox: predictable, but a broken mailbox can go a week unnoticed.
 - (c) Daily: catches a break within a day, and breaks the one-email rule for two mailboxes.
+
+**Answered 2026-09-30: (a).** A canary only after a mailbox goes quiet, at least 72 hours apart (D14,
+§4.10, test 6).
 
 **Q3. The saved session's reconcile cadence (D15), after the 10-08 spike.**
 - (a) **Provisionally once a day, in the first slot after 10:00, over the last three days, at most 30
@@ -1327,6 +1538,9 @@ allows one Knowlu email a day.
 - (c) Repair-only from the start: the gentlest on the session and the provider's terms; losses the
   canary does not see (a burst like §3's) are found only when something else is wrong.
 
+**Answered 2026-09-30: (a).** Saved-session reconcile once a day, revisited after the 10-08 spike
+(D15, §4.11, T0 S4).
+
 **Q4. Which provider, when the campus row has no mail field (§4.1).**
 - (a) **Curated rows gain `mail_provider` and `mail_domain` (UA's in the MVP); at an uncurated school the
   setup asks once for the school email address and the service decides from its MX records; unknown is
@@ -1336,12 +1550,17 @@ allows one Knowlu email a day.
   provider; a later improvement on (a).
 - (c) Two buttons, "School email (Microsoft)" and "School email (Google)": the student guesses.
 
+**Answered 2026-09-30: (a).** The provider from the curated campus row, else an MX lookup of the
+school's domain (§4.1, §6.3, T14).
+
 **Q5. The address domain (D2).**
 - (a) **`in.knowlu.com`, an MX on a subdomain of the product's own domain**, in the SES receiving region
   S0 records. *Recommended:* the apex's mail (`hello@`, `support@` through Cloudflare) is untouched, and
   the address a student sees in their settings says Knowlu.
 - (b) A separate domain, to keep the receiver's reputation apart from the product's: one more domain to
   hold and explain, and an address that does not say Knowlu.
+
+**Answered 2026-09-30: (a).** `in.knowlu.com` (D2).
 
 **Q6. Q6's saved session beside ruling 12's promise: a direct conflict for Quinn to resolve.** Your Q6
 answer is binding and this spec is written to it: the saved mail sign-in is **on by default for
@@ -1361,6 +1580,15 @@ answer here.
   session is discarded, so reconcile and recover wait for a sign-in. Personal Gmail is not gated. This
   narrows Q6; choose it only if you read ruling 12 as covering every kept school session.
 
+**Answered 2026-09-30: neither option as written; both sessions allowed.** Quinn: "change both to
+allow. We'll keep the school sign-in and mail sign-in for now. Once we have 20 paying users, we'll come
+back to this … since we're just trying to prove this concept can work as a desktop app, let's give
+ourselves as much of an advantage as possible." So until Knowlu has 20 paying users, ruling 12's
+per-school `policy_read` gate is suspended for the kept Blackboard session (M1 grades) and the saved
+mail sign-in alike; both run at every school without a recorded read; the 20th paying account is the
+review trigger. A new amendment item, A13 (§10), quotes ruling 12 and its replacement; D25 and D15
+carry it, T19 changes M1's gate, risk 17 names the cost, and §7 says it plainly.
+
 **Q7. Should `ingest` honour ruling 3 now (F1, D11)?** Ruling 3 says no source overwrites a field the
 student set by hand; on `main` the LMS feed overwrites `title` and `due` whoever set them. That decides
 whether an approved mail change to an LMS item lasts.
@@ -1375,12 +1603,19 @@ whether an approved mail change to an LMS item lasts.
 - The alternative of adding `due` to `JUDGED_FIELDS_TASK` is not offered: it changes judge-once for every
   agent in every vault, and the reconciler does not need it (D11).
 
+**Answered 2026-09-30: (a), fix it now.** `ingest` files a `kind: amend` card instead of overwriting a
+`due` or `title` the journal shows the student set (ruling 3), as `judge` does for its fields (D11 (5),
+§6.1, §8, T8b, test 31b).
+
 **Q8. Where S6 measures Microsoft's sending pace (§4.2 step 5, risk 15).** A restriction blocks the
 sending mailbox until its IT unblocks it.
 - (a) **A Microsoft 365 developer or trial tenant you create for the purpose (a spend of nothing to a few
   dollars), never your UA account.** *Recommended:* a restriction there harms nobody. Until S6 passes,
   backfill code ships with 10 a minute and 600 a day and the proof's own UA backfill stays under 600.
 - (b) Your UA account at a low pace: no new account, but a restriction would stop your school mail.
+
+**Answered 2026-09-30: (a).** S6 runs on a Microsoft 365 test tenant, never a real school account
+(§12.5 S6, risk 15, §15).
 
 **Q9. "Offered right after Knowlu sign-in" (D6).** The wizard offers setup on the panel after sign-in and
 subscription, and setup **runs** at the console's first open after Finish.
@@ -1389,6 +1624,10 @@ subscription, and setup **runs** at the console's first open after Finish.
 - (b) Run setup inside the wizard: the student sees forwarding happen sooner, at the cost of a wizard
   that carries the mail window and a backfill re-matched once courses arrive.
 
+**Answered 2026-09-30: (a), yes.** "Offered right after sign-in" means the wizard announces "Next:
+connect your school email", and the mail sign-in opens as the console first opens; progress shows in
+the console (§0, D6, §6.2, §12.6 step 1).
+
 **Q10. The sender on mail cards (D21) differs from your Gmail decision (Gmail spec D15: no sender in
 the MVP).** Mail cards, notices and applied changes here show the sender's name and address and the date.
 - (a) **Show the sender on mail cards in the MVP; the Gmail path keeps D15 until its Pilot item.**
@@ -1396,6 +1635,8 @@ the MVP).** Mail cards, notices and applied changes here show the sender's name 
   judged by who sent it; the MVP's only user needs no disclosure, and bump #1 carries it before anyone
   else.
 - (b) Match Gmail's D15: no sender until the Pilot, for both paths.
+
+**Answered 2026-09-30: (a).** Mail cards show the sender (D21; the Gmail path keeps its D15).
 
 **Q11. Re-enabling forwarding the student turned off (Q6, §4.11 step 2).** Your Q6 answer has the saved
 session turn forwarding back on when it is found off, and this spec does that and then says so. The
@@ -1408,6 +1649,12 @@ and recover then brings in mail from the period they held back.
   asking (that is not "turned off").
 - (b) Ask first: a heads-up card "Forwarding to Knowlu is off. Turn it back on?" and act only on yes,
   recovering the gap only if the student says so. Gentler, and it narrows Q6.
+
+**Answered 2026-09-30: (a), with Quinn's text and one limit.** Knowlu re-enables forwarding
+automatically, then shows a notice: "Email forwarding was off; Knowlu turned it back on. Turn off email
+in Settings to stop this." It never re-enables a mailbox the student turned off in Knowlu's own
+Settings (`mail.json`'s `turned_off`, written first by Turn off email; §4.11 step 2, §4.12 step 0, §5.4,
+§7, test 36).
 
 ## 14. Task sketch
 
@@ -1444,39 +1691,44 @@ every one; this sketch names the seams, the plan fixes them:
 | **T6** The mail pass | **implementer** (Sonnet, high): specified, off the list, checked by tests; starts from T5's first commit | new `engine/src/mail.rs` (with its card writer); `engine/src/cloudmodel.rs` (two calls); one call in `engine/src/enrich.rs`; `engine/src/lib.rs` (`mod` lines) | 21 (the writer's half), 22e, 25, 27, 28, 28b, 28c, 30 |
 | **T7** `mail-applied` | **implementer**: read-only, specified | new `engine/src/mailapplied.rs`; the `main.rs`/`cli.rs` lines are a controller hand-off | 29 |
 | **T8** D11 | **contract-engineer** (Opus, xhigh): `approvals.rs` is on the list; after the events lane's T3 if it merged first | `engine/src/approvals.rs` | 31 |
-| **T8b** Ruling 3 in `ingest` *(only if Quinn answers §13 Q7 (a))* | **contract-engineer** (Opus, xhigh): off the list, but it changes the feed's behaviour in every existing vault; its first step checks no fixture vault holds a hand-edited LMS `due` the feed contradicts (if one does, it stops and asks before any code, since frozen references are never regenerated) | `engine/src/ingest.rs` (`sync_tasks`' update branch) | 31b |
+| **T8b** Ruling 3 in `ingest` *(§13 Q7: fix it now)* | **contract-engineer** (Opus, xhigh): off the list, but it changes the feed's behaviour in every existing vault and writes cards through `write::create`, whose shape `approvals::validate_amendment` (on the list) must accept; its first step checks no fixture vault holds a hand-edited LMS `title` or `due` the feed contradicts (if one does, it stops and asks before any code, since frozen references are never regenerated); reviewed by contract-reviewer | `engine/src/ingest.rs` (`sync_tasks`' update branch and its card writer) | 31b |
 | **T9** The window and the session | **contract-engineer** (Opus, xhigh): a signed-in mailbox, a kept profile and its deletion; no Opus-high implementer exists and this is the case contract-engineer's description names; after S1–S3 | new `app/src/mail.rs` (window, runner, sign-in detection, `forget`) | 32 (session), 33, 34 |
 | **T10** Steps and scripts | **implementer** (Sonnet, high): pure step machines and DOM scripts against synthetic pages | new `app/src/mail_steps.rs`; new `app/assets/mail/**` and their Deno tests | 32 (steps), 35 |
 | **T11** Commands and the slot | **implementer**: after T9 and T10 | the commands appended to `app/src/mail.rs`; `app/src/scheduler.rs` | 36, 37 |
 | **T12** Deletion and sign-out | **contract-engineer** (Opus, xhigh): `account.rs` is on the list | `app/src/account.rs`; `app/tests/account.rs` | 38 |
-| **T13** Docs | **docs-keeper** (Sonnet, medium) | `HANDOFF.md` (the lane, Quinn's queue, bump #1's list, the release guard, production parity's migration and functions); `docs/reference/{app,engine-commands}.md`; `cloud/supabase/README.md` (the AWS runbook); the legal note's two lines | — |
+| **T13** Docs | **docs-keeper** (Sonnet, medium) | `HANDOFF.md` (the lane, Quinn's queue, bump #1's list, the release guard widened for the Knowbox and the suspended gate, A13's review trigger at 20 paying users, UA's policy read moved out of the MVP rows (`:167`, `:260`, `:383`) and the Pilot and Launch read rows (`:220`, `:230`, `:300`, `:331`) marked suspended, production parity's migration and functions); `docs/reference/{app,engine-commands}.md`; `cloud/supabase/README.md` (the AWS runbook); the legal note's two lines | — |
 | **T14** Campus rows and the offer | **mechanical** (Sonnet, low): two struct fields and a marker, fully specified; UA's term dates come from the main session (a public calendar read) | `app/src/scaffold.rs` (`Curated` gains `mail_provider`, `mail_domain`, `terms`); `app/src/onboarding.rs` (the marker); `app/tests/scaffold.rs` | the rows' shape |
 | **T15** The page | **console-ui** (Sonnet, medium): `app/static` is theirs | `app/static/{index.html,console.js,console.css}`; `app/tests/static_assets.rs`; `scripts/{settings,wizard}-check.py` | §12.4 |
 | **T16** The digest *(optional, last, cuttable)* | **cloud-engineer** | `functions/mail-digest/**` and its `models` row | its own |
 | **T17** Integration | **integrator** (Opus, high): the shared single-owner files and the merge train | `app/src/main.rs` (ten commands, recounted); `engine/src/{main,cli}.rs` (`mail-applied`); the CI line that runs the step scripts' Deno tests | the full gate, 0 warnings |
 | **T18** Deploy and proof | **main session**: staging pushes, the OTP session, AWS and the sign-ins are the controller's | none | §12.6 |
+| **T19** Ruling 12's gate suspended (D25, A13) | **implementer** (Sonnet, high): `app/src/grades.rs` is off the contract list and the change is one constant, one pure `availability_with(gate, row, lms)` seam holding the one branch, and `availability` delegating to it with its signature and its four callers unchanged (§6.2), fully specified and pinned by tests; reviewed by `reviewer`, and the diff goes to Quinn at the signing checkpoint's follow-up because it carries a signed promise. It edits only the grades tests in `app/tests/scheduler.rs` (`:1503-1700`), none of its entitlement tests; if a change would reach one, it stops and goes to contract-engineer. Test first: 39–41 fail before the constant exists. The `Enforced` arm is reachable only at `availability_with`, so only the six predicate tests keep today's assertions against it (test 39) and gain the `Suspended` arm's through `availability`. The command and scheduler tests go through the unchanged callers, which always see `Suspended`: their undated cases are rewritten to the `Suspended` expectation and every uncurated, `NotBlackboard`, no-session and failed-window case keeps today's assertion (tests 40–41: `grades_status_reports_the_gate_and_with_a_date_the_session`, `grades_connect_refuses_without_a_date_and_opens_nothing`, `grades_refresh_refuses_without_a_date_and_reads_no_session`; in `scheduler.rs`, `the_grades_decision_asks_the_predicate_and_never_rederives_it`, `the_skip_order_is_school_then_availability_then_entitlement_then_session_then_window`, `the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step`). No gate parameter is added to any caller; no assertion is weakened beyond the undated case each names; none is deleted, and the date-and-bump tests are untouched. If a kept assertion cannot pass with the callers unchanged, the implementer stops and asks rather than editing it. May merge ahead of this lane as its own PR, but only together with T13's HANDOFF release-guard line (D18) | `app/src/grades.rs` (the constant, `availability_with`, `availability`); `app/tests/grades.rs`; `app/tests/scheduler.rs` (the grades tests only) | 39–41 |
 
 **Order.** T0 first; nothing commits to SES before S0, no app window task before S1–S3, and no backfill
 pace merged before S6. Then T1; then T2, T4, T4b and T5 in parallel (T5 needs no cloud); T3 after T2; T6
-and T7 after T5's first commit; T8 and T8b any time after signing; T9 then T10 and T11; T12 and T14 in
-parallel with the app tasks; T15 once T11's command names are fixed; T13 throughout; T17; T18. T16 only
-if time allows.
+and T7 after T5's first commit; T8, T8b and T19 any time after signing (T19 needs no T0 gate and may
+merge first, with T13's guard line); T9 then T10 and T11; T12 and T14 in parallel with the app tasks;
+T15 once T11's command names are fixed; T13 throughout; T17; T18. T16 only if time allows.
 
-**Checkpoints for Quinn:** at signing (§10, §13); after T0 (S0's DMARC result and header evidence,
-S1–S3, the sessions log, S6's pace); after T5's, T8's and T8b's contract review, with the diffs; before
-T18, with the whole-branch review.
+**Checkpoints for Quinn:** at signing (§10 with A13, the *Signing sheet*); after T0 (S0's DMARC result
+and header evidence, S1–S3, the sessions log and §13 Q3's revisit, S6's pace on the test tenant); after
+T5's, T8's and T8b's contract review and T19's review, with the diffs; before T18, with the whole-branch
+review; and, outside this lane, at the 20th paying account (A13's review trigger).
 
 **Size: XL.** The cloud (T1–T4) is about four M tasks; the engine (T5–T8) about one L; the app (T9–T12)
 about one L; the page one M. It is the largest MVP lane, and it moves the MVP's exit by its length.
 
 ## 15. What signing changes elsewhere
 
-- The signing commit applies §10: the cloud design's Amendment 2026-09-30 and its markers, the Gmail
-  spec's §5 line, VISION's six edits, and CLAUDE.md's slot and actor lines.
+- The signing commit applies §10: the cloud design's Amendment 2026-09-30 and its markers (A13's on
+  ruling 12, ruling 10 and §11a's grades row included), the Gmail spec's §5 line, the grades spec's
+  markers, VISION's seven edits (A7–A12 and A13's), and CLAUDE.md's slot and actor lines.
 - HANDOFF (T13): an MVP lane "Email: the Knowbox" after Gmail connect; Quinn's queue gains, one at a time,
-  the AWS account (a spend), the receiving domain's MX in Cloudflare DNS, the Knowbox secrets on staging,
-  UA's mail fields and term dates for the curated row, and (under §13 Q8 (a)) an M365 test tenant for
-  S6; bump #1's list gains §7's drafts; the Pilot gate's release guard names the Knowbox.
+  the AWS account (a spend), the receiving domain's MX in Cloudflare DNS (`in.knowlu.com`), the Knowbox
+  secrets on staging, UA's mail fields and term dates for the curated row, and an M365 test tenant for
+  S6 (§13 Q8); "Record UA's university-policy read" leaves the MVP queue, and A13's review trigger (the
+  20th paying account) joins it; bump #1's list gains §7's drafts; the Pilot gate's release guard names
+  the Knowbox and the suspended grades gate.
 - `docs/notes/2026-09-29-vision-program.md` gains the email row as an MVP item.
 - Production parity, when the Pilot reaches it: the Knowbox migration in step (1)'s ordered list, its
   functions in step (2), its secrets and production's own AWS receiving domain in step (3).
@@ -1487,7 +1739,8 @@ The review's 39 findings (R1–R39, in the order given), plus one the reviser fo
 `199cd1f` (R40). Each was checked against the repo at `199cd1f` before anything changed. "Refuted" means
 the repo shows a premise is wrong; whatever in the finding still holds was acted on. **No answer of
 Quinn's (Q1–Q7, Q5b) was changed:** where a finding argued against one, the answer stays in the spec and
-the concern became a §13 question with a recommendation (§13 Q6, Q11).
+the concern became a §13 question with a recommendation (§13 Q6, Q11). These entries record the spec
+before Quinn answered §13 on 2026-09-30; where one says a question is open, §13's answer now governs.
 
 **R1** (critical; D11, §8, test 31: an approved mail amend vs `ingest`). *Partly refuted:* `ingest`
 writes with `WriteOpts::default()` (`ingest.rs:689-696`), so it never skips a human-set field; it
@@ -1684,4 +1937,42 @@ the new address's canary arrives (at most 7 days), and Gmail re-confirms (D3, te
 not be silent: the merged device reads any unknown quiet reason as `Revoked`, "re-connect from settings",
 and returns before reading queued items (`cloudmodel.rs:667-675`). D22 now answers a non-quiet empty read
 with the undelivered items and a `via_knowbox` field the device ignores; no device change; T4b, test 16c.
+
+**R41** (important; T19, §6.2, tests 39–41; second review, after Quinn's answers). *Accepted, option A.*
+The callers call `availability` directly (`grades.rs:355-356`, `:382`, `:400`; `scheduler.rs:428`), so
+no caller test can reach an `Enforced` arm while the callers stay unchanged. The `Enforced` arm is
+tested only at the pure `availability_with` seam (test 39); the command and scheduler tests' undated
+cases are rewritten to the `Suspended` expectation and every other case is kept (tests 40–41); §6.2,
+§8's row, D25 and T19 say so. No answer of Quinn's changes.
+
+**R42** (important; §10 A13). *Accepted, both fixes.* Ruling 12's *Policy read* passage
+(`cloud-design:699-703`) and *What it costs* (`:714-717`) still said the MVP's grades proof waits on
+UA's read; A13 now quotes them as the fourth and fifth texts with replacements, and "every other
+sentence stands" is read with the heading marker.
+
+## Signing sheet
+Signing this spec signs the amendment items of §10 and the decisions below, in plain words.
+- **A1** Cloud design D12: email has two paths, the Knowbox and Gmail OAuth (a marker).
+- **A2** Cloud design §13: email by forwarding is decided, on AWS SES rather than Cloudflare Email Routing.
+- **A3** Cloud design §3.1: a new row, email by forwarding, judged in the cloud and set up on the device.
+- **A4** Cloud design §5.3: the pilot schools' student mail is Microsoft 365, read through the Knowbox (a marker).
+- **A5** Rulings 9 and 10: the MVP gains email by the Knowbox; its exit gains the founder's Knowbox proof.
+- **A6** Gmail spec §5: forwarded mail is the Knowbox's; a Gmail address with a Knowbox is not read by OAuth.
+- **A7** VISION's sources: email from any mailbox that can forward, and Gmail directly.
+- **A8** VISION's "Knowlu reads": Knowlu may change forwarding in the student's own mailbox, and sends nothing to anyone else.
+- **A9** VISION's data minimisation: what cannot be narrowed is screened before any model reads it; Knowlu keeps findings, never mail.
+- **A10** VISION commitment 5 and ruling 3: the one-time backfill is applied and listed with Undo; later mail is proposed.
+- **A11** VISION's build order and Beyond: email by the Knowbox; "Outlook" becomes "the Outlook calendar".
+- **A12** VISION's telemetry and CLAUDE.md: no forwarded-mail content in telemetry; the app's mail step before the chain; `agent:knowlu.mail`.
+- **A13** Ruling 12, with rulings 10, §11a, the grades spec and VISION: the policy-read gate suspended for both kept sign-ins until 20 paying users; the MVP's grades proof runs on `main` and waits on no read.
+
+Decisions Quinn signs:
+1. All of email ships in the MVP; no release carries it, or the suspended grades gate, before privacy bump #1 (D1, D18).
+2. Each mailbox forwards everything to a private `@in.knowlu.com` address; AWS holds a message until read, about two days at most (D2–D4).
+3. Setup is automatic: the wizard says "Next: connect your school email" and the mail sign-in opens with the console (D5, D6).
+4. Mail since the term began is applied and listed with Undo; later mail, and any conflict with you or the LMS, is a card; mail cards show the sender (D7–D11, D21, D24).
+5. The LMS feed stops overwriting a title or due date you set by hand and files a card instead (D11, T8b).
+6. The saved mail sign-in and the kept Blackboard sign-in are on at every school, no school's policy read, until the 20th paying account; then you rule again (D15, D25, T19).
+7. Forwarding found off is turned back on and you are told; never for a mailbox you turned off in Knowlu's Settings (§4.11).
+8. Limits: 2,000 backfill judgments and $1 per account per term; canaries only after quiet, 72 hours apart; reconcile once a day; Microsoft's pace measured on a test tenant (D14, D23, S6).
 
