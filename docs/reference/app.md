@@ -39,10 +39,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - **`set_body`'s record holds no text.** `write::set_body` journals first, then replaces the body
   after the head and its separator. The record is `op: set_body`, `field: null`, with `old` and `new`
   each `{sha256, bytes}` (`write::body_sha256`, lowercase hex over the body's UTF-8 bytes); the body is
-  normalised (`
-` to `
-`, outer newlines trimmed, one final `
-`) so the next edit's hash chains.
+  normalised (`\r\n` to `\n`, outer newlines trimmed, one final `\n`) so the next edit's hash chains.
   An unchanged body is a no-op that writes no record. `surface::describe` reads it as `<path>: body
   edited (<who>)`. A stale `expected` is `WriteError::Conflict` and the note is untouched.
 - **Two `profile/` files, local only.** `profile/preferences.md` (a free-text body, created empty) and
