@@ -465,7 +465,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    any author `display`) — so `[hidden]` alone would never hide it below 1180px, and `block` alone
    would let the breakpoint grid its rows apart when it is open. `.drawer` carries only the
    `[hidden]` half; it is not this rule's business to change that. */
-.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; }
+.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; max-height: calc(100vh - 2 * var(--s4)); overflow-y: auto; }
 .setpanel[hidden] { display: none; }
 .set-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--s3); }
 .set-hd h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
