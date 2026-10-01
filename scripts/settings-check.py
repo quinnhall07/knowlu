@@ -79,6 +79,28 @@ ACTION_ERROR = {"ok": True, "error": None, "version": "0.1.0", "staged": None, "
                 "last_check": "2026-09-06T12:30:00Z", "last_error": None,
                 "action_error": "a slot is running — the update will be offered when it finishes"}
 
+# Gmail connect T9c: the Google row's states. Copy is spec section 4.4's table, verbatim.
+ACCOUNT = {"ok": True, "error": None, "needs_account": False, "email": "ada@example.test", "status": "active", "plan": "monthly"}
+G_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week."
+G_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet."
+G_NONE = {"ok": True, "error": None, "state": "none", "calendar": False, "gmail": False, "email": None}
+G_CAL = {"ok": True, "error": None, "state": "active", "calendar": True, "gmail": False, "email": "ada@example.test"}
+G_GMAIL = {"ok": True, "error": None, "state": "active", "calendar": True, "gmail": True, "email": "ada@example.test"}
+G_REVOKED = {"ok": True, "error": None, "state": "revoked", "calendar": True, "gmail": True, "email": "ada@example.test"}
+G_ERROR = {"ok": False, "error": "Knowlu could not reach Google just now."}
+G_CAL_SAYS = "Google Calendar is connected (as ada@example.test). Gmail is not."
+G_BUTTONS = ["#set-google-connect", "#set-google-reconnect", "#set-google-disconnect-1", "#set-google-retry"]
+G_STATES = [
+    (G_NONE, "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve.",
+     ["#set-google-connect"]),
+    (G_CAL, G_CAL_SAYS, ["#set-google-connect", "#set-google-disconnect-1"]),
+    (G_GMAIL, "Gmail is connected (as ada@example.test), read-only. Knowlu proposes what it finds; nothing is added without you.",
+     ["#set-google-disconnect-1"]),
+    (G_REVOKED, "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days.",
+     ["#set-google-reconnect", "#set-google-disconnect-1"]),
+    (G_ERROR, G_ERROR["error"], ["#set-google-retry"]),
+]
+
 FAKE = """
 window.__CALLS = [];
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
@@ -101,6 +123,13 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
     case "check_for_updates": return Promise.resolve(window.__UPDATE);
     case "install_update":   window.__INSTALLED = true;
                              return Promise.resolve(window.__INSTALL_RESULT || { ok: true, error: null });
+    // Gmail connect T9c: the Google row. `window.__ACCOUNT` unset keeps the vault-less shell's
+    // behaviour (the command is not registered, the row stays hidden).
+    case "account_status":   return window.__ACCOUNT ? Promise.resolve(window.__ACCOUNT)
+                                                     : Promise.reject(new Error("no account_status"));
+    case "google_status":    return Promise.resolve(window.__GSTATUS);
+    case "google_connect":   return Promise.resolve({ ok: true, error: null });
+    case "google_disconnect": return Promise.resolve(window.__GDISCONNECT || { ok: true, error: null });
     case "switch_profile":
     case "copy_text":
     case "copy_diagnostics":
@@ -338,6 +367,87 @@ def check(url, fixture_name, out, bad):
             bad.append("the offer was hidden without being cleared")
         if page.locator("#upd [data-install]").count() != 0:
             bad.append("a dead Restart to update button was left in the page")
+
+        # 6c. Gmail connect T9c (spec section 4.4): the Google row's states with a stubbed invoke,
+        #     the poll timeout, and the two-step Disconnect. Copy is asserted verbatim from the spec.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        page.evaluate(f"window.__ACCOUNT = {json.dumps(ACCOUNT)};")
+
+        def open_google(status):
+            page.evaluate(f"window.__GSTATUS = {json.dumps(status)}; window.__CALLS = [];")
+            page.evaluate("window.KNOWLU_OPEN_SETTINGS()")
+            page.wait_for_timeout(400)
+
+        def shown(sel):
+            return not page.is_hidden(sel)
+
+        for status, says, buttons in G_STATES:
+            open_google(status)
+            got = page.inner_text("#set-google-state")
+            if says not in got:
+                bad.append(f"the Google row says {got!r}, wanted {says!r}")
+            for sel in G_BUTTONS:
+                if shown(sel) != (sel in buttons):
+                    bad.append(f"the Google row ({says[:24]!r}) shows {sel} = {shown(sel)}")
+            note = page.inner_text("#set-google-note")
+            if G_TESTING not in note:
+                bad.append(f"the Google row lacks the Testing sentence ({note!r})")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(100)
+
+        # A poll that never finishes: timers are collapsed so twenty 3 s waits take no time.
+        page.evaluate("window.__realST = window.__realST || window.setTimeout.bind(window); "
+                      "window.setTimeout = function (f) { return window.__realST(f, 0); };")
+        open_google(G_CAL)
+        page.click("#set-google-connect")
+        page.wait_for_timeout(1500)
+        if calls(page, "google_connect") != [{"scope": "gmail"}]:
+            bad.append(f"Connect Gmail payload: {calls(page, 'google_connect')}")
+        if G_TIMEOUT not in page.inner_text("#set-google-note"):
+            bad.append(f"the poll timeout sentence is missing ({page.inner_text('#set-google-note')!r})")
+        if G_CAL_SAYS not in page.inner_text("#set-google-state"):
+            bad.append("the row did not repaint from one fresh status after the timeout")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+
+        # Two-step Disconnect: step 2 is hidden until step 1, step 1 names Calendar and calls nothing.
+        open_google(G_GMAIL)
+        if shown("#set-google-disconnect-2"):
+            bad.append("Yes, disconnect is visible before step 1")
+        page.click("#set-google-disconnect-1")
+        page.wait_for_timeout(200)
+        if "Google Calendar too" not in page.inner_text("#set-google-note") or not shown("#set-google-disconnect-2"):
+            bad.append("step 1 did not reveal the Calendar confirm and Yes, disconnect")
+        if calls(page, "google_disconnect"):
+            bad.append("step 1 disconnected already")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+        page.evaluate("window.KNOWLU_OPEN_SETTINGS()")
+        page.wait_for_timeout(400)
+        if shown("#set-google-disconnect-2"):
+            bad.append("closing Settings did not hide step 2")
+        # ok: false keeps the row and shows the error under it.
+        page.evaluate("window.__GDISCONNECT = { ok: false, error: 'Google could not be reached.' };")
+        page.click("#set-google-disconnect-1")
+        page.click("#set-google-disconnect-2")
+        page.wait_for_timeout(400)
+        if calls(page, "google_disconnect") != [{}]:
+            bad.append(f"Yes, disconnect payload: {calls(page, 'google_disconnect')}")
+        if "Google could not be reached." not in page.inner_text("#set-google-note"):
+            bad.append("a refused disconnect showed no error")
+        if "Gmail is connected" not in page.inner_text("#set-google-state"):
+            bad.append("a refused disconnect changed the row")
+        # ok: the row asks again and shows the new truth.
+        page.evaluate(f"window.__GDISCONNECT = null; window.__GSTATUS = {json.dumps(G_NONE)};")
+        page.click("#set-google-disconnect-1")
+        page.click("#set-google-disconnect-2")
+        page.wait_for_timeout(400)
+        if "Gmail is not connected" not in page.inner_text("#set-google-state"):
+            bad.append(f"the row did not repaint after Disconnect ({page.inner_text('#set-google-state')!r})")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+        page.evaluate("window.__ACCOUNT = null;")
 
         # 7. Both ways out, and the tray's one way in.
         page.keyboard.press("Escape")

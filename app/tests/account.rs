@@ -1596,3 +1596,253 @@ fn a_session_refresh_that_fails_is_named_in_the_sync_status() {
     let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+// ---- Gmail connect T4b: the three pure cores (spec §4.2, D3; §8.1 items 1–3) ----
+//
+// Each core takes `(api_base, anon, token)` and reads nothing process-global, so these need neither
+// `CREDMAN_LOCK` nor the `ApiBase` seam: the base is the test's own loopback, and
+// `no_test_in_this_file_can_reach_the_compiled_in_project` scans these tests like every other.
+use knowlu::account::{google_connect_url_at, google_disconnect_at, google_status_at};
+
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+
+/// What every core sends: the named method and path, the session's bearer, and the anon key the
+/// caller passed in (not one read from the environment).
+fn assert_bearer_request(seen: &str, request_line: &str) {
+    assert!(seen.starts_with(&format!("{request_line} HTTP/1.1\r\n")), "{seen}");
+    let lower = seen.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer the-access-token\r\n"), "{seen}");
+    assert!(lower.contains("\r\napikey: the-anon-key\r\n"), "{seen}");
+}
+
+#[test]
+fn google_status_at_reads_each_state_and_both_scopes() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"connected":false,"scopes":[],"status":"none","email":null}"#.to_string()),
+        (200, format!(r#"{{"connected":true,"scopes":["openid","email","{CALENDAR_SCOPE}","{GMAIL_SCOPE}"],"status":"active","email":"student@example.invalid"}}"#)),
+        // A bare scope name is not the scope: only the full URL counts, as the wizard's check did.
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}","gmail.readonly"],"status":"quiet","email":"student@example.invalid"}}"#)),
+        (200, r#"{"connected":false,"scopes":[],"status":"revoked","email":"student@example.invalid"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..4).map(|_| google_status_at(&api, "the-anon-key", "the-access-token")).collect();
+    let got: Vec<_> = got.into_iter().map(|r| r.expect("a status")).collect();
+    assert_eq!(got.iter().map(|s| s.state).collect::<Vec<_>>(), ["none", "active", "quiet", "revoked"]);
+    assert_eq!(got.iter().map(|s| s.connected).collect::<Vec<_>>(), [false, true, true, false]);
+    assert_eq!(got.iter().map(|s| (s.calendar, s.gmail)).collect::<Vec<_>>(), [(false, false), (true, true), (true, false), (false, false)]);
+    let who = Some("student@example.invalid");
+    assert_eq!(got.iter().map(|s| s.email.as_deref()).collect::<Vec<_>>(), [None, who, who, who]);
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "GET /functions/v1/google-connect?status=1");
+    }
+}
+
+#[test]
+fn google_status_at_reads_an_older_servers_reply() {
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}"]}}"#)),
+        (200, r#"{"connected":false,"scopes":[]}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let on = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    let off = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    assert_eq!((on.state, on.connected, on.calendar, on.gmail, on.email), ("active", true, true, false, None));
+    assert_eq!((off.state, off.connected, off.calendar, off.gmail, off.email), ("none", false, false, false, None));
+    handle.join().expect("server thread");
+}
+
+/// `gmail`, `reconnect` and `calendar` pass through; anything else — a typo, another scope, or an
+/// attempt to smuggle a second `scope=` into the query — asks for `calendar`.
+#[test]
+fn google_connect_url_at_asks_for_the_named_scope_with_the_bearer() {
+    let consent = "https://accounts.google.com/o/oauth2/v2/auth?state=s";
+    let asks = ["gmail", "reconnect", "calendar", "drive", "gmail&scope=reconnect"];
+    let (base, handle) = loopback(asks.iter().map(|_| (200, format!(r#"{{"url":"{consent}"}}"#))).collect());
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = asks.iter().map(|ask| google_connect_url_at(&api, "the-anon-key", "the-access-token", ask)).collect();
+    assert!(got.iter().all(|u| u.as_deref() == Ok(consent)), "{got:?}");
+    let seen = handle.join().expect("server thread");
+    for (s, scope) in seen.iter().zip(["gmail", "reconnect", "calendar", "calendar", "calendar"]) {
+        assert_bearer_request(s, &format!("GET /functions/v1/google-connect?scope={scope}"));
+    }
+}
+
+/// The URL is checked in Rust before any caller can open it, and the refusal never repeats it.
+#[test]
+fn google_connect_url_at_refuses_a_url_knowlu_will_not_open() {
+    let (base, handle) = loopback(vec![(200, r#"{"url":"https://evil.example/o/oauth2/v2/auth?state=s"}"#.to_string())]);
+    let got = google_connect_url_at(&format!("{base}/functions/v1"), "the-anon-key", "the-access-token", "gmail");
+    assert_eq!(got, Err("the service returned a url Knowlu will not open".to_string()));
+    handle.join().expect("server thread");
+}
+
+/// Each refusal maps by its status, never by its body (T4a's sentences, spec §4.2).
+#[test]
+fn google_disconnect_at_sends_delete_and_maps_each_status() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"disconnected":true}"#.to_string()),
+        (502, r#"{"error":"a body the student never sees"}"#.to_string()),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+        (402, r#"{"error":"subscription required"}"#.to_string()),
+        (503, r#"{"error":"not configured"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..5).map(|_| google_disconnect_at(&api, "the-anon-key", "the-access-token")).collect();
+    assert_eq!(
+        got,
+        [
+            Ok(()),
+            Err("Google could not be reached to disconnect; try again".to_string()),
+            Err("sign in again".to_string()),
+            Err("your subscription is not active, so Google cannot be connected".to_string()),
+            Err("Google sign-in is not available right now — use the secret address below".to_string()),
+        ]
+    );
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "DELETE /functions/v1/google-connect");
+    }
+}
+
+// ---- Gmail connect T5: the three console commands (spec §4.2, D2; §8.1 item 5) ----
+//
+// The console reads the vault's `config/cloud.yaml` and the session target it names, never
+// `PENDING_TARGET`, which is a fixed, real target a developer's own wizard may be holding, so nothing
+// here writes it. The loopback starts last (its `accept` deadline must not outlast the Credential
+// Manager setup; see `refresh_entitlement_saves_the_cache_from_a_live_reply`), and `KNOWLU_API_BASE`
+// names the same loopback, because `cloud_config` refuses a vault `api_base` naming another host.
+
+/// A scratch vault, its generated profile's session target, and a live session (an hour left, so
+/// nothing is refreshed) stored under that target and nowhere else. The `Cleanup` guard exists before
+/// the credential does. `cloud.yaml` is written by [`point_console_vault_at`] once the port is known.
+#[cfg(windows)]
+fn console_vault(tag: &str) -> (std::path::PathBuf, String, Cleanup) {
+    use knowlu::account::{save_session, session_target, Session};
+    let vault = std::env::temp_dir().join(format!("knowlu-google-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("tasks").join("t.md"), "---\nid: task_0000000001\n---\n\nA task.\n").unwrap();
+    let target = session_target(&knowlu::profiles::id_for(&vault));
+    let cleanup = Cleanup(vec![target.clone()]);
+    let live = jiff::Timestamp::now().as_second() + 3600;
+    let s = Session { access_token: "the-profiles-token".into(), refresh_token: "rt".into(), expires_at: live, email: "a@example.invalid".into() };
+    save_session(&target, "acc-1", &s).expect("write the profile's session");
+    (vault, target, cleanup)
+}
+
+#[cfg(windows)]
+fn point_console_vault_at(vault: &std::path::Path, api_base: &str, target: &str) {
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: '{api_base}'\nanon_key: 'the-vaults-anon-key'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    )
+    .unwrap();
+}
+
+/// The bearer is the profile's session and the anon key is the vault's, never the compiled-in one.
+#[cfg(windows)]
+fn assert_the_profiles_request(seen: &str, request_line: &str) {
+    assert!(seen.starts_with(&format!("{request_line} HTTP/1.1\r\n")), "{seen}");
+    let lower = seen.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer the-profiles-token\r\n"), "{seen}");
+    assert!(lower.contains("\r\napikey: the-vaults-anon-key\r\n"), "{seen}");
+}
+
+/// D2: after onboarding the pending target is empty (or, on a shared machine, another student's), so
+/// a console command that read it would answer "sign in again" or speak as someone else. The reply's
+/// error envelope is pinned too: the page shows `error` verbatim and knows nothing it did not hear.
+#[cfg(windows)]
+#[test]
+fn the_console_google_commands_use_the_vaults_session_not_the_pending_one() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{google_status_in, PENDING_TARGET};
+    let (vault, target, _cleanup) = console_vault("status");
+    assert_ne!(target, PENDING_TARGET);
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"connected":true,"scopes":["openid","email","{CALENDAR_SCOPE}","{GMAIL_SCOPE}"],"status":"active","email":"student@example.invalid"}}"#)),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+
+    let live = google_status_in(&vault);
+    let refused = google_status_in(&vault);
+    let seen = handle.join().expect("server thread");
+    let who = "student@example.invalid";
+    let ok = serde_json::json!({ "ok": true, "state": "active", "calendar": true, "gmail": true, "email": who, "error": null });
+    assert_eq!(live, ok);
+    let err = serde_json::json!({ "ok": false, "state": null, "calendar": null, "gmail": null, "email": null, "error": "sign in again" });
+    assert_eq!(refused, err);
+    assert_eq!(seen.len(), 2);
+    for s in &seen {
+        assert_the_profiles_request(s, "GET /functions/v1/google-connect?status=1");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D2: the inner function answers the URL `external_url_allowed` passed, and only the Tauri wrapper
+/// opens it from Rust. A refused URL comes back as T4b's sentence and no URL, so there is nothing to
+/// open. `reconnect` reaches the service as itself (D8), unlike the wizard's command.
+#[cfg(windows)]
+#[test]
+fn google_connect_in_returns_nothing_to_open_when_the_url_is_refused() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::google_connect_in;
+    let (vault, target, _cleanup) = console_vault("connect");
+    let consent = "https://accounts.google.com/o/oauth2/v2/auth?state=s";
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"url":"{consent}"}}"#)),
+        (200, r#"{"url":"https://evil.example/o/oauth2/v2/auth?state=s"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+
+    let allowed = google_connect_in(&vault, "reconnect");
+    let refused = google_connect_in(&vault, "gmail");
+    let seen = handle.join().expect("server thread");
+    assert_eq!(allowed.as_deref(), Ok(consent));
+    assert_eq!(refused, Err("the service returned a url Knowlu will not open".to_string()));
+    assert_eq!(seen.len(), 2);
+    assert_the_profiles_request(&seen[0], "GET /functions/v1/google-connect?scope=reconnect");
+    assert_the_profiles_request(&seen[1], "GET /functions/v1/google-connect?scope=gmail");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D6: a refused revoke (502) leaves the grant where it was, and Disconnect never touches this
+/// machine either way: the vault keeps what Knowlu wrote, and the session is the student's Knowlu
+/// sign-in, not Google's. The 200 half shows the envelope a landed disconnect answers.
+#[cfg(windows)]
+#[test]
+fn google_disconnect_in_reports_a_502_and_changes_nothing_locally() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{google_disconnect_in, load_session};
+    let (vault, target, _cleanup) = console_vault("disconnect");
+    let (base, handle) = loopback(vec![
+        (502, r#"{"error":"a body the student never sees"}"#.to_string()),
+        (200, r#"{"disconnected":true}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+    let (tree, held) = (fingerprint(&vault), load_session(&target).ok());
+    assert!(held.is_some(), "the profile's session is there to begin with");
+
+    let failed = google_disconnect_in(&vault);
+    let after_failed = (fingerprint(&vault), load_session(&target).ok());
+    let landed = google_disconnect_in(&vault);
+    let after_landed = (fingerprint(&vault), load_session(&target).ok());
+    let seen = handle.join().expect("server thread");
+    let try_again = "Google could not be reached to disconnect; try again";
+    assert_eq!(failed, serde_json::json!({ "ok": false, "error": try_again }));
+    assert!(after_failed == (tree.clone(), held.clone()), "a refused disconnect changed a vault file or the session");
+    assert_eq!(landed, serde_json::json!({ "ok": true, "error": null }));
+    assert!(after_landed == (tree, held), "a disconnect changed a vault file or the session");
+    assert_eq!(seen.len(), 2);
+    for s in &seen {
+        assert_the_profiles_request(s, "DELETE /functions/v1/google-connect");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}

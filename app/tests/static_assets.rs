@@ -595,6 +595,53 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
     );
 }
 
+/// Gmail connect D11: the wizard's Gmail panel has a Connect Gmail button whose state follows the
+/// same A-5 rule as the calendar button's (`WIZ`, `renderWizard()`, a token `wizGo` bumps).
+#[test]
+fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-gmail\"").nth(1).and_then(|s| s.split("id=\"wiz-slots\"").next()).expect("the Gmail panel");
+    assert!(panel.contains("id=\"wiz-gmail-connect\""), "the panel has the button");
+    assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
+    assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
+    assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
+    assert!(panel.contains("Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings."), "the plan's what-it-does sentence");
+    assert_eq!(panel.matches("read your").count(), 1, "one what-it-does sentence");
+    assert!(js.contains("WIZ.gmailNote = \"Gmail is connected.\";"), "the plan's success note");
+    assert!(js.contains("WIZ.gmailNote = GOOGLE_TIMEOUT;"), "the Settings timeout sentence, unchanged");
+    assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
+    assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
+    assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");
+    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
+    assert!(
+        go.find("WIZ.gmailSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
+        "wizGo bumps the token on leaving the panel"
+    );
+}
+
+#[test]
+fn the_wizard_gmail_button_uses_the_wizard_commands() {
+    let js = read("console.js");
+    let h = js.split("getElementById(\"wiz-gmail-connect\")").nth(1).and_then(|s| s.split("// ---- R-OB-4").next()).expect("the Gmail handler");
+    assert!(h.contains("invoke(\"google_connect_url\", { scope: \"gmail\" })"), "the wizard command, scope gmail");
+    assert!(h.contains("invoke(\"open_external\""), "the wizard's opener");
+    assert!(h.contains("invoke(\"google_connected\")"), "polls the wizard's status command");
+    for console_only in ["google_status", "google_connect\"", "google_disconnect"] {
+        assert!(!h.contains(console_only), "no console-only command: {console_only}");
+    }
+}
+
+#[test]
+fn next_never_waits_on_gmail() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("function clearCredentialFields").next()).expect("renderWizard");
+    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy;"), "Next depends on busy alone");
+    assert!(!render.contains("wiz-next\").disabled = WIZ.busy ||") && !render.contains("gmailPolling ||  WIZ.busy"), "not on polling");
+    let finish = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
+    assert!(!finish.contains("gmail"), "nothing about Gmail reaches the plan");
+}
+
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
 /// first slot had both logins stored and `courses: {}` in the config, so the engine answered
 /// `zybook UACS100Fall2026 not in config; skipped` and then `0 assignments parsed; treating as
@@ -1804,6 +1851,112 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     let after_open_profile = &go_handler[open_profile_call..];
     assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
+}
+
+/// Gmail connect T9a (spec §8.4 item 1): the Google row sits after Account, inside Settings, with
+/// every id T9b and T9c bind to.
+#[test]
+fn the_google_row_sits_after_account_with_its_ids() {
+    let html = read("index.html");
+    let js = read("console.js");
+    let open = html.find("id=\"settings\"").expect("#settings");
+    let close = open + html[open..].find("</aside>").expect("end of #settings");
+    let acct = html.find("id=\"set-account\"").expect("#set-account");
+    let google = html.find("id=\"set-google\"").expect("#set-google");
+    assert!(open < acct && acct < google && google < close, "#set-google is inside #settings, after #set-account");
+    for id in [
+        "set-google-state", "set-google-connect", "set-google-reconnect",
+        "set-google-disconnect-1", "set-google-disconnect-2", "set-google-note",
+    ] {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has no #{id}"));
+        assert!(google < at && at < close, "#{id} is inside the Google row");
+        assert!(js.contains(&format!("\"{id}\"")), "console.js never names #{id}");
+    }
+    assert!(js.contains("\"google_status\""), "the row asks google_status");
+}
+
+/// The launch-time `checkAccount` (upgrade overlay) must not reach `google_status`: the row loads
+/// only while Settings is open (spec section 4.4).
+#[test]
+fn the_launch_account_check_does_not_reach_google_status() {
+    let js = read("console.js");
+    let start = js.find("function gateGoogleRow").expect("gateGoogleRow");
+    let end = start + js[start..].find("function closeSettings").expect("closeSettings");
+    let gate = &js[start..end];
+    let guard = gate.find("EL(\"settings\").hidden").expect("gateGoogleRow checks that Settings is open");
+    let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
+    assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 2): the console invokes the three Google commands, and
+/// `open_external` is invoked only inside the wizard's Google handler. Its `google_disconnect` half
+/// is red until T9c wires the two-step Disconnect.
+#[test]
+fn the_console_invokes_the_three_google_commands_and_never_open_external_outside_the_wizard() {
+    let js = read("console.js");
+    for cmd in ["google_status", "google_connect", "google_disconnect"] {
+        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
+    }
+    // The wizard's two handlers (calendar, and Gmail per D11) are the only places it may be invoked.
+    let spans: Vec<(usize, usize)> = ["wiz-google", "wiz-gmail-connect"].iter().map(|id| {
+        let start = js.find(&format!("getElementById(\"{id}\").addEventListener")).unwrap_or_else(|| panic!("the wizard's {id} handler"));
+        (start, start + js[start..].find("
+  });").expect("end of the handler"))
+    }).collect();
+    for (at, _) in js.match_indices("invoke(\"open_external\"") {
+        assert!(spans.iter().any(|&(a, b)| a < at && at < b), "open_external is invoked outside the wizard's handlers");
+    }
+}
+
+/// Gmail connect plan section 4: while polling, the state line (not the note) reads the plan's
+/// exact sentence.
+#[test]
+fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
+    let js = read("console.js");
+    assert!(js.contains("var GOOGLE_POLLING = \"Waiting for Google\u{2026} finish in your browser.\";"));
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : googleSentence(g)"), "{f}");
+    let c = js.find("function connectGoogle(").expect("connectGoogle");
+    let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
+    assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 3): the row's poll carries `SET.googleSeq`, bumped on
+/// Settings close and on every new click.
+#[test]
+fn the_google_row_poll_is_cancelled_when_settings_closes() {
+    let js = read("console.js");
+    let start = js.find("function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(f.contains("var mySeq = ++SET.googleSeq"), "every click takes a new token: {f}");
+    assert!(f.matches("SET.googleSeq !== mySeq").count() >= 2, "the loop checks the token after each await: {f}");
+    assert!(f.contains("SET.googlePolling = true") && f.contains("SET.googlePolling = false"), "{f}");
+    let close = js.find("function closeSettings(").map(|i| &js[i..i + 160]).expect("closeSettings");
+    assert!(close.contains("SET.googleSeq += 1"), "closing Settings bumps the token: {close}");
+    assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
+    assert!(!js.contains("gmail.readonly"), "no scope string on the page");
+}
+
+/// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
+/// to `google_disconnect`, and closing Settings puts the confirm away.
+#[test]
+fn the_disconnect_confirm_names_calendar() {
+    let js = read("console.js");
+    assert!(js.contains("Google Calendar too"), "the step-1 text names Calendar");
+    let text = js.find("var GOOGLE_DISCONNECT_CONFIRM").expect("the confirm text is one constant");
+    assert!(js[text..text + 400].contains("This disconnects Google Calendar too"), "step 1 opens with the spec's sentence");
+    assert!(js.contains("\"#set-google-disconnect-1\"") && js.contains("\"#set-google-disconnect-2\""), "both steps are wired");
+    let step2 = js.find("closest(\"#set-google-disconnect-2\")").expect("step 2 handler");
+    assert!(js[step2..step2 + 120].contains("disconnectGoogle()"), "step 2 runs disconnectGoogle");
+    let f = js.find("function disconnectGoogle(").expect("disconnectGoogle");
+    let call = js.find("invoke(\"google_disconnect\"").expect("google_disconnect is invoked");
+    assert!(f < call && call < f + 400, "google_disconnect is called from disconnectGoogle only");
+    assert_eq!(js.matches("invoke(\"google_disconnect\"").count(), 1);
+    let close = js.find("function closeSettings(").map(|i| js[i..].lines().next().unwrap()).expect("closeSettings");
+    assert!(close.contains("SET.confirming = false"), "closing Settings hides step 2: {close}");
 }
 
 // ---- M1 grades (spec 2026-09-29-grades-design §2 and §9; plan Task 7) ------------------------------
