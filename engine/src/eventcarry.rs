@@ -1973,4 +1973,53 @@ mod tests {
         assert_eq!(carry(&control, std::slice::from_ref(&fair_sat)).0, 1, "the control");
         assert_eq!(carry_lines(&control), [carry_line(&fair_sat, "obligation", ID_B)]);
     }
+
+    /// What a second desktop sees (W's finding 2, plan §8). Two desktops on one account each run
+    /// `rank` before either syncs, so each books the carried date under its own random `cmt_` id:
+    /// spec §9 hands deterministic ids for these notes to the two-desktop stream, and the cloud
+    /// design keeps one computer per student until Launch. This pins the MVP's bounds: the same
+    /// file name on both, no third note once the other's has synced, `commitments::load` counting
+    /// one of two (commitment-model §2.5), and a delete that must be made once per copy.
+    #[test]
+    fn a_date_two_desktops_carry_is_counted_once() {
+        use crate::commitments::{load, FOLDER};
+        let event = instance("lx:77:5", "lx:77", at(10, 1, 10, 0), at(10, 1, 11, 0));
+        let (a, b) = (tmp("two-desktops-a"), tmp("two-desktops-b"));
+        for vault in [&a, &b] {
+            // The archived card syncs, so both desktops read one answer.
+            answered_card(vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000f1");
+            assert_eq!(carry(vault, std::slice::from_ref(&event)).1, Vec::<String>::new());
+        }
+        let (theirs, mine) = (notes(&a, FOLDER), notes(&b, FOLDER));
+        assert_eq!((theirs.len(), mine.len()), (1, 1));
+        assert_eq!(theirs[0].0, mine[0].0, "the same file name: a pull keeps this desktop's own");
+        let (their_id, my_id) = (card_text(&theirs[0].1, "id"), card_text(&mine[0].1, "id"));
+        assert_ne!(their_id, my_id, "two random ids");
+
+        // Where the names differ (another note took this one first on a desktop), a pull lands
+        // the other desktop's note beside this one's.
+        let stem = mine[0].0.trim_end_matches(".md");
+        let pulled = b.join(FOLDER).join(format!("{stem}-2.md"));
+        fs::copy(a.join(FOLDER).join(&theirs[0].0), &pulled).unwrap();
+        let counted = |vault: &Path| -> (Vec<String>, Vec<String>) {
+            let read = load(vault);
+            let ids = read.confirmed.iter().filter(|n| n.source_uid.as_deref() == Some("lx:77:5")).map(|n| n.id.clone()).collect();
+            (ids, read.warnings.into_iter().filter(|w| w.starts_with("duplicate source_uid lx:77:5:")).collect())
+        };
+        let (ids, warned) = counted(&b);
+        assert_eq!(ids, [their_id.clone().min(my_id.clone())], "the lowest id is the one counted");
+        assert_eq!(warned.len(), 1, "one warning names the pair");
+        let journal = journal_text(&b);
+        assert_eq!(carry(&b, std::slice::from_ref(&event)).0, 0);
+        assert_eq!(journal_text(&b), journal, "no third note");
+
+        // The student deletes the counted copy: the other is counted next, and still no rank books.
+        let kept = if their_id < my_id { format!("{stem}-2.md") } else { mine[0].0.clone() };
+        let mut student_journal = Journal::new(&b);
+        crate::write::delete(&b, &format!("{FOLDER}/{kept}"), &student(&b), &mut student_journal).unwrap();
+        assert_eq!(counted(&b), (vec![their_id.max(my_id)], Vec::new()), "a delete per copy");
+        let journal = journal_text(&b);
+        assert_eq!(carry(&b, std::slice::from_ref(&event)).0, 0);
+        assert_eq!(journal_text(&b), journal);
+    }
 }
