@@ -984,6 +984,7 @@
   }
   // Read-only: the breakdown never edits, creates or deletes a note.
   function openGradesDrawer(slug) {
+    dropSavedToast();
     var d = EL("drawer"), c = null, groups = [], html;
     GRADES.list.forEach(function (x) { if (x.course === slug) { c = x; } });
     if (!c) { return; }
@@ -1000,7 +1001,7 @@
     });
     d.innerHTML = html + gradesFooterHtml(c);
     d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
-    d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
+    d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; d.removeAttribute("data-grades-open"); });
   }
   // M2 9.1: a background repaint never closes, rebuilds or refills an open body editor.
   function editorOpen() { return !!document.querySelector("#drawer [data-open-editor]"); }
@@ -1222,6 +1223,7 @@
   var DRAWER_RO = { id: 1, source_uid: 1, also_uids: 1, judgment: 1 };
 
   function openDrawer(id) {
+    dropSavedToast();
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
       if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
@@ -1240,7 +1242,7 @@
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
       d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
-      d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
+      d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; });
       var be = d.querySelector("[data-body-edit]");
       if (be) { be.addEventListener("click", function () { openBodyEditor(d, id, n.body || ""); }); }
     });
@@ -1292,9 +1294,16 @@
 
   // M2 D8: Saved - Undo for 10 seconds. Undo is a second set_body whose `expected` is the body of
   // the re-read note (never the textarea) and whose body is the text loaded before the edit.
+  // The toast belongs to the drawer it was raised from: closing it or opening another note drops it.
+  function dropSavedToast() {
+    Array.prototype.forEach.call(document.querySelectorAll(".savedtoast"), function (x) { x.remove(); });
+  }
   function offerBodyUndo(id, before) {
     invoke("note", { id: id }).then(function (env) {
       if (!env.ok || !env.note) { return; }
+      var dr = EL("drawer");
+      if (!dr || dr.hidden || dr.getAttribute("data-id") !== id) { return; }
+      dropSavedToast();
       var t = document.createElement("div"); t.className = "savedtoast";
       t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-body-undo>Undo</button>';
       document.body.appendChild(t);
@@ -1533,7 +1542,7 @@
 
   function confirmDelete(id, title) {
     if (!window.confirm("Archive \"" + title + "\"? Nothing is deleted — it moves to archive/ and shows in CLOSED THIS WEEK.")) { return; }
-    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { EL("drawer").hidden = true; } });
+    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { dropSavedToast(); EL("drawer").hidden = true; } });
   }
 
   // ----- the deck: approve/reject/snooze (Knowlu plan 1, Task 14). One click commits — the

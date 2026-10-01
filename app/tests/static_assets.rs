@@ -2164,6 +2164,22 @@ fn body_undo_sends_the_reread_body_as_expected() {
 }
 
 #[test]
+fn the_saved_toast_dies_with_its_drawer() {
+    let js = read("console.js");
+    assert!(js.contains("function dropSavedToast(") && js.contains(".savedtoast"), "one helper removes the toast");
+    for f in ["function openDrawer(", "function openGradesDrawer("] {
+        let at = js.find(f).unwrap();
+        let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+        assert!(js[at..end].contains("dropSavedToast()"), "{f} drops the toast of the previous note");
+    }
+    let at = js.find("function openDrawer(").unwrap();
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+    assert!(js[at..end].contains("click\", function () { dropSavedToast(); d.hidden = true;"), "closing the drawer drops the toast");
+    let u = js.find("function offerBodyUndo(").unwrap();
+    assert!(js[u..u + 600].contains("data-id") && js[u..u + 600].contains("!== id"), "a toast is only raised for the open drawer");
+}
+
+#[test]
 fn a_body_conflict_keeps_the_draft() {
     let js = read("console.js");
     let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
