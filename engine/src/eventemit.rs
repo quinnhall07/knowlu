@@ -2290,8 +2290,9 @@ mod tests {
             assert_eq!(uids, vec!["lx:77:1", "lx:77:2"]);
             assert_eq!(field(&listed[0], "url").as_deref(), Some("https://example.edu/fair"));
             assert_eq!(field(&listed[0], "location").as_deref(), Some("Ferguson Center"));
-            assert_eq!(field(&listed[0], "start").as_deref(), Some("2026-10-01T10:00"));
-            assert_eq!(field(&listed[0], "end").as_deref(), Some("2026-10-01T15:00"));
+            // To the second, as the carry line holds a span (R1 minor 2).
+            assert_eq!(field(&listed[0], "start").as_deref(), Some("2026-10-01T10:00:00"));
+            assert_eq!(field(&listed[0], "end").as_deref(), Some("2026-10-01T15:00:00"));
             assert_eq!(field(&listed[0], "registration_deadline").as_deref(), Some("2026-09-30"));
 
             let paragraphs: Vec<&str> = body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();

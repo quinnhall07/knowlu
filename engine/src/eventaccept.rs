@@ -24,8 +24,12 @@ const WHERE_MAX: usize = 80;
 /// Characters of title slug in a `register-` file stem.
 const SLUG_MAX: usize = 40;
 
-/// Wall-clock, minutes, no zone: how `instances:` holds `start` and `end`.
-const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
+/// Wall-clock, seconds, no zone: how `instances:` holds `start` and `end`, the carry line's own
+/// span format (`eventledger::record_carried_answer`), so a card and a carry line for one instance
+/// agree. A card written in minutes still reads (`from_yaml`).
+const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
+/// A past-midnight event books to 23:59 on its start day, so it must start before it.
+const LAST_MINUTE: Time = Time::constant(23, 59, 0, 0);
 
 /// How an event sits in a day (P4). The one classifier: the builders, the settlement and
 /// `surface` all call [`shape`].
@@ -39,7 +43,9 @@ pub enum Shape {
     /// All-day or multi-day: no commitment; drawn in the all-day lane on each day from `first` to
     /// `last`, both inclusive.
     AllDay { first: Date, last: Date },
-    /// `end <= start` on one day: no commitment; drawn in the all-day lane on `day` (PQ2).
+    /// `end <= start` on one day at minute resolution (a sub-minute event included), or a
+    /// past-midnight event that starts at 23:59: no commitment; drawn in the all-day lane on `day`
+    /// (PQ2).
     ZeroLength { day: Date },
 }
 
@@ -63,9 +69,22 @@ fn ends_label(end: DateTime) -> String {
     }
 }
 
-/// P4's classifier over wall-clock `start` and `end`. The rules extend `eventemit::when_label`'s:
-/// an end at 00:00 on a later day belongs to the day before it.
+/// `at` without its seconds: the resolution a commitment books at.
+fn to_minute(at: DateTime) -> DateTime {
+    at.date().at(at.hour(), at.minute(), 0, 0)
+}
+
+/// `at` without its sub-seconds: the resolution the payload and the carry line store.
+fn to_second(at: DateTime) -> DateTime {
+    at.date().at(at.hour(), at.minute(), at.second(), 0)
+}
+
+/// P4's classifier over wall-clock `start` and `end`, at minute resolution, and the one place that
+/// decides booking or lane: every `Timed` and `PastMidnight` shape books (`commitment_for`), every
+/// other shape is drawn. The rules extend `eventemit::when_label`'s: an end at 00:00 on a later day
+/// belongs to the day before it.
 pub fn shape(start: DateTime, end: DateTime) -> Shape {
+    let (start, end) = (to_minute(start), to_minute(end));
     let midnight = Time::midnight();
     let last_day = if end.time() == midnight && end.date() > start.date() {
         end.date().yesterday().unwrap_or(start.date())
@@ -77,6 +96,10 @@ pub fn shape(start: DateTime, end: DateTime) -> Shape {
     }
     let next_day = start.date().tomorrow().ok();
     if Some(end.date()) == next_day && end.time() <= start.time() {
+        if start.time() >= LAST_MINUTE {
+            // No room before the 23:59 booking end: drawn, not booked (PQ2).
+            return Shape::ZeroLength { day: start.date() };
+        }
         return Shape::PastMidnight { ends: ends_label(end) };
     }
     if last_day > start.date() {
@@ -111,8 +134,8 @@ impl Instance {
         Instance {
             uid: event.uid.clone(),
             title: one_line(&event.title, TITLE_MAX),
-            start: event.start(),
-            end: event.end(),
+            start: to_second(event.start()),
+            end: to_second(event.end()),
             location: one_line(&event.location, LOCATION_MAX),
             url: one_line(&event.url, URL_MAX),
             registration: event.registration,
@@ -174,10 +197,11 @@ fn string(text: &str) -> Value {
 }
 
 /// The mapping `commitments::create_confirmed` takes for an accepted instance (spec §4.2 step 1),
-/// or `None` for the lane shapes (all-day, multi-day, zero-length: Q1b, PQ2), and for a start the
-/// day has no room to end after. `level` is `Hard` for an obligation and `Soft` for an
-/// opportunity. Times are the instance's wall clock. A past-midnight event books to 23:59 on its
-/// start day and carries its true end in `ends` (P6), which only the note's body reads.
+/// or `None` for the lane shapes (all-day, multi-day, zero-length: Q1b, PQ2). [`shape`] alone
+/// decides which: its booking shapes always have `start < end` at minute resolution, as `meets`
+/// needs. `level` is `Hard` for an obligation and `Soft` for an opportunity. Times are the
+/// instance's wall clock, to the minute. A past-midnight event books to 23:59 on its start day and
+/// carries its true end in `ends` (P6), which only the note's body reads.
 pub fn commitment_for(instance: &Instance, level: Level) -> Option<Mapping> {
     let (end_time, ends) = match shape(instance.start, instance.end) {
         Shape::Timed => (instance.end.strftime("%H:%M").to_string(), None),
@@ -185,9 +209,7 @@ pub fn commitment_for(instance: &Instance, level: Level) -> Option<Mapping> {
         Shape::AllDay { .. } | Shape::ZeroLength { .. } => return None,
     };
     let start_time = instance.start.strftime("%H:%M").to_string();
-    if start_time >= end_time {
-        return None; // `meets` needs start < end at minute resolution
-    }
+    debug_assert!(start_time < end_time, "shape books only start < end at minute resolution");
     let day = instance.start.date();
     let title = one_line(&instance.title, TITLE_MAX);
     let mut meet = Mapping::new();
@@ -425,6 +447,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_minute_degenerate_event_is_zero_length_and_goes_in_the_lane() {
+        // R1 minor 1: the shape alone decides booking or lane. A past-midnight event that starts at
+        // 23:59 has no room before the 23:59 booking end, and a timed event shorter than a minute
+        // has none at minute resolution: both are zero-length (PQ2), drawn, never booked.
+        let late = (at(10, 1, 23, 59), at(10, 2, 0, 30));
+        let blink = (date(2026, 10, 1).at(10, 0, 0, 0), date(2026, 10, 1).at(10, 0, 40, 0));
+        let late_seconds = (date(2026, 10, 1).at(23, 59, 30, 0), at(10, 2, 1, 0));
+        for (start, end) in [late, blink, late_seconds] {
+            let found = shape(start, end);
+            assert_eq!(found, Shape::ZeroLength { day: date(2026, 10, 1) }, "{start} -> {end}");
+            assert_eq!(found.lane(), Some((date(2026, 10, 1), date(2026, 10, 1))));
+            let inst = instance(start, end);
+            for level in [Level::Hard, Level::Soft] {
+                assert!(commitment_for(&inst, level).is_none());
+            }
+        }
+        // A shape that is no lane always books.
+        for (start, end) in [
+            (at(10, 1, 23, 58), at(10, 2, 0, 30)),
+            (date(2026, 10, 1).at(10, 0, 0, 0), date(2026, 10, 1).at(10, 1, 10, 0)),
+        ] {
+            let found = shape(start, end);
+            assert_eq!(found.lane(), None, "{start} -> {end}");
+            assert!(commitment_for(&instance(start, end), Level::Hard).is_some(), "{start} -> {end}");
+        }
+    }
+
     fn registering(deadline: Option<Date>) -> Instance {
         let mut inst = instance(at(10, 1, 10, 0), at(10, 1, 15, 0));
         inst.registration = true;
@@ -549,6 +599,43 @@ mod tests {
         let all = [with_deadline, plain, messy];
         let back: Vec<Option<Instance>> = read_back(&all).iter().map(Instance::from_yaml).collect();
         assert_eq!(back, all.iter().cloned().map(Some).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_seconds_bearing_instance_round_trips_and_matches_the_carry_span() {
+        // R1 minor 2: the payload keeps the feed's seconds, as the carry line does
+        // (`eventledger::record_carried_answer`), so the card and the line agree. Sub-seconds,
+        // which neither stores, are dropped on the way in, so the instance equals what is stored.
+        let start = date(2026, 10, 1).at(10, 30, 45, 0);
+        let end = date(2026, 10, 1).at(15, 0, 15, 500_000_000);
+        let inst = Instance::from_event(&DiscoveredEvent::new("a:1", "T", start, end, "c"));
+        assert_eq!(inst.start, start);
+        assert_eq!(inst.end, date(2026, 10, 1).at(15, 0, 15, 0));
+        let back = read_back(std::slice::from_ref(&inst));
+        assert_eq!(text_of(&back[0], "start").as_deref(), Some("2026-10-01T10:30:45"));
+        assert_eq!(text_of(&back[0], "end").as_deref(), Some("2026-10-01T15:00:15"));
+        assert_eq!(Instance::from_yaml(&back[0]), Some(inst.clone()));
+        // The carry line's span reads back as the same instants.
+        let vault = std::env::temp_dir().join(format!("qo-accept-span-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        crate::eventledger::record_carried_answer(
+            &vault,
+            "a:1",
+            "T",
+            date(2026, 10, 1),
+            "opportunity",
+            "appr_0123456789",
+            start,
+            end,
+        )
+        .unwrap();
+        let carry = crate::eventledger::load_ledger(&vault, None)["a:1"].carry.clone().expect("a carry line");
+        assert_eq!((carry.start, carry.end), (inst.start, inst.end));
+        let _ = std::fs::remove_dir_all(&vault);
+        // A card written in minutes (the spec's own example) still reads.
+        let minutes = crate::yaml::mapping_of("uid: a:1\nstart: 2026-10-01T10:30\nend: 2026-10-01T15:00\n");
+        assert_eq!(Instance::from_yaml(&minutes).unwrap().start, at(10, 1, 10, 30));
     }
 
     #[test]
