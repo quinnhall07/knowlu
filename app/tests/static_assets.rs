@@ -2134,3 +2134,45 @@ fn no_ui_event_carries_body_text() {
         assert!(!line.contains("ta.value") && !line.contains("expected") && !line.contains("body:"), "a ui event carries body text: {line}");
     }
 }
+
+// M2 T5a.2 (spec tests 29 and 32, the drawer halves, and the plan's conflict test).
+#[test]
+fn a_poll_leaves_an_open_editor_alone() {
+    let js = read("console.js");
+    assert!(js.contains("data-open-editor"), "an open editor is marked");
+    let at = js.find("function refreshGradesDrawer(").expect("the one background drawer rewrite");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    assert!(js[at..end].contains("editorOpen()"), "a background repaint of the drawer skips an open editor");
+    let p = js.find("function paint(").unwrap();
+    let pe = js[p..].find("\n  }\n").map(|i| p + i).unwrap();
+    assert!(!js[p..pe].contains("openDrawer(") && !js[p..pe].contains("EL(\"drawer\").innerHTML"), "paint never rebuilds the drawer");
+    let q = js.find("function poll(").unwrap();
+    let qe = js[q..].find("\n  }\n").map(|i| q + i).unwrap();
+    assert!(!js[q..qe].contains("openDrawer("), "poll never reopens the drawer");
+}
+
+#[test]
+fn body_undo_sends_the_reread_body_as_expected() {
+    let js = read("console.js");
+    let at = js.find("function offerBodyUndo(").expect("the Saved - Undo toast");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let u = &js[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"note\"") && u.contains("expected: env.note.body") && u.contains("body: before"), "undo's expected is the re-read body, its body the pre-edit text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+    assert!(js.contains("edit_cancelled") && !u.contains("ev(\"edit_undone"), "no new telemetry action");
+}
+
+#[test]
+fn a_body_conflict_keeps_the_draft() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("env.conflict"), "a conflict envelope has its own state");
+    assert!(ed.contains("This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version."), "the spec's line");
+    assert!(ed.contains("copy_text") && ed.contains("data-body-copy") && ed.contains("data-body-reload"), "Copy and Reload");
+    assert!(ed.contains("confirm("), "Reload asks before it discards the draft");
+    let c = ed.find("env.conflict").unwrap();
+    assert!(!ed[c..c + 600].contains("ta.value = "), "the draft is never refilled");
+}

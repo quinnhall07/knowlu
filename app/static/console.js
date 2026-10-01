@@ -1002,9 +1002,11 @@
     d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
     d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
   }
+  // M2 9.1: a background repaint never closes, rebuilds or refills an open body editor.
+  function editorOpen() { return !!document.querySelector("#drawer [data-open-editor]"); }
   function refreshGradesDrawer() {
     var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
-    if (open) { openGradesDrawer(open); }
+    if (open && !editorOpen()) { openGradesDrawer(open); }
   }
   function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
   // A capture's answer is a named outcome, never an error line; the strip re-reads its own state after
@@ -1260,10 +1262,24 @@
     ta.value = expected; ta.focus();
     ev("edit_started", id, "body");
     function lock(on) { ta.disabled = on; sv.disabled = on; cn.disabled = on; }
+    function conflictState() {
+      if (host.querySelector("[data-body-conflict]")) { return; }
+      var c = document.createElement("div"); c.setAttribute("data-body-conflict", ""); c.className = "bodyconf";
+      c.innerHTML = "<p>This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+        '<button class="b" data-body-copy>Copy</button> <button class="b" data-body-reload>Reload</button>';
+      host.appendChild(c);
+      c.querySelector("[data-body-copy]").addEventListener("click", function () { invoke("copy_text", { text: ta.value }).catch(function () {}); });
+      c.querySelector("[data-body-reload]").addEventListener("click", function () {
+        if (ta.value !== expected && !confirm("Reload and discard your text?")) { return; }
+        ev("edit_cancelled", id, "body"); openDrawer(id);
+      });
+    }
     function save() {
       lock(true);
+      var before = expected;
       invoke("set_body", { view: stateView(), id: id, expected: expected, body: ta.value }).then(function (env) {
-        if (applyEnvelope(env, function (m) { lock(false); showRefusal(null, m, id, "body"); })) { ev("edit_committed", id, "body"); openDrawer(id); }
+        if (env.conflict) { applyEnvelope(env, function () {}); lock(false); conflictState(); return; }
+        if (applyEnvelope(env, function (m) { lock(false); showRefusal(null, m, id, "body"); })) { ev("edit_committed", id, "body"); openDrawer(id); offerBodyUndo(id, before); }
       }).catch(function (e) { lock(false); showRefusal(null, "refused: " + e, id, "body"); });
     }
     function cancel() { ev("edit_cancelled", id, "body"); openDrawer(id); }
@@ -1272,6 +1288,29 @@
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
       else if (e.key === "Escape") { e.preventDefault(); cancel(); }
     });
+  }
+
+  // M2 D8: Saved - Undo for 10 seconds. Undo is a second set_body whose `expected` is the body of
+  // the re-read note (never the textarea) and whose body is the text loaded before the edit.
+  function offerBodyUndo(id, before) {
+    invoke("note", { id: id }).then(function (env) {
+      if (!env.ok || !env.note) { return; }
+      var t = document.createElement("div"); t.className = "savedtoast";
+      t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-body-undo>Undo</button>';
+      document.body.appendChild(t);
+      var gone = setTimeout(function () { t.remove(); }, 10000);
+      t.querySelector("[data-body-undo]").addEventListener("click", function () {
+        clearTimeout(gone); t.querySelector("[data-body-undo]").disabled = true;
+        invoke("set_body", { view: stateView(), id: id, expected: env.note.body || "", body: before }).then(function (r) {
+          if (applyEnvelope(r, function (m) {
+            showRefusal(null, m, id, "body");
+            t.innerHTML = '<button class="b" data-body-prev>Copy previous text</button>';
+            t.querySelector("[data-body-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+            setTimeout(function () { t.remove(); }, 10000);
+          })) { t.remove(); ev("edit_committed", id, "body"); var d = EL("drawer"); if (d && d.getAttribute("data-id") === id && !editorOpen()) { openDrawer(id); } }
+        }).catch(function () { t.remove(); });
+      });
+    }).catch(function () {});
   }
 
   // ----- writes (Knowlu plan 1, Task 13). Every mutating call returns the fresh state; paint it
