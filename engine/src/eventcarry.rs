@@ -100,7 +100,8 @@ pub fn answered_series(vault: &Path) -> BTreeMap<String, SeriesAccept> {
     answered
 }
 
-/// One series an archived `executed` `event-check` card with `instances:` accepted (PQ1 (a)).
+/// One series an archived `executed` `event-check` card with `instances:` claimed and accepted
+/// (PQ1 (a)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckAccept {
     /// The answering card's file name in `archive/`.
@@ -119,28 +120,36 @@ pub struct CheckAccept {
 /// Only the accept carry reads it: never the decline carry, the emitter or `judge_roster`, which
 /// keep [`answered_series`] (whose edge rule still leaves `event-check` cards out). The rules:
 /// - it reads `archive/` only, through `approvals::sorted_md`, and only `type: approval`,
-///   `kind: event-check`, `status: executed` cards whose `instances:` is a sequence. A card filed
-///   before this lane has none: its Approve only answered, and it carries nothing. Any other
-///   status answers nothing here: a `rejected` `event-check` series has its `drop` lines through
-///   `eventemit::inherit_series_answers`;
-/// - a card with a missing or empty `series_uid` answers no series;
-/// - if two such cards answer one series, the lowest file name wins.
+///   `kind: event-check` cards;
+/// - a series is claimed as `eventemit::settled_series` claims it, so the two `event-check`
+///   readers never disagree: the lowest-named `executed` or `rejected` card with a non-empty
+///   `series_uid` claims it, and an `expired` card or any other status claims nothing (ruling G1);
+/// - the series carries only when its claiming card is `executed` and its `instances:` is a
+///   sequence. A claiming `rejected` card (its series has `drop` lines through
+///   `eventemit::inherit_series_answers`) or a claiming card filed before this lane (no
+///   `instances:`: its Approve only answered) carries nothing, and no later card of the series
+///   can book it (review finding on T2b.2b).
 ///
 /// It reads no ledger. An unreadable card answers nothing.
 pub fn accepted_check_series(vault: &Path) -> BTreeMap<String, CheckAccept> {
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
     let mut accepted: BTreeMap<String, CheckAccept> = BTreeMap::new();
     for path in crate::approvals::sorted_md(&vault.join("archive")) {
         let Ok(text) = pystr::read_text(&path) else { continue };
         let Ok((meta, _)) = split_frontmatter(&text) else { continue };
-        if card_text(&meta, "type") != "approval"
-            || card_text(&meta, "kind") != EVENT_CHECK
-            || card_text(&meta, "status") != "executed"
-            || !matches!(yaml::get(&meta, "instances"), Some(serde_yaml_ng::Value::Sequence(_)))
-        {
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_CHECK {
             continue;
         }
+        let executed = match card_text(&meta, "status").as_str() {
+            "executed" => true,
+            "rejected" => false,
+            _ => continue,
+        };
         let series = card_text(&meta, "series_uid");
-        if series.is_empty() || accepted.contains_key(&series) {
+        if series.is_empty() || !claimed.insert(series.clone()) {
+            continue;
+        }
+        if !executed || !matches!(yaml::get(&meta, "instances"), Some(serde_yaml_ng::Value::Sequence(_))) {
             continue;
         }
         let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1125,5 +1134,39 @@ mod tests {
         assert_eq!(booked(&vault), [(String::from("lx:7:2"), String::from("hard"))], "only the control");
         let records = Journal::new(&vault).read(None, None);
         assert_eq!(records.len(), 1, "one journal record, the control's");
+    }
+
+    #[test]
+    fn a_rejected_or_pre_lane_check_card_blocks_its_series() {
+        // Review finding on T2b.2b: the carry claims a series as `eventemit::settled_series` does.
+        // The lowest-named executed or rejected card claims it, and the series carries only if that
+        // card is executed with `instances:`. A hand edit, or sync merging two desktops' cards, makes
+        // two cards for one series.
+        let vault = tmp("check-claims");
+        let at_day = |series: &str, n: u8, day: i8| instance(&format!("{series}:{n}"), series, at(10, day, 19, 0), at(10, day, 21, 0));
+        // lx:9: the student rejected it first, then a later card was executed.
+        check_card(&vault, "event-check-weekly-2026-10-13.md", "executed", "lx:9", &[&at_day("lx:9", 2, 13)], true, "appr_00000000g2");
+        check_card(&vault, "event-check-weekly-2026-10-06.md", "rejected", "lx:9", &[&at_day("lx:9", 1, 6)], true, "appr_00000000g1");
+        // lx:8: a card filed before this lane (no `instances:`), then one with them.
+        check_card(&vault, "event-check-lab-2026-10-06.md", "executed", "lx:8", &[&at_day("lx:8", 1, 6)], false, "appr_00000000g3");
+        check_card(&vault, "event-check-lab-2026-10-13.md", "executed", "lx:8", &[&at_day("lx:8", 2, 13)], true, "appr_00000000g4");
+        // lx:6, the control: executed with `instances:` first, so a later rejected card loses.
+        check_card(&vault, "event-check-club-2026-10-06.md", "executed", "lx:6", &[&at_day("lx:6", 1, 6)], true, "appr_00000000g5");
+        check_card(&vault, "event-check-club-2026-10-13.md", "rejected", "lx:6", &[&at_day("lx:6", 2, 13)], true, "appr_00000000g6");
+
+        // Both `event-check` readers give one answer per series.
+        let settled = crate::eventemit::settled_series(&vault);
+        let verdicts: Vec<(&str, &str)> = settled.iter().map(|(s, a)| (s.as_str(), a.verdict.as_str())).collect();
+        assert_eq!(verdicts, [("lx:6", "obligation"), ("lx:8", "obligation"), ("lx:9", "drop")]);
+        let checks = accepted_check_series(&vault);
+        assert_eq!(checks.keys().map(String::as_str).collect::<Vec<_>>(), ["lx:6"]);
+        assert_eq!(checks["lx:6"].file, "event-check-club-2026-10-06.md", "the claiming card's");
+
+        let events = [at_day("lx:9", 3, 20), at_day("lx:8", 3, 20), at_day("lx:6", 3, 20)];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(booked(&vault), [(String::from("lx:6:3"), String::from("hard"))], "only the control");
+        let records = Journal::new(&vault).read(None, None);
+        assert_eq!(records.len(), 1, "one journal record, the control's: none for lx:9:3 or lx:8:3");
     }
 }

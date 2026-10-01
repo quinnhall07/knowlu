@@ -890,15 +890,23 @@ Split from T2b.2 by the second review so its diff is small and Checkpoint B read
   no `instances:` key (as filed before this lane), and its series' later instance in the events: no
   commitment and no journal record. The same holds for a `rejected` and an `expired` `event-check`
   card that carries `instances:`.
+- `a_rejected_or_pre_lane_check_card_blocks_its_series` (added by the review of T2b.2b): a
+  `rejected` card followed by an `executed` card with `instances:` for `lx:9`, and an `executed`
+  card without `instances:` followed by one with them for `lx:8`. A later instance of either gets
+  no commitment and no journal record. `settled_series` and `accepted_check_series` agree on every
+  series. A control series (`executed` with `instances:`, then `rejected`) is booked.
 
 **Behaviour.** PQ1 (a), P7.
 - `accepted_check_series(vault) -> BTreeMap<String, CheckAccept>`: reads `archive/` only, through
-  `approvals::sorted_md`, for `type: approval`, `kind: event-check`, `status: executed` cards with
-  an `instances:` sequence. The value holds the card's file name, its `id:` (as T2b.1's) and the
-  uids its `events:` lists.
-  A card with a missing or empty `series_uid` answers no series, and the lowest file name wins. Any
-  other status answers nothing here: a `rejected` `event-check` series already has `drop` lines
-  through `inherit_series_answers`. It reads no ledger.
+  `approvals::sorted_md`, for `type: approval`, `kind: event-check` cards. The value holds the
+  card's file name, its `id:` (as T2b.1's) and the uids its `events:` lists.
+  A series is claimed as `settled_series` claims it: the lowest-named `executed` or `rejected` card
+  with a non-empty `series_uid` claims it, and an `expired` card or any other status claims
+  nothing. The series carries only if its claiming card is `executed` with an `instances:`
+  sequence. A claiming `rejected` card (its series already has `drop` lines through
+  `inherit_series_answers`), or a claiming card with no `instances:`, blocks the carry for its
+  series, whatever a later card says. *Changed by the review of T2b.2b. Checkpoint B confirms
+  this reading.* It reads no ledger.
 - T2b.2's accepted-set helper becomes the union of `answered_series`' executed entries and
   `accepted_check_series`. Where one series is in both readers, which only a hand edit can make,
   `answered_series` wins, so a series declined on an `event-accept` card is never booked. The level
@@ -906,7 +914,7 @@ Split from T2b.2 by the second review so its diff is small and Checkpoint B read
 - Only the accept carry calls it: not the decline carry, the emitter or `judge_roster`, which keep
   the union of `settled_series` and `answered_series`.
 
-**Done when:** both tests pass, and T2b.1's and T2b.2's tests pass unchanged.
+**Done when:** the three tests pass, and T2b.1's and T2b.2's tests pass unchanged.
 
 ### T2b.3. `judge_roster` skips a settled series of either kind (`events.rs`)
 
@@ -1154,7 +1162,9 @@ D1–D11, Quinn's PQ1 (a) and PQ3 (P15), and checks in particular:
 - that `answered_series` has one definition and the emitter has no copy;
 - reading T2b.2b's commit alone: that `accepted_check_series` feeds only the accept carry, never
   the decline carry, the emitter or `judge_roster`; that a cross-reader overlap goes to
-  `answered_series`; and that an `event-check` card with no `instances:` carries nothing;
+  `answered_series`; that an `event-check` card with no `instances:` carries nothing; and that a
+  series is claimed as `settled_series` claims it, so a claiming `rejected` card or a claiming
+  card with no `instances:` blocks a later card's carry (the reading the review of T2b.2b chose);
 - reading T2b.4's commit alone, that the carry's line is additive:
   - `record_answer`'s signature, refusals and bytes, `VALID_VERDICTS` and `ANSWER_VERDICTS` are
     unchanged, and `opportunity` is accepted only on the carry's entry point;
@@ -1656,8 +1666,9 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   reading each commit alone.
 - **PQ1 (a) books an `event-check` series as hard that the student did not mean.** The student
   answered "this applies to me", which D11 already treats as an Accept for the listed instances.
-  Guarded by `accepted_check_series`' own edge rules (executed, with `instances:`, archive only),
-  `answered_series` winning an overlap, the two PQ1 tests in T2b.2b (its own commit), the
+  Guarded by `accepted_check_series`' own edge rules (the series claimed as `settled_series`
+  claims it, then executed, with `instances:`, archive only), `answered_series` winning an overlap,
+  the three PQ1 tests in T2b.2b (its own commit), the
   rank-level case in 20a, and Checkpoint B's check, on that commit alone, that the reader feeds
   only the accept carry.
 - **A card books an hour the feed never claimed.** On a feed-failure run the emitters read
@@ -1773,7 +1784,7 @@ its own row.
 
 | Answer | Task | What proves it |
 |---|---|---|
-| PQ1 (a): an executed `event-check` card with `instances:` carries its series; `accepted_check_series`; the accept carry over the union; `answered_series`' edge rule unchanged | T2b.1, T2b.2b, T4, B, T8 | `an_accepted_event_check_series_books_a_later_instance_once`, `an_event_check_card_without_instances_carries_nothing`; T2b.1's `an_event_check_card_is_not_counted`; 20a's `event-check` case at `rank` level; Checkpoint B; the spec §12 note |
+| PQ1 (a): an executed `event-check` card with `instances:` carries its series; `accepted_check_series`; the accept carry over the union; `answered_series`' edge rule unchanged | T2b.1, T2b.2b, T4, B, T8 | `an_accepted_event_check_series_books_a_later_instance_once`, `an_event_check_card_without_instances_carries_nothing`, `a_rejected_or_pre_lane_check_card_blocks_its_series`; T2b.1's `an_event_check_card_is_not_counted`; 20a's `event-check` case at `rank` level; Checkpoint B; the spec §12 note |
 | PQ2: a zero-length event is drawn in the all-day lane with no commitment | T1a, T3.2, T4b, T8 | `a_zero_length_event_gives_the_lane_marker`; test 16's zero-length clause; test 22a's zero-length clause; anatomy §3.7 |
 | PQ2, held on a feed-failure run: no card or `instances:` entry is built from `read_roster`'s lossy events (second review) | T2a.1b, T2a.2, T4 | `a_roster_read_event_files_no_event_accept_card_and_no_instances`, `a_roster_read_opportunity_files_no_card`, the card clause of `a_rank_on_the_roster_alone_carries_nothing` |
 | PQ3, final: (b-prime) with the span (replaced (c), then (b-prime) without it). One answer line per carried date, timed and all-day, by `agent:knowlu.carry`, with `from:` the answering card, the series' real verdict (`opportunity` accepted) and the feed's `start:`/`end:`. Judge-once: a later human answer wins, and the carry never overwrites one. Coming up lists the date with its provenance. The all-day lane draws carried all-day, multi-day and zero-length dates on each day they cover, independent of the roster. No other write | T2b.1, T2b.2b (the card id), T2b.4, T2b.5, T4 (P16), T4c, T5, T8, B, B2, W | T2b.4's eleven tests; T2b.5's nine; `rank_gives_each_carried_date_the_carrys_line_and_lists_it`; T4c's nine; `coming_up_shows_the_carrys_provenance`; anatomy §3.7, §3.9 and §3.11; the spec §12 note; Checkpoint B's and W's checks |
