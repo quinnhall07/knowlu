@@ -55,6 +55,34 @@
 //! line itself with a warning, so the answer line becomes that uid's first *valid* verdict and
 //! settles it immediately — harmless, and arguably the better outcome, just not the one either
 //! brief anticipated.
+//!
+//! # The carry's line (PQ3 (b-prime), P15)
+//!
+//! When the student accepts a series (an executed `event-accept` card, or an executed
+//! `event-check` card with `instances:`), the accept carry writes one line for each later instance
+//! the card did not list: [`record_carried_answer`], shaped `verdict:<obligation|opportunity> ·
+//! by:agent:knowlu.carry · from:<card id> · start:<…> · end:<…> · answered <date>`. The word is
+//! the series' real verdict; `from:` names the archived card, which holds who answered, when, and
+//! the series; the span is the instance's own, so the all-day lane can draw the date on each day it
+//! covers without the roster. The line is the carry's, not the student's: its `by` starts `agent:`
+//! ([`crate::provenance::is_agent`]). [`load_ledger`] reads it into [`LedgerEntry::carry`]:
+//!
+//! - it sets the verdict where there is none, or where an `unsure` stands unanswered, and its `by`
+//!   becomes `answered_by`;
+//! - it never flips a confident machine verdict, but its card and span are recorded all the same;
+//! - it never counts after a human answer, and only a uid's first carry line counts;
+//! - a later human answer replaces a verdict a carry line set, and clears `carry` (judge-once).
+//!
+//! A human answer is an answer-shaped line whose `by` is *not* an agent's. Any other answer-shaped
+//! line with an agent `by` (no card, no span that parses, or a word outside [`CARRY_VERDICTS`]) is
+//! an ordinary verdict line: first verdict wins, it supersedes nothing, and `answered_by` stays
+//! empty. No line written before PQ3 has an agent `by` (an `event-check` answer is written as the
+//! vault's human actor or `unknown`), so every existing line reads exactly as before.
+//!
+//! **What an older engine does with a carry line.** It sees an answer line from an unknown actor:
+//! as a uid's first line it settles the uid with the carried word; over an `unsure` it settles
+//! only with `obligation`; and a later human answer can no longer replace it. Only a downgrade on
+//! the same device meets this, because the ledger never syncs (F4).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -62,7 +90,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use jiff::civil::Date;
+use jiff::civil::{Date, DateTime};
 use regex::Regex;
 
 /// Written once, when the file is first created. The em dash is part of the byte stream.
@@ -88,6 +116,19 @@ pub const VALID_VERDICTS: [&str; 4] = ["obligation", "opportunity", "drop", "uns
 /// [`VALID_VERDICTS`]: a person answers "does this apply to you", never "I'm not sure either" or
 /// "this is an opportunity" — those stay machine-only verdicts.
 pub const ANSWER_VERDICTS: [&str; 2] = ["obligation", "drop"];
+
+/// The actor of the carry's answer line ([`record_carried_answer`], PQ3 (b-prime), P15). It
+/// starts `agent:`, so [`crate::provenance::is_agent`] reads it as non-human: judge-once never
+/// mistakes a carried answer for the student's own.
+pub const CARRY_ACTOR: &str = "agent:knowlu.carry";
+
+/// The words the carry's line may carry: an accepted series' real verdict. An `event-accept` card
+/// accepts as `obligation` or `opportunity`, and an `event-check` series as `obligation`. `drop`
+/// and `unsure` are never carried; a rejected series gets `declined` lines instead.
+pub const CARRY_VERDICTS: [&str; 2] = ["obligation", "opportunity"];
+
+/// The carry line's span format, on write and on read: the feed's civil time, to the second.
+const SPAN_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// The line terminator Python's text-mode writes produce on this platform.
 ///
@@ -129,10 +170,10 @@ static WHY: LazyLock<Regex> = LazyLock::new(|| Regex::new("· why:\"(?P<why>[^\"
 static TITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^- [A-Za-z0-9_.:@+-]+ · (?P<title>[^·]*?) · ").unwrap());
 
-/// Searched, not matched, like [`VERDICT`]. Present on a human answer line and, in principle,
-/// nowhere else — no machine writer ever emits a `by:` field. Always searched with the quoted
-/// `why:` field stripped out first (review I-1): `why` is free text and is otherwise able to
-/// forge this field (see [`load_ledger`]).
+/// Searched, not matched, like [`VERDICT`]. Present on a human answer line and on the carry's line
+/// (P15), whose `by` starts `agent:`; no other machine writer emits a `by:` field. Always searched
+/// with the quoted `why:` field stripped out first (review I-1): `why` is free text and is
+/// otherwise able to forge this field (see [`load_ledger`]).
 static BY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"· by:(?P<by>[A-Za-z0-9_.:@-]+)").unwrap());
 
@@ -144,11 +185,23 @@ static JID: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-/// The marker that makes a line a human answer rather than an ordinary verdict line. Checked
-/// together with [`BY`], both with `why:` stripped first: a line needs both to count as an
-/// answer.
+/// The marker that makes a line answer-shaped (a human answer, or the carry's line, P15) rather
+/// than an ordinary verdict line. Checked together with [`BY`], both with `why:` stripped first: a
+/// line needs both to count as an answer, and its `by` then says whose.
 static ANSWERED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"· answered \d{4}-\d{2}-\d{2}").unwrap());
+
+/// The carry line's card (P15): the answering card's `id:`. Present on the carry's line and
+/// nowhere else; searched with `why:` stripped first, like [`BY`].
+static FROM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"· from:(?P<from>appr_[0-9a-f]{10})").unwrap());
+
+/// The carry line's span (P15), first and last instant, to the second ([`SPAN_FORMAT`]). Searched
+/// like [`FROM`]; a value that matches but does not parse makes the line no carry line.
+static START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"· start:(?P<at>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})").unwrap());
+static END: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"· end:(?P<at>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})").unwrap());
 
 /// What [`record_answer`]'s `by` argument must look like — the actor sits unquoted on the line,
 /// so it can never carry ` · `.
@@ -221,7 +274,9 @@ pub struct LedgerEntry {
     pub declined: bool,
     /// The `by:` of the human answer that settled this uid, once one has (F1). Empty until a
     /// [`record_answer`] line has superseded an `unsure` verdict, or is itself the first verdict
-    /// line seen for the uid.
+    /// line seen for the uid. A carry line that set the verdict leaves its own agent `by` here
+    /// ([`CARRY_ACTOR`], P15), which [`crate::provenance::is_agent`] tells from a human's; a later
+    /// human answer replaces it.
     pub answered_by: String,
     /// The `jid:` carried by whichever line won this uid's verdict — a judged machine verdict's
     /// own id, or (once a human answer supersedes an `unsure` one) the answer's id. Empty when
@@ -230,6 +285,22 @@ pub struct LedgerEntry {
     /// The second `·`-segment of the uid's first verdict line, read by [`TITLE`]. Read-only: no
     /// writer consults it, and a superseding answer line never changes it (F1 decision 4).
     pub title: String,
+    /// What the uid's first carry line recorded (P15): the answering card and the instance's
+    /// span. Set even when the line could not set the verdict (a confident machine word stands);
+    /// never set over a human answer; cleared when a later human answer replaces the verdict a
+    /// carry line set (judge-once). `None` on every line shape written before PQ3.
+    pub carry: Option<Carried>,
+}
+
+/// The carry line's own fields (P15): which archived card answered the series, and the carried
+/// instance's span exactly as the feed gave it, so the all-day lane can draw it on each day it
+/// covers without the roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    /// The answering card's `id:`, an `appr_` id.
+    pub from: String,
+    pub start: DateTime,
+    pub end: DateTime,
 }
 
 impl LedgerEntry {
@@ -264,8 +335,9 @@ pub enum VerdictError {
     /// Python: `ValueError(problem)`, where `problem` came from [`why_problem`].
     BadWhy(&'static str),
     /// New in F1: [`record_answer`]'s `by` or [`record_judged_verdict`]/[`record_answer`]'s `jid`
-    /// failed its charclass check. The field name (`"by"` or `"jid"`), not the bad value — the bad
-    /// value may itself contain ` · ` and does not belong in an error message that could be logged.
+    /// failed its charclass check, or (PQ3) [`record_carried_answer`]'s `from` is not an `appr_`
+    /// id. The field name (`"by"`, `"jid"` or `"from"`), not the bad value — the bad value may
+    /// itself contain ` · ` and does not belong in an error message that could be logged.
     BadField(&'static str),
     /// Python: an uncaught `OSError` from the append.
     Io(String),
@@ -444,60 +516,118 @@ pub fn load_ledger(vault: &Path, mut warnings: Option<&mut Vec<String>>) -> BTre
         // `answered <date>` (review I-1). `bare` is the line with the whole quoted `why:"…"`
         // field removed, and every field below is searched on `bare`, never on `line`.
         let bare = WHY.replace(line, "");
-        // A human answer line ([`record_answer`]) is the one line shape allowed to break "first
-        // verdict wins" — and only when the verdict it would replace is `unsure`, and only with
-        // an answer word (F1 decision 1; review m-1 rules out a hand-edited or forged
-        // `verdict:opportunity`/`verdict:unsure` on an answer-shaped line).
-        let is_human_answer = ANSWERED.is_match(&bare) && BY.is_match(&bare);
+        // Answer-shaped means `answered <date>` and a `by:`, both outside the why. Who answered
+        // decides what the line may do (P15):
+        // - a `by` that `provenance::is_agent` rejects makes a human answer ([`record_answer`]);
+        // - an agent `by`, a word in [`CARRY_VERDICTS`], a card and a span that parses make the
+        //   carry's line ([`record_carried_answer`]);
+        // - any other agent line is an ordinary verdict line: it supersedes nothing, and
+        //   `answered_by` stays empty. No line written before PQ3 has an agent `by`.
+        let by = match (ANSWERED.is_match(&bare), BY.captures(&bare)) {
+            (true, Some(c)) => Some(c.name("by").unwrap().as_str().to_string()),
+            _ => None,
+        };
+        let agent = by.as_deref().is_some_and(crate::provenance::is_agent);
+        let is_human_answer = by.is_some() && !agent;
+        let carried =
+            if agent && CARRY_VERDICTS.contains(&token) { carried_of(&bare) } else { None };
+        if let Some(carried) = carried {
+            // Only the first carry line counts, and none after a human answer (judge-once). It
+            // sets the verdict where there is none or an `unsure` stands, with the carry as
+            // `answered_by`; a confident machine verdict stands (F1's rule), but the card and the
+            // span are recorded all the same, so the lane can still draw the date.
+            let answered = &current.answered_by;
+            let human = !answered.is_empty() && !crate::provenance::is_agent(answered);
+            if current.carry.is_some() || human {
+                continue;
+            }
+            let carry_by = by.unwrap_or_default();
+            let mut next = match current.verdict.as_deref() {
+                None => first_verdict(line, &bare, uid, token, &current, carry_by),
+                Some("unsure") => LedgerEntry {
+                    verdict: Some(token.to_string()),
+                    answered_by: carry_by,
+                    ..current.clone()
+                },
+                Some(_) => current.clone(),
+            };
+            next.carry = Some(carried);
+            entries.insert(uid.to_string(), next);
+            continue;
+        }
         if let Some(existing) = current.verdict.as_deref() {
-            if is_human_answer && existing == "unsure" && ANSWER_VERDICTS.contains(&token) {
+            // A human answer line is the other shape allowed to break "first verdict wins": only
+            // with an answer word (F1 decision 1; review m-1 rules out a hand-edited or forged
+            // `verdict:opportunity`/`verdict:unsure` on an answer-shaped line), and only over an
+            // `unsure` (F1) or over a verdict a carry line set (P15, judge-once).
+            let carry_set = crate::provenance::is_agent(&current.answered_by);
+            if is_human_answer
+                && (existing == "unsure" || carry_set)
+                && ANSWER_VERDICTS.contains(&token)
+            {
                 // Supersede: the answer's verdict and `by` win; `why`, `strength` and `title`
-                // stay the unsure line's (F1 decision 4), and `judgment_id` becomes the answer's
-                // `jid` when the line carries one.
+                // stay the first line's (F1 decision 4), `judgment_id` becomes the answer's
+                // `jid` when the line carries one, and a carry is cleared.
                 let mut settled = current.clone();
                 settled.verdict = Some(token.to_string());
-                settled.answered_by = BY
-                    .captures(&bare)
-                    .map(|c| c.name("by").unwrap().as_str().to_string())
-                    .unwrap_or_default();
+                settled.answered_by = by.unwrap_or_default();
                 if let Some(jid) = JID.captures(&bare) {
                     settled.judgment_id = jid.name("jid").unwrap().as_str().to_string();
                 }
+                settled.carry = None;
                 entries.insert(uid.to_string(), settled);
             }
             continue; // first verdict wins otherwise — the invariant that keeps reads unambiguous
         }
-        let strength = STRENGTH.captures(line);
-        let why = WHY.captures(line);
-        let jid = JID.captures(&bare);
         // `answered_by` is only ever set from a real answer line, never merely because a `by:`
-        // substring is findable somewhere on the line (review I-1).
-        let by = if is_human_answer { BY.captures(&bare) } else { None };
-        let title = TITLE.captures(line);
-        entries.insert(
-            uid.to_string(),
-            LedgerEntry {
-                uid: uid.to_string(),
-                verdict: Some(token.to_string()),
-                strength: strength
-                    .map(|c| c.name("strength").unwrap().as_str().to_string())
-                    .unwrap_or_default(),
-                why: why.map(|c| c.name("why").unwrap().as_str().to_string()).unwrap_or_default(),
-                proposed: current.proposed,
-                declined: current.declined,
-                answered_by: by
-                    .map(|c| c.name("by").unwrap().as_str().to_string())
-                    .unwrap_or_default(),
-                judgment_id: jid
-                    .map(|c| c.name("jid").unwrap().as_str().to_string())
-                    .unwrap_or_default(),
-                title: title
-                    .map(|c| c.name("title").unwrap().as_str().to_string())
-                    .unwrap_or_default(),
-            },
-        );
+        // substring is findable somewhere on the line (review I-1); an agent's ordinary verdict
+        // line answers nothing (P15).
+        let answered_by = if is_human_answer { by.unwrap_or_default() } else { String::new() };
+        let entry = first_verdict(line, &bare, uid, token, &current, answered_by);
+        entries.insert(uid.to_string(), entry);
     }
     entries
+}
+
+/// A uid's first verdict line, read in full: its word, `strength`, `why`, `jid` and title, with
+/// the markers seen so far. `answered_by` is the caller's to decide (a human answer's or the
+/// carry's `by`, else empty), and so is `carry`. `bare` is the line with `why:` stripped.
+fn first_verdict(
+    line: &str,
+    bare: &str,
+    uid: &str,
+    token: &str,
+    current: &LedgerEntry,
+    answered_by: String,
+) -> LedgerEntry {
+    LedgerEntry {
+        uid: uid.to_string(),
+        verdict: Some(token.to_string()),
+        strength: capture(&STRENGTH, line, "strength"),
+        why: capture(&WHY, line, "why"),
+        proposed: current.proposed,
+        declined: current.declined,
+        answered_by,
+        judgment_id: capture(&JID, bare, "jid"),
+        title: capture(&TITLE, line, "title"),
+        carry: None,
+    }
+}
+
+/// The named group of `re`'s first match in `text`, or `""`.
+fn capture(re: &Regex, text: &str, name: &str) -> String {
+    re.captures(text).map(|c| c.name(name).unwrap().as_str().to_string()).unwrap_or_default()
+}
+
+/// The carry fields of an agent's answer-shaped line (P15): a card, and a span whose two ends
+/// both parse. `None` makes the line no carry line. `bare` is the line with `why:` stripped, so a
+/// why can never forge either.
+fn carried_of(bare: &str) -> Option<Carried> {
+    fn at(re: &Regex, bare: &str) -> Option<DateTime> {
+        DateTime::strptime(SPAN_FORMAT, re.captures(bare)?.name("at")?.as_str()).ok()
+    }
+    let from = FROM.captures(bare)?.name("from")?.as_str().to_string();
+    Some(Carried { from, start: at(&START, bare)?, end: at(&END, bare)? })
 }
 
 /// `Path.read_text(encoding="utf-8")` — bytes, strict UTF-8, then universal newlines.
@@ -632,8 +762,10 @@ pub fn record_judged_verdict(
     write_verdict_line(vault, uid, title, when, verdict, "", why, "", judgment_id)
 }
 
-/// Append a human answer line: the one shape [`load_ledger`] lets supersede an `unsure` verdict
-/// (F1 decision 1).
+/// Append a human answer line: the shape [`load_ledger`] lets supersede an `unsure` verdict (F1
+/// decision 1) or one the carry set (P15). It counts as a human answer only while `by` is not an
+/// agent's ([`crate::provenance::is_agent`]): `settle_event_check` passes the journal's human
+/// actor or `unknown`, and `inherit_series_answers` copies one of those.
 ///
 /// `verdict` must be one of [`ANSWER_VERDICTS`]; anything else — including a word from
 /// [`VALID_VERDICTS`] that is not an answer word, such as `"opportunity"` — is refused. `by` must
@@ -666,6 +798,44 @@ pub fn record_answer(
         line.push_str(&format!(" · jid:{jid}"));
     }
     line.push_str(&format!(" · answered {}", when.strftime("%Y-%m-%d")));
+    append(vault, &line).map_err(|e| VerdictError::Io(e.to_string()))
+}
+
+/// Append the carry's answer line (PQ3 (b-prime), P15), one per carried date:
+/// `- <uid> · <title> · verdict:<w> · by:agent:knowlu.carry · from:<card id> · start:<…> ·
+/// end:<…> · answered <when>`.
+///
+/// A carried date is an instance of an accepted series that the answering card did not list.
+/// `verdict` is the series' real verdict, one of [`CARRY_VERDICTS`]; `from` is the answering
+/// card's `id:`, an `appr_` id; `start` and `end` are the instance's span as the feed gave it,
+/// written to the second. Both checks run before the line is built, so a refused call never
+/// touches the file. The actor is always [`CARRY_ACTOR`], never an argument, so this line can never
+/// be credited to the student. A sibling of [`record_answer`], whose signature, checks and bytes
+/// are unchanged: the two share only [`clean_title`] and the append.
+#[allow(clippy::too_many_arguments)]
+pub fn record_carried_answer(
+    vault: &Path,
+    uid: &str,
+    title: &str,
+    when: Date,
+    verdict: &str,
+    from: &str,
+    start: DateTime,
+    end: DateTime,
+) -> Result<(), VerdictError> {
+    if !CARRY_VERDICTS.contains(&verdict) {
+        return Err(VerdictError::UnknownVerdict(verdict.to_string()));
+    }
+    if !(crate::ids::is_id(from) && from.starts_with("appr_")) {
+        return Err(VerdictError::BadField("from"));
+    }
+    let clean = clean_title(title);
+    let line = format!(
+        "- {uid} · {clean} · verdict:{verdict} · by:{CARRY_ACTOR} · from:{from} · start:{} · end:{} · answered {}",
+        start.strftime(SPAN_FORMAT),
+        end.strftime(SPAN_FORMAT),
+        when.strftime("%Y-%m-%d"),
+    );
     append(vault, &line).map_err(|e| VerdictError::Io(e.to_string()))
 }
 
@@ -1259,5 +1429,235 @@ mod tests {
         );
         let ledger = load_ledger(&vault, None);
         assert_eq!(ledger["ics:fixture-1"].title, "Undergraduate Research Symposium");
+    }
+
+    // --- PQ3 (b-prime): the carry's line and its read rules (P15, T2b.4) ----------------------
+
+    use crate::journal::HUMAN_ACTOR;
+
+    /// The answering card the carry's tests name.
+    const CARD: &str = "appr_0123456789";
+
+    /// A second judgment id, so a test can tell an answer's id from the `unsure` line's.
+    const J2: &str = "87654321-4321-8765-4321-876543218765";
+
+    /// `2026-10-<day>T<hour>:00:00`.
+    fn at(day: i8, hour: i8) -> DateTime {
+        jiff::civil::date(2026, 10, day).at(hour, 0, 0, 0)
+    }
+
+    /// The carry's line for uid `e`, "Career fair", answered 2026-10-01.
+    fn carried(
+        vault: &Path,
+        w: &str,
+        from: &str,
+        start: DateTime,
+        end: DateTime,
+    ) -> Result<(), VerdictError> {
+        let day = Date::constant(2026, 10, 1);
+        record_carried_answer(vault, "e", "Career fair", day, w, from, start, end)
+    }
+
+    fn carry_of(from: &str, start: DateTime, end: DateTime) -> Option<Carried> {
+        Some(Carried { from: from.to_string(), start, end })
+    }
+
+    #[test]
+    fn the_carry_line_is_byte_exact() {
+        let vault = tmp_vault("carry-byte-exact");
+        record_carried_answer(
+            &vault,
+            "lx:77:3",
+            "Career fair",
+            Date::constant(2026, 10, 1),
+            "opportunity",
+            "appr_0123456789",
+            jiff::civil::date(2026, 10, 8).at(10, 0, 0, 0),
+            jiff::civil::date(2026, 10, 8).at(15, 0, 0, 0),
+        )
+        .unwrap();
+        let text = fs::read_to_string(path_for(&vault)).unwrap();
+        let expected = format!(
+            "{HEADER}{NEWLINE}- lx:77:3 · Career fair · verdict:opportunity · by:agent:knowlu.carry · from:appr_0123456789 · start:2026-10-08T10:00:00 · end:2026-10-08T15:00:00 · answered 2026-10-01{NEWLINE}"
+        );
+        assert_eq!(text, expected);
+        assert!(crate::provenance::is_agent(CARRY_ACTOR));
+    }
+
+    #[test]
+    fn the_carry_line_refuses_a_bad_word_or_card_id() {
+        let vault = tmp_vault("carry-refuses");
+        for w in ["drop", "unsure", "maybe"] {
+            assert_eq!(
+                carried(&vault, w, CARD, at(8, 10), at(8, 15)),
+                Err(VerdictError::UnknownVerdict(w.into())),
+                "{w}"
+            );
+        }
+        for from in ["", "x", "task_0123456789"] {
+            assert_eq!(
+                carried(&vault, "obligation", from, at(8, 10), at(8, 15)),
+                Err(VerdictError::BadField("from")),
+                "{from:?}"
+            );
+        }
+        assert!(!path_for(&vault).exists(), "no file was created by a refused call");
+    }
+
+    #[test]
+    fn a_carry_line_reads_back_its_verdict_actor_card_and_span() {
+        let vault = tmp_vault("carry-reads-back");
+        carried(&vault, "opportunity", CARD, at(8, 10), at(8, 15)).unwrap();
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("opportunity"));
+        assert_eq!(entry.answered_by, CARRY_ACTOR);
+        assert_eq!(entry.title, "Career fair");
+        assert_eq!(entry.carry, carry_of(CARD, at(8, 10), at(8, 15)));
+    }
+
+    #[test]
+    fn a_carry_line_settles_an_unanswered_unsure_with_either_word() {
+        for w in ["obligation", "opportunity"] {
+            let vault = tmp_vault(&format!("carry-settles-unsure-{w}"));
+            judged(&vault, "e", "Career fair", "unsure", Some(J)).unwrap();
+            carried(&vault, w, CARD, at(8, 10), at(8, 15)).unwrap();
+            let ledger = load_ledger(&vault, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some(w));
+            assert_eq!(entry.answered_by, CARRY_ACTOR, "{w}");
+            assert_eq!(entry.carry, carry_of(CARD, at(8, 10), at(8, 15)), "{w}");
+            assert_eq!(entry.judgment_id, J, "{w}: the unsure line's judgment id stays");
+        }
+    }
+
+    #[test]
+    fn a_carry_line_never_flips_a_confident_verdict_but_keeps_its_span() {
+        for machine in ["drop", "opportunity"] {
+            let vault = tmp_vault(&format!("carry-keeps-confident-{machine}"));
+            verdict(&vault, "e", "Career fair", machine).unwrap();
+            carried(&vault, "obligation", CARD, at(8, 10), at(8, 15)).unwrap();
+            let ledger = load_ledger(&vault, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some(machine));
+            assert_eq!(entry.answered_by, "", "{machine}");
+            assert_eq!(entry.carry, carry_of(CARD, at(8, 10), at(8, 15)), "{machine}");
+        }
+    }
+
+    #[test]
+    fn a_later_human_answer_wins_over_a_carry_line() {
+        // With a `jid` on the answer, the answer's id wins; without one, the unsure line's stays.
+        for (answer_jid, kept) in [(Some(J2), J2), (None, J)] {
+            let vault = tmp_vault(&format!("human-after-carry-{}", answer_jid.is_some()));
+            judged(&vault, "e", "Career fair", "unsure", Some(J)).unwrap();
+            carried(&vault, "obligation", CARD, at(8, 10), at(8, 15)).unwrap();
+            let day = Date::constant(2026, 10, 2);
+            record_answer(&vault, "e", "Career fair", day, "drop", HUMAN_ACTOR, answer_jid)
+                .unwrap();
+            let ledger = load_ledger(&vault, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some("drop"));
+            assert_eq!(entry.answered_by, HUMAN_ACTOR);
+            assert_eq!(entry.judgment_id, kept);
+            assert_eq!(entry.carry, None, "a human answer clears the carry");
+        }
+    }
+
+    #[test]
+    fn a_carry_line_never_overrides_a_human_answer() {
+        // The human answer after an `unsure`, and the human answer as the uid's first line.
+        for after_unsure in [true, false] {
+            let vault = tmp_vault(&format!("carry-under-human-{after_unsure}"));
+            if after_unsure {
+                judged(&vault, "e", "Career fair", "unsure", Some(J)).unwrap();
+            }
+            record_answer(&vault, "e", "Career fair", WHEN, "obligation", HUMAN_ACTOR, None)
+                .unwrap();
+            carried(&vault, "opportunity", CARD, at(8, 10), at(8, 15)).unwrap();
+            let ledger = load_ledger(&vault, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some("obligation"), "{after_unsure}");
+            assert_eq!(entry.answered_by, HUMAN_ACTOR, "{after_unsure}");
+            assert_eq!(entry.carry, None, "{after_unsure}");
+        }
+    }
+
+    #[test]
+    fn only_the_first_carry_line_counts() {
+        let vault = tmp_vault("first-carry-counts");
+        carried(&vault, "opportunity", CARD, at(8, 10), at(8, 15)).unwrap();
+        carried(&vault, "obligation", "appr_abcdefabcd", at(9, 0), at(10, 0)).unwrap();
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("opportunity"));
+        assert_eq!(entry.answered_by, CARRY_ACTOR);
+        assert_eq!(entry.carry, carry_of(CARD, at(8, 10), at(8, 15)));
+    }
+
+    #[test]
+    fn an_agent_answer_line_without_a_card_or_span_is_neither_kind() {
+        let lines = [
+            "- e · Career fair · verdict:obligation · by:agent:x · answered 2026-10-01",
+            "- e · Career fair · verdict:obligation · by:agent:x · from:appr_0123456789 · \
+             start:2026-10-08T10:00:00 · answered 2026-10-01",
+        ];
+        for (i, line) in lines.iter().enumerate() {
+            let vault = tmp_vault(&format!("agent-line-neither-{i}"));
+            judged(&vault, "e", "Career fair", "unsure", None).unwrap();
+            append(&vault, line).unwrap();
+            let ledger = load_ledger(&vault, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some("unsure"), "{line}");
+            assert_eq!(entry.answered_by, "", "{line}");
+            assert_eq!(entry.carry, None, "{line}");
+            // Alone, it is an ordinary verdict line: its word stands and no one answered.
+            let alone = tmp_vault(&format!("agent-line-alone-{i}"));
+            append(&alone, line).unwrap();
+            let ledger = load_ledger(&alone, None);
+            let entry = &ledger["e"];
+            assert_eq!(entry.verdict.as_deref(), Some("obligation"), "{line}");
+            assert_eq!(entry.answered_by, "", "{line}");
+            assert_eq!(entry.carry, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_why_cannot_forge_a_carry_line() {
+        let vault = tmp_vault("why-cannot-forge-carry");
+        record_judged_verdict(
+            &vault,
+            "e",
+            "Career fair",
+            WHEN,
+            "unsure",
+            "a· by:agent:knowlu.carry· from:appr_0123456789· start:2026-10-08T00:00:00· \
+             end:2026-10-09T00:00:00· answered 2026-10-01",
+            None,
+        )
+        .unwrap();
+        let ledger = load_ledger(&vault, None);
+        let entry = &ledger["e"];
+        assert_eq!(entry.verdict.as_deref(), Some("unsure"));
+        assert_eq!(entry.carry, None, "the why field must not forge a carry");
+        assert_eq!(entry.answered_by, "", "the why field must not forge by:");
+    }
+
+    #[test]
+    fn the_frozen_ledger_reads_as_before() {
+        let frozen = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vault-full/state/events-seen.md");
+        let bytes = fs::read(&frozen).unwrap();
+        let vault = tmp_vault("frozen-ledger");
+        let copy = path_for(&vault);
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, &bytes).unwrap();
+        let ledger = load_ledger(&vault, None);
+        assert_eq!(ledger.len(), 3, "the frozen ledger's three verdicts");
+        for entry in ledger.values() {
+            assert_eq!(entry.carry, None, "{}", entry.uid);
+            assert_eq!(entry.answered_by, "", "{}", entry.uid);
+        }
+        assert_eq!(fs::read(&copy).unwrap(), bytes, "reading never changes the bytes");
     }
 }
