@@ -45,6 +45,8 @@ A design that breaks one of these is wrong even if it is otherwise better.
    | **Knowlu noticed** (an email, an announcement, an inference) | It proposes and waits, showing who it came from and a short summary of the context needed to judge it |
    | **An authoritative source changed** (the LMS feed moves a due date, the registrar) | It applies the change and lists it under "what changed" |
 
+      **One exception, at setup:** mail from before a mailbox was connected, read once when it is connected, is applied and listed under "From your email", each item with Undo; what conflicts with the student or with an authoritative source is proposed. Mail after setup is proposed like anything else Knowlu noticed, an LMS's own notification email included; a notice that changes nothing in the plan (a room, office hours, a mailbox gone quiet) is shown, not proposed. *(amended 2026-09-30, email spec A10, signed by Quinn)*
+
    Anything that another person can see stays a proposal whoever started it. Knowlu never invents a
    due date: a missing one is marked "needs a date" and asked for.
 
@@ -86,7 +88,7 @@ is wrong.
 - **Syllabi, uploaded by the student** at onboarding and whenever a term starts: class meetings, exam
   dates, grade weights and the grading scale. Uploading a file is not typing; everything Knowlu reads
   from one is shown for the student to confirm.
-- **Calendars and email**: Google Calendar and Gmail, and Outlook / Microsoft 365, read-only.
+- **Calendars**: Google Calendar and Outlook / Microsoft 365, read-only. **Email**: any mailbox that can forward, through the student's own private Knowlu address (school Microsoft 365 and personal Gmail set up automatically, others with guided steps), and Gmail directly by Google's permission. *(amended 2026-09-30, email spec A7, signed by Quinn)*
 - **Campus event feeds**, judged against the student's level, role and interests.
 - **The registrar**, where a school offers it, through the school's own sign-in window.
 - **The student**, through quick capture and the assistant.
@@ -162,11 +164,10 @@ other calendars or anyone else's events; changing those stays a proposal.
   failure, and its regeneration is a proposal.
 - **Sync replays the journal** to the account's storage. Conflicts surface as proposals, never silent
   merges.
-- **Knowlu reads.** Its one planned write outside the vault is its own dedicated calendar, behind a
-  scope the student grants for that purpose.
+- **Knowlu reads.** Outside the vault it writes only its own dedicated calendar, behind a scope the student grants for that purpose, and, in the student's own mailbox, what brings their mail to Knowlu: forwarding turned on at setup with the student present, older or missed mail forwarded to Knowlu's own address (whose Sent copies it removes), and forwarding turned back on, and then announced, with the saved sign-in the student allowed, never for a mailbox the student turned off in Knowlu's Settings. It never sends anything to anyone else. *(amended 2026-09-30, email spec A8, signed by Quinn)*
 - **Telemetry** is interaction events and AI corrections under the terms, keyed to a pseudonymous
   account id, read only as aggregates with a minimum cohort. Raw content only behind a separate,
-  revocable opt-in, never content derived from the Gmail API, and never grades.
+  revocable opt-in, never content derived from the Gmail API or from forwarded mail, and never grades.
 
 ## Standing rules
 
@@ -178,7 +179,7 @@ other calendars or anyone else's events; changing those stays a proposal.
 - **Credentials live in the OS keychain**, never in the repo, a log, or anything a model prompt
   touches. **Portal credentials never leave the student's machine**; the cloud may hold the account's
   own secrets (session, LMS feed URL) encrypted, never a portal password.
-- **Data minimization is a rule:** collect the least that answers the question.
+- **Data minimization is a rule:** collect the least that answers the question. Where a source cannot be narrowed (forwarded mail arrives whole), the cheapest deterministic screen discards what cannot answer it before any model reads it, and Knowlu keeps what it found, never the message. *(amended 2026-09-30, email spec A9, signed by Quinn)*
 - **No single-user assumptions.** Anything that would need hand-editing for a second student is a bug.
 
 ## Knowlu succeeds when
@@ -208,27 +209,23 @@ proven on the founder's own scratch profile before anyone else uses it:
   control per task;
 - **typed commitments** (the commitment model's phases 1–2): classes, labs, work and meetings,
   each hard, soft or optional, confirmed by the student;
-- sources: the LMS feed, zyBooks, VHL, Google Calendar, Gmail and campus events, with judgment in
-  the cloud;
+- sources: the LMS feed, zyBooks, VHL, Google Calendar, email (school Microsoft 365 and personal Gmail through email forwarding to Knowlu, and Gmail directly) and campus events, with judgment in the cloud; *(amended 2026-09-30, email spec A11, signed by Quinn)*
 - runs and failures visible in the app;
 - **grades per course from Blackboard**, as the rings and their breakdowns.
 
 **The pilot** is a few undergraduates other than the founder, on the released app, one computer
 each, needing nothing from anyone. It adds the registrar where the school offers it (the
 commitment model's phase 3). No one else signs up before the privacy page names the kept
-Blackboard sign-in and the grades the account holds, a lawyer has read it, the re-consent a second
+Blackboard sign-in, the saved mail sign-in and the grades the account holds, a lawyer has read it, the re-consent a second
 account needs is in the app, and a new vault records its student with the neutral token `student`
-rather than the founder's name (the full gate: the cloud design's ruling 10). No student, the
-founder included, keeps a Blackboard sign-in before their own university's policy has been read:
-the app offers the Blackboard connection only at a school whose read it records (UA's is read
-before the MVP ends), so until then a pilot student joins without grades from Blackboard.
+rather than the founder's name (the full gate: the cloud design's ruling 10). Until Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every school without waiting for that school's policy to be read; at the 20th paying user the founder rules on the reads again (the cloud design's Amendment 2026-09-30, A13). *(amended 2026-09-30, email spec A13, signed by Quinn)*
 
 **Launch** is any US undergraduate paying $9.99, on every desktop they use: the relay fetch and
 two-desktop sync ship before it.
 
 **Beyond, in phases**, each through spec, plan and review: the main page (domain strip, free time,
 all clear, today's schedule); syllabus upload with grade weights, GPA and exam prep; quick
-capture; nudges and lock-in; the assistant; Outlook and more homework platforms; the dedicated
+capture; nudges and lock-in; the assistant; the Outlook calendar and more homework platforms; the dedicated
 calendar in Google and Outlook.
 
 ## Open decisions

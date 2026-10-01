@@ -320,3 +320,14 @@ migrations the push applied, the seven function versions, and S1–S8 pass or fa
 "Staging carries …" line changes in the next docs batch, and §4's parity row gains the missing rows
 from §9. This note is not edited to record results. If the run turns up a correction, that goes in
 a dated addendum at the end.
+
+## Addendum 2026-09-30 (the run)
+
+What the run turned up. The body above is unchanged.
+
+- **Run the CLI from `cloud/`.** Outside it the CLI answers `Cannot find project ref`.
+- **The proof account's entitlement was `none`**, so S3-S8 answered 402. For the run it was set to
+  `active`, and set back to `none` after (Quinn's call that day).
+- **S6 can answer reason `revoked`.** An account with a revoked Google grant does; that is a pass,
+  like `no_gmail_scope`.
+- **S7 with `grades/` now answers 200.**
