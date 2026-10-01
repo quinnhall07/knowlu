@@ -98,6 +98,65 @@ pub struct Loaded {
     /// preview, against the current window). `None` with no planning-day note, and whenever the
     /// windows or the plans are equal.
     pub moved: Option<crate::commitments::Moved>,
+    /// The accepted events `archive/` and `commitments/` name, read once for the page (T4b).
+    pub(crate) accepted: AcceptedEvents,
+}
+
+/// One lane-shaped instance of an accepted event (all-day, multi-day or zero-length).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaneInstance {
+    pub uid: String,
+    pub title: String,
+    pub first: Date,
+    pub last: Date,
+}
+
+/// What the page reads as accepted: the uid set, and the instances the all-day lane draws.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AcceptedEvents {
+    pub uids: std::collections::BTreeSet<String>,
+    /// De-duplicated by uid, in `(first day, title, uid)` order, so the lane's order is total.
+    pub lane: Vec<LaneInstance>,
+}
+
+/// What `archive/` and `commitments/` say the student accepted (spec §4.2's lane, Q1b (i), P4, P8).
+/// Read-only, and it reads no ledger: T4c adds the carry's lines.
+///
+/// - `archive/`: every `executed` `event-accept` or `event-check` card's `instances:`. Each
+///   instance's uid is accepted; one whose [`crate::eventaccept::shape`] is all-day, multi-day or
+///   zero-length (a lane shape) is also a lane instance, its days `first..=last`. An `instances:`
+///   entry that does not read back is skipped, as is an unreadable note.
+/// - `commitments/`: the `source_uid` of every confirmed `kind: event` note, which the carry books
+///   for a later instance of an accepted series (a card names only the instances it listed).
+fn accepted_events(vault: &Path) -> AcceptedEvents {
+    use crate::eventaccept::{shape, Instance};
+    let mut out = AcceptedEvents::default();
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = crate::pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        let kind = meta_text(Some(&meta), "kind").unwrap_or_default();
+        let is_event_card = kind == "event-accept" || kind == "event-check";
+        let field_is = |key: &str, want: &str| meta_text(Some(&meta), key).is_some_and(|v| v.trim() == want);
+        if !is_event_card || !field_is("type", "approval") || !field_is("status", "executed") {
+            continue;
+        }
+        let Some(serde_yaml_ng::Value::Sequence(items)) = crate::yaml::get(&meta, "instances") else { continue };
+        for item in items {
+            let Some(instance) = item.as_mapping().and_then(Instance::from_yaml) else { continue };
+            out.uids.insert(instance.uid.clone());
+            let Some((first, last)) = shape(instance.start, instance.end).lane() else { continue };
+            if out.lane.iter().all(|lane| lane.uid != instance.uid) {
+                out.lane.push(LaneInstance { uid: instance.uid, title: instance.title, first, last });
+            }
+        }
+    }
+    for note in crate::commitments::load(vault).confirmed {
+        if let (true, Some(uid)) = (note.kind == "event", note.source_uid) {
+            out.uids.insert(uid);
+        }
+    }
+    out.lane.sort_by(|a, b| (a.first, &a.title, &a.uid).cmp(&(b.first, &b.title, &b.uid)));
+    out
 }
 
 /// The one place the vault is read for the page: notes, calendar snapshot, and the ranking and
@@ -159,7 +218,8 @@ fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
     let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
     let moved = against
         .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved }
+    let accepted = accepted_events(vault);
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -963,6 +1023,9 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
             blocks.push(DayBlock { start: hm(e.start), end: hm(e.end), kind: "busy".into(), label: e.title.clone(), hours: hours_between(e.start, e.end), takes: Vec::new() });
         }
     }
+    // An accepted all-day, multi-day or zero-length event has no commitment (P4, PQ2): it is drawn
+    // here on each day it covers, after the calendar's own entries, and never touches capacity.
+    all_day.extend(l.accepted.lane.iter().filter(|e| e.first <= today && today <= e.last).map(|e| e.title.clone()));
     // Classes are the gaps between the TEMPLATE's classes alone inside the day window —
     // `template_only_blocks` (weekcal.rs) has no commitment span folded in, so a confirmed club
     // is never mistaken for a class gap here (R15); the commitment spans draw their own blocks
@@ -1074,6 +1137,9 @@ pub struct ComingUp {
     pub when: String,
     pub location: String,
     pub organizer: String,
+    /// The student accepted this event (P8). Absent from the JSON when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub accepted: bool,
 }
 
 /// The next five relevant events, read the same way `cli::run`'s events step assembles them for
@@ -1091,9 +1157,11 @@ pub fn coming_up(vault: &Path, today: Date, now: DateTime) -> Vec<ComingUp> {
             crate::render::ComingUpEvent { uid: e.uid, title: e.title, start, location: e.location, organizer: e.organizer }
         })
         .collect();
+    let accepted = accepted_events(vault).uids;
     crate::render::upcoming(&events, today, Some(now))
         .into_iter()
         .map(|e| ComingUp {
+            accepted: accepted.contains(&e.uid),
             when: format!("{} {} {}", WEEKDAYS[e.start.date().weekday().to_monday_zero_offset() as usize], short_date(e.start.date()), hm(e.start)),
             start: e.start.strftime("%Y-%m-%dT%H:%M").to_string(),
             uid: e.uid,
@@ -3395,5 +3463,180 @@ mod moved_tests {
         }
         assert!(build_state_preview(&v, View::Week, DAY, &now(), None, WEEKDAYS_22).is_err());
         let _ = std::fs::remove_dir_all(&v);
+    }
+}
+
+/// T4b — the all-day lane and "Accepted": an accepted event reads from `archive/` cards and
+/// `commitments/` only (the carry's ledger lines are T4c's), and `surface` still writes nothing.
+#[cfg(test)]
+mod accepted_tests {
+    use super::tests::{fixture_full, TODAY};
+    use super::*;
+    use crate::events::DiscoveredEvent;
+    use std::path::PathBuf;
+
+    fn at(day: i8, hour: i8, minute: i8) -> DateTime {
+        Date::constant(2026, 8, day).at(hour, minute, 0, 0)
+    }
+
+    fn event(uid: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+        DiscoveredEvent::new(uid, &format!("Event {uid}"), start, end, "campus")
+    }
+
+    /// An archived `event-accept` or `event-check` card in the emitter's shape, `instances:` listing
+    /// `listed`. `status` is `executed` for an Accept.
+    fn card(vault: &Path, name: &str, kind: &str, status: &str, listed: &[&DiscoveredEvent]) {
+        use crate::yamlemit::Node;
+        let pairs = vec![
+            ("id", Node::text("appr_0123456789")),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(kind)),
+            ("title", Node::text("Required · an event")),
+            ("status", Node::text(status)),
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(&listed[0].series_uid)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+            (
+                "instances",
+                Node::Seq(listed.iter().map(|e| crate::eventaccept::Instance::from_event(e).to_node()).collect()),
+            ),
+            ("created_by", Node::text("events")),
+        ];
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        crate::pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    fn lane_on(vault: &Path, day: Date) -> Vec<String> {
+        the_day(&load(vault, day), day).all_day
+    }
+
+    #[test]
+    fn an_accepted_two_day_event_is_in_the_all_day_lane_on_each_day() {
+        let v = fixture_full();
+        let day = |n: i8| Date::constant(2026, 8, n);
+        let open = |n: i8| the_day(&load(&v, day(n)), day(n)).open_hours;
+        let before: Vec<f64> = (27..=31).map(open).collect();
+        // Fri 28 00:00 to Sun 30 00:00: Fri and Sat, both inclusive. A zero-length event on Mon 31.
+        let two_day = event("lx:1:1", at(28, 0, 0), at(30, 0, 0));
+        let zero = event("lx:2:1", at(31, 10, 0), at(31, 10, 0));
+        card(&v, "event-two-day.md", "event-accept", "executed", &[&two_day]);
+        card(&v, "event-zero.md", "event-check", "executed", &[&zero]);
+        let after: Vec<f64> = (27..=31).map(open).collect();
+        assert_eq!(before, after, "the lane never moves capacity");
+        assert!(lane_on(&v, day(27)).is_empty(), "the day before lists nothing");
+        assert_eq!(lane_on(&v, day(28)), ["Event lx:1:1"]);
+        assert_eq!(lane_on(&v, day(29)), ["Event lx:1:1"]);
+        assert!(lane_on(&v, day(30)).is_empty(), "the day after lists nothing");
+        assert_eq!(lane_on(&v, day(31)), ["Event lx:2:1"], "a zero-length event is on its own day");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_lane_is_ordered_by_first_day_title_and_uid() {
+        let v = fixture_full();
+        let mut b = event("lx:b:1", at(28, 0, 0), at(29, 0, 0));
+        b.title = "Same".into();
+        let mut a = event("lx:a:1", at(28, 0, 0), at(29, 0, 0));
+        a.title = "Same".into();
+        let mut early = event("lx:c:1", at(27, 0, 0), at(29, 0, 0));
+        early.title = "Zed".into();
+        card(&v, "event-1.md", "event-accept", "executed", &[&b, &a]);
+        card(&v, "event-2.md", "event-accept", "executed", &[&early]);
+        let l = load(&v, TODAY);
+        let order: Vec<String> = l.accepted.lane.iter().map(|i| i.uid.clone()).collect();
+        assert_eq!(order, ["lx:c:1", "lx:a:1", "lx:b:1"]);
+        assert_eq!(the_day(&l, TODAY).all_day, ["Zed", "Same", "Same"]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn an_unanswered_or_declined_card_adds_nothing_to_the_lane() {
+        let v = fixture_full();
+        let e = event("lx:1:1", at(28, 0, 0), at(29, 0, 0));
+        card(&v, "event-a.md", "event-accept", "rejected", &[&e]);
+        card(&v, "event-b.md", "event-accept", "expired", &[&e]);
+        card(&v, "event-c.md", "event-accept", "pending", &[&e]);
+        assert!(lane_on(&v, TODAY).is_empty());
+        assert!(accepted_events(&v).uids.is_empty());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A vault holding only a roster and its verdict ledger, as `rank` leaves them.
+    fn coming_up_vault(events: &[(DiscoveredEvent, &str)]) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qo-t4b-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        for (e, verdict) in events {
+            crate::eventledger::record_verdict(&dir, &e.uid, &e.title, TODAY, verdict, "", "", "").unwrap();
+        }
+        let list: Vec<DiscoveredEvent> = events.iter().map(|(e, _)| e.clone()).collect();
+        let ledger = crate::eventledger::load_ledger(&dir, None);
+        let path = dir.join("state").join("events.md");
+        crate::eventroster::write_roster(&path, &list, &ledger, &Default::default(), TODAY, &[]).unwrap();
+        dir
+    }
+
+    fn sep(day: i8, from: (i8, i8), to: (i8, i8)) -> (DateTime, DateTime) {
+        let d = Date::constant(2026, 9, day);
+        (d.at(from.0, from.1, 0, 0), d.at(to.0, to.1, 0, 0))
+    }
+
+    #[test]
+    fn an_accepted_event_is_marked_in_coming_up() {
+        let (s, e) = sep(2, (16, 0), (17, 0));
+        let timed = event("lx:t:1", s, e);
+        let allday = event("lx:d:1", Date::constant(2026, 9, 3).at(0, 0, 0, 0), Date::constant(2026, 9, 4).at(0, 0, 0, 0));
+        let (s, e) = sep(4, (10, 0), (11, 0));
+        let booked_hard = event("lx:h:1", s, e);
+        let (s, e) = sep(5, (10, 0), (11, 0));
+        let booked_check = event("lx:k:1", s, e);
+        let (s, e) = sep(6, (10, 0), (11, 0));
+        let open = event("lx:u:1", s, e);
+        let v = coming_up_vault(&[
+            (timed.clone(), "obligation"),
+            (allday.clone(), "obligation"),
+            (booked_hard.clone(), "obligation"),
+            (booked_check.clone(), "opportunity"),
+            (open, "obligation"),
+        ]);
+        card(&v, "event-timed.md", "event-accept", "executed", &[&timed]);
+        card(&v, "event-allday.md", "event-check", "executed", &[&allday]);
+        // The carry's booking of a later instance of a series: a `kind: event` commitment, no card.
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        for (id, uid) in [("cmt_hhhhhhhhhh", &booked_hard.uid), ("cmt_kkkkkkkkkk", &booked_check.uid)] {
+            std::fs::write(
+                v.join("commitments").join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: commitment\nkind: event\nlevel: hard\ntitle: \"An event\"\n\
+                     meets: [{{days: [fri], start: \"10:00\", end: \"11:00\"}}]\n\
+                     source_uid: \"{uid}\"\nstatus: confirmed\n---\n\nbody\n"
+                ),
+            )
+            .unwrap();
+        }
+        let rows = coming_up(&v, TODAY, TODAY.at(9, 0, 0, 0));
+        let marks: Vec<(&str, bool)> = rows.iter().map(|r| (r.uid.as_str(), r.accepted)).collect();
+        assert_eq!(marks, [("lx:t:1", true), ("lx:d:1", true), ("lx:h:1", true), ("lx:k:1", true), ("lx:u:1", false)]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn accepted_is_absent_from_the_json_when_false() {
+        let row = ComingUp {
+            uid: "lx:1".into(),
+            title: "T".into(),
+            start: "2026-09-02T16:00".into(),
+            when: "Wed 9/2 16:00".into(),
+            location: String::new(),
+            organizer: String::new(),
+            accepted: false,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(!json.contains("accepted"), "{json}");
+        let json = serde_json::to_string(&ComingUp { accepted: true, ..row }).unwrap();
+        assert!(json.contains("\"accepted\":true"), "{json}");
     }
 }
