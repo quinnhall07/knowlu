@@ -86,6 +86,10 @@ pub mod surface;
 // `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.
 pub mod commitments;
 
+// Grades from Blackboard (M1 spec 2026-09-29): the pure half — the capture bundle, course matching,
+// one column into the fields of a `grades/` note, and a course's standing. No I/O here.
+pub mod grades;
+
 // The console's write path (Knowlu plan 1): interaction events only, through the same
 // `JsonlLedger` seam as the journal. Never read by the engine.
 pub mod uievents;

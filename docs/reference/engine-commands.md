@@ -11,6 +11,29 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
   zyBooks 403s without a `User-Agent`; VHL is CAS with a one-time `lt` ticket and a dashboard on
   `m3a.vhlcentral.com`.
+- `grades --vault <v> --input <bundle> [--via <via>] [--run-id <id>]` — a Blackboard capture
+  bundle (M1 spec §5, version 1; the app writes it into its own data, never the vault) into
+  `grades/`: one note per gradebook column at `grades/<course-slug>-<column-id-slug>.md`, id
+  `ids::derived_id("grade", path)`, matched to a course note by its `code:` (`membership.courseId`,
+  else `course.courseId`, else `course.id`; nothing is created in `courses/`). New columns are
+  `write::create`d and existing notes get only the fields that differ, so an unchanged gradebook
+  writes no journal record; a column gone from a matched course becomes `status: removed`. Writes as
+  `agent:knowlu.grades` and drops, before every write, each field `Journal::human_set` shows the
+  student set. Gated like `coursework`. Holds `state/sync.lock` (`sync::RunLock`, the lock every
+  sync takes) from its first read of the vault to its exit, because `grades/` is a synced folder;
+  finding it held, it writes nothing and prints `grades (skipped: the vault is busy with a sync or
+  another grades run)` at exit 0. A bundle whose `fetched_at` is strictly older than the one
+  `state/grades.json` records (compared as instants; a recorded stamp that does not parse, or is
+  later than now, orders nothing) writes nothing and prints `grades (skipped: a newer capture is
+  already applied)` at exit 0, so the slot's early capture never undoes a Refresh made while it
+  waited. Otherwise rewrites `state/grades.json` (`fetched_at`, `host`, the
+  course counts `matched`/`skipped`/`failed`; device-local, never synced). Output is counts, course
+  codes, note paths and error codes only — never a column name, category or score (spec §11):
+  `grades: 2 courses, 3 changed items`, `grades: <code> not matched`, `grades: <code> failed (403)`,
+  `grades: <path> not written (<kind>)`; the same lines, joined with `; `, go to
+  `state/runner-log.md`. Exits 0 for every per-course outcome; 1 only for a missing or unparseable
+  bundle (or a schema other than 1), whose line names serde's category, line and column, never the
+  offending value.
 - `coursework-discover [--vault <v>] [--zybooks-target <t>] [--vhl-target <t>]` — read-only: the
   zyBooks books and VHL sections the stored logins can see, as JSON (`errors`, `vhl`, `zybooks`, each
   row marked `mapped` against the vault's `course_map`). Always exits 0; the wizard's mapping rows

@@ -236,7 +236,7 @@ fn the_line_a_student_reads_names_the_step_and_the_reason() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs"),
     ).expect("engine/src/main.rs");
     assert!(main.contains(r#"println!("{line}");"#), "the gate must print the one composed line");
-    for word in ["\"coursework\"", "\"ingest\"", "\"judge\"", "\"sync\""] {
+    for word in ["\"coursework\"", "\"grades\"", "\"ingest\"", "\"judge\"", "\"sync\""] {
         assert!(main.contains(word), "name_of must answer for {word}");
     }
     // And the shape itself, spelled out once so a reader knows what to look for on the page.
@@ -320,17 +320,28 @@ fn a_spawned_binary_refuses_each_gated_command_at_exit_0_with_the_named_line() {
     // `.env("LOCALAPPDATA", &root)` points the child at this temp root without needing a real
     // profile — `oracle.rs` already spawns this same binary from this crate's tests, and the gate
     // returns before any Credential Manager or network call, since it precedes every match arm.
-    for cmd in ["coursework", "ingest", "judge", "sync"] {
+    for cmd in ["coursework", "grades", "ingest", "judge", "sync"] {
         let root = temp(&format!("spawn-{cmd}"));
         let vault = root.join("vault");
         cloud_yaml(&vault, "knowlu/profile_0a1b2c3d4e/session");
         cache(&root, "profile_0a1b2c3d4e", "canceled", "2026-09-17T06:00:00Z");
-        let out = Command::new(binary())
+        let mut child = Command::new(binary());
+        child
             .no_console()
             .env("LOCALAPPDATA", &root)
-            .args([cmd, "--vault", vault.to_str().expect("temp path is UTF-8")])
-            .output()
-            .expect("run knowlu-engine");
+            .args([cmd, "--vault", vault.to_str().expect("temp path is UTF-8")]);
+        if cmd == "grades" {
+            // M1 grades plan, T3C: `--input` is required, so without it clap exits 2 before the gate
+            // is ever asked. The bundle sits beside the vault, never in it (the app keeps it in its
+            // own data), and it is a real synthetic one, so were `grades` ever dropped from
+            // `gated_vault` this run would apply it and print its own summary, not the named line.
+            let input = root.join("bundle.json");
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests").join("fixtures").join("grades").join("bundle-basic.json");
+            std::fs::copy(&fixture, &input).expect("copy the synthetic bundle beside the vault");
+            child.arg("--input").arg(&input);
+        }
+        let out = child.output().expect("run knowlu-engine");
         assert!(out.status.success(), "{cmd}: exit {:?}, stderr {}", out.status.code(), String::from_utf8_lossy(&out.stderr));
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(stdout.trim_end(), format!("{cmd} (skipped: no entitlement)"), "{cmd}: {stdout:?}");

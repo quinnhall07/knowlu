@@ -392,10 +392,15 @@ pub fn get_settings_inner(cs: &ConsoleState) -> Result<Value, String> {
     Ok(json!({ "ok": true, "error": Value::Null, "settings": serde_json::to_value(&*cs.settings.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())? }))
 }
 
-/// Only `backup_dir` (string path; `null`/empty string clears it) and `autostart` (bool) may be
-/// set here — anything else is refused by name, never silently ignored. Toggling the OS
-/// autostart entry needs the `AppHandle`, which only the `#[tauri::command]` twin has, so it
-/// happens there, not here.
+/// Only `backup_dir` (string path; `null`/empty string clears it), `autostart` (bool) and
+/// `grades_hidden` (bool) may be set here — anything else is refused by name, never silently
+/// ignored. Toggling the OS autostart entry needs the `AppHandle`, which only the
+/// `#[tauri::command]` twin has, so it happens there, not here.
+///
+/// **`grades_hidden` is *Hide grades*** (M1 grades spec §2, §9; T9 finding 3): a row in this panel
+/// like the others, so the console's grades commands stay four. Its flag lives in
+/// `grades::GradesPrefs` (`grades.json`, spec §3), never in `settings.json`, and a patch that
+/// carries only it leaves `settings.json` untouched.
 ///
 /// R-T10: `serde_json::Map` iterates keys alphabetically, so a patch like `{"autostart": true,
 /// "unknown": 1}` would hit `autostart` before the refusal on `unknown` — mutating the live
@@ -405,8 +410,13 @@ pub fn get_settings_inner(cs: &ConsoleState) -> Result<Value, String> {
 pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Value>) -> Result<Value, String> {
     let mut s = cs.settings.lock().map_err(|_| "lock")?;
     let mut next = s.clone();
+    let mut grades_hidden = None;
     for (k, v) in &patch {
         match k.as_str() {
+            "grades_hidden" => match v.as_bool() {
+                Some(b) => grades_hidden = Some(b),
+                None => return Ok(json!({ "ok": false, "error": "grades_hidden must be true or false", "settings": Value::Null })),
+            },
             "backup_dir" => match v {
                 Value::Null => next.backup_dir = None,
                 Value::String(p) => next.backup_dir = (!p.is_empty()).then(|| std::path::PathBuf::from(p)),
@@ -417,6 +427,12 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
                 None => return Ok(json!({ "ok": false, "error": "autostart must be true or false", "settings": Value::Null })),
             },
             other => return Ok(json!({ "ok": false, "error": format!("{other} is not a setting you can change here"), "settings": Value::Null })),
+        }
+    }
+    if let Some(hidden) = grades_hidden {
+        crate::grades::GradesPrefs { hidden }.save(&cs.data_dir)?;
+        if patch.len() == 1 {
+            return Ok(json!({ "ok": true, "error": Value::Null, "settings": serde_json::to_value(&*s).map_err(|e| e.to_string())? }));
         }
     }
     next.save(&cs.settings_path)?;
