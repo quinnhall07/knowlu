@@ -1468,6 +1468,32 @@ fn transition_note(
             write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
             delete(vault, &rel, ctx, journal)?;
             result.executed.push(stem);
+        } else if kind == "event-accept" {
+            // Events spec §4.2 (D1, D10): the commitments and the register task first, the stamp
+            // second, as `event-check` does. A failed write leaves the card `approved` for the next
+            // run, and the ever-written set makes that retry write nothing twice. A card with no
+            // level or no payload (only a hand edit makes one) writes nothing and waits, as an
+            // approved `task` card with no payload does.
+            let level = match str_field(meta, "verdict").as_str() {
+                "obligation" => crate::commitments::Level::Hard,
+                "opportunity" => crate::commitments::Level::Soft,
+                _ => {
+                    result.warnings.push(format!("{name}: no verdict the settlement reads"));
+                    return Ok(());
+                }
+            };
+            let Some(warnings) = settle_event_accept(vault, meta, level, today, ctx, journal)? else {
+                result.warnings.push(format!("missing event payload: {name}"));
+                return Ok(());
+            };
+            result.warnings.extend(warnings.into_iter().map(|w| format!("{name}: {w}")));
+            let literals = vec![
+                ("status".to_string(), "executed".to_string()),
+                ("executed_at".to_string(), stamped),
+            ];
+            write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+            delete(vault, &rel, ctx, journal)?;
+            result.executed.push(stem);
         } else if kind == COMMITMENT_CHECK {
             // P13 (§5.2, §5.4): the confirmed note, the planning day or the change first, the
             // stamp second — a failed write leaves the card `approved` for the next run.
@@ -1722,6 +1748,64 @@ fn settle_event_check(
         recorded.map_err(|e| WriteError::Io(e.to_string()))?;
     }
     Ok(())
+}
+
+/// Write the notes an accepted event card books (events spec §4.2, D1, D10), from the card's own
+/// `instances:`. `process_approvals` runs with no feed at hand, so the payload is the only input.
+///
+/// For each entry (`eventaccept::Instance::from_yaml`) whose uid is not in
+/// `eventcarry::ever_written`, the commitment `eventaccept::commitment_for` gives at `level`
+/// through `commitments::create_confirmed` (actor `agent:commitments`, journal first). A lane shape
+/// (all-day, multi-day, zero-length) has none: the answer stands, and nothing warns. Then, for the
+/// primary (`source_uid`) alone, the "Register" task `eventaccept::register_task` gives, through
+/// `write::create` under `ctx`, unless `register:<uid>` is in the set; `-2`, `-3` on a name
+/// collision. The set reads `commitments/`, `tasks/` and `archive/`, approval cards left out, so a
+/// retry after a failed stamp writes nothing twice and a note the student deleted never returns.
+///
+/// `Ok(None)`: the card carries no `instances:` payload, and nothing was written. Otherwise the
+/// warnings, one per malformed entry, which is skipped. `Err` is a failed write: the caller leaves
+/// the card `approved`, and the next pass retries.
+fn settle_event_accept(
+    vault: &Path,
+    meta: &Mapping,
+    level: crate::commitments::Level,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<Vec<String>>, WriteError> {
+    let entries = match crate::yaml::get(meta, "instances") {
+        Some(Value::Sequence(entries)) if !entries.is_empty() => entries,
+        _ => return Ok(None),
+    };
+    let primary = truthy_str(meta, "source_uid");
+    let mut written = crate::eventcarry::ever_written(vault);
+    let mut warnings = Vec::new();
+    let mut register = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(instance) = entry.as_mapping().and_then(crate::eventaccept::Instance::from_yaml) else {
+            warnings.push(format!("bad instance entry {}", index + 1));
+            continue;
+        };
+        if instance.uid == primary && register.is_none() {
+            register = crate::eventaccept::register_task(&instance);
+        }
+        if written.contains(&instance.uid) {
+            continue;
+        }
+        let Some(commitment) = crate::eventaccept::commitment_for(&instance, level) else { continue };
+        crate::commitments::create_confirmed(vault, &commitment, &instance.uid, today, ctx, journal)?;
+        written.insert(instance.uid);
+    }
+    if let Some((stem, text)) = register.filter(|_| !written.contains(&format!("register:{primary}"))) {
+        let mut rel = format!("tasks/{stem}.md");
+        let mut suffix = 2;
+        while vault.join(&rel).exists() {
+            rel = format!("tasks/{stem}-{suffix}.md");
+            suffix += 1;
+        }
+        create(vault, &rel, &text, ctx, journal, None)?;
+    }
+    Ok(Some(warnings))
 }
 
 static PAYLOAD_FENCE: LazyLock<Regex> =
@@ -3952,6 +4036,382 @@ mod tests {
             let entry = &load_ledger(&v, None)["ics:fair-1"];
             assert_eq!(entry.verdict.as_deref(), Some("obligation"));
             assert_eq!(entry.answered_by, "unknown");
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The event-accept card (events spec §4.2, D1, D10; spec tests 9–12): Accept writes the
+    // commitment and the register task from the card's own `instances:`, then the stamp. Every
+    // title, place and uid is invented.
+    // -----------------------------------------------------------------------------------------
+
+    mod event_accept {
+        use super::*;
+        use crate::commitments::{Level, Meet, CARD_ACTOR};
+        use crate::eventledger::{load_ledger, record_judged_verdict};
+        use crate::events::{DiscoveredEvent, EventsConfig};
+        use jiff::civil::Time;
+
+        const J: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        const WHY: &str = "the listing says every first-year attends";
+        const URL: &str = "https://events.example.edu/e/1";
+
+        /// A 7–9pm campus event on 2026-08-`day`, in `series` (its own uid when empty).
+        fn event(uid: &str, series: &str, title: &str, day: i8) -> DiscoveredEvent {
+            DiscoveredEvent {
+                uid: uid.to_string(),
+                title: title.to_string(),
+                start: Some(Date::constant(2026, 8, day).at(19, 0, 0, 0)),
+                end: Some(Date::constant(2026, 8, day).at(21, 0, 0, 0)),
+                source: "campus".into(),
+                location: "Ferguson Center".into(),
+                url: URL.into(),
+                series_uid: series.to_string(),
+                ..Default::default()
+            }
+            .normalized()
+        }
+
+        /// `e`, with the feed saying registration is required, by `deadline` when it gives one.
+        fn registered(mut e: DiscoveredEvent, deadline: Option<Date>) -> DiscoveredEvent {
+            e.registration = true;
+            e.registration_deadline = deadline;
+            e
+        }
+
+        /// The one `event-accept` card the emitter files for `events`, each judged `verdict` first.
+        fn file_card(vault: &Path, events: &[DiscoveredEvent], verdict: &str) -> PathBuf {
+            for e in events {
+                record_judged_verdict(vault, &e.uid, &e.title, TODAY, verdict, WHY, Some(J)).unwrap();
+            }
+            let ledger = load_ledger(vault, None);
+            let config = EventsConfig { event_cards: true, ..EventsConfig::default() };
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(vault);
+            let (paths, count) = crate::eventemit::emit_event_accepts(
+                vault, events, &ledger, &config, TODAY, 15, verdict, &ctx, &mut journal,
+            );
+            assert_eq!(count, 1, "{paths:?}");
+            paths[0].clone()
+        }
+
+        /// The console's half of `decide_inner` (`app/src/commands.rs`): the status, set by the
+        /// vault's own human actor.
+        fn mark(vault: &Path, card: &Path, status: &str) {
+            let human = crate::journal::read_human_actor(vault).unwrap();
+            let console = WriteContext::new(human, "dashboard");
+            let mut journal = Journal::new(vault);
+            let literals = vec![("status".to_string(), status.to_string())];
+            let rel = rel_path(vault, card);
+            write_literals(vault, &rel, &literals, &console, &mut journal, &WriteOpts::default()).unwrap();
+        }
+
+        /// All of `decide_inner`: the status, then `process_approvals` under the default context.
+        fn decide(vault: &Path, card: &Path, status: &str) -> ApprovalsResult {
+            mark(vault, card, status);
+            run(vault)
+        }
+
+        fn archived(vault: &Path, card: &Path) -> PathBuf {
+            vault.join("archive").join(card.file_name().unwrap())
+        }
+
+        fn files(vault: &Path, folder: &str) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(vault.join(folder))
+                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            out.sort();
+            out
+        }
+
+        fn text(record: &crate::ledger::Record, key: &str) -> String {
+            record.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        }
+
+        /// The journal's `create` records under `folder/`, in order.
+        fn creates(vault: &Path, folder: &str) -> Vec<crate::ledger::Record> {
+            let prefix = format!("{folder}/");
+            journal_records(vault)
+                .into_iter()
+                .filter(|r| text(r, "op") == "create" && text(r, "path").starts_with(&prefix))
+                .collect()
+        }
+
+        /// A hand-written note at `rel`, written outside the engine (no journal record).
+        fn seed(vault: &Path, rel: &str, front: &str) {
+            let path = vault.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            pystr::write_text(&path, &format!("---\n{front}\n---\n\nMine.\n")).unwrap();
+        }
+
+        fn at(h: i8, m: i8) -> Time {
+            Time::new(h, m, 0, 0).unwrap()
+        }
+
+        #[test]
+        fn approving_an_obligation_card_writes_a_hard_commitment() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            assert_eq!(proposal_weight(&front(&card)), 1);
+            let card_rel = rel_path(&v, &card);
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            let note = v.join("commitments").join("career-fair.md");
+            for (key, want) in [
+                ("type", "commitment"),
+                ("kind", "event"),
+                ("level", "hard"),
+                ("title", "Career fair"),
+                ("where", "Ferguson Center"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:fair-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            assert!(read(&note).ends_with("\n\nYou accepted this from your campus events.\n"), "{}", read(&note));
+            // The one-day `meets` (Tuesday 25 Aug, 7–9pm), as `commitments::load` reads it back.
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Hard);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(19, 0), end: at(21, 0) }]);
+            assert!(files(&v, "tasks").is_empty(), "no registration, no task");
+
+            // The journal: the note's `create` (as `agent:commitments`, carrying its id), then the
+            // card's stamp, then its move to `archive/`.
+            let records = journal_records(&v);
+            let index = |wanted: &dyn Fn(&crate::ledger::Record) -> bool| {
+                records.iter().position(wanted).expect("the record is journaled")
+            };
+            let created = index(&|r| text(r, "op") == "create" && text(r, "path") == "commitments/career-fair.md");
+            let stamped = index(&|r| text(r, "op") == "set" && text(r, "path") == card_rel && text(r, "new") == "executed");
+            let moved = index(&|r| text(r, "op") == "delete" && text(r, "path") == card_rel);
+            assert!(created < stamped && stamped < moved, "{created} {stamped} {moved}");
+            assert_eq!(text(&records[created], "actor"), CARD_ACTOR);
+            assert_eq!(text(&records[created], "id"), field(&note, "id"));
+
+            assert!(!card.exists());
+            let archived = archived(&v, &card);
+            assert_eq!(field(&archived, "status"), "executed");
+            assert!(!field(&archived, "executed_at").is_empty());
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn approving_an_opportunity_card_writes_a_soft_commitment() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:talk-1", "", "Engineering talk", 26)], "opportunity");
+            assert_eq!(field(&card, "verdict"), "opportunity");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+            assert_eq!(files(&v, "commitments"), vec!["engineering-talk.md"]);
+            let note = v.join("commitments").join("engineering-talk.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "soft"),
+                ("from", "2026-08-26"),
+                ("until", "2026-08-26"),
+                ("source_uid", "ics:talk-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            let set = crate::commitments::load(&v);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Soft);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["wed"], start: at(19, 0), end: at(21, 0) }]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn registration_writes_the_register_task() {
+            // With a deadline: a two-date series books both dates and writes one task, the
+            // primary's, due at the deadline at 23:59, under the pass's own context.
+            let v = vault();
+            let deadline = Some(Date::constant(2026, 8, 23));
+            let series = [
+                registered(event("lx:7:1", "lx:7", "Resume clinic", 25), deadline),
+                registered(event("lx:7:2", "lx:7", "Resume clinic", 27), deadline),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments").len(), 2);
+            assert_eq!(files(&v, "tasks"), vec!["register-resume-clinic-2026-08-25.md"]);
+            let task = v.join("tasks").join("register-resume-clinic-2026-08-25.md");
+            for (key, want) in [
+                ("title", "Register: Resume clinic"),
+                ("due", "2026-08-23T23:59"),
+                ("effort_hours", "0.25"),
+                ("importance", "3"),
+                ("domain", "school"),
+                ("status", "active"),
+                ("created_by", "events"),
+                ("source_uid", "register:lx:7:1"),
+            ] {
+                assert_eq!(field(&task, key), want, "{key}");
+            }
+            let made = creates(&v, "tasks");
+            assert_eq!(made.len(), 1);
+            assert_eq!(text(&made[0], "actor"), "agent:approvals");
+            assert_eq!(text(&made[0], "id"), field(&task, "id"));
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+
+            // With `registration_deadline: null`: `due` is null, the task is in the read model's
+            // undated list, and no field holds the event's start. The body names the start as an
+            // upper bound, with the URL.
+            let v = vault();
+            let expo = registered(event("ics:expo-1", "", "Startup expo", 26), None);
+            let card = file_card(&v, std::slice::from_ref(&expo), "obligation");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "tasks"), vec!["register-startup-expo-2026-08-26.md"]);
+            let task = v.join("tasks").join("register-startup-expo-2026-08-26.md");
+            let meta = front(&task);
+            assert_eq!(crate::yaml::get(&meta, "due"), Some(&Value::Null));
+            for (key, value) in &meta {
+                let shown = python_str(value);
+                assert!(!shown.contains("2026-08-26") && !shown.contains("19:00"), "{}: {shown}", key_text(key));
+            }
+            let body = read(&task);
+            assert!(
+                body.contains(
+                    "Registration closes by Wed 26 Aug 7pm at the latest; check the event page for the real deadline."
+                ),
+                "{body}"
+            );
+            assert!(body.contains(URL), "{body}");
+            let loaded = crate::surface::load(&v, TODAY);
+            let undated = crate::surface::ranked_list(&loaded, TODAY, "undated", &[]);
+            let slugs: Vec<&str> = undated.rows.iter().map(|r| r.slug.as_str()).collect();
+            assert_eq!(slugs, vec!["register-startup-expo-2026-08-26"]);
+        }
+
+        #[test]
+        fn a_retried_settlement_writes_no_second_note() {
+            // A card left `approved` with its notes written (the stamp failed), settled again:
+            // nothing new is written, and the card is stamped and archived.
+            let v = vault();
+            let fair = registered(event("ics:fair-1", "", "Career fair", 25), Some(Date::constant(2026, 8, 23)));
+            let card = file_card(&v, std::slice::from_ref(&fair), "obligation");
+            mark(&v, &card, "approved");
+            let mut journal = Journal::new(&v);
+            let settled = settle_event_accept(&v, &front(&card), Level::Hard, TODAY, &default_ctx(), &mut journal);
+            assert_eq!(settled.unwrap(), Some(Vec::new()));
+            assert_eq!(field(&card, "status"), "approved");
+            let (notes, tasks) = (files(&v, "commitments"), files(&v, "tasks"));
+            assert_eq!((notes.len(), tasks.len()), (1, 1));
+            let journaled = journal_records(&v).len();
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!((files(&v, "commitments"), files(&v, "tasks")), (notes, tasks));
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert!(!since.is_empty() && since.iter().all(|op| op != "create"), "{since:?}");
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            // The ever-written set: a uid on a live commitment, a live task or an archived (deleted)
+            // commitment is skipped, and so is the primary's register task deleted to `archive/`.
+            // An archived approval card carrying the primary as its `source_uid` does not count, so
+            // the primary is still written.
+            let v = vault();
+            let series = [
+                registered(event("lx:9:1", "lx:9", "Writing lab", 24), None),
+                event("lx:9:2", "lx:9", "Writing lab", 25),
+                event("lx:9:3", "lx:9", "Writing lab", 26),
+                event("lx:9:4", "lx:9", "Writing lab", 27),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            seed(&v, "commitments/writing-lab-two.md", "type: commitment\nkind: event\nsource_uid: \"lx:9:2\"");
+            seed(&v, "archive/writing-lab-three.md", "type: commitment\nkind: event\nsource_uid: \"lx:9:3\"");
+            seed(&v, "tasks/writing-lab-four.md", "title: Writing lab four\nsource_uid: \"lx:9:4\"");
+            seed(&v, "archive/register-writing-lab.md", "title: \"Register: Writing lab\"\nsource_uid: \"register:lx:9:1\"");
+            seed(
+                &v,
+                "archive/event-check-writing-lab.md",
+                "type: approval\nkind: event-check\nstatus: expired\nsource_uid: \"lx:9:1\"\nseries_uid: \"lx:9\"",
+            );
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:9:1"));
+            assert!(creates(&v, "tasks").is_empty());
+            assert_eq!(files(&v, "commitments"), vec!["writing-lab-two.md", "writing-lab.md"]);
+            assert_eq!(files(&v, "tasks"), vec!["writing-lab-four.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_failed_write_leaves_the_card_approved_for_the_next_pass() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            mark(&v, &card, "approved");
+            // The journal cannot be appended to, so the commitment's `create` fails before its file.
+            let journal_dir = v.join("state").join("journal");
+            let aside = v.join("state").join("journal-aside");
+            std::fs::rename(&journal_dir, &aside).unwrap();
+            pystr::write_text(&journal_dir, "not a folder\n").unwrap();
+            let result = run(&v);
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert!(result.executed.is_empty());
+            assert_eq!(field(&card, "status"), "approved");
+            assert!(files(&v, "commitments").is_empty());
+
+            // The next pass, with the journal back, settles it, once.
+            std::fs::remove_file(&journal_dir).unwrap();
+            std::fs::rename(&aside, &journal_dir).unwrap();
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_card_with_no_payload_or_no_verdict_it_reads_stays_approved_and_warns() {
+            // Only a hand edit makes either. Nothing is written, and the card waits, as an approved
+            // `task` card with no payload does.
+            for (from, to, warning) in [
+                ("\ninstances:", "\nlisted:", "missing event payload: {name}"),
+                ("verdict: obligation", "verdict: required", "{name}: no verdict the settlement reads"),
+            ] {
+                let v = vault();
+                let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+                let edited = read(&card).replacen(from, to, 1);
+                assert_ne!(edited, read(&card));
+                pystr::write_text(&card, &edited).unwrap();
+                let result = decide(&v, &card, "approved");
+                let name = name_of(&card);
+                assert_eq!(result.warnings, vec![warning.replace("{name}", &name)]);
+                assert!(result.executed.is_empty());
+                assert_eq!(field(&card, "status"), "approved");
+                assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            }
+        }
+
+        #[test]
+        fn a_malformed_instance_entry_is_skipped_with_a_warning_and_the_rest_settles() {
+            let v = vault();
+            let series = [event("lx:3:1", "lx:3", "Study hall", 25), event("lx:3:2", "lx:3", "Study hall", 27)];
+            let card = file_card(&v, &series, "obligation");
+            let edited = read(&card).replacen("2026-08-27T19:00", "soon", 1);
+            assert_ne!(edited, read(&card));
+            pystr::write_text(&card, &edited).unwrap();
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings, vec![format!("{}: bad instance entry 2", name_of(&card))]);
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:3:1"));
             assert_eq!(field(&archived(&v, &card), "status"), "executed");
         }
     }
