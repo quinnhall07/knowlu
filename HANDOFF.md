@@ -303,8 +303,10 @@ It holds:
 **Gate:** no non-founder account exists before the re-consent screen, privacy bump #1 (after its
 lawyer read) and ruling 11's token have shipped; the token is done in Integrate. No pilot student
 uses the kept Blackboard session before their own university's read is recorded.
-**Release gate:** no release is cut from a main carrying the Gmail settings row until privacy bump #1
-merges (Gmail connect spec, Q8, signed 2026-09-29).
+**Release gate:** no release is cut from a `main` carrying the Gmail settings row, email forwarding to
+Knowlu, or the suspended grades gate (`POLICY_READ_GATE = Suspended`, which offers the kept Blackboard
+session at every curated Blackboard school) until privacy bump #1 merges (Gmail connect spec, Q8,
+signed 2026-09-29; email forwarding spec D18 and D25, signed 2026-09-30).
 
 **Open question for Quinn, at Pilot entry:** ruling 10 names the Pilot's contents, entry and gate but
 no exit. This section reads the exit as "the measure set at entry is met, and Quinn says so".
@@ -396,6 +398,7 @@ a spend is asked at the time.
 | Launch | **`gmail.readonly` verification and the annual CASA, or accept the 100-user cap** | The restricted scope; Gmail stays in Testing mode (seven-day refresh tokens) until it lands. |
 | Launch | **The two-desktop live proof** (moved from production parity's step (5) by ruling 10) | Two computers on one account, after Plans 1–3 merge (§3's Launch). |
 | Launch | **Lawyer sign-off, tax registration, the private-repository decision** | The lawyer's open call includes whether the annual reminder must name the next charge date (R-C1-18). The repository is public (ruling 13); while it is, no self-hosted runner is registered. |
+| Any time (trigger, set 2026-09-30) | **Rule again on ruling 12's suspended policy-read gate at the 20th paying account** (email forwarding spec D25, A13) | Counted as an `active` paid subscription (`trialing` and founder-owned test accounts not counted); the controller's count-only query checks it at each milestone HANDOFF update, and Quinn rules before the next release tagged after it. Restoring the gate is one constant, `POLICY_READ_GATE = Enforced` in `app/src/grades.rs`, with its predicate tests already written. |
 | Any time | **Rotate the Blackboard token and the Google Calendar capability URL** | Neither was regenerated as far as this file knows; both sat in a OneDrive mirror. |
 | Any time | **Delete the old local copies** | `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors, after two clean slots. |
 | Later | **A co-founder** | Unowned, and VISION's only open decision with no next action. |
