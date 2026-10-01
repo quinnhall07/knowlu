@@ -332,7 +332,22 @@
     var cu = state.coming_up;
     EL("cu-n").textContent = cu.length ? cu.length + " accepted" : "";
     EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
+    renderNotShown();
   }
+
+  // M2 T7: Not shown (N) under Coming up, read-only, from dropped_events (events the engine dropped, each with its reason).
+  function renderNotShown() {
+    var box = EL("cu-ns");
+    return invoke("dropped_events", {}).then(function (r) {
+      var list = (r && r.ok && r.dropped) || null;
+      if (!r || !r.ok) { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; return; }
+      if (!list || !list.length) { box.innerHTML = ""; return; }
+      box.innerHTML = '<details class="notshown"><summary>Not shown (' + list.length + ")</summary>" + list.map(function (d) {
+        return '<div class="ln"><span class="k lp">' + h(d.date) + "</span><span>" + h(d.title) + '</span><span class="rt">' + h(d.reason) + "</span></div>";
+      }).join("") + "</details>";
+    }).catch(function () { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; });
+  }
+  // M2 T7 end
 
   function renderGoodToKnow(state) {
     var g = state.good_to_know;
@@ -984,6 +999,7 @@
   }
   // Read-only: the breakdown never edits, creates or deletes a note.
   function openGradesDrawer(slug) {
+    dropSavedToast();
     var d = EL("drawer"), c = null, groups = [], html;
     GRADES.list.forEach(function (x) { if (x.course === slug) { c = x; } });
     if (!c) { return; }
@@ -1000,11 +1016,13 @@
     });
     d.innerHTML = html + gradesFooterHtml(c);
     d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
-    d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
+    d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; d.removeAttribute("data-grades-open"); });
   }
+  // M2 9.1: a background repaint never closes, rebuilds or refills an open body editor.
+  function editorOpen() { return !!document.querySelector("#drawer [data-open-editor]"); }
   function refreshGradesDrawer() {
     var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
-    if (open) { openGradesDrawer(open); }
+    if (open && !editorOpen()) { openGradesDrawer(open); }
   }
   function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
   // A capture's answer is a named outcome, never an error line; the strip re-reads its own state after
@@ -1220,6 +1238,7 @@
   var DRAWER_RO = { id: 1, source_uid: 1, also_uids: 1, judgment: 1 };
 
   function openDrawer(id) {
+    dropSavedToast();
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
       if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
@@ -1231,15 +1250,91 @@
       });
       var hist = (n.history || []).map(function (r) { return "<div>" + h(r.ts.slice(0, 16).replace("T", " ")) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
       clearStaleEditing(d);
-      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + (n.body ? "<pre>" + h(n.body) + "</pre>" : "") +
+      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
         '<button class="b crit" data-del="' + h(id) + '" data-title="' + h(title) + '">Delete&hellip;</button>' +
         '<div class="hist"><b>history</b>' + hist + "</div>";
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
       d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
-      d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
+      d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; });
+      var be = d.querySelector("[data-body-edit]");
+      if (be) { be.addEventListener("click", function () { openBodyEditor(d, id, n.body || ""); }); }
     });
+  }
+
+  // M2 9.1: only a note in tasks/ or courses/ has an editable body. The text reaches the DOM as
+  // escaped text (<pre>) or a textarea's value, never as markup, and never reaches a ui_event.
+  var BODY_FOLDERS = { tasks: 1, courses: 1 };
+  function bodyViewHtml(n) {
+    var pre = n.body ? "<pre>" + h(n.body) + "</pre>" : "";
+    if (!BODY_FOLDERS[n.folder]) { return pre; }
+    return '<div class="bodyed">' + pre + '<button class="b" data-body-edit>' + (n.body ? "Edit" : "Add notes") + "</button></div>";
+  }
+  function openBodyEditor(d, id, expected) {
+    var host = d.querySelector(".bodyed"); if (!host) { return; }
+    host.setAttribute("data-open-editor", "body");
+    host.innerHTML = '<textarea class="bodyta" rows="10"></textarea><div class="bodybtns"><button class="b" data-body-save>Save</button> <button class="b" data-body-cancel>Cancel</button></div>';
+    var ta = host.querySelector("textarea"), sv = host.querySelector("[data-body-save]"), cn = host.querySelector("[data-body-cancel]");
+    ta.value = expected; ta.focus();
+    ev("edit_started", id, "body");
+    function lock(on) { ta.disabled = on; sv.disabled = on; cn.disabled = on; }
+    function conflictState() {
+      if (host.querySelector("[data-body-conflict]")) { return; }
+      var c = document.createElement("div"); c.setAttribute("data-body-conflict", ""); c.className = "bodyconf";
+      c.innerHTML = "<p>This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+        '<button class="b" data-body-copy>Copy</button> <button class="b" data-body-reload>Reload</button>';
+      host.appendChild(c);
+      c.querySelector("[data-body-copy]").addEventListener("click", function () { invoke("copy_text", { text: ta.value }).catch(function () {}); });
+      c.querySelector("[data-body-reload]").addEventListener("click", function () {
+        if (ta.value !== expected && !confirm("Reload and discard your text?")) { return; }
+        ev("edit_cancelled", id, "body"); openDrawer(id);
+      });
+    }
+    function save() {
+      lock(true);
+      var before = expected;
+      invoke("set_body", { view: stateView(), id: id, expected: expected, body: ta.value }).then(function (env) {
+        if (env.conflict) { applyEnvelope(env, function () {}); lock(false); conflictState(); return; }
+        if (applyEnvelope(env, function (m) { lock(false); showRefusal(null, m, id, "body"); })) { ev("edit_committed", id, "body"); openDrawer(id); offerBodyUndo(id, before); }
+      }).catch(function (e) { lock(false); showRefusal(null, "refused: " + e, id, "body"); });
+    }
+    function cancel() { ev("edit_cancelled", id, "body"); openDrawer(id); }
+    sv.addEventListener("click", save); cn.addEventListener("click", cancel);
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+  }
+
+  // M2 D8: Saved - Undo for 10 seconds. Undo is a second set_body whose `expected` is the body of
+  // the re-read note (never the textarea) and whose body is the text loaded before the edit.
+  // The toast belongs to the drawer it was raised from: closing it or opening another note drops it.
+  function dropSavedToast() {
+    Array.prototype.forEach.call(document.querySelectorAll(".savedtoast"), function (x) { x.remove(); });
+  }
+  function offerBodyUndo(id, before) {
+    invoke("note", { id: id }).then(function (env) {
+      if (!env.ok || !env.note) { return; }
+      var dr = EL("drawer");
+      if (!dr || dr.hidden || dr.getAttribute("data-id") !== id) { return; }
+      dropSavedToast();
+      var t = document.createElement("div"); t.className = "savedtoast";
+      t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-body-undo>Undo</button>';
+      document.body.appendChild(t);
+      var gone = setTimeout(function () { t.remove(); }, 10000);
+      t.querySelector("[data-body-undo]").addEventListener("click", function () {
+        clearTimeout(gone); t.querySelector("[data-body-undo]").disabled = true;
+        invoke("set_body", { view: stateView(), id: id, expected: env.note.body || "", body: before }).then(function (r) {
+          if (applyEnvelope(r, function (m) {
+            showRefusal(null, m, id, "body");
+            t.innerHTML = '<button class="b" data-body-prev>Copy previous text</button>';
+            t.querySelector("[data-body-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+            setTimeout(function () { t.remove(); }, 10000);
+          })) { t.remove(); ev("edit_committed", id, "body"); var d = EL("drawer"); if (d && d.getAttribute("data-id") === id && !editorOpen()) { openDrawer(id); } }
+        }).catch(function () { t.remove(); });
+      });
+    }).catch(function () {});
   }
 
   // ----- writes (Knowlu plan 1, Task 13). Every mutating call returns the fresh state; paint it
@@ -1462,7 +1557,7 @@
 
   function confirmDelete(id, title) {
     if (!window.confirm("Archive \"" + title + "\"? Nothing is deleted — it moves to archive/ and shows in CLOSED THIS WEEK.")) { return; }
-    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { EL("drawer").hidden = true; } });
+    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { dropSavedToast(); EL("drawer").hidden = true; } });
   }
 
   // ----- the deck: approve/reject/snooze (Knowlu plan 1, Task 14). One click commits — the
@@ -1835,8 +1930,172 @@
       maybeUpgrade(s);
     }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
+  // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
+  // the `expected` of a save. Events carry the object kind only, never the text (D15).
+  var PREFS = { loaded: "", started: false };
+  function prefsDirty() { return EL("set-prefs-ta").value !== PREFS.loaded; }
+  function prefsCount() {
+    var n = Array.from(EL("set-prefs-ta").value).length, c = EL("set-prefs-count");
+    c.textContent = n + " / 600";
+    c.classList.toggle("over", n > 600);
+  }
+  function prefsFill(p) {
+    PREFS.loaded = p.preferences || ""; PREFS.started = false;
+    EL("set-prefs-ta").value = PREFS.loaded; prefsCount();
+    var c = document.querySelector("[data-prefs-conflict]"); if (c) { c.remove(); }
+  }
+  function loadPrefs() {
+    if (prefsDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !prefsDirty()) { prefsFill(env.profile); }
+    }).catch(function () {});
+  }
+  function prefsLock(on) { EL("set-prefs-ta").disabled = on; EL("set-prefs-save").disabled = on; EL("set-prefs-cancel").disabled = on; }
+  function prefsConflict() {
+    if (document.querySelector("[data-prefs-conflict]")) { return; }
+    var c = document.createElement("div"); c.setAttribute("data-prefs-conflict", ""); c.className = "prefsconf";
+    c.innerHTML = "<p>This changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+      '<button class="b" data-prefs-copy>Copy</button> <button class="b" data-prefs-reload>Reload</button>';
+    EL("set-prefs").appendChild(c);
+    c.querySelector("[data-prefs-copy]").addEventListener("click", function () { invoke("copy_text", { text: EL("set-prefs-ta").value }).catch(function () {}); });
+    c.querySelector("[data-prefs-reload]").addEventListener("click", function () {
+      if (prefsDirty() && !confirm("Reload and discard your text?")) { return; }
+      ev("edit_cancelled", null, "preferences");
+      invoke("profile", {}).then(function (env) { if (env.ok && env.profile) { prefsFill(env.profile); } }).catch(function () {});
+    });
+  }
+  function savePrefs() {
+    var before = PREFS.loaded;
+    prefsLock(true);
+    invoke("set_preferences", { view: stateView(), expected: PREFS.loaded, text: EL("set-prefs-ta").value }).then(function (env) {
+      if (env.conflict) { applyEnvelope(env, function () {}); prefsLock(false); prefsConflict(); return; }
+      if (!applyEnvelope(env, function (m) { prefsLock(false); showRefusal(null, m, null, "preferences"); })) { return; }
+      ev("edit_committed", null, "preferences");
+      return invoke("profile", {}).then(function (p) {
+        prefsLock(false);
+        if (!p.ok || !p.profile) { return; }
+        prefsFill(p.profile); offerPrefsUndo(before, PREFS.loaded);
+      });
+    }).catch(function (e) { prefsLock(false); showRefusal(null, "refused: " + e, null, "preferences"); });
+  }
+  function offerPrefsUndo(before, after) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-prefs-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-prefs-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-prefs-undo]").disabled = true;
+      invoke("set_preferences", { view: stateView(), expected: after, text: before }).then(function (r) {
+        if (applyEnvelope(r, function (m) {
+          showRefusal(null, m, null, "preferences");
+          t.innerHTML = '<button class="b" data-prefs-prev>Copy previous text</button>';
+          t.querySelector("[data-prefs-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+          setTimeout(function () { t.remove(); }, 10000);
+        })) {
+          t.remove(); ev("edit_committed", null, "preferences");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { prefsFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  EL("set-prefs-ta").addEventListener("input", function () {
+    var first = !PREFS.started;
+    PREFS.started = true;
+    if (first) { ev("edit_started", null, "preferences"); }
+    prefsCount();
+  });
+  EL("set-prefs-save").addEventListener("click", savePrefs);
+  EL("set-prefs-cancel").addEventListener("click", function () {
+    if (prefsDirty()) { ev("edit_cancelled", null, "preferences"); }
+    EL("set-prefs-ta").value = PREFS.loaded; PREFS.started = false; prefsCount();
+  });
+  EL("set-prefs-ta").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); savePrefs(); }
+  });
+  // M2 T5b.1 end
+  // M2 T5b.2: Settings, "Campus events". INT.loaded is the four lists `profile` last returned; undo
+  // sends the ones held before the save. Events carry the object kind only, never an item (D15).
+  var INT_KEYS = ["strong", "mild", "never", "clubs"];
+  var INT = { loaded: null, started: false, editable: true };
+  function intRead() {
+    var out = {};
+    INT_KEYS.forEach(function (k) {
+      out[k] = EL("set-int-" + k).value.split("\n").map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+    });
+    return out;
+  }
+  function intDirty() { return !!INT.loaded && JSON.stringify(intRead()) !== JSON.stringify(INT.loaded); }
+  function intLock(on) {
+    INT_KEYS.forEach(function (k) { EL("set-int-" + k).disabled = on; });
+    EL("set-int-save").disabled = on || !INT.editable; EL("set-int-cancel").disabled = on;
+  }
+  function intFill(p) {
+    INT.loaded = {}; INT.started = false; INT.editable = p.interests_editable !== false;
+    INT_KEYS.forEach(function (k) {
+      INT.loaded[k] = (p[k] || []).slice();
+      var ta = EL("set-int-" + k); ta.value = INT.loaded[k].join("\n"); ta.readOnly = !INT.editable;
+    });
+    EL("set-int-save").disabled = !INT.editable; EL("set-int-cancel").disabled = !INT.editable;
+    var n = EL("set-int-reason"), r = "Knowlu can only edit a list written on one line. Yours continues onto following lines, so it is shown here to read only.";
+    if (!INT.editable && !n) {
+      n = document.createElement("p"); n.id = "set-int-reason"; n.className = "meta set-prefs-copy"; n.textContent = r;
+      EL("set-int-note").parentNode.insertBefore(n, EL("set-int-note"));
+    }
+    if (INT.editable && n) { n.remove(); }
+  }
+  function loadInterests() {
+    if (intDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !intDirty()) { intFill(env.profile); }
+    }).catch(function () {});
+  }
+  function saveInterests() {
+    var held = INT.loaded;
+    var sent = intRead();
+    intLock(true);
+    invoke("set_interests", { view: stateView(), strong: sent.strong, mild: sent.mild, never: sent.never, clubs: sent.clubs }).then(function (env) {
+      if (!applyEnvelope(env, function (m) { intLock(false); showRefusal(null, m, null, "interests"); })) { return; }
+      ev("edit_committed", null, "interests");
+      return invoke("profile", {}).then(function (p) {
+        intLock(false);
+        if (!p.ok || !p.profile) { return; }
+        intFill(p.profile); offerIntUndo(held);
+      });
+    }).catch(function (e) { intLock(false); showRefusal(null, "refused: " + e, null, "interests"); });
+  }
+  function offerIntUndo(before) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-int-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-int-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-int-undo]").disabled = true;
+      invoke("set_interests", { view: stateView(), strong: before.strong, mild: before.mild, never: before.never, clubs: before.clubs }).then(function (r) {
+        if (applyEnvelope(r, function (m) { t.remove(); showRefusal(null, m, null, "interests"); })) {
+          t.remove(); ev("edit_committed", null, "interests");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { intFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  INT_KEYS.forEach(function (k) {
+    EL("set-int-" + k).addEventListener("input", function () {
+      var first = !INT.started;
+      INT.started = true;
+      if (first) { ev("edit_started", null, "interests"); }
+    });
+  });
+  EL("set-int-save").addEventListener("click", saveInterests);
+  EL("set-int-cancel").addEventListener("click", function () {
+    if (intDirty()) { ev("edit_cancelled", null, "interests"); }
+    if (INT.loaded) { intFill({ strong: INT.loaded.strong, mild: INT.loaded.mild, never: INT.loaded.never, clubs: INT.loaded.clubs, interests_editable: INT.editable }); }
+  });
+  // M2 T5b.2 end
   function openSettings() {
     EL("settings").hidden = false;
+    loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
     invoke("settings_context", {}).then(function (c) {

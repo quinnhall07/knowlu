@@ -324,6 +324,12 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - Next five events, from the roster.
 - **Distinct from the deck**, which holds *undecided* proposals. Accepted events and pending
   decisions are different information and must not share a region.
+- **Not shown (N)** (M2): a closed `<details class="notshown">` under the list, filled by the
+  `dropped_events` command (`eventroster::read_dropped`) when *Coming up* renders, never on a poll.
+  Each line is the event's date, its title and the reason (`filtered by your interests`, `you
+  declined it`, or `judged not relevant`, with the judge's why when it has one), as escaped text with no
+  action. An event nobody has judged yet never appears here. An empty list renders nothing and a
+  refusal is one quiet line (`renderNotShown` in `app/static/console.js`).
 
 ### 3.12 GOOD TO KNOW
 
@@ -449,6 +455,21 @@ editable** (`EDITABLE` in `app/static/console.js`, Knowlu plan 1, Task 13): `tit
 `<dl>` markup — that attribute, not a hard-coded list at the click site, is what the handler reads
 to know which field it is committing; a field the drawer renders without `data-field` (everything
 outside `EDITABLE`) is inert to a click.
+
+**The body editor (M2).** In the drawer of a note in `tasks/` or `courses/` (`BODY_EDITABLE_FOLDERS`;
+any other folder is refused by `set_body_inner`), the body is a plain `<pre>` with an *Edit* button
+(*Add notes* when empty). *Edit* swaps in a textarea holding the loaded body, kept as `expected`;
+*Save* (or Ctrl+Enter) calls `set_body`, *Cancel* (or Esc) discards. Controls stay disabled until the
+envelope returns, and a poll or repaint never closes or refills an open editor. After a save the
+drawer re-reads the note and a toast says *Saved · Undo* for 10 seconds; Undo is a second `set_body`
+whose `expected` is the re-read body and whose body is the text loaded before the edit, and the
+toast goes with its drawer. A **conflict** (`conflict: true` in the envelope: the body changed after
+the drawer opened it) keeps the textarea and the student's text, with a line saying so and a *Copy*
+button (`copy_text`); *Reload* asks first if the draft would be lost. Telemetry is `edit_started`,
+`edit_committed` and `edit_cancelled` with `object_kind: body` and the id, never the text. The
+history line for a save reads `<path>: body edited (<who>)` (`surface::describe`); the journal record
+holds two SHA-256 digests and byte counts and no text. Settings has the same pattern for
+`profile/preferences.md` and the four one-line interest lists (see `docs/reference/app.md`).
 
 **Never editable:** `id`, `source_uid`, `also_uids`, `judgment`. Keys and provenance; an edited key
 is a corrupted index.
