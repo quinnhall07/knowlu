@@ -2388,7 +2388,8 @@ fn remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes() {
     let b = fn_body(&js, "function removeFromMyDay(");
     assert!(b.contains("pendingLaneRemovals[") && b.contains("renderTheDay("), "hidden at once");
     assert!(b.contains("Removed") && b.contains("Undo") && b.contains("10000"), "Removed - Undo for 10 seconds");
-    assert!(b.contains("savedtoast"), "an existing class");
+    assert!(b.contains("className = \"lanetoast\"") && !b.contains("savedtoast"), "its own class, which dropSavedToast leaves alone");
+    assert!(read("console.css").contains(".savedtoast, .settoast, .lanetoast"), "styled by the existing rule");
     assert!(b.contains("invoke(\"remove_lane_date\", { view: stateView(), uid: uid })"), "the one invoke, with the view and uid");
     assert!(b.contains("applyEnvelope("), "the envelope goes to applyEnvelope");
     assert!(!js.contains("confirm(\"Remove"), "no window.confirm");
@@ -2397,6 +2398,17 @@ fn remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes() {
     assert!(to < call, "the call sits behind the timer");
     assert!(js.contains("[data-lane-remove]") && js.contains("removeFromMyDay("), "the delegated handler");
     assert!(!b.contains("ev("), "no telemetry row of its own (D12)");
+}
+
+#[test]
+fn a_refused_removal_repaints_the_lane() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let d = b.find("delete pendingLaneRemovals[uid];").unwrap();
+    let r = b[d..].find("renderTheDay(").expect("the .then branch re-renders");
+    let a = b[d..].find("applyEnvelope(").unwrap();
+    assert!(r < a, "the lane is repainted before the envelope is applied, state or not");
+    assert!(b.contains("querySelectorAll(\".lanetoast\")"), "a second pending toast is offset, not stacked on the first");
 }
 
 #[test]

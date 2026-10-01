@@ -1357,13 +1357,15 @@
     if (pendingLaneRemovals[uid]) { return; }
     pendingLaneRemovals[uid] = true;
     if (current.state) { renderTheDay(current.state); }
-    var t = document.createElement("div"); t.className = "savedtoast";
+    var t = document.createElement("div"); t.className = "lanetoast";
+    t.style.bottom = "calc(var(--s4) + " + (document.querySelectorAll(".lanetoast").length * 44) + "px)";
     t.innerHTML = '<span>Removed</span> &middot; <button class="b" data-lane-undo>Undo</button>';
     document.body.appendChild(t);
     var timer = setTimeout(function () {
       t.remove();
       invoke("remove_lane_date", { view: stateView(), uid: uid }).then(function (env) {
         delete pendingLaneRemovals[uid];
+        if (current.state) { renderTheDay(current.state); }
         applyEnvelope(env, function (m) { showRefusal(null, m); });
       }).catch(function () { delete pendingLaneRemovals[uid]; if (current.state) { renderTheDay(current.state); } });
     }, 10000);
