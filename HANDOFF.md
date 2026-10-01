@@ -86,7 +86,7 @@ older under `docs/` is history or design authority from the previous repository 
 
 ## 2. What gets built, and how it is kept apart
 
-**The lanes, 2026-09-30 (from the ledgers, after the Gmail merge):** Gmail connect MERGED (#26, `199cd1f`; T12 staging deploy done, T13 live proof is Quinn's). M2 editing: PR #27 open. Events lane: building, plan on branch `events`. Email forwarding to Knowlu: spec signed 2026-09-30 (branch `email-knowbox`), plan in progress. B1 closed (event-4 did not ship). The table below is the 2026-09-29 record.
+**The lanes, 2026-09-30 (from the ledgers, after the Gmail merge):** Gmail connect MERGED (#26, `199cd1f`; T12 staging deploy done, T13 live proof is Quinn's). M2 editing MERGED (#27, `30b6fb7`; T10 live proof is Quinn's). Events lane: building, plan on branch `events`. Email forwarding to Knowlu: spec signed 2026-09-30, amendments and plan on main (branch `email-forwarding`); staging receiver (SES, us-east-2) being set up. Docs-only PRs now report the required checks (#28). B1 closed (event-4 did not ship). The table below is the 2026-09-29 record.
 
 **The lanes then (2026-09-29, from `git branch -a`, `gh pr list` and `git worktree list`).** `main` is
 `86a3431` and carries Integrate's merges (#11, #12, #14, #16, #17, #18). Commits ahead are `git rev-list --count main..<branch>`.
