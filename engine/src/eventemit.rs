@@ -366,6 +366,10 @@ own listing whether it is meant for you.";
 const CLOSING: &str = "Approve if it applies to you: it goes on your schedule for that day. \
 Reject and it's dropped. Either way you won't be asked again.";
 
+/// The closing of a card with no `instances:` (a roster read-back, §2): its Approve only records
+/// the answer and books nothing (D11), so it promises no schedule entry.
+const ANSWER_ONLY_CLOSING: &str = "Approve if it applies to you: it joins Coming up as something you're expected at. Reject and it's dropped. Either way you won't be asked again.";
+
 const EVENT_ACCEPT: &str = "event-accept";
 
 /// The `source` `eventroster::read_roster` gives every event it reads back (a literal there).
@@ -713,11 +717,22 @@ fn check_body(
         let days: Vec<String> = others.iter().map(|e| when_label(e)).collect();
         lines.push(format!("Also on: {}", days.join(", ")));
     }
-    lines.extend([String::new(), row.closing.to_string(), String::new()]);
+    // The new closing promises a booking, so only a card that carries `instances:` (D10) says it.
+    let closing = if row.kind == EVENT_CHECK && !writes_instances(primary) {
+        ANSWER_ONLY_CLOSING
+    } else {
+        row.closing
+    };
+    lines.extend([String::new(), closing.to_string(), String::new()]);
     if row.buttons {
         lines.extend([BUTTONS.to_string(), String::new()]);
     }
     lines.join("\n")
+}
+
+/// Does the card for `primary` carry `instances:`? Never when it is read back from the roster.
+fn writes_instances(primary: &DiscoveredEvent) -> bool {
+    primary.source != ROSTER_SOURCE
 }
 
 /// Write one card for `primary` and the rest of its series, `others`. `Err` is a create that
@@ -762,7 +777,7 @@ fn write_check(
     ]);
     // The settlement's whole input (D10). Never from `read_roster`'s lossy read-back (§2): such
     // a card answers only, and books nothing.
-    if primary.source != ROSTER_SOURCE {
+    if writes_instances(primary) {
         let listed = std::iter::once(primary).chain(others.iter().copied());
         let instances = listed
             .filter(|e| e.source != ROSTER_SOURCE)
@@ -2436,6 +2451,16 @@ mod tests {
             assert_eq!(field(&note(&checks[0]).0, "source_uid").as_deref(), Some("ics:ask"));
             assert!(crate::yaml::get(&note(&checks[0]).0, "instances").is_none());
             assert!(!pystr::read_text(&checks[0]).unwrap().contains("instances"));
+            // Approving it books nothing (D11), so it never promises a schedule entry.
+            let body = note(&checks[0]).1;
+            assert!(!body.contains("goes on your schedule"), "{body}");
+            assert!(
+                body.contains(
+                    "Approve if it applies to you: it joins Coming up as something you're \
+                     expected at. Reject and it's dropped. Either way you won't be asked again."
+                ),
+                "{body}"
+            );
 
             // The same events from a feed file their cards.
             let fed: Vec<DiscoveredEvent> = events
