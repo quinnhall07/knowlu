@@ -111,9 +111,11 @@ spec's line numbers have drifted.
   - *Cost:* none if the files stay disjoint. The one shared file, `app/src/main.rs`, is changed
     only by the main session at hand-off time.
   - *Needs Quinn's word:* it departs from the letter of a signed section.
+  - Answered 2026-09-30: resolved. Gmail connect merged to main (#26) before the page tasks, as the spec ordered.
 - **PQ2. Do unjudged events appear under *Not shown*?**
   - *Recommend:* no. An unjudged event has not been dropped: the next slot judges it. Listing it
     as "not shown" would claim a decision nobody made. Asked before T6; not blocking before then.
+  - Answered 2026-09-30: NO. Unjudged events never appear under Not shown (only filtered, declined, judged-irrelevant, each with its reason).
 
 ## 5. Tasks
 
