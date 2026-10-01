@@ -18,6 +18,9 @@
 //! lane date moved to clock hours is booked at its new hours and gets that line with its timed
 //! span (PQ7 (c)); a card-listed one stays drawn where it was.
 //!
+//! The student's removal of an accepted lane date, [`remove_lane_date`] (P17), is the one write in
+//! this module made on the student's click.
+//!
 //! **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
 //! passes `eventroster::read_roster`'s events. Their `series_uid` is their own uid and their span
 //! is the roster's lossy read-back, so they match no answered series, and the carry skips any
@@ -304,6 +307,65 @@ pub fn run(
     let moved = follow_moves(vault, &ordered, &accepted, ledger, today, &mut unlisted, &mut warnings);
     read_back(vault, &moved, ledger);
     (lines + carried.len() + moved.len(), warnings)
+}
+
+/// P17 (Quinn, Checkpoint B, 2026-10-01): the student's "Remove from my day" on an accepted lane
+/// date, from either source: a carried date whose carry span is lane-shaped, or a date on an
+/// executed card's `instances:`. It writes the line a card's Decline writes (spec §4.3),
+/// `- <uid> · declined <today>`, through `eventledger::record_declined`. `rank` never calls it.
+///
+/// In P17's order:
+/// 1. the gate ([`student_gate`]): only the vault's own human token removes a date;
+/// 2. a uid the ledger cannot read back (`ledger_reads`) is refused: its line would never read as
+///    declined;
+/// 3. a uid already `declined` writes nothing: `Ok(false)`;
+/// 4. a uid that is not a lane instance of `surface::accepted_events` over the vault's ledger is
+///    refused, so the lane and the removal read one definition of an accepted lane date;
+/// 5. the line, then `Ok(true)`.
+///
+/// Each refusal is one line naming the uid and the reason, and writes nothing. The line is the
+/// only write: no note, and no journal record (a ledger line has none, P15). The existing readers
+/// do the rest: `load_ledger` sets `declined` whatever the verdict, and the lane, Coming up, the
+/// carry and never-ask-twice each leave a declined uid alone.
+pub fn remove_lane_date(vault: &Path, uid: &str, today: Date, ctx: &WriteContext) -> Result<bool, String> {
+    let refused = |why: &str| format!("{uid:?} was not removed: {why}");
+    student_gate(vault, ctx).map_err(|why| refused(&why))?;
+    if !ledger_reads(uid) {
+        return Err(refused("the event ledger cannot read that uid back"));
+    }
+    let ledger = load_ledger(vault, None);
+    if ledger.get(uid).is_some_and(|entry| entry.declined) {
+        return Ok(false);
+    }
+    if crate::surface::accepted_events(vault, &ledger).lane.iter().all(|lane| lane.uid != uid) {
+        return Err(refused("it is not an accepted all-day date on the day"));
+    }
+    record_declined(vault, uid, today).map_err(|err| refused(&format!("the event ledger was not written ({err})")))?;
+    Ok(true)
+}
+
+/// [`remove_lane_date`]'s gate: `write::human_gate`'s rule, restated here because that gate is
+/// private and on the contract list, and made stricter, because only the student removes a date.
+/// A change to one is to be seen beside the other.
+///
+/// - An invalid `config/actor.yaml` refuses every actor with `journal::read_human_actor`'s own
+///   line (ruling 11). `human_gate` lets an agent past without reading the file; this gate admits
+///   no agent, so it reads the file first.
+/// - An `agent:` or `system:` actor is refused, where `human_gate` lets it write.
+/// - A human actor that is not the vault's own token is refused, as `human_gate` refuses it.
+///
+/// The token is read on every call, never cached.
+fn student_gate(vault: &Path, ctx: &WriteContext) -> Result<(), String> {
+    let token = crate::journal::read_human_actor(vault).map_err(|err| err.to_string())?;
+    let actor = &ctx.actor;
+    if crate::provenance::is_agent(actor) || actor.starts_with("system:") {
+        return Err(format!("only the student removes a date from the day, and {actor:?} is not the student"));
+    }
+    if actor != token {
+        let file = crate::journal::ACTOR_FILE;
+        return Err(format!("{file}: this vault's human is {token}, so a removal as {actor:?} is refused"));
+    }
+    Ok(())
 }
 
 /// D9: a `declined` line for each uid a `rejected` `event-accept` card in `archive/` lists, unless
@@ -2112,5 +2174,210 @@ mod tests {
         let journal = journal_text(&b);
         assert_eq!(carry(&b, std::slice::from_ref(&event)).0, 0);
         assert_eq!(journal_text(&b), journal);
+    }
+
+    // --- T4d: P17, the student removes an accepted lane date ------------------------------------
+
+    /// The removal's day, Sat 3 Oct: not `TODAY` (nor the real date), so the line shows the day
+    /// the call was given and nothing else.
+    const REMOVED: Date = Date::constant(2026, 10, 3);
+    const REMOVED_ON: &str = "declined 2026-10-03";
+
+    /// Every file under `vault`, keyed by its path relative to `vault`, with its bytes.
+    fn tree(vault: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(dir) else { return };
+            for entry in entries.map(Result::unwrap) {
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(vault, vault, &mut out);
+        out
+    }
+
+    /// `remove_lane_date` as the console calls it: as the student, on [`REMOVED`].
+    fn remove(vault: &Path, uid: &str) -> Result<bool, String> {
+        remove_lane_date(vault, uid, REMOVED, &student(vault))
+    }
+
+    /// P17's write, checked in full: `Ok(true)`; the ledger's bytes are its old bytes, then exactly
+    /// one `declined` line; `load_ledger` reads the old entry, declined; every other file, the
+    /// journal's included, is byte-identical.
+    fn removes_with_one_line(vault: &Path, uid: &str) {
+        let ledger = Path::new("state").join("events-seen.md");
+        let mut rest = tree(vault);
+        let old = rest.remove(&ledger).expect("the vault has a ledger");
+        let (entry, journal) = (load_ledger(vault, None).remove(uid).expect("an entry"), journal_text(vault));
+        assert_eq!(remove(vault, uid), Ok(true), "{uid}");
+        let mut after = tree(vault);
+        let mut want = old;
+        want.extend(format!("- {uid} · {REMOVED_ON}{NEWLINE}").as_bytes());
+        assert_eq!(after.remove(&ledger), Some(want), "{uid}: the old bytes, then exactly one line");
+        assert_eq!(after, rest, "{uid}: every other file is byte-identical");
+        assert_eq!(journal_text(vault), journal, "{uid}: no journal file created or changed");
+        let read = load_ledger(vault, None).remove(uid).unwrap();
+        assert_eq!(read, LedgerEntry { declined: true, ..entry }, "{uid}: its verdict, answered_by and carry as before");
+    }
+
+    #[test]
+    fn removing_a_carried_lane_date_appends_one_declined_line() {
+        // `pq5_vault`: an executed `event-accept` card with an `id:`, and the carry's line for the
+        // later two-day all-day `lx:77:3`.
+        let (vault, _) = pq5_vault("p17-carried");
+        let entry = load_ledger(&vault, None).remove("lx:77:3").unwrap();
+        assert!(entry.carry.is_some() && !entry.declined, "a carried lane date: {entry:?}");
+        removes_with_one_line(&vault, "lx:77:3");
+    }
+
+    #[test]
+    fn removing_a_card_listed_lane_date_appends_one_declined_line() {
+        // A one-day all-day instance on an executed `event-accept` card's `instances:`, with the
+        // emitter's verdict and `proposed` lines.
+        let accept = tmp("p17-card-listed");
+        let open_day = all_day("lx:88:1", "lx:88", 9, 1);
+        accept_card_with_instances(&accept, "event-open-day-2026-10-09.md", "obligation", "lx:88", &[&open_day], ID_A);
+        record_verdict(&accept, &open_day.uid, &open_day.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+        crate::eventledger::record_proposed(&accept, &open_day.uid, date(2026, 9, 24)).unwrap();
+        removes_with_one_line(&accept, "lx:88:1");
+        // D11: one on an executed `event-check` card's `instances:`, beside the student's answer
+        // line its settlement wrote.
+        let check = tmp("p17-check-listed");
+        let fair = all_day("lx:99:1", "lx:99", 10, 1);
+        check_card(&check, "event-check-fair-a.md", "executed", "lx:99", &[&fair], true, ID_B);
+        let human = crate::journal::read_human_actor(&check).unwrap();
+        record_answer(&check, &fair.uid, &fair.title, date(2026, 9, 30), "obligation", human, None).unwrap();
+        removes_with_one_line(&check, "lx:99:1");
+    }
+
+    #[test]
+    fn a_second_removal_writes_nothing() {
+        let (vault, _) = pq5_vault("p17-twice");
+        assert_eq!(remove(&vault, "lx:77:3"), Ok(true));
+        let before = tree(&vault);
+        assert_eq!(remove(&vault, "lx:77:3"), Ok(false));
+        assert_eq!(tree(&vault), before, "the ledger's bytes, and every other file's, unchanged");
+        let declined: Vec<String> = lines_for(&vault, "lx:77:3").into_iter().filter(|l| l.ends_with(REMOVED_ON)).collect();
+        assert_eq!(declined.len(), 1, "{declined:?}");
+    }
+
+    /// One refused call: an error that is one line naming the uid and holding each of `why`, and
+    /// no file changed in the vault.
+    fn refused(vault: &Path, uid: &str, ctx: &WriteContext, why: &[&str]) {
+        let before = tree(vault);
+        let err = remove_lane_date(vault, uid, REMOVED, ctx).expect_err(&format!("{uid} as {:?}", ctx.actor));
+        assert!(err.contains(&format!("{uid:?}")) && !err.contains('\n'), "one line naming {uid:?}: {err}");
+        for part in why {
+            assert!(err.contains(part), "{part:?} in {err:?}");
+        }
+        assert_eq!(tree(vault), before, "{uid} as {:?}: no file changed", ctx.actor);
+    }
+
+    #[test]
+    fn only_the_student_removes_a_date() {
+        use crate::journal::{create_actor_file, read_human_actor, ACTOR_FILE, HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        // Each vault holds a date the student can remove, so only the actor is refused.
+        let (agent, _) = pq5_vault("p17-gate-agent");
+        refused(&agent, "lx:77:3", &rank_ctx(), &["only the student", "\"agent:approvals\""]);
+        let (system, _) = pq5_vault("p17-gate-system");
+        let migration = WriteContext::new("system:migration", "cli");
+        refused(&system, "lx:77:3", &migration, &["only the student", "\"system:migration\""]);
+        // A human actor that is not the vault's own token, built from the two tokens as `write.rs`'
+        // gate tests build one: each way round, a legacy vault and a `student` one.
+        for (name, file) in [("p17-gate-legacy", None), ("p17-gate-student", Some(HUMAN_ACTOR))] {
+            let (vault, _) = pq5_vault(name);
+            if let Some(token) = file {
+                create_actor_file(&vault, token).unwrap();
+            }
+            let own = read_human_actor(&vault).unwrap();
+            let other = if own == HUMAN_ACTOR { LEGACY_HUMAN_ACTOR } else { HUMAN_ACTOR };
+            let quoted = format!("{other:?}");
+            refused(&vault, "lx:77:3", &WriteContext::new(other, "dashboard"), &[ACTOR_FILE, own, quoted.as_str()]);
+        }
+        // Any actor, in a vault whose `config/actor.yaml` is invalid: the reader's named line.
+        let (invalid, _) = pq5_vault("p17-gate-invalid");
+        fs::create_dir_all(invalid.join(ACTOR_FILE).parent().unwrap()).unwrap();
+        pystr::write_text(&invalid.join(ACTOR_FILE), &format!("human_actor: {CARRY_ACTOR}\n")).unwrap();
+        let line = read_human_actor(&invalid).unwrap_err().to_string();
+        for actor in [HUMAN_ACTOR, LEGACY_HUMAN_ACTOR, CARRY_ACTOR] {
+            refused(&invalid, "lx:77:3", &WriteContext::new(actor, "dashboard"), &[&line]);
+        }
+        // The control: the student's own call removes the date the agent could not.
+        assert_eq!(remove(&agent, "lx:77:3"), Ok(true));
+    }
+
+    #[test]
+    fn only_an_accepted_lane_date_is_removed() {
+        // `pq3_vault` carried: `lx:77:2` timed and booked, `lx:77:3` two-day and `lx:77:4`
+        // zero-length, both lane dates.
+        let (vault, events) = pq3_vault("p17-only-lane");
+        assert_eq!(carry(&vault, &events).1, Vec::<String>::new());
+        assert_eq!(booked(&vault), [row("lx:77:2", "soft")], "a carried timed date");
+        record_verdict(&vault, "lx:50:1", "Career fair", date(2026, 9, 30), "obligation", "", "", "").unwrap();
+        // A lane date on a `rejected` card and one on an `expired` card, of each card kind.
+        let lane = |series: &str, uid: &str, first: i8| all_day(uid, series, first, 1);
+        for (name, status, series, id) in [
+            ("event-a-rejected.md", "rejected", "lx:61", "appr_6100000000"),
+            ("event-b-expired.md", "expired", "lx:62", "appr_6200000000"),
+        ] {
+            accept_card_with_instances(&vault, name, "obligation", series, &[&lane(series, &format!("{series}:1"), 12)], id);
+            let path = vault.join("archive").join(name);
+            let text = pystr::read_text(&path).unwrap().replace("status: executed\n", &format!("status: {status}\n"));
+            pystr::write_text(&path, &text).unwrap();
+        }
+        for (name, status, series, id) in [
+            ("event-check-c-rejected.md", "rejected", "lx:63", "appr_6300000000"),
+            ("event-check-d-expired.md", "expired", "lx:64", "appr_6400000000"),
+        ] {
+            check_card(&vault, name, status, series, &[&lane(series, &format!("{series}:1"), 13)], true, id);
+        }
+        // Two uids the ledger cannot read back, each a lane date on an executed card's
+        // `instances:`, so only the read-back check can refuse them.
+        let unreadable = [lane("lx:70", "a b", 14), lane("lx:70", "lx:70:verdict:2", 15)];
+        let listed = [&unreadable[0], &unreadable[1]];
+        accept_card_with_instances(&vault, "event-e-unreadable.md", "obligation", "lx:70", &listed, "appr_7000000000");
+        let ledger = load_ledger(&vault, None);
+        let drawn: Vec<String> = crate::surface::accepted_events(&vault, &ledger).lane.into_iter().map(|l| l.uid).collect();
+        assert_eq!(drawn, ["a b", "lx:70:verdict:2", "lx:77:3", "lx:77:4"], "the lane's own reader");
+
+        let as_student = student(&vault);
+        for uid in ["lx:77:2", "lx:50:1", "lx:404:1", "lx:61:1", "lx:62:1", "lx:63:1", "lx:64:1"] {
+            refused(&vault, uid, &as_student, &["not an accepted all-day date"]);
+        }
+        for uid in ["a b", "lx:70:verdict:2"] {
+            refused(&vault, uid, &as_student, &["the event ledger cannot read"]);
+        }
+        // The control: a lane date of the same vault is removed.
+        removes_with_one_line(&vault, "lx:77:4");
+    }
+
+    #[test]
+    fn removal_is_deterministic_and_leaves_existing_vaults_alone() {
+        let (vault, _) = pq5_vault("p17-determinism");
+        let copy = tmp("p17-determinism-copy");
+        copy_tree(&vault, &copy);
+        for v in [&vault, &copy] {
+            assert_eq!(remove(v, "lx:77:3"), Ok(true), "{}", v.display());
+        }
+        assert_eq!(tree(&copy), tree(&vault), "P14: the line holds only the uid and the day");
+
+        // `vault-full`, copied first and never used in place. It has no accepted lane date.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault-full");
+        let full = tmp("p17-vault-full");
+        copy_tree(&fixture, &full);
+        let ledger = load_ledger(&full, None);
+        assert_eq!(ledger.len(), 3, "vault-full's three ledger uids");
+        assert!(crate::surface::accepted_events(&full, &ledger).lane.is_empty());
+        let before = tree(&full);
+        let as_student = student(&full);
+        for uid in ledger.keys() {
+            refused(&full, uid, &as_student, &["not an accepted all-day date"]);
+        }
+        assert_eq!(tree(&full), before, "no byte of the copy changes");
     }
 }

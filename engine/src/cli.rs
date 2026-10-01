@@ -4139,4 +4139,69 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         }
         let _ = std::fs::remove_dir_all(&vault);
     }
+
+    /// P17 (T4d) at `rank` level: once the student removes an accepted lane date, no `rank` brings
+    /// it back, from the feed or from the roster alone: a carried date of one series and a
+    /// card-listed date of a second.
+    #[test]
+    fn rank_never_brings_a_removed_date_back() {
+        const OPEN_DAY_ID: &str = "appr_8888888888";
+        let vault = events_vault("t4d-removed", "event_cards: true\n");
+        let feed = lx_feed(vec![
+            lx(77, "Weekly meeting", &[
+                (1, "2026-10-06T19:00:00-05:00", "2026-10-06T21:00:00-05:00"),
+                (3, "2026-10-20T00:00:00-05:00", "2026-10-22T00:00:00-05:00"),
+            ]),
+            lx(88, "Open day", &[(1, "2026-10-09T00:00:00-05:00", "2026-10-10T00:00:00-05:00")]),
+        ]);
+        let events = lx_events(&feed);
+        let meeting = [uid_of(&events, "localist:77:1")];
+        archived_card(&vault, "event-weekly-meeting-2026-10-06.md", "event-accept", "executed", Some("obligation"), &meeting, true, ACCEPT_ID);
+        // The second series' one date is on its executed card's `instances:`, judged first.
+        let open_day = uid_of(&events, "localist:88:1");
+        let judged = Date::constant(2026, 9, 24);
+        crate::eventledger::record_judged_verdict(&vault, &open_day.uid, &open_day.title, judged, "obligation", "Required.", Some(EV_JID)).unwrap();
+        archived_card(&vault, "event-open-day-2026-10-09.md", "event-accept", "executed", Some("obligation"), &[open_day], true, OPEN_DAY_ID);
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let carried = uid_of(&events, "localist:77:3");
+        assert_eq!(ledger_lines_for(&vault, &carried.uid), [carry_line(carried, "obligation", ACCEPT_ID)]);
+        let days: [(&crate::events::DiscoveredEvent, &[i8]); 2] = [(carried, &[20, 21]), (open_day, &[9])];
+        let drawn = |event: &crate::events::DiscoveredEvent, day: i8| {
+            let day = Date::constant(2026, 10, day);
+            let the_day = crate::surface::the_day(&crate::surface::load(&vault, day), day);
+            the_day.all_day_uids.contains(&Some(event.uid.clone())) || the_day.all_day.contains(&event.title)
+        };
+        let now = EV_DAY.at(8, 0, 0, 0);
+        let listed = || -> Vec<String> { crate::surface::coming_up(&vault, EV_DAY, now).into_iter().map(|e| e.uid).collect() };
+        for (event, on) in days {
+            assert!(on.iter().all(|&day| drawn(event, day)), "{} is drawn before the removal", event.uid);
+            assert!(listed().contains(&event.uid), "{} is listed before the removal", event.uid);
+        }
+
+        let student = WriteContext::new(crate::journal::read_human_actor(&vault).unwrap(), "dashboard");
+        for event in [carried, open_day] {
+            assert_eq!(crate::eventcarry::remove_lane_date(&vault, &event.uid, EV_DAY, &student), Ok(true), "{}", event.uid);
+        }
+        let removed = ledger_bytes(&vault);
+        for (run, feed) in [("a second rank", Some(feed.as_str())), ("a third rank", Some(feed.as_str())), ("a rank on the roster alone", None)] {
+            rank_events(&vault, EV_TODAY, feed);
+            assert!(ledger_bytes(&vault) == removed, "{run} changed the ledger's bytes");
+        }
+        let declined = |uid: &str| format!("- {uid} · declined {EV_TODAY}");
+        let carried_lines = [carry_line(carried, "obligation", ACCEPT_ID), declined(&carried.uid)];
+        assert_eq!(ledger_lines_for(&vault, &carried.uid), carried_lines, "no second carry line, answer or decline");
+        let open_lines = ledger_lines_for(&vault, &open_day.uid);
+        assert_eq!(open_lines.len(), 2, "the judged line, then the one decline: {open_lines:?}");
+        assert_eq!(open_lines[1], declined(&open_day.uid));
+        for name in md_names(&vault.join("approvals"), "") {
+            let text = pystr::read_text(&vault.join("approvals").join(&name)).unwrap();
+            assert!(!text.contains(&carried.uid) && !text.contains(&open_day.uid), "approvals/{name} names a removed date");
+        }
+        for (event, on) in days {
+            assert!(on.iter().all(|&day| !drawn(event, day)), "{} is still drawn", event.uid);
+            assert!(!listed().contains(&event.uid), "{} is still listed", event.uid);
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }
