@@ -115,6 +115,9 @@ pub struct EventsConfig {
     pub daily_proposal_target: i64,
     pub daily_proposal_ceiling: i64,
     pub timezone: String,
+    /// `event_cards:` in `config/events.yaml` (events spec §5.5): `true` or the integer `1` file
+    /// event cards; anything else, or no key, is off. Not a `DEFAULTS` key, which holds integers.
+    pub event_cards: bool,
 }
 
 impl Default for EventsConfig {
@@ -129,6 +132,7 @@ impl Default for EventsConfig {
             daily_proposal_target: default_for("daily_proposal_target"),
             daily_proposal_ceiling: default_for("daily_proposal_ceiling"),
             timezone: "America/Chicago".to_string(),
+            event_cards: false,
         }
     }
 }
@@ -290,6 +294,13 @@ pub fn load_events_config(path: &Path) -> (EventsConfig, Vec<String>) {
         }
         Some(_) => warnings.push("sources must be a list".to_string()),
     }
+    // The switch (spec §5.5): a YAML `true` or the integer `1` is on. Anything else (`false`,
+    // "yes", a list, another number) or no key is off, and none of it warns.
+    config.event_cards = match yaml::get(&raw, "event_cards") {
+        Some(Value::Bool(on)) => *on,
+        Some(Value::Number(n)) => n.as_i64() == Some(1),
+        _ => false,
+    };
     config.sources = sources;
     (config, warnings)
 }
@@ -1278,6 +1289,30 @@ mod tests {
         let summary = lines.last().expect("a summary line");
         assert!(summary.starts_with("events: 0 judged"), "no item should have started: {summary}");
         assert!(summary.contains("1 left"), "the remainder line must name every pending event: {summary}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn event_cards_reads_true_or_1_and_anything_else_is_off() {
+        let dir = tmp_dir("eventcards");
+        for (n, (line, want)) in [
+            ("event_cards: true\n", true),
+            ("event_cards: 1\n", true),
+            ("event_cards: false\n", false),
+            ("event_cards: \"yes\"\n", false),
+            ("event_cards: [true]\n", false),
+            ("event_cards: 2\n", false),
+            ("", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = write(&dir, &format!("events-{n}.yaml"), &format!("{line}sources: []\n"));
+            let (config, warnings) = load_events_config(&path);
+            assert_eq!(config.event_cards, want, "{line:?}");
+            assert!(warnings.is_empty(), "{line:?}: {warnings:?}");
+        }
+        assert!(!EventsConfig::default().event_cards);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
