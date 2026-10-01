@@ -4,6 +4,8 @@
 //! Spec `2026-09-29-events-design.md` §4.5 and §6.1. [`answered_series`] is the one definition of
 //! an answered `event-accept` series. The emitter's never-ask-twice, the carry and `judge_roster`
 //! all call it and none restates it, so one `rank` cannot both carry a series and ask about it.
+//! [`accepted_check_series`] (PQ1 (a), Quinn, 2026-09-30) adds the series an accepted
+//! `event-check` card carries, for the accept carry alone.
 //!
 //! [`run`] is the one entry point `rank` calls: D9's rebuild of `declined` lines from archived
 //! `rejected` cards, then the carry over every fetched instance of an answered series that no event
@@ -98,6 +100,57 @@ pub fn answered_series(vault: &Path) -> BTreeMap<String, SeriesAccept> {
     answered
 }
 
+/// One series an archived `executed` `event-check` card with `instances:` accepted (PQ1 (a)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckAccept {
+    /// The answering card's file name in `archive/`.
+    pub file: String,
+    /// The answering card's `id:`, read as [`SeriesAccept::id`] is: the carry's ledger line names
+    /// the card by it (the plan's P15, `from:`).
+    pub id: String,
+    /// The uids the card's `events:` lists. The settlement answered these, so the carry never does.
+    pub listed: BTreeSet<String>,
+}
+
+/// Every series an accepted `event-check` card carries, keyed by `series_uid` (PQ1 (a), Quinn,
+/// 2026-09-30). D11 makes such a card's Approve an Accept, so its series carries as an accepted
+/// `event-accept` series does, at `level: hard` (P7).
+///
+/// Only the accept carry reads it: never the decline carry, the emitter or `judge_roster`, which
+/// keep [`answered_series`] (whose edge rule still leaves `event-check` cards out). The rules:
+/// - it reads `archive/` only, through `approvals::sorted_md`, and only `type: approval`,
+///   `kind: event-check`, `status: executed` cards whose `instances:` is a sequence. A card filed
+///   before this lane has none: its Approve only answered, and it carries nothing. Any other
+///   status answers nothing here: a `rejected` `event-check` series has its `drop` lines through
+///   `eventemit::inherit_series_answers`;
+/// - a card with a missing or empty `series_uid` answers no series;
+/// - if two such cards answer one series, the lowest file name wins.
+///
+/// It reads no ledger. An unreadable card answers nothing.
+pub fn accepted_check_series(vault: &Path) -> BTreeMap<String, CheckAccept> {
+    let mut accepted: BTreeMap<String, CheckAccept> = BTreeMap::new();
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        if card_text(&meta, "type") != "approval"
+            || card_text(&meta, "kind") != EVENT_CHECK
+            || card_text(&meta, "status") != "executed"
+            || !matches!(yaml::get(&meta, "instances"), Some(serde_yaml_ng::Value::Sequence(_)))
+        {
+            continue;
+        }
+        let series = card_text(&meta, "series_uid");
+        if series.is_empty() || accepted.contains_key(&series) {
+            continue;
+        }
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = yaml::opt_text(yaml::get(&meta, "id")).filter(|id| ids::is_id(id)).unwrap_or_default();
+        let listed = crate::eventemit::card_event_uids(&meta).into_iter().collect();
+        accepted.insert(series, CheckAccept { file, id, listed });
+    }
+    accepted
+}
+
 /// The ever-written set (spec §5.3): the `source_uid` of every note in `commitments/`, `tasks/` and
 /// `archive/`. A live note means "already written"; an archived one means "written, then deleted by
 /// the student" (`write::delete` moves it there with its frontmatter intact). Both mean "never
@@ -162,13 +215,17 @@ fn shown_on_a_card(vault: &Path) -> BTreeSet<String> {
 ///    unless it has one: the archived card is the record of the answer, and it syncs where the
 ///    ledger does not. An `executed` card needs nothing here.
 /// 2. **The carry**, over each fetched instance in `events` whose series a card answered
-///    ([`answered_series`]) and whose uid no event card names (`shown_on_a_card`: not the
-///    answering card, and not an expired or live one), in `(start, uid)` order, each uid once:
-///    - a declined series gives the instance a `declined` line unless it has one;
-///    - an accepted series books an instance starting today or later, one carried date at a time
-///      (`book`): the commitment `eventaccept::commitment_for` gives at the level the card's
-///      `verdict:` names, through `commitments::create_confirmed` (actor `agent:commitments`,
-///      journal first). A lane-shaped instance (all-day, multi-day, zero-length) has no
+///    ([`answered_series`], or for an accept [`accepted_check_series`] too) and whose uid no event
+///    card names (`shown_on_a_card`: not the answering card, and not an expired or live one), in
+///    `(start, uid)` order, each uid once:
+///    - a declined series ([`answered_series`] alone) gives the instance a `declined` line unless
+///      it has one;
+///    - an accepted series (`accepted_series`: the union, [`answered_series`] winning an overlap)
+///      books an instance starting today or later, one carried date at a time (`book`): the
+///      commitment `eventaccept::commitment_for` gives at the level the `event-accept` card's
+///      `verdict:` names, or `hard` for an `event-check` series (P7), through
+///      `commitments::create_confirmed` (actor `agent:commitments`, journal first). A
+///      lane-shaped instance (all-day, multi-day, zero-length) has no
 ///      commitment, and its answer stands with nothing to write. No register task is written (P9):
 ///      a series has one, for its primary. No ledger line is written for an accepted series.
 ///      It never books a uid in the [`ever_written`] set, so a note the student deleted stays
@@ -189,7 +246,7 @@ pub fn run(
     let mut warnings = Vec::new();
     let mut lines = rebuild_declines(vault, ledger, today, &mut warnings);
     let answered = answered_series(vault);
-    let accepted = accepted_series(&answered, &mut warnings);
+    let accepted = accepted_series(&answered, &accepted_check_series(vault), &mut warnings);
     let written = ever_written(vault);
     let shown = shown_on_a_card(vault);
     let mut ordered: Vec<&DiscoveredEvent> = events.iter().filter(|e| e.source != ROSTER_SOURCE).collect();
@@ -276,17 +333,24 @@ fn ledger_reads(uid: &str) -> bool {
 
 /// One accepted series, as the accept carry books it.
 struct Accepted {
-    /// `Hard` for an obligation, `Soft` for an opportunity (D1).
+    /// `Hard` for an obligation or an `event-check` series (P7), `Soft` for an opportunity (D1).
     level: Level,
     /// The uids the answering card listed: the settlement's, never the carry's.
     listed: BTreeSet<String>,
 }
 
-/// The accepted set, keyed by `series_uid`: [`answered_series`]' executed entries, at the level the
-/// card's `verdict:` names. The one place it is built. A card with any other verdict books nothing
-/// and warns, since Knowlu never guesses a level; only a hand edit makes one.
+/// The accepted set, keyed by `series_uid`: the one place it is built. It is the union of
+/// [`answered_series`]' executed entries, at the level the card's `verdict:` names, and
+/// [`accepted_check_series`] (PQ1 (a)), at `Hard` (P7).
+///
+/// A series in both readers, which only a hand edit makes, takes [`answered_series`]' answer
+/// whatever it is: a series declined on an `event-accept` card is never booked, and one whose
+/// `event-accept` card names no verdict the carry reads is not booked either. An `event-accept`
+/// card with any other verdict books nothing and warns, since Knowlu never guesses a level; only a
+/// hand edit makes one.
 fn accepted_series(
     answered: &BTreeMap<String, SeriesAccept>,
+    checks: &BTreeMap<String, CheckAccept>,
     warnings: &mut Vec<String>,
 ) -> BTreeMap<String, Accepted> {
     let mut accepted = BTreeMap::new();
@@ -303,6 +367,9 @@ fn accepted_series(
             }
         };
         accepted.insert(series.clone(), Accepted { level, listed: answer.listed.clone() });
+    }
+    for (series, check) in checks.iter().filter(|(series, _)| !answered.contains_key(*series)) {
+        accepted.insert(series.clone(), Accepted { level: Level::Hard, listed: check.listed.clone() });
     }
     accepted
 }
@@ -930,5 +997,133 @@ mod tests {
         let (lines, warnings, _) = carry(&vault, &events);
         assert_eq!((lines, warnings.as_slice()), (0, expected.as_slice()));
         assert_eq!(ledger_text(&vault), before);
+    }
+
+    // --- T2b.2b: PQ1 (a), an accepted `event-check` series carries -----------------------------
+    //
+    // As in T2b.2, no test here asserts on the accept carry's ledger lines: T2b.5 adds them.
+
+    /// An answered `event-check` card in `archive/`, in the emitter's shape: no `verdict:`,
+    /// `events:` lists `listed` (the first its primary), and `instances:` carries them when
+    /// `with_instances` (a card filed before this lane carries none). An empty `series` is `''`.
+    fn check_card(vault: &Path, name: &str, status: &str, series: &str, listed: &[&DiscoveredEvent], with_instances: bool, id: &str) {
+        use crate::yamlemit::Node;
+        let mut pairs = vec![
+            ("id", Node::text(id)),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(EVENT_CHECK)),
+            ("title", Node::text(&crate::eventemit::what_and_when(listed[0]))),
+            ("status", Node::text(status)),
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(series)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+        ];
+        if with_instances {
+            pairs.push(("instances", Node::Seq(listed.iter().map(|e| Instance::from_event(e).to_node()).collect())));
+        }
+        pairs.extend([
+            ("proposed_at", Node::Date(date(2026, 9, 24))),
+            ("first_proposed_at", Node::Date(date(2026, 9, 24))),
+            ("expires", Node::Date(listed[0].start().date())),
+            ("snooze_until", Node::Null),
+            ("created_by", Node::text("events")),
+        ]);
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    /// `(source_uid, level)` of every commitment, in file-name order.
+    fn booked(vault: &Path) -> Vec<(String, String)> {
+        let rows = notes(vault, crate::commitments::FOLDER);
+        rows.iter().map(|(_, m)| (card_text(m, "source_uid"), card_text(m, "level"))).collect()
+    }
+
+    #[test]
+    fn an_accepted_event_check_series_books_a_later_instance_once() {
+        let vault = tmp("check-series");
+        let first = instance("lx:9:1", "lx:9", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let mut later = instance("lx:9:2", "lx:9", at(10, 13, 19, 0), at(10, 13, 21, 0));
+        later.registration = true; // P9: the carry still writes no register task
+        check_card(&vault, "event-check-weekly-b.md", "executed", "lx:9", &[&first], true, ID_B);
+        check_card(&vault, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_A);
+        // The reader: the lowest file name wins; the value is its file, its id and its listed uids.
+        let checks = accepted_check_series(&vault);
+        let listed = BTreeSet::from(["lx:9:1".to_string()]);
+        let file = "event-check-weekly-a.md".to_string();
+        assert_eq!(checks, BTreeMap::from([("lx:9".to_string(), CheckAccept { file, id: ID_A.into(), listed })]));
+        assert!(answered_series(&vault).is_empty(), "T2b.1's edge rule is unchanged: the card is not counted");
+
+        let events = [first.clone(), later.clone()];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let row = (String::from("lx:9:2"), String::from("hard"));
+        assert_eq!(booked(&vault), [row.clone()], "P7: hard; nothing for lx:9:1, which the card listed");
+        let records = Journal::new(&vault).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)], "one create, journal first");
+        assert!(!vault.join("tasks").exists(), "P9: the carry writes commitments only");
+        // A second call writes nothing, no journal record included.
+        let journal = journal_text(&vault);
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((journal_text(&vault), booked(&vault)), (journal, vec![row]));
+
+        // A hand edit makes an archived `rejected` `event-accept` card answer `lx:9` too:
+        // `answered_series`' answer wins, so the series is declined and nothing is booked.
+        let edited = tmp("check-series-hand-edit");
+        check_card(&edited, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_A);
+        answered_card(&edited, "event-weekly-2026-10-20.md", "rejected", "obligation", "lx:9", &["lx:9:3"], ID_B);
+        let (_, warnings, ledger) = carry(&edited, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(!edited.join(crate::commitments::FOLDER).exists(), "a series declined on an event-accept card");
+        assert_eq!(journal_text(&edited), "");
+        assert!(ledger["lx:9:2"].declined, "the decline carry's line, as answered_series answers it");
+
+        // Built as `read_roster` builds events (series equal to uid): a one-instance `ics:fair`
+        // whose executed card lists it writes nothing, from the roster or from a feed.
+        let fair_vault = tmp("check-series-roster");
+        let fair = DiscoveredEvent::new("ics:fair", "Career fair", at(10, 20, 10, 0), at(10, 20, 14, 0), "ics");
+        check_card(&fair_vault, "event-check-career-fair-2026-10-20.md", "executed", "ics:fair", &[&fair], true, ID_A);
+        let roster = DiscoveredEvent::new("ics:fair", "Career fair", at(10, 20, 10, 0), at(10, 20, 11, 0), "roster");
+        assert_eq!(roster.series_uid, "ics:fair");
+        for events in [[roster], [fair]] {
+            let (lines, warnings, _) = carry(&fair_vault, &events);
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        }
+        assert!(!fair_vault.join(crate::commitments::FOLDER).exists(), "no note");
+        assert_eq!((journal_text(&fair_vault), ledger_text(&fair_vault)), (String::new(), None), "no record, no line");
+    }
+
+    #[test]
+    fn an_event_check_card_without_instances_carries_nothing() {
+        let vault = tmp("check-without-instances");
+        let primary = |n: u8| instance(&format!("lx:{n}:1"), &format!("lx:{n}"), at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let later = |n: u8| instance(&format!("lx:{n}:2"), &format!("lx:{n}"), at(10, 13, 19, 0), at(10, 13, 21, 0));
+        // As filed before this lane: executed, with no `instances:` key. Its Approve only answered (D11).
+        check_card(&vault, "event-check-a.md", "executed", "lx:1", &[&primary(1)], false, ID_A);
+        // Rejected and expired, each carrying `instances:`.
+        check_card(&vault, "event-check-b.md", "rejected", "lx:2", &[&primary(2)], true, ID_A);
+        check_card(&vault, "event-check-c.md", "expired", "lx:3", &[&primary(3)], true, ID_A);
+        // A hand edit: `instances:` that is not a sequence.
+        card(&vault, "archive", "event-check-d.md", EVENT_CHECK, "executed", "series_uid: \"lx:4\"\ninstances: null\n");
+        // Executed with `instances:`, but in `approvals/`, or with an empty `series_uid`.
+        check_card(&vault, "event-check-e.md", "executed", "lx:5", &[&primary(5)], true, ID_A);
+        fs::create_dir_all(vault.join("approvals")).unwrap();
+        fs::rename(vault.join("archive").join("event-check-e.md"), vault.join("approvals").join("event-check-e.md")).unwrap();
+        check_card(&vault, "event-check-f.md", "executed", "", &[&primary(6)], true, ID_A);
+        assert!(accepted_check_series(&vault).is_empty(), "no card here answers a series for the carry");
+        // The control: an executed card with `instances:`, whose later instance is booked.
+        check_card(&vault, "event-check-g.md", "executed", "lx:7", &[&primary(7)], true, ID_B);
+
+        let events: Vec<DiscoveredEvent> = (1..=7).map(later).collect();
+        // No assertion on `run`'s line count: the control carries (the T2b.2b note above).
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        // A rejected `event-check` series has its `drop` lines through `inherit_series_answers`.
+        assert_eq!(declined_lines(&vault), Vec::<String>::new(), "the decline carry reads event-accept cards only");
+        assert_eq!(booked(&vault), [(String::from("lx:7:2"), String::from("hard"))], "only the control");
+        let records = Journal::new(&vault).read(None, None);
+        assert_eq!(records.len(), 1, "one journal record, the control's");
     }
 }
