@@ -1890,6 +1890,18 @@ Fixes go to `contract-engineer` (T4, T2b.6, T4d) and `implementer` (T4b, T4c), s
 brings Quinn, for information, P17's two remaining trade-offs and (b2)'s two rules and two
 uncovered cases (§13).
 
+*B2's first pass (2026-10-01) was partial.* It read T4 (`68bf88a`), T4b (`1c309cc`) and T2b.6
+(`7550b0d`) only. T4c and T4d are not built: PQ7 gates T4c (§13), and T4d builds on T4c. At
+`1c309cc`, `surface.rs`'s `accepted_events(vault)` reads no ledger and drops no declined uid, and
+there is no `eventcarry::remove_lane_date`, so P17 and PQ5's read side are unbuilt. Example: after
+the first rank in `rank_gives_each_carried_date_the_carrys_line_and_lists_it`, `localist:77:3`
+(all-day, Oct 20–21) has its carry line but is in neither day's `the_day(..).all_day`. And
+`lx:88:1`, which T2b.6 moves from Fri to Sat, is still drawn on Fri. That pass cannot meet this
+Done-when. It closes nothing, and the controller does not ask the push go on it. Its two Important
+findings are this scope and PQ7. Once Quinn answers PQ7 and any T2b.6 fix has landed, T4c is built,
+then T4d, and B2 is dispatched again over those two commits and that fix. Only that pass can close
+B2.
+
 ### M. Take `main` in after M2 merges (main session)
 
 **Why the main session:** it is a merge that keeps the reviewed commits' hashes (P12). Gmail is
@@ -2234,8 +2246,10 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   Neither gates a task any longer, unless T2b.6's first check blocks (b2) and PQ5 returns.
 
   *Open, raised by T2b.6's review on 2026-10-01:* **PQ7** (a carried lane date moved to clock
-  hours, §13), asked before T4 is dispatched. It gates T4c. Under (b) or (c), a T2b.6 fix lands
-  first.
+  hours, §13). It was to be asked before T4. T4 and T4b were built while it was still open, and
+  B2's partial pass found that no T4 test pins the guarded clause. It is now asked before T4c is
+  dispatched, and it gates T4c. Under (b) or (c), a T2b.6 fix lands first. B2's first pass was
+  partial (§5, B2) and carries no push go.
 
   Also still waiting on Quinn: W's checkpoint, the push go after B2 and after W, and the merge
   word in T10. P17's two remaining trade-offs (device-local; today's lane only) go to Quinn with
@@ -3046,3 +3060,11 @@ but it leaves a duplicate for T4c to hide. (a) loses the event.
 *When.* Asked now, before T4 is dispatched, as the review asks: a later change would move a pinned
 clause. It gates T4c. Under (b) or (c), the fix lands before T4c, and B2's contract-reviewer reads it
 with T2b.6.
+
+*Still open at B2's partial pass (2026-10-01).* T4 (`68bf88a`) and T4b (`1c309cc`) were built with
+PQ7 open. B2's contract-reviewer found that the `lane_date` guard in `eventcarry::book` goes beyond
+T2b.6's "Nothing else" and is this question, not a defect to fix before Quinn answers. No T4 test
+pins the clause, so any answer still moves only T2b.6's `booked(&timed)` assertion. PQ7 is now asked
+before T4c is dispatched. The recommendation stays (c). Under (b) or (c), `contract-engineer` drops
+the guard and updates the timed-move clause, and B2's contract-reviewer re-reads that fix together
+with T2b.6. Under (a), T8 and PQ5's *Not covered* say "never booked".
