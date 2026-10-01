@@ -21,6 +21,8 @@ const TITLE_MAX: usize = 200;
 const LOCATION_MAX: usize = 120;
 const URL_MAX: usize = 500;
 const WHERE_MAX: usize = 80;
+/// Characters of title slug in a `register-` file stem.
+const SLUG_MAX: usize = 40;
 
 /// Wall-clock, minutes, no zone: how `instances:` holds `start` and `end`.
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
@@ -215,7 +217,7 @@ fn day_label(day: Date) -> String {
 }
 
 /// The "Register" task for an instance whose feed says registration is required (spec §4.2 step
-/// 2): the note's file stem and its full text, frontmatter through `safe_dump_block` and then the
+/// 2): the note's file stem (`register-<slug>-<start date>`) and its full text, frontmatter through `safe_dump_block` and then the
 /// body. `None` unless `registration` is set. With no deadline the task is undated (`due: null`):
 /// Knowlu never invents one, and the event's start is named only in the body, as an upper bound.
 pub fn register_task(instance: &Instance) -> Option<(String, String)> {
@@ -258,7 +260,14 @@ pub fn register_task(instance: &Instance) -> Option<(String, String)> {
         body.push_str(&format!("\n\n{url}"));
     }
     let text = format!("---\n{}---\n\n{body}\n", safe_dump_block(&front));
-    let stem = format!("register-{}", crate::ingest::slugify(&title));
+    // Unique per instance, not per title: two series titled alike, or a task the student already
+    // keeps, must not make `write::create` fail on `Exists` and stall the card (spec §4.2, D10).
+    let slug: String = crate::ingest::slugify(&title).chars().take(SLUG_MAX).collect();
+    let stem = format!(
+        "register-{}-{}",
+        slug.trim_end_matches('-'),
+        instance.start.strftime("%Y-%m-%d")
+    );
     Some((stem, text))
 }
 
@@ -428,10 +437,33 @@ mod tests {
     }
 
     #[test]
+    fn two_instances_with_one_title_get_different_register_stems() {
+        let mut first = registering(None);
+        let mut second = registering(None);
+        first.start = at(10, 1, 10, 0);
+        second.start = at(10, 8, 10, 0);
+        second.uid = "localist:77:2".into();
+        let (a, _) = register_task(&first).unwrap();
+        let (b, _) = register_task(&second).unwrap();
+        assert_eq!(a, "register-career-fair-2026-10-01");
+        assert_eq!(b, "register-career-fair-2026-10-08");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_long_title_clips_its_register_stem_to_40_characters_of_slug() {
+        let mut inst = registering(None);
+        inst.title = "An exceedingly long career fair title that runs on and on".into();
+        let (stem, _) = register_task(&inst).unwrap();
+        let slug = stem.strip_prefix("register-").unwrap().strip_suffix("-2026-10-01").unwrap();
+        assert!(slug.chars().count() <= 40 && !slug.ends_with('-'), "{slug}");
+    }
+
+    #[test]
     fn the_register_task_is_due_at_the_deadline_at_2359() {
         let inst = registering(Some(date(2026, 9, 28)));
         let (stem, text) = register_task(&inst).expect("registration: true gives a task");
-        assert_eq!(stem, "register-career-fair");
+        assert_eq!(stem, "register-career-fair-2026-10-01");
         let meta = task_front(&text);
         assert_eq!(text_of(&meta, "title").as_deref(), Some("Register: Career fair"));
         assert_eq!(text_of(&meta, "due").as_deref(), Some("2026-09-28T23:59"));
