@@ -641,4 +641,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 #set-prefs-count.over { color: var(--crit); }
 .set-prefs-copy { flex: 1 1 100%; }
 .prefsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
+.set-int { display: flex; flex-direction: column; gap: 2px; flex: 1 1 100%; color: var(--t3); font-size: 11.5px; }
+.set-int textarea { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; }
+.intsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
 .set-sec h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }

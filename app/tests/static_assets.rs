@@ -2242,3 +2242,58 @@ fn settings_offers_undo_for_preferences() {
     assert!(p.contains("invoke(\"profile\"") && p.contains("offerPrefsUndo(before, PREFS.loaded)"), "after is the re-read text");
     assert!(!u.contains("ta.value"), "never the textarea's value");
 }
+
+// M2 T5b.2 (spec tests 27, 28 and 32, the interests halves; plan addition for D10).
+fn ints_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.2").expect("the interests section");
+    let end = js[at..].find("// M2 T5b.2 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_interests() {
+    let html = read("index.html");
+    for id in ["set-int-strong", "set-int-mild", "set-int-never", "set-int-clubs", "set-int-save"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in", "one call", "judges"] {
+        assert!(html.contains(label), "the section keeps: {label}");
+    }
+    let p = ints_js();
+    assert!(p.contains("invoke(\"set_interests\"") && p.contains("strong:") && p.contains("mild:") && p.contains("never:") && p.contains("clubs:"), "Save sends the four lists");
+    assert!(p.contains("showRefusal("), "a refusal is shown, the draft kept");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadInterests("), "opening Settings loads the lists");
+}
+
+#[test]
+fn no_settings_ui_event_carries_interests_text() {
+    let p = ints_js();
+    assert!(p.contains("\"edit_started\", null, \"interests\"") && p.contains("\"edit_committed\", null, \"interests\"") && p.contains("\"edit_cancelled\", null, \"interests\""), "interests events use object_kind interests");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["value", "INT", "before", "after", "lists", "draft", "strong", "clubs"] {
+            assert!(!line.contains(bad), "a ui event carries interests text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_interests() {
+    let p = ints_js();
+    let at = p.find("function offerIntUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_interests\"") && u.contains("before.strong") && u.contains("before.clubs"), "undo sends the four lists held before the save");
+}
+
+#[test]
+fn interests_are_read_only_when_not_editable() {
+    let p = ints_js();
+    assert!(p.contains("interests_editable"), "the page reads the flag");
+    assert!(p.contains("readOnly") && p.contains("set-int-save"), "the lists lock and Save is disabled");
+    assert!(p.contains("Knowlu can only edit a list written on one line"), "D10's reason is shown");
+}

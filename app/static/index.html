@@ -209,6 +209,14 @@
       <button class="b" id="set-prefs-save">Save</button><button class="b" id="set-prefs-cancel">Cancel</button>
       <p class="meta set-prefs-copy">Knowlu&rsquo;s judge reads the first 600 characters of this when it sizes up a task. They are sent for that one call, and neither we nor the model&rsquo;s host keep them. Otherwise this stays on this computer.</p>
     </div>
+    <div class="set-row" id="set-ints"><span class="k">Campus events</span>
+      <label class="set-int">Always show me<textarea id="set-int-strong" rows="3"></textarea></label>
+      <label class="set-int">Maybe<textarea id="set-int-mild" rows="3"></textarea></label>
+      <label class="set-int">Never show me<textarea id="set-int-never" rows="3"></textarea></label>
+      <label class="set-int">Clubs I&rsquo;m in<textarea id="set-int-clubs" rows="3"></textarea></label>
+      <button class="b" id="set-int-save">Save</button><button class="b" id="set-int-cancel">Cancel</button>
+      <p class="meta set-prefs-copy" id="set-int-note">One item per line. Knowlu uses these to choose which campus events to show you. The first 600 characters also go to its judge with each event it judges, for that one call.</p>
+    </div>
   </div>
   <div class="set-row" id="set-report"><span class="k">Problems</span><button class="b" id="set-report-go">Report an issue</button></div>
   <div class="set-row" id="set-delete"><span class="k">Delete my data</span><span class="meta" id="set-delete-note"></span><button class="b" id="set-delete-1">Delete everything</button><button class="b crit" id="set-delete-2" hidden>Yes, delete it all</button></div>

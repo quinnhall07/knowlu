@@ -1999,9 +1999,88 @@
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); savePrefs(); }
   });
   // M2 T5b.1 end
+  // M2 T5b.2: Settings, "Campus events". INT.loaded is the four lists `profile` last returned; undo
+  // sends the ones held before the save. Events carry the object kind only, never an item (D15).
+  var INT_KEYS = ["strong", "mild", "never", "clubs"];
+  var INT = { loaded: null, started: false, editable: true };
+  function intRead() {
+    var out = {};
+    INT_KEYS.forEach(function (k) {
+      out[k] = EL("set-int-" + k).value.split("\n").map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+    });
+    return out;
+  }
+  function intDirty() { return !!INT.loaded && JSON.stringify(intRead()) !== JSON.stringify(INT.loaded); }
+  function intLock(on) {
+    INT_KEYS.forEach(function (k) { EL("set-int-" + k).disabled = on; });
+    EL("set-int-save").disabled = on || !INT.editable; EL("set-int-cancel").disabled = on;
+  }
+  function intFill(p) {
+    INT.loaded = {}; INT.started = false; INT.editable = p.interests_editable !== false;
+    INT_KEYS.forEach(function (k) {
+      INT.loaded[k] = (p[k] || []).slice();
+      var ta = EL("set-int-" + k); ta.value = INT.loaded[k].join("\n"); ta.readOnly = !INT.editable;
+    });
+    EL("set-int-save").disabled = !INT.editable; EL("set-int-cancel").disabled = !INT.editable;
+    var n = EL("set-int-reason"), r = "Knowlu can only edit a list written on one line. Yours continues onto following lines, so it is shown here to read only.";
+    if (!INT.editable && !n) {
+      n = document.createElement("p"); n.id = "set-int-reason"; n.className = "meta set-prefs-copy"; n.textContent = r;
+      EL("set-int-note").parentNode.insertBefore(n, EL("set-int-note"));
+    }
+    if (INT.editable && n) { n.remove(); }
+  }
+  function loadInterests() {
+    if (intDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !intDirty()) { intFill(env.profile); }
+    }).catch(function () {});
+  }
+  function saveInterests() {
+    var held = INT.loaded;
+    var sent = intRead();
+    intLock(true);
+    invoke("set_interests", { view: stateView(), strong: sent.strong, mild: sent.mild, never: sent.never, clubs: sent.clubs }).then(function (env) {
+      if (!applyEnvelope(env, function (m) { intLock(false); showRefusal(null, m, null, "interests"); })) { return; }
+      ev("edit_committed", null, "interests");
+      return invoke("profile", {}).then(function (p) {
+        intLock(false);
+        if (!p.ok || !p.profile) { return; }
+        intFill(p.profile); offerIntUndo(held);
+      });
+    }).catch(function (e) { intLock(false); showRefusal(null, "refused: " + e, null, "interests"); });
+  }
+  function offerIntUndo(before) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-int-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-int-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-int-undo]").disabled = true;
+      invoke("set_interests", { view: stateView(), strong: before.strong, mild: before.mild, never: before.never, clubs: before.clubs }).then(function (r) {
+        if (applyEnvelope(r, function (m) { t.remove(); showRefusal(null, m, null, "interests"); })) {
+          t.remove(); ev("edit_committed", null, "interests");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { intFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  INT_KEYS.forEach(function (k) {
+    EL("set-int-" + k).addEventListener("input", function () {
+      var first = !INT.started;
+      INT.started = true;
+      if (first) { ev("edit_started", null, "interests"); }
+    });
+  });
+  EL("set-int-save").addEventListener("click", saveInterests);
+  EL("set-int-cancel").addEventListener("click", function () {
+    if (intDirty()) { ev("edit_cancelled", null, "interests"); }
+    if (INT.loaded) { intFill({ strong: INT.loaded.strong, mild: INT.loaded.mild, never: INT.loaded.never, clubs: INT.loaded.clubs, interests_editable: INT.editable }); }
+  });
+  // M2 T5b.2 end
   function openSettings() {
     EL("settings").hidden = false;
-    loadPrefs();
+    loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
     invoke("settings_context", {}).then(function (c) {
