@@ -317,10 +317,10 @@ uncurated Blackboard school (§4); a school gains grades only through a curated 
   `grades_connect`, `grades_refresh`, the scheduler's grades step); a refusal opens no window and
   reads no session. **The date-and-bump test** fails when any curated campus row carries a
   `policy_read` date while `PRIVACY_VERSION` is older than privacy bump #1.
-- **Live proof** *(suspended until 20 paying users: Amendment 2026-09-30, A13)* (desktop safety: never synthetic input): on the founder's scratch profile, on a dev build of `main` through the suspended gate (§4; no proof branch or date needed; the text below is the enforced-gate proof, run again at the review) —
+- **Live proof** *(suspended until 20 paying users: Amendment 2026-09-30, A13)* (desktop safety: never synthetic input): on the founder's scratch profile, on a dev build of `main` through the suspended gate (§4; no proof branch or date needed; run again at the review) —
   connect Blackboard, see the rings, run a slot and see a silent refresh, forget the sign-in and see
-  *not connected*. The same build on a profile at a school without a dated row shows *not
-  available*. The proof branch is never merged ahead of privacy bump #1. The first real capture's
+  *not connected*. The same build on a profile at an uncurated school shows *not
+  available*. The first real capture's
   bundle is **not** committed (real grades).
 
 ## 14. Coordination

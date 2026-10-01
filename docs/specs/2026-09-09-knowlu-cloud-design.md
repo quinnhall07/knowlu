@@ -559,7 +559,7 @@ signed.
 3. **Who started a change decides how it lands.** The student asked → act at once with undo. Knowlu
    noticed → propose and wait, showing who it came from and a summary of the context. An
    authoritative source changed → apply and list it. Anything another person can see stays a
-   proposal. Knowlu never invents a due date.
+   proposal. Knowlu never invents a due date. *(amended 2026-09-30: the backfill exception)*
    *Consequence for the registrar:* a registrar change is an authoritative-source change. The UA
    registrar (the commitment model's phase 3) applies it and lists it under "what changed"; it does
    not file change or end cards. The phase-3 spec
@@ -596,23 +596,23 @@ signed.
     - **MVP:** quinn-ops parity plus grades from Blackboard (item 9), proven on a founder-owned
       scratch profile and test account on staging, with no second person. It holds commitment-model
       phases 1–2, M1 grades, Gmail connect in the app, email by the forwarding (the receiver, automatic setup for school Microsoft 365 and personal Gmail, backfill to the term's start, the canary and "source went quiet" for forwarded mailboxes, and the saved sign-in's reconcile and recover) *(amended 2026-09-30, email forwarding to Knowlu)*, events (required events enter the plan as a one-off commitment; accept and decline) *(amended 2026-09-29, events spec Q1: enter the plan as
-      a one-off commitment, signed by Quinn)*, body and profile editing, each small parity item done or cut, and ~~UA's university-policy read (ruling 12)~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Exit:* the parity audit re-run shows no open row; ~~Quinn has recorded UA's read;~~ the founder's grades proof has passed through the app's real gate on a dev build ~~from the proof branch that carries UA's date~~ (Quinn is a UA student and the MVP's only user; ruling 12's date-and-bump rule); the founder's forwarding proof (the email spec's §12.6) has passed on a dev build against staging *(amended 2026-09-30, email forwarding to Knowlu)*; and Quinn says "MVP reached". Exit does not need UA's date on main. ~~The MVP's grades proof therefore waits on Quinn recording UA's read.~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
+      a one-off commitment, signed by Quinn)*, body and profile editing, each small parity item done or cut, and UA's university-policy read (ruling 12) *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Exit:* the parity audit re-run shows no open row; ~~Quinn has recorded UA's read;~~ the founder's grades proof has passed through the app's real gate on a dev build ~~from the proof branch that carries UA's date~~ (Quinn is a UA student and the MVP's only user; ruling 12's date-and-bump rule); the founder's forwarding proof (the email spec's §12.6) has passed on a dev build against staging *(amended 2026-09-30, email forwarding to Knowlu)*; and Quinn says "MVP reached". Exit does not need UA's date on main. ~~The MVP's grades proof therefore waits on Quinn recording UA's read.~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
     - **Pilot:** a few undergraduates other than the founder, on the released app, one computer
       each, needing nothing from anyone. It holds production parity (HANDOFF §4 less the two-desktop
       proof); v0.1.1 built by CI; privacy bump #1 with one lawyer read and the re-consent screen
       (R-PS-4); the UA registrar (commitment phase 3, item 3's consequence); removal of the local
       model runtime (`runtime.rs`, `inference.rs`, `SUPPORTED_RUNTIMES`, the wizard offer); the OpenRouter 402 and Gmail's "source went quiet" shown as issues (email forwarding's is the MVP's) *(amended 2026-09-30, email forwarding to Knowlu)*; `calendar.readonly` verification
-      submitted; ~~the university-policy read for each pilot student's university other than UA, whose read is done at MVP exit (ruling 12)~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Entry:* Quinn sets the number of students and
+      submitted; the university-policy read for each pilot student's university other than UA, whose read is done at MVP exit (ruling 12) *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Entry:* Quinn sets the number of students and
       their universities, the length, a measure drawn from VISION's successes 1, 2, 5 and 6, and
       whether pilot students pay; if they do,
       VISION's gate "a lawyer before the first non-founder paid sign-up" moves from Launch to Pilot
       entry. *Gate:* no non-founder account exists before these ship: the re-consent screen (R-PS-4);
       privacy bump #1 (`PRIVACY_VERSION` moved, with the page naming ruling 12's session and the
-      grades the account holds, after its lawyer read); and item 11. ~~And no pilot student uses ruling 12's kept Blackboard session before the policy read for that student's own university is done; a student whose university's read is not done joins without grades from Blackboard. The app enforces this half (ruling 12): Connect is offered, and a capture runs, only where the curated campus row records the read.~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
+      grades the account holds, after its lawyer read); and item 11. And no pilot student uses ruling 12's kept Blackboard session before the policy read for that student's own university is done; a student whose university's read is not done joins without grades from Blackboard. The app enforces this half (ruling 12): Connect is offered, and a capture runs, only where the curated campus row records the read. *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
     - **Launch:** any US undergraduate can pay $9.99 and use more than one desktop. It holds C5, the
       relay fetch (its pre-flight re-run first); the two-desktop stream's Plans 1–3 and its
       two-computer proof; privacy bump #2; `gmail.readonly` verification and CASA (or Quinn accepts
-      the 100-user cap); lawyer sign-off (unless it moved to Pilot entry), ~~each university-policy read not already done in the MVP or the Pilot (UK's, unless a pilot student is at UK)~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*, tax
+      the 100-user cap); lawyer sign-off (unless it moved to Pilot entry), each university-policy read not already done in the MVP or the Pilot (UK's, unless a pilot student is at UK) *(suspended until 20 paying users: Amendment 2026-09-30, A13)*, tax
       registration, code signing and the private-repository decision (ruling 13).
     - **Beyond:** each VISION phase that makes the morning answer better. Per feature: a signed
       spec, a plan, a review, a merge and a live proof.
@@ -718,62 +718,31 @@ tested by `human_edited`); START-HERE v2 §2's MVP row takes UA's policy read as
 and its Pilot row takes ruling 10's gate and entry as written here (privacy bump #1, the policy read
 for each other pilot student's university, and whether pilot students pay).
 
-
-
-
 ---
-
-
 
 ## Amendment 2026-09-30 — email forwarding to Knowlu (Quinn's rulings of 2026-09-30) — **SIGNED by Quinn, 2026-09-30**
 
-
-
 Authority: `docs/specs/2026-09-30-email-forwarding-design.md` §10 (items A1–A13), signed the same day. As with the earlier amendments, the body of this spec is not rewritten; the markers above point here.
 
-
-
 > **Email has two paths (Quinn's rulings of 2026-09-30).** (1) **Email forwarding to Knowlu:** each connected mailbox
-
 > forwards everything to a private Knowlu address; AWS SES receives it, S3 holds it until it is read
-
 > (its one-day rule removes anything left within about two days), and our service screens it, extracts
-
 > claims and queues them; it never rejects mail at the door for SPF, DKIM or DMARC. Knowlu sets the
-
 > forwarding up itself in a sign-in window the student sees only to sign in, for school Microsoft 365
-
 > and personal Gmail, with guided steps for every other case; it backfills to the term's start,
-
 > applies that backfill and lists it with Undo (proposing only what conflicts), proposes every change
-
 > and new item after setup, and watches each mailbox with a canary. Mail cards, notices and applied
-
 > changes name their sender and date, unlike Gmail cards in the MVP (the Gmail spec's D15). (2) **Gmail
-
 > OAuth** stays the direct path for testers, and for everyone after CASA; a Gmail address with an
-
 > active forwarding is read by email forwarding to Knowlu only. **A second named exception to §11a's "keep nothing"**
-
 > joins ruling 12's: a saved mail sign-in, one WebView2 profile per connected mailbox under the app's
-
 > data folder, never in the vault, never synced, never sent, its cookies DPAPI-encrypted, no password
-
 > kept; **on by default for everyone, at every school, with no university-policy read until Knowlu
-
 > has 20 paying users (A13)**, with a switch in Settings; used only to reconcile, recover and re-enable
-
 > forwarding (re-enabled automatically and then announced, never for a mailbox the student turned off
-
 > in Knowlu's Settings); deleted when switched off, on that mailbox's Disconnect, on Knowlu sign-out
-
 > and on account deletion; named on the privacy page in bump #1. Ruling 10's MVP gains email by the
-
 > forwarding, including its own "source went quiet", and its exit gains email forwarding's live proof. No
-
 > release carries it before privacy bump #1.
 
-
-
 **Ruling 12 of Amendment 2026-09-29 is suspended until 20 paying users (A13).** Quinn (2026-09-30): "change both to allow. We'll keep the school sign-in and mail sign-in for now. Once we have 20 paying users, we'll come back to this." The five passages of ruling 12 and the passages of ruling 10 and §11a's grades row that depend on it carry the marker; the text above shows the replacements in place. The grades spec's §4 and proof lines and VISION's pilot paragraph carry the same ruling.
-
