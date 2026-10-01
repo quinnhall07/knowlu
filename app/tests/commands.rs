@@ -5,7 +5,7 @@ use knowlu::commands::{
     answer_card_inner, backup_now_inner, close_info_inner, console_ctx, create_task_inner, decide_inner,
     delete_note_inner, get_settings_inner, mark_seen_inner, note_inner, open_issue_inner,
     dropped_events_inner, profile_inner, resolve_issue_inner, set_body_inner, set_fields_inner, set_interests_inner,
-    set_preferences_inner, set_settings_inner, state_inner, sync_inner, ui_event_inner,
+    set_preferences_inner, set_settings_inner, state_inner, sync_inner, ui_event_inner, remove_lane_date_inner,
 };
 use knowlu::scheduler::{lock, LiveSlot, RunSummary, Scheduler};
 
@@ -1171,4 +1171,92 @@ fn dropped_events_lists_the_audit_drops_and_writes_nothing() {
     assert_eq!((env["ok"].clone(), env["error"].clone()), (json!(true), json!(null)), "{env}");
     assert_eq!(env["dropped"], json!([{ "uid": "localist:pep", "title": "Pep Rally", "date": "2026-09-04", "time": "18:30", "reason": "filtered by your interests" }]), "{env}");
     assert_eq!(tree_bytes(&v), before, "nothing was written");
+}
+
+/// Spec test 28: accepting an `event-accept` card in the console books the event before the call
+/// returns, the way approving a task card puts the task in the returned state. The card is
+/// hand-built (spec §5.1's shape); every title, place and uid is invented.
+#[test]
+fn decide_accepting_an_event_card_books_it_before_returning() {
+    let (v, cs) = open_scratch("decide-event");
+    cs.set_test_today(Some("2026-10-01".parse().unwrap()));
+    std::fs::write(
+        v.join("approvals/event-career-fair-2026-10-01.md"),
+        "---\nid: appr_00000000e1\ntype: approval\nkind: event-accept\ntitle: \"Required · Career fair · Thu 1 Oct 10am–3pm\"\n\
+         status: pending\nverdict: obligation\nsource_uid: \"lx:77:1\"\nseries_uid: \"lx:77\"\nevents: [\"lx:77:1\"]\ninstances:\n  \
+         - {uid: \"lx:77:1\", title: \"Career fair\", start: '2026-10-01T10:00:00', end: '2026-10-01T15:00:00', location: \"Ferguson Center\", \
+         registration: false, registration_deadline: null}\njudgment_kind: event\nproposed_at: 2026-09-24\nfirst_proposed_at: 2026-09-24\n\
+         expires: 2026-10-01\nsnooze_until: null\ncreated_by: events\n---\n\nInvented.\n",
+    )
+    .unwrap();
+    let env = decide_inner(&cs, "today", "appr_00000000e1", "approved", "", None).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["decision"]["executed"], json!(["event-career-fair-2026-10-01"]), "{env}");
+
+    let notes: Vec<_> = std::fs::read_dir(v.join("commitments")).unwrap().flatten().collect();
+    assert_eq!(notes.len(), 1, "the commitment exists before the call returned");
+    let text = std::fs::read_to_string(notes[0].path()).unwrap().replace("\r\n", "\n");
+    assert!(text.contains("source_uid: lx:77:1") || text.contains("source_uid: \"lx:77:1\""), "{text}");
+    let note_id = text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().trim().to_string();
+
+    let records = journal_records(&v);
+    let status_rec = records.iter().find(|r| r["op"] == "set" && r["field"] == "status" && r["id"] == json!("appr_00000000e1")).expect("the card's status record");
+    assert!(!knowlu_engine::provenance::is_agent(status_rec["actor"].as_str().unwrap()), "the decision is the student's: {status_rec}");
+    let create_rec = records.iter().find(|r| r["op"] == "create" && r["id"] == json!(note_id)).expect("the commitment's create record");
+    assert!(knowlu_engine::provenance::is_agent(create_rec["actor"].as_str().unwrap()), "the booking is the system's: {create_rec}");
+}
+
+/// P17: "Remove from my day" takes an accepted all-day date off the day, in the returned state,
+/// with one `declined` ledger line. Tested through the call the console sends once the Undo toast
+/// has closed (PQ6 (b)); there is no toast here.
+#[test]
+fn remove_lane_date_takes_the_date_off_the_day_before_returning() {
+    let (v, cs) = open_scratch("remove-lane-date");
+    let day = "2026-10-09";
+    cs.set_test_today(Some(day.parse().unwrap()));
+    let card = "appr_0123456789";
+    std::fs::create_dir_all(v.join("archive")).unwrap();
+    std::fs::write(
+        v.join("archive/event-weekly-meeting-2026-10-06.md"),
+        format!(
+            "---\nid: {card}\ntype: approval\nkind: event-accept\ntitle: \"Weekly meeting\"\nstatus: executed\nverdict: opportunity\n\
+             source_uid: \"lx:77:1\"\nseries_uid: \"lx:77\"\nevents: [\"lx:77:1\"]\ninstances:\n  \
+             - {{uid: \"lx:77:1\", title: \"Weekly meeting\", start: '2026-10-06T19:00:00', end: '2026-10-06T21:00:00', location: \"Hall\", \
+             registration: false, registration_deadline: null}}\nproposed_at: 2026-09-24\nfirst_proposed_at: 2026-09-24\n\
+             expires: 2026-10-06\nsnooze_until: null\ncreated_by: events\n---\n\nInvented.\n"
+        ),
+    )
+    .unwrap();
+    let dt = |s: &str| -> jiff::civil::DateTime { s.parse().unwrap() };
+    knowlu_engine::eventledger::record_carried_answer(
+        &v, "lx:77:3", "Open house", "2026-10-01".parse().unwrap(), "opportunity", card, dt("2026-10-09T00:00:00"), dt("2026-10-10T00:00:00"),
+    )
+    .unwrap();
+    let ledger_path = v.join("state/events-seen.md");
+    let ledger = || std::fs::read(&ledger_path).unwrap();
+    let declined_lines = || String::from_utf8(ledger()).unwrap().lines().filter(|l| l.starts_with("- lx:77:3 ") && l.contains("declined")).count();
+    let carry_pos = String::from_utf8(ledger()).unwrap().find("verdict:opportunity").unwrap();
+
+    let s = state_inner(&cs, "today").unwrap();
+    assert!(s["state"]["the_day"]["all_day"].as_array().unwrap().contains(&json!("Open house")), "{}", s["state"]["the_day"]);
+    assert!(s["state"]["the_day"]["all_day_uids"].as_array().unwrap().contains(&json!("lx:77:3")), "{}", s["state"]["the_day"]);
+
+    let env = remove_lane_date_inner(&cs, "today", "lx:77:3").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let the_day = &env["state"]["the_day"];
+    assert!(!the_day["all_day"].as_array().unwrap().contains(&json!("Open house")), "{the_day}");
+    assert!(the_day.get("all_day_uids").is_none(), "{the_day}");
+    assert_eq!(declined_lines(), 1);
+    let text = String::from_utf8(ledger()).unwrap();
+    assert!(text.find(&format!("- lx:77:3 · declined {day}")).unwrap() > carry_pos, "the declined line comes after the carry line");
+
+    let before = ledger();
+    let again = remove_lane_date_inner(&cs, "today", "lx:77:3").unwrap();
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(ledger(), before, "a second removal writes nothing");
+
+    let nope = remove_lane_date_inner(&cs, "today", "lx:nothing:1").unwrap();
+    assert_eq!(nope["ok"], false, "{nope}");
+    assert!(nope["error"].as_str().unwrap().contains("lx:nothing:1") && nope["state"].is_object(), "{nope}");
+    assert_eq!(ledger(), before, "a refusal writes nothing");
 }
