@@ -595,6 +595,43 @@ fn set_settings_validates_the_whole_patch_before_touching_anything() {
     assert!(env2["error"].as_str().unwrap().contains("backup_dir"), "{env2}");
 }
 
+/// M1 grades spec §2, §3 and §9 (T9 finding 3): *Hide grades* is a settings row like the others,
+/// through `set_settings`, so the console's grades commands stay four. Its flag lives in
+/// `grades.json` beside `settings.json` and never in it. A patch that carries only it leaves
+/// `settings.json` byte for byte, and a bad value, or a refused key in the same patch, writes
+/// neither file.
+#[test]
+fn set_settings_hides_grades_in_grades_json_and_never_in_settings_json() {
+    use knowlu::grades::{status_for, GradesPrefs};
+    let v = scratch("settings-grades-hidden");
+    let data = std::env::temp_dir().join(format!("qo-settings-grades-hidden-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let cs = ConsoleState::open(v.clone(), data.clone());
+    let mut seed = serde_json::Map::new(); seed.insert("autostart".into(), json!(true));
+    assert_eq!(set_settings_inner(&cs, seed).unwrap()["ok"], true);
+    let settings_before = std::fs::read(&cs.settings_path).unwrap();
+    let patch = |pairs: &[(&str, serde_json::Value)]| pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect::<serde_json::Map<_, _>>();
+
+    let env = set_settings_inner(&cs, patch(&[("grades_hidden", json!(true))])).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert!(GradesPrefs::load(&data).hidden, "grades.json holds the flag");
+    assert_eq!(status_for(None, "", &data, &v)["hidden"], json!(true), "grades_status reports it");
+    assert_eq!(std::fs::read(&cs.settings_path).unwrap(), settings_before, "settings.json is never touched by Hide grades");
+
+    let env = set_settings_inner(&cs, patch(&[("grades_hidden", json!("yes"))])).unwrap();
+    assert_eq!(env["ok"], false, "{env}");
+    assert!(env["error"].as_str().unwrap().contains("grades_hidden"), "{env}");
+    let env = set_settings_inner(&cs, patch(&[("grades_hidden", json!(false)), ("zzz_unknown", json!(1))])).unwrap();
+    assert_eq!(env["ok"], false, "{env}");
+    assert!(GradesPrefs::load(&data).hidden, "a refused patch changes neither file");
+
+    assert_eq!(set_settings_inner(&cs, patch(&[("grades_hidden", json!(false))])).unwrap()["ok"], true);
+    assert!(!GradesPrefs::load(&data).hidden, "and the student can show grades again");
+    assert_eq!(std::fs::read(&cs.settings_path).unwrap(), settings_before);
+    drop(cs);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 #[test]
 fn ui_events_land_ids_only_and_refuse_text() {
     let v = scratch("uiev");

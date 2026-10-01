@@ -301,8 +301,9 @@ student's own address, shown back to them.
     that R-C2-E15, R-C2-E38 and R-C2-E46 are superseded for this arm.
   - The local arm (`cloud` is `None`, `:350-359`) is untouched.
   - **Under Q1 (a′) only (recommended):** a probe that failed in transport ends the cloud arm. No
-    enrichment batch, events pass, Gmail pull, rule pull or label report runs, and the run prints
-    exactly one line, `judge: skipped (no network (…))`, at exit 0. `probe()` (`cloudmodel.rs:712-720`,
+    events pass, Gmail pull, rule pull or label report runs, and the run prints
+    exactly one skipped line, `judge: skipped (no network (…))`; tier-1 answers are still written; no
+    `gmail:`, `rules:` or `labels:` line; exit 0 (amended by Quinn's PQ1 answer, 2026-09-30). `probe()` (`cloudmodel.rs:712-720`,
     off the contract list) gains a way to report the transport case without changing what a fatal
     status sets on `model.fatal()`. A 5xx or 429 on the probe is not transport and keeps today's
     path. Test: §8.2 item 9.
@@ -648,7 +649,9 @@ the request, so each test can assert the method, the path, the bearer and the `a
 8. Every row of §7's two tables is done as tabled, and the stop rule held.
 9. **Q1 (a′) only, the transport stop:** a bare vault whose `api_base` points at a loopback listener
    that is bound and then dropped (so the connection is refused locally; no egress) prints exactly
-   `judge: skipped (no network (…))`, makes no `/gmail-read` or `/judge-rules` request, and exits 0.
+   exactly one skipped line, `judge: skipped (no network (…))`; tier-1 answers are still written; no
+   `gmail:`, `rules:` or `labels:` line; it makes no `/gmail-read` or `/judge-rules` request, and
+   exits 0 (amended by Quinn's PQ1 answer, 2026-09-30).
    A probe answered 503 still runs the arm as today.
 
 ### 8.3 Cloud (Deno; cloud-engineer)
@@ -789,8 +792,9 @@ so a student who skipped the calendar step gets no mail after connecting Gmail.
   Every offline slot for every student also prints `gmail: skipped (no network (…))` and
   `rules: skipped (no network (…))`, where a bare vault printed neither.
 - (a′) (a), plus a **transport stop**: when the probe fails in transport (`CloudError::Transport`),
-  the cloud arm runs no further pass and prints one line, `judge: skipped (no network (…))`. This caps
-  an offline slot at one `CALL_TIMEOUT` and one line. Costs: a small `enrich.rs` branch and one §8.2
+  the cloud arm runs no further pass and prints exactly one skipped line, `judge: skipped (no network
+  (…))`; tier-1 answers are still written; no `gmail:`, `rules:` or `labels:` line (amended by Quinn's
+  PQ1 answer, 2026-09-30). This caps an offline slot at one `CALL_TIMEOUT` and one skipped line. Costs: a small `enrich.rs` branch and one §8.2
   test; `probe()` must report a transport failure, which it now folds into `None` (`cloudmodel.rs:719`);
   and a vault with pending items loses its whole slot to a one-off blip on the probe, where today each
   item is tried. The plan must also find every existing test that scripts a transport-failed probe and

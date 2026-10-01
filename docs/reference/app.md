@@ -4,14 +4,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-29 (the merge of
-  the commitment model into this file's branch; the 2026-09-26 recount of C3′ into phase 2 gave the
-  same)** (by script, over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **47** (phase 2 added `answer_card`, `commitment_proposals`,
-  `commitments_confirm`, `your_week`, `preview_window`), the vault-less picker/wizard window **29**
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-09-30 (the merge of M1 grades into
+  Gmail connect; the 2026-09-29 recount after the commitment model's merge gave 47 / 29 / 66)** (by script,
+  over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
+  the console window registers **54** (phase 2 added `answer_card`, `commitment_proposals`,
+  `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
+  `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
+  `account::google_connect` and `account::google_disconnect`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **66** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **73** distinct. Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
   `report.rs`, `lms_link.rs`), never all in one file. **Ten** mutate notes (`set_fields`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
@@ -21,15 +23,54 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
   app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
   before quoting a number.
+- **Google connection from Settings (Gmail connect).** Three console commands in `app/src/account.rs`,
+  each reading the profile's session from `cfg.session_credential_target` (the wizard's
+  `google_connect_url`, `google_connected` and `open_external` keep `PENDING_TARGET`, and call the same
+  cores). `google_status` returns `{ok, state, calendar, gmail, email, error}` (`state` is `none`,
+  `active`, `quiet` or `revoked`; an older server's reply without `status` reads `active` when connected,
+  else `none`). `google_connect(scope)` takes `calendar`, `gmail` or `reconnect`, opens the consent URL
+  from Rust only if it passes `external_url_allowed`, and returns `{ok, error}`. `google_disconnect`
+  sends a bearer `DELETE` to `google-connect` and returns `{ok, error}`. Errors: 402 "your subscription
+  is not active, so Google cannot be connected" (Connect and Reconnect only: the status read and
+  Disconnect need a session, not a subscription, so a lapsed student can still disconnect), 502 "Google could not be reached to disconnect; try
+  again", plus 401, 503 and the generic form. No token, URL or Google email is logged. The Settings row
+  (`#set-google`, after `#set-account`) renders one state per `google_status` reply, polls every 3 s up
+  to 20 times after Connect or Reconnect, and disconnects in two steps (a warning that Calendar goes
+  too and that undelivered Gmail proposals are deleted, then **Yes, disconnect**). The wizard's Gmail
+  step has a **Connect Gmail** button (`#wiz-gmail-connect`) and never blocks Next. Spec:
+  `docs/specs/2026-09-29-gmail-connect-design.md` §4.2 and §4.4.
+- **Grades** (spec `docs/specs/2026-09-29-grades-design.md`; ruling 12). `grades::availability(row,
+  campus_lms)` is the one predicate: grades are available only for a curated campus row whose
+  `lms_kind` is `blackboard` and which carries a `policy_read` date, and then only on that row's own
+  `lms_host`. No `cfg`, feature or environment variable reaches it. Its four callers check it and never
+  re-derive it: `grades_status`, `grades_connect`, `grades_refresh` and the scheduler's `grades_step`.
+  A no answers with a named refusal: `not available at your school yet` (an uncurated Blackboard school,
+  or a curated row without a date) or `not a Blackboard school`; the slot records the same as
+  `grades (skipped: not available at your school yet)` / `(skipped: not a Blackboard school)`, at exit
+  0. The four commands live in `app/src/grades.rs` (`grades_forget` is never gated: it closes the
+  `lms-grades` window and deletes the kept session). *Hide grades* is a settings row like *Start with
+  Windows*: `set_settings`'s `grades_hidden` key writes `grades::GradesPrefs` (`<profile>\grades.json`)
+  and never `settings.json`, and `grades_status` reports it as `hidden`. The slot's other skips, in order: `no entitlement`,
+  `not connected`, `no window on this run`, the sign-in window open, then the capture's own outcomes
+  (signed out, Blackboard unreachable). A capture writes a bundle private to that run
+  (`grades::slot_bundle_path`) for the engine's `grades` step, deleted afterwards. That step, the
+  slot's or a Refresh's, holds `state/sync.lock` itself, so it never overlaps a sync or another
+  `grades` run. It refuses a bundle older than the last one applied, so the slot's capture (taken
+  before `sync`) never undoes a Refresh made while it waited. A Refresh whose step skipped answers
+  the skip by name (`grades::step_answer`). No grade value is
+  logged. No curated row carries a `policy_read` date on this branch; the date-and-bump test in
+  `app/tests/grades.rs` keeps it so until privacy bump #1. Before any release that writes `grades/`,
+  migration `20260929000100` must be applied to the server.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
   `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
   `app/src`, and it stays.
-- A slot is `sync → coursework → ingest → judge → rank` (`scheduler::slot_argv`), each the sibling
+- A slot is `sync → coursework → ingest → grades → judge → rank` (`scheduler::slot_argv`), each the sibling
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
   named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
-  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)` —
+  `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)`,
+  `grades (skipped: <why>)` (the Grades bullet below) —
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
   unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
   wizard-created vault carries both from birth.

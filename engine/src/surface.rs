@@ -1843,6 +1843,11 @@ pub struct State {
     /// vault with no planning-day note serialises exactly as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moved: Option<crate::commitments::Moved>,
+    /// The Grades strip (grades spec §8): one entry per course with grade notes. Omitted when
+    /// empty, so a vault with no `grades/` notes serialises exactly as before and the three
+    /// surface references stay byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grades: Vec<crate::grades::CourseGrade>,
     /// Every `Journal::warnings()` this build touched (a malformed journal line) — collected
     /// once, after every builder that opens the shared `Journal` has run.
     pub warnings: Vec<String>,
@@ -1931,6 +1936,7 @@ fn build_state_with(
         issues_panel: issues,
         unreadable: l.unreadable.iter().map(|n| format!("tasks/{n}")).collect(),
         moved: if view == View::Today { l.moved.clone() } else { None },
+        grades: crate::grades::course_grades(vault),
         warnings: Vec::new(),
     };
     state.warnings = journal.warnings().to_vec();
@@ -3081,6 +3087,101 @@ mod tests {
     fn first_task_id(v: &std::path::Path) -> String {
         let s = build_state(v, View::Today, pinned_today(), &pinned_now(), None);
         s.must_do.groups[0].rows[0].id.clone()
+    }
+
+    // ---- Grades (spec 2026-09-29-grades-design §8): the strip's read model ----------------
+
+    /// A scratch copy of vault-full with two courses (titled so that title order and slug order
+    /// disagree) and their `grades/` notes; never touches `tests/fixtures/`.
+    fn grades_vault() -> std::path::PathBuf {
+        let dir = fixture_full();
+        let put = |rel: &str, text: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        put("courses/zz-bio.md", "---\nid: crs_0000000001\ntype: course\ntitle: Biology 101\ncode: BIO 101\n---\n");
+        put("courses/aa-hist.md", "---\nid: crs_0000000002\ntype: course\ntitle: World History\ncode: HIST 110\n---\n");
+        put("courses/mm-art.md", "---\nid: crs_0000000003\ntype: course\ntitle: Art 100\ncode: ART 100\n---\n");
+        let note = |name: &str, course: &str, fields: &str| {
+            put(&format!("grades/{name}.md"), &format!("---\nid: grade_0000000000\ntype: grade\ncourse: {course}\nsource: blackboard\n{fields}---\n"));
+        };
+        // Biology: an overall column AND points-so-far items, two pending, one removed.
+        note("zz-bio-1", "zz-bio", "title: Overall Grade\nsource_uid: _1_1\nkind: overall\npossible: 100\nscore: 91\nstatus: graded\ncounts: true\n");
+        note("zz-bio-2", "zz-bio", "title: Quiz 1\nsource_uid: _2_1\nkind: item\npossible: 10\nscore: 8\nstatus: graded\ncounts: true\ncategory: Quizzes\ndue: 2026-08-20T23:59\n");
+        note("zz-bio-3", "zz-bio", "title: Lab 1\nsource_uid: _3_1\nkind: item\npossible: 30\nscore: 21\nstatus: graded\ncounts: true\ndue: 2026-08-10T23:59\n");
+        note("zz-bio-4", "zz-bio", "title: Exam 2\nsource_uid: _4_1\nkind: item\npossible: 100\nstatus: not-submitted\ncounts: true\ndue: 2026-09-15T23:59\n");
+        note("zz-bio-5", "zz-bio", "title: Quiz 2\nsource_uid: _5_1\nkind: item\npossible: 10\nstatus: needs-grading\ncounts: true\ndue: 2026-09-01T23:59\n");
+        note("zz-bio-6", "zz-bio", "title: Old\nsource_uid: _6_1\nkind: item\npossible: 10\nstatus: removed\ncounts: true\n");
+        // History: no overall column, so the ring is points.
+        note("aa-hist-1", "aa-hist", "title: Essay\nsource_uid: _7_1\nkind: item\npossible: 50\nscore: 40\nstatus: graded\ncounts: true\n");
+        // Art: nothing graded yet.
+        note("mm-art-1", "mm-art", "title: Sketch\nsource_uid: _8_1\nkind: item\npossible: 20\nstatus: in-progress\ncounts: true\n");
+        put("state/grades.json", "{\"courses\": {\"failed\": 0, \"matched\": 3, \"skipped\": 0}, \"fetched_at\": \"2026-09-29T15:00:00Z\", \"host\": \"bb.example.edu\"}\n");
+        dir
+    }
+
+    #[test]
+    fn the_read_model_carries_grades_in_course_title_order() {
+        let vault = grades_vault();
+        let s = build_state(&vault, View::Today, TODAY, &zoned(TODAY), None);
+        let titles: Vec<&str> = s.grades.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Art 100", "Biology 101", "World History"], "course-title order, not slug order");
+        let art = &s.grades[0];
+        assert_eq!((art.basis, art.pct, art.letter, art.family.as_deref()), ("none", None, None, None));
+        assert_eq!((art.graded, art.items, art.pending), (0, 1, 1));
+        assert_eq!(art.fetched_at.as_deref(), Some("2026-09-29T15:00:00Z"));
+        let hist = &s.grades[2];
+        assert_eq!((hist.course.as_str(), hist.basis, hist.pct), ("aa-hist", "points", Some(80.0)));
+        assert_eq!((hist.letter, hist.family.as_deref()), (Some("B\u{2212}"), Some("B")));
+    }
+
+    #[test]
+    fn an_overall_course_still_carries_its_points_so_far() {
+        let vault = grades_vault();
+        let s = build_state(&vault, View::Today, TODAY, &zoned(TODAY), None);
+        let bio = &s.grades[1];
+        assert_eq!((bio.course.as_str(), bio.basis, bio.pct), ("zz-bio", "overall", Some(91.0)));
+        assert_eq!((bio.letter, bio.family.as_deref()), (Some("A\u{2212}"), Some("A")));
+        assert_eq!((bio.earned, bio.possible), (29.0, 40.0), "points so far beside the overall");
+        assert_eq!((bio.graded, bio.items, bio.pending), (2, 4, 2), "the removed and overall notes are not items");
+    }
+
+    #[test]
+    fn entries_run_graded_first_then_pending_each_by_due() {
+        let vault = grades_vault();
+        let s = build_state(&vault, View::Today, TODAY, &zoned(TODAY), None);
+        let bio = &s.grades[1];
+        let order: Vec<(&str, &str)> = bio.entries.iter().map(|e| (e.title.as_str(), e.status.as_str())).collect();
+        assert_eq!(order, [("Lab 1", "graded"), ("Quiz 1", "graded"), ("Quiz 2", "needs-grading"), ("Exam 2", "not-submitted")]);
+        let quiz = &bio.entries[1];
+        assert_eq!((quiz.score, quiz.possible, quiz.pct, quiz.counts), (Some(8.0), Some(10.0), Some(80.0), true));
+        assert_eq!((quiz.category.as_deref(), quiz.due.as_deref()), (Some("Quizzes"), Some("2026-08-20T23:59")));
+        assert_eq!(bio.entries[3].pct, None);
+    }
+
+    #[test]
+    fn a_vault_without_grades_serializes_without_the_key_and_grades_join_the_revision() {
+        let plain = fixture_full();
+        let s = build_state(&plain, View::Today, TODAY, &zoned(TODAY), None);
+        assert!(s.grades.is_empty());
+        assert!(!state_json(&s).contains("\"grades\""), "no grades key, so the three references stay byte-identical");
+        let vault = grades_vault();
+        let with = build_state(&vault, View::Today, TODAY, &zoned(TODAY), None);
+        let json = state_json(&with);
+        assert!(json.contains("\"grades\": [{"), "{json}");
+        assert_ne!(s.revision, with.revision, "a grade change repaints");
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_grades_state_file_only_drops_fetched_at() {
+        let vault = grades_vault();
+        std::fs::write(vault.join("state/grades.json"), "{not json").unwrap();
+        let s = build_state(&vault, View::Today, TODAY, &zoned(TODAY), None);
+        assert_eq!(s.grades.len(), 3);
+        assert!(s.grades.iter().all(|c| c.fetched_at.is_none()));
+        std::fs::remove_file(vault.join("state/grades.json")).unwrap();
+        assert_eq!(build_state(&vault, View::Today, TODAY, &zoned(TODAY), None).grades.len(), 3);
     }
 }
 

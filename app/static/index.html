@@ -53,6 +53,7 @@
         <div class="meter-key" id="meterkey"></div>
         <p class="overflow" id="overflow"></p>
       </div>
+      <div class="sec grades" id="grades" hidden></div>
       <div class="sec"><div class="sec-hd"><h2>Must do</h2><span class="n" id="mustdo-n"></span><button class="b" id="newtask">+ task</button></div><div id="mustdo"></div></div>
       <div class="sec"><div class="sec-hd"><h2>Recommended</h2><span class="n" id="recommended-n"></span></div><div id="recommended"></div></div>
     </div>
@@ -174,8 +175,10 @@
     </div>
   </div>
   <div class="wiz-panel" id="wiz-gmail" hidden><h2>Gmail</h2>
-    <p class="lede">Knowlu can read your inbox for things you have to do, and propose them.</p>
-    <p class="meta">Not yet: Google is still reviewing our request for this, so today it works for a handful of named test users only, and those users have to re-connect every week. When the review is done this step will connect in one click. Skip it for now.</p>
+    <p class="lede">Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings.</p>
+    <p class="meta">While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.</p>
+    <div class="wiz-row"><button class="b" id="wiz-gmail-connect">Connect Gmail</button></div>
+    <p class="meta" id="wiz-gmail-note"></p>
   </div>
   <div class="wiz-panel" id="wiz-slots" hidden><h2>When should Knowlu look?</h2>
     <div class="wiz-row"><input type="text" id="wiz-tz" placeholder="Timezone"><input type="text" id="wiz-slot1" placeholder="12:00"><input type="text" id="wiz-slot2" placeholder="18:00"></div>
@@ -196,6 +199,9 @@
   <div class="set-row" id="set-autostart"><span class="k">Start with Windows</span><input type="checkbox" id="set-autostart-in"></div>
   <div class="set-row" id="set-updates"><span class="k">Updates</span><span class="meta" id="set-update-state"></span><button class="b" id="set-update-check">Check now</button></div>
   <div class="set-row" id="set-account"><span class="k">Account</span><span class="meta" id="set-account-state"></span><button class="b" id="set-portal">Manage subscription</button></div>
+  <div class="set-row" id="set-google" hidden><span class="k">Google</span><span class="meta" id="set-google-state"></span><button class="b" id="set-google-retry" hidden>Try again</button><button class="b" id="set-google-connect" hidden>Connect Gmail</button><button class="b" id="set-google-reconnect" hidden>Reconnect</button><button class="b" id="set-google-disconnect-1" hidden>Disconnect Google</button><button class="b crit" id="set-google-disconnect-2" hidden>Yes, disconnect</button><span class="meta" id="set-google-note"></span></div>
+  <div class="set-row" id="set-grades"><span class="k">Blackboard sign-in</span><span class="meta" id="set-grades-note"></span><button class="b" id="set-grades-forget">Forget Blackboard sign-in</button></div>
+  <div class="set-row" id="set-grades-hide"><span class="k">Hide grades</span><input type="checkbox" id="set-grades-hide-in"></div>
   <div class="set-row" id="set-report"><span class="k">Problems</span><button class="b" id="set-report-go">Report an issue</button></div>
   <div class="set-row" id="set-delete"><span class="k">Delete my data</span><span class="meta" id="set-delete-note"></span><button class="b" id="set-delete-1">Delete everything</button><button class="b crit" id="set-delete-2" hidden>Yes, delete it all</button></div>
   <div class="set-row" id="set-judge"><span class="k">Local judgment</span><span class="meta" id="set-judge-state"></span><button class="b" id="set-judge-download">Download</button><button class="b" id="set-judge-file">Install from a file&hellip;</button><button class="b" id="set-judge-remove" hidden>Remove model</button></div>

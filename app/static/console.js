@@ -19,6 +19,13 @@
       // without the engine. Never reached inside Tauri, where __TAURI__ exists.
       var fx = new URLSearchParams(location.search).get("fixture");
       if (fx && cmd === "state") { return fetch(fx).then(function (r) { return r.json(); }).then(function (s) { return { ok: true, error: null, state: s }; }); }
+      // Also dev-only: the grades strip's answer, so the shots can show each of its states. `?gs=`
+      // names one of unavailable / notconnected / signedout / hidden; anything else is connected.
+      if (fx && cmd === "grades_status") {
+        var gs = new URLSearchParams(location.search).get("gs") || "";
+        return Promise.resolve({ ok: true, available: gs !== "unavailable", reason: null, connected: gs !== "notconnected" && gs !== "unavailable", signed_out: gs === "signedout",
+          host: "bb.example.edu", fetched_at: new Date(Date.now() - 7200000).toISOString(), hidden: gs === "hidden" });
+      }
       return Promise.reject(new Error("no engine: __TAURI__ is absent"));
     }
     return window.__TAURI__.core.invoke(cmd, args || {});
@@ -901,6 +908,139 @@
     EL("runs").innerHTML = html;
   }
 
+  // ---- M1 grades (grades spec §2 and §9). The strip on Today, one ring per course, and the read-only
+  // breakdown in the existing drawer. Nothing is computed here: every number is `state.grades`'s, and
+  // which of the states shows is `grades_status`'s word alone. The console has no address entry and
+  // never decides whether a school offers grades. A signed-out session is a named state, in the
+  // page's own quiet voice: never amber, never an error.
+  var GRADES = { status: null, list: [], note: "" };
+  var GRADE_STATUS_WORDS = { "graded": "graded", "needs-grading": "needs grading", "in-progress": "in progress", "not-submitted": "not submitted", "exempt": "exempt" };
+
+  function renderGrades(state) {
+    GRADES.list = (state && state.grades) || [];
+    return gradesStatus().then(refreshGradesDrawer);
+  }
+  function gradesStatus() {
+    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); }).catch(function () { GRADES.status = null; drawGrades(); });
+  }
+  function gradesUnavailableHtml() {
+    return '<div class="gs-line"><span>Grades from Blackboard are not available at your school yet</span></div>';
+  }
+  function ringSvg(c) {
+    var fam = c.family ? String(c.family).toLowerCase() : "";
+    var ring = '<svg class="ring" viewBox="0 0 36 36" aria-hidden="true"><circle class="rt" cx="18" cy="18" r="15.9155" fill="none"></circle>';
+    if (c.pct != null) {
+      // r = 100 / 2π, so the circle's length is 100 and the dash is the percentage itself.
+      ring += '<circle class="rf' + (/^[abcdf]$/.test(fam) ? " grade-" + fam : "") + '" cx="18" cy="18" r="15.9155" fill="none" stroke-dasharray="' + Math.max(0, Math.min(100, c.pct)) + ' 100" transform="rotate(-90 18 18)"></circle>';
+    }
+    return ring + "</svg>";
+  }
+  function drawGrades() {
+    var el = EL("grades"), s = GRADES.status, html;
+    if (!el) { return; }
+    // The settings panel's Hide grades box shows the student's own flag, whatever the strip shows.
+    if (s && s.ok !== false) { EL("set-grades-hide-in").checked = !!s.hidden; }
+    if (!s || s.ok === false || s.hidden) { el.hidden = true; el.innerHTML = ""; return; }
+    html = '<div class="sec-hd"><h2>Grades</h2></div>';
+    if (s.available === false) {
+      html += gradesUnavailableHtml();
+    } else {
+      if (GRADES.list.length) {
+        html += '<div class="gs-rings">' + GRADES.list.map(function (c) {
+          return '<button class="gring" type="button" data-grades-course="' + h(c.course) + '" title="' + h(c.title) + '">' + ringSvg(c)
+            + '<span class="gt"><b>' + h(c.title) + "</b><span>" + (c.pct == null ? "no grades yet" : h(c.pct) + "% " + h(c.letter || "")) + "</span></span></button>";
+        }).join("") + "</div>";
+      }
+      if (!s.connected) {
+        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect>Connect Blackboard</button></div>';
+      } else if (s.signed_out) {
+        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect>Sign in again</button></div>';
+      } else if (!GRADES.list.length) {
+        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh>Refresh</button></div>';
+      }
+    }
+    if (GRADES.note) { html += '<p class="hint gs-note">' + h(GRADES.note) + "</p>"; }
+    el.innerHTML = html; el.hidden = false;
+  }
+  function agoText(iso) {
+    var t = Date.parse(iso), m;
+    if (isNaN(t)) { return ""; }
+    m = Math.floor((Date.now() - t) / 60000);
+    return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 1440 ? Math.floor(m / 60) + " h ago" : Math.floor(m / 1440) + " d ago";
+  }
+  function gradesFooterHtml(c) {
+    var pts = c.earned + " / " + c.possible, src;
+    if (c.basis === "overall") { src = "Overall Grade" + (c.possible > 0 ? " · points so far " + pts : ""); }
+    else if (c.basis === "points") { src = "points so far · " + pts; }
+    else { src = "nothing graded yet"; }
+    return '<div class="gd-foot"><span>From Blackboard · ' + h(src) + (c.fetched_at ? " · updated " + h(agoText(c.fetched_at)) : "")
+      + '</span><button class="b" type="button" data-grades-refresh>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
+  }
+  function gradeRowHtml(e) {
+    var score = (e.score == null ? "–" : e.score) + " / " + (e.possible == null ? "–" : e.possible);
+    return '<div class="grw"><span class="gn">' + h(e.title) + (e.counts === false ? ' <small>not counted</small>' : "") + "</span>"
+      + '<span class="gsc">' + h(score) + '</span><span class="gst st-' + h(e.status) + '">' + h(GRADE_STATUS_WORDS[e.status] || e.status) + "</span>"
+      + (e.due ? '<span class="gdue">' + h(String(e.due).slice(0, 10)) + "</span>" : "") + "</div>";
+  }
+  // Read-only: the breakdown never edits, creates or deletes a note.
+  function openGradesDrawer(slug) {
+    var d = EL("drawer"), c = null, groups = [], html;
+    GRADES.list.forEach(function (x) { if (x.course === slug) { c = x; } });
+    if (!c) { return; }
+    (c.entries || []).forEach(function (e) {
+      var k = e.category || "", g = null;
+      groups.forEach(function (x) { if (x.cat === k) { g = x; } });
+      if (!g) { g = { cat: k, rows: [] }; groups.push(g); }
+      g.rows.push(e);
+    });
+    html = '<button class="close">&times;</button><h2>' + h(c.title) + "</h2>"
+      + '<p class="hint">' + (c.pct == null ? "no grades yet" : h(c.pct) + "% " + h(c.letter || "")) + " · " + h(c.graded) + " graded · " + h(c.pending) + " waiting</p>";
+    groups.forEach(function (g) {
+      html += (g.cat ? '<h3 class="gcat">' + h(g.cat) + "</h3>" : "") + g.rows.map(gradeRowHtml).join("");
+    });
+    d.innerHTML = html + gradesFooterHtml(c);
+    d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
+    d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
+  }
+  function refreshGradesDrawer() {
+    var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
+    if (open) { openGradesDrawer(open); }
+  }
+  function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
+  // A capture's answer is a named outcome, never an error line; the strip re-reads its own state after
+  // every press, and the day repaints from the new notes.
+  function gradesAct(cmd, button) {
+    if (button) { button.disabled = true; }
+    gradesSay("");
+    return invoke(cmd, {}).then(function (r) {
+      gradesSay(r && r.ok === false ? String(r.error || "") : "");
+      return gradesStatus().then(poll);
+    }).catch(function () { if (button) { button.disabled = false; } });
+  }
+  EL("grades").addEventListener("click", function (e) {
+    var ring = e.target.closest("[data-grades-course]"); if (ring) { openGradesDrawer(ring.getAttribute("data-grades-course")); return; }
+    var conn = e.target.closest("[data-grades-connect]"); if (conn) { gradesAct("grades_connect", conn); return; }
+    var ref = e.target.closest("[data-grades-refresh]"); if (ref) { gradesAct("grades_refresh", ref); }
+  });
+  EL("drawer").addEventListener("click", function (e) {
+    var ref = e.target.closest("[data-grades-refresh]"); if (ref) { gradesAct("grades_refresh", ref); }
+  });
+  EL("set-grades-forget").addEventListener("click", function () {
+    invoke("grades_forget", {}).then(function (r) {
+      EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "forgotten";
+      return gradesStatus();
+    }).catch(function () {});
+  });
+  // Hide grades (spec §2, §9): a settings row like Start with Windows, through set_settings; the
+  // flag lives in grades.json, and the strip follows grades_status's `hidden`.
+  EL("set-grades-hide-in").addEventListener("change", function () {
+    invoke("set_settings", { patch: { grades_hidden: EL("set-grades-hide-in").checked } }).then(function (r) {
+      EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      return gradesStatus();
+    }).catch(function () {});
+  });
+  // ---- end M1 grades
+
   function paint(state, force) {
     // R28/R29/R30: a reorder never freezes the whole page — only the order-bearing regions
     // (must-do/recommended on Today, the list on a horizon view) hold for the "refresh order"
@@ -922,7 +1062,7 @@
     EL("main-gtk").hidden = current.view !== "good-to-know";
     EL("main-issues").hidden = current.view !== "issues";
     EL("main-schedule").hidden = current.view !== "schedule";
-    if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); }
+    if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); renderGrades(state); }
     if (reordered) { watchSeen(); return; }   // hold only renderMustDo/renderRecommended or renderList below
     current.state = state; current.revision = state.revision;
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
@@ -1082,7 +1222,7 @@
   function openDrawer(id) {
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
-      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); return; }
+      if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
       var n = env.note, fm = n.frontmatter || {}, dl = "", title = fm.title || n.slug;
       Object.keys(fm).sort().forEach(function (k) {
         var val = typeof fm[k] === "object" ? JSON.stringify(fm[k]) : fm[k];
@@ -1097,7 +1237,7 @@
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
-      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || "");
+      d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
       d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
     });
   }
@@ -1582,6 +1722,106 @@
     // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
     EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
+  // Gmail connect T9a (spec §4.4, D1, D10, D12): the Google row. `SET` is the settings panel's own
+  // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
+  // bumped on close and on every new load, so a stale reply never repaints the row. The buttons are
+  // wired in T9b (Connect, Reconnect) and T9c (Disconnect).
+  var SET = { googleSeq: 0, google: null, googleNote: "", googlePolling: false, confirming: false, leaving: false };
+  var GOOGLE_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.";
+  // T9c (D6, D14): Disconnect is two steps, like Delete my data. Step 1 shows this and step 2.
+  var GOOGLE_DISCONNECT_CONFIRM = "This disconnects Google Calendar too — Google keeps them as one permission. Knowlu stops reading both and deletes the proposals from your mail it had not delivered yet. What it already added stays in your vault, and your calendar stops updating.";
+  var GOOGLE_DISCLOSURE = "Google also tells Knowlu which Google account you connected, so this row can show it.";
+  function googleSentence(g) {
+    if (!g) { return "Checking Google…"; }
+    if (!g.ok) { return g.error || "Knowlu could not reach Google just now."; }
+    var who = g.email ? " (as " + g.email + ")" : "";
+    if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
+    if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
+    if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
+    return "Google Calendar is connected" + who + ". Gmail is not.";
+  }
+  function renderGoogleRow() {
+    var g = SET.google, busy = SET.googlePolling;
+    var known = !!(g && g.ok), none = known && g.state === "none", revoked = known && g.state === "revoked";
+    var live = known && !none && !revoked;
+    EL("set-google-state").textContent = busy ? GOOGLE_POLLING : googleSentence(g);
+    EL("set-google-note").textContent = (SET.confirming ? GOOGLE_DISCONNECT_CONFIRM + " " : "") + (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
+    EL("set-google-connect").hidden = !(none || (live && !g.gmail));
+    EL("set-google-reconnect").hidden = !revoked;
+    EL("set-google-disconnect-1").hidden = !(revoked || live);
+    EL("set-google-retry").hidden = !(g && !g.ok);
+    EL("set-google-disconnect-2").hidden = !(SET.confirming && (revoked || live));
+    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry"].forEach(function (id) { EL(id).disabled = busy || SET.leaving; });
+  }
+  function loadGoogleRow() {
+    var seq = ++SET.googleSeq;
+    SET.google = null; SET.googleNote = ""; SET.googlePolling = false; SET.confirming = false;
+    EL("set-google").hidden = false;
+    renderGoogleRow();
+    return invoke("google_status", {}).then(function (g) {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = g || { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    }).catch(function () {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    });
+  }
+  // T9b: Connect ("gmail") and Reconnect ("reconnect"). The browser opens from Rust; the page only
+  // polls google_status, every 3 s, twenty times. `mySeq` is taken on every click and Settings close
+  // bumps `SET.googleSeq`, so a stale poll never repaints the row (as `WIZ.googleSeq` does).
+  var GOOGLE_POLLING = "Waiting for Google… finish in your browser.";
+  var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
+  async function connectGoogle(scope) {
+    var mySeq = ++SET.googleSeq;
+    SET.googlePolling = true; SET.googleNote = ""; SET.confirming = false;
+    renderGoogleRow();
+    var started = await invoke("google_connect", { scope: scope }).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    if (!started || !started.ok) {
+      SET.googlePolling = false; SET.googleNote = (started && started.error) || UNREACHABLE;
+      renderGoogleRow();
+      return;
+    }
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (SET.googleSeq !== mySeq) { return; }
+      var g = await invoke("google_status", {}).catch(function () { return null; });
+      if (SET.googleSeq !== mySeq) { return; }
+      if (g && g.ok && (scope === "reconnect" ? g.state === "active" : g.gmail === true)) {
+        SET.google = g; SET.googlePolling = false; SET.googleNote = "";
+        renderGoogleRow();
+        return;
+      }
+    }
+    var fresh = await invoke("google_status", {}).catch(function () { return null; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.google = fresh || { ok: false, error: UNREACHABLE };
+    SET.googlePolling = false; SET.googleNote = GOOGLE_TIMEOUT;
+    renderGoogleRow();
+  }
+  // T9c: step 2. On ok: false the row keeps its previous state and shows the error under it; on ok
+  // the row is asked afresh. A close or a new click bumps the token, so a late reply repaints nothing.
+  async function disconnectGoogle() {
+    var mySeq = ++SET.googleSeq;
+    SET.leaving = true;
+    renderGoogleRow();
+    var r = await invoke("google_disconnect", {}).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.leaving = false;
+    if (r && r.ok) { loadGoogleRow(); return; }
+    SET.confirming = false; SET.googleNote = (r && r.error) || UNREACHABLE;
+    renderGoogleRow();
+  }
+  // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
+  function gateGoogleRow(a) {
+    // checkAccount also runs at launch; the row asks google_status only while Settings is open.
+    if (EL("settings").hidden) { return; }
+    if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
+    SET.googleSeq += 1; EL("set-google").hidden = true;
+  }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -1591,12 +1831,14 @@
   function checkAccount() {
     return invoke("account_status", {}).then(function (s) {
       renderAccountRow(s);
+      gateGoogleRow(s);
       maybeUpgrade(s);
-    }).catch(function () { renderAccountRow(null); EL("upgrade").hidden = true; });
+    }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
   function openSettings() {
     EL("settings").hidden = false;
     checkAccount();
+    gradesStatus();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
@@ -1606,7 +1848,12 @@
   window.KNOWLU_OPEN_SETTINGS = openSettings;
 
   EL("settings").addEventListener("click", function (e) {
-    if (e.target.closest("#set-close")) { EL("settings").hidden = true; return; }
+    if (e.target.closest("#set-close")) { closeSettings(); return; }
+    if (e.target.closest("#set-google-connect")) { connectGoogle("gmail"); return; }
+    if (e.target.closest("#set-google-reconnect")) { connectGoogle("reconnect"); return; }
+    if (e.target.closest("#set-google-retry")) { loadGoogleRow(); return; }
+    if (e.target.closest("#set-google-disconnect-1")) { SET.confirming = true; SET.googleNote = ""; renderGoogleRow(); return; }
+    if (e.target.closest("#set-google-disconnect-2")) { disconnectGoogle(); return; }
     if (e.target.closest("#set-name-save")) {
       invoke("set_profile_name", { name: EL("set-name-in").value }).then(function (r) {
         EL("set-diag-note").textContent = r.ok ? "saved" : r.error;
@@ -1665,7 +1912,7 @@
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
     // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
     if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
-    if (e.key === "Escape" && !EL("settings").hidden) { EL("settings").hidden = true; }
+    if (e.key === "Escape" && !EL("settings").hidden) { closeSettings(); }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
   // `report.rs` builds and scrubs it, the textarea shows it, and the send posts exactly what is on
@@ -2017,6 +2264,9 @@
               // cancellation token `wizGo` bumps on leaving the panel, the same shape
               // `schoolSeq` uses for the typeahead.
               google: false, googleNote: "", googlePolling: false, googleSeq: 0,
+              // The Gmail panel's own flow (D11): the same shape, its own token. Nothing here reaches
+              // the plan — Next never waits on it and Finish never reads it.
+              gmail: false, gmailNote: "", gmailPolling: false, gmailSeq: 0,
               // R-OB-4: the school the student picked — a unitid, a name, a state and (once
               // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
               // command, and the page holds only the ten rows it is showing.
@@ -2122,6 +2372,8 @@
     // on it) always shows the truth — connected, mid-poll, or neither — never a stale DOM write.
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
+    EL("wiz-gmail-note").textContent = WIZ.gmailNote;
+    EL("wiz-gmail-connect").disabled = WIZ.gmail || WIZ.gmailPolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
     // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
     // has an actual answer from `restore_into`, never a claim made before Finish has even run.
@@ -2253,6 +2505,11 @@
     if (leaving === 4 && WIZ.googlePolling) {
       WIZ.googleSeq += 1;
       WIZ.googlePolling = false;
+    }
+    // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
+    if (leaving === 6 && WIZ.gmailPolling) {
+      WIZ.gmailSeq += 1;
+      WIZ.gmailPolling = false;
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
@@ -2755,6 +3012,36 @@
     }
     WIZ.googlePolling = false;
     WIZ.googleNote = "Google did not finish connecting. You can try again, or use the secret address above.";
+    renderWizard();
+  });
+
+  // ---- D11: the Gmail panel's Connect Gmail. The wizard's own commands with `scope: "gmail"`, the
+  // calendar button's poll shape and its own token (`WIZ.gmailSeq`, bumped by `wizGo`). Skip is the
+  // default path: Next is never gated on this, and nothing about it is written to the plan.
+  document.getElementById("wiz-gmail-connect").addEventListener("click", async () => {
+    var got = await invoke("google_connect_url", { scope: "gmail" });
+    if (!got.ok) { showWizardError(got.error); return; }
+    var opened = await invoke("open_external", { url: got.url });
+    if (!opened.ok) { showWizardError(opened.error); return; }
+    var mySeq = ++WIZ.gmailSeq;
+    WIZ.gmailPolling = true;
+    WIZ.gmailNote = "Finish signing in to Google in your browser — this may take a moment.";
+    renderWizard();
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      var status = await invoke("google_connected");
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      if (status.ok && status.gmail) {
+        WIZ.gmail = true;
+        WIZ.gmailPolling = false;
+        WIZ.gmailNote = "Gmail is connected.";
+        renderWizard();
+        return;
+      }
+    }
+    WIZ.gmailPolling = false;
+    WIZ.gmailNote = GOOGLE_TIMEOUT;
     renderWizard();
   });
 

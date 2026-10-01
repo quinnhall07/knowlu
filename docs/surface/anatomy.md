@@ -38,7 +38,7 @@ record something that was already tried and rejected.
 
 ## 2. The page set
 
-Nine pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
+Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
 
 | Page | The question it answers |
 |---|---|
@@ -47,7 +47,6 @@ Nine pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column
 | **Week** | Seven days: capacity, hours due, commitments — and where **pull-ahead** lives |
 | **Decisions** | The full approval queue, every kind and urgency |
 | **Info** | Things to know, open/close — including grade postings and late/missing flags |
-| **Grades** | Projected term GPA vs 3.75, per-course standing, needed-on-remainder |
 | **Issues** | Flagged judgments, cleared in one sitting |
 | **Health** | Runs, sync, ingest and source status |
 | **Schedule** | What is my week made of, and which hours do I plan in? (§3.15) |
@@ -382,6 +381,31 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   preview's `moved.text`, or "No change to today's plan", and the first five items of the
   previewed day.
 - **Left out:** a remove control (spec D8).
+
+### 3.16 GRADES (the strip and its drawer)
+
+- **Answers:** how am I doing in each course, and what is still to be graded? It is a strip on
+  Today, **not a page**: the earlier "Grades" page (projected term GPA, needed-on-remainder) is gone,
+  and term and cumulative GPA are a later phase (grades spec §12).
+- **Computed by:** `grades::course_grades → state.grades`, from the `grades/` notes and
+  `state/grades.json`; pure, and it writes nothing. A grade never enters `rank`.
+- **Absent, not empty:** `grades` is omitted from the payload when no course has grade notes
+  (`skip_serializing_if`), so a vault that never connected serialises exactly as before and the
+  three `surface-today-*.json` references are byte-identical.
+- **Per course** (`CourseGrade`), in the order of the course notes' titles: `course` (slug), `title`,
+  `pct`, `basis`, `letter`, `family`, `earned`, `possible`, `graded`, `items`, `pending`,
+  `fetched_at`, `entries`. **`basis: overall`** when the course's `kind: overall` note is graded with
+  `possible > 0` (the ring shows Blackboard's own number); **`points`** otherwise (Σ score ÷ Σ
+  possible over graded, counted items); **`none`** with `pct`, `letter` and `family` null when nothing
+  is graded. `earned` and `possible` are the points-so-far sums whatever the basis, so an `overall`
+  course still shows its points so far in the footer. `letter` is G3's default scale; `family` is its
+  first letter and picks the ring's colour token.
+- **Drawer entries** (`GradeEntry`): `title`, `category`, `score`, `possible`, `pct`, `status`,
+  `due`, `counts` — graded items first, then the rest, each by due (undated last). Removed columns
+  and the overall column are not entries.
+- **`fetched_at`** is the strip's "updated 2 h ago", read from `state/grades.json`; a missing or
+  unreadable file leaves it null and nothing else changes.
+- **Left out:** any ranking weight, GPA and a per-course scale until a syllabus supplies one.
 
 ---
 

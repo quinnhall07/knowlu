@@ -592,3 +592,44 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .ask-time input[type=time] { background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r1); padding: 2px var(--s2); font-family: var(--mono); margin-left: var(--s2); }
 .ask-err { color: var(--crit); font-size: 12px; margin-top: var(--s2); }
 .ask-err[hidden] { display: none; }
+
+/* ---- M1 grades (grades spec §2 and §9): the strip on Today, its rings and the read-only breakdown.
+   Five letter-family tokens, A to F. The console is a dark page, so `:root` carries the dark set; the
+   light set waits under a named theme for the day a light console exists (it is never applied by the
+   OS setting, which would paint light colours on a dark ground). ---- */
+:root {
+  --grade-a: #3FB68B;
+  --grade-b: #5AA9E0;
+  --grade-c: #D9A441;
+  --grade-d: #E08A4A;
+  --grade-f: #E0605A;
+}
+:root[data-theme="light"] {
+  --grade-a: #1F8F68;
+  --grade-b: #2678B5;
+  --grade-c: #A87A18;
+  --grade-d: #B85E1C;
+  --grade-f: #C0392F;
+}
+.grades .gs-rings { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s5); padding: var(--s3) 0; }
+.gring { display: flex; align-items: center; gap: var(--s3); background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.gring:hover .gt b { color: var(--t1); }
+.ring { width: 44px; height: 44px; flex: none; }
+.ring circle { stroke-width: 3.6; }
+.ring .rt { stroke: var(--s3c); }
+.ring .rf { stroke: var(--t3); stroke-linecap: round; }
+.ring .rf.grade-a { stroke: var(--grade-a); } .ring .rf.grade-b { stroke: var(--grade-b); } .ring .rf.grade-c { stroke: var(--grade-c); }
+.ring .rf.grade-d { stroke: var(--grade-d); } .ring .rf.grade-f { stroke: var(--grade-f); }
+.gring .gt { display: flex; flex-direction: column; min-width: 0; }
+.gring .gt b { color: var(--t2); font-weight: 600; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gring .gt span { color: var(--t3); font: 500 11.5px/1.4 var(--mono); }
+.grades .gs-line { display: flex; gap: var(--s3); align-items: center; padding: var(--s2) 0; color: var(--t3); font-size: 12.5px; }
+.grades .gs-note, .drawer .gs-note { color: var(--t4); }
+.drawer .gcat { margin: var(--s4) 0 var(--s1); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.drawer .grw { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px var(--s3); padding: var(--s1) 0; border-top: 1px solid var(--hair); font-size: 12.5px; color: var(--t2); }
+.drawer .grw .gn small { color: var(--t4); font-family: var(--mono); font-size: 10.5px; }
+.drawer .grw .gsc { font-family: var(--mono); color: var(--t1); text-align: right; }
+.drawer .grw .gst { font-family: var(--mono); font-size: 11px; color: var(--t3); min-width: 11ch; text-align: right; }
+.drawer .grw .gst.st-graded { color: var(--acc); }
+.drawer .grw .gdue { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
+.drawer .gd-foot { display: flex; gap: var(--s3); align-items: center; justify-content: space-between; margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--hair); font-family: var(--mono); font-size: 11px; color: var(--t3); }
