@@ -2233,6 +2233,10 @@ the J functions redeployed), since the proof's verdicts come from staging's `jud
   *Both answered 2026-10-01:* PQ5 (b2), built by the new T2b.6 before T4c; PQ6 (b), built in T5.
   Neither gates a task any longer, unless T2b.6's first check blocks (b2) and PQ5 returns.
 
+  *Open, raised by T2b.6's review on 2026-10-01:* **PQ7** (a carried lane date moved to clock
+  hours, §13), asked before T4 is dispatched. It gates T4c. Under (b) or (c), a T2b.6 fix lands
+  first.
+
   Also still waiting on Quinn: W's checkpoint, the push go after B2 and after W, and the merge
   word in T10. P17's two remaining trade-offs (device-local; today's lane only) go to Quinn with
   B2's report, for information.
@@ -2832,6 +2836,10 @@ answered, `needs_quinn` is these two, not none.
 question, and the tasks below apply it. `needs_quinn` from this section is now none, unless
 T2b.6's first check blocks (b2), which brings PQ5 back.
 
+**PQ7 is open (raised by T2b.6's review, 2026-10-01).** It asks whether a carried lane date that
+the campus moves to clock hours is booked. Until Quinn answers it, `needs_quinn` from this section
+is PQ7.
+
 ### PQ5. An accepted all-day event that the campus moves (asked before T4c)
 
 *Context.* Quinn's answer covers a date a later fetch drops because it was "cancelled or moved". A
@@ -2975,3 +2983,66 @@ the faithful undo, at the cost of two shapes and a second command.
   anatomy text follow.
 - The named cost stands: a window closed inside the 10 seconds loses the removal, and the date
   shows again until the student removes it again.
+
+### PQ7. A carried lane date the campus moves to clock hours (raised by T2b.6's review, 2026-10-01)
+
+*Context.* T2b.6 (`7550b0d`) added a guard to `eventcarry::book`: a date whose `carry` span is
+lane-shaped is never booked. T2b.6's test asks for it ("a move to a timed span … also books no
+commitment"). But T2b.6's Behaviour says "Nothing else", and T2b.5's reviewed booking did book such
+a move. PQ5's "lane to lane only" rule assumes that a lane date moved to clock hours "would
+otherwise leave the lane with no commitment booked for it". That holds for a card-listed date, which
+the carry never books, because its card's settlement does. It did not hold for a carried date: at
+T2b.5, the carry's step 2 booked the move.
+
+Example: the carried date `lx:77:3` is first fetched as zero-length, 2026-10-09 10:00–10:00 (PQ2:
+the lane), and gets its carry line. The next fetch gives 10:00–11:00: the feed fixed a placeholder
+end.
+- At T2b.5 (`f7caa8f`): a soft commitment is booked for 10:00–11:00. The carry span is unchanged,
+  so T4c's lane would also draw the 10:00 marker.
+- As built (`7550b0d`): nothing is ever booked. The lane draws the stale marker. "Remove from my
+  day" on it writes `declined`, so the real event also leaves Coming up for good.
+
+The same happens to:
+- a sub-minute event (10:00:00–10:00:30, zero-length at minute resolution);
+- a 23:59 event that a later fetch makes past-midnight;
+- an all-day date moved to clock hours (T2b.6's own case, Sat 10:00–15:00).
+
+*Options.*
+- **(a) Keep it, as built.** The date is never booked and stays drawn on its old day. P17's removal
+  drops it. T8 and PQ5's *Not covered* say "never booked", not only "stays drawn on its old day".
+  Cost: the accepted event's real time never reaches the plan.
+- **(b) Revert the guard.** T2b.5's booking stands: the moved date is booked at its new time, at
+  the series' level. The carry span is unchanged, so the lane also draws the old span. T4c then
+  decides whether the lane hides a uid that has a booked commitment.
+  - *Cost:* a `contract-engineer` fix to T2b.6 and to its pinned clause (`booked(&timed)` empty).
+  - *Without T4c's rule:* the student sees the date twice. Removing the stale copy hides the event
+    from Coming up, while its commitment stays.
+- **(c) Revert the guard and follow the move, for a carried date.** As (b). In addition,
+  `follow_moves` appends a carry line with the timed span when the entry already has `carry`. A
+  card-listed date gets no such line, because it would then leave the lane unbooked.
+  - *Result:* the date becomes what a carried timed date is today. It is booked and has a timed
+    carry span, so the lane does not draw it (P17: "a carry line whose span is lane-shaped"). T4c
+    needs no new rule.
+  - *Cost:* (b)'s fix plus one condition in `follow_moves`. The pinned clause becomes "one line, one
+    commitment, one journal `create`". No new line shape.
+
+Under every option, a card-listed lane date moved to clock hours stays as PQ5's *Not covered* says,
+because the carry never books a card-listed date.
+
+*Recommendation:* **(c).** It puts the moved date in the plan at its real time without drawing a
+stale marker beside it, and it adds neither a shape nor a T4c rule. (b) is the smaller code change,
+but it leaves a duplicate for T4c to hide. (a) loses the event.
+
+*What each answer changes:*
+- (a): no code change. T8's anatomy §3.7 line and PQ5's *Not covered* say "never booked". B2 reads
+  the guard as intended.
+- (b): a T2b.6 fix (`contract-engineer`, xhigh). It drops the `lane_date` guard in `book`, and the
+  test's timed case asserts the soft commitment. T4c gains a choice for Quinn: hide a uid that has a
+  booked commitment, or draw both.
+- (c): (b)'s fix, and `follow_moves` writes the timed span for an entry with `carry`. The test's
+  timed case asserts one line, the commitment and its journal record. PQ5's "lane to lane only" rule
+  narrows to card-listed dates, and T8 names that.
+
+*When.* Asked now, before T4 is dispatched, as the review asks: a later change would move a pinned
+clause. It gates T4c. Under (b) or (c), the fix lands before T4c, and B2's contract-reviewer reads it
+with T2b.6.
