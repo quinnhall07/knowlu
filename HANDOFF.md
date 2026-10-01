@@ -328,7 +328,7 @@ It holds:
 Each VISION phase that makes the morning answer better, in the vision program note's order: the main
 page (domain strip, free time, all clear, today's schedule); syllabus upload with grade weights, GPA
 and exam prep (onboarding asks for syllabi from then on; Amendment 2026-09-29, item 5); quick capture; nudges and lock-in;
-the assistant; Outlook and more homework platforms; the dedicated Knowlu calendar in Google and
+the assistant; the Outlook calendar and more homework platforms; the dedicated Knowlu calendar in Google and
 Outlook. Also here: stream J's T0, T5 and T7, and the `origin` split for Calendar-API rows (so
 ICS-derived events can rejoin the training export). J's T6, the calibration harness, stays parked until
 real corrections exist. Per feature: a signed spec, a plan, a review, a merge and a live proof.

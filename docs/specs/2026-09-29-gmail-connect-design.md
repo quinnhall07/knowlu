@@ -427,8 +427,7 @@ in this spec changes the server-side attack surface that CASA assesses. It adds 
 token path, and it adds no stored field unless Q7 is answered (b), which adds the sender's display
 name to the queue payload. D14 only deletes more.
 
-**Before Launch, nothing else is used.** There is no email forwarding inbox (cloud design §13's
-fallback, not built), no `gmail.metadata` and no local reading.
+**Before Launch, nothing else is used for Gmail by OAuth:** no `gmail.metadata` and no local reading. Forwarded mail is email forwarding's (`2026-09-30-email-forwarding-design.md`), a separate path; a Gmail address with an active forwarding is not read here (that spec's D22). *(amended 2026-09-30, email spec A6, signed by Quinn)*
 
 ## 6. Privacy impact
 
