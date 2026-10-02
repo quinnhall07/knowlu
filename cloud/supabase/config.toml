@@ -154,3 +154,5 @@ verify_jwt = false
 # The cron and intake's kick send no bearer: `mail-process` is authenticated by its `x-knowlu-job-token`.
 [functions.mail-process]
 verify_jwt = false
+[functions.mail]
+verify_jwt = false

@@ -269,6 +269,13 @@ class FakeStore implements InboundStore {
     if (["pending", "confirmed", "quiet", "blocked", "off"].includes(a.status)) a.status = "active";
     return Promise.resolve(true);
   }
+  endRotateGrace(addressId: string) {
+    this.calls.push("endRotateGrace");
+    const a = this.addresses.find((x) => x.id === addressId)!;
+    a.retiredTokenHmac = null;
+    a.retiredUntil = null;
+    return Promise.resolve();
+  }
   confirmed(addressId: string) {
     this.calls.push("confirmed");
     const a = this.addresses.find((x) => x.id === addressId)!;
@@ -998,6 +1005,35 @@ Deno.test("a_canary_marks_arrived_and_records_forward_hint", async () => {
     assertEquals(w.store.counters, {});
     assertEquals(keysUnder(w, "inbound/"), []);
     assertEquals(keysUnder(w, "work/"), []);
+  });
+});
+
+Deno.test("a_canary_through_the_new_token_ends_the_rotate_grace", async () => {
+  // T4.1's Rotate (D3): the old token binds until the new address's canary arrives, at most 7 days.
+  await withWorld(async (w) => {
+    const school = w.store.addresses[3];
+    const OLD = "hijklmnopqrstuvwxyz2345672";
+    school.retiredTokenHmac = await tokenHmac(ADDRESS_KEY, OLD);
+    school.retiredUntil = new Date(NOW + 6 * 86_400_000).toISOString();
+    const hmac = await nonceHmac(ADDRESS_KEY, NONCE);
+    // Through the retired token (forwarding not yet re-pointed): the canary counts, the grace holds.
+    w.store.canaries["addr-4"] = [{ id: "c-1", nonceHmac: hmac, arrivedAt: null }];
+    const old = { key: "inbound/g1", recipients: [at(OLD)], source: SRS };
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), old)).status, 200);
+    assertEquals(w.store.canaries["addr-4"][0].arrivedAt, Date.parse("2026-10-02T12:00:00.000Z"));
+    assertEquals(school.retiredTokenHmac, await tokenHmac(ADDRESS_KEY, OLD));
+    assert(!w.store.calls.includes("endRotateGrace"), w.store.calls.join());
+    // A replay through the new token ends nothing either: only a canary that arrives does.
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), SCHOOL_FWD("inbound/g2"))).status, 200);
+    assert(!w.store.calls.includes("endRotateGrace"), w.store.calls.join());
+    // The next canary, through the new token: the old token stops binding at once.
+    w.store.canaries["addr-4"] = [{ id: "c-2", nonceHmac: hmac, arrivedAt: null }];
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), SCHOOL_FWD("inbound/g3"))).status, 200);
+    assertEquals([school.retiredTokenHmac, school.retiredUntil], [null, null]);
+    const gets = w.gets;
+    await w.arrive(await m365Forward(TENANT), { key: "inbound/g4", recipients: [at(OLD)], source: SRS });
+    assertEquals(w.gets, gets);
+    assertEquals(w.store.workRows, []);
   });
 });
 

@@ -120,6 +120,8 @@ export interface InboundStore {
     forwardHint: string | null,
     iso: string,
   ): Promise<boolean>;
+  /** Rotate's grace is over: `retired_token_hmac` and `retired_until` go back to null. */
+  endRotateGrace(addressId: string): Promise<void>;
   /** Gmail's confirmation completed: a `pending` mailbox reads `confirmed`, and its confirm window closes. */
   confirmed(addressId: string): Promise<void>;
   /** Adds `n` to the batch's `received`. */
@@ -231,6 +233,8 @@ interface Found {
   row: AddressRow;
   /** The recipient, lower-cased, whose token found the row. */
   recipient: string;
+  /** Whether the recipient is the mailbox's current token, not one retired by Rotate. */
+  current: boolean;
 }
 
 /** Whether `hmac` binds `row` now: its own token, or its retired one inside Rotate's grace; never revoked. */
@@ -255,7 +259,7 @@ async function find(n: Receipt, cfg: InboundConfig, deps: InboundDeps): Promise<
       log("unknown or revoked recipient, deleted unread");
       continue;
     }
-    if (!out.some((f) => f.row.id === row.id)) out.push({ row, recipient });
+    if (!out.some((f) => f.row.id === row.id)) out.push({ row, recipient, current: hmac === row.tokenHmac });
   }
   return out;
 }
@@ -356,11 +360,15 @@ async function arrive(
         log("canary replay, nothing changed");
         return 0;
       }
-      log(
-        await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, iso(n.arrivedAt))
-          ? "canary arrived"
-          : "canary replay, nothing changed",
-      );
+      if (!await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, iso(n.arrivedAt))) {
+        log("canary replay, nothing changed");
+        return 0;
+      }
+      // Rotate's grace (D3) ends when a canary comes back through the new address: the forwarding
+      // now points at it. One through the retired token leaves the grace to run out by its date. A
+      // failure here keeps the old token a little longer, never shorter.
+      if (f.current && f.row.retiredTokenHmac !== null) await deps.store.endRotateGrace(f.row.id);
+      log("canary arrived");
       return 0;
     case "gmail_confirm":
     case "gmail_confirm_refused":

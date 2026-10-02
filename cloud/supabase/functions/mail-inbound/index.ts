@@ -233,6 +233,12 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
         }
         return true;
       },
+      async endRotateGrace(address) {
+        await patch("rotate grace", `id=eq.${id(address)}&retired_token_hmac=not.is.null`, {
+          retired_token_hmac: null,
+          retired_until: null,
+        });
+      },
       async confirmed(address) {
         await patch("confirmed", `id=eq.${id(address)}&status=eq.pending`, { status: "confirmed" });
         await patch("confirm window", `id=eq.${id(address)}`, { confirm_until: null });
