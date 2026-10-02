@@ -21,7 +21,9 @@
 //!   for a past event.
 //!
 //! A note made from a `new_item` carries the claim's `effort_hours` and `importance` as given
-//! (§5.2), and `mail_asof` for `due` at the message's ordering date when the mail gave the due.
+//! (§5.2), and `mail_asof` for `due` at the message's ordering date when the mail gave the due. A
+//! due in §5.1's wire shape naming no real day or time is no due ([`super::NewItem::known_due`]):
+//! the item needs a date, and is created or carded and counted like any undated item.
 //!
 //! **Past** is a due whose date is strictly before `today`, never before *now*: the module has no
 //! clock, and `ingest` and `coursework` archive `imported-past` by the same rule, since an item due
@@ -60,16 +62,17 @@ pub(super) fn rule(
 
 /// §4.9's first four rows, for a `new_item` naming no note (D24 for events).
 fn new_item(message: &Message, at: ClaimRef, claim: &Claim, item: &NewItem, today: Date, vault_day: i64) -> Action {
-    let past = item.due.as_deref().and_then(due_date).is_some_and(|due| due < today);
+    let due = item.known_due();
+    let past = due.and_then(due_date).is_some_and(|due| due < today);
     let note = |imported_past| NewNote {
         title: item.title.clone(),
         course: claim.course.clone(),
-        due: item.due.clone(),
+        due: due.map(str::to_string),
         item_kind: item.item_kind,
         effort_hours: item.effort_hours,
         importance: item.importance,
         imported_past,
-        mail_asof: item.due.as_ref().map(|_| message.ordering_date),
+        mail_asof: due.map(|_| message.ordering_date),
     };
     let direct = writes_direct(message);
     match (item.item_kind, past) {
@@ -100,14 +103,20 @@ pub(super) fn proposal(today: Date, vault_day: i64) -> Proposal {
     }
 }
 
-/// The date of a due in §5.1's wire shape, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` with ASCII digits
-/// (`judge_validate.ts`'s `ABSOLUTE_DUE_RE`), naming a real date and time; `None` for anything else.
-pub(super) fn due_date(due: &str) -> Option<Date> {
+/// Whether `due` is in §5.1's wire shape, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` with ASCII digits
+/// (`judge_validate.ts`'s `ABSOLUTE_DUE_RE`), whatever day and time it names.
+pub(super) fn wire_shaped(due: &str) -> bool {
     let shaped = |pattern: &str| {
         due.len() == pattern.len()
             && due.bytes().zip(pattern.bytes()).all(|(c, p)| if p == b'9' { c.is_ascii_digit() } else { c == p })
     };
-    if !shaped("9999-99-99") && !shaped("9999-99-99T99:99") {
+    shaped("9999-99-99") || shaped("9999-99-99T99:99")
+}
+
+/// The date of a due in §5.1's wire shape ([`wire_shaped`]) naming a real date and time; `None` for
+/// anything else.
+pub(super) fn due_date(due: &str) -> Option<Date> {
+    if !wire_shaped(due) {
         return None;
     }
     // Every byte is ASCII now, so each range is on a character boundary.
@@ -353,17 +362,18 @@ mod tests {
     }
 
     /// The device's own check of §5.1's due, as `enrich.rs` re-checks a Gmail due (R-C2-E43): a
-    /// `new_item` whose due is not `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` in ASCII digits, naming a real
-    /// date and time, can neither be ordered against today nor written, so it is noise and nothing
-    /// else, in both phases.
+    /// `new_item` whose due is not `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` in ASCII digits never passed
+    /// the server's shape check (`ABSOLUTE_DUE_RE`), so it can neither be ordered against today nor
+    /// written: it is noise and nothing else, in both phases. A line break or another digit set is
+    /// off the shape too.
     #[test]
     fn a_new_item_whose_due_is_not_the_wire_shape_is_noise() {
         let noise = Action::Skip { claim: at(), reason: SkipReason::Noise };
         for due in [
             "2026-10-12T23:59:00", "2026-10-12 23:59", "2026-10-12T23:59Z", "2026-1-12", "12/10/2026", "next Friday",
-            "", "2026-02-30", "2026-13-01", "2026-10-12T24:00", "2026-10-12T23:60", "\u{FF12}026-10-12",
-            "\u{0662}026-10-12", "2026-10-12T2\u{0663}:00", "+2026-10-12", "2026-10-1\u{0661}", "2026-1a-12",
-            "2026/10/12", "2026-10-12t23:59",
+            "", "\u{FF12}026-10-12", "\u{0662}026-10-12", "2026-10-12T2\u{0663}:00", "+2026-10-12",
+            "2026-10-1\u{0661}", "2026-1a-12", "2026/10/12", "2026-10-12t23:59", "2026-10-12\n", "2026-10-1\u{2028}",
+            "2026-10-12\r\n", "\n2026-10-12",
         ] {
             assert_eq!(due_date(due), None, "{due:?}");
             for phase in [Backfill, Live] {
@@ -373,5 +383,30 @@ mod tests {
         assert_eq!(due_date("2026-10-12"), Some(date(2026, 10, 12)));
         assert_eq!(due_date("2026-10-12T23:59"), Some(date(2026, 10, 12)));
         assert_eq!(due_date("2028-02-29T00:00"), Some(date(2028, 2, 29)));
+    }
+
+    /// A due in the wire shape naming no real day or time (`2026-09-31`: a misprint in the mail the
+    /// model copied, which the server's shape check passes) is no date known: the item "needs a
+    /// date" (§4.9 row 1), as the server's resolver reads a due it cannot place on one calendar day
+    /// (T3b). So it is created or carded and counted like any undated item, never dropped as noise,
+    /// and with no `mail_asof`, since the mail gave no usable due.
+    #[test]
+    fn a_new_item_whose_shaped_due_names_no_real_day_or_time_needs_a_date() {
+        for due in [
+            "2026-09-31", "2026-02-29", "2026-02-30", "2026-13-01", "2026-00-10", "2026-10-00", "2026-09-31T23:59",
+            "2026-10-12T24:00", "2026-10-12T23:60",
+        ] {
+            assert_eq!(due_date(due), None, "{due:?}");
+            for (title, kind) in [("Lab 5", Task), ("Midterm", Exam), ("Career fair", Event)] {
+                let (shaped, undated) = (item(title, Some(due), kind), item(title, None, kind));
+                for (phase, authenticity) in [(Backfill, Aligned), (Backfill, Unaligned), (Live, Aligned)] {
+                    let got = planned(phase, authenticity, &shaped, 9);
+                    assert_eq!(got, planned(phase, authenticity, &undated, 9), "{due:?} {kind:?} {phase:?} {authenticity:?}");
+                }
+            }
+        }
+        // The finding's case, spelled out: an aligned backfill creates "Lab 5" active, needing a date.
+        let Action::Create { note, .. } = planned(Backfill, Aligned, &item("Lab 5", Some("2026-09-31"), Task), 9) else { panic!() };
+        assert_eq!((note.due, note.mail_asof, note.imported_past), (None, None, false));
     }
 }

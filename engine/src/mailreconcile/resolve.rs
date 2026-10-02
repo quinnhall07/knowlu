@@ -30,6 +30,7 @@
 //!    note's `due`, never a duplicate (test 24); two such notes are ambiguous; none is a new note.
 //!    One with no due is [`Resolved::Restated`] and changes nothing: no due means "no date known",
 //!    never "date removed" (spec risk 1; §4.8 step 2 is silent on it, so it waits on Quinn's ruling).
+//!    A due naming no real day is no due ([`super::NewItem::known_due`]), so never a change to it.
 //!
 //! **Words.** An *item note* is a note in `tasks/` or `archive/`, never a card in `approvals/`, in
 //! the vault or *planned* (filed by an earlier claim's action in this plan, [`Target::Planned`]). An
@@ -132,7 +133,7 @@ impl Working {
         // with no item, has nothing to change: unmatched, so it is shown and never guessed at.
         let (field, value, named) = match (claim.kind, claim.field, &claim.item) {
             (ClaimKind::Change, Some(field), _) => (field, claim.value.clone(), Named::Target(claim.target.as_deref())),
-            (ClaimKind::NewItem, _, Some(item)) => (ClaimField::Due, item.due.clone(), Named::Title(&item.title)),
+            (ClaimKind::NewItem, _, Some(item)) => (ClaimField::Due, item.known_due().map(str::to_string), Named::Title(&item.title)),
             (ClaimKind::Change, None, _) | (ClaimKind::NewItem, _, None) => return Resolved::Unmatched,
             (ClaimKind::CourseInfo | ClaimKind::Noise, _, _) => return Resolved::NoTarget,
         };
@@ -538,7 +539,12 @@ mod tests {
         let answered = stored(undated.clone(), Some("task-essay"));
         assert_eq!(working.resolve(&at(0), &answered), Resolved::Restated { target }, "answered");
         let skip = Action::Skip { claim: at(0), reason: SkipReason::Equal };
-        assert_eq!(plan(&view, &[message(vec![undated])], today(), 9), vec![skip]);
+        assert_eq!(plan(&view, &[message(vec![undated])], today(), 9), vec![skip.clone()]);
+        // A due in the wire shape naming no real day is no date known either: never a change to it.
+        let mut misprinted = new_item("CS 101", "essay 2");
+        misprinted.item.as_mut().unwrap().due = Some("2026-09-31".to_string());
+        assert_eq!(working.resolve(&at(0), &misprinted), Resolved::Restated { target }, "never a change to 2026-09-31");
+        assert_eq!(plan(&view, &[message(vec![misprinted])], today(), 9), vec![skip]);
         assert_eq!(ask("MATH 220", "Essay 2"), Resolved::New, "another course");
         assert_eq!(ask("CS 101", "Quiz 3"), Resolved::New, "an archived note is not active (step 2)");
         assert_eq!(ask("CS 101", "Lab 4"), Resolved::New, "equal titles only, never tokens");

@@ -164,6 +164,16 @@ pub struct NewItem {
     pub importance: i64,
 }
 
+impl NewItem {
+    /// The due the reconciler acts on: `due` when it names a real date and time in §5.1's wire shape.
+    /// A shaped due naming none (`2026-09-31`, `T24:00`; the server's shape check passes it) is no
+    /// date known, "needs a date" (§4.9 row 1), as the server's resolver reads a due it cannot place
+    /// on one calendar day (T3b). A due off the shape is noise ([`is_noise`]) and never reaches here.
+    pub fn known_due(&self) -> Option<&str> {
+        self.due.as_deref().filter(|due| rules::due_date(due).is_some())
+    }
+}
+
 /// `exam` follows the task-shaped rows; an `event` is the student's call (D24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,7 +319,8 @@ pub enum SkipReason {
     AlreadyApplied,
     /// The note already holds the value.
     Equal,
-    /// A `noise` claim, or one whose mail text would break a line (plan §10, R11).
+    /// A `noise` claim, one whose mail text would break a line (plan §10, R11), or a `new_item` whose
+    /// due is off §5.1's wire shape.
     Noise,
     /// No note matched (§4.8 step 2).
     Unmatched,
@@ -375,8 +386,10 @@ fn order(messages: &[Message]) -> Vec<(&Message, usize)> {
 /// §4.9's `noise` row, and plan §10 R11: a claim whose title, sender, why or evidence
 /// `write::single_line_problem` refuses is noise whatever its kind, so no mail text that breaks a
 /// line (any `pystr::splitlines` boundary) ever reaches a writer. So is a `new_item` whose due is
-/// not §5.1's wire shape ([`rules::due_date`]): the device's own check, as `enrich.rs` re-checks a
-/// Gmail due, since such a due can neither be ordered against today nor written.
+/// off §5.1's wire shape ([`rules::wire_shaped`]; a line break or another digit set included): the
+/// server's shape check refuses it, so the claim never passed validation, and such a due can
+/// neither be ordered against today nor written. A shaped due naming no real day passes the server
+/// and is no due here ([`NewItem::known_due`]), never noise: the item needs a date and is counted.
 fn is_noise(message: &Message, claim: &Claim) -> bool {
     let title = claim.item.as_ref().map(|item| item.title.as_str());
     let sender = [message.sender.name.as_deref(), Some(message.sender.address.as_str())];
@@ -384,7 +397,7 @@ fn is_noise(message: &Message, claim: &Claim) -> bool {
     let due = claim.item.as_ref().and_then(|item| item.due.as_deref());
     claim.kind == ClaimKind::Noise
         || sender.into_iter().chain(texts).flatten().any(|text| write::single_line_problem(text).is_some())
-        || due.is_some_and(|due| rules::due_date(due).is_none())
+        || due.is_some_and(|due| !rules::wire_shaped(due))
 }
 
 #[cfg(test)]
