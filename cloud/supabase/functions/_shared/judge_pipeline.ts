@@ -1,7 +1,8 @@
 // The pipeline of cloud design §5.2, and the only place the order of those steps is written down:
 //
-//   rules (tier 2, free) -> monthly budget -> daily cap -> constrained call (tier 3)
-//                        -> validate -> record tokens -> log -> reply
+//   rules (tier 2, free) -> breaker -> monthly budget -> daily cap -> constrained call (tier 3)
+//                        -> refund if the model never answered | validate -> record tokens
+//                        -> log -> reply
 //
 // **Rules come before the cap on purpose.** "Rules retire model calls" (§5.4 measure 1) and "a
 // rule still spends the account's model allowance" cannot both be true; the first one is the
@@ -163,6 +164,22 @@ async function judgeUngated(
     // rather than answering with it, and let the promotion job's own evidence retire it.
   }
 
+  // F1 (live proof 2026-10-02): this invocation has already seen `BREAKER_FAILURES` model calls in
+  // a row fail, so the provider is down. Answer exactly as a failed call does — the device already
+  // reads `model failed` as an outage — but at tier 0, uncharged, without sending anything.
+  if (deps.caps.tripped()) {
+    await deps.log.write({
+      ...base,
+      tier: 0,
+      outcome: "low confidence",
+      cause: "model failed",
+      confidence: 0,
+      fields: {},
+      ms: deps.now() - started,
+    });
+    return { verdict: null, tier: 0, outcome: "low confidence", cause: "model failed" };
+  }
+
   // The monthly ceiling before the daily cap: an account over budget must not even spend its
   // allowance, and `withinBudget` is memoised per invocation so this is one query, not sixty.
   if (!await deps.caps.withinBudget(accountId)) {
@@ -219,6 +236,11 @@ async function judgeUngated(
       : e instanceof Error && e.message.includes("max_tokens")
       ? "truncated"
       : "model failed";
+    // F1: `model failed` means the model never answered (transport, auth, provider, timeout, an
+    // error envelope, an unparseable reply), so the call `charge` counted is given back — an outage
+    // must not spend the student's day. A refusal or a truncation is the model answering; it stays
+    // charged. The charge before the call is untouched: it is what bounds a hot loop in flight.
+    if (cause === "model failed") await deps.caps.refund(accountId, req.kind);
     const id = await deps.log.write({
       ...base,
       ...pinned,

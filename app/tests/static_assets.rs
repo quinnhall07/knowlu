@@ -511,6 +511,9 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
     // command; the page holds ten rows.
     assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
+    // A curated school's LMS kind comes in the hit (`r[4]`) and is the pick's answer, so the chooser is
+    // for an uncurated school only (live proof 2026-10-02). The page names no school.
+    assert!(js.contains("lms: r[4] || \"\""), "pickSchool takes the curated LMS kind from the hit");
     // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
     // personal one is what makes today's page know the day is already half full.
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
@@ -1917,7 +1920,7 @@ fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
     let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
     let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
     let f = &js[start..end];
-    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : googleSentence(g)"), "{f}");
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : (SET.googleWaitedOut"), "{f}");
     let c = js.find("function connectGoogle(").expect("connectGoogle");
     let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
     assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
@@ -1938,6 +1941,18 @@ fn the_google_row_poll_is_cancelled_when_settings_closes() {
     assert!(close.contains("SET.googleSeq += 1"), "closing Settings bumps the token: {close}");
     assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
     assert!(!js.contains("gmail.readonly"), "no scope string on the page");
+}
+
+/// The poll runs ten minutes; a student who cancelled on Google's page must be able to mint a new
+/// link, so Connect and Reconnect stay enabled while polling (only a disconnect in flight locks them).
+#[test]
+fn the_google_row_connect_buttons_stay_enabled_while_polling() {
+    let js = read("console.js");
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("var retry = id === \"set-google-connect\" || id === \"set-google-reconnect\""), "{f}");
+    assert!(f.contains("EL(id).disabled = SET.leaving || (busy && !retry)"), "{f}");
 }
 
 /// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
@@ -2419,4 +2434,44 @@ fn undo_within_the_toast_never_calls_remove_lane_date() {
     assert!(b.contains("clearTimeout("), "undo cancels the timer");
     assert!(b[u..].contains("delete pendingLaneRemovals["), "undo clears the pending uid");
     assert_eq!(js.matches("invoke(\"remove_lane_date\"").count(), 1, "one call site, behind the timer");
+}
+
+/// Live proof 2026-10-02 (F2): the row keeps polling until the consent link's own lifetime (the
+/// server's nonce dies ten minutes after minting), backing off gently, then offers "Check again",
+/// which re-reads the status and never mints a new link. Reconnect shares the same code.
+#[test]
+fn the_google_row_waits_out_the_link_lifetime_then_offers_check_again() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(js.contains("var GOOGLE_LINK_LIFETIME_MS = 600000;"), "ten minutes, the nonce's lifetime");
+    assert!(js.contains("var GOOGLE_NO_ANSWER = \"Didn\u{2019}t hear back from Google.\";"));
+    let start = js.find("async function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(!f.contains("i < 20"), "no fixed count of polls: {f}");
+    assert!(f.contains("GOOGLE_LINK_LIFETIME_MS") && f.contains("Date.now()"), "{f}");
+    assert!(f.contains("delay = Math.min("), "the wait grows between polls: {f}");
+    assert!(f.contains("SET.googleWaitedOut = !googleDone("), "{f}");
+    assert!(html.contains("id=\"set-google-check\"") && html.contains(">Check again</button>"));
+    let r = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let r_end = r + js[r..].find("\n  }\n").expect("end");
+    assert!(js[r..r_end].contains("EL(\"set-google-check\").hidden = !SET.googleWaitedOut"), "shown only after the wait ran out");
+    assert!(js[r..r_end].contains("GOOGLE_NO_ANSWER"));
+    let c = js.find("function checkGoogleAgain(").expect("checkGoogleAgain");
+    let c_end = c + js[c..].find("\n  }\n").expect("end");
+    assert!(js[c..c_end].contains("invoke(\"google_status\"") && !js[c..c_end].contains("google_connect"), "re-polls status, never re-mints");
+    assert!(js.contains("closest(\"#set-google-check\")) { checkGoogleAgain(); return; }"));
+    assert_eq!(js.matches("invoke(\"google_connect\", { scope: scope })").count(), 1, "only connectGoogle mints a link");
+}
+
+#[test]
+fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
+    let js = read("console.js");
+    assert!(js.contains("function sourceLabel(c)"), "one helper names a card's source");
+    assert!(js.contains("from Gmail"), "the label words");
+    let deck = js.split("function renderDeck(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
+    assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
 }
