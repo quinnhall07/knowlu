@@ -1,3 +1,472 @@
-//! The mail setup's window and script runner (email-forwarding plan T9.2, spec §4 and §5). This
-//! file is the doc-only hand-off (H3b): the code lands with T9.2, tests first. Nothing here yet
-//! opens a window, reaches a network or logs.
+//! The mail setup's window and script runner (email-forwarding plan T9.2; spec D5, D19, §4.2, §4.3,
+//! §5.4, §6.2; the T0.S1-S3 report). The runner and its checks are pure and tested through [`Page`];
+//! the window half at the bottom is the one place a mail window is built.
+//!
+//! **One window, `mail`**, with no capability grant (Tauri injects its internals into every webview,
+//! and Quinn's ruling of 2026-10-02 accepts that only while no capability covers a mail window, so
+//! every invoke from it is denied), on the mailbox's kept profile ([`crate::mail_session`]). It is
+//! visible only to sign in; then it steps aside (hidden, out of the taskbar: S2's mode) and comes
+//! back, centred and focused, only when the site needs the student. Google's "verify it's you"
+//! popup is the one other window, `mail-popup`, in the same profile (S1b).
+//!
+//! **The runner** evaluates a compiled-in script by name (D19), never text from anywhere else, and
+//! only while the top-level page is on the provider's mail hosts (D5): checked host-side before
+//! every evaluation, and again in the page through `location.host`, because a script queued before
+//! a cross-origin navigation can still run on the new document (S1c). The result comes back through
+//! WebView2's script-completion value (S1a), never IPC. Every refusal is a fixed word: no page text,
+//! address, URL or session ever reaches an error, a log or telemetry. Setup drives the page by
+//! script evaluation only; nothing here simulates a keyboard or a mouse, and the window has no
+//! debugging port.
+use crate::mail_steps::Provider;
+use serde_json::Value;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// The mail window's one label (spec §5.4).
+pub const WINDOW: &str = "mail";
+/// Google's "verify it's you" popup (S1b): the mail window's child, in the same profile.
+pub const POPUP: &str = "mail-popup";
+
+// ---- origins (D5) -----------------------------------------------------------------------------
+
+/// The hosts a step script may run on. Outlook lives at `outlook.cloud.microsoft` now and
+/// `outlook.office.com` redirects there (S1c), so both. A guided provider runs nothing.
+pub fn mail_hosts(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::M365 => &["outlook.office.com", "outlook.cloud.microsoft"],
+        Provider::Gmail => &["mail.google.com"],
+        Provider::Guided => &[],
+    }
+}
+
+/// The provider's own sign-in hosts: where a popup may go (S1b), and never where a script runs.
+fn sign_in_hosts(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::M365 => &["login.microsoftonline.com"],
+        Provider::Gmail => &["accounts.google.com", "mail-settings.google.com"],
+        Provider::Guided => &[],
+    }
+}
+
+/// Whether `url` is `https://<one of the provider's mail hosts>…` exactly (grades' `on_host`: no
+/// user part, no port, case-blind host).
+pub fn on_mail_host(provider: Provider, url: &str) -> bool {
+    mail_hosts(provider).iter().any(|h| crate::grades::on_host(url, h))
+}
+
+/// S1b: the popup's first request is `about:blank`; after that only the provider's own sign-in or
+/// mail hosts. Anything else, and every popup for a guided provider, is denied.
+pub fn popup_allowed(provider: Provider, url: &str) -> bool {
+    if mail_hosts(provider).is_empty() {
+        return false;
+    }
+    url == "about:blank" || on_mail_host(provider, url) || sign_in_hosts(provider).iter().any(|h| crate::grades::on_host(url, h))
+}
+
+/// Where setup's window opens: the provider's mailbox, which sends a signed-out student to sign in.
+pub fn start_url(provider: Provider) -> Option<&'static str> {
+    match provider {
+        Provider::M365 => Some("https://outlook.office.com/mail/"),
+        Provider::Gmail => Some("https://mail.google.com/mail/u/0/"),
+        Provider::Guided => None,
+    }
+}
+
+// ---- the sign-in detector (X2's title signal) ---------------------------------------------------
+
+/// X2's signal: the page is on a mail host and its title reads as a signed-in mailbox. Outlook's is
+/// `<folder> - <name> - Outlook`; Gmail's is `<folder> - <address> - Gmail` (a Google Workspace
+/// mailbox ends with its organisation's name instead), so for Gmail a middle part must be an
+/// address. A step-script probe confirms it before anything acts (D5). The title is read here and
+/// nowhere kept.
+pub fn signed_in(provider: Provider, url: Option<&str>, title: &str) -> bool {
+    if !url.is_some_and(|u| on_mail_host(provider, u)) {
+        return false;
+    }
+    let parts: Vec<&str> = title.split(" - ").collect();
+    let named = parts.len() >= 3 && parts.iter().all(|p| !p.trim().is_empty());
+    match provider {
+        Provider::M365 => named && parts.last() == Some(&"Outlook"),
+        Provider::Gmail => named && parts[1..parts.len() - 1].iter().any(|p| p.contains('@')),
+        Provider::Guided => false,
+    }
+}
+
+// ---- one mail window at a time (spec §5.4) -----------------------------------------------------
+
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Held by whoever drives the mail window (setup, a repair sign-in, the slot's mail step) for the
+/// whole of its run; dropping it frees the next. Grades' `Capturing` rule.
+pub struct MailWindow(());
+
+impl MailWindow {
+    pub fn try_take() -> Option<MailWindow> {
+        HELD.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| MailWindow(()))
+    }
+}
+
+impl Drop for MailWindow {
+    fn drop(&mut self) {
+        HELD.store(false, Ordering::SeqCst);
+    }
+}
+
+// ---- the compiled-in scripts (D19) --------------------------------------------------------------
+
+/// The initialisation script of every mail document (S3): it answers `registerProtocolHandler`
+/// with nothing, so the "open email links" prompt never shows. It is not a step script and no name
+/// runs it.
+pub const INIT_SCRIPT: &str = include_str!("../assets/mail/init.js");
+
+/// One step script: `app/assets/mail/<path>`, compiled in. A script is the body of an async function
+/// of `args`; what it returns is its result. One under `m365/` or `gmail/` runs only for that
+/// provider; one at the top runs for either.
+#[derive(Debug)]
+pub struct Script {
+    path: &'static str,
+    source: &'static str,
+}
+
+impl Script {
+    pub fn path(&self) -> &'static str {
+        self.path
+    }
+    pub fn source(&self) -> &'static str {
+        self.source
+    }
+    fn runs_for(&self, provider: Provider) -> bool {
+        match self.path.split_once('/') {
+            None => true,
+            Some(("m365", _)) => provider == Provider::M365,
+            Some(("gmail", _)) => provider == Provider::Gmail,
+            Some(_) => false,
+        }
+    }
+}
+
+macro_rules! compiled {
+    ($($path:literal),* $(,)?) => {
+        &[$(Script { path: $path, source: include_str!(concat!("../assets/mail/", $path)) }),*]
+    };
+}
+
+/// Every step script there is. T10 adds each provider's under `m365/` and `gmail/`.
+static SCRIPTS: &[Script] = compiled!["ready.js"];
+
+pub fn scripts() -> &'static [Script] {
+    SCRIPTS
+}
+
+/// The compiled-in script at `path`, exactly as listed; anything else is `None`.
+pub fn script(path: &str) -> Option<&'static Script> {
+    SCRIPTS.iter().find(|s| s.path == path)
+}
+
+// ---- the runner (S1a, S1c) ----------------------------------------------------------------------
+
+/// The page a script runs in: the mail window, or a test's fake.
+pub trait Page {
+    /// The top-level document's URL, or `None` when there is no page.
+    fn url(&self) -> Option<String>;
+    /// Evaluates `js` in the page and hands back the completion's JSON value, or `None` when none
+    /// came within `wait` (the window went, or the document changed under it).
+    fn eval(&self, js: &str, wait: Duration) -> Option<String>;
+}
+
+/// Why a script produced no result. Each is a fixed word; none carries page text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// No script of that name is compiled in.
+    Unknown,
+    /// The script belongs to the other provider.
+    NotForProvider,
+    NoPage,
+    /// The page is not on the provider's mail hosts (sign-in, SSO, consent, anywhere else).
+    OffOrigin,
+    TimedOut,
+    /// The page loaded a new document and the result went with the old one.
+    Lost,
+    /// The script threw.
+    Failed,
+    Unreadable,
+}
+
+impl Refusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refusal::Unknown => "no such step script",
+            Refusal::NotForProvider => "a step script for another provider",
+            Refusal::NoPage => "the mail window is not open",
+            Refusal::OffOrigin => "the page is not the mailbox",
+            Refusal::TimedOut => "the page did not answer in time",
+            Refusal::Lost => "the page moved before the step finished",
+            Refusal::Failed => "the step script failed",
+            Refusal::Unreadable => "the page's answer was unreadable",
+        }
+    }
+}
+
+/// How often a running script's result is asked for.
+const POLL: Duration = Duration::from_millis(50);
+/// Where a run's result waits in the page, keyed by run id; never enumerable.
+const SLOT: &str = "__knowlu_mail";
+static RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Runs the compiled-in script `path` in `page` for `provider` and returns its result, within
+/// `timeout`. The script is started (its result kept in the page under a fresh run id), then its
+/// result is asked for every [`POLL`] until it is there. Before each evaluation the page's URL is
+/// checked host-side, and each evaluation checks `location.host` in the page again, so nothing is
+/// evaluated on a page off the provider's mail hosts. Call it from a background thread: the window's
+/// evaluation completes on the main thread.
+pub fn run<P: Page + ?Sized>(page: &P, provider: Provider, path: &str, args: &Value, timeout: Duration) -> Result<Value, Refusal> {
+    let script = script(path).ok_or(Refusal::Unknown)?;
+    if !script.runs_for(provider) {
+        return Err(Refusal::NotForProvider);
+    }
+    let hosts = serde_json::to_string(mail_hosts(provider)).map_err(|_| Refusal::Unreadable)?;
+    let args = serde_json::to_string(args).map_err(|_| Refusal::Unreadable)?;
+    let id = RUN_ID.fetch_add(1, Ordering::SeqCst);
+    let deadline = Instant::now() + timeout;
+    let started = ask(page, provider, &start_js(&hosts, id, script.source, &args), deadline)?;
+    match started.get("state").and_then(Value::as_str) {
+        Some("started") => {}
+        other => return Err(refusal_for(other)),
+    }
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Refusal::TimedOut);
+        }
+        std::thread::sleep(POLL.min(left));
+        let polled = ask(page, provider, &poll_js(&hosts, id), deadline)?;
+        match polled.get("state").and_then(Value::as_str) {
+            Some("running") => continue,
+            Some("done") => return Ok(polled.get("value").cloned().unwrap_or(Value::Null)),
+            other => return Err(refusal_for(other)),
+        }
+    }
+}
+
+fn refusal_for(state: Option<&str>) -> Refusal {
+    match state {
+        Some("refused") => Refusal::OffOrigin,
+        Some("lost") => Refusal::Lost,
+        Some("failed") => Refusal::Failed,
+        _ => Refusal::Unreadable,
+    }
+}
+
+/// One evaluation behind the host-side origin check. The page answers `JSON.stringify` of an
+/// object, which the completion hands back as a JSON string.
+fn ask<P: Page + ?Sized>(page: &P, provider: Provider, js: &str, deadline: Instant) -> Result<Value, Refusal> {
+    let url = page.url().ok_or(Refusal::NoPage)?;
+    if !on_mail_host(provider, &url) {
+        return Err(Refusal::OffOrigin);
+    }
+    let wait = deadline.saturating_duration_since(Instant::now());
+    if wait.is_zero() {
+        return Err(Refusal::TimedOut);
+    }
+    let raw = page.eval(js, wait).ok_or(Refusal::TimedOut)?;
+    let text: String = serde_json::from_str(&raw).map_err(|_| Refusal::Unreadable)?;
+    let value: Value = serde_json::from_str(&text).map_err(|_| Refusal::Unreadable)?;
+    if value.is_object() { Ok(value) } else { Err(Refusal::Unreadable) }
+}
+
+/// The in-page head every evaluation shares: the host list, the result slot, the run id, and the
+/// `location.host` guard.
+fn guard(hosts: &str, id: u64) -> String {
+    let mut js = String::from("(function(){var H=");
+    js.push_str(hosts);
+    js.push_str(",K=\"");
+    js.push_str(SLOT);
+    js.push_str("\",I=");
+    js.push_str(&id.to_string());
+    js.push_str(";try{if(H.indexOf(location.host)<0){return JSON.stringify({state:\"refused\"});}");
+    js
+}
+
+const TAIL: &str = "}catch(e){return JSON.stringify({state:\"failed\"});}})()";
+
+/// Starts `source` as the body of an async function of `args`, keeping its settled result under
+/// the run id, and answers `started` at once.
+fn start_js(hosts: &str, id: u64, source: &str, args: &str) -> String {
+    let mut js = guard(hosts, id);
+    js.push_str("var s=window[K];if(!s){s={};Object.defineProperty(window,K,{value:s});}s[I]={state:\"running\"};");
+    js.push_str("Promise.resolve().then(function(){return (async function(args){\n");
+    js.push_str(source);
+    js.push_str("\n})(");
+    js.push_str(args);
+    js.push_str(");}).then(function(v){s[I]={state:\"done\",value:(v===undefined?null:v)};},function(){s[I]={state:\"failed\"};});");
+    js.push_str("return JSON.stringify({state:\"started\"});");
+    js.push_str(TAIL);
+    js
+}
+
+/// Asks for run `id`'s result: `running`, the settled result (taken out of the page), or `lost`
+/// when the document that ran it is gone.
+fn poll_js(hosts: &str, id: u64) -> String {
+    let mut js = guard(hosts, id);
+    js.push_str("var s=window[K],r=s&&s[I];if(!r){return JSON.stringify({state:\"lost\"});}");
+    js.push_str("if(r.state===\"running\"){return JSON.stringify({state:\"running\"});}");
+    js.push_str("delete s[I];return JSON.stringify(r);");
+    js.push_str(TAIL);
+    js
+}
+
+// ---- the window (D5; S1b, S2, S3) ---------------------------------------------------------------
+//
+// Built only on a profile folder `mail_session::is_session_dir` accepts. Visible to sign in; hidden
+// and out of the taskbar while steps run (S2 passed both that and off-screen; hidden is grades'
+// mode). No navigation filter: a school's own sign-in can be on any host, and nothing runs there.
+use crate::mail_session::is_session_dir;
+use std::path::Path;
+use tauri::webview::{NewWindowFeatures, NewWindowResponse};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// The mail window as a [`Page`]: its URL, and WebView2's script-completion value (S1a).
+pub struct Window(pub tauri::WebviewWindow);
+
+impl Page for Window {
+    fn url(&self) -> Option<String> {
+        self.0.url().ok().map(|u| u.to_string())
+    }
+    fn eval(&self, js: &str, wait: Duration) -> Option<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.0.eval_with_callback(js, move |raw| drop(tx.send(raw))).ok()?;
+        rx.recv_timeout(wait).ok()
+    }
+}
+
+/// [`run`] in the open mail window.
+pub fn run_in_window(app: &tauri::AppHandle, provider: Provider, path: &str, args: &Value, timeout: Duration) -> Result<Value, Refusal> {
+    let w = app.get_webview_window(WINDOW).ok_or(Refusal::NoPage)?;
+    run(&Window(w), provider, path, args, timeout)
+}
+
+/// [`signed_in`] for the open mail window, now.
+pub fn window_signed_in(app: &tauri::AppHandle, provider: Provider) -> bool {
+    let Some(w) = app.get_webview_window(WINDOW) else { return false };
+    let url = w.url().ok().map(|u| u.to_string());
+    signed_in(provider, url.as_deref(), &w.title().unwrap_or_default())
+}
+
+/// The sign-in window: `mail`, visible and centred, at the provider's mailbox, on `profile`.
+pub fn open_visible(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provider) -> Result<(), String> {
+    open(app, data_dir, profile, provider, true)
+}
+
+/// The same window for a saved sign-in's run (the slot's mail step, a resumed backfill): hidden.
+pub fn open_hidden(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provider) -> Result<(), String> {
+    open(app, data_dir, profile, provider, false)
+}
+
+fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provider, visible: bool) -> Result<(), String> {
+    if app.get_webview_window(WINDOW).is_some() {
+        return Err("the mail window is already open".into());
+    }
+    if !is_session_dir(data_dir, profile) {
+        return Err("not a mail profile folder".into());
+    }
+    let url: tauri::Url = start_url(provider)
+        .ok_or_else(|| "this provider is set up by hand".to_string())?
+        .parse()
+        .map_err(|_| "the mailbox address is not a URL".to_string())?;
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    let opener = app.clone();
+    let w = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
+        .title(if visible { "Sign in to your email" } else { "Knowlu email setup" })
+        .inner_size(1000.0, 760.0)
+        .center()
+        .visible(visible)
+        .focused(visible)
+        .skip_taskbar(!visible)
+        .data_directory(profile.to_path_buf())
+        .initialization_script(INIT_SCRIPT)
+        .on_new_window(move |url, features| open_popup(&opener, provider, &url, features))
+        .build()
+        .map_err(|e| e.to_string())?;
+    refuse_external_schemes(&w);
+    Ok(())
+}
+
+/// S1b: Google's "verify it's you" popup, in the opener's environment (so its profile), with its
+/// own window features. Its first request is `about:blank`; only [`popup_allowed`] URLs open, one
+/// popup at a time, and the mail window comes back with it, because the site needs the student.
+/// The popup closes itself (`window.close()`; WebView2's close request destroys its window).
+fn open_popup(app: &tauri::AppHandle, provider: Provider, url: &tauri::Url, features: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
+    if !popup_allowed(provider, url.as_str()) || app.get_webview_window(POPUP).is_some() {
+        return NewWindowResponse::Deny;
+    }
+    let Ok(blank) = "about:blank".parse::<tauri::Url>() else { return NewWindowResponse::Deny };
+    let built = WebviewWindowBuilder::new(app, POPUP, WebviewUrl::External(blank))
+        .window_features(features)
+        .title("Confirm it's you")
+        .initialization_script(INIT_SCRIPT)
+        .build();
+    match built {
+        Ok(window) => {
+            refuse_external_schemes(&window);
+            let _ = come_back(app);
+            NewWindowResponse::Create { window }
+        }
+        Err(_) => NewWindowResponse::Deny,
+    }
+}
+
+/// Whether Google's popup is open (the step waits while it is).
+pub fn popup_open(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window(POPUP).is_some()
+}
+
+/// D5: once signed in, the window steps aside: hidden and out of the taskbar (S2).
+pub fn step_aside(app: &tauri::AppHandle) -> Result<(), String> {
+    let w = app.get_webview_window(WINDOW).ok_or_else(|| Refusal::NoPage.as_str().to_string())?;
+    w.hide().map_err(|e| e.to_string())?;
+    w.set_skip_taskbar(true).map_err(|e| e.to_string())
+}
+
+/// D5: the site needs the student (a popup, an MFA or SSO prompt, a consent page): the window comes
+/// back, centred and focused.
+pub fn come_back(app: &tauri::AppHandle) -> Result<(), String> {
+    let w = app.get_webview_window(WINDOW).ok_or_else(|| Refusal::NoPage.as_str().to_string())?;
+    w.set_skip_taskbar(false).map_err(|e| e.to_string())?;
+    w.show().map_err(|e| e.to_string())?;
+    let _ = w.unminimize();
+    w.center().map_err(|e| e.to_string())?;
+    w.set_focus().map_err(|e| e.to_string())
+}
+
+/// Closes the popup and the mail window. The profile folder is `mail_session`'s to delete, which
+/// retries while WebView2 lets go of it (S2: 0.8 to 1.3 s).
+pub fn close(app: &tauri::AppHandle) {
+    for label in [POPUP, WINDOW] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.destroy();
+        }
+    }
+}
+
+/// S3: a page's launch of an external scheme (`mailto:`, an app's own) is cancelled, so no
+/// "open this link" prompt and no other app ever opens from a mail window.
+#[cfg(windows)]
+fn refuse_external_schemes(w: &tauri::WebviewWindow) {
+    let _ = w.with_webview(|pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_18;
+        use windows_core::Interface;
+        let Ok(core) = pw.controller().CoreWebView2() else { return };
+        let Ok(core) = core.cast::<ICoreWebView2_18>() else { return };
+        let handler = webview2_com::LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                args.SetCancel(true)?;
+            }
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let _ = core.add_LaunchingExternalUriScheme(&handler, &mut token);
+    });
+}
+
+#[cfg(not(windows))]
+fn refuse_external_schemes(_w: &tauri::WebviewWindow) {}
