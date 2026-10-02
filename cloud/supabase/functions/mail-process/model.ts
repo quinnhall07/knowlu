@@ -6,14 +6,16 @@
  *    which opens one when none was opened in the last 120 days); when that refuses, it charges the day's
  *    `mail_claim` cap as a `live` or `recover` item always does (`charge_call`). Then `enforce_budget`,
  *    whose ceiling is raised by the allowance's dollars while it is open, must pass. Capped or over budget:
- *    no model call; the item waits to the next UTC day, and its third attempt expires it (D8).
+ *    no model call (an allowance judgment charged over budget is given back); the item waits to the next
+ *    UTC day, and its third attempt expires it (D8). The attempt is counted, and that wait written, before
+ *    the charge, so a failure after the call never re-charges the item when its lease runs out.
  * 4. **The small model**, kind `mail_claim` at its pinned row (prompt and grammar `mail-1`): the subject,
  *    sender, Date, known courses and the scrubbed text cut to 2,000 characters. Its tokens are recorded
  *    (`record_tokens`: tokens, never calls, so an allowance call leaves the day's cap alone). The answer is
  *    checked by `validateMailClaims` against the same text the model saw.
- *    - `model failed` (no answer: the upstream, the network, the clock): a backfill judgment charged to the
- *      allowance is given back (`refund_allowance`), and the item waits as a capped one does, never an
- *      immediate re-charge.
+ *    - `model failed` (no answer: the upstream, the network, the clock): the charge is given back, a
+ *      backfill judgment to the allowance (`refund_allowance`), a day's-cap call by main's F1 `refund_call`,
+ *      and the item waits as a capped one does, never an immediate re-charge.
  *    - a refusal, a truncation or a failed validation reached the model: it stays charged, and the item is
  *      finished with no claim.
  * 6. **Queue and forget.** One `mail_claims` row when any claim is not `noise`; the row and the object are
@@ -52,6 +54,9 @@ export interface MailCharges {
   refundAllowance(account: string): Promise<boolean>;
   /** `charge_call` for `mail_claim` at its daily cap. */
   daily(account: string): Promise<boolean>;
+  /** Main's F1 `refund_call` for `mail_claim`: one call back after a call the model never answered. It is
+   * not in this branch's base, so until main is merged the call fails and refuses (§9.5, T17). */
+  refundDaily(account: string): Promise<boolean>;
   /** `enforce_budget` at `MONTHLY_CEILING_USD` (the SQL adds an open allowance's dollars). Read per item. */
   withinBudget(account: string): Promise<boolean>;
   /** `record_tokens` for `mail_claim`; never throws. */
@@ -72,6 +77,10 @@ export function mailCharges(db: Db): MailCharges {
     daily: (account) =>
       yes(
         db.rpc("charge_call", { p_account: account, p_kind: "mail_claim", p_cap: MAIL_DAILY_CAP.mail_claim }),
+      ),
+    refundDaily: (account) =>
+      yes(
+        db.rpc("refund_call", { p_account: account, p_kind: "mail_claim", p_cap: MAIL_DAILY_CAP.mail_claim }),
       ),
     withinBudget: (account) =>
       yes(db.rpc("enforce_budget", { p_account: account, p_ceiling: MONTHLY_CEILING_USD })),
@@ -111,15 +120,14 @@ export function nextUtcDay(ms: number): string {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
 }
 
-/** A capped, over-budget or failed attempt: the next UTC day, or expiry at the third. */
+/** A capped, over-budget or failed attempt: the attempt was counted and its wait written before the
+ * charge, so only the third expires the item here. */
 async function waitOrExpire(item: WorkItem, deps: ModelPathDeps, why: string): Promise<void> {
-  const attempts = item.attempts + 1;
-  if (attempts >= MAX_ATTEMPTS) {
+  if (item.attempts + 1 >= MAX_ATTEMPTS) {
     await expireItem(item, deps);
     log(`${why} on the last attempt, expired`);
     return;
   }
-  await deps.store.wait(item.id, nextUtcDay(deps.now()), attempts);
   log(`${why}, waits for the next UTC day`);
 }
 
@@ -154,11 +162,25 @@ export function modelPath(deps: ModelPathDeps): (input: ModelInput) => Promise<v
     };
     const record = (r: Partial<JudgmentRow>) => deps.log.write({ ...base, ...r, ms: deps.now() - started });
 
+    // The attempt is counted, and its wait to the next UTC day written, before any charge. A failure after
+    // the call (a store write the database refuses every time) then leaves the item waiting with this
+    // attempt spent, never re-charged when the lease runs out: at most MAX_ATTEMPTS charges an item. One
+    // that arrives with its attempts spent is expired, uncharged. A path that finishes it deletes the row.
+    if (item.attempts >= MAX_ATTEMPTS) {
+      await expireItem(item, deps);
+      log("attempts spent, expired");
+      return;
+    }
+    await deps.store.wait(item.id, nextUtcDay(deps.now()), item.attempts + 1);
+
     // Step 5, before any call: the allowance for a backfill item while it lasts, else the day's cap; then the
     // budget, raised by the allowance while it is open.
     const fromAllowance = item.phase === "backfill" && await deps.charges.allowance(account);
     const charged = fromAllowance || await deps.charges.daily(account);
     if (!charged || !(await deps.charges.withinBudget(account))) {
+      // Over budget, an account must not spend its allowance (D23): no call was made, so the judgment the
+      // charge took is given back. (A day's-cap charge over budget stays, as before F1; §9.5.)
+      if (fromAllowance) await deps.charges.refundAllowance(account);
       await record({});
       await waitOrExpire(item, deps, charged ? "over budget" : "capped");
       return;
@@ -191,7 +213,9 @@ export function modelPath(deps: ModelPathDeps): (input: ModelInput) => Promise<v
       const cause = failureCause(e);
       await record({ ...pinned, outcome: "low confidence", cause });
       if (cause === "model failed") {
+        // No answer: the charge is given back, the allowance's or (main's F1 rule) the day's cap.
         if (fromAllowance) await deps.charges.refundAllowance(account);
+        else await deps.charges.refundDaily(account);
         await waitOrExpire(item, deps, "model failed");
         return;
       }

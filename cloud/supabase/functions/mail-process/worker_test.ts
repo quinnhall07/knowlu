@@ -68,6 +68,8 @@ class FakeDb implements Db {
   accounts = new Map<string, Allowance>([["acct-1", { openedAt: null, left: 0, usd: 0, until: null }]]);
   /** `usage_daily`, keyed `account|day|kind`. */
   usage = new Map<string, Usage>();
+  /** `usage_daily.refunds`, keyed as `usage`. */
+  refunds = new Map<string, number>();
   /** This month's spend outside `usage_daily`'s mail rows, in dollars (`monthly_spend`'s other kinds). */
   otherSpend = 0;
   judgments: Record<string, unknown>[] = [];
@@ -124,6 +126,17 @@ class FakeDb implements Db {
       return Promise.resolve(
         first === null || first >= utcDay(now - DAY) ? u.calls <= cap * 2 : u.calls <= cap,
       );
+    }
+    if (fn === "refund_call") {
+      // Main's F1 `refund_call` (20261002000100_refund_failed_call.sql): one call back while the day has
+      // one, at most the day's allowance of refunds. The account here is past its first two days.
+      const u = this.use(account, String(args.p_kind));
+      const key = `${account}|${utcDay(now)}|${args.p_kind}`;
+      const refunds = this.refunds.get(key) ?? 0;
+      if (u.calls <= 0 || refunds >= Number(args.p_cap)) return Promise.resolve(false);
+      u.calls -= 1;
+      this.refunds.set(key, refunds + 1);
+      return Promise.resolve(true);
     }
     if (fn === "record_tokens") {
       const u = this.use(account, String(args.p_kind));
@@ -539,6 +552,70 @@ Deno.test("a_model_failure_on_a_backfill_item_refunds_its_allowance_judgment_and
       "only the model failure refunds",
     );
     assertEquals(w.db.judgments.slice(-3).map((j) => j.cause), ["refused", "truncated", "incomplete"]);
+  });
+});
+
+Deno.test("a_model_failure_on_a_live_item_refunds_its_daily_cap_charge_and_waits_to_retry", async () => {
+  await withWorld(async (w) => {
+    w.model.script = () => new Error("upstream 503");
+    const item = w.put(mail());
+    await w.run();
+    // Main's F1 rule: a call the model never answered gives its cap charge back (`refund_call`).
+    assertEquals(w.events, ["charge_call", "enforce_budget", "model", "refund_call"]);
+    assertEquals(w.db.calls("mail_claim").calls, 0);
+    assertEquals(w.store.work.map((r) => [r.id, r.attempts, r.nextAttemptAt]), [[item.id, 1, midnight(T0)]]);
+    // A refusal reached the model: it stays charged, and nothing is refunded.
+    w.events.length = 0;
+    w.model.script = () => new ModelRefused("the model declined");
+    w.put(mail(), { phase: "recover", batchId: "b-2" });
+    await w.run();
+    assertEquals(w.events, ["charge_call", "enforce_budget", "model"]);
+    assertEquals(w.db.calls("mail_claim").calls, 1);
+  });
+});
+
+Deno.test("an_over_budget_backfill_item_gives_its_allowance_judgment_back", async () => {
+  await withWorld(async (w) => {
+    // Over the ceiling even raised by the allowance's $1.00: no call, and no judgment spent (D23).
+    w.db.otherSpend = 10;
+    const item = w.put(mail(), BACKFILL);
+    await w.run();
+    assertEquals(w.events, ["charge_allowance", "enforce_budget", "refund_allowance"]);
+    assertEquals(allowance(w)?.left, 2000);
+    // Every attempt the same, down to its expiry: the allowance and the day's cap are both untouched.
+    for (let day = 1; day <= 2; day++) {
+      w.clock.now = T0 + day * DAY;
+      await w.run();
+    }
+    assertEquals(modelCalls(w), 0);
+    assertEquals(allowance(w)?.left, 2000);
+    assertEquals(charged(w), ["charge_allowance", "charge_allowance", "charge_allowance"]);
+    assertEquals([work(w), w.store.counters], [[], { "addr-1:expired": 1 }]);
+    assertEquals(w.store.seen.has(`acct-1|h-${item.id}`), false);
+  });
+});
+
+Deno.test("a_store_failure_after_the_call_charges_and_calls_at_most_three_times", async () => {
+  await withWorld(async (w) => {
+    // One message whose `mail_claims` insert is refused every time (a check constraint, say).
+    w.model.script = () => ({ claims: [changeClaim()] });
+    w.store.queue = () => Promise.reject(new Error("mail_claims check constraint"));
+    const item = w.put(mail());
+    // Five days of runs, each day one run every six minutes for half an hour: past the lease every time.
+    for (let day = 0; day < 5; day++) {
+      for (let k = 0; k < 5; k++) {
+        const start = day === 0 ? T0 : Date.parse(midnight(T0 + (day - 1) * DAY)) + 60_000;
+        w.clock.now = start + k * 6 * 60_000;
+        await w.run();
+      }
+      if (day === 0) assertEquals(modelCalls(w), 1, "the attempt is counted before the call, not after");
+    }
+    // The attempt is counted before the charge, so a broken item spends at most MAX_ATTEMPTS charges.
+    assertEquals(modelCalls(w), 3);
+    assertEquals(charged(w), ["charge_call", "charge_call", "charge_call"]);
+    assertEquals([work(w), objects(w), w.store.claims], [[], [], []]);
+    assertEquals(w.store.counters, { "addr-1:expired": 1 });
+    assertEquals(w.store.seen.has(`acct-1|h-${item.id}`), false);
   });
 });
 
