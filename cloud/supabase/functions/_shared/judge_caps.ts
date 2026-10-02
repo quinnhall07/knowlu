@@ -1,5 +1,5 @@
 import type { Db } from "./judge_db.ts";
-import type { Kind } from "./judge_validate.ts";
+import type { Kind, MailKind } from "./judge_validate.ts";
 
 export interface CapStore {
   charge(account: string, kind: Kind): Promise<boolean>;
@@ -37,6 +37,16 @@ export interface CapStore {
  * (`charge_call`, migration `20260923000100`, R-C1c-7), and `p_cap` below stays this value.
  */
 export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120 };
+
+/**
+ * The mail kinds' daily caps (email spec §5.1, plan P6): their own record, keyed by `MailKind`, so
+ * `DAILY_CAP` and every `Record<Kind, …>` stay as they were. `mail_claim` starts at email's 120 and
+ * charges only `live` and `recover` items; a `backfill` item charges the account's allowance instead
+ * (D23), never this cap. `mail_resolve` is one call per course batch of ambiguous claims (D12), so 20
+ * a day is many backfills' worth. `mail_digest` is 0 until the optional digest (plan T16) is built and
+ * sets its own number: a cap of 0 refuses every call, so an unbuilt kind can never spend.
+ */
+export const MAIL_DAILY_CAP: Record<MailKind, number> = { mail_claim: 120, mail_resolve: 20, mail_digest: 0 };
 
 /**
  * The enforced monthly ceiling per account, in dollars. The provider swap (Quinn's ruling of
