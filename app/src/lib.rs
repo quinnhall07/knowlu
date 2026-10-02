@@ -7,6 +7,7 @@ pub mod commands;
 pub mod grades;
 pub mod inference;
 pub mod lms_link;
+pub mod mail;
 pub mod mail_session;
 pub mod mail_steps;
 pub mod onboarding;
