@@ -477,7 +477,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T3a | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
 | T3b | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
 | T3c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/judge_prompts.ts`, `judge_caps.ts` | T3b | cloud |
-| T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `config.toml` | T3c | cloud |
+| T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `functions/mail-inbound/handler.ts` (D8's kick), `config.toml` | T3c | cloud |
 | T3e | `cloud-engineer` (Opus, high) | yes | PQ6 (answered) | `functions/mail-process/**` | T3d | cloud |
 | T4.1 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail/**` (new), `config.toml` | T3e | cloud |
 | T4.2 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail/**`, `functions/_shared/canary_send.ts` (new) | T4.1 | cloud |
@@ -1532,9 +1532,18 @@ is unchanged.
   5's duplicate is caught on the device by T5.6 instead.
 - `no_process_log_line_carries_the_messages_marker` (15)
 - `no_object_is_left_after_noise_refused_template_only_or_unauthenticated` (16)
+- `a_hand_off_kicks_mail_process_once_with_the_job_token` (D8, "kicked by intake"): in
+  `mail-inbound`, a hand-off that made at least one new work item sends one POST to `mail-process`
+  carrying `x-knowlu-job-token`; a duplicate or a non-work arrival sends none.
+- `a_failed_or_slow_kick_still_answers_200_and_keeps_the_work` (D8): the kick is fire-and-forget,
+  bounded in time; its failure is a fixed log line, never a 500, and the work row stays for the cron.
 
 **Behaviour.** §4.7 steps 1–3, plus the step 6 deletes. The `[functions.mail-process]` section goes
-in (P5).
+in (P5). D8's kick: after a successful hand-off `mail-inbound` POSTs to `mail-process` (the
+`MAIL_JOBS_TOKEN` header, the URL from `SUPABASE_URL`) without awaiting its work; the every-minute
+cron stays the backstop. T2g.1 built intake without it (review, 2026-10-02), so the kick is T3d's.
+`20261002000200_mail.sql`'s cron comment says so: T3d corrects that comment if the file is still
+unapplied, and otherwise leaves it (an applied migration is never edited) and names the kick here.
 
 #### T3e. The worker, part 2: charge, model, queue, expire, sweep (`mail-process`)
 
@@ -2242,7 +2251,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | T8c's reading, confirmed at Checkpoint A (2026-10-02): arm (1) keyed on the card, so any dateless task, hand-made too | T8c, T5.5 | `a_mail_card_fills_an_empty_due_…`, `a_date_for_a_hand_made_note_with_no_due_is_an_amend_card_from_null` |
 | PQ7 (2026-10-02): a residual `NotAmendable` counts in `U`; §4.8 step 7's line unchanged | T5.5, T6.3 | `the_mail_run_line_is_exact` |
 | PQ8 (2026-10-02): (ii) a live `new_item` matching an open mail task card files nothing; (i) declined, the screen keeps "From is the mailbox itself" | T5.6, T3d | T5.6's tests; `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` |
-| D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen` | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…` |
+| D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen`; `mail-process` on a cron every minute and kicked by intake (the kick is T3d's: T2g.1 shipped without it) | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…`; `a_hand_off_kicks_mail_process_once_with_the_job_token`, `a_failed_or_slow_kick_still_answers_200_and_keeps_the_work` |
 | D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e | tests 8, 9 and 10 |
 | D10: deterministic reconcile in `judge`; the ordering date; batches whole; backfill applies and lists, live proposes; Undo | T4.4, T5.1–T5.5, T6.3, T7, T15.4 | tests 12, 18, 19 and 29; `undo_invokes_…`; proof step 3 |
 | D11 (1)–(3): card or direct decided from `human_set`; the mail card writer after `find_pending_amendment` | T5.4, T5.5, T6.2 | tests 20, 21 and 22; `a_mail_amend_card_passes_validate_amendment_…`; `a_human_set_landing_between_plan_and_apply_…` (§10, R10); Checkpoints A and C |
