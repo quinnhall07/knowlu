@@ -322,8 +322,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // counted by hand against today's corpus: C3′ adds six, C1c one and D14 one, on top of the 21
   // both streams inherited (the C3′ merge of main, PR #13); plus email forwarding T1.2's three
   // re-issues in <stamp>_mail.sql (`export_training_rows`, non-writing; `backfill_correction_judgments`
-  // and `promote_rules`, writing, each revoked from `public, anon, authenticated` again in that file).
-  assertEquals(parsed, 32, "today's corpus should parse exactly 32 function creations");
+  // and `promote_rules`, writing, each revoked from `public, anon, authenticated` again in that file),
+  // plus T1.3's three in the same file (`delete_mail_address`, SECURITY DEFINER; `charge_allowance`
+  // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`).
+  assertEquals(parsed, 35, "today's corpus should parse exactly 35 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -1112,13 +1114,13 @@ Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
   const { name, sql } = await mailMigration();
   const want: Record<string, string[]> = {
     mail_accounts: [
-      "account_id", "fp_key_ciphertext", "fp_key_iv", "digest", "allowance_term_start", "allowance_left",
+      "account_id", "fp_key_ciphertext", "fp_key_iv", "digest", "allowance_opened_at", "allowance_left",
       "allowance_usd", "allowance_until", "mints_30d",
     ],
     mail_addresses: [
       "id", "account_id", "provider", "token_hmac", "token_ciphertext", "token_iv", "retired_token_hmac",
       "retired_until", "mailbox_hint", "forward_hint", "status", "lapsed_since", "reenabled_at", "confirm_until",
-      "term_start", "last_received_at", "last_canary_sent_at", "last_canary_ok_at", "canaries_today", "unbound",
+      "backfill_since", "last_received_at", "last_canary_sent_at", "last_canary_ok_at", "canaries_today", "unbound",
       "unauthenticated", "expired",
     ],
     mail_batches: [
@@ -1153,6 +1155,22 @@ Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
   for (const t of ["mail_seen", "mail_work", "mail_claims"]) oneOf(t, "phase", ["live", "backfill", "recover"]);
   for (const t of ["mail_work", "mail_claims"]) oneOf(t, "authenticity", ["aligned", "unaligned"]);
   assert(/\bdefault false\b/.test(words("mail_accounts", "digest")), `${name}: digest defaults to false (D13)`);
+  // PQ6 (a) and BW (T1.3's renames): the allowance's key is a moment, the mailbox's window start a day.
+  assertEquals(words("mail_accounts", "allowance_opened_at"), "allowance_opened_at timestamptz", `${name}: PQ6 (a)`);
+  assertEquals(words("mail_addresses", "backfill_since"), "backfill_since date", `${name}: BW's window start`);
+  // Neither old name survives anywhere in cloud/ (spelt in halves so this file does not match itself).
+  const old = new RegExp(`\\b(?:allowance_)?${"term"}_${"start"}\\b`);
+  const walk = async (dir: URL): Promise<void> => {
+    for await (const e of Deno.readDir(dir)) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const at = new URL(e.isDirectory ? `${e.name}/` : e.name, dir);
+      if (e.isDirectory) await walk(at);
+      else if (/\.(ts|sql|md|toml|json)$/.test(e.name)) {
+        assert(!old.test(await Deno.readTextFile(at)), `${at.pathname}: an old allowance or window column name`);
+      }
+    }
+  };
+  await walk(new URL("../../", HERE));
   assert(/^claims jsonb not null\b/.test(words("mail_claims", "claims")), `${name}: claims is jsonb`);
   assert(
     /references public\.judgments ?\( ?id ?\) on delete set null/.test(words("mail_claims", "judgment_id")),
@@ -1357,4 +1375,162 @@ Deno.test("mail_claim_and_mail_resolve_are_pinned_provisionally_to_the_email_mod
   const above: string[] = [];
   while (--at >= 0 && lines[at].trim().startsWith("--")) above.unshift(lines[at]);
   assert(/\bprovisional\b/i.test(above.join("\n")), `${name}: the pins are marked provisional in a SQL comment`);
+});
+
+// Email forwarding T1.3 (spec §5.1's RPCs and cron, test 14's RPC half and 11's database half; D17,
+// D23 as amended 2026-10-02 by PQ6 (a); plan P7). Textual: the behaviour is smoke-tested on staging.
+
+/** A definition's header (through `as $tag$`) and body (inside the tags), whitespace-normalised and
+ *  lower-cased, from the LAST definition of `fn`, which must be the mail migration's. */
+async function mailFunction(fn: string): Promise<{ name: string; sql: string; header: string; body: string }> {
+  const { name, sql } = await mailMigration();
+  const last = await lastFunction(fn);
+  assertEquals(last.name, name, `${fn}: the mail migration's definition governs`);
+  const m = new RegExp(FUNCTION_DEFINITION.source, "i").exec(last.text)!;
+  const rest = m[0].slice(m[1].length);
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return { name, sql: flat(sql), header: flat(m[1]), body: flat(rest.slice(0, rest.indexOf(m[3]))) };
+}
+
+function assertServiceRoleOnly(f: { name: string; sql: string }, fn: string, args: string): void {
+  assert(
+    f.sql.includes(`revoke execute on function public.${fn}(${args}) from public, anon, authenticated;`),
+    `${f.name}: ${fn} is revoked from every client role`,
+  );
+  assert(f.sql.includes(`grant execute on function public.${fn}(${args}) to service_role;`), `${f.name}: ${fn}`);
+}
+
+Deno.test("delete_mail_address_revokes_then_deletes_one_mailboxs_rows_delivered_claims_included", async () => {
+  const f = await mailFunction("delete_mail_address");
+  assert(/delete_mail_address\s*\(\s*p_address uuid\s*\)/.test(f.header), `${f.name}: delete_mail_address(p_address uuid)`);
+  assert(f.header.includes("returns void"), `${f.name}: returns void`);
+  assert(f.header.includes("security definer"), `${f.name}: security definer (spec §5.1)`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "delete_mail_address", "uuid");
+  // Revoke first, then each child table, filtered on the one mailbox and nothing else (so delivered
+  // claims go too), then the row itself.
+  const steps = [
+    "update public.mail_addresses set status = 'revoked' where id = p_address;",
+    "delete from public.mail_seen where address_id = p_address;",
+    "delete from public.mail_work where address_id = p_address;",
+    "delete from public.mail_claims where address_id = p_address;",
+    "delete from public.mail_batches where address_id = p_address;",
+    "delete from public.mail_canaries where address_id = p_address;",
+    "delete from public.mail_addresses where id = p_address;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (revoke, children, then the row)`);
+    at = next;
+  }
+  const writes = f.body.match(/\b(insert|update|delete)\b/g) ?? [];
+  assertEquals(writes.length, steps.length, `${f.name}: no other write`);
+  assert(!/delivered_at|mail_accounts|judgments|account_id/.test(f.body), `${f.name}: one mailbox, never the account`);
+});
+
+// The opening test of PQ6 (a): no allowance yet, or the last one opened 120 days or more ago.
+const OPENS = "(allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')";
+
+Deno.test("charge_allowance_is_one_statement_like_charge_call", async () => {
+  const f = await mailFunction("charge_allowance");
+  assert(/charge_allowance\s*\(\s*p_account uuid\s*\)/.test(f.header), `${f.name}: charge_allowance(p_account uuid)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers charged or not, as charge_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_call`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "charge_allowance", "uuid");
+  // One statement: two concurrent charges serialise on the row, so neither can open twice or overdraw.
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(f.body.includes("update public.mail_accounts set"), `${f.name}: the write is mail_accounts'`);
+  // Opening sets the period's start, 14 days, $1.00 and 2,000 judgments; then the one charge.
+  for (const set of [
+    `allowance_opened_at = case when ${OPENS} then now() else allowance_opened_at end`,
+    `allowance_until = case when ${OPENS} then now() + interval '14 days' else allowance_until end`,
+    `allowance_usd = case when ${OPENS} then 1.00 else allowance_usd end`,
+    `allowance_left = case when ${OPENS} then 2000 else allowance_left end - 1`,
+  ]) assert(f.body.includes(set), `${f.name}: ${set}`);
+  // Otherwise only what is left, and nothing after allowance_until.
+  assert(
+    f.body.includes(`where account_id = p_account and (${OPENS} or (allowance_until > now() and allowance_left > 0))`),
+    `${f.name}: charges only on opening, or while the allowance is open and not spent`,
+  );
+  assert(f.body.includes("returning true into charged;"), `${f.name}: charged only when the row was written`);
+  assert(f.body.includes("return coalesce(charged, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("the_allowance_period_is_keyed_on_allowance_opened_at_and_never_on_a_mailbox", async () => {
+  const charge = await mailFunction("charge_allowance");
+  const budget = await mailFunction("enforce_budget");
+  for (const f of [charge, budget]) {
+    assert(!/mail_addresses|mail_batches|backfill_since|address/.test(f.body), `${f.name}: reads no mailbox`);
+  }
+  assert(charge.body.includes(OPENS), `${charge.name}: the period opens on allowance_opened_at alone`);
+  // Disconnect deletes nothing the opening test reads.
+  const del = await mailFunction("delete_mail_address");
+  assert(!/mail_accounts|allowance/.test(del.body), `${del.name}: Disconnect never touches the allowance`);
+});
+
+Deno.test("enforce_budget_raises_the_ceiling_by_the_allowance_only_while_it_is_open", async () => {
+  const f = await mailFunction("enforce_budget");
+  assert(/enforce_budget\s*\(\s*p_account uuid, p_ceiling numeric\s*\)/.test(f.header), `${f.name}: same signature`);
+  assert(f.header.includes("returns boolean") && !f.header.includes("security definer"), `${f.name}: as before`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "enforce_budget", "uuid, numeric");
+  assert(
+    f.body.includes(
+      "select coalesce(sum(allowance_usd), 0) into raised from public.mail_accounts " +
+        "where account_id = p_account and allowance_until > now();",
+    ),
+    `${f.name}: the allowance's dollars, only inside its 14 days`,
+  );
+  assert(f.body.includes("if spent < p_ceiling + raised then return true;"), `${f.name}: the raised ceiling`);
+  assert(!/spent < p_ceiling then/.test(f.body), `${f.name}: no comparison against the bare ceiling`);
+  assert(
+    f.body.includes("from public.monthly_spend where account_id = p_account and month = date_trunc('month', current_date)"),
+    `${f.name}: still this month's spend, allowance calls' tokens included`,
+  );
+  assertEquals((f.body.match(/insert into public\.budget_alerts/g) ?? []).length, 1, `${f.name}: one alert insert`);
+});
+
+/** Every `cron.schedule('<job>', '<when>', $tag$ … $tag$)` in `sql`: name, schedule and command. */
+function cronJobs(sql: string): Array<{ job: string; when: string; command: string }> {
+  const re = /cron\.schedule\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*(\$\w*\$)([\s\S]*?)\3\s*\)/gi;
+  return [...sql.matchAll(re)].map((m) => ({ job: m[1], when: m[2], command: m[4].replace(/\s+/g, " ").trim() }));
+}
+
+Deno.test("the_mail_cron_jobs_use_the_vault_token", async () => {
+  // Spec §5.1's cron and §6.3's auth; plan P7 (the sweep is a mode of mail-process). As the billing
+  // job's guard (20260910000700): the URL and the token come from Vault, a missing one raises, and
+  // the request carries the token in `x-knowlu-job-token`, never a literal.
+  const { name, sql } = await mailMigration();
+  const jobs = cronJobs(sql);
+  const want: Record<string, { when: RegExp; url: string; body: string }> = {
+    "knowlu-mail-process": { when: /^\* \* \* \* \*$/, url: "mail_process_url", body: "'{}'::jsonb" },
+    "knowlu-mail-canary": { when: /^\d{1,2} \* \* \* \*$/, url: "mail_canary_url", body: "'{}'::jsonb" },
+    "knowlu-mail-sweep": { when: /^\d{1,2} \d{1,2} \* \* \*$/, url: "mail_process_url", body: `'{"mode": "sweep"}'::jsonb` },
+  };
+  assertEquals(jobs.map((j) => j.job).sort(), Object.keys(want).sort(), `${name}: the three mail jobs`);
+  for (const j of jobs) {
+    const w = want[j.job];
+    assert(w.when.test(j.when), `${name}: ${j.job} runs at '${j.when}'`);
+    const c = j.command.toLowerCase();
+    const secret = (s: string) =>
+      `(select decrypted_secret from vault.decrypted_secrets where name = '${s}' order by created_at desc limit 1)`;
+    assert(c.includes(`v_url text := ${secret(w.url)};`), `${name}: ${j.job}'s URL is Vault's ${w.url}`);
+    assert(c.includes(`v_token text := ${secret("mail_jobs_token")};`), `${name}: ${j.job}'s token is Vault's`);
+    assert(c.includes("if v_url is null or v_token is null then raise exception"), `${name}: ${j.job} fails loudly`);
+    assert(c.includes("'x-knowlu-job-token', v_token"), `${name}: ${j.job} sends the Vault token`);
+    assert(c.includes("perform net.http_post("), `${name}: ${j.job} calls through pg_net`);
+    assert(c.includes(`body := ${w.body}`), `${name}: ${j.job}'s body is ${w.body}`);
+    assert(/timeout_milliseconds := \d+/.test(c), `${name}: ${j.job} waits for the function`);
+    assertEquals((c.match(/'x-knowlu-job-token'/g) ?? []).length, 1, `${name}: ${j.job}: one token header`);
+  }
+  // The nightly sweep shares no minute with another nightly job in the corpus.
+  const sweep = jobs.find((j) => j.job === "knowlu-mail-sweep")!.when;
+  for (const [file, raw] of await everyMigrationFile()) {
+    for (const j of cronJobs(stripLineComments(raw))) {
+      if (j.job !== "knowlu-mail-sweep") assert(j.when !== sweep, `${file}: ${j.job} shares the sweep's '${sweep}'`);
+    }
+  }
 });

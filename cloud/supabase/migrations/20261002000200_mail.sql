@@ -1,6 +1,6 @@
 -- Knowlu email forwarding (spec docs/specs/2026-09-30-email-forwarding-design.md §5.1), T1.1: the
--- seven tables; T1.2, at the end: the kinds, the origin, the training and rules paths and the
--- provisional pins. T1.3 extends this same file (RPCs, budget, cron) before it is applied anywhere;
+-- seven tables; T1.2: the kinds, the origin, the training and rules paths and the provisional pins;
+-- T1.3, at the end: the two RPCs, the raised budget and the cron. All before it is applied anywhere;
 -- nothing here edits an applied migration. Stamped after 20261002000100_refund_failed_call.sql so it
 -- still sorts last.
 --
@@ -23,9 +23,10 @@ create table if not exists public.mail_accounts (
   fp_key_iv            text not null check (length(fp_key_iv) = 16),
   -- D13's per-course digest, off unless the student turns it on.
   digest               boolean not null default false,
-  -- D23's backfill allowance: keyed by the start it was opened for, so Disconnect and reconnect never
-  -- renew it. Zero until T1.3's RPC opens it: a closed allowance is the default, never an open one.
-  allowance_term_start date,
+  -- D23's backfill allowance (as amended 2026-10-02, PQ6 (a)): one per account per 120-day period,
+  -- keyed on the moment it opened, never on a mailbox, so Disconnect and reconnect never renew it.
+  -- Zero until `charge_allowance` opens it: a closed allowance is the default, never an open one.
+  allowance_opened_at  timestamptz,
   allowance_left       integer not null default 0 check (allowance_left >= 0),
   allowance_usd        numeric not null default 0 check (allowance_usd >= 0),
   allowance_until      timestamptz,
@@ -56,7 +57,9 @@ create table if not exists public.mail_addresses (
   lapsed_since        timestamptz,
   reenabled_at        timestamptz,
   confirm_until       timestamptz,
-  term_start          date,
+  -- The mailbox's fixed backfill window start (BW: 120 days before setup), set once when its first
+  -- backfill batch opens, so a later recover keeps it after that batch is pruned.
+  backfill_since      date,
   last_received_at    timestamptz,
   last_canary_sent_at timestamptz,
   last_canary_ok_at   timestamptz,
@@ -343,3 +346,195 @@ update public.models set
   route = '{"order": ["DeepInfra"], "allow_fallbacks": false, "zdr": true, "require_parameters": true}'::jsonb,
   since = current_date
 where kind = 'mail_resolve';
+
+-- T1.3: the two RPCs, the raised budget and the cron (spec §5.1; D17; D23 as amended 2026-10-02 by
+-- PQ6 (a); plan P7).
+--
+-- Disconnect's purge of one mailbox (D17). Revoke first, so the row reads `revoked` for as long as the
+-- purge holds it; then every row that serves the mailbox, its claims delivered or not (the Gmail
+-- disconnect precedent); then the row. The account's own rows (`mail_accounts`, and with it the
+-- allowance) and its judgments stay. Callers (`DELETE /mail/addresses/<id>` and the account purge)
+-- have already scoped the id to the caller's account, and have read the mailbox's `work/` keys from
+-- `mail_work` and deleted those objects before calling; nothing here can reach S3.
+create or replace function public.delete_mail_address(p_address uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  update public.mail_addresses set status = 'revoked' where id = p_address;
+  delete from public.mail_seen where address_id = p_address;
+  delete from public.mail_work where address_id = p_address;
+  delete from public.mail_claims where address_id = p_address;
+  delete from public.mail_batches where address_id = p_address;
+  delete from public.mail_canaries where address_id = p_address;
+  delete from public.mail_addresses where id = p_address;
+end;
+$$;
+revoke execute on function public.delete_mail_address(uuid) from public, anon, authenticated;
+grant execute on function public.delete_mail_address(uuid) to service_role;
+
+-- One backfill judgment charged to the account's allowance (D23 as amended, PQ6 (a)), in one
+-- statement like `charge_call`: two concurrent charges serialise on the account's row, and the
+-- second re-reads it, so neither can open the allowance twice or take it below zero. When no
+-- allowance was ever opened, or the last opened 120 days or more ago, the statement opens one
+-- (2,000 judgments, $1.00 above the ceiling, 14 days) and charges its first judgment. Otherwise it
+-- charges only what is left, and nothing once `allowance_until` has passed. Every SET expression
+-- reads the row as it was, so the opening test is the same in all four. No mailbox enters it:
+-- Disconnect and reconnect inside the period renew nothing. Unlike `charge_call`, a refused charge
+-- writes nothing; the caller then charges the daily cap (spec test 11's 2,001st item). An account
+-- with no `mail_accounts` row answers false.
+create or replace function public.charge_allowance(p_account uuid)
+returns boolean
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  charged boolean;
+begin
+  update public.mail_accounts set
+    allowance_opened_at = case when (allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')
+                               then now() else allowance_opened_at end,
+    allowance_until     = case when (allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')
+                               then now() + interval '14 days' else allowance_until end,
+    allowance_usd       = case when (allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')
+                               then 1.00 else allowance_usd end,
+    allowance_left      = case when (allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')
+                               then 2000 else allowance_left end - 1
+   where account_id = p_account
+     and ((allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')
+          or (allowance_until > now() and allowance_left > 0))
+  returning true into charged;
+  return coalesce(charged, false);
+end;
+$$;
+revoke execute on function public.charge_allowance(uuid) from public, anon, authenticated;
+grant execute on function public.charge_allowance(uuid) to service_role;
+
+-- The budget ceiling, re-issued from 20260911000100_judgment_service.sql with one change (D23): while
+-- the account's allowance is inside its 14 days, the ceiling is the caller's `MONTHLY_CEILING_USD`
+-- plus the allowance's dollars, a hard per-account ceiling; from `allowance_until` on it is the bare
+-- ceiling again. Allowance calls' tokens are in `usage_daily` through `record_tokens`, so this
+-- month's spend includes them. Same signature, so `_shared/judge_caps.ts` does not change.
+create or replace function public.enforce_budget(p_account uuid, p_ceiling numeric)
+returns boolean
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  spent  numeric;
+  raised numeric;
+begin
+  select coalesce(sum(allowance_usd), 0) into raised
+    from public.mail_accounts
+   where account_id = p_account and allowance_until > now();
+  select coalesce(sum(usd), 0) into spent
+    from public.monthly_spend
+   where account_id = p_account and month = date_trunc('month', current_date);
+  if spent < p_ceiling + raised then
+    return true;
+  end if;
+  insert into public.budget_alerts (account_id, month, usd)
+       values (p_account, date_trunc('month', current_date)::date, spent)
+  on conflict (account_id, month) do update set usd = excluded.usd;
+  return false;
+end;
+$$;
+revoke execute on function public.enforce_budget(uuid, numeric) from public, anon, authenticated;
+grant execute on function public.enforce_budget(uuid, numeric) to service_role;
+
+-- The cron (spec §5.1, §6.3; plan P7), in 20260910000700's guarded form: the URL and the token come
+-- from Vault, a missing one raises into `cron.job_run_details`, and the token travels only in
+-- `x-knowlu-job-token`. `mail-process` every minute (intake also kicks it); `mail-canary` hourly at
+-- :11; `mail-process` in sweep mode nightly at 07:47 UTC, a minute no other nightly job uses.
+--
+-- The secrets, once per project, in the SQL editor (the controller's, T18a). The URLs are public; the
+-- token is the same string as the function secret `MAIL_JOBS_TOKEN` that both functions compare the
+-- header against:
+--   select vault.create_secret('https://<ref>.supabase.co/functions/v1/mail-process', 'mail_process_url');
+--   select vault.create_secret('https://<ref>.supabase.co/functions/v1/mail-canary', 'mail_canary_url');
+--   select vault.create_secret('<the token>', 'mail_jobs_token');
+create extension if not exists pg_cron;
+create extension if not exists pg_net with schema extensions;
+create extension if not exists supabase_vault with schema vault;
+
+select cron.schedule(
+  'knowlu-mail-process',
+  '* * * * *',
+  $job$
+  do $guard$
+  declare
+    v_url   text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_process_url' order by created_at desc limit 1);
+    v_token text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_jobs_token' order by created_at desc limit 1);
+  begin
+    if v_url is null or v_token is null then
+      raise exception 'knowlu-mail-process: vault secret mail_process_url or mail_jobs_token is missing';
+    end if;
+    perform net.http_post(
+      url                  := v_url,
+      headers              := jsonb_build_object('content-type', 'application/json',
+                                                 'x-knowlu-job-token', v_token),
+      body                 := '{}'::jsonb,
+      timeout_milliseconds := 60000
+    );
+  end
+  $guard$;
+  $job$
+);
+
+select cron.schedule(
+  'knowlu-mail-canary',
+  '11 * * * *',
+  $job$
+  do $guard$
+  declare
+    v_url   text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_canary_url' order by created_at desc limit 1);
+    v_token text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_jobs_token' order by created_at desc limit 1);
+  begin
+    if v_url is null or v_token is null then
+      raise exception 'knowlu-mail-canary: vault secret mail_canary_url or mail_jobs_token is missing';
+    end if;
+    perform net.http_post(
+      url                  := v_url,
+      headers              := jsonb_build_object('content-type', 'application/json',
+                                                 'x-knowlu-job-token', v_token),
+      body                 := '{}'::jsonb,
+      timeout_milliseconds := 60000
+    );
+  end
+  $guard$;
+  $job$
+);
+
+select cron.schedule(
+  'knowlu-mail-sweep',
+  '47 7 * * *',
+  $job$
+  do $guard$
+  declare
+    v_url   text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_process_url' order by created_at desc limit 1);
+    v_token text := (select decrypted_secret from vault.decrypted_secrets
+                     where name = 'mail_jobs_token' order by created_at desc limit 1);
+  begin
+    if v_url is null or v_token is null then
+      raise exception 'knowlu-mail-sweep: vault secret mail_process_url or mail_jobs_token is missing';
+    end if;
+    perform net.http_post(
+      url                  := v_url,
+      headers              := jsonb_build_object('content-type', 'application/json',
+                                                 'x-knowlu-job-token', v_token),
+      body                 := '{"mode": "sweep"}'::jsonb,
+      timeout_milliseconds := 60000
+    );
+  end
+  $guard$;
+  $job$
+);
