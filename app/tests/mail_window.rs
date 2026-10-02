@@ -281,6 +281,25 @@ fn the_runner_runs_only_compiled_in_scripts() {
     }
 }
 
+/// T10.2a: Microsoft 365's four scripts are compiled in, run for that provider alone, and carry the
+/// caller's arguments and the script's own source into the page.
+#[test]
+fn the_m365_scripts_run_for_m365_only() {
+    let on = "https://outlook.cloud.microsoft/mail/options/forwarding";
+    for name in ["m365/signin.js", "m365/forwarding_read.js", "m365/forwarding_set.js", "m365/forwarding_off.js"] {
+        assert!(script(name).is_some(), "{name} is compiled in");
+        let gmail = Fake::at("https://mail.google.com/mail/u/0/").says(json!({ "state": "started" }));
+        assert_eq!(run(&gmail, Provider::Gmail, name, &json!({}), WAIT), Err(Refusal::NotForProvider), "{name}");
+        assert!(gmail.evals.borrow().is_empty(), "{name} was evaluated for Gmail");
+        let page = Fake::at(on).says(json!({ "state": "started" })).says(json!({ "state": "done", "value": { "result": "ok" } }));
+        let args = json!({ "address": "box-1@in.example.invalid" });
+        assert_eq!(run(&page, Provider::M365, name, &args, WAIT), Ok(json!({ "result": "ok" })), "{name}");
+        let evals = page.evals.borrow();
+        assert!(evals[0].contains(script(name).unwrap().source()), "{name}: the compiled-in source runs");
+        assert!(evals[0].contains("box-1@in.example.invalid"), "{name}: the arguments reach the page");
+    }
+}
+
 // ---- X2's title signal -----------------------------------------------------------------------
 
 #[test]
