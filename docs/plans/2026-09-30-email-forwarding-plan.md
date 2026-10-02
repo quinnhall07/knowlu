@@ -404,6 +404,21 @@ Briefs cite functions and headings, never line numbers.
     campus row. Until the answer, Workspace live mail is unbound.
   - *Blocks:* nothing before Checkpoint B. The ruling is recorded in the spec's amendments, then the
     code is kept or narrowed.
+- **PQ10. D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02; for
+  Checkpoint B).** D9 names "Blackboard, Canvas and zyBooks notifications, as data rows beside
+  `RECEIPT_TEMPLATES`", and §4.7 step 3 lists new assignment, due soon, due date changed and
+  announcement rows. T3a shipped `MAIL_TEMPLATES` empty: the lane holds no captured notification
+  mail, and a row is written from a real message's exact sender, subject and body, never guessed. The
+  implementer ruled this alone; departing from a signed decision is Quinn's call.
+  - *What the empty list changes:* every such notification goes to the `mail_claim` model. Each one
+    spends against the 120-a-day cap and the per-account allowance that §11 risk 9 bounds with "the
+    screen and the templates first". Its claim is `source: model`, so it takes §4.9's model rows: in
+    backfill, a change to a note no feed supplies becomes a `kind: amend` card where a template claim
+    would have written directly. So the gap is a behaviour change as well as a cost.
+  - *Recommend:* T3a.2 writes the Blackboard, Canvas and zyBooks rows from real captured mail before
+    Checkpoint B. If no capture can be had by then, Quinn accepts the model path until the pilot, and
+    T3a.2 lands before the pilot.
+  - *Blocks:* Checkpoint B's D9 reading. Nothing built before it waits.
 
 ## 5. Tasks
 
@@ -475,6 +490,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T2g.1 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` (new), `config.toml` | T2f | cloud |
 | T2g.2 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` | T2g.1 | cloud |
 | T3a | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
+| T3a.2 | `cloud-engineer` (Opus, high) | yes | PQ10 | `functions/_shared/mail_templates.ts` (the vendor rows region) and its test | T3a, real captures | cloud |
 | T3b | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
 | T3c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/judge_prompts.ts`, `judge_caps.ts` | T3b | cloud |
 | T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `functions/mail-inbound/handler.ts` (D8's kick), `config.toml` | T3c | cloud |
@@ -1486,6 +1502,25 @@ comment (P5).
 `judge_due.ts`, and course codes are matched against the known courses. `lms_receipts.ts` is not
 edited.
 
+**Built (2026-10-02, `5ce22b4`):** `MAIL_TEMPLATES` ships empty, since no notification mail has been
+captured and rows are never guessed. D9's rows are deferred to T3a.2 under PQ10.
+
+#### T3a.2. D9's notification rows (`_shared/mail_templates.ts`, under PQ10)
+
+**Needs:** real Blackboard, Canvas and zyBooks notification mail (new assignment, due soon, due date
+changed, announcement), captured with its exact sending address, subject and body. The controller
+supplies the captures. The agent never reads a student's or quinn-ops's mailbox or vault. A capture
+is cut to the lines a row matches before it enters the repo, and it carries no student content.
+
+**Tests first:** for each vendor and notification kind captured, one test that the aligned capture
+yields its template claim (with `judge_due.ts`'s resolved due where the mail carries a date), one that
+the same mail unaligned yields nothing, and `the_code_names_no_vendor` still green.
+
+**Behaviour.** Rows only, inside `// vendor rows: begin` … `end`. No matcher change. A kind with no
+capture gets no row, and its mail stays on the model path.
+
+**When:** before Checkpoint B, or before the pilot if Quinn accepts the model path until then (PQ10).
+
 #### T3b. Validation (`_shared/judge_validate.ts`, the mail region)
 
 **Before it:** the disjointness check is repeated for `j-events`, which edits `judge_validate.ts` and
@@ -1683,7 +1718,9 @@ D14, D17, D22, D23 and P5–P9, P21 and P22. It reads in particular:
 - that no text lands in a table or a log;
 - that every final path deletes its object;
 - that charge and budget always run before the model;
-- the per-route authentication and every `config.toml` section.
+- the per-route authentication and every `config.toml` section;
+- PQ10 put to Quinn: D9's notification rows (T3a.2) landed from real captures, or the model path
+  accepted until the pilot.
 
 Fixes go back to `cloud-engineer`. The cloud sub-branch merges into the lane when no Critical or
 Important finding is open.
@@ -2120,7 +2157,7 @@ controller's (spec T18; HANDOFF §2's controller rules).
 |---|---|
 | `main` (T19's branch) | T19 → T13a → R19 → PR merged on Quinn's word → `main` merged into the lane and into `email-app` |
 | `email-engine` | H1a → T5.1 → T5.2 → T5.3 → T5.4 → (PQ5) T8 → T8b → A's first fix round (`968d86d`) → (F3) T8c → (PQ4) T5.5 → A's second fix round (all built, HEAD `4194817`) → Checkpoint A passed (2026-10-02) → (PQ8 ii) T5.6 → T6.1, while contract-reviewer reads T5.6 → that read's fix loop, if any → H1b → T6.2 → T6.3 (PQ7 answered) → T6.4 → H1c → T7 → H2 |
-| `email-cloud` | S0 (passed) → T1.1 → T1.2 (both built, with the old column names) → T1.3 (PQ6 answered; unblocked; renames the two columns first) → T2a → T2b → T2c → T2d (PQ2 answered) → interop check → T2e → T2f → T2g.1 → T2g.2 → T3a (PQ4 answered) → T3b → T3c → T3d (PQ8 (i) declined) → T3e → T4.1 → T4.2 → T4.3 → T4.4 → T4.5 → T4.6 → T4b → Checkpoint B → T16 (only if PQ3 keeps it) |
+| `email-cloud` | S0 (passed) → T1.1 → T1.2 (both built, with the old column names) → T1.3 (PQ6 answered; unblocked; renames the two columns first) → T2a → T2b → T2c → T2d (PQ2 answered) → interop check → T2e → T2f → T2g.1 → T2g.2 → T3a (PQ4 answered) → T3b → T3c → T3d (PQ8 (i) declined) → T3e → T4.1 → T4.2 → T4.3 → T4.4 → T4.5 → T4.6 → T4b → T3a.2 (PQ10; only with real captures, else before the pilot) → Checkpoint B → T16 (only if PQ3 keeps it) |
 | `email-app` | T19 merged → T14 → H3a → T9.1 → H3c → T10.1 → S1–S3 → H3b → T9.2 → T10.2a → T10.2b → T10.3a → T10.3b → H3d → T11.1 → T11.2 → T11.3 → H4 → T12 → Checkpoint C → `email-engine` merged in (for `mail-applied`) → T11.4 → H5 with test 37 → T11.5 → `origin/main` merged in and the registrar check → T15.1 → … → T15.5 |
 | lane | T0.0 → … → T13b (after T15.5 and B) → T17 → Checkpoint D → T18 |
 
@@ -2258,7 +2295,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | PQ7 (2026-10-02): a residual `NotAmendable` counts in `U`; §4.8 step 7's line unchanged | T5.5, T6.3 | `the_mail_run_line_is_exact` |
 | PQ8 (2026-10-02): (ii) a live `new_item` matching an open mail task card files nothing; (i) declined, the screen keeps "From is the mailbox itself" | T5.6, T3d | T5.6's tests; `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` |
 | D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen`; `mail-process` on a cron every minute and kicked by intake (the kick is T3d's: T2g.1 shipped without it) | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…`; `a_hand_off_kicks_mail_process_once_with_the_job_token`, `a_failed_or_slow_kick_still_answers_200_and_keeps_the_work` |
-| D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e | tests 8, 9 and 10 |
+| D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e, T3a.2 | tests 8, 9 and 10; T3a.2's per-row tests. **Open (PQ10):** the Blackboard, Canvas and zyBooks rows are deferred until real captures exist; `MAIL_TEMPLATES` is empty at `5ce22b4` |
 | D10: deterministic reconcile in `judge`; the ordering date; batches whole; backfill applies and lists, live proposes; Undo | T4.4, T5.1–T5.5, T6.3, T7, T15.4 | tests 12, 18, 19 and 29; `undo_invokes_…`; proof step 3 |
 | D11 (1)–(3): card or direct decided from `human_set`; the mail card writer after `find_pending_amendment` | T5.4, T5.5, T6.2 | tests 20, 21 and 22; `a_mail_amend_card_passes_validate_amendment_…`; `a_human_set_landing_between_plan_and_apply_…` (§10, R10); Checkpoints A and C |
 | D11 (4): an approved mail amend writes as the human actor; a bad actor file stops it | T8 | test 31; Checkpoint A |
@@ -2445,6 +2482,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | SNS signature version (T2a's review, 2026-10-02). `verifySns` accepts only `SignatureVersion` 2 (RSA with SHA-256) and refuses version 1 (SHA-1) before any fetch. An SNS topic signs with version 1 by default, and S0's topic was built with the default. So T18a now sets the topic's `SignatureVersion` attribute to 2 and reads it back before the subscribe step, and T13b's runbook carries the same step. `sns.ts` is unchanged. | Without the step, the SubscriptionConfirmation is refused with the same bare 403 as every other refusal and leaves no log line. The subscription stays PendingConfirmation, no mail arrives, and nothing points at the cause. That costs a live deploy, but it fails closed. | T18a, T13b; T2a's version test in `sns_test.ts` | **carried (controller):** T18a's attribute step; T13b's runbook line |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
 | PQ9 (T2f's review, 2026-10-02). On Gmail, check (i) does not name the mailbox (no AMS covers `X-Forwarded-*`), and the `+caf_=` envelope is `@gmail.com` only, so Workspace live mail is unbound. Step 6 aligns a child of the From domain only through the provider's DMARC pass. | Spec §4.6 step 5 cannot be met as written on Gmail; widening to the hint's domain was not signed. | T2f; `a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path`, `a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it`; Checkpoint B | **open (Quinn):** PQ9 |
+| D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02). T3a shipped `MAIL_TEMPLATES` empty: no Blackboard, Canvas or zyBooks notification has been captured, and rows are never guessed. Until T3a.2, every such mail goes to the `mail_claim` model, spends the daily cap and the allowance, and takes §4.9's model rows (in backfill, a card where a template change to a note no feed supplies would write directly). | Departing from D9 as signed is Quinn's call; the implementer ruled alone. | T3a.2; PQ10; Checkpoint B | **open (Quinn)** |
 
 ## 10. Review revisions (2026-09-30)
 
