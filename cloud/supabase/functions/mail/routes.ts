@@ -11,13 +11,16 @@
  *   nonce, the only time it leaves (kept as its HMAC). BW: a backfill starts on a date at most 120 days
  *   before the service's UTC day, less one for a device whose local day is behind UTC's; the first one
  *   fixes `backfill_since`, and every later backfill must start there. A recover starts at an instant no
- *   more than 180 days back, the `mail_seen` horizon, past which nothing could be told apart from what was
- *   already processed. At most ten open batches a mailbox (intake reads twenty).
+ *   earlier than `backfill_since` (or, before the first backfill, that backfill's own bound), so a device
+ *   bug cannot forward mail from before the window; and no more than 180 days back, the `mail_seen`
+ *   horizon, past which nothing could be told apart from what was already processed. At most ten open
+ *   batches a mailbox (intake reads twenty).
  * - `POST /batches/<id>/sent {sent}` records the device's count once (`sent`, `sent_at`); the batch stays
  *   open for intake until the pull sees it whole or the sweep times it out.
  * - `POST /reconcile {address_id, since, until}` answers the account's fingerprint key and the held
  *   `(fp_hash, received_minute)` pairs in the window widened by the 15-minute match (§4.11 step 3). The
- *   body may carry nothing else, so nothing about a message the service does not hold reaches it.
+ *   window starts no earlier than a recover may, and spans at most 181 days. The body may carry nothing
+ *   else, so nothing about a message the service does not hold reaches it.
  * - `POST /addresses/<id>/state {state}`: `off` and `elsewhere` set `off`, `reenabled` stamps
  *   `reenabled_at`, `confirming` opens a Gmail mailbox's 15-minute confirm window (P21).
  * - `GET /provider?domain=` reads the domain's MX (PS: the device asks only when no curated row names it).
@@ -38,6 +41,8 @@ export const BACKFILL_TOO_WIDE = "a backfill reaches back at most 120 days";
 /** How far back a recover may reach: `mail_seen`'s 180 days. */
 export const RECOVER_DAYS = 180;
 export const RECOVER_TOO_WIDE = "a recover reaches back at most 180 days";
+export const RECOVER_BEFORE_WINDOW = "a recover starts no earlier than this mailbox's backfill window";
+export const RECONCILE_BEFORE_WINDOW = "a reconcile starts no earlier than this mailbox's backfill window";
 export const MAX_OPEN_BATCHES = 10;
 export const OPEN_BATCH_CAP = "this mailbox has ten open batches";
 export const MAX_COUNT = 100_000;
@@ -140,6 +145,17 @@ export async function canary(req: Request, accountId: string, deps: MailDeps): P
 
 // ---------------------------------------------------------------- POST /batches
 
+/**
+ * The earliest instant a recover or reconcile of the mailbox may start (spec D7 as amended 2026-10-02:
+ * every resume or recover of the backfill reads the same start). Mail after setup is later still, so
+ * nothing either routine needs lies before it: `backfill_since`'s UTC midnight once the first backfill
+ * fixed it, else the bound that first backfill would have.
+ */
+function windowFloor(row: MailRow, now: number): number {
+  const fixed = row.backfillSince === null ? null : dateMs(row.backfillSince);
+  return fixed ?? utcDay(now) - (BACKFILL_DAYS + 1) * DAY;
+}
+
 /** The batch's window start (ISO) under BW's rules; fixes `backfill_since` on a mailbox's first backfill. */
 async function windowStart(
   accountId: string,
@@ -152,6 +168,7 @@ async function windowStart(
   if (phase === "recover") {
     const at = instantMs(since);
     if (at === null || at > now) throw fail(400, "since must be a past date or time");
+    if (at < windowFloor(row, now)) throw fail(422, RECOVER_BEFORE_WINDOW);
     if (at < now - RECOVER_DAYS * DAY) throw fail(422, RECOVER_TOO_WIDE);
     return iso(at);
   }
@@ -242,6 +259,7 @@ export async function reconcile(req: Request, accountId: string, deps: MailDeps)
   }
   if (until - since > MAX_WINDOW_DAYS * DAY) throw fail(422, "a reconcile window spans at most 181 days");
   const row = await own(accountId, b.address_id, deps);
+  if (since < windowFloor(row, deps.now())) throw fail(422, RECONCILE_BEFORE_WINDOW);
   const box = await deps.store.fpKey(accountId);
   if (box === null) throw fail(409, "this account has no mail key yet");
   const key = await deps.decrypt(box.ciphertext, box.iv);

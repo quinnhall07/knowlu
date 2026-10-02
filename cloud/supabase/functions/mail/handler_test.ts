@@ -32,6 +32,8 @@ import {
   MAX_OPEN_BATCHES,
   NO_HINT,
   OPEN_BATCH_CAP,
+  RECONCILE_BEFORE_WINDOW,
+  RECOVER_BEFORE_WINDOW,
   RECOVER_TOO_WIDE,
 } from "./routes.ts";
 
@@ -925,16 +927,32 @@ Deno.test("a_backfill_batch_reaching_more_than_120_days_before_its_opening_is_re
   const moved = await open(dayOf(TODAY + 3 * DAY - 120 * DAY));
   assertEquals(moved.status, 409);
   assertEquals(await moved.json(), { error: "this mailbox's backfill starts 2026-06-04" });
-  // A recover that finishes it reuses that start too.
+  // A recover that finishes it reuses that start too, and none reaches before it: an instant a day (or
+  // a minute) earlier, or the 180 days the service keeps, would forward mail outside the window.
   assertEquals((await open("2026-06-04T00:00:00Z", "recover")).status, 201);
+  assertEquals((await open("2026-06-04", "recover")).status, 201);
+  for (const since of ["2026-06-03T00:00:00Z", "2026-06-03T23:59:00Z", iso(NOW + 3 * DAY - 179 * DAY)]) {
+    const early = await open(since, "recover");
+    assertEquals(early.status, 422, since);
+    assertEquals(await early.json(), { error: RECOVER_BEFORE_WINDOW });
+  }
   assertEquals(w.store.rows.find((r) => r.id === A1)!.backfillSince, "2026-06-04");
-  // A recover reaches back at most as far as the service still holds what it saw (180 days).
+  // A recover reaches back at most as far as the service still holds what it saw (180 days), even for a
+  // mailbox whose backfill started earlier than that.
+  w.store.rows.find((r) => r.id === A1)!.backfillSince = "2026-01-01";
   const old = await open(iso(NOW + 3 * DAY - 181 * DAY), "recover");
   assertEquals(old.status, 422);
   assertEquals(await old.json(), { error: RECOVER_TOO_WIDE });
+  assertEquals((await open(iso(NOW + 3 * DAY - 179 * DAY), "recover")).status, 201);
   // Another mailbox, with a device a day behind UTC: 121 days before the service's day is its 120.
   w.clock = NOW;
   w.store.rows.push(await stored(A2, ACCT, TOK2, { mailboxHint: "jdoe2@school.test" }));
+  // Before its first backfill, a recover is held to the bound that backfill would have (121 days).
+  const unfixed = await open(iso(TODAY - 121 * DAY - 60_000), "recover", A2);
+  assertEquals(unfixed.status, 422);
+  assertEquals(await unfixed.json(), { error: RECOVER_BEFORE_WINDOW });
+  assertEquals((await open(iso(TODAY - 121 * DAY), "recover", A2)).status, 201);
+  assertEquals(w.store.rows.find((r) => r.id === A2)!.backfillSince, null);
   assertEquals((await open(dayOf(TODAY - 121 * DAY), "backfill", A2)).status, 201);
   assertEquals(w.store.rows.find((r) => r.id === A2)!.backfillSince, "2026-06-03");
 });
@@ -1023,12 +1041,29 @@ Deno.test("reconcile_answers_only_held_fingerprints_in_the_window_and_the_key", 
     [{ address_id: A1, since: "last week", until: iso(NOW) }, 400],
     [{ address_id: A1, until: iso(NOW) }, 400],
     [{ address_id: A1, since: iso(NOW - 182 * DAY), until: iso(NOW) }, 422],
+    // Before its first backfill, a mailbox's window reaches back at most 121 UTC days (the backfill's bound).
+    [{ address_id: A1, since: iso(TODAY - 121 * DAY - 60_000), until: iso(NOW) }, 422],
     [{ address_id: B1, since: iso(since), until: iso(NOW) }, 404],
   ];
   for (const [req, status] of bad) {
     assertEquals((await w.call("POST", "/reconcile", req)).status, status, JSON.stringify(req));
   }
   assertEquals(w.store.heldAsked.length, 1);
+  // Once the backfill fixed its start, no reconcile reaches before it (spec D7 as amended 2026-10-02).
+  w.store.rows.find((r) => r.id === A1)!.backfillSince = "2026-06-04";
+  const early = await w.call("POST", "/reconcile", {
+    address_id: A1,
+    since: "2026-06-03T23:59:00Z",
+    until: iso(NOW),
+  });
+  assertEquals(early.status, 422);
+  assertEquals(await early.json(), { error: RECONCILE_BEFORE_WINDOW });
+  assertEquals(w.store.heldAsked.length, 1);
+  assertEquals(
+    (await w.call("POST", "/reconcile", { address_id: A1, since: "2026-06-04", until: iso(NOW) })).status,
+    200,
+  );
+  assertEquals(w.store.heldAsked.length, 2);
 });
 
 Deno.test("the_reconcile_request_carries_only_the_window", async () => {
