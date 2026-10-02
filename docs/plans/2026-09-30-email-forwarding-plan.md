@@ -1629,6 +1629,12 @@ dialog is found by the words confirmation and sent, its OK by value. (3) "Remove
 guess at the control's name and that it acts on the list's selected address, with a confirm dialog naming a
 removal: `forwarding_remove_address.js` selects ours, checks it is selected, and reads the list back after
 a round trip, but the real button needs one live run on a scratch mailbox before Disconnect uses it.
+Until that run has passed, `forwarding_remove_address.js` clicks nothing while forwarding is saved to an
+address other than ours and returns `{result: "needs you", reason: "forwarding goes to another address"}`
+(test `gmail_remove_address_does_nothing_while_forwarding_goes_to_another_address`). The live run is a
+gate, not a note: T11.4's `mail_disconnect_gmail_removal_waits_for_the_live_remove_check` and T15.2's
+`turn_off_email_names_a_forwarding_address_it_left_for_the_student` pin it (the live run itself is a T18c
+step, and the guard is lifted only in a commit that records its result).
 (4) A script that must reload returns `{result: "reloading"}` after `location.reload()`; whether its
 result still reaches the host before the navigation must be seen live, and a host that gets no result
 after a navigation must treat it as "reloading": T11.3 re-runs the step once with `reloaded: true`, and a
@@ -1790,6 +1796,9 @@ T11.4 starts when no Critical or Important finding is open.
 - `mail_keep_session_off_deletes_every_mail_profile`
 - `mail_applied_passes_the_engines_json_through_unchanged`
 - `mail_status_reports_offer_pending_until_setup_starts_or_not_now` (D6, T14's marker)
+- `mail_disconnect_gmail_removal_waits_for_the_live_remove_check` (T10.3a review, R4): a Gmail Disconnect
+  that gets `{result: "needs you"}` from `forwarding_remove_address.js` leaves the address in Gmail, says
+  so, and does not retry or fall back to a click; the step ends as a needs-you, never as done.
 
 **Behaviour.** Spec §6.2's table: thin wrappers over T11.1–T11.3 and T9.1. `mail_applied` runs
 `knowlu-engine mail-applied` and computes nothing. **Commit and H5 (§10, R5).** The implementer
@@ -1857,6 +1866,9 @@ R2).
 - `settings_email_lists_each_mailbox_with_its_state_and_its_address_with_copy`
 - `resume_rotate_and_the_saved_sign_in_switch_invoke_their_commands`
 - `turn_off_email_is_two_steps_with_the_confirm_text`: §4.12's sentence, word for word.
+- `turn_off_email_names_a_forwarding_address_it_left_for_the_student`: when Gmail's address removal
+  returned needs-you, Settings says Knowlu's forwarding address is still in the student's Gmail list and
+  names where to remove it by hand (T10.3a review, R4).
 - `delete_my_data_confirm_adds_the_forwarding_sentence`: §4.13's sentence, word for word.
 - `a_failed_profile_delete_is_named_until_it_succeeds`
 - `the_google_row_and_the_email_row_sit_side_by_side` (§9)

@@ -6,6 +6,7 @@
 // forwarding address; `args.wait_ms` and `args.reloaded` are as in forwarding_read.js. It returns one of
 //   { result: "ok", removed: true, changed: true }     (it is gone and every other address is still listed)
 //   { result: "ok", removed: false, changed: false }   (it was not in the list: nothing clicked)
+//   { result: "needs you", reason: "forwarding goes to another address" }   (nothing clicked, see below)
 //   { result: "reloading" }
 //   { result: "not found", control: "section" | "address list" | "remove" }
 //   { result: "failed", reason: "no address" | "could not select it" | "read back differed" }
@@ -79,6 +80,16 @@ const list = toSelect();
 if (!list) return { result: "not found", control: "address list" };
 const ours = [...list.options].find((o) => optionIs(o, address));
 if (!ours) return { result: "ok", removed: false, changed: false };
+// Whether Remove acts on the list's selected-but-unsaved address, or on the saved forward-to address, is
+// not verified on real Gmail (plan, live checks for T11 and T18c). While forwarding is saved to an address
+// that is not ours, a wrong guess would delete the student's own address and switch their forwarding off,
+// so nothing is clicked and the student is asked (R4). Until a scratch-mailbox run has passed, only a list
+// whose saved address is ours, or forwarding that is off, is acted on.
+const radioNow = radioOn();
+const saved = radioNow && radioNow.checked === true ? selectedOf(list) : null;
+if (saved && norm(saved.value || text(saved)) !== "" && !optionIs(saved, address)) {
+  return { result: "needs you", reason: "forwarding goes to another address" };
+}
 const remove = byValue(document, /^remove forwarding address$/i);
 if (!remove) return { result: "not found", control: "remove" };
 const others = names(list).filter((n) => n !== address);
