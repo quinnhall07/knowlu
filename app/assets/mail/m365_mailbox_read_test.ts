@@ -27,6 +27,26 @@ Deno.test("m365_search_since_a_date_excludes_junk_and_deleted_and_counts_by_aria
   assert(q.includes('NOT folder:"Junk Email"') && q.includes('NOT folder:"Deleted Items"'), q);
 });
 
+Deno.test("m365_search_leaves_out_sent_items_and_drafts_which_are_not_mail_received", async () => {
+  // Exchange gives a Sent Items row a received time, and a "Knowlu <nonce>" copy a failed cleanup left
+  // there would be forwarded again: the student's own mail is never counted, listed or recovered.
+  const box = mailbox([
+    ...MAIL,
+    msg("s1", "ana.lopez@school.example.invalid", "Re: Quiz 3 moved", 3, "Sent Items"),
+    msg("s2", "in@example.invalid", "Knowlu bk7f3a9c2e41", 4, "Sent Items"),
+    msg("d1", "bo.chen@school.example.invalid", "Re: Lab report due", 6, "Drafts"),
+  ]);
+  const r = await run("m365/search.js", box.page, { since: "2026-10-02" });
+  assertEquals(r, { result: "ok", count: 3 }, "m1, m2 and m3a only");
+  const q = box.queries[0];
+  assert(q.includes('NOT folder:"Sent Items"') && q.includes('NOT folder:"Drafts"'), q);
+  assertEquals(
+    box.rows().map((row) => row.getAttribute("id")).sort(),
+    ["r-m1", "r-m2", "r-m3a"],
+    "no Sent or Drafts row is listed",
+  );
+});
+
 Deno.test("m365_search_reports_no_results_as_zero_and_a_deaf_page_as_not_settled", async () => {
   const none = mailbox(MAIL);
   assertEquals(await run("m365/search.js", none.page, { since: "2026-12-01" }), { result: "ok", count: 0 });

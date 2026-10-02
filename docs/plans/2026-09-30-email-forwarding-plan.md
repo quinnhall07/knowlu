@@ -1607,8 +1607,14 @@ in the popup off the provider's hosts is cancelled (it stays on the page it was 
 
 **Live checks for T11 and T18c, Microsoft 365 mailbox scripts** (T10.2b; the synthetic page models the
 spikes' selectors, it is not Outlook): (1) `search.js` types `received>=<day> NOT folder:"Junk Email" NOT
-folder:"Deleted Items"`; the real search box must read that syntax and leave out both folders, and
-`aria-setsize` must be the result count. (2) `list.js` reads only the rows drawn: the routine (T11.2) must
+folder:"Deleted Items" NOT folder:"Sent Items" NOT folder:"Drafts"`; the real search box must read that
+syntax and leave out all four folders, and `aria-setsize` must be the result count. The last two terms are
+T10.3b's review fix, to match the Gmail query's `-in:sent -in:drafts` (T10.3b's ruling: Sent and Drafts are
+not mail received): Exchange gives a Sent Items row a received time, so without them recover would forward
+the student's own replies, and any `Knowlu <nonce>` copy a failed cleanup left in Sent Items, to Knowlu as
+"missing". Spec §4.2 step 5's "excluding Junk Email and Deleted Items" names the two folders a
+received-mail search must leave out of the mailbox's own folders; Sent Items and Drafts are the student's
+own mail and follow the same rule (test `m365_search_leaves_out_sent_items_and_drafts_which_are_not_mail_received`). (2) `list.js` reads only the rows drawn: the routine (T11.2) must
 scroll or narrow the virtualised list to reach the rest, and `forward.js` finds a row only among the rows
 drawn. (3) `forward.js` finds Forward's dropdown (a button named Forward with `aria-haspopup`), the menu
 item "Forward as attachment", the To, subject and Send controls by their names, and sends the subject
@@ -1651,9 +1657,18 @@ subject from `.bog`, time from the `[title]` that holds a clock time, and each r
 `[role=checkbox]`; the Newest/Newer/Older/Oldest buttons are found by `aria-label`, and "Oldest" is a guess
 at the real pager's name (the routine, T11.2, reads the oldest page with `go: "oldest"`, then `"newer"`; a
 missing "Oldest" on a multi-page result is `not found` `pager` and the step's guided fallback). Gmail lists
-conversations, not messages: a row with several senders is read as its newest and `thread: true`, and what
-"Forward as attachment" attaches for a conversation row (every message, or the newest) must be seen live,
-since T11.2's fingerprint compare is per message. (3) `forward.js` ticks the wanted rows, then More →
+conversations, not messages: a row with several senders is read as its newest and `thread: true`. This is
+a named gate (T18c, "Gmail conversation rows"; T11.2's `a_gmail_thread_row_is_left_for_guided_never_sent`),
+not a note. Three consequences: (a) `list.js` reads a conversation's newest sender and time only, so
+reconcile never fingerprints its older messages and a missing older message is never recovered; and
+`thread` is true only when the row shows two or more different senders, so a conversation of several
+messages from one sender reads `thread: false` (the live run must show whether the row carries a count to
+read, "Name (3)", and `list.js` must then read it); (b) if "Forward as attachment" attaches every
+message of a conversation row, `forward.js` refuses the page ("attachments do not match the rows"), and
+Gmail backfill falls to guided on a page that holds a thread; (c) `search.js` returns the pager's
+total, which on Gmail is a **conversation** count, as the batch's `expected`, so on Gmail `expected` is
+a conversation count and the progress view's "N of M" compares conversations handled against it, never
+messages sent. (3) `forward.js` ticks the wanted rows, then More →
 "Forward as attachment" (the message-list toolbar's More), and reads the attachment chips (`aria-label`
 starting "Attachment:", the size in the text beside the name, "12K" or "1.2M"); it refuses to send over
 `max_bytes` (default 25,000,000, the sum of the sizes shown) or when Gmail offers Google Drive links, and the
@@ -1766,6 +1781,18 @@ never writes the vault here: the vault changes only through the engine's `judge`
 - `an_open_backfill_ignores_the_slot_cap_and_keeps_microsofts_pace`
 - `the_window_is_three_days_or_back_to_lapsed_since_at_most_30_or_to_when_last_known_on`
 - `the_batch_closes_with_the_count_sent_and_the_sent_copies_are_cleaned`
+- `a_gmail_thread_row_is_left_for_guided_never_sent`
+- `on_gmail_expected_and_the_progress_count_are_conversations`
+
+**Behaviour for Gmail conversation rows** (T10.3b review; until the T18c gate "Gmail conversation rows"
+says otherwise). The routine sends only the rows `list.js` returns with `thread: false`, one message
+each. A `thread: true` row is never ticked, so `forward.js` is never handed a page whose attachments
+cannot match its rows; it is counted, and named in the batch's closing view as "left for you" (the number
+of conversations skipped, never their senders or subjects). The batch's `expected` is the pager's
+conversation total and its progress compares conversations handled (sent or left) against it. This
+narrows what Gmail backfill promises: a conversation with more than one sender is not backfilled by the
+routine. **Ask Quinn** before T11.2 is dispatched whether that is acceptable or the routine should open
+a thread and fingerprint each message instead; the answer changes this task's size.
 
 #### T11.3. The setup runner (`app/src/mail.rs`)
 
@@ -2020,6 +2047,13 @@ controller's (spec T18; HANDOFF §2's controller rules).
   scratch profile and founder-owned mailboxes, and Quinn at the machine for each sign-in and phone
   tap. Until S6 confirms the pace, the school backfill stays under 600. Afterwards, clean up per the
   standing rule and restore the school mailbox's forwarding.
+  **Gate, Gmail conversation rows** (T10.3b review; a result recorded in the proof record, and T11.2's
+  `a_gmail_thread_row_is_left_for_guided_never_sent` stays until a commit records it): on a scratch Gmail
+  mailbox holding a conversation of several messages from one sender and one of several senders, see
+  live (1) what the list row shows (a count beside the name, several `span[email]`), and that `thread`
+  is true for both; (2) what "Forward as attachment" attaches for a conversation row (every message or
+  the newest), and whether `forward.js` then refuses; (3) that the pager's total is a conversation count.
+  Backfill on Gmail is not called proven until this gate has a recorded result.
 - **T18d. The PR.** CI green and Quinn's word to merge; the merge carries H0. No release is tagged
   before privacy bump #1 (D18). The controller's HANDOFF milestone update follows.
 

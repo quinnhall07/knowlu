@@ -1,14 +1,16 @@
 // Microsoft 365, Outlook on the web: search the mailbox for mail received on or after a day, leaving out
-// Junk Email and Deleted Items, and read the number of results from the list's aria-setsize (spec 4.2
-// step 5, 4.11 step 3). The caller has Outlook's mail view open. Like every step script it is the body of
-// an async function of `args`: `args.since` is a day, `YYYY-MM-DD`; `args.wait_ms` (default 10000) bounds
-// the wait for the page to answer. It returns one of
+// Junk Email, Deleted Items, Sent Items and Drafts, and read the number of results from the list's
+// aria-setsize (spec 4.2 step 5, 4.11 step 3). The caller has Outlook's mail view open. Like every step
+// script it is the body of an async function of `args`: `args.since` is a day, `YYYY-MM-DD`;
+// `args.wait_ms` (default 10000) bounds the wait for the page to answer. It returns one of
 //   { result: "ok", count: number }          (the list is virtualised: the count is aria-setsize, never
 //                                             the number of rows drawn)
 //   { result: "not found", control: "search" | "result count" }
 //   { result: "failed", reason: "bad date" | "search did not settle" }
-// The query is `received>=<since>` with `NOT folder:"Junk Email" NOT folder:"Deleted Items"`, so the
-// results are the mailbox's own folders and nothing else. Whether Outlook reads that syntax is a live
+// The query is `received>=<since>` with `NOT folder:"Junk Email" NOT folder:"Deleted Items"
+// NOT folder:"Sent Items" NOT folder:"Drafts"`, so the results are mail the mailbox received and nothing
+// else: Exchange gives a Sent Items row a received time, and the student's own replies, or a Knowlu copy a
+// failed cleanup left there, must never be forwarded as "missing". Whether Outlook reads that syntax is a live
 // check (plan T11, T18c), not a thing the synthetic page can say.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
@@ -71,7 +73,9 @@ const none = () =>
 const was = new Set(rows());
 const hadNone = none();
 
-setValue(box, `received>=${since} NOT folder:"Junk Email" NOT folder:"Deleted Items"`);
+const query = `received>=${since} NOT folder:"Junk Email" NOT folder:"Deleted Items"` +
+  ` NOT folder:"Sent Items" NOT folder:"Drafts"`;
+setValue(box, query);
 if (go) go.click();
 else press(box, "Enter");
 

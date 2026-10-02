@@ -10,7 +10,7 @@ import { El, load, Page } from "./test_dom.ts";
 export const OURS = "box-1@in.example.invalid";
 export const NONCE = "bk7f3a9c2e41";
 
-export type Folder = "Inbox" | "Junk Email" | "Deleted Items" | "Sent Items";
+export type Folder = "Inbox" | "Junk Email" | "Deleted Items" | "Sent Items" | "Drafts";
 
 export interface Msg {
   id: string;
