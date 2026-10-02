@@ -64,15 +64,15 @@ fn forget_deletes_only_that_mailboxs_profile() {
     profile(&d, "mail-setup");
     profile(&d, "lms-session");
     std::fs::write(d.join("settings.json"), "{}").unwrap();
-    assert!(forget(&d, A));
+    assert_eq!(forget(&d, A), Ok(true));
     assert!(!d.join(format!("mail-session-{A}")).exists());
     for kept in [format!("mail-session-{B}"), "mail-setup".into(), "lms-session".into(), "settings.json".into()] {
         assert!(d.join(&kept).exists(), "{kept} survives forget");
     }
-    assert!(forget(&d, A), "nothing to forget is done, not a failure");
-    assert!(!forget(&d, "../lms-session"), "a bad id is refused");
+    assert_eq!(forget(&d, A), Ok(true), "nothing to forget is done, not a failure");
+    assert!(forget(&d, "../lms-session").is_err(), "a bad id is refused");
     assert!(d.join("lms-session").exists());
-    assert!(!forget(Path::new("relative"), A), "a relative profile is refused");
+    assert!(forget(Path::new("relative"), A).is_err(), "a relative profile is refused");
     assert!(MailState::load(&d).unwrap().pending_deletes.is_empty());
 }
 
@@ -90,14 +90,65 @@ fn a_failed_delete_is_recorded_and_retried_at_start_up() {
     let name = format!("mail-session-{A}");
     profile(&d, &name);
     let held = lock(&d.join(&name));
-    assert!(!forget(&d, A), "a held profile is not gone");
+    assert_eq!(forget(&d, A), Ok(false), "a held profile is not gone, and is recorded");
     assert_eq!(MailState::load(&d).unwrap().pending_deletes, vec![name.clone()]);
-    assert_eq!(start_up_sweep(&d), vec![name.clone()], "still held: still pending");
+    assert_eq!(start_up_sweep(&d), Ok(vec![name.clone()]), "still held: still pending");
     assert_eq!(MailState::load(&d).unwrap().pending_deletes, vec![name.clone()]);
     drop(held);
-    assert!(start_up_sweep(&d).is_empty(), "released: the retry deletes it");
+    assert_eq!(start_up_sweep(&d), Ok(vec![]), "released: the retry deletes it");
     assert!(!d.join(&name).exists());
     assert!(MailState::load(&d).unwrap().pending_deletes.is_empty());
+}
+
+/// D15: a Settings write made from an older read (here, before sign-out's delete failed) never
+/// drops the pending delete, and never switches the saved sign-in back.
+#[cfg(windows)]
+#[test]
+fn a_settings_write_from_an_older_read_keeps_a_pending_delete() {
+    let d = temp("stale");
+    let name = format!("mail-session-{A}");
+    profile(&d, &name);
+    let older = MailState::load(&d).unwrap();
+    let held = lock(&d.join(&name));
+    assert_eq!(forget_all(&d), Ok(false), "a held profile is recorded");
+    MailState::update(&d, |s| {
+        s.keep_session = !older.keep_session;
+        true
+    })
+    .unwrap();
+    let s = MailState::load(&d).unwrap();
+    assert_eq!(s.pending_deletes, vec![name.clone()], "the failed delete is still named");
+    assert!(!s.keep_session);
+    drop(held);
+    assert_eq!(start_up_sweep(&d), Ok(vec![]));
+}
+
+/// `mail.json` has one write path, `MailState::update`, which reloads under the lock: no public
+/// call can write a stale copy over `pending_deletes` or `keep_session`.
+#[test]
+fn mail_json_is_written_only_through_update() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mail_session.rs")).unwrap();
+    assert!(!src.contains("pub fn save"), "a public save writes whatever copy its caller holds");
+}
+
+/// D15, §5.4: an unreadable `mail.json` is a named state, never "nothing pending". A delete that
+/// fails and cannot be recorded is an error, and the sweep says it cannot read the file.
+#[cfg(windows)]
+#[test]
+fn an_unreadable_mail_json_is_named_never_read_as_clean() {
+    let d = temp("corrupt");
+    let name = format!("mail-session-{A}");
+    profile(&d, &name);
+    std::fs::write(d.join("mail.json"), "{").unwrap();
+    let held = lock(&d.join(&name));
+    assert!(forget(&d, A).is_err(), "held and unrecordable: an error, never a silent false");
+    assert!(forget_all(&d).is_err());
+    assert!(d.join(&name).exists());
+    assert!(start_up_sweep(&d).is_err(), "an unreadable mail.json is never a clean sweep");
+    drop(held);
+    assert_eq!(forget(&d, A), Ok(true), "the delete itself stands");
+    assert!(start_up_sweep(&d).is_err(), "still unreadable: still named");
+    assert_eq!(std::fs::read_to_string(d.join("mail.json")).unwrap(), "{", "never overwritten");
 }
 
 #[test]
@@ -106,11 +157,11 @@ fn the_start_up_sweep_removes_a_leftover_mail_setup() {
     profile(&d, "mail-setup");
     profile(&d, &format!("mail-session-{A}"));
     profile(&d, "lms-session");
-    assert!(start_up_sweep(&d).is_empty());
+    assert_eq!(start_up_sweep(&d), Ok(vec![]));
     assert!(!d.join("mail-setup").exists());
     assert!(d.join(format!("mail-session-{A}")).exists(), "a kept profile is kept");
     assert!(d.join("lms-session").exists());
-    assert!(start_up_sweep(&d).is_empty(), "nothing left is done");
+    assert_eq!(start_up_sweep(&d), Ok(vec![]), "nothing left is done");
 }
 
 #[test]
@@ -127,7 +178,7 @@ fn forget_all_removes_every_mail_profile_and_nothing_else() {
         std::fs::write(d.join(file), "{}").unwrap();
     }
     turn_off(&d, A).unwrap();
-    assert!(forget_all(&d));
+    assert_eq!(forget_all(&d), Ok(true));
     for gone in [format!("mail-session-{A}"), format!("mail-session-{B}"), "mail-setup".into()] {
         assert!(!d.join(&gone).exists(), "{gone} is removed");
     }
@@ -135,7 +186,7 @@ fn forget_all_removes_every_mail_profile_and_nothing_else() {
         assert!(d.join(name).exists(), "{name} survives forget_all");
     }
     assert_eq!(MailState::load(&d).unwrap().turned_off, vec![A.to_string()], "turned_off survives");
-    assert!(!forget_all(Path::new("relative")));
+    assert!(forget_all(Path::new("relative")).is_err());
 }
 
 #[test]
@@ -145,8 +196,12 @@ fn turned_off_only_grows() {
     turn_off(&d, B).unwrap();
     turn_off(&d, A).unwrap();
     assert_eq!(MailState::load(&d).unwrap().turned_off, vec![A.to_string(), B.to_string()]);
-    // A save from a stale copy that never saw B (or saw neither) cannot drop either.
-    MailState { keep_session: false, ..MailState::default() }.save(&d).unwrap();
+    // Every write reloads under the lock, so a Settings change made from an older read drops neither.
+    MailState::update(&d, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
     let s = MailState::load(&d).unwrap();
     assert_eq!(s.turned_off, vec![A.to_string(), B.to_string()]);
     assert!(!s.keep_session, "the rest of the save lands");
@@ -156,7 +211,11 @@ fn turned_off_only_grows() {
     std::fs::write(d.join("mail.json"), "{").unwrap();
     assert!(MailState::load(&d).is_err());
     assert!(turn_off(&d, A).is_err());
-    assert!(MailState::default().save(&d).is_err());
+    assert!(MailState::update(&d, |s| {
+        *s = MailState::default();
+        true
+    })
+    .is_err());
     assert_eq!(std::fs::read_to_string(d.join("mail.json")).unwrap(), "{");
 }
 
@@ -167,9 +226,7 @@ fn mail_json_is_its_own_file_and_settings_json_is_untouched() {
     let fresh = MailState::load(&d).unwrap();
     assert_eq!(fresh, MailState::default(), "missing is the default");
     assert!(fresh.keep_session, "the saved sign-in is on by default (D15)");
-    let mut s = fresh;
-    s.last_reconcile.insert(A.into(), "2026-10-02T12:00:00Z".into());
-    s.save(&d).unwrap();
+    MailState::update(&d, |s| s.last_reconcile.insert(A.into(), "2026-10-02T12:00:00Z".into()).is_none()).unwrap();
     turn_off(&d, B).unwrap();
     let text = std::fs::read_to_string(d.join("mail.json")).unwrap();
     let want = json!({

@@ -8,12 +8,15 @@
 //! address id is the service's opaque mailbox id, never the address: 1 to 64 ASCII lowercase
 //! letters, digits or `-` (a UUID fits), so no id can name a separator, a `..` or a second folder.
 //! A delete that fails is recorded in `mail.json`'s `pending_deletes` and retried by
-//! [`start_up_sweep`], which also removes a `mail-setup` a crash left.
+//! [`start_up_sweep`], which also removes a `mail-setup` a crash left. A delete that fails and
+//! cannot be recorded is an error, never a quiet `false`.
 //!
 //! **`mail.json`** sits beside `settings.json` and is never a field in it (the `grades.json`
 //! precedent). Unlike `grades.json`, an unreadable file is an error, never the default: its
 //! `turned_off` only grows (§13 Q11), so reading a corrupt file as "nothing turned off" could turn
-//! back on a mailbox the student turned off, and every save refuses rather than overwrite it.
+//! back on a mailbox the student turned off, and reading it as "nothing pending" would leave a
+//! signed-in profile unnamed. Every write refuses rather than overwrite it, and the one write path
+//! is [`MailState::update`], which reloads under the lock.
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -118,13 +121,9 @@ impl MailState {
         self.turned_off.iter().any(|id| id == address_id)
     }
 
-    /// Writes this state, keeping every `turned_off` id already on disk (a stale copy can never
-    /// shrink it), and refuses while the file on disk is unreadable.
-    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
-        let _held = lock();
-        self.write_merged(data_dir)
-    }
-
+    /// Writes this state, keeping every `turned_off` id already on disk, and refuses while the file
+    /// on disk is unreadable. Private: [`MailState::update`] is the one write path, so no caller can
+    /// write a stale copy over `pending_deletes` or `keep_session` (D15).
     fn write_merged(&self, data_dir: &Path) -> Result<(), String> {
         let mut merged = MailState::load(data_dir)?.turned_off;
         for id in &self.turned_off {
@@ -189,16 +188,18 @@ fn wipe(dir: &Path) -> bool {
 }
 
 /// Delete the profile folder `name` under `data_dir` through the guard, and keep
-/// `pending_deletes` true to the result: a failure is added, a success removed. A refused path is
-/// `false` and records nothing.
-fn forget_named(data_dir: &Path, name: &str) -> bool {
+/// `pending_deletes` true to the result: a failure is added, a success removed.
+///
+/// `Ok(true)`: gone (a success `mail.json` cannot record still stands; the sweep names the file).
+/// `Ok(false)`: still there, and recorded for [`start_up_sweep`]. `Err`: still there and nothing
+/// records it, because the path is refused or `mail.json` cannot be read or written.
+fn forget_named(data_dir: &Path, name: &str) -> Result<bool, String> {
     let dir = data_dir.join(name);
     if !is_session_dir(data_dir, &dir) {
-        return false;
+        return Err("not a mail profile".into());
     }
     let gone = wipe(&dir);
-    // An unreadable mail.json cannot record the failure; the delete itself stands.
-    let _ = MailState::update(data_dir, |s| {
+    let recorded = MailState::update(data_dir, |s| {
         let listed = s.pending_deletes.iter().any(|n| n == name);
         if gone && listed {
             s.pending_deletes.retain(|n| n != name);
@@ -207,56 +208,67 @@ fn forget_named(data_dir: &Path, name: &str) -> bool {
         }
         gone == listed
     });
-    gone
+    match recorded {
+        Err(e) if !gone => Err(format!("{name} not deleted and not recorded: {e}")),
+        _ => Ok(gone),
+    }
 }
 
 /// **Forget one mailbox's saved sign-in**: delete `mail-session-<address_id>` and nothing else.
-/// Closing the window first is the caller's. A failure is retried by [`start_up_sweep`].
-pub fn forget(data_dir: &Path, address_id: &str) -> bool {
-    valid_address_id(address_id) && forget_named(data_dir, &format!("{SESSION_PREFIX}{address_id}"))
+/// Closing the window first is the caller's. `Ok(false)` is retried by [`start_up_sweep`]; an
+/// id [`valid_address_id`] refuses is an error.
+pub fn forget(data_dir: &Path, address_id: &str) -> Result<bool, String> {
+    if !valid_address_id(address_id) {
+        return Err("not an address id".into());
+    }
+    forget_named(data_dir, &format!("{SESSION_PREFIX}{address_id}"))
 }
 
 /// Delete `mail-setup` (setup with the saved sign-in off, when its window closes).
-pub fn forget_setup(data_dir: &Path) -> bool {
+pub fn forget_setup(data_dir: &Path) -> Result<bool, String> {
     forget_named(data_dir, SETUP_DIR)
 }
 
 /// **Every mail profile of this Knowlu profile** (sign-out, §4.13): each `mail-session-<id>` and
-/// `mail-setup`, and nothing else in `data_dir`. `true` when all are gone.
-pub fn forget_all(data_dir: &Path) -> bool {
+/// `mail-setup`, and nothing else in `data_dir`. Tries every one; `Ok(true)` when all are gone,
+/// `Ok(false)` when every leftover is recorded, the first error when one is not.
+pub fn forget_all(data_dir: &Path) -> Result<bool, String> {
     if !sound(data_dir) {
-        return false;
+        return Err("not a data folder".into());
     }
     let entries = match std::fs::read_dir(data_dir) {
         Ok(entries) => entries,
-        Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(format!("data folder unreadable: {}", e.kind())),
     };
     let mut names: Vec<String> = entries
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|n| is_profile_name(n))
         .collect();
     names.sort();
-    names.iter().fold(true, |all, n| forget_named(data_dir, n) && all)
+    let results: Vec<Result<bool, String>> = names.iter().map(|n| forget_named(data_dir, n)).collect();
+    results.into_iter().try_fold(true, |all, r| r.map(|gone| gone && all))
 }
 
 /// **At start-up** (H4): remove a `mail-setup` a crash left and retry every delete that failed
-/// before. Returns the folder names still pending. A pending name that is not a mail profile's is
-/// dropped, never deleted.
-pub fn start_up_sweep(data_dir: &Path) -> Vec<String> {
+/// before. Returns the folder names still pending, or an error when `mail.json` cannot be read or
+/// written: that is a named state for Settings, never "nothing pending". A pending name that is not
+/// a mail profile's is dropped, never deleted.
+pub fn start_up_sweep(data_dir: &Path) -> Result<Vec<String>, String> {
     if !sound(data_dir) {
-        return Vec::new();
+        return Err("not a data folder".into());
     }
-    forget_setup(data_dir);
-    let pending = MailState::load(data_dir).map(|s| s.pending_deletes).unwrap_or_default();
-    for name in &pending {
-        if is_profile_name(name) {
-            forget_named(data_dir, name);
+    forget_setup(data_dir)?;
+    for name in MailState::load(data_dir)?.pending_deletes {
+        if is_profile_name(&name) {
+            // Already listed: a failure needs no new record, and the update below reads the result.
+            let _ = forget_named(data_dir, &name);
         }
     }
-    let _ = MailState::update(data_dir, |s| {
+    let state = MailState::update(data_dir, |s| {
         let before = s.pending_deletes.len();
         s.pending_deletes.retain(|n| is_profile_name(n));
         s.pending_deletes.len() != before
-    });
-    MailState::load(data_dir).map(|s| s.pending_deletes).unwrap_or_default()
+    })?;
+    Ok(state.pending_deletes)
 }
