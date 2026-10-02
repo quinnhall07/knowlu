@@ -761,7 +761,8 @@ pub struct MailboxReport {
     pub expired: u64,
 }
 
-/// What `POST /mail-pull` answered. Wire shape (the `mail_claims` columns of spec §5.1, by name):
+/// What `POST /mail-pull` answered. The wire shapes are written in the plan's T4.4 and T4.5 (the
+/// authority the cloud lane builds to); the shape, by the `mail_claims` columns of spec §5.1:
 /// `{messages: [{uid, message_date, ordering_date, sender_name, sender_addr, phase, authenticity,
 /// claims, judgment_id}], mailboxes: [{address_id, status, reenabled_at, unbound, unauthenticated,
 /// expired}], more}`.
@@ -858,7 +859,14 @@ fn mailbox_of(row: &Value) -> Option<MailboxReport> {
 /// address or session in it.
 pub fn pull_mail_claims(client: &CloudClient, ack: &[String]) -> Result<MailPull, CloudError> {
     let reply = client.post("/mail-pull", &json!({ "ack": ack }))?;
-    let rows = reply.get("messages").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    // Unlike `pull_gmail_queue`, a reply with no `messages` array is not an empty pull: the keys are a
+    // contract with `functions/mail-pull` (plan T4.4), and drift there must be loud, not mail that
+    // silently never lands.
+    let rows = reply
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| CloudError::Body("the reply has no `messages` array".to_string()))?;
     let messages: Vec<_> = rows.iter().filter_map(message_of).collect();
     let judgment_ids = messages
         .iter()

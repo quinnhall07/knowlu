@@ -1115,7 +1115,10 @@ code reads, calls and writes. T6.2's card writer is read by contract-reviewer at
 
 **Behaviour.** `pull_mail_claims(client, ack)` and `resolve_mail(client, batch)` (spec §6.1). The pull
 answer carries the messages (§4.7 step 6's row) and each mailbox's state, `reenabled_at` and counters
-(§4.10's *Shown*). Mail has no `Quiet` arm: a mailbox's state is data, never an error.
+(§4.10's *Shown*). Mail has no `Quiet` arm: a mailbox's state is data, never an error. The JSON the
+two calls send and read is written under T4.4 and T4.5 (the wire shapes), which the cloud lane builds
+to. A pull reply with no `messages` array is "an unreadable reply", unlike `pull_gmail_queue`, so key
+drift is loud (test `a_mail_pull_reply_without_a_messages_array_is_an_unreadable_reply_not_an_empty_pull`).
 
 #### T6.2. The writers (`mail.rs`)
 
@@ -1618,6 +1621,31 @@ service reads the school address domain's MX.
 
 **Behaviour.** §4.8 step 1 and D10.
 
+**Wire shape (T6.1's addendum; the device in `cloudmodel.rs::pull_mail_claims` is built to it, and
+`engine/tests/cloud_contract.rs` pins it).** The request is `{ack: [uid]}`. The reply is one JSON object:
+`{messages: [...], mailboxes: [...], more: bool}`.
+- `messages` is **required** and an array (empty is a real, empty pull). A reply without it, or with
+  another key in its place (`claims`, `rows`), reads on the device as "an unreadable reply" and no mail
+  lands, so the key name is a contract. Each row carries the `mail_claims` column names: `uid`
+  (`mail:<h>`), `message_date` (nullable), `ordering_date`, `sender_name` (nullable), `sender_addr`,
+  `phase`, `authenticity`, `claims` (the §5.1 jsonb array, one object per claim, in index order) and
+  `judgment_id` (nullable). Rows are in delivery order (D10); the device never re-sorts.
+- `phase` is one of `backfill`, `live` or `recover`; the device reads `recover` as `live`. Any other
+  word makes the row unreadable: counted, not acked, so it returns.
+- Every date is an RFC 3339 timestamp with a `Z` or an offset (`2026-10-02T09:30:00Z`), never a date
+  alone. A row with no parsable `ordering_date`, no `sender_addr` or no `mail:` uid is unreadable and
+  is not acked. `message_date` and `reenabled_at` may be null or absent.
+- `authenticity` is `aligned` or `unaligned`; anything else reads `unaligned` (only `aligned` backfill
+  may write directly, §4.9).
+- `mailboxes` is an array of `{address_id, status, reenabled_at, unbound, unauthenticated, expired}`
+  (§4.10's *Shown*): `status` is a `mail_addresses.status` word (an unknown word reads `Unknown`), the
+  counters are non-negative integers. No address and no token ever ride here.
+- `more` is `true` when the service stopped at its wall-clock budget; it defaults to `false`.
+
+**Test, added to the list above:** `the_pull_reply_keys_and_phase_and_date_formats_are_the_devices`:
+assert the answer's top-level keys are exactly `messages`, `mailboxes` and `more`, each row's key set
+is the one above, `phase` is in `{backfill, live, recover}` and every date parses as RFC 3339.
+
 #### T4.5. Resolve (`functions/mail-resolve/`)
 
 **Tests first** (spec test 13, plus the cap):
@@ -1627,6 +1655,18 @@ service reads the school address domain's MX.
 - `a_resolve_call_is_charged_before_the_model`
 
 **Behaviour.** D12, through the one pipeline, under the `mail_resolve` cap.
+
+**Wire shape (T6.1's addendum; `cloudmodel.rs::resolve_mail` is built to it).** The request is
+`{course: string, claims: [{uid, index}], candidates: [{id, title, due}]}`: a claim goes as a reference
+(`uid` is the message's `mail:<h>`, `index` its place in that message's `claims`, zero-based), since
+the service holds the claim text; `due` is a string or null. The reply is `{answers: [{uid, index,
+target_id}]}`: one entry per claim the service answered, `target_id` the id of one of the request's
+candidates or `null` for "none". The device drops an id outside the batch (reads `None`) and an answer
+for a claim it did not ask. A claim with no entry in the reply is asked again at the next slot, so
+the service must answer "none" with an explicit `null`, never by leaving the claim out.
+
+**Test, added to the list above:** `the_resolve_reply_is_answers_with_uid_index_and_target_id`: the
+reply's only top-level key is `answers`, and each entry's keys are `uid`, `index` and `target_id`.
 
 #### T4.6. Account deletion and export (`functions/account/`)
 

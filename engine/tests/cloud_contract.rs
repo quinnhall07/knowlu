@@ -1386,6 +1386,26 @@ fn a_mail_pull_never_reads_as_gmail_quiet() {
 }
 
 #[test]
+fn a_mail_pull_reply_without_a_messages_array_is_an_unreadable_reply_not_an_empty_pull() {
+    // Key drift on the service side must be loud: a reply that parses but has no `messages` array
+    // (here the wrong key, `claims`) would otherwise read as an empty pull, and no mail would ever land.
+    for reply in [r#"{"claims":[],"mailboxes":[],"more":false}"#, r#"{"messages":{},"mailboxes":[]}"#, "[]"] {
+        let mut server = loopback(vec![(200, reply.to_string())]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let err = pull_mail_claims(&client, &[]).expect_err(reply);
+        assert_eq!(err.label(), "an unreadable reply", "{reply}");
+        assert!(!err.fatal(), "{reply}");
+        let _ = server.requests();
+    }
+    // An empty array is a real, empty pull.
+    let mut server = loopback(vec![(200, r#"{"messages":[]}"#.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let pull = pull_mail_claims(&client, &[]).expect("an empty messages array is an empty pull");
+    assert!(pull.messages.is_empty() && pull.mailboxes.is_empty() && !pull.more && pull.unreadable == 0);
+    let _ = server.requests();
+}
+
+#[test]
 fn resolve_mail_over_loopback_returns_one_answer_per_claim() {
     let batch = ResolveBatch {
         course: "CS 101".to_string(),
