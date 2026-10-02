@@ -183,6 +183,12 @@ and the VISION fixes). `main` is `86a3431`. Required checks on `main` since the 
 merge with `--admin`). `p3-registrar` and `two-desktop` are open as draft PRs #19 and #20, as a record
 only. `m1-grades` is pushed with no PR.
 
+**Merged 2026-10-01 (facts from `git log origin/main` and the ultracode run ledger):** #28 (the docs-only
+CI fix: docs go by PR again), #29 (the grades policy-read gate suspended until 20 paying users, A13), #30
+(docs) and #31 (events, MVP). The MVP lanes now on `main`: Gmail connect, M2 editing, events and grades.
+The remaining MVP lane is email forwarding to Knowlu (item 2a below). Quinn's live proofs still open:
+Gmail T13, M2 T10, events T10 and grades.
+
 **Left** (each merge or deploy on Quinn's word at the time, asked in one line with the evidence):
 1. **The Credential Manager flake** (worktree `fix-credman-flake`). `app/src/account.rs`'s
    `PENDING_TARGET` (`knowlu/pending/session`) is machine-global, so two processes running the app's
@@ -251,7 +257,8 @@ in this order (gap ids from the vision program note):
    this branch before privacy bump #1 (the Pilot's release gate).
 2a. **Email: email forwarding to Knowlu** (spec `docs/specs/2026-09-30-email-forwarding-design.md`,
    signed 2026-09-30, amendments A1-A13; plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built
-   in its own worktrees; no release is cut from a `main` carrying it before privacy bump #1 (D18).
+   in its own worktrees (`email-engine`, `email-app`, `email-cloud`; build started 2026-10-01); the staging
+   receiver is in SES us-east-2 and the S0 DMARC gate passed 2026-10-01; no release is cut from a `main` carrying it before privacy bump #1 (D18).
 3. **M2, body and profile editing** (P5): a body write through `write`, the drawer's body editor, and
    profile editing (interests, preferences). Sized M/L, not small: the engine can only append a body
    line today, so replacing a body is new `write` and journal semantics, and a journal record that
