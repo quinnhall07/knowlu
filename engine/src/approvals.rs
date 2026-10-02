@@ -54,6 +54,21 @@ pub const AMENDABLE_FIELDS: [&str; 9] = [
 
 pub const AMENDABLE_FOLDERS: [&str; 2] = ["tasks", "courses"];
 
+/// The `created_by` of a card the mail pass files (email spec D11 (3), D20). Approving one of its
+/// `kind: amend` cards writes the changed fields as the vault's human (D11 (4)).
+const MAIL_CARD_CREATOR: &str = "mail";
+
+/// PQ5 (c), Quinn's answer: the one creator whose `kind: amend` card may change `title`, beside
+/// [`AMENDABLE_FIELDS`]. Only `ingest` files such a card, for a title the student set by hand that
+/// the feed contradicts (email spec D11 (5), plan P12); every other card naming `title` is refused
+/// exactly as before.
+pub const TITLE_CARD_CREATOR: &str = "blackboard";
+
+/// Why an approved mail card carrying `append` is refused (plan §10 R15): its lines would be
+/// journalled as the student. Recoverable, so the card goes back to pending, where it can be
+/// rejected.
+pub const MAIL_APPEND_REFUSAL: &str = "a mail card carries append lines, which are never written as the student";
+
 /// PyYAML's YAML 1.1 timestamp resolver, transcribed from `yaml/resolver.py`.
 ///
 /// serde_yaml_ng follows YAML **1.2**, whose core schema has no timestamp tag, so it hands over
@@ -358,9 +373,11 @@ pub fn validate_amendment(vault: &Path, meta: &Mapping) -> Result<PathBuf, Strin
         return Err("nothing to apply".to_string());
     }
 
+    // PQ5 (c): `title` too, on a card the feed filed, and on no other.
+    let title_card = str_field(meta, "created_by") == TITLE_CARD_CREATOR;
     for (key, spec) in changes {
         let name = key_text(key);
-        if !AMENDABLE_FIELDS.contains(&name.as_str()) {
+        if !AMENDABLE_FIELDS.contains(&name.as_str()) && !(title_card && name == "title") {
             return Err(format!("field not amendable: {name}"));
         }
         if !matches!(spec, Value::Mapping(_)) {
@@ -470,7 +487,9 @@ fn comparable(field: &str, value: Option<&Value>) -> Comparable {
     }
 }
 
-const QUOTED_FIELDS: [&str; 2] = ["status", "importance_reason"];
+/// `title` is reached only through a feed card (PQ5 (c), [`TITLE_CARD_CREATOR`]); a title is free
+/// text, so it is quoted like the other two.
+const QUOTED_FIELDS: [&str; 3] = ["status", "importance_reason", "title"];
 
 /// `models.load_tasks` keeps only `status == "active"`; the design doc lists these three.
 /// Anything else is not a status, it is a disappearance.
@@ -792,6 +811,33 @@ pub fn apply_amendment(
         write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
     }
     Ok(None)
+}
+
+/// Apply an approved mail `kind: amend` card (email spec D11 (4), test 31; plan P11, §10 R15).
+///
+/// The student approved it, so its changed fields are written **as the vault's human**
+/// (`journal::read_human_actor`) with the executor's `via` and run id: `Journal::human_set` then
+/// finds the student's value, and later mail about the field is a card (judge once). Only the actor
+/// changes; [`apply_amendment`] is called unchanged, and the card's own bookkeeping stays the
+/// executor's. Two refusals come first, both recoverable, so the card goes back to pending where the
+/// student can reject it, and neither writes anything:
+/// - a bad `config/actor.yaml` (ruling 11) refuses with the file's named error, and no other actor
+///   is tried;
+/// - an `append` would journal its lines as the student; the mail pass writes none, so a card
+///   carrying one is refused ([`MAIL_APPEND_REFUSAL`]) before `apply_amendment` runs.
+fn apply_mail_amendment(
+    vault: &Path,
+    meta: &Mapping,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<String>, WriteError> {
+    if crate::yaml::get(meta, "append").is_some_and(is_truthy) {
+        return Ok(Some(MAIL_APPEND_REFUSAL.to_string()));
+    }
+    match crate::journal::read_human_actor(vault) {
+        Ok(human) => apply_amendment(vault, meta, &ctx.with_actor(human), journal),
+        Err(refusal) => Ok(Some(refusal.to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1426,7 +1472,12 @@ fn transition_note(
             delete(vault, &rel, ctx, journal)?;
             result.executed.push(slug);
         } else if kind == "amend" {
-            if let Some(reason) = apply_amendment(vault, meta, ctx, journal)? {
+            let refusal = if str_field(meta, "created_by") == MAIL_CARD_CREATOR {
+                apply_mail_amendment(vault, meta, ctx, journal)?
+            } else {
+                apply_amendment(vault, meta, ctx, journal)?
+            };
+            if let Some(reason) = refusal {
                 result.warnings.push(format!("{name}: {reason}"));
                 // Recoverable by hand (stale value, bad field, bad line) → write the status back to
                 // pending, so the proposal is counted, escalated into Must do, and eventually
@@ -5971,6 +6022,262 @@ mod tests {
             let done = withdraw_asks(&v, &[], &set, &default_ctx(), &mut Journal::new(&v));
             assert_eq!(done.withdrawn, ["commitment-ask-when-does-bui-100-meet"]);
             assert!(!card.exists());
+        }
+    }
+
+    // T8 (email spec D11 (4), §5.3, test 31; plan P11, §10 R15): approving a mail amend card writes
+    // its fields as the vault's human; and PQ5 (c), a feed card may amend `title`. Every course,
+    // title and date is invented.
+    mod mail_amend {
+        use super::*;
+
+        const TASK_ID: &str = "task_00000000e1";
+        const NOTE: &str = "tasks/lab-5.md";
+        const CARD: &str = "approvals/amend-lab-5.md";
+
+        /// "Lab 5", a mail note with an id, so `Journal::human_set` can find what an approval writes.
+        fn lab(vault: &Path, due: &str) -> PathBuf {
+            let front = format!("id: {TASK_ID}\ntitle: Lab 5\ncourse: cs-101\ndue: {due}\nstatus: active\ncreated_by: mail");
+            with_task(vault, "lab-5.md", &front)
+        }
+
+        /// An approved `kind: amend` card filed by `created_by`, moving Lab 5's due from 10-12 to
+        /// 10-14, with `extra` frontmatter lines after `changes`.
+        fn card(vault: &Path, created_by: &str, extra: &str) -> PathBuf {
+            let front = format!(
+                "id: appr_00000000e2\ntype: approval\nkind: amend\ntarget: {NOTE}\ntitle: Lab 5 moved\nstatus: approved\n\
+                 source_uid: \"mail:5a5a:1\"\nproposed_at: 2026-08-18\nfirst_proposed_at: 2026-08-18\nexpires: null\n\
+                 snooze_until: null\ncreated_by: {created_by}\nchanges:\n  due:\n    from: 2026-10-12\n    to: 2026-10-14{extra}"
+            );
+            proposal(vault, "amend-lab-5.md", &front, "**Why proposed:** the lab moved.\n")
+        }
+
+        /// The executor as a slot runs it (P11): `agent:approvals`, with the slot's `via` and run id.
+        fn executor() -> WriteContext {
+            WriteContext { run_id: Some("run-t8".to_string()), ..WriteContext::new("agent:approvals", "local-runner") }
+        }
+
+        fn execute(vault: &Path) -> ApprovalsResult {
+            process_approvals(vault, TODAY, now(), &executor(), &mut Journal::new(vault))
+        }
+
+        fn text(record: &crate::ledger::Record, key: &str) -> String {
+            record.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        }
+
+        /// `[op, field, actor, via, run_id]` of every journal record on `path`, in order.
+        fn trail(vault: &Path, path: &str) -> Vec<[String; 5]> {
+            let records = journal_records(vault).into_iter().filter(|r| text(r, "path") == path);
+            records.map(|r| ["op", "field", "actor", "via", "run_id"].map(|key| text(&r, key))).collect()
+        }
+
+        fn by(op: &str, field: &str, actor: &str) -> [String; 5] {
+            [op, field, actor, "local-runner", "run-t8"].map(str::to_string)
+        }
+
+        fn bad_actor_file(vault: &Path, text: &str) {
+            std::fs::create_dir_all(vault.join("config")).unwrap();
+            pystr::write_text(&vault.join(crate::journal::ACTOR_FILE), text).unwrap();
+        }
+
+        /// Spec test 31 and D11 (4): an approved mail amend writes its field as the vault's human
+        /// (`journal::read_human_actor`: the legacy token with no `config/actor.yaml`, else the
+        /// file's), with the executor's `via` and run id (P11). `Journal::human_set` then finds the
+        /// student's value, so later mail about the field is a card (judge once).
+        #[test]
+        fn an_approved_mail_amend_writes_its_fields_as_the_human_actor() {
+            for token in [None, Some("student"), Some("quinn")] {
+                let v = vault();
+                if let Some(token) = token {
+                    crate::journal::create_actor_file(&v, token).unwrap();
+                }
+                let target = lab(&v, "2026-10-12");
+                card(&v, "mail", "");
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{token:?}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{token:?}");
+                assert_eq!(field(&target, "due"), "2026-10-14", "{token:?}");
+                let human = crate::journal::read_human_actor(&v).unwrap();
+                assert_eq!(trail(&v, NOTE), vec![by("set", "due", human)], "{token:?}");
+                let set = Journal::new(&v).human_set(TASK_ID, "due").map(|r| text(&r, "new"));
+                assert_eq!(set.as_deref(), Some("2026-10-14"), "{token:?}");
+            }
+        }
+
+        /// D11 (4) and ruling 11: with a bad `config/actor.yaml` the approval stops with the file's
+        /// named error, the card goes back to pending (a recoverable refusal) and nothing is written
+        /// to the note: no other actor is tried.
+        #[test]
+        fn a_bad_actor_file_leaves_the_mail_card_pending_with_ruling_11s_error() {
+            for bad in ["human_actor: alice\n", "human_actor: agent:approvals\n", "human_actor:\n", "- student\n"] {
+                let v = vault();
+                bad_actor_file(&v, bad);
+                let target = lab(&v, "2026-10-12");
+                let before = read(&target);
+                let path = card(&v, "mail", "");
+                let error = crate::journal::read_human_actor(&v).unwrap_err().to_string();
+                let result = execute(&v);
+                assert_eq!(result.warnings, vec![format!("amend-lab-5.md: {error}")], "{bad:?}");
+                assert_eq!(field(&path, "status"), "pending", "{bad:?}");
+                assert_eq!(read(&target), before, "{bad:?}");
+                assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new(), "{bad:?}");
+                assert_eq!(trail(&v, CARD), vec![by("set", "status", "agent:approvals")], "{bad:?}");
+                // Pending again, it is counted and shown like any card the student can reject.
+                assert_eq!(execute(&v).pending, 1, "{bad:?}");
+            }
+        }
+
+        /// Spec test 31's last clause: every other amend executes exactly as today, as
+        /// `agent:approvals`, whatever `config/actor.yaml` says. Only `created_by: mail`, exactly,
+        /// is a mail card.
+        #[test]
+        fn a_non_mail_amend_executes_exactly_as_today() {
+            for created_by in ["gmail", "events", "blackboard", "agent:knowlu.enrich", "agent:knowlu.sync", "Mail", "null"] {
+                for bad in [false, true] {
+                    let v = vault();
+                    if bad {
+                        bad_actor_file(&v, "human_actor: alice\n");
+                    }
+                    let target = lab(&v, "2026-10-12");
+                    card(&v, created_by, "");
+                    let result = execute(&v);
+                    assert!(result.warnings.is_empty(), "{created_by} {bad}: {:?}", result.warnings);
+                    assert_eq!(result.executed, ["amend-lab-5"], "{created_by} {bad}");
+                    assert_eq!(field(&target, "due"), "2026-10-14", "{created_by} {bad}");
+                    assert_eq!(trail(&v, NOTE), vec![by("set", "due", "agent:approvals")], "{created_by} {bad}");
+                }
+            }
+        }
+
+        /// §4.9's last line: approving a mail **task** card materialises the task as today, as
+        /// `agent:approvals`, never as the student.
+        #[test]
+        fn an_approved_mail_task_card_materialises_as_agent_approvals() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let front = PENDING.replace("status: pending", "status: approved").replace("created_by: gmail", "created_by: mail");
+            proposal(&v, "task-study-group.md", &front, &approved_task_body());
+            let result = execute(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.executed, ["study-group"]);
+            let records = journal_records(&v);
+            let creates: Vec<_> = records.iter().filter(|r| text(r, "op") == "create").collect();
+            assert_eq!(creates.len(), 1);
+            assert_eq!(text(creates[0], "path"), "tasks/study-group.md");
+            assert!(records.iter().all(|r| text(r, "actor") == "agent:approvals"), "{records:?}");
+        }
+
+        /// P11: only the amended fields are the student's. The card's own bookkeeping (the executed
+        /// stamp and the move to `archive/`, or the status written back to pending on a refusal)
+        /// stays `agent:approvals`.
+        #[test]
+        fn the_mail_cards_own_status_bookkeeping_stays_agent_approvals() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-12");
+            card(&v, "mail", "");
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            let agent = "agent:approvals";
+            assert_eq!(trail(&v, CARD), vec![by("set", "status", agent), by("set", "executed_at", agent), by("delete", "", agent)]);
+            assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student")]);
+            // A recoverable refusal (the note moved since the card was filed): back to pending, as
+            // `agent:approvals`, and nothing written to the note.
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-13");
+            let path = card(&v, "mail", "");
+            let result = execute(&v);
+            assert_eq!(result.warnings, ["amend-lab-5.md: stale amendment: due is 2026-10-13, expected 2026-10-12"]);
+            assert_eq!(field(&path, "status"), "pending");
+            assert_eq!(trail(&v, CARD), vec![by("set", "status", agent)]);
+            assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new());
+        }
+
+        /// Plan §10 R15: a mail card never carries `append` (T6.2 writes none). One that does is
+        /// refused before anything is written, so no line is ever journalled as the student; the
+        /// refusal is recoverable, so the card goes back to pending, where the student can reject
+        /// it. An empty `append` carries no line, and the card executes as the student.
+        #[test]
+        fn a_mail_card_carrying_append_is_refused_and_writes_nothing() {
+            for append in ["\nappend:\n  - moved by the course staff", "\nappend:\n  - one\n  - two", "\nappend: a line"] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let target = lab(&v, "2026-10-12");
+                let before = read(&target);
+                let path = card(&v, "mail", append);
+                let result = execute(&v);
+                assert_eq!(result.warnings, vec![format!("amend-lab-5.md: {MAIL_APPEND_REFUSAL}")], "{append:?}");
+                assert!(is_recoverable_refusal(MAIL_APPEND_REFUSAL));
+                assert_eq!(field(&path, "status"), "pending", "{append:?}");
+                assert_eq!(read(&target), before, "{append:?}");
+                assert!(journal_records(&v).iter().all(|r| text(r, "op") != "append_body"), "{append:?}");
+                assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new(), "{append:?}");
+            }
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-12");
+            card(&v, "mail", "\nappend: []");
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student")]);
+        }
+
+        /// "HW 01", a Blackboard note whose title the student set by hand.
+        fn homework(vault: &Path) -> PathBuf {
+            let front = "id: task_00000000e3\ntitle: \"HW 01\"\ncourse: cs-101\ndue: 2026-10-12\nstatus: active\n\
+                         created_by: blackboard\nsource_uid: \"_901_1\"";
+            with_task(vault, "hw-1.md", front)
+        }
+
+        /// An amend card by `created_by` (`None`: no `created_by:` line) renaming HW 01 to `to`, a
+        /// YAML scalar as written.
+        fn rename(created_by: Option<&str>, to: &str) -> String {
+            let by = created_by.map(|c| format!("created_by: {c}\n")).unwrap_or_default();
+            format!(
+                "type: approval\nkind: amend\ntarget: tasks/hw-1.md\ntitle: HW 01 renamed\nstatus: approved\n\
+                 proposed_at: 2026-08-18\nfirst_proposed_at: 2026-08-18\nexpires: null\nsnooze_until: null\n\
+                 {by}changes:\n  title:\n    from: HW 01\n    to: {to}"
+            )
+        }
+
+        /// PQ5 (c): `title` is amendable on a card `created_by: blackboard`, the one feed that files
+        /// such a card (T8b, P12). It is written quoted, so a colon, a quote or a backslash in it
+        /// cannot corrupt the block, and the card executes as every non-mail amend does.
+        #[test]
+        fn title_is_amendable_only_on_a_blackboard_card() {
+            for (to, want) in [
+                ("HW 02", "HW 02"),
+                (r#""HW 01: Linked \"Lists\" \\ part 2""#, r#"HW 01: Linked "Lists" \ part 2"#),
+                ("'Lab #3 — recursion'", "Lab #3 — recursion"),
+            ] {
+                let v = vault();
+                let target = homework(&v);
+                let meta = yaml(&rename(Some(TITLE_CARD_CREATOR), to));
+                assert_eq!(validate_amendment(&v, &meta), Ok(resolve_lenient(&target)), "{to}");
+                proposal(&v, "amend-hw-1.md", &rename(Some(TITLE_CARD_CREATOR), to), "");
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{to}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-hw-1"], "{to}");
+                assert_eq!(field(&target, "title"), want, "{to}");
+                assert_eq!(field(&target, "due"), "2026-10-12", "{to}: every other line untouched");
+                assert_eq!(trail(&v, "tasks/hw-1.md"), vec![by("set", "title", "agent:approvals")], "{to}");
+            }
+            assert_eq!(TITLE_CARD_CREATOR, "blackboard");
+        }
+
+        /// PQ5 (c): every other card that names `title` is refused exactly as today, the mail pass's
+        /// own cards included, and a blackboard card gains no other field.
+        #[test]
+        fn a_title_amend_on_any_other_card_is_refused_exactly_as_today() {
+            let v = vault();
+            homework(&v);
+            let others = ["mail", "gmail", "events", "zybooks", "agent:knowlu.enrich", "agent:knowlu.sync", "Blackboard", "null"];
+            for created_by in others.map(Some).into_iter().chain([None]) {
+                let meta = yaml(&rename(created_by, "HW 02"));
+                assert_eq!(validate_amendment(&v, &meta), Err("field not amendable: title".to_string()), "{created_by:?}");
+            }
+            let progress = rename(Some(TITLE_CARD_CREATOR), "HW 02").replace("title:\n    from: HW 01\n    to: HW 02", "progress:\n    from: 0\n    to: 1");
+            assert_eq!(validate_amendment(&v, &yaml(&progress)), Err("field not amendable: progress".to_string()));
+            assert!(!AMENDABLE_FIELDS.contains(&"title"), "the nine stay nine");
         }
     }
 }
