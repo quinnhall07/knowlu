@@ -197,7 +197,7 @@ jobs:
   # out, and spends nothing finding that out. The spend this job CAN incur is on a branch PR in
   # this repository — whose steps below set both secrets TOGETHER, never one without the other —
   # and it is bounded even then: `run_eval.ts`'s `MAX_CASES` caps each kind's corpus at 200 rows in
-  # the query itself (C2 final review S-5), so the worst case is 600 model calls at roughly $0.0002
+  # the query itself (C2 final review S-5), so the worst case is 600 cases at up to 3 attempts each (eval hardening, 2026-10-02: a call that never answered is retried) = 1,800 model calls at roughly $0.0002
   # each on the pinned OpenRouter models (provider swap Task 4; the figure was Haiku-priced before
   # 2026-09-16) — well under a dollar — and the run prints its own case count before each kind's loop.
   eval-gate:
