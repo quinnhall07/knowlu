@@ -1,6 +1,6 @@
 -- Knowlu email forwarding (spec docs/specs/2026-09-30-email-forwarding-design.md §5.1), T1.1: the
 -- seven tables; T1.2: the kinds, the origin, the training and rules paths and the provisional pins;
--- T1.3, at the end: the two RPCs, the raised budget and the cron. All before it is applied anywhere;
+-- T1.3, at the end: the three RPCs, the raised budget and the cron. All before it is applied anywhere;
 -- nothing here edits an applied migration. Stamped after 20261002000100_refund_failed_call.sql so it
 -- still sorts last.
 --
@@ -347,7 +347,7 @@ update public.models set
   since = current_date
 where kind = 'mail_resolve';
 
--- T1.3: the two RPCs, the raised budget and the cron (spec §5.1; D17; D23 as amended 2026-10-02 by
+-- T1.3: the three RPCs, the raised budget and the cron (spec §5.1; D17; D23 as amended 2026-10-02 by
 -- PQ6 (a); plan P7).
 --
 -- Disconnect's purge of one mailbox (D17). Revoke first, so the row reads `revoked` for as long as the
@@ -412,6 +412,36 @@ end;
 $$;
 revoke execute on function public.charge_allowance(uuid) from public, anon, authenticated;
 grant execute on function public.charge_allowance(uuid) to service_role;
+
+-- One backfill judgment given back after a call the model never answered (the T1.3 review, after
+-- F1's `refund_call` in 20261002000100_refund_failed_call.sql): `charge_allowance` charges before
+-- the call, so without this a provider outage during a first backfill would spend the allowance on
+-- failed calls and leave the backfill trickling at the daily cap for its 120 days. `mail-process`
+-- (T3e) calls it on the pipeline's `model failed` outcome only; a refusal, a truncation or an answer
+-- that fails validation reached the model and stays charged. One statement: it gives back only
+-- while the allowance is open (`allowance_until` not yet passed) and never past 2,000, and it never
+-- opens, extends or re-prices one. The row lock serialises it against `charge_allowance`, and
+-- Postgres re-checks the `where` on the locked row. Request volume on a failing provider is bounded
+-- by the item's wait-and-retry in `mail-process`, and dollars by `enforce_budget`'s raised ceiling.
+create or replace function public.refund_allowance(p_account uuid)
+returns boolean
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  done boolean;
+begin
+  update public.mail_accounts set allowance_left = allowance_left + 1
+   where account_id = p_account
+     and allowance_until > now()
+     and allowance_left < 2000
+  returning true into done;
+  return coalesce(done, false);
+end;
+$$;
+revoke execute on function public.refund_allowance(uuid) from public, anon, authenticated;
+grant execute on function public.refund_allowance(uuid) to service_role;
 
 -- The budget ceiling, re-issued from 20260911000100_judgment_service.sql with one change (D23): while
 -- the account's allowance is inside its 14 days, the ceiling is the caller's `MONTHLY_CEILING_USD`

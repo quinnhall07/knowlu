@@ -161,8 +161,8 @@ Briefs cite functions and headings, never line numbers.
   - prune delivered claims at 7 days and undelivered ones at 30, counting them;
   - prune batches and canaries at 30 days.
 
-  The two RPCs (`charge_allowance`, `delete_mail_address`) are SQL. Like every RPC here, they are
-  pinned textually in `migrations_test.ts`, and their behaviour is smoke-tested on staging (T18).
+  The three RPCs (`charge_allowance`, `refund_allowance` (§9.5), `delete_mail_address`) are SQL.
+  Like every RPC here, they are pinned textually in `migrations_test.ts`, and their behaviour is smoke-tested on staging (T18).
 - **P8. Provisional pins.** T1.2 inserts `models` rows for `mail_claim` and `mail_resolve`, pinned to
   `email`'s current model, route and ZDR provider. They are marked provisional in a SQL comment.
   `mail_digest` gets a row only if T16 is built. Test 17's live check (T18a) confirms each pin, or a
@@ -1255,6 +1255,9 @@ columns, and a grep of `cloud/` finds neither old name.
   allowance (PQ6 (a)): when `allowance_opened_at` is null or 120 days or more before now, it sets
   `allowance_opened_at` to now, 2,000 judgments, $1.00 and `allowance_until` 14 days on, then
   charges; otherwise it only charges what is left, and after `allowance_until` it charges nothing.
+- `refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open` (T1.3's review, after
+  F1's `refund_call`; §9.5): one statement, one judgment back, only before `allowance_until` and
+  never above 2,000; it never opens, extends or re-prices an allowance.
 - `the_allowance_period_is_keyed_on_allowance_opened_at_and_never_on_a_mailbox`: no
   `mail_addresses` column or row enters the opening test, so a Disconnect deletes nothing it reads.
 - `enforce_budget_raises_the_ceiling_by_the_allowance_only_while_it_is_open` (D23 as amended: 2,000
@@ -1486,6 +1489,9 @@ in (P5).
 **Tests first** (spec tests 11 and 7's expiry half, plus P7's sweep):
 - `a_backfill_item_charges_the_allowance_not_the_daily_cap`
 - `the_2001st_backfill_item_waits_for_the_daily_cap`
+- `a_model_failure_on_a_backfill_item_refunds_its_allowance_judgment_and_waits_to_retry` (§9.5):
+  the pipeline's `model failed` calls `refund_allowance` and leaves the item to wait-and-retry, never
+  an immediate re-charge; a refusal, a truncation or a failed validation stays charged.
 - `charge_and_enforce_budget_run_before_the_spy_model`
 - `a_capped_item_makes_no_model_call_and_waits_to_the_next_utc_day_at_most_three_times`
 - `allowance_calls_add_tokens_to_usage_daily_but_no_calls`
@@ -2360,6 +2366,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | PQ2's interop corpus. The progress ledger says the raw S0 copies are kept for the check, but `s0-captures.md` says local copies were deleted. | The check needs the raw copies; the header facts alone verify nothing. | T2d; Checkpoint B | **open (controller):** confirm before T2d, and re-capture cases 1, 3, 4 and 6 if the copies are gone |
 | Checkpoint A passed. T8c's two arms are keyed on the card's `created_by: mail`, so arm (1) fills any dateless task, hand-made too, and never checks the target's `created_by`. | Quinn confirmed the plan's reading at Checkpoint A. The re-read covered both fix rounds through `4194817` (`fa980a1` and `4194817` added to the list). | T8c, T5.5; Checkpoint A's report | **Answered 2026-10-02 (Quinn)** |
 | PQ6 (a). The allowance is per account per 120-day period on `mail_accounts.allowance_opened_at`. T1.1 was built before the answer with `allowance_term_start` and `term_start`; T1.3 renames them to `allowance_opened_at` (`timestamptz`) and `backfill_since` in the still-unapplied `20261002000200_mail.sql`, and updates `the_mail_tables_have_section_5_1s_columns_and_words`. `term_start` is renamed, not dropped: T4.2 and T10.1 read the window start, and T15.1 shows it. The opening rule sits in `charge_allowance`'s one statement, so the period opens at the first backfill charge, not at the batch route. | Quinn, 2026-10-02, amending decision 8 and D23 (markers at decision 8, D23 and §5.1). Renaming in the unapplied file keeps one mail migration; nothing is applied until T18. Opening in the charge keeps T4.2 unchanged; the two moments differ by minutes. | T1.3, T3e; the renamed column test, T1.3's and T3e's allowance tests | **Answered 2026-10-02 (Quinn)**; the column and opening details are the plan's |
+| The allowance refund (T1.3's review, 2026-10-02). `refund_allowance(p_account)` is added to the still-unapplied `20261002000200_mail.sql`: one `update` of `mail_accounts` that gives one judgment back only while `allowance_until > now()` and never above 2,000, service-role only, and never opens, extends or re-prices an allowance. T3e calls it on `model failed` alone (F1's rule: a refusal, a truncation or a failed validation reached the model and stays charged) and routes the item through wait-and-retry. Chosen over "a failed backfill item is never counted" because charge-before-call is the hot-loop guard and stays, as F1 kept it for `charge_call`. Unlike `refund_call`, refunds are not counted: the caller is the server's cron worker, so request volume is bounded by the item's retry schedule, and dollars by `enforce_budget`'s raised ceiling. Spec §5.1's RPC list names two; this third is the plan's. | `charge_allowance` charges before the call, as `charge_call` did before F1 (main's `20261002000100_refund_failed_call.sql`, PR #33). A first backfill during a provider outage would spend 2,000 judgments in seconds on calls the model never answered, then trickle at the daily cap for the 120-day period: D23's failure. | T1.3, T3e; `refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open`, `a_model_failure_on_a_backfill_item_refunds_…`. The function-count pin is 36 here; merging main (PR #33's `refund_call`) moves it to 37, not 36. | recorded, for the planner; T3e must not build past it |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
 
 ## 10. Review revisions (2026-09-30)

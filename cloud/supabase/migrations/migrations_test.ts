@@ -324,8 +324,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // re-issues in <stamp>_mail.sql (`export_training_rows`, non-writing; `backfill_correction_judgments`
   // and `promote_rules`, writing, each revoked from `public, anon, authenticated` again in that file),
   // plus T1.3's three in the same file (`delete_mail_address`, SECURITY DEFINER; `charge_allowance`
-  // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`).
-  assertEquals(parsed, 35, "today's corpus should parse exactly 35 function creations");
+  // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
+  // plus the T1.3 review's `refund_allowance` (writing, revoked the same way; main's F1 `refund_call`
+  // arrives with the merge of PR #33 and moves this to 37).
+  assertEquals(parsed, 36, "today's corpus should parse exactly 36 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -1459,10 +1461,39 @@ Deno.test("charge_allowance_is_one_statement_like_charge_call", async () => {
   assert(f.body.includes("return coalesce(charged, false);"), `${f.name}: no row written answers false`);
 });
 
+Deno.test("refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open", async () => {
+  // Review of T1.3, after F1 (20261002000100_refund_failed_call.sql): `charge_allowance` charges
+  // before the call, so without a refund a provider outage during a first backfill would spend the
+  // whole allowance on calls the model never answered, and the backfill would trickle at the daily
+  // cap for 120 days: the outcome D23 exists to prevent.
+  const f = await mailFunction("refund_allowance");
+  assert(/refund_allowance\s*\(\s*p_account uuid\s*\)/.test(f.header), `${f.name}: refund_allowance(p_account uuid)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers refunded or not, as refund_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_allowance`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "refund_allowance", "uuid");
+  // One guarded statement: concurrent refunds and charges serialise on the row, and the `where` is
+  // re-checked on the locked row, so the allowance never passes 2,000.
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(
+    f.body.includes(
+      "update public.mail_accounts set allowance_left = allowance_left + 1 " +
+        "where account_id = p_account and allowance_until > now() and allowance_left < 2000",
+    ),
+    `${f.name}: one judgment back, only inside allowance_until and never above 2,000`,
+  );
+  // It never opens, extends or re-prices an allowance: only `allowance_left` is set.
+  assert(!/allowance_opened_at|allowance_usd|allowance_until =|case when/.test(f.body), `${f.name}: sets nothing else`);
+  assert(f.body.includes("returning true into done;"), `${f.name}: refunded only when the row was written`);
+  assert(f.body.includes("return coalesce(done, false);"), `${f.name}: no row written answers false`);
+});
+
 Deno.test("the_allowance_period_is_keyed_on_allowance_opened_at_and_never_on_a_mailbox", async () => {
   const charge = await mailFunction("charge_allowance");
   const budget = await mailFunction("enforce_budget");
-  for (const f of [charge, budget]) {
+  const refund = await mailFunction("refund_allowance");
+  for (const f of [charge, budget, refund]) {
     assert(!/mail_addresses|mail_batches|backfill_since|address/.test(f.body), `${f.name}: reads no mailbox`);
   }
   assert(charge.body.includes(OPENS), `${charge.name}: the period opens on allowance_opened_at alone`);
