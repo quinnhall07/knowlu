@@ -186,8 +186,26 @@ only. `m1-grades` is pushed with no PR.
 **Merged 2026-10-01 (facts from `git log origin/main` and the ultracode run ledger):** #28 (the docs-only
 CI fix: docs go by PR again), #29 (the grades policy-read gate suspended until 20 paying users, A13), #30
 (docs) and #31 (events, MVP). The MVP lanes now on `main`: Gmail connect, M2 editing, events and grades.
-The remaining MVP lane is email forwarding to Knowlu (item 2a below). Quinn's live proofs still open:
-Gmail T13, M2 T10, events T10 and grades.
+The remaining MVP lane is email forwarding to Knowlu (item 2a below).
+
+**Proven 2026-10-02 (live proofs on a dev build of `main` `376e8ba`, scratch profile, proof account,
+staging; facts from the run ledger; each row closed by Quinn's word 2026-10-02):**
+- **Gmail connect** (T13): all seven checks passed (no Gmail step in onboarding, Connect, a slot that
+  proposed 11 cards, approve, revoke at Google then Reconnect, two-step Disconnect with grants 0, queue
+  and seen sets 0, cleanup). Two findings, both fixed on branch `proof-fixes` (not yet on `main`): the
+  consent poll stopped before a ~3 minute consent finished (`49debd0`, `b167e73`), and the deck card
+  did not show its Gmail attribution, D15 (`0aad6d5`).
+- **M2 editing** (T10): all six checks passed (body edit and Undo, conflict refusal with the draft kept,
+  preferences, interests, sync carries no `profile/` records, Not shown 34).
+- **Events** (T10): passed with recorded gaps. No obligation card appeared in the feed, no carried
+  series date existed (every date was card-listed), and no accepted all-day date fell on the proof day;
+  the T4, T4c, T4d and T7 tests stand for those. Findings: failed model calls were charged to the
+  120-a-day judgment cap (fixed on `proof-fixes`, `65c5e43`), and the UA preset asked "Blackboard or
+  Canvas?" in the wizard (fixed on `proof-fixes`, `f680445`).
+- **Grades** (A13, through the suspended gate): connect, capture, refresh (2 courses, 12 changed items),
+  silent refresh and forget passed. Not run: an uncurated school's "not available" check (it needs a
+  second onboarding). A scheduled slot's capture was not observed (run-slot-once cannot reach the kept
+  session), and two courses answered 403.
 
 **Left** (each merge or deploy on Quinn's word at the time, asked in one line with the evidence):
 1. **The Credential Manager flake** (worktree `fix-credman-flake`). `app/src/account.rs`'s
@@ -402,6 +420,7 @@ a spend is asked at the time.
 | MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; The proof runs in the Blackboard sign-in window on a dev build of `main` and waits on no policy read (A13; §3's MVP lane 1). |
 | Review | **A13's review at the 20th paying account** | Ruling 12's policy-read gate is suspended until then (A13); the controller checks a count-only query at each milestone and asks. "Record UA's university-policy read" has left the MVP queue. |
 | MVP | **Mark each P6 item do or cut** | The four items are in §3's MVP lane 5, sized as a list first. |
+| MVP | **Roll staging's `OPENROUTER_API_KEY`** | Staging's secret holds Quinn's temporary key (set 2026-10-02, after the old key of 09-16 proved dead and every event judgment failed). When that key is rolled, update staging again, and the GitHub secret the eval gate reads too if it is still the old key. |
 | MVP | **Say "MVP reached"** | Once the parity audit re-run shows no open row and the grades proof has passed. |
 | Pilot entry | **The pilot's shape** | Ruling 10: the number of students and their universities, the length, a measure from VISION's successes 1, 2, 5 and 6, and whether pilot students pay (if they do, the lawyer gate moves from Launch to Pilot entry). Also the Pilot's and Launch's exits, which ruling 10 leaves unnamed (§3). |
 | Pilot, before parity | **Roll the prod database password and the Resend key** (both pasted in chat on 2026-09-14; moved here from "before launch", because non-founder accounts start in the Pilot) | Database: reset at `https://supabase.com/dashboard/project/jxthohvwrijwtuwlglan/settings/database`; nothing else references it. Resend: create the new key, then on **both** projects `supabase secrets set EMAIL_API_KEY=… SMTP_PASSWORD=… --project-ref <ref>` and `$env:SMTP_PASSWORD=…; supabase config push --workdir cloud` while linked to each (`link --project-ref <ref> --password ""`), **then** delete the old key — the other order breaks sign-in mail. `BILLING_JOBS_TOKEN` and `SOURCES_ENC_KEY` on prod were generated on this machine and never shown; they need no roll. |
