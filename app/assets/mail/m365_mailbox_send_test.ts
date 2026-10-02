@@ -151,6 +151,19 @@ Deno.test("m365_sent_cleanup_keeps_a_nonce_copy_to_another_recipient_and_a_knowl
   assertEquals((await run("m365/sent_cleanup.js", both.page, { address: OURS, nonce: NONCE })).deleted, 0);
 });
 
+Deno.test("m365_sent_cleanup_rechecks_the_row_before_each_delete_when_the_list_reuses_a_node", async () => {
+  // After c1 goes, the page reuses c2's node to draw the student's own "Lunch on Friday" (k3).
+  const box = mailbox([
+    COPY("c1", OURS, `Knowlu ${NONCE}`),
+    COPY("c2", OURS, `Knowlu ${NONCE}`),
+    COPY("k3", OURS, "Lunch on Friday"),
+  ], { folder: "Sent Items", recycle: { node: "c2", as: "k3" } });
+  const r = await run("m365/sent_cleanup.js", box.page, { address: OURS, nonce: NONCE });
+  assertEquals(r, { result: "ok", deleted: 1 });
+  assertEquals(box.deleted, ["c1"]);
+  assert(box.msgs.some((m) => m.id === "k3"), "the student's own mail survives");
+});
+
 Deno.test("m365_sent_cleanup_never_runs_outside_sent_items_and_refuses_a_bad_nonce", async () => {
   // The Inbox holds a message that looks like one of ours (a reply quoting the nonce, from Knowlu's address).
   const inbox = mailbox([msg("r1", OURS, `Re: Knowlu ${NONCE}`, 4)]);

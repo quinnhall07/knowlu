@@ -41,6 +41,8 @@ export interface Opts {
   bare?: boolean;
   /** The page never answers the search. */
   deaf?: boolean;
+  /** After the first Delete the list is virtualised again: the node that drew `node` is reused to draw `as`. */
+  recycle?: { node: string; as: string };
 }
 
 export interface Sent {
@@ -135,6 +137,18 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     b.msgs = b.msgs.filter((m) => m.id !== selected);
     b.el(`r-${selected}`)?.remove();
     selected = null;
+    const re = o.recycle;
+    const node = re && b.el(`r-${re.node}`);
+    const as = re && b.msgs.find((m) => m.id === re.as);
+    if (node && as) {
+      // The same DOM node now shows another message; the row that drew it before leaves the list.
+      b.el(`r-${as.id}`)?.remove();
+      node.setAttribute("id", `r-${as.id}`);
+      const [who, subject, at] = [...node.querySelectorAll("[title]")];
+      who.setAttribute("title", as.who);
+      subject.setAttribute("title", as.subject);
+      at.setAttribute("title", as.at);
+    }
   });
   b.el("fwd").addEventListener("click", () => {
     if (!selected) return;

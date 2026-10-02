@@ -11,7 +11,7 @@
 // and its recipients are exactly Knowlu's address, with no one else. A copy with the nonce to someone
 // else, a copy to Knowlu without the nonce, a copy to Knowlu and to someone else, and every other item
 // stay. It does nothing at all unless the selected folder is Sent Items, and before each Delete it
-// checks the one row selected is the row it means.
+// checks the one row selected is the row it means, and that the row still shows one of ours.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -80,6 +80,8 @@ for (const row of mine) {
     row.getAttribute("aria-selected") === "true" &&
     document.querySelectorAll('[role="option"][aria-selected="true"]').length === 1;
   if (!(await until(picked, waitMs))) return { result: "failed", reason: "row not selected", deleted };
+  // The list is virtualised: the node may now draw another message, so it is read again before the Delete.
+  if (!ours(row)) continue;
   if (!del()) return { result: "not found", control: "delete" };
   del().click();
   if (!(await until(() => !document.contains(row), waitMs))) {
