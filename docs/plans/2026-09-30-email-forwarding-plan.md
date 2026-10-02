@@ -941,7 +941,14 @@ for `two-desktop`, which edits `approvals.rs` (§10, R2). **Reviewed at:** Check
   unrecoverable, `target outside tasks/courses`.
 - `an_unarchive_interrupted_between_its_writes_completes_or_stays_pending`: a failure injected
   between the steps either leaves the card pending with the note unchanged, or a re-run finishes
-  it. A card never settles while its note is half moved.
+  it, at the suffixed path too when the plain one was taken. A card never settles while its note is
+  half moved.
+- `an_unarchived_task_can_still_be_proposed_done` (Checkpoint A): after an un-archive,
+  `Journal::human_set(id, "status")` is empty and `completion::propose_done` on the moved task
+  proposes, never `Skipped("status set by hand")`.
+- `a_repeated_title_unarchives_to_the_first_free_suffixed_path` (Checkpoint A): with
+  `tasks/lab-5.md` (and `-2`) taken, the note moves to the first free suffix, the notes already
+  there are untouched, and the card settles.
 - `amendable_fields_is_exactly_the_nine` and the `AMENDABLE_FOLDERS` pin (`["tasks", "courses"]`)
   pass unchanged.
 
@@ -954,8 +961,17 @@ for `two-desktop`, which edits `approvals.rs` (§10, R2). **Reviewed at:** Check
   `resolve_amend_target` and `AMENDABLE_FOLDERS` are unchanged; the arm sits beside them, as PQ5's
   title arm sits beside `AMENDABLE_FIELDS`.
 - "Future" is the rule T5.3's `imported-past` uses: a due on or after the approval day. The note's
-  writes are the student's, under T8's actor (`journal::read_human_actor`, with the executor's `via`
-  and run id).
+  move and its `due` are the student's, under T8's actor (`journal::read_human_actor`, with the
+  executor's `via` and run id).
+- **Ruled 2026-10-02 (Quinn): status/archived_reason as agent:approvals.** An un-archive writes
+  `status: active` and `archived_reason: null` with the executor's own ctx (`agent:approvals`), not
+  the student's, so `Journal::human_set(id, "status")` stays empty and `completion::propose_done`
+  can still propose the task done. The due is written first, then those two, so a failure between
+  them leaves the note `archived` (it never ranks) and the next run finishes it.
+- **Free suffixed path (Checkpoint A).** Ingest names `archive/` and `tasks/` apart, so a repeated
+  title can sit in both. The note moves to the first free `tasks/<stem>[-N].md`, ingest's own suffix
+  loop, chosen before the move; a taken path is never a refusal. An interrupted run is finished at
+  the move record's new path.
 - The card's own bookkeeping stays `agent:approvals`. `write.rs` is used, never edited.
 
 ### Checkpoint A. Contract review of T5.1–T5.5, T8, T8b and T8c

@@ -889,7 +889,9 @@ pub fn apply_amendment(
 /// whose new due is on or after `today`, the approval day, takes the note out of `archive/`
 /// ([`unarchive`]); an earlier due is set in place by `apply_amendment`, and the note stays
 /// archived. A card whose `archive/` note an interrupted un-archive already moved is finished at the
-/// note's new path ([`unarchived_note`]).
+/// note's new path ([`unarchived_note`]). The un-archive's `due` is the student's, but its `status`
+/// and `archived_reason` are the executor's own (`ctx`, Quinn 2026-10-02), so completion detection
+/// may still propose the task done.
 fn apply_mail_amendment(
     vault: &Path,
     meta: &Mapping,
@@ -900,20 +902,20 @@ fn apply_mail_amendment(
     if crate::yaml::get(meta, "append").is_some_and(is_truthy) {
         return Ok(Some(MAIL_APPEND_REFUSAL.to_string()));
     }
-    let ctx = match crate::journal::read_human_actor(vault) {
+    let human = match crate::journal::read_human_actor(vault) {
         Ok(human) => ctx.with_actor(human),
         Err(refusal) => return Ok(Some(refusal.to_string())),
     };
     if imported_past_target(vault, meta).is_some() {
         if card_due(meta).is_some_and(|due| due >= today) {
-            return unarchive(vault, meta, &ctx, journal);
+            return unarchive(vault, meta, &human, ctx, journal);
         }
     } else if let Some(moved) = unarchived_note(vault, meta, journal) {
         let mut retargeted = meta.clone();
         retargeted.insert(Value::String("target".to_string()), Value::String(rel_path(vault, &moved)));
-        return unarchive(vault, &retargeted, &ctx, journal);
+        return unarchive(vault, &retargeted, &human, ctx, journal);
     }
-    apply_amendment(vault, meta, &ctx, journal)
+    apply_amendment(vault, meta, &human, journal)
 }
 
 /// The day of the card's new `due`, or `None` when it has none the engine can read.
@@ -926,22 +928,28 @@ fn card_due(meta: &Mapping) -> Option<Date> {
 /// the note an interrupted run already moved (`meta` then names its path in `tasks/`).
 ///
 /// The card must pass [`validate_amendment`], and the note must hold the card's `from` or already its
-/// `to`, read as [`apply_amendment`]'s stale check reads them. Every note write is the student's
-/// (`ctx`, T8's actor); the card's own stamp is the caller's, after this returns `Ok(None)`.
+/// `to`, read as [`apply_amendment`]'s stale check reads them. The move and the `due` are the
+/// student's (`human`, T8's actor). `status: active` and `archived_reason: null` are the executor's
+/// (`executor`, Quinn 2026-10-02): taking a note out of `archive/` is the un-archive's bookkeeping,
+/// not the student's position on `status`, so `Journal::human_set` finds none and
+/// `completion::propose_done` may still propose the task done. The card's own stamp is the
+/// caller's, after this returns `Ok(None)`.
 ///
-/// **The order of writes.** Whatever could refuse the write after the move is checked before it
+/// **The order of writes.** Whatever could refuse the writes after the move is checked before it
 /// ([`unarchive_problem`]); a refusal there writes nothing, and the card goes back to pending. Then
-/// `write::move_note` takes the note to `tasks/<name>`, and one frontmatter write there sets the new
-/// `due`, `status: active` and `archived_reason: null`, each journal first. A failure before the move
-/// leaves the note as it was. A failure between the two leaves it in `tasks/` still `archived` and
-/// `imported-past`, so it never ranks half done, with the card unsettled; the next run finds it
-/// through the move record ([`unarchived_note`]) and makes the write. There, `status` and
-/// `archived_reason` are written only while the note is still `archived` `imported-past`, so a note
-/// finished since is never set active again.
+/// `write::move_note` takes the note to the first free `tasks/<stem>[-N].md` ([`free_task_path`]),
+/// and two frontmatter writes there set the new `due`, then `status: active` and
+/// `archived_reason: null`, each journal first. A failure before the move leaves the note as it
+/// was. A failure after it and before the status write leaves the note in `tasks/` still `archived`
+/// and `imported-past`, so it never ranks half done, with the card unsettled; the next run finds it
+/// through the move record ([`unarchived_note`]) and makes the writes, a `due` already set being
+/// no write. There, `status` and `archived_reason` are written only while the note is still
+/// `archived` `imported-past`, so a note finished since is never set active again.
 fn unarchive(
     vault: &Path,
     meta: &Mapping,
-    ctx: &WriteContext,
+    human: &WriteContext,
+    executor: &WriteContext,
     journal: &mut Journal,
 ) -> Result<Option<String>, WriteError> {
     let target = match validate_amendment(vault, meta) {
@@ -962,32 +970,46 @@ fn unarchive(
     if comparable("due", held) != comparable("due", Some(to)) && comparable("due", held) != comparable("due", from) {
         return Ok(Some(format!("stale amendment: due is {}, expected {}", inline_opt(held), inline_opt(from))));
     }
-    let mut literals = vec![("due".to_string(), frontmatter_literal("due", to))];
+    let due = [("due".to_string(), frontmatter_literal("due", to))];
+    let mut bookkeeping = Vec::new();
     if str_field(&current, "status") == "archived" && str_field(&current, "archived_reason") == IMPORTED_PAST {
         let active = frontmatter_literal("status", &Value::String("active".to_string()));
-        literals.push(("status".to_string(), active));
-        literals.push(("archived_reason".to_string(), "null".to_string()));
+        bookkeeping.push(("status".to_string(), active));
+        bookkeeping.push(("archived_reason".to_string(), "null".to_string()));
     }
     let mut rel = rel_path(vault, &target);
     if archive_contains(vault, &target) {
-        let dest = format!("tasks/{}", name_of(&target));
-        if let Some(problem) = unarchive_problem(vault, &target, &text, to, &dest) {
+        if let Some(problem) = unarchive_problem(&target, &text, to) {
             return Ok(Some(problem));
         }
-        move_note(vault, &rel, &dest, ctx, journal)?;
+        let dest = free_task_path(vault, &stem_of(&target));
+        move_note(vault, &rel, &dest, human, journal)?;
         rel = dest;
     }
-    write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+    write_literals(vault, &rel, &due, human, journal, &WriteOpts::default())?;
+    if !bookkeeping.is_empty() {
+        write_literals(vault, &rel, &bookkeeping, executor, journal, &WriteOpts::default())?;
+    }
     Ok(None)
 }
 
-/// What would refuse the un-archive's write once the note had moved, checked before the move: the
-/// destination already taken, a `judgment:` block the writer will not edit around, or a write of the
-/// three fields that would not read back ([`write_problem`]). `None` when the move may go ahead.
-fn unarchive_problem(vault: &Path, target: &Path, text: &str, to: &Value, dest: &str) -> Option<String> {
-    if vault.join(dest).exists() {
-        return Some(format!("{dest} already exists, so the note cannot leave archive/"));
+/// The first free `tasks/<stem>.md`, then `tasks/<stem>-2.md`, `-3` and on: the suffix loop
+/// `ingest::sync_tasks` names a new note with. Ingest names `archive/` and `tasks/` apart, so one
+/// title can sit in both, and an un-archive never waits on a path the student cannot free.
+fn free_task_path(vault: &Path, stem: &str) -> String {
+    let mut dest = format!("tasks/{stem}.md");
+    let mut suffix = 2;
+    while vault.join(&dest).exists() {
+        dest = format!("tasks/{stem}-{suffix}.md");
+        suffix += 1;
     }
+    dest
+}
+
+/// What would refuse the un-archive's writes once the note had moved, checked before the move: a
+/// `judgment:` block the writer will not edit around, or a write of the three fields that would not
+/// read back ([`write_problem`]). `None` when the move may go ahead.
+fn unarchive_problem(target: &Path, text: &str, to: &Value) -> Option<String> {
     if let Err(problem) = crate::provenance::guard_block_style(text) {
         return Some(problem.to_string());
     }
@@ -6603,10 +6625,15 @@ mod tests {
             assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new());
         }
 
-        /// Lab 5 un-archived: in `tasks/`, `status: active`, the card's `due`, `archived_reason: null`,
-        /// its body kept, and the card executed and settled.
+        /// Lab 5 un-archived to [`NOTE`]: see [`unarchived_at`].
         fn unarchived(vault: &Path, due: &str) {
-            let note = vault.join(NOTE);
+            unarchived_at(vault, NOTE, due);
+        }
+
+        /// Lab 5 un-archived to `rel`: in `tasks/`, `status: active`, the card's `due`,
+        /// `archived_reason: null`, its body kept, and the card executed and settled.
+        fn unarchived_at(vault: &Path, rel: &str, due: &str) {
+            let note = vault.join(rel);
             assert!(!vault.join(ARCHIVED).exists(), "the note has left archive/");
             let fields = ["status", "due", "archived_reason"].map(|key| field(&note, key));
             assert_eq!(fields, ["active", due, "None"]);
@@ -6618,8 +6645,10 @@ mod tests {
 
         /// F3 (b) arm (2): a mail card giving an `imported-past` note a due on or after the approval day
         /// (TODAY, 2026-08-20, at any hour, as T5.3 reads past) moves it to `tasks/` through
-        /// `write::move_note`, then writes the due, `status: active` and `archived_reason: null` there,
-        /// all as the student. The card's own bookkeeping stays `agent:approvals`.
+        /// `write::move_note`, then writes the due there as the student, and `status: active` and
+        /// `archived_reason: null` as the executor (Quinn 2026-10-02: the un-archive's bookkeeping is
+        /// never the student's position on `status`). The card's own bookkeeping stays
+        /// `agent:approvals`.
         #[test]
         fn approving_a_future_due_for_an_imported_past_mail_note_unarchives_it() {
             for to in ["2026-09-01", "2026-08-20", "2026-08-20T09:00"] {
@@ -6635,13 +6664,66 @@ mod tests {
                 assert_eq!(result.executed, ["amend-lab-5"], "{to}");
                 unarchived(&v, to);
                 assert_eq!(trail(&v, ARCHIVED), vec![by("move", "", "student")], "{to}");
-                let student = |field| by("set", field, "student");
-                assert_eq!(trail(&v, NOTE), vec![student("due"), student("status"), student("archived_reason")], "{to}");
                 let agent = "agent:approvals";
-                let bookkeeping = vec![by("set", "status", agent), by("set", "executed_at", agent), by("delete", "", agent)];
+                let set = |field| by("set", field, agent);
+                assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student"), set("status"), set("archived_reason")], "{to}");
+                let bookkeeping = vec![set("status"), set("executed_at"), by("delete", "", agent)];
                 assert_eq!(trail(&v, CARD), bookkeeping, "{to}");
                 let set = Journal::new(&v).human_set(TASK_ID, "due").map(|r| text(&r, "new"));
                 assert_eq!(set.as_deref(), Some(to), "{to}: judge once sees the student's date");
+            }
+        }
+
+        /// Quinn 2026-10-02 (Checkpoint A): only the un-archive's due is the student's, so
+        /// `Journal::human_set` finds no student `status` on the moved task, and completion detection
+        /// may still propose it done. Written as the student, it was skipped `status set by hand`.
+        #[test]
+        fn an_unarchived_task_can_still_be_proposed_done() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            archived_lab(&v, IMPORTED);
+            amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived(&v, "2026-09-01");
+            let mut journal = Journal::new(&v);
+            assert!(journal.human_set(TASK_ID, "status").is_none(), "the student never set status");
+            assert!(journal.human_set(TASK_ID, "due").is_some(), "the due stays the student's");
+            let evidence = crate::completion::Evidence {
+                source: "zybooks".to_string(),
+                summary: "zyBooks reports 10 of 10 points earned (100%)".to_string(),
+                detail: serde_json::Map::new(),
+            };
+            let ctx = executor().with_actor(crate::completion::ACTOR);
+            let task = Path::new(NOTE);
+            let outcome = crate::completion::propose_done(&v, task, &evidence, TODAY, &ctx, &mut journal, false, None);
+            assert!(matches!(outcome, Ok(crate::completion::Outcome::Proposed(_))), "{outcome:?}");
+        }
+
+        /// Checkpoint A: ingest names `archive/` and `tasks/` apart, so one title can sit in both
+        /// (`archive/lab-5.md` beside `tasks/lab-5.md`). The un-archive takes the first free
+        /// `tasks/<stem>[-N].md`, ingest's own suffix loop, rather than leave the card pending for
+        /// good; the notes already there are untouched, and the move record names the new path.
+        #[test]
+        fn a_repeated_title_unarchives_to_the_first_free_suffixed_path() {
+            for (taken, free) in [(&["lab-5.md"][..], "tasks/lab-5-2.md"), (&["lab-5.md", "lab-5-2.md"][..], "tasks/lab-5-3.md")] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                archived_lab(&v, IMPORTED);
+                let others: Vec<(PathBuf, String)> = taken
+                    .iter()
+                    .map(|name| with_task(&v, name, "title: Another Lab 5"))
+                    .map(|path| (path.clone(), read(&path)))
+                    .collect();
+                amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{free}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{free}");
+                unarchived_at(&v, free, "2026-09-01");
+                for (path, before) in others {
+                    assert_eq!(read(&path), before, "{free}: {}", path.display());
+                }
+                let moves: Vec<String> = journal_records(&v).iter().filter(|r| text(r, "op") == "move").map(|r| text(r, "new")).collect();
+                assert_eq!(moves, [free], "{free}");
             }
         }
 
@@ -6708,11 +6790,11 @@ mod tests {
         }
 
         /// Plan T8c: a failure between the un-archive's steps never settles the card while its note is
-        /// half moved. A destination already taken refuses before anything is written (back to pending,
-        /// the note unchanged). A failed move leaves the note as it was. A failed write after the move
-        /// leaves the note in `tasks/` still `archived` (it never ranks half done), and the next run finds
-        /// it through the journal's move record and finishes. A failed stamp after both leaves the card
-        /// approved, and the next run stamps it, writing nothing more to the note.
+        /// half moved. A failed move leaves the note as it was. A failed write after the move leaves the
+        /// note in `tasks/` still `archived` (it never ranks half done), and the next run finds it
+        /// through the journal's move record and finishes, at a suffixed path too when the plain one
+        /// was taken (Checkpoint A). A failed stamp after both leaves the card approved, and the next
+        /// run stamps it, writing nothing more to the note.
         #[test]
         fn an_unarchive_interrupted_between_its_writes_completes_or_stays_pending() {
             let failed = vec!["transition failed: amend-lab-5.md".to_string()];
@@ -6725,13 +6807,17 @@ mod tests {
             };
 
             let (v, archived, card) = setup();
-            let before = read(&archived);
-            with_task(&v, "lab-5.md", "title: Another Lab 5");
-            let taken = "amend-lab-5.md: tasks/lab-5.md already exists, so the note cannot leave archive/";
-            assert_eq!(execute(&v).warnings, [taken]);
-            assert_eq!(field(&card, "status"), "pending");
-            assert_eq!(read(&archived), before);
-            assert_eq!(trail(&v, ARCHIVED), Vec::<[String; 5]>::new());
+            let other = with_task(&v, "lab-5.md", "title: Another Lab 5");
+            let before = read(&other);
+            let suffixed = "tasks/lab-5-2.md";
+            set_readonly(&archived, true);
+            assert_eq!(execute(&v).warnings, failed, "the write after the move to {suffixed} fails");
+            assert_eq!(field(&v.join(suffixed), "status"), "archived", "half moved, it never ranks");
+            assert_eq!(field(&card, "status"), "approved", "never settled while half moved");
+            set_readonly(&v.join(suffixed), false);
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived_at(&v, suffixed, "2026-09-01");
+            assert_eq!(read(&other), before, "the note already at tasks/lab-5.md is untouched");
 
             let (v, archived, card) = setup();
             let before = read(&archived);
