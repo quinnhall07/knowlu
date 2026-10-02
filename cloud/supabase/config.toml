@@ -156,3 +156,6 @@ verify_jwt = false
 verify_jwt = false
 [functions.mail]
 verify_jwt = false
+# The hourly cron sends no bearer: `mail-canary` is authenticated by its `x-knowlu-job-token`.
+[functions.mail-canary]
+verify_jwt = false
