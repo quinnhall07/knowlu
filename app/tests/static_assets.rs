@@ -511,6 +511,9 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
     // command; the page holds ten rows.
     assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
+    // A curated school's LMS kind comes in the hit (`r[4]`) and is the pick's answer, so the chooser is
+    // for an uncurated school only (live proof 2026-10-02). The page names no school.
+    assert!(js.contains("lms: r[4] || \"\""), "pickSchool takes the curated LMS kind from the hit");
     // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
     // personal one is what makes today's page know the day is already half full.
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");

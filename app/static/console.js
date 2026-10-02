@@ -3397,7 +3397,7 @@
 
   function renderSchoolHits(hits) {
     EL("wiz-school-hits").innerHTML = hits.map(function (r, i) {
-      // [unitid, name, city, state]
+      // [unitid, name, city, state, lms]
       return '<div class="hit" data-school="' + i + '" tabindex="0">' + h(r[1]) +
              '<span class="meta"> &middot; ' + h(r[2]) + ", " + h(r[3]) + "</span></div>";
     }).join("");
@@ -3405,7 +3405,9 @@
   }
 
   function pickSchool(r) {
-    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: "" };
+    // r[4] is the curated LMS kind, "" for an uncurated school: a curated school is never asked.
+    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: r[4] || "" };
+    EL("wiz-lms-kind").hidden = true;
     EL("wiz-school").value = r[1];
     EL("wiz-school-hits").innerHTML = "";
     EL("wiz-school-free").hidden = true;
