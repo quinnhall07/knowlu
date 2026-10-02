@@ -65,9 +65,11 @@ pub const CAMPUSES: [Curated; 2] = [
         lms_host: "uk.instructure.com",
         lms_kind: "canvas",
         policy_read: None,
-        // MX of the school's domain names `mail.protection.outlook.com` (read 2026-10-02).
-        mail_provider: "m365",
-        mail_domain: Some("uky.edu"),
+        // `other` with no domain, per the plan's T14: an MX record shows who hosts the mail, not that
+        // the school allows outside forwarding. Kentucky's student takes the MX-lookup path until Quinn
+        // confirms a row (one edit here).
+        mail_provider: "other",
+        mail_domain: None,
     },
 ];
 

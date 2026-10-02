@@ -1009,3 +1009,14 @@ fn a_mail_domain_is_set_only_for_m365_or_google() {
         }
     }
 }
+
+/// The plan's T14 text: UA is the one proof school (m365, `crimson.ua.edu`), and Kentucky's row is
+/// `other` with no domain until Quinn confirms otherwise, so its student takes the MX-lookup path.
+#[test]
+fn the_curated_mail_rows_are_the_plans_ua_proof_school_and_an_other_kentucky() {
+    use knowlu::scaffold::curated;
+    let ua = curated("100751").expect("UA");
+    assert_eq!((ua.mail_provider, ua.mail_domain), ("m365", Some("crimson.ua.edu")));
+    let uk = curated("157085").expect("Kentucky");
+    assert_eq!((uk.mail_provider, uk.mail_domain), ("other", None));
+}
