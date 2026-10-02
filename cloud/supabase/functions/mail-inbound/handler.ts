@@ -30,6 +30,8 @@
  *    concurrent delivery won, and the put is taken back out); then `last_received_at` for a live item.
  *    The `inbound/` object is deleted last, and the answer is 200. A failed put or row write answers 500
  *    with no row written and the `inbound/` object left, so SNS's retry is processed as new.
+ *    A delivery that queued new work then kicks `mail-process` once (D8, T3d): fire-and-forget, bounded in
+ *    time, and a failed kick is one fixed line; the every-minute cron is the backstop.
  *
  * **Privacy:** every log line is a fixed phrase. No address, token, key, header value, subject, body or
  * object key is logged, put in an error or answered; a store or S3 failure is logged by its kind only.
@@ -135,6 +137,44 @@ export interface InboundDeps {
   workKey?(): string;
   /** The fetch Gmail's confirmation page is read and posted with (`confirm.ts`). */
   confirmFetch: ConfirmFetch;
+  /** D8's kick: after a delivery that queued new work, one POST to `mail-process`. Absent, the cron alone
+   * starts it. */
+  kick?: Kick;
+}
+
+/** Where and how intake kicks `mail-process` (D8; plan T3d). */
+export interface Kick {
+  /** `mail-process`'s URL, from `SUPABASE_URL`. */
+  url: string;
+  /** `MAIL_JOBS_TOKEN`, sent as `x-knowlu-job-token`, as the cron sends it. */
+  token: string;
+  fetch(url: string, init?: RequestInit): Promise<Response>;
+  /** How long the kick may wait for an answer before it is dropped; `KICK_TIMEOUT_MS` by default. */
+  timeoutMs?: number;
+  /** The runtime's `EdgeRuntime.waitUntil`, where there is one: the kick then runs after the answer. */
+  waitUntil?(p: Promise<unknown>): void;
+}
+export const KICK_TIMEOUT_MS = 5_000;
+
+/** The kick is fire-and-forget: bounded in time, and a failure is one fixed line, never an error. The
+ * work row stays either way, and the every-minute cron is the backstop. Nothing of the URL or the token
+ * is logged. */
+function kickProcess(k: Kick): Promise<void> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), k.timeoutMs ?? KICK_TIMEOUT_MS);
+  const sent = k.fetch(k.url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-knowlu-job-token": k.token },
+    body: "{}",
+    signal: abort.signal,
+  }).then(async (res) => {
+    await res.body?.cancel();
+    if (!res.ok) log(`kick failed (${res.status}), left for the cron`);
+  }, () => log("kick failed (no answer), left for the cron"))
+    .finally(() => clearTimeout(timer));
+  if (k.waitUntil === undefined) return sent;
+  k.waitUntil(sent);
+  return Promise.resolve();
 }
 
 /** Knowlu's canary sender (spec §4.10, plan P9). The canary's sender (T4.2, `_shared/canary_send.ts`)
@@ -272,8 +312,14 @@ async function handOff(
   return queued;
 }
 
-/** Steps 5–8 for one mailbox the message is bound for. */
-async function arrive(raw: Uint8Array, f: Found, n: Receipt, cfg: InboundConfig, deps: InboundDeps) {
+/** Steps 5–8 for one mailbox the message is bound for; how many new work items it queued. */
+async function arrive(
+  raw: Uint8Array,
+  f: Found,
+  n: Receipt,
+  cfg: InboundConfig,
+  deps: InboundDeps,
+): Promise<number> {
   const { batches, canaries } = await deps.store.bindRows(f.row.id);
   const mailbox: BindMailbox = {
     id: f.row.id,
@@ -290,38 +336,38 @@ async function arrive(raw: Uint8Array, f: Found, n: Receipt, cfg: InboundConfig,
     case "unbound":
       await deps.store.count(f.row.id, "unbound");
       log("unbound, deleted");
-      return;
+      return 0;
     case "live": {
       if (arrival.authenticity !== "aligned") {
         await deps.store.count(f.row.id, "unauthenticated");
         log("unauthenticated, deleted");
-        return;
+        return 0;
       }
       const item = { batchId: null, phase: "live" as const, authenticity: arrival.authenticity };
       if (await handOff(raw, f.row, { ...item, receivedAt: n.arrivedAt }, deps)) {
         await deps.store.received(f.row.id, new Date(n.arrivedAt).toISOString());
         log("queued (live)");
+        return 1;
       }
-      return;
+      return 0;
     }
     case "canary":
       if (arrival.replay) {
         log("canary replay, nothing changed");
-        return;
+        return 0;
       }
       log(
         await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, iso(n.arrivedAt))
           ? "canary arrived"
           : "canary replay, nothing changed",
       );
-      return;
+      return 0;
     case "gmail_confirm":
     case "gmail_confirm_refused":
       await gmailConfirm(arrival, f.row, deps);
-      return;
+      return 0;
     case "batch":
-      await batchSend(raw, f.row, arrival, n, deps);
-      return;
+      return await batchSend(raw, f.row, arrival, n, deps);
   }
 }
 
@@ -356,7 +402,7 @@ async function batchSend(
   batch: Extract<Arrival, { kind: "batch" }>,
   n: Receipt,
   deps: InboundDeps,
-): Promise<void> {
+): Promise<number> {
   const originals = attachedMessages(raw);
   let queued = 0;
   for (const original of originals) {
@@ -371,13 +417,16 @@ async function batchSend(
   }
   if (originals.length > 0) await deps.store.batchReceived(batch.batchId, row.id, originals.length);
   log(`batch send: ${queued} of ${originals.length} queued (${batch.phase})`);
+  return queued;
 }
 
-/** Steps 2–4 and the final delete: find, entitle, fetch once, then each bound mailbox in turn. */
-async function intake(n: Receipt, cfg: InboundConfig, deps: InboundDeps): Promise<void> {
+/** Steps 2–4 and the final delete: find, entitle, fetch once, then each bound mailbox in turn; how many
+ * new work items the delivery queued. */
+async function intake(n: Receipt, cfg: InboundConfig, deps: InboundDeps): Promise<number> {
   const found = await find(n, cfg, deps);
   const entitled: Found[] = [];
   const answers = new Map<string, boolean>();
+  let queued = 0;
   for (const f of found) {
     let ok = answers.get(f.row.accountId);
     if (ok === undefined) answers.set(f.row.accountId, ok = await deps.store.entitled(f.row.accountId));
@@ -390,9 +439,10 @@ async function intake(n: Receipt, cfg: InboundConfig, deps: InboundDeps): Promis
   }
   if (entitled.length > 0) {
     const raw = await deps.s3.get(n.key);
-    for (const f of entitled) await arrive(raw, f, n, cfg, deps);
+    for (const f of entitled) queued += await arrive(raw, f, n, cfg, deps);
   }
   await deps.s3.delete(n.key);
+  return queued;
 }
 
 /** One SNS delivery. 403 when it does not verify, 500 when a write failed (SNS retries), else 200. */
@@ -415,12 +465,15 @@ export async function handle(req: Request, cfg: InboundConfig, deps: InboundDeps
     log("not a receipt, ignored");
     return done();
   }
+  let queued: number;
   try {
-    await intake(n, cfg, deps);
+    queued = await intake(n, cfg, deps);
   } catch (e) {
     log(`failed (${e instanceof S3Error ? `s3 ${e.op} ${e.status}` : "store"})`);
     return fail(500, "intake failed");
   }
+  // D8: new work kicks `mail-process` once, never waiting on its work; the cron is the backstop.
+  if (queued > 0 && deps.kick !== undefined) await kickProcess(deps.kick);
   return done();
 }
 

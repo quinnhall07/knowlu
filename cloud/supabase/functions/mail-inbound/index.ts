@@ -2,10 +2,12 @@
  * The wire for `mail-inbound` (email plan T2g.1): the environment, the store over PostgREST, S3, SNS and
  * DNS, then `handler.ts`. `verify_jwt = false` (config.toml): SNS sends no bearer, and its signature is
  * the check. Secrets, named only (spec §5.1): `MAIL_DOMAIN`, `MAIL_ADDRESS_KEY`, `MAIL_ENC_KEY`,
- * `MAIL_BUCKET`, `MAIL_SNS_TOPIC_ARN`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+ * `MAIL_BUCKET`, `MAIL_SNS_TOPIC_ARN`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`; and
+ * `MAIL_JOBS_TOKEN` for D8's kick (T3d).
  *
- * The one other outbound fetch is Gmail's confirmation (`confirm.ts`, T2g.2), and it reaches only a link
- * and a form action on `mail_bind.ts`'s fixed Google allow-list.
+ * The other outbound fetches are Gmail's confirmation (`confirm.ts`, T2g.2), which reaches only a link
+ * and a form action on `mail_bind.ts`'s fixed Google allow-list, and D8's kick to this project's own
+ * `mail-process` (T3d).
  *
  * The store logs nothing: a failed call throws `store <what> <status>`, the database's answer is
  * cancelled unread (a constraint error can echo a hash), and the handler logs only that a store call
@@ -17,7 +19,14 @@ import { dnsTxtResolver } from "../_shared/dkim.ts";
 import { isActive, lookupFrom } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { s3Client } from "../_shared/s3.ts";
-import { type AddressRow, handle, type InboundConfig, type InboundDeps, MAIL_CANARY_FROM } from "./handler.ts";
+import {
+  type AddressRow,
+  handle,
+  type InboundConfig,
+  type InboundDeps,
+  type Kick,
+  MAIL_CANARY_FROM,
+} from "./handler.ts";
 import { hmacKeyFromBase64, nonceHmac, tokenHmac } from "./keys.ts";
 
 function env(name: string): string {
@@ -52,6 +61,22 @@ async function call(
 const rows = async <T>(res: Response) => await res.json() as T[];
 const id = (s: string) => encodeURIComponent(s);
 const HEX = /^[0-9a-f]{64}$/;
+
+/** D8's kick (plan T3d): `mail-process` at this project's own functions URL, with `MAIL_JOBS_TOKEN`, the
+ * token the cron sends. Run after the answer through `EdgeRuntime.waitUntil` where the runtime has it.
+ * Without the token there is no kick, and the every-minute cron alone starts `mail-process`. */
+function kickFromEnv(rest: Rest): Kick | undefined {
+  const token = Deno.env.get("MAIL_JOBS_TOKEN");
+  if (!token) return undefined;
+  const runtime = (globalThis as { EdgeRuntime?: { waitUntil?(p: Promise<unknown>): void } }).EdgeRuntime;
+  const waitUntil = runtime?.waitUntil?.bind(runtime);
+  return {
+    url: `${rest.url.replace(/\/+$/, "")}/functions/v1/mail-process`,
+    token,
+    fetch: (url, init) => fetch(url, init),
+    ...(waitUntil === undefined ? {} : { waitUntil }),
+  };
+}
 
 interface AddressDb {
   id: string;
@@ -228,6 +253,7 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
       },
     },
     confirmFetch: (url, init) => fetch(url, init),
+    kick: kickFromEnv(rest),
   };
   return { cfg, deps };
 }

@@ -529,10 +529,10 @@ grant execute on function public.count_mail_arrival(uuid, text) to service_role;
 
 -- The cron (spec §5.1, §6.3; plan P7), in 20260910000700's guarded form: the URL and the token come
 -- from Vault, a missing one raises into `cron.job_run_details`, and the token travels only in
--- `x-knowlu-job-token`. `mail-process` every minute; spec D8's kick from intake after a hand-off is
--- not built yet (plan T3d adds it once `mail-process` exists), so until then this cron is the only
--- start. `mail-canary` hourly at :11; `mail-process` in sweep mode nightly at 07:47 UTC, a minute no
--- other nightly job uses.
+-- `x-knowlu-job-token`. `mail-process` every minute, the backstop to spec D8's kick: `mail-inbound`
+-- POSTs to `mail-process` once after a delivery that queued new work (plan T3d), with the same token
+-- (`MAIL_JOBS_TOKEN`), fire-and-forget. `mail-canary` hourly at :11; `mail-process` in sweep mode
+-- nightly at 07:47 UTC, a minute no other nightly job uses.
 --
 -- The secrets, once per project, in the SQL editor (the controller's, T18a). The URLs are public; the
 -- token is the same string as the function secret `MAIL_JOBS_TOKEN` that both functions compare the

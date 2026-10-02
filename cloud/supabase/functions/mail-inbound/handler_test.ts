@@ -398,6 +398,27 @@ function confirmPage(w: World, req: Request, path: string, body: string): Respon
   });
 }
 
+interface KickRequest {
+  url: string;
+  method: string;
+  token: string | null;
+}
+const KICK_URL = "http://127.0.0.1:9/functions/v1/mail-process";
+const KICK_TOKEN = "test-jobs-token-0000";
+
+/** D8's kick, never on the wire: `ok` answers 200, `fail` 500, and `slow` nothing until it is aborted. */
+function kickFetch(w: World) {
+  return (url: string, init?: RequestInit): Promise<Response> => {
+    const headers = new Headers(init?.headers);
+    w.kick.sent.push({ url, method: init?.method ?? "GET", token: headers.get("x-knowlu-job-token") });
+    if (w.kick.mode === "ok") return Promise.resolve(new Response("{}", { status: 200 }));
+    if (w.kick.mode === "fail") return Promise.resolve(new Response("{}", { status: 500 }));
+    return new Promise((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  };
+}
+
 interface World {
   store: FakeStore;
   /** The fake bucket, by key. */
@@ -407,6 +428,8 @@ interface World {
   logs: string[];
   /** Google's confirmation page, faked on the same listener: how it answers, and what reached it. */
   confirm: { mode: "ok" | "redirect" | "post_redirect" | "offlist"; requests: ConfirmRequest[] };
+  /** D8's kick, faked: how `mail-process` answers, and each POST intake sent it. */
+  kick: { mode: "ok" | "fail" | "slow"; sent: KickRequest[] };
   deps: InboundDeps;
   /** Put `raw` at `key` as SES would, then deliver the notification; the handler's answer. */
   arrive(raw: string, d: Delivery): Promise<Response>;
@@ -431,7 +454,8 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
   ];
   const bucket = new Map<string, Uint8Array>();
   const confirm = { mode: "ok" as World["confirm"]["mode"], requests: [] as ConfirmRequest[] };
-  const w = { store, bucket, gets: 0, failPut: false, logs: [] as string[], confirm } as World;
+  const kick = { mode: "ok" as World["kick"]["mode"], sent: [] as KickRequest[] };
+  const w = { store, bucket, gets: 0, failPut: false, logs: [] as string[], confirm, kick } as World;
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
     const path = new URL(req.url).pathname;
     if (path.endsWith(".pem")) return new Response(PEM);
@@ -472,6 +496,7 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     now: () => NOW,
     workKey: () => `work/item-${++n}`,
     confirmFetch: local,
+    kick: { url: KICK_URL, token: KICK_TOKEN, fetch: kickFetch(w), timeoutMs: 50 },
   };
   w.arrive = async (raw, d) => {
     bucket.set(d.key, bin(raw));
@@ -1005,5 +1030,55 @@ Deno.test("a_replayed_canary_changes_nothing", async () => {
     assertEquals(school.forwardHint, TENANT);
     assertEquals(school.status, "quiet");
     assertEquals(w.store.canaryOk, ok);
+  });
+});
+
+// ---------------------------------------------------------------- T3d: D8's kick
+
+Deno.test("a_hand_off_kicks_mail_process_once_with_the_job_token", async () => {
+  await withWorld(async (w) => {
+    const raw = await gmailForward();
+    assertEquals((await w.arrive(raw, JANE("inbound/k1"))).status, 200);
+    assertEquals(w.kick.sent, [{ url: KICK_URL, method: "POST", token: KICK_TOKEN }]);
+    // A duplicate makes no new work: no kick.
+    await w.arrive(raw, JANE("inbound/k2"));
+    assertEquals(w.kick.sent.length, 1);
+    // A batch send of two new originals is one delivery: one kick.
+    await openBatches(w);
+    await w.arrive(await batchSend(NONCE, [{ eml: ORIGINAL_A }, { eml: ORIGINAL_B }]), SEND("inbound/k3"));
+    assertEquals(w.store.workRows.length, 3);
+    assertEquals(w.kick.sent.length, 2);
+    // Arrivals that make no work send none: unbound, unknown, a canary, the same batch again.
+    await w.arrive(directForgery(), { key: "inbound/k4", recipients: [at(TOK1)] });
+    await w.arrive(raw, { key: "inbound/k5", recipients: [at(UNKNOWN)] });
+    const canary = { id: "c-1", nonceHmac: await nonceHmac(ADDRESS_KEY, NONCE), arrivedAt: null };
+    w.store.canaries["addr-4"] = [canary];
+    await w.arrive(await canaryMail(NONCE, TENANT), SCHOOL_FWD("inbound/k6"));
+    await w.arrive(await batchSend(NONCE, [{ eml: ORIGINAL_A }]), SEND("inbound/k7"));
+    assertEquals(w.kick.sent.length, 2);
+    for (const line of w.logs) assert(!line.includes(KICK_TOKEN), "a log line carries the job token");
+  });
+});
+
+Deno.test("a_failed_or_slow_kick_still_answers_200_and_keeps_the_work", async () => {
+  await withWorld(async (w) => {
+    w.kick.mode = "fail";
+    assertEquals((await w.arrive(await gmailForward(), JANE("inbound/s1"))).status, 200);
+    w.kick.mode = "slow";
+    const started = performance.now();
+    const slow = await w.arrive(await gmailForward({ messageId: false }), JANE("inbound/s2"));
+    assertEquals(slow.status, 200);
+    assert(performance.now() - started < 2_000, "the kick is bounded in time");
+    assertEquals(w.kick.sent.length, 2);
+    // The work stays for the cron: both rows and both objects.
+    assertEquals(w.store.workRows.length, 2);
+    assertEquals(keysUnder(w, "work/"), ["work/item-1", "work/item-2"]);
+    assertEquals(keysUnder(w, "inbound/"), []);
+    // Each failure is one fixed line, never the URL or the token.
+    const kicks = w.logs.filter((l) => l.includes("kick"));
+    assertEquals(kicks, [
+      "mail-inbound: kick failed (500), left for the cron",
+      "mail-inbound: kick failed (no answer), left for the cron",
+    ]);
   });
 });

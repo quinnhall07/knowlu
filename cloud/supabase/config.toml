@@ -151,3 +151,6 @@ verify_jwt = false
 # SNS sends no bearer: `mail-inbound` is authenticated by its SNS signature, as `stripe-webhook` is by Stripe's.
 [functions.mail-inbound]
 verify_jwt = false
+# The cron and intake's kick send no bearer: `mail-process` is authenticated by its `x-knowlu-job-token`.
+[functions.mail-process]
+verify_jwt = false
