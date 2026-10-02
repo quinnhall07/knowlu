@@ -326,8 +326,9 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // plus T1.3's three in the same file (`delete_mail_address`, SECURITY DEFINER; `charge_allowance`
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
   // plus the T1.3 review's `refund_allowance` (writing, revoked the same way; main's F1 `refund_call`
-  // arrives with the merge of PR #33 and moves this to 37).
-  assertEquals(parsed, 36, "today's corpus should parse exactly 36 function creations");
+  // arrives with the merge of PR #33 and moves this by one), plus T2g.1's two (`mail_hand_off` and
+  // `count_mail_arrival`, writing, each revoked from `public, anon, authenticated`).
+  assertEquals(parsed, 38, "today's corpus should parse exactly 38 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -1564,4 +1565,56 @@ Deno.test("the_mail_cron_jobs_use_the_vault_token", async () => {
       if (j.job !== "knowlu-mail-sweep") assert(j.when !== sweep, `${file}: ${j.job} shares the sweep's '${sweep}'`);
     }
   }
+});
+
+// Email forwarding T2g.1 (spec §4.6 steps 5 and 8, D8): intake's two writes PostgREST cannot make alone.
+
+Deno.test("mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transaction", async () => {
+  // Spec §4.6 step 8: only after the put, the `mail_work` and `mail_seen` rows in one transaction. A
+  // function body is one transaction: a failed work insert takes the seen row back, and a concurrent
+  // delivery of the same Message-ID loses on the primary key and writes nothing.
+  const f = await mailFunction("mail_hand_off");
+  const args = "p_account uuid, p_address uuid, p_batch uuid, p_s3_key text, p_phase text, " +
+    "p_authenticity text, p_msg_hash text, p_fp_hash text, p_received_minute timestamptz";
+  assert(f.header.includes(`mail_hand_off( ${args} )`) || f.header.includes(`mail_hand_off(${args})`), f.header);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers queued or duplicate`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_call`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "mail_hand_off", "uuid, uuid, uuid, text, text, text, text, text, timestamptz");
+  const steps = [
+    "insert into public.mail_seen (account_id, msg_hash, fp_hash, received_minute, address_id, phase) " +
+    "values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase) " +
+    "on conflict (account_id, msg_hash) do nothing returning true into fresh;",
+    "if fresh is null then return false; end if;",
+    "insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity) " +
+    "values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity);",
+    "return true;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (seen, the duplicate's way out, work)`);
+    at = next;
+  }
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 2, `${f.name}: the two inserts only`);
+});
+
+Deno.test("count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticated", async () => {
+  // Spec §4.6 steps 5 and 6: unbound and unauthenticated mail is counted on the address, by one
+  // statement, so two deliveries at once both count.
+  const f = await mailFunction("count_mail_arrival");
+  assert(/count_mail_arrival\s*\(\s*p_address uuid, p_counter text\s*\)/.test(f.header), f.header);
+  assert(f.header.includes("returns void") && !f.header.includes("security definer"), `${f.name}: invoker`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "count_mail_arrival", "uuid, text");
+  assert(
+    f.body.includes(
+      "update public.mail_addresses set " +
+        "unbound = unbound + (p_counter = 'unbound')::int, " +
+        "unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int " +
+        "where id = p_address;",
+    ),
+    `${f.name}: one statement, one mailbox, the named counter only`,
+  );
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
 });

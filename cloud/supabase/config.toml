@@ -148,3 +148,6 @@ verify_jwt = false
 verify_jwt = false
 [functions.sync-pull]
 verify_jwt = false
+# SNS sends no bearer: `mail-inbound` is authenticated by its SNS signature, as `stripe-webhook` is by Stripe's.
+[functions.mail-inbound]
+verify_jwt = false

@@ -1,8 +1,8 @@
 -- Knowlu email forwarding (spec docs/specs/2026-09-30-email-forwarding-design.md §5.1), T1.1: the
 -- seven tables; T1.2: the kinds, the origin, the training and rules paths and the provisional pins;
--- T1.3, at the end: the three RPCs, the raised budget and the cron. All before it is applied anywhere;
--- nothing here edits an applied migration. Stamped after 20261002000100_refund_failed_call.sql so it
--- still sorts last.
+-- T1.3, at the end: the three RPCs, the raised budget and the cron; T2g.1, before the cron: intake's
+-- two RPCs. All before it is applied anywhere; nothing here edits an applied migration. Stamped after
+-- 20261002000100_refund_failed_call.sql so it still sorts last.
 --
 -- Every table has RLS on, no policy, and Supabase's default grants to `anon` and `authenticated`
 -- revoked: only the service role reads them, as `google_accounts` (§5.1). Every `account_id`
@@ -475,6 +475,57 @@ end;
 $$;
 revoke execute on function public.enforce_budget(uuid, numeric) from public, anon, authenticated;
 grant execute on function public.enforce_budget(uuid, numeric) to service_role;
+
+-- T2g.1: intake's two writes that PostgREST cannot make on its own (spec §4.6 steps 5, 6 and 8; D8).
+--
+-- The hand-off. `mail-inbound` calls it only after its `work/` put succeeded; the seen row and the work
+-- row are written in this one transaction, or neither is. A Message-ID the account already holds (a
+-- concurrent delivery of the same message) writes nothing and answers false, and the caller deletes its
+-- put. The received minute is truncated here as well as by the caller.
+create or replace function public.mail_hand_off(
+  p_account uuid, p_address uuid, p_batch uuid, p_s3_key text, p_phase text,
+  p_authenticity text, p_msg_hash text, p_fp_hash text, p_received_minute timestamptz
+)
+returns boolean
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  fresh boolean;
+begin
+  insert into public.mail_seen (account_id, msg_hash, fp_hash, received_minute, address_id, phase)
+       values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase)
+  on conflict (account_id, msg_hash) do nothing
+  returning true into fresh;
+  if fresh is null then
+    return false;
+  end if;
+  insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity)
+       values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity);
+  return true;
+end;
+$$;
+revoke execute on function public.mail_hand_off(uuid, uuid, uuid, text, text, text, text, text, timestamptz) from public, anon, authenticated;
+grant execute on function public.mail_hand_off(uuid, uuid, uuid, text, text, text, text, text, timestamptz) to service_role;
+
+-- Unbound and unauthenticated mail, counted on its address in one statement (a rising `unbound` means
+-- the address leaked, and Settings offers Rotate). Any other counter name adds nothing.
+create or replace function public.count_mail_arrival(p_address uuid, p_counter text)
+returns void
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+begin
+  update public.mail_addresses set
+    unbound         = unbound + (p_counter = 'unbound')::int,
+    unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int
+   where id = p_address;
+end;
+$$;
+revoke execute on function public.count_mail_arrival(uuid, text) from public, anon, authenticated;
+grant execute on function public.count_mail_arrival(uuid, text) to service_role;
 
 -- The cron (spec §5.1, §6.3; plan P7), in 20260910000700's guarded form: the URL and the token come
 -- from Vault, a missing one raises into `cron.job_run_details`, and the token travels only in
