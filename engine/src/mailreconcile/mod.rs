@@ -239,8 +239,9 @@ pub enum Action {
     TaskCard { claim: ClaimRef, note: NewNote, proposal: Proposal },
     /// A `kind: amend` card against `target` (D11 (3)). `also` holds the other claims a two-value
     /// card names (§4.9's row for two claims at one ordering date, P20), in plan order, each with
-    /// the value it claims and its sender; the card's own claim, whose value is `to`, sorts after
-    /// them all. Empty on every other card.
+    /// the value it claims and its sender, and never the card's own claim, whose value is `to`: the
+    /// last in plan order whose value the note did not already hold (plan §9.5). Empty on every
+    /// other card. A field T5.1's action list did not have, recorded in plan §9.5.
     AmendCard { claim: ClaimRef, target: String, changes: Vec<Change>, proposal: Proposal, also: Vec<Claimed> },
     /// An `info/` item: `kind` is one of `info::KINDS`, and a later notice with the same
     /// `close_key` supersedes it (D13).
@@ -339,7 +340,10 @@ pub enum SkipReason {
     Unmatched,
     /// A card row whose card `approvals::validate_amendment` would refuse: its note is outside
     /// `tasks/`, or holds no value in the field to amend from (a null `from`). The feed's rule for
-    /// the same refusal (plan §10, R14): the note keeps its value and no card is filed.
+    /// the same refusal (plan §10, R14): the note keeps its value and no card is filed. A seventh
+    /// reason beyond T5.1's six, and it drops a live date for a note needing one: what it becomes (a
+    /// notice, or a card `approvals` accepts) and how T6.3's run line counts it wait on the ruling
+    /// plan §9.5 records.
     NotAmendable,
 }
 
@@ -381,9 +385,12 @@ fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vau
 /// Claims sharing an ordering date are one *run*: once a run of two or more is planned, `settle`
 /// may rewrite its steps' actions against the vault as it stood before the run (§4.9's two-value
 /// row), and the working vault is then rebuilt from that point with the run's final actions. A
-/// rewrite only exchanges members' sets and cards for skips and one card under the last member's
-/// uid; it adds and removes no item, and resolution reads a card only for its own claim's uid, so
-/// no claim in the run resolves differently for it.
+/// rewrite only exchanges members' sets and cards for skips and one card under one member's uid; it
+/// adds and removes no item, resolution reads no `due`, and it reads a card only for its own
+/// claim's uid, so a claim delivered once resolves the same for it. A claim delivered twice does
+/// not: its later copy resolved against the first copy's actions, which a rewrite may change, so
+/// `settle` plans each claim once, by its first copy, and skips each later copy as already applied
+/// (§4.8 step 4), as a later copy delivered in another pull reads the first's card.
 fn walk<'m>(
     view: &VaultView,
     messages: &'m [Message],

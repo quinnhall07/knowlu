@@ -27,12 +27,13 @@
 //!
 //! **`change`, §4.9's rows 5, 6, 10, 11 and 12 (T5.4).** Card or direct is decided from the view's
 //! `human_set` snapshot (D11 (1)), never from `write`'s judged set, which does not cover `due`.
-//! Only a mail note's `due` that the student never set takes an aligned backfill's value directly;
-//! every other change is a `kind: amend` card in both phases, `cancelled` always
-//! (`status: active → archived`). A change that changes nothing writes nothing, and a card
-//! `approvals::validate_amendment` would refuse is never planned ([`change`]). Two claims at one
-//! ordering date saying different values for one note's field make one card naming both
-//! ([`settle`], P20). A change to a note this plan files waits on the open plan amendment.
+//! Only a mail note's `due` that the student never set takes an aligned backfill's value directly,
+//! and outside `tasks/` only a due still past; every other change is a `kind: amend` card in both
+//! phases, `cancelled` always (`status: active → archived`). A change that changes nothing writes
+//! nothing, and a card `approvals::validate_amendment` would refuse is never planned ([`change`]).
+//! Two claims at one ordering date saying different values for one note's field make one card
+//! naming both, proposing a value the note does not hold ([`settle`], P20 as plan §9.5 reads it).
+//! A change to a note this plan files waits on the open plan amendment (plan §9.5).
 //!
 //! **Past** is a due whose date is strictly before `today`, never before *now*: the module has no
 //! clock, and `ingest` and `coursework` archive `imported-past` by the same rule, since an item due
@@ -76,7 +77,7 @@ pub(super) fn rule(
     match (resolved, &claim.item) {
         (Resolved::New, Some(item)) => vec![new_item(message, at, claim, item, today, vault_day)],
         (Resolved::Change { target: Target::Note(note), field, value }, _) => {
-            vec![change(message, at, claim, note, *field, value.as_deref(), proposal(today, vault_day))]
+            vec![change(message, at, claim, note, *field, value.as_deref(), today, proposal(today, vault_day))]
         }
         (Resolved::AlreadyApplied, _) => skip(at, SkipReason::AlreadyApplied),
         (Resolved::Restated { .. }, _) => skip(at, SkipReason::Equal),
@@ -124,6 +125,10 @@ pub(super) fn writes_direct(message: &Message) -> bool {
 /// - **Direct** only for `due` on a mail note (`created_by: mail`) whose `due` the view's
 ///   `human_set` does not hold, from a message that [`writes_direct`]: row 5's backfill column.
 ///   `mail.rs`'s direct-set writer re-reads the journal first, and may only turn this into a card.
+///   On a note outside `tasks/` (archived `imported-past`) only a due still before `today` is set:
+///   a later one would leave the plan holding an archived item rank never shows (spec risk 1,
+///   T5.3's past). It takes the card row instead, and no card can amend outside `tasks/`, so it
+///   skips as [`SkipReason::NotAmendable`] until the open ruling (plan §9.5).
 /// - **Otherwise a `kind: amend` card**: row 5 live (and an unaligned backfill, §4.6 step 6); row
 ///   6, a field the student set, a hand-made note's included, in both phases; row 10, a Gmail or
 ///   events note, in both phases; and row 11, `cancelled`, always, proposing `status: active →
@@ -131,6 +136,7 @@ pub(super) fn writes_direct(message: &Message) -> bool {
 ///   for a model claim; T5.5's template rows 8 and 9 refine it for `source: template`.
 /// - **A card `approvals::validate_amendment` would refuse is never planned** (D11 (3)): a note
 ///   outside `tasks/`, or a null `from`, skips as [`SkipReason::NotAmendable`].
+#[allow(clippy::too_many_arguments)]
 fn change(
     message: &Message,
     at: ClaimRef,
@@ -138,6 +144,7 @@ fn change(
     note: &NoteView,
     field: ClaimField,
     value: Option<&str>,
+    today: Date,
     card: Proposal,
 ) -> Action {
     let skip = |claim, reason| Action::Skip { claim, reason };
@@ -155,7 +162,8 @@ fn change(
         return skip(at, SkipReason::Equal);
     }
     let mails = note.created_by.as_deref() == Some(MAIL) && !note.human_set.contains(name);
-    if field == ClaimField::Due && mails && writes_direct(message) {
+    let stays_past = || to.as_str().and_then(due_date).is_some_and(|due| due < today);
+    if field == ClaimField::Due && mails && writes_direct(message) && (note.folder == "tasks" || stays_past()) {
         let (target, field, mail_asof) = (note.path.clone(), name.to_string(), message.ordering_date);
         Action::Set { claim: at, target, field, to, mail_asof, body_line: body_line(message, claim) }
     } else if amendable(note, &from) {
@@ -215,12 +223,20 @@ pub(super) fn said(resolved: &Resolved<'_>) -> Option<Said> {
 
 /// §4.9's row 12 and P20, over one run of claims sharing an ordering date (`super::walk`): claims
 /// saying different values for one vault note's field make one `kind: amend` card, in both phases,
-/// whatever each alone planned. The card proposes the value of the claim that sorts last by uid and
-/// claim index (the run's order), from the value the note held before the run (`before`), and names
-/// each other claim with its value and sender (`also`); each other claim skips as superseded. An
-/// applied claim keeps its skip, so a run delivered again after its card was filed files nothing
-/// more. A card the executor would refuse is never planned ([`SkipReason::NotAmendable`]).
-/// Returns whether it rewrote a step.
+/// whatever each alone planned. The card proposes, from the value the note held before the run
+/// (`before`), the value of the last claim in the run's order (uid, then claim index) whose value
+/// the note did not already hold, so approving it always changes something (P20 as plan §9.5 reads
+/// it); it names every other claim with its value and sender (`also`), and each skips as superseded.
+/// A card the executor would refuse is never planned ([`SkipReason::NotAmendable`]). Returns whether
+/// it rewrote a step.
+///
+/// **Once per claim, and once per group (§4.8 step 4, D10).** A claim delivered twice in the run is
+/// one member, its first copy; each later copy resolved against the first copy's own actions, which
+/// this rewrite may change, so it skips as already applied, never as a member, and no card names its
+/// own claim. A member already applied before the run (`before`, never the run's own cards) keeps its
+/// skip, and then the group's card was filed when the run was first planned, so nothing more is
+/// filed and every other member skips as superseded: a run delivered again files nothing, whether
+/// its card is pending or the student already approved it.
 ///
 /// For T5.5: a member's own direct set stamps `mail_asof` at the run's date, so per-claim
 /// supersession would skip the next member; this rewrite replaces both. A group no later than the
@@ -234,38 +250,46 @@ pub(super) fn settle(before: &Working, run: &mut [Step<'_>], today: Date, vault_
         }
     }
     let mut rewrote = false;
-    for ((path, field), members) in groups {
+    for ((path, field), steps) in groups {
+        let (mut members, mut copies): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        for i in steps {
+            let copy = members.iter().any(|&m| run[m].at == run[i].at);
+            if copy { copies.push(i) } else { members.push(i) }
+        }
         let value = |i: usize| run[i].said.as_ref().map_or(Value::Null, |said| Value::String(said.value.clone()));
         let values: BTreeSet<String> = members.iter().map(|&i| literal(&value(i))).collect();
-        let (Some(note), Some((&last, others))) = (before.note_at(&path), members.split_last()) else { continue };
+        let Some(note) = before.note_at(&path) else { continue };
         if values.len() < 2 {
             continue;
         }
-        let also = others.iter().map(|&i| Claimed { claim: run[i].at.clone(), value: value(i), sender: run[i].message.sender.clone() });
-        let from = note.due.clone();
-        let card = if amendable(note, &from) {
-            let changes = vec![Change { field: field.to_string(), from, to: value(last) }];
+        // Two values: at least one is not the note's, so this always finds the proposer.
+        let held = literal(&note.due);
+        let Some(&proposer) = members.iter().rev().find(|&&i| literal(&value(i)) != held) else { continue };
+        let applied: BTreeSet<usize> =
+            members.iter().copied().filter(|&i| before.resolve(&run[i].at, run[i].claim) == Resolved::AlreadyApplied).collect();
+        let card = if !applied.is_empty() {
+            Action::Skip { claim: run[proposer].at.clone(), reason: SkipReason::Superseded }
+        } else if amendable(note, &note.due) {
+            let named = members.iter().filter(|&&i| i != proposer);
+            let also = named.map(|&i| Claimed { claim: run[i].at.clone(), value: value(i), sender: run[i].message.sender.clone() });
+            let changes = vec![Change { field: field.to_string(), from: note.due.clone(), to: value(proposer) }];
             let (target, proposal) = (path.clone(), proposal(today, vault_day));
-            Action::AmendCard { claim: run[last].at.clone(), target, changes, proposal, also: also.collect() }
+            Action::AmendCard { claim: run[proposer].at.clone(), target, changes, proposal, also: also.collect() }
         } else {
-            Action::Skip { claim: run[last].at.clone(), reason: SkipReason::NotAmendable }
+            Action::Skip { claim: run[proposer].at.clone(), reason: SkipReason::NotAmendable }
         };
-        for &i in others {
-            if !applied(&run[i]) {
-                run[i].actions = vec![Action::Skip { claim: run[i].at.clone(), reason: SkipReason::Superseded }];
-            }
+        for &i in members.iter().filter(|&&i| i != proposer && !applied.contains(&i)) {
+            run[i].actions = vec![Action::Skip { claim: run[i].at.clone(), reason: SkipReason::Superseded }];
         }
-        if !applied(&run[last]) {
-            run[last].actions = vec![card];
+        if !applied.contains(&proposer) {
+            run[proposer].actions = vec![card];
+        }
+        for &i in &copies {
+            run[i].actions = vec![Action::Skip { claim: run[i].at.clone(), reason: SkipReason::AlreadyApplied }];
         }
         rewrote = true;
     }
     rewrote
-}
-
-/// Whether a step's claim was already applied (§4.8 step 4): its one action is that skip.
-fn applied(step: &Step<'_>) -> bool {
-    matches!(step.actions.as_slice(), [Action::Skip { reason: SkipReason::AlreadyApplied, .. }])
 }
 
 /// A mail card's place in the deck on `today` (§4.8 step 5, plan §10 R16): held to day 2 on the
@@ -814,11 +838,12 @@ mod tests {
             ];
             assert_eq!(against(vec![note.clone()], &[b.clone(), a.clone()], 9), want, "{phase:?}");
             assert_eq!(against(vec![note.clone()], &[a.clone(), b.clone()], 9), want, "{phase:?}, the other way round");
-            // P20 read literally: the last claim's value, even the one the note already holds.
+            // The last claim saying the value the note already holds: the card proposes the other
+            // (P20 as plan §9.5 reads it), so approving it changes something.
             let holds = from("mail:bbbb", &bo, phase, vec![moved(Some("2026-10-12"))]);
             let want = vec![
-                superseded(at("mail:aaaa", 0)),
-                card(at("mail:bbbb", 0), "2026-10-12", "2026-10-12", vec![named(at("mail:aaaa", 0), MOVED, &ada)]),
+                card(at("mail:aaaa", 0), "2026-10-12", MOVED, vec![named(at("mail:bbbb", 0), "2026-10-12", &bo)]),
+                superseded(at("mail:bbbb", 0)),
             ];
             assert_eq!(against(vec![note.clone()], &[a.clone(), holds], 9), want, "{phase:?}");
         }
@@ -894,14 +919,13 @@ mod tests {
         let (folder, path, status) = ("archive".to_string(), "archive/lab-5.md".to_string(), Some("done".to_string()));
         let archived = NoteView { folder, path, status, ..lab(Some("mail"), &[]) };
         let undated = NoteView { due: Value::Null, ..lab(Some("mail"), &[]) };
-        for note in [&archived, &undated] {
-            for (phase, authenticity) in [(Backfill, Unaligned), (Live, Aligned), (Live, Unaligned)] {
+        // The archived note in every phase: a due today or later is never set directly outside
+        // `tasks/` either (spec risk 1; `a_backfill_never_sets_an_archived_mail_note_…`).
+        for (note, phases) in [(&archived, &PHASES[..]), (&undated, &PHASES[1..])] {
+            for &(phase, authenticity) in phases {
                 assert_eq!(on(note, phase, authenticity, &moved(Some(MOVED)), 9), not_amendable, "{} {phase:?}", note.path);
             }
         }
-        let Action::Set { claim, field, to, mail_asof, body_line, .. } = set(MOVED, LINE) else { panic!() };
-        let into_archive = Action::Set { claim, target: archived.path.clone(), field, to, mail_asof, body_line };
-        assert_eq!(on(&archived, Backfill, Aligned, &moved(Some(MOVED)), 9), into_archive);
         assert_eq!(on(&undated, Backfill, Aligned, &moved(Some(MOVED)), 9), set(MOVED, LINE));
         // A hand-made note created with `due: null` is the student's: a card row in both phases, and
         // a card that cannot be filed.
@@ -918,5 +942,110 @@ mod tests {
         let (first, last) = (ClaimRef { message: a.uid.clone(), index: 0 }, ClaimRef { message: b.uid.clone(), index: 0 });
         let want = vec![Action::Skip { claim: first, reason: SkipReason::Superseded }, Action::Skip { claim: last, reason: SkipReason::NotAmendable }];
         assert_eq!(against(vec![undated], &[b, a], 9), want);
+    }
+
+    /// §4.8 step 4 and D10 on §4.9's two-value row: one message delivered twice in a run is one
+    /// claim. Its first copy is the group's member and each later copy skips as already applied, so
+    /// the card is the one a single copy files, and no card names its own claim.
+    #[test]
+    fn a_claim_delivered_twice_in_a_two_value_run_is_planned_once() {
+        let at = |uid: &str| ClaimRef { message: uid.to_string(), index: 0 };
+        let note = lab(Some("mail"), &[]);
+        for phase in [Backfill, Live] {
+            let a = Message { uid: "mail:aaaa".to_string(), ..message(phase, Aligned, vec![moved(Some(MOVED))]) };
+            let b = Message { uid: "mail:bbbb".to_string(), ..message(phase, Aligned, vec![moved(Some("2026-10-16"))]) };
+            let changes = vec![Change { field: "due".to_string(), from: json!("2026-10-12"), to: json!("2026-10-16") }];
+            let also = vec![Claimed { claim: at("mail:aaaa"), value: json!(MOVED), sender: a.sender.clone() }];
+            let card = Action::AmendCard { claim: at("mail:bbbb"), target: PATH.to_string(), changes, proposal: pending(), also };
+            let superseded = Action::Skip { claim: at("mail:aaaa"), reason: SkipReason::Superseded };
+            assert_eq!(against(vec![note.clone()], &[a.clone(), b.clone()], 9), vec![superseded.clone(), card.clone()], "{phase:?}");
+            let want = vec![superseded, card, Action::Skip { claim: at("mail:bbbb"), reason: SkipReason::AlreadyApplied }];
+            for delivered in [[a.clone(), b.clone(), b.clone()], [b.clone(), a.clone(), b.clone()], [b.clone(), b.clone(), a.clone()]] {
+                assert_eq!(against(vec![note.clone()], &delivered, 9), want, "{phase:?}");
+            }
+        }
+    }
+
+    /// P20 as plan §9.5 reads it: a two-value card proposes the value of the last claim, by uid and
+    /// claim index, whose value the note does not already hold, and names every other claim. Read
+    /// literally, P20 would propose the note's own value when one message names the old date and
+    /// the new, a card whose approval changes nothing (`approvals::apply_amendment` reads `to` in
+    /// place as applied). Delivered again once the card is filed, pending or approved, the run
+    /// files nothing more (§4.8 step 4).
+    #[test]
+    fn a_two_value_card_proposes_the_last_value_the_note_does_not_hold() {
+        let note = lab(Some("mail"), &[]);
+        let at = |index| ClaimRef { message: UID.to_string(), index };
+        for phase in [Backfill, Live] {
+            let both = message(phase, Aligned, vec![moved(Some(MOVED)), moved(Some("2026-10-12"))]);
+            let changes = vec![Change { field: "due".to_string(), from: json!("2026-10-12"), to: json!(MOVED) }];
+            let also = vec![Claimed { claim: at(1), value: json!("2026-10-12"), sender: both.sender.clone() }];
+            let card = Action::AmendCard { claim: at(0), target: PATH.to_string(), changes, proposal: pending(), also };
+            let superseded = Action::Skip { claim: at(1), reason: SkipReason::Superseded };
+            assert_eq!(against(vec![note.clone()], &[both.clone()], 9), vec![card, superseded.clone()], "{phase:?}");
+            let (folder, path) = ("approvals".to_string(), "approvals/amend-lab-5.md".to_string());
+            let filed = NoteView { folder, path, source_uid: Some(at(0).uid()), ..lab(Some("mail"), &[]) };
+            let applied = Action::Skip { claim: at(0), reason: SkipReason::AlreadyApplied };
+            for due in ["2026-10-12", MOVED] {
+                let now = NoteView { due: json!(due), ..note.clone() };
+                let got = against(vec![now, filed.clone()], &[both.clone()], 9);
+                assert_eq!(got, vec![applied.clone(), superseded.clone()], "{phase:?}, the note due {due}");
+            }
+        }
+    }
+
+    /// Spec risk 1 and T5.3's `imported-past` (a due before today): a direct set never gives a note
+    /// outside `tasks/` a due today or later, where rank would never show it. A backfill that
+    /// archives "Lab 5" in one slot and brings its extension in the next (§4.8 step 1) writes no
+    /// more than the same batch planned whole (D10). A due still before today is set.
+    #[test]
+    fn a_backfill_never_sets_an_archived_mail_note_to_a_due_today_or_later() {
+        let (first, extended) = (item("Lab 5", Some("2026-09-28"), Task), moved(Some("2026-10-05")));
+        let later_at = ClaimRef { message: "mail:bbbb".to_string(), index: 0 };
+        let later = |claims: Vec<Claim>| Message {
+            uid: later_at.message.clone(),
+            ordering_date: "2026-09-20T09:00:00Z".parse().unwrap(),
+            message_date: None,
+            ..message(Backfill, Aligned, claims)
+        };
+        let slot_one = against(vec![], &[message(Backfill, Aligned, vec![first.clone()])], 9);
+        assert_eq!(slot_one, vec![created(&first, true)]);
+        let archived = NoteView {
+            folder: "archive".to_string(),
+            path: "archive/lab-5.md".to_string(),
+            status: Some("archived".to_string()),
+            due: json!("2026-09-28"),
+            source_uid: Some(at().uid()),
+            mail_asof: BTreeMap::from([("due".to_string(), ordering())]),
+            ..lab(Some("mail"), &[])
+        };
+        let not_amendable = Action::Skip { claim: later_at.clone(), reason: SkipReason::NotAmendable };
+        for due in ["2026-10-05", "2026-10-01", "2026-10-01T08:00"] {
+            assert_eq!(against(vec![archived.clone()], &[later(vec![moved(Some(due))])], 9), vec![not_amendable.clone()], "{due}");
+        }
+        let writes = |actions: Vec<Action>| actions.into_iter().filter(|a| !matches!(a, Action::Skip { .. })).collect::<Vec<_>>();
+        let slot_two = against(vec![archived.clone()], &[later(vec![extended.clone()])], 9);
+        let whole = against(vec![], &[message(Backfill, Aligned, vec![first.clone()]), later(vec![extended])], 9);
+        assert_eq!(writes(whole), writes([slot_one, slot_two].concat()), "split or whole, the same writes");
+        let still_past = against(vec![archived.clone()], &[later(vec![moved(Some("2026-09-30"))])], 9);
+        let set_there = matches!(&still_past[..], [Action::Set { target, to, .. }] if target == "archive/lab-5.md" && to == &json!("2026-09-30"));
+        assert!(set_there, "{still_past:?}");
+    }
+
+    /// D10 and §4.8 step 4 across two desktops: one aligned backfill message creates "Lab 5" due
+    /// 2026-10-12 and moves it to 2026-10-14. The desktop that plans it first creates the note (the
+    /// move to a note this plan files waits on the planned-note amendment, plan §9.5); the other,
+    /// once that note has synced, writes nothing more, never a card from 10-12 to 10-14.
+    #[test]
+    fn a_run_another_desktop_planned_writes_nothing_more_after_sync() {
+        let lab_5 = item("Lab 5", Some("2026-10-12"), Task);
+        let both = message(Backfill, Aligned, vec![lab_5.clone(), moved(Some(MOVED))]);
+        let first = against(vec![], &[both.clone()], 9);
+        assert_eq!(first.first(), Some(&created(&lab_5, false)), "{first:?}");
+        let mail_asof = BTreeMap::from([("due".to_string(), ordering())]);
+        let synced = NoteView { source_uid: Some(at().uid()), mail_asof, ..lab(Some("mail"), &[]) };
+        let second_at = ClaimRef { message: UID.to_string(), index: 1 };
+        let want = vec![skip(SkipReason::AlreadyApplied), Action::Skip { claim: second_at, reason: SkipReason::Superseded }];
+        assert_eq!(against(vec![synced], &[both], 9), want);
     }
 }
