@@ -192,7 +192,7 @@ The remaining MVP lane is email forwarding to Knowlu (item 2a below).
 staging; facts from the run ledger; each row closed by Quinn's word 2026-10-02):**
 - **Gmail connect** (T13): all seven checks passed (no Gmail step in onboarding, Connect, a slot that
   proposed 11 cards, approve, revoke at Google then Reconnect, two-step Disconnect with grants 0, queue
-  and seen sets 0, cleanup). Two findings, both fixed on branch `proof-fixes` (not yet on `main`): the
+  and seen sets 0, cleanup). Two findings, both fixed in the proof-fixes PR: the
   consent poll stopped before a ~3 minute consent finished (`49debd0`, `b167e73`), and the deck card
   did not show its Gmail attribution, D15 (`0aad6d5`).
 - **M2 editing** (T10): all six checks passed (body edit and Undo, conflict refusal with the draft kept,
@@ -200,8 +200,17 @@ staging; facts from the run ledger; each row closed by Quinn's word 2026-10-02):
 - **Events** (T10): passed with recorded gaps. No obligation card appeared in the feed, no carried
   series date existed (every date was card-listed), and no accepted all-day date fell on the proof day;
   the T4, T4c, T4d and T7 tests stand for those. Findings: failed model calls were charged to the
-  120-a-day judgment cap (fixed on `proof-fixes`, `65c5e43`), and the UA preset asked "Blackboard or
-  Canvas?" in the wizard (fixed on `proof-fixes`, `f680445`).
+  first-day event allowance (event cap 80 a day, doubled to 160 on an account's first two judging days;
+  fixed in the proof-fixes PR, `65c5e43`), and the wizard showed the "Blackboard or Canvas?" chooser
+  after a curated pick (F4, fixed in the proof-fixes PR, `f680445`). Root cause of F4: the reviewer was
+  right about the mechanism, but the chooser was stale and F4 does fix what the proof saw. On `main`
+  `376e8ba` the chooser becomes visible only when an `open_lms_window` call fails (`console.js:3111`, in
+  the `!r.ok` branch of the `#wiz-lms-open` handler, call at `:3106`). It ships `hidden`
+  (`index.html:148`), `.wiz-row[hidden]` keeps CSS from leaking it (`console.css:445`, `:450`),
+  `renderWizard` and `pickSchool` (`:3374-3387`) never touch it, and `lms_link.rs:230-231` answers every
+  `ok:false` with a non-empty error. So a curated pick could not show it; what was seen was a chooser
+  left over from an earlier failed call that the pick did not hide, and F4 now knows the curated
+  campus's LMS in the wizard.
 - **Grades** (A13, through the suspended gate): connect, capture, refresh (2 courses, 12 changed items),
   silent refresh and forget passed. Not run: an uncurated school's "not available" check (it needs a
   second onboarding). A scheduled slot's capture was not observed (run-slot-once cannot reach the kept
@@ -415,6 +424,7 @@ a spend is asked at the time.
 | Stage | Ask | Context to give them |
 |---|---|---|
 | Integrate | **Merge the flake-fix PR, then the token PR** | Asked one at a time at merge time, each in one line with the evidence (the contract-reviewer's verdict, green CI). §3's Integrate items 1–2. |
+| Integrate | **Push migration `20261002000100` (`refund_call`) to staging (`db push --include-all`) BEFORE redeploying `judge-task`, `judge-event`, `judge-email` and `gmail-read`; then to prod on Quinn's word** | Refunds fail silently without it: the functions call `refund_call`, and a missing function is not an error the student sees. The controller runs it; production waits for Quinn. |
 | Integrate | **Go for the staging deploy** | Asked once the staging runbook is reviewed; the order is §3's Integrate item 3. The controller runs it; nothing touches production. |
 | MVP | **Sign the Gmail-connect and M2 specs** (one sitting), later the events spec | Each after its research and spec review. W1's research left 13 questions for these specs; they are asked inside the specs, not separately. |
 | MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; The proof runs in the Blackboard sign-in window on a dev build of `main` and waits on no policy read (A13; §3's MVP lane 1). |
