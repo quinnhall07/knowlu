@@ -1,5 +1,5 @@
-// Plan T10 "Rules for the scripts" for Gmail's forwarding scripts: each is one readable file under gmail/
-// that opens with a comment saying what it does, logs nothing and names no credential (D19).
+// Plan T10 "Rules for the scripts" for Gmail's forwarding and mailbox scripts: each is one readable file
+// under gmail/ that opens with a comment saying what it does, logs nothing and names no credential (D19).
 import { assert } from "@std/assert";
 
 const FORBIDDEN = [
@@ -29,5 +29,5 @@ Deno.test("gmail_scripts_log_nothing_and_name_no_credential", async () => {
     }
     assert(text.trimStart().startsWith("//"), `gmail/${e.name} opens with a comment saying what it does`);
   }
-  assert(seen >= 6, "the six forwarding scripts");
+  assert(seen >= 10, "the six forwarding scripts and the four mailbox scripts");
 });

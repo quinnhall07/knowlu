@@ -1640,6 +1640,35 @@ result still reaches the host before the navigation must be seen live, and a hos
 after a navigation must treat it as "reloading": T11.3 re-runs the step once with `reloaded: true`, and a
 second miss is `not found` and the step's guided fallback.
 
+**Live checks for T11 and T18c, Gmail mailbox scripts** (T10.3b; the synthetic page models the spikes'
+selectors, it is not Gmail): (1) `search.js` types `after:<yyyy/mm/dd> -in:spam -in:trash -in:sent
+-in:drafts` and presses Enter; the last two terms are this task's addition to §4.3 step 7's query (Gmail's
+search covers Sent and Drafts, which are the student's own mail and are never received, so recover would
+forward them to Knowlu as "missing"); the real box must read all four and the date form, and the count is
+the pager's "1–50 of 123" total (a "many" or an estimate is `not found` `result count`). (2) `list.js`
+reads a page of `tr[role=row]` in `table[role=grid]`: sender from the last `span[email]`'s attribute,
+subject from `.bog`, time from the `[title]` that holds a clock time, and each row's checkbox is
+`[role=checkbox]`; the Newest/Newer/Older/Oldest buttons are found by `aria-label`, and "Oldest" is a guess
+at the real pager's name (the routine, T11.2, reads the oldest page with `go: "oldest"`, then `"newer"`; a
+missing "Oldest" on a multi-page result is `not found` `pager` and the step's guided fallback). Gmail lists
+conversations, not messages: a row with several senders is read as its newest and `thread: true`, and what
+"Forward as attachment" attaches for a conversation row (every message, or the newest) must be seen live,
+since T11.2's fingerprint compare is per message. (3) `forward.js` ticks the wanted rows, then More →
+"Forward as attachment" (the message-list toolbar's More), and reads the attachment chips (`aria-label`
+starting "Attachment:", the size in the text beside the name, "12K" or "1.2M"); it refuses to send over
+`max_bytes` (default 25,000,000, the sum of the sizes shown) or when Gmail offers Google Drive links, and the
+caller halves the rows on `over 25 MB`. Whether Gmail counts the base64 overhead against 25 MB (so that the
+real ceiling on the shown sizes is nearer 18 MB) is unknown; the routine may pass a lower `max_bytes`. The
+To field, Subject field and Send are found by `aria-label` ("To recipients", "Subject", "Send …"); the
+subject is exactly `Knowlu <nonce>`. (4) A non-delivery report is looked for among the rows the page lists
+(a row with the nonce and a delivery-failure phrase); Gmail's bounce lands in the Inbox as "Delivery Status
+Notification (Failure)" and the page left open after a send may not list the Inbox, so the routine (T11.2)
+must also look at the Inbox between sends. `result: "refused"` is the "first send failure" the step machine
+stops on. (5) `sent_cleanup.js` runs only at `#sent`, takes one row at a time (Gmail draws the list again
+after every Delete) and deletes a row only when its subject is exactly `Knowlu <nonce>` and its one
+recipient (the `span[email]` list of a Sent row) is Knowlu's address; Gmail's Delete moves the copy to Trash
+(30 days), which the privacy copy must say.
+
 ### T10. Step machines and step scripts, in five dispatches
 
 **Agent, all five:** `implementer` (Sonnet, high). **Why:** pure state machines, and DOM scripts tested
