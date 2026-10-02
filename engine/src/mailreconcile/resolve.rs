@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::civil::Date;
 use serde_json::Value;
 
-use super::{Action, CardStatus, Claim, ClaimField, ClaimKind, ClaimRef, Message, NoteView, VaultView};
+use super::{Action, CardStatus, Claim, ClaimField, ClaimKind, ClaimRef, Message, NoteView, Place, VaultView};
 
 /// Where a note or card made from a claim sits once written (§4.8 step 4).
 const APPLIED_FOLDERS: [&str; 3] = ["tasks", "archive", "approvals"];
@@ -82,11 +82,10 @@ pub enum Resolved<'v> {
 pub enum Target<'v> {
     /// A note in the vault: an action names it by its `path`.
     Note(&'v NoteView),
-    /// A note the action of an earlier claim in this plan (`by`) files, not written yet: its `id`
-    /// and `path` are empty, so an action can name it only through `by`. How an action does is an
-    /// open plan amendment (T5.2's review); until it lands, T5.4's change rows act only on a
-    /// [`Target::Note`] and plan a change to a planned note as unmatched, writing nothing. This
-    /// variant keeps a rule from taking it for a vault note.
+    /// A note the `Create` of an earlier claim in this plan (`by`) files, not written yet: its `id`
+    /// and `path` are empty, so an action names it as [`Place::Planned`]`(by)` (plan §9.5's
+    /// planned-note amendment). The rules read it as the mail note it will be: `created_by: mail`,
+    /// no field a human set.
     Planned { by: &'v ClaimRef, note: &'v NoteView },
 }
 
@@ -95,6 +94,15 @@ impl<'v> Target<'v> {
     pub fn note(self) -> &'v NoteView {
         match self {
             Target::Note(note) | Target::Planned { note, .. } => note,
+        }
+    }
+
+    /// How an action names this note: a vault note by its path, a planned one by the claim whose
+    /// `Create` files it.
+    pub fn place(self) -> Place {
+        match self {
+            Target::Note(note) => Place::Path(note.path.clone()),
+            Target::Planned { by, .. } => Place::Planned(by.clone()),
         }
     }
 }
@@ -133,9 +141,10 @@ impl Working {
         self.resolve_target(claim)
     }
 
-    /// The vault note at `path`, as the plan leaves it so far; never a note this plan files.
-    pub(super) fn note_at(&self, path: &str) -> Option<&NoteView> {
-        self.notes.iter().find(|(n, by)| by.is_none() && n.path == path).map(|(n, _)| n)
+    /// The item note `place` names, as the plan leaves it so far: a vault note by its path, or the
+    /// note a claim's `Create` files in this plan (never a card that claim files).
+    pub(super) fn note_in(&self, place: &Place) -> Option<&NoteView> {
+        self.notes.iter().find(|entry| names(entry, place)).map(|(n, _)| n)
     }
 
     /// Steps 2 to 4 alone: what the claim's target would be were its uid not yet applied. §4.9's
@@ -193,11 +202,11 @@ impl Working {
                 (filed(claim, "approvals", card(proposal.status), &note.title, note.course.clone(), note.due.clone()), claim)
             }
             Action::AmendCard { claim, target, proposal, .. } => {
-                let (title, course) = self.note_at(target).map(|n| (n.title.clone(), n.course.clone())).unwrap_or_default();
+                let (title, course) = self.note_in(target).map(|n| (n.title.clone(), n.course.clone())).unwrap_or_default();
                 (filed(claim, "approvals", card(proposal.status), &title, course, None), claim)
             }
             Action::Set { target, field, to, mail_asof, .. } => {
-                if let Some((note, _)) = self.notes.iter_mut().find(|(n, by)| by.is_none() && &n.path == target) {
+                if let Some((note, _)) = self.notes.iter_mut().find(|entry| names(entry, target)) {
                     if field == "due" {
                         note.due = to.clone();
                     }
@@ -208,6 +217,15 @@ impl Working {
             Action::Notice { .. } | Action::ProposeDone { .. } | Action::Skip { .. } => return,
         };
         self.notes.push((filed_note, Some(by.clone())));
+    }
+}
+
+/// Whether a working entry is the item note `place` names: a vault note at its path, or the item
+/// the claim's `Create` filed (a claim files one item at most, and a card is no item).
+fn names((note, by): &(NoteView, Option<ClaimRef>), place: &Place) -> bool {
+    match place {
+        Place::Path(path) => by.is_none() && &note.path == path,
+        Place::Planned(claim) => by.as_ref() == Some(claim) && ITEM_FOLDERS.contains(&note.folder.as_str()),
     }
 }
 
@@ -690,9 +708,10 @@ mod tests {
         let (quiz, lab) = (ClaimRef { message: "mail:aaaa".to_string(), index: 0 }, ClaimRef { message: "mail:bbbb".to_string(), index: 0 });
         working.apply(&Action::Create { claim: quiz.clone(), note: filed("Quiz 3", true) });
         working.apply(&Action::TaskCard { claim: lab.clone(), note: filed("Lab 4", false), proposal });
-        working.apply(&Action::AmendCard { claim: at(6), target: "tasks/task-e2.md".to_string(), changes: vec![], proposal, also: vec![] });
+        let essay = Place::Path("tasks/task-e2.md".to_string());
+        working.apply(&Action::AmendCard { claim: at(6), target: essay.clone(), changes: vec![], proposal, also: vec![] });
         let stamp: jiff::Timestamp = "2026-09-09T09:00:00Z".parse().unwrap();
-        let (target, field, body_line) = ("tasks/task-e2.md".to_string(), "due".to_string(), String::new());
+        let (target, field, body_line) = (essay, "due".to_string(), String::new());
         working.apply(&Action::Set { claim: at(5), target, field, to: json!("2026-10-10"), mail_asof: stamp, body_line });
         // The imported-past quiz is an item and never active: a change names it by its title, a
         // new_item with that title is new, and its tokens reach nothing. No answer names it.
@@ -710,5 +729,17 @@ mod tests {
         let got = working.resolve(&at(0), &change(Some("CS 101"), Some("Essay 2")));
         let Resolved::Change { target: Target::Note(essay), .. } = got else { panic!("{got:?}") };
         assert_eq!((&essay.due, essay.mail_asof.get("due"), essay.path.as_str()), (&json!("2026-10-10"), Some(&stamp), "tasks/task-e2.md"));
+        // Plan §9.5's planned-note amendment: a set naming a planned note by its claim reaches the
+        // note that claim's `Create` files; a claim that filed only a card names no note.
+        let later: jiff::Timestamp = "2026-09-10T09:00:00Z".parse().unwrap();
+        for (claim, to) in [(quiz.clone(), "2026-09-25"), (lab.clone(), "2026-10-30")] {
+            let (target, field, body_line) = (Place::Planned(claim), "due".to_string(), String::new());
+            working.apply(&Action::Set { claim: at(7), target, field, to: json!(to), mail_asof: later, body_line });
+        }
+        let got = working.resolve(&at(0), &change(Some("CS 101"), Some("quiz 3")));
+        let Resolved::Change { target: Target::Planned { note: quiz_note, .. }, .. } = got else { panic!("{got:?}") };
+        assert_eq!((&quiz_note.due, quiz_note.mail_asof.get("due")), (&json!("2026-09-25"), Some(&later)));
+        assert_eq!(working.note_in(&Place::Planned(lab)), None, "a card is no item");
+        assert_eq!(Target::Planned { by: &quiz, note: quiz_note }.place(), Place::Planned(quiz.clone()));
     }
 }

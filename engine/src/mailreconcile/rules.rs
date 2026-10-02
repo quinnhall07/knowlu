@@ -33,7 +33,9 @@
 //! nothing, and a card `approvals::validate_amendment` would refuse is never planned ([`change`]).
 //! Two claims at one ordering date saying different values for one note's field make one card
 //! naming both, proposing a value the note does not hold ([`settle`], P20 as plan §9.5 reads it).
-//! A change to a note this plan files waits on the open plan amendment (plan §9.5).
+//! A note this plan files takes every row as the mail note it will be, and its actions name it by
+//! its creating claim ([`Place::Planned`]; plan §9.5's planned-note amendment), so a batch planned
+//! whole writes what the same batch split across pulls writes (D10, spec test 18).
 //!
 //! **Past** is a due whose date is strictly before `today`, never before *now*: the module has no
 //! clock, and `ingest` and `coursework` archive `imported-past` by the same rule, since an item due
@@ -53,7 +55,7 @@ use serde_json::Value;
 use super::resolve::{Resolved, Target, Working};
 use super::{
     Action, Authenticity, CardStatus, Change, Claim, ClaimField, ClaimRef, Claimed, ItemKind, Message, NewItem, NewNote,
-    NoteView, Phase, Proposal, Sender, SkipReason, Step,
+    NoteView, Phase, Place, Proposal, Sender, SkipReason, Step,
 };
 use crate::approvals::AMENDABLE_FOLDERS;
 use crate::write;
@@ -62,9 +64,9 @@ use crate::write;
 const MAIL: &str = "mail";
 
 /// The actions one claim plans, from its resolution (§4.9). T5.3 holds the `new_item` rows and
-/// T5.4 the `change` rows; a `course_info` and an unresolved claim are unmatched until T5.5 fills
-/// in their rows, and so is a change to a note this plan files ([`Target::Planned`]) until the
-/// open plan amendment says how an action names it.
+/// T5.4 the `change` rows, for a vault note and for a note this plan files alike (plan §9.5's
+/// planned-note amendment); a `course_info` and an unresolved claim are unmatched until T5.5 fills
+/// in their rows.
 pub(super) fn rule(
     resolved: &Resolved<'_>,
     message: &Message,
@@ -76,12 +78,12 @@ pub(super) fn rule(
     let skip = |claim, reason| vec![Action::Skip { claim, reason }];
     match (resolved, &claim.item) {
         (Resolved::New, Some(item)) => vec![new_item(message, at, claim, item, today, vault_day)],
-        (Resolved::Change { target: Target::Note(note), field, value }, _) => {
-            vec![change(message, at, claim, note, *field, value.as_deref(), today, proposal(today, vault_day))]
+        (Resolved::Change { target, field, value }, _) => {
+            vec![change(message, at, claim, *target, *field, value.as_deref(), today, proposal(today, vault_day))]
         }
         (Resolved::AlreadyApplied, _) => skip(at, SkipReason::AlreadyApplied),
         (Resolved::Restated { .. }, _) => skip(at, SkipReason::Equal),
-        // `resolve` gives `New` only with an item; the rest wait on T5.5 and the amendment.
+        // `resolve` gives `New` only with an item; the rest wait on T5.5.
         _ => skip(at, SkipReason::Unmatched),
     }
 }
@@ -136,17 +138,22 @@ pub(super) fn writes_direct(message: &Message) -> bool {
 ///   for a model claim; T5.5's template rows 8 and 9 refine it for `source: template`.
 /// - **A card `approvals::validate_amendment` would refuse is never planned** (D11 (3)): a note
 ///   outside `tasks/`, or a null `from`, skips as [`SkipReason::NotAmendable`].
+///
+/// A note this plan files ([`Target::Planned`]) takes these rows as the note it will be, a mail
+/// note no human set a field of, so a batch planned whole writes what it writes split across pulls
+/// (D10); its actions name it by its creating claim ([`Place::Planned`]).
 #[allow(clippy::too_many_arguments)]
 fn change(
     message: &Message,
     at: ClaimRef,
     claim: &Claim,
-    note: &NoteView,
+    target: Target<'_>,
     field: ClaimField,
     value: Option<&str>,
     today: Date,
     card: Proposal,
 ) -> Action {
+    let note = target.note();
     let skip = |claim, reason| Action::Skip { claim, reason };
     let (name, from, to) = match field {
         ClaimField::Cancelled => match note.status.as_deref() {
@@ -164,11 +171,11 @@ fn change(
     let mails = note.created_by.as_deref() == Some(MAIL) && !note.human_set.contains(name);
     let stays_past = || to.as_str().and_then(due_date).is_some_and(|due| due < today);
     if field == ClaimField::Due && mails && writes_direct(message) && (note.folder == "tasks" || stays_past()) {
-        let (target, field, mail_asof) = (note.path.clone(), name.to_string(), message.ordering_date);
+        let (target, field, mail_asof) = (target.place(), name.to_string(), message.ordering_date);
         Action::Set { claim: at, target, field, to, mail_asof, body_line: body_line(message, claim) }
     } else if amendable(note, &from) {
         let changes = vec![Change { field: name.to_string(), from, to }];
-        Action::AmendCard { claim: at, target: note.path.clone(), changes, proposal: card, also: Vec::new() }
+        Action::AmendCard { claim: at, target: target.place(), changes, proposal: card, also: Vec::new() }
     } else {
         skip(at, SkipReason::NotAmendable)
     }
@@ -202,28 +209,31 @@ fn sender(sender: &Sender) -> String {
     }
 }
 
-/// What one claim says a vault note's field should be, the key §4.9's two-value row groups by.
-/// Only a known due is ever said: a `cancelled` always says `"true"`, so two never differ.
+/// What one claim says a note's field should be, the key §4.9's two-value row groups by. Only a
+/// known due is ever said: a `cancelled` always says `"true"`, so two never differ.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Said {
-    path: String,
+    place: Place,
     field: &'static str,
     value: String,
 }
 
-/// What `resolved` says, when it is a change to a vault note's due naming a known date.
+/// What `resolved` says, when it is a change to a note's due naming a known date: a vault note, or
+/// one this plan files (plan §9.5).
 pub(super) fn said(resolved: &Resolved<'_>) -> Option<Said> {
     match resolved {
-        Resolved::Change { target: Target::Note(note), field: ClaimField::Due, value: Some(value) } if due_date(value).is_some() => {
-            Some(Said { path: note.path.clone(), field: "due", value: value.clone() })
+        Resolved::Change { target, field: ClaimField::Due, value: Some(value) } if due_date(value).is_some() => {
+            Some(Said { place: target.place(), field: "due", value: value.clone() })
         }
         _ => None,
     }
 }
 
 /// §4.9's row 12 and P20, over one run of claims sharing an ordering date (`super::walk`): claims
-/// saying different values for one vault note's field make one `kind: amend` card, in both phases,
-/// whatever each alone planned. The card proposes, from the value the note held before the run
+/// saying different values for one note's field make one `kind: amend` card, in both phases,
+/// whatever each alone planned. A note this plan files is grouped as a vault note is, and holds
+/// before the run the due it is filed with, in an earlier run or by its `Create` in this one
+/// ([`filed_before`]). The card proposes, from the value the note held before the run
 /// (`before`), the value of the last claim in the run's order (uid, then claim index) whose value
 /// the note did not already hold, so approving it always changes something (P20 as plan §9.5 reads
 /// it); it names every other claim with its value and sender (`also`), and each skips as superseded.
@@ -243,14 +253,14 @@ pub(super) fn said(resolved: &Resolved<'_>) -> Option<Said> {
 /// note's `mail_asof` from before the run is a different case, superseded whole, which T5.5's
 /// supersession must keep here.
 pub(super) fn settle(before: &Working, run: &mut [Step<'_>], today: Date, vault_day: i64) -> bool {
-    let mut groups: BTreeMap<(String, &'static str), Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<(Place, &'static str), Vec<usize>> = BTreeMap::new();
     for (i, step) in run.iter().enumerate() {
         if let Some(said) = &step.said {
-            groups.entry((said.path.clone(), said.field)).or_default().push(i);
+            groups.entry((said.place.clone(), said.field)).or_default().push(i);
         }
     }
     let mut rewrote = false;
-    for ((path, field), steps) in groups {
+    for ((place, field), steps) in groups {
         let (mut members, mut copies): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
         for i in steps {
             let copy = members.iter().any(|&m| run[m].at == run[i].at);
@@ -258,7 +268,7 @@ pub(super) fn settle(before: &Working, run: &mut [Step<'_>], today: Date, vault_
         }
         let value = |i: usize| run[i].said.as_ref().map_or(Value::Null, |said| Value::String(said.value.clone()));
         let values: BTreeSet<String> = members.iter().map(|&i| literal(&value(i))).collect();
-        let Some(note) = before.note_at(&path) else { continue };
+        let Some(note) = filed_before(before, run, &place) else { continue };
         if values.len() < 2 {
             continue;
         }
@@ -269,11 +279,11 @@ pub(super) fn settle(before: &Working, run: &mut [Step<'_>], today: Date, vault_
             members.iter().copied().filter(|&i| before.resolve(&run[i].at, run[i].claim) == Resolved::AlreadyApplied).collect();
         let card = if !applied.is_empty() {
             Action::Skip { claim: run[proposer].at.clone(), reason: SkipReason::Superseded }
-        } else if amendable(note, &note.due) {
+        } else if amendable(&note, &note.due) {
             let named = members.iter().filter(|&&i| i != proposer);
             let also = named.map(|&i| Claimed { claim: run[i].at.clone(), value: value(i), sender: run[i].message.sender.clone() });
             let changes = vec![Change { field: field.to_string(), from: note.due.clone(), to: value(proposer) }];
-            let (target, proposal) = (path.clone(), proposal(today, vault_day));
+            let (target, proposal) = (place.clone(), proposal(today, vault_day));
             Action::AmendCard { claim: run[proposer].at.clone(), target, changes, proposal, also: also.collect() }
         } else {
             Action::Skip { claim: run[proposer].at.clone(), reason: SkipReason::NotAmendable }
@@ -290,6 +300,21 @@ pub(super) fn settle(before: &Working, run: &mut [Step<'_>], today: Date, vault_
         rewrote = true;
     }
     rewrote
+}
+
+/// The note `place` names as it stood before a run: in `before` (a vault note, or one an earlier run
+/// of this plan files), else the note a `Create` of this run files, as it files it. A `Create` is
+/// never a group member (a new item says no due), so no rewrite has changed it.
+fn filed_before(before: &Working, run: &[Step<'_>], place: &Place) -> Option<NoteView> {
+    if let Some(note) = before.note_in(place) {
+        return Some(note.clone());
+    }
+    let Place::Planned(by) = place else { return None };
+    let mut actions = run.iter().filter(|step| &step.at == by).flat_map(|step| &step.actions);
+    let create = actions.find(|action| matches!(action, Action::Create { .. }))?;
+    let mut filed = before.clone();
+    filed.apply(create);
+    filed.note_in(place).cloned()
 }
 
 /// A mail card's place in the deck on `today` (§4.8 step 5, plan §10 R16): held to day 2 on the
@@ -682,13 +707,13 @@ mod tests {
     }
 
     fn set_as(claim: ClaimRef, to: &str, mail_asof: Timestamp, body_line: &str) -> Action {
-        let (target, field, to) = (PATH.to_string(), "due".to_string(), json!(to));
+        let (target, field, to) = (Place::Path(PATH.to_string()), "due".to_string(), json!(to));
         Action::Set { claim, target, field, to, mail_asof, body_line: body_line.to_string() }
     }
 
     fn amend(field: &str, from: Value, to: Value, proposal: Proposal) -> Action {
         let changes = vec![Change { field: field.to_string(), from, to }];
-        Action::AmendCard { claim: at(), target: PATH.to_string(), changes, proposal, also: vec![] }
+        Action::AmendCard { claim: at(), target: Place::Path(PATH.to_string()), changes, proposal, also: vec![] }
     }
 
     fn held() -> Proposal {
@@ -825,7 +850,7 @@ mod tests {
         let superseded = |claim: ClaimRef| Action::Skip { claim, reason: SkipReason::Superseded };
         let card = |claim: ClaimRef, from: &str, to: &str, also: Vec<Claimed>| {
             let changes = vec![Change { field: "due".to_string(), from: json!(from), to: json!(to) }];
-            Action::AmendCard { claim, target: PATH.to_string(), changes, proposal: pending(), also }
+            Action::AmendCard { claim, target: Place::Path(PATH.to_string()), changes, proposal: pending(), also }
         };
         let named = |claim: ClaimRef, value: &str, sender: &Sender| Claimed { claim, value: json!(value), sender: sender.clone() };
         let note = lab(Some("mail"), &[]);
@@ -956,7 +981,7 @@ mod tests {
             let b = Message { uid: "mail:bbbb".to_string(), ..message(phase, Aligned, vec![moved(Some("2026-10-16"))]) };
             let changes = vec![Change { field: "due".to_string(), from: json!("2026-10-12"), to: json!("2026-10-16") }];
             let also = vec![Claimed { claim: at("mail:aaaa"), value: json!(MOVED), sender: a.sender.clone() }];
-            let card = Action::AmendCard { claim: at("mail:bbbb"), target: PATH.to_string(), changes, proposal: pending(), also };
+            let card = Action::AmendCard { claim: at("mail:bbbb"), target: Place::Path(PATH.to_string()), changes, proposal: pending(), also };
             let superseded = Action::Skip { claim: at("mail:aaaa"), reason: SkipReason::Superseded };
             assert_eq!(against(vec![note.clone()], &[a.clone(), b.clone()], 9), vec![superseded.clone(), card.clone()], "{phase:?}");
             let want = vec![superseded, card, Action::Skip { claim: at("mail:bbbb"), reason: SkipReason::AlreadyApplied }];
@@ -980,7 +1005,7 @@ mod tests {
             let both = message(phase, Aligned, vec![moved(Some(MOVED)), moved(Some("2026-10-12"))]);
             let changes = vec![Change { field: "due".to_string(), from: json!("2026-10-12"), to: json!(MOVED) }];
             let also = vec![Claimed { claim: at(1), value: json!("2026-10-12"), sender: both.sender.clone() }];
-            let card = Action::AmendCard { claim: at(0), target: PATH.to_string(), changes, proposal: pending(), also };
+            let card = Action::AmendCard { claim: at(0), target: Place::Path(PATH.to_string()), changes, proposal: pending(), also };
             let superseded = Action::Skip { claim: at(1), reason: SkipReason::Superseded };
             assert_eq!(against(vec![note.clone()], &[both.clone()], 9), vec![card, superseded.clone()], "{phase:?}");
             let (folder, path) = ("approvals".to_string(), "approvals/amend-lab-5.md".to_string());
@@ -1023,29 +1048,129 @@ mod tests {
         for due in ["2026-10-05", "2026-10-01", "2026-10-01T08:00"] {
             assert_eq!(against(vec![archived.clone()], &[later(vec![moved(Some(due))])], 9), vec![not_amendable.clone()], "{due}");
         }
-        let writes = |actions: Vec<Action>| actions.into_iter().filter(|a| !matches!(a, Action::Skip { .. })).collect::<Vec<_>>();
         let slot_two = against(vec![archived.clone()], &[later(vec![extended.clone()])], 9);
         let whole = against(vec![], &[message(Backfill, Aligned, vec![first.clone()]), later(vec![extended])], 9);
-        assert_eq!(writes(whole), writes([slot_one, slot_two].concat()), "split or whole, the same writes");
+        assert_eq!(whole, [slot_one.clone(), slot_two].concat(), "split or whole, the same plan (plan §9.5)");
         let still_past = against(vec![archived.clone()], &[later(vec![moved(Some("2026-09-30"))])], 9);
-        let set_there = matches!(&still_past[..], [Action::Set { target, to, .. }] if target == "archive/lab-5.md" && to == &json!("2026-09-30"));
+        let set_there = matches!(&still_past[..], [Action::Set { target: Place::Path(path), to, .. }] if path == "archive/lab-5.md" && to == &json!("2026-09-30"));
         assert!(set_there, "{still_past:?}");
+        // Whole, the set names the note the batch's own `Create` files.
+        let whole = against(vec![], &[message(Backfill, Aligned, vec![first.clone()]), later(vec![moved(Some("2026-09-30"))])], 9);
+        let [Action::Set { claim, field, to, mail_asof, body_line, .. }] = &still_past[..] else { panic!() };
+        let (claim, field, to, mail_asof, body_line) = (claim.clone(), field.clone(), to.clone(), *mail_asof, body_line.clone());
+        assert_eq!(whole, [slot_one, vec![Action::Set { claim, target: Place::Planned(at()), field, to, mail_asof, body_line }]].concat());
     }
 
-    /// D10 and §4.8 step 4 across two desktops: one aligned backfill message creates "Lab 5" due
-    /// 2026-10-12 and moves it to 2026-10-14. The desktop that plans it first creates the note (the
-    /// move to a note this plan files waits on the planned-note amendment, plan §9.5); the other,
-    /// once that note has synced, writes nothing more, never a card from 10-12 to 10-14.
+    // -----------------------------------------------------------------------------------------
+    // Plan §9.5's planned-note amendment: a change to a note this plan files
+    // -----------------------------------------------------------------------------------------
+
+    /// One message at `ordering`, its Date header unknown (so a body line shows the ordering day).
+    fn sent(uid: &str, ordering: &str, phase: Phase, authenticity: Authenticity, claims: Vec<Claim>) -> Message {
+        let (uid, ordering_date) = (uid.to_string(), ordering.parse().unwrap());
+        Message { uid, ordering_date, message_date: None, ..message(phase, authenticity, claims) }
+    }
+
+    fn first_of(uid: &str) -> ClaimRef {
+        ClaimRef { message: uid.to_string(), index: 0 }
+    }
+
+    /// Spec test 18's third case, the pure half (D10), and the Checkpoint A failing input: one closed
+    /// aligned backfill batch on an empty vault, M1 (09-02) posting "Lab 5" due 10-12 and M2 (09-09)
+    /// moving it to 10-08. Planned whole, in either delivery order, M2 reaches the note M1 creates,
+    /// named by M1's claim, exactly as it reaches that note by its path once M1 is written (the batch
+    /// split over two slots). Live or unaligned, the move is the card a mail note gets; `cancelled`
+    /// is the archive card. The note is never left at 10-12 and never reported unmatched.
     #[test]
-    fn a_run_another_desktop_planned_writes_nothing_more_after_sync() {
+    fn a_batch_applied_whole_reaches_the_item_it_creates() {
+        let posted = item("Lab 5", Some("2026-10-12"), Task);
+        let m1 = sent("mail:aaaa", "2026-09-02T09:00:00Z", Backfill, Aligned, vec![posted.clone()]);
+        let create = Action::Create { claim: first_of("mail:aaaa"), note: NewNote { mail_asof: Some(m1.ordering_date), ..note(&posted, false) } };
+        let written = NoteView {
+            source_uid: Some(first_of("mail:aaaa").uid()),
+            mail_asof: BTreeMap::from([("due".to_string(), m1.ordering_date)]),
+            ..lab(Some("mail"), &[])
+        };
+        assert_eq!(against(vec![], &[m1.clone()], 9), vec![create.clone()], "slot one");
+        let line = "2026-09-09 \u{b7} Course Staff <staff@example.edu>: The due date moved \u{2014} \"Lab 5 is now due Wednesday\"";
+        for (phase, authenticity) in PHASES {
+            for claim in [moved(Some("2026-10-08")), cancelled()] {
+                let m2 = sent("mail:bbbb", "2026-09-09T09:00:00Z", phase, authenticity, vec![claim.clone()]);
+                let [slot_two] = &against(vec![written.clone()], &[m2.clone()], 9)[..] else { panic!("{phase:?}") };
+                let planned = Place::Planned(first_of("mail:aaaa"));
+                let named = match slot_two.clone() {
+                    Action::Set { claim, target: Place::Path(path), field, to, mail_asof, body_line } if path == PATH => {
+                        assert_eq!((phase, authenticity, to.clone(), body_line.as_str()), (Backfill, Aligned, json!("2026-10-08"), line));
+                        Action::Set { claim, target: planned, field, to, mail_asof, body_line }
+                    }
+                    Action::AmendCard { claim, target: Place::Path(path), changes, proposal, also } if path == PATH => {
+                        Action::AmendCard { claim, target: planned, changes, proposal, also }
+                    }
+                    other => panic!("{phase:?} {authenticity:?} {:?}: {other:?}", claim.field),
+                };
+                let want = vec![create.clone(), named];
+                assert_eq!(against(vec![], &[m1.clone(), m2.clone()], 9), want, "{phase:?} {authenticity:?} {:?}", claim.field);
+                assert_eq!(against(vec![], &[m2, m1.clone()], 9), want, "delivered the other way round");
+            }
+        }
+    }
+
+    /// D10 and §4.8 step 4 across two desktops, and a pass cut short: one aligned backfill message
+    /// creates "Lab 5" due 2026-10-12 and moves it to 2026-10-14. The desktop that plans it first
+    /// creates the note and moves it (plan §9.5). The other, once both writes have synced, writes
+    /// nothing more, never a card from 10-12 to 10-14. A re-plan after a pass that wrote the note and
+    /// stopped before the move still moves it: the claim that created the note said nothing about its
+    /// due when first planned, so it says nothing on a re-plan either.
+    #[test]
+    fn a_message_that_creates_and_moves_an_item_moves_it_once_on_every_desktop() {
         let lab_5 = item("Lab 5", Some("2026-10-12"), Task);
         let both = message(Backfill, Aligned, vec![lab_5.clone(), moved(Some(MOVED))]);
-        let first = against(vec![], &[both.clone()], 9);
-        assert_eq!(first.first(), Some(&created(&lab_5, false)), "{first:?}");
-        let mail_asof = BTreeMap::from([("due".to_string(), ordering())]);
-        let synced = NoteView { source_uid: Some(at().uid()), mail_asof, ..lab(Some("mail"), &[]) };
         let second_at = ClaimRef { message: UID.to_string(), index: 1 };
-        let want = vec![skip(SkipReason::AlreadyApplied), Action::Skip { claim: second_at, reason: SkipReason::Superseded }];
-        assert_eq!(against(vec![synced], &[both], 9), want);
+        let (field, to, body_line) = ("due".to_string(), json!(MOVED), LINE.to_string());
+        let moved_there = Action::Set { claim: second_at.clone(), target: Place::Planned(at()), field, to, mail_asof: ordering(), body_line };
+        assert_eq!(against(vec![], &[both.clone()], 9), vec![created(&lab_5, false), moved_there]);
+        let mail_asof = BTreeMap::from([("due".to_string(), ordering())]);
+        let synced = NoteView { source_uid: Some(at().uid()), mail_asof, due: json!(MOVED), ..lab(Some("mail"), &[]) };
+        let equal = Action::Skip { claim: second_at.clone(), reason: SkipReason::Equal };
+        assert_eq!(against(vec![synced.clone()], &[both.clone()], 9), vec![skip(SkipReason::AlreadyApplied), equal]);
+        let cut_short = NoteView { due: json!("2026-10-12"), ..synced };
+        let want = vec![skip(SkipReason::AlreadyApplied), set_as(second_at, MOVED, ordering(), LINE)];
+        assert_eq!(against(vec![cut_short], &[both], 9), want);
+    }
+
+    /// §4.9's row 12 and P20 on a note this plan files, as on a vault note: two claims at one
+    /// ordering date saying different dues for it make one card from the due it was filed with,
+    /// whether it was filed in an earlier run or by a claim of the same run. Delivered again once the
+    /// note and the card have synced, the run files nothing more (§4.8 step 4).
+    #[test]
+    fn a_two_value_run_on_a_note_this_plan_files_makes_one_card() {
+        let lab_5 = item("Lab 5", Some("2026-10-12"), Task);
+        let at = |index| ClaimRef { message: UID.to_string(), index };
+        let superseded = |claim| Action::Skip { claim, reason: SkipReason::Superseded };
+        let card = |claim, target, also| {
+            let changes = vec![Change { field: "due".to_string(), from: json!("2026-10-12"), to: json!("2026-10-16") }];
+            Action::AmendCard { claim, target, changes, proposal: pending(), also }
+        };
+        let sender = message(Backfill, Aligned, vec![]).sender;
+        // Filed by a claim of the same run.
+        let one = message(Backfill, Aligned, vec![lab_5.clone(), moved(Some(MOVED)), moved(Some("2026-10-16"))]);
+        let also = vec![Claimed { claim: at(1), value: json!(MOVED), sender: sender.clone() }];
+        let want = vec![created(&lab_5, false), superseded(at(1)), card(at(2), Place::Planned(at(0)), also)];
+        assert_eq!(against(vec![], &[one.clone()], 9), want);
+        let mail_asof = BTreeMap::from([("due".to_string(), ordering())]);
+        let synced = NoteView { source_uid: Some(at(0).uid()), mail_asof, ..lab(Some("mail"), &[]) };
+        let (folder, path) = ("approvals".to_string(), "approvals/amend-lab-5.md".to_string());
+        let filed = NoteView { folder, path, source_uid: Some(at(2).uid()), ..lab(Some("mail"), &[]) };
+        let applied = |claim| Action::Skip { claim, reason: SkipReason::AlreadyApplied };
+        assert_eq!(against(vec![synced, filed], &[one], 9), vec![applied(at(0)), superseded(at(1)), applied(at(2))]);
+        // Filed in an earlier run.
+        let m1 = sent("mail:aaaa", "2026-09-02T09:00:00Z", Backfill, Aligned, vec![lab_5.clone()]);
+        let (a, b) = (first_of("mail:bbbb"), first_of("mail:cccc"));
+        let m2 = sent("mail:bbbb", "2026-09-09T09:00:00Z", Backfill, Aligned, vec![moved(Some(MOVED))]);
+        let m3 = sent("mail:cccc", "2026-09-09T09:00:00Z", Live, Aligned, vec![moved(Some("2026-10-16"))]);
+        let create = Action::Create { claim: first_of("mail:aaaa"), note: NewNote { mail_asof: Some(m1.ordering_date), ..note(&lab_5, false) } };
+        let also = vec![Claimed { claim: a.clone(), value: json!(MOVED), sender }];
+        let want = vec![create, superseded(a), card(b, Place::Planned(first_of("mail:aaaa")), also)];
+        assert_eq!(against(vec![], &[m3, m1, m2], 9), want);
     }
 }

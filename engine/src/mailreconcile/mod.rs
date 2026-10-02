@@ -17,9 +17,9 @@
 //! 4, what a claim's target is, read against the vault the earlier claims' actions leave (D10).
 //! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day, and
 //! T5.4's `change` rows for mail, the student, other notes, `cancelled` and two values at one
-//! ordering date. Every other claim that passes the screen and is not already applied (a
-//! `course_info`, an unresolved claim, a change to a note this plan files) is unmatched until T5.5
-//! and the open plan amendment for planned notes fill in their rows.
+//! ordering date, for a vault note and a note the same plan files alike ([`Place::Planned`], plan
+//! §9.5's planned-note amendment). Every other claim that passes the screen and is not already
+//! applied (a `course_info`, an unresolved claim) is unmatched until T5.5 fills in its row.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -219,17 +219,29 @@ pub struct ClaimRef {
     pub index: usize,
 }
 
+/// The note an action writes to or files a card against (plan §9.5's planned-note amendment).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Place {
+    /// A note in the vault, by its [`NoteView::path`] (`tasks/lab-5.md`).
+    Path(String),
+    /// The note the [`Action::Create`] of this claim files, earlier in the same plan: a batch
+    /// applied whole reaches the item it creates (D10, spec test 18). `mail.rs` executes actions in
+    /// plan order, so that note is written first, and an action naming it writes at the path its
+    /// `Create` gave. Only a `Create` files an item, so no other claim is ever named here.
+    Planned(ClaimRef),
+}
+
 /// What the mail pass writes for one claim, in plan order (§4.9). `mail.rs` executes each through
 /// `write`, journal first, as `agent:knowlu.mail`, and decides nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// A new note in `tasks/` (§5.2), written directly.
     Create { claim: ClaimRef, note: NewNote },
-    /// One field set directly on `target` (a [`NoteView::path`]), with its `mail_asof` stamp and
-    /// the body line `<date> · <sender>: <why> — "<evidence>"` (§5.2).
+    /// One field set directly on `target`, with its `mail_asof` stamp and the body line
+    /// `<date> · <sender>: <why> — "<evidence>"` (§5.2).
     Set {
         claim: ClaimRef,
-        target: String,
+        target: Place,
         field: String,
         to: Value,
         mail_asof: Timestamp,
@@ -242,7 +254,7 @@ pub enum Action {
     /// the value it claims and its sender, and never the card's own claim, whose value is `to`: the
     /// last in plan order whose value the note did not already hold (plan §9.5). Empty on every
     /// other card. A field T5.1's action list did not have, recorded in plan §9.5.
-    AmendCard { claim: ClaimRef, target: String, changes: Vec<Change>, proposal: Proposal, also: Vec<Claimed> },
+    AmendCard { claim: ClaimRef, target: Place, changes: Vec<Change>, proposal: Proposal, also: Vec<Claimed> },
     /// An `info/` item: `kind` is one of `info::KINDS`, and a later notice with the same
     /// `close_key` supersedes it (D13).
     Notice {
@@ -253,7 +265,7 @@ pub enum Action {
         body_line: String,
     },
     /// A submission receipt: `completion::propose_done` on `target`.
-    ProposeDone { claim: ClaimRef, target: String },
+    ProposeDone { claim: ClaimRef, target: Place },
     /// Nothing is written; the reason is counted on the run line (§4.8 step 7).
     Skip { claim: ClaimRef, reason: SkipReason },
 }
@@ -407,8 +419,13 @@ fn walk<'m>(
                 (false, None, vec![Action::Skip { claim: at.clone(), reason: SkipReason::Noise }])
             } else {
                 let resolved = working.resolve(&at, claim);
+                // An applied claim says what it said when first planned. One whose target is the
+                // note it created itself (its uid on it) was `New` then, and said nothing.
                 let said = match resolved {
-                    Resolved::AlreadyApplied => rules::said(&working.resolve_target(claim)),
+                    Resolved::AlreadyApplied => match working.resolve_target(claim) {
+                        Resolved::Change { target, .. } if target.note().source_uid == Some(at.uid()) => None,
+                        first => rules::said(&first),
+                    },
                     ref resolved => rules::said(resolved),
                 };
                 (resolved == Resolved::Ambiguous, said, rule(&resolved, message, at.clone(), claim))
