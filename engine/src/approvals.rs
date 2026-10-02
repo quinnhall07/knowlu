@@ -6794,7 +6794,11 @@ mod tests {
         /// note in `tasks/` still `archived` (it never ranks half done), and the next run finds it
         /// through the journal's move record and finishes, at a suffixed path too when the plain one
         /// was taken (Checkpoint A). A failed stamp after both leaves the card approved, and the next
-        /// run stamps it, writing nothing more to the note.
+        /// run stamps it, writing nothing more to the note. Checkpoint A's two minor findings: a note
+        /// the writes after the move would refuse (a block-style `judgment:`) is refused before the
+        /// move, so it never sits half moved; and the split write's middle (the student's move and
+        /// due made, the executor's `status` not), staged by hand, is finished by the next run with
+        /// exactly the executor's two writes.
         #[test]
         fn an_unarchive_interrupted_between_its_writes_completes_or_stays_pending() {
             let failed = vec!["transition failed: amend-lab-5.md".to_string()];
@@ -6851,6 +6855,50 @@ mod tests {
             assert_eq!(execute(&v).executed, ["amend-lab-5"]);
             assert_eq!(trail(&v, NOTE), note, "the re-run writes nothing more to the note");
             unarchived(&v, "2026-09-01");
+
+            // A block-style `judgment:` the writes after the move would refuse: `unarchive_problem`
+            // refuses before the move, recoverably, and nothing is written or moved.
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let archived = archived_lab(&v, &format!("{IMPORTED}\njudgment:\n  migrated: true"));
+            let before = read(&archived);
+            let card = amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+            let block = crate::provenance::ProvenanceError::BlockStyle.to_string();
+            assert_eq!(execute(&v).warnings, [format!("amend-lab-5.md: {block}")], "refused before the move");
+            assert!(is_recoverable_refusal(&block));
+            assert_eq!(field(&card, "status"), "pending");
+            assert_eq!(read(&archived), before, "archive/lab-5.md unchanged byte for byte");
+            assert!(journal_records(&v).iter().all(|r| text(r, "path") == CARD), "no record on the note");
+            let listed = std::fs::read_dir(v.join("tasks")).map(|dir| dir.count()).unwrap_or(0);
+            assert_eq!(listed, 0, "nothing in tasks/");
+
+            // The split write's middle, staged by hand through the writer: the student's move to the
+            // suffixed path and the student's due are made, the executor's `status` is not. The next
+            // run writes exactly `status` and `archived_reason` as the executor, then settles the card.
+            let (v, _, card) = setup();
+            let suffixed = "tasks/lab-5-2.md";
+            let (student, mut journal) = (executor().with_actor("student"), Journal::new(&v));
+            move_note(&v, ARCHIVED, suffixed, &student, &mut journal).unwrap();
+            let due = [("due".to_string(), "2026-09-01".to_string())];
+            write_literals(&v, suffixed, &due, &student, &mut journal, &WriteOpts::default()).unwrap();
+            let fields = ["due", "status", "archived_reason"].map(|key| field(&v.join(suffixed), key));
+            assert_eq!(fields, ["2026-09-01", "archived", "imported-past"], "staged half done");
+            assert_eq!(trail(&v, ARCHIVED), [by("move", "", "student")]);
+            assert_eq!(trail(&v, suffixed), [by("set", "due", "student")]);
+            assert_eq!(field(&card, "status"), "approved", "staged unsettled");
+            let staged = journal_records(&v).len();
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            let agent = "agent:approvals";
+            let written: Vec<[String; 4]> = journal_records(&v)[staged..]
+                .iter()
+                .map(|r| ["path", "op", "field", "actor"].map(|key| text(r, key)))
+                .collect();
+            let by_agent = |path: &str, op: &str, field: &str| [path, op, field, agent].map(str::to_string);
+            let settled = [by_agent(CARD, "set", "status"), by_agent(CARD, "set", "executed_at"), by_agent(CARD, "delete", "")];
+            let finished = [by_agent(suffixed, "set", "status"), by_agent(suffixed, "set", "archived_reason")];
+            assert_eq!(written, [&finished[..], &settled[..]].concat(), "exactly the executor's two writes, then the card");
+            unarchived_at(&v, suffixed, "2026-09-01");
+            assert!(Journal::new(&v).human_set(TASK_ID, "status").is_none(), "the student never set status");
         }
     }
 }
