@@ -26,11 +26,15 @@ use crate::mailreconcile::{self, Action, Change, Claim, ClaimRef, Message, NewNo
 use crate::write::{self, WriteContext, WriteError, WriteOpts};
 
 mod cards;
+mod heads;
+mod pass;
 mod text;
+mod view;
 
 #[cfg(test)]
 mod tests;
 
+pub use pass::{pull_mail, pull_mail_on};
 use text::{asof_literal, json_lit, note_text, single_lines, Origin};
 
 /// D20: the journal actor of every write the mail pass makes. `agent:` keeps judge-once.
@@ -238,6 +242,15 @@ impl<'a> Writer<'a> {
         let item = NewInfo { title, kind, body: body_line, opened_by: MAIL_ACTOR, close_key, expires: None };
         let path = info::open_info(self.vault, &item, &self.ctx, Some(self.journal), None).map_err(io)?;
         Ok(Wrote::Notice(ids::rel(self.vault, &path)))
+    }
+
+    /// Close every open `info/` item with this `close_key` (a heads-up whose mailbox is active again).
+    pub fn close_notices(&mut self, close_key: &str) -> Result<(), WriteError> {
+        let closed = info::close_info(self.vault, Some(close_key), None, MAIL_ACTOR, &self.ctx, Some(self.journal), None);
+        closed.map(|_| ()).map_err(|e| match e {
+            InfoError::Write(e) => e,
+            other => WriteError::Io(other.to_string()),
+        })
     }
 
     /// PQ4: a template receipt is `completion::propose_done`, which always proposes and asks once

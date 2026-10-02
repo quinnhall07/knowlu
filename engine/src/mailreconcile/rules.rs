@@ -436,7 +436,7 @@ fn filed_before(before: &Working, run: &[Step<'_>], place: &Place) -> Option<Not
 /// A mail card's place in the deck on `today` (§4.8 step 5, plan §10 R16): held to day 2 on the
 /// vault's first day, else `pending` today. `commitments::vault_day` is never below 1; a lower
 /// number is read as the first day, so a card is held rather than shown early.
-pub(super) fn proposal(today: Date, vault_day: i64) -> Proposal {
+pub(crate) fn proposal(today: Date, vault_day: i64) -> Proposal {
     if vault_day <= 1 {
         // Only 9999-12-31 has no next day.
         let day_two = today.tomorrow().unwrap_or(today);

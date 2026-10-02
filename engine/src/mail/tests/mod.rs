@@ -15,6 +15,7 @@ mod cards;
 mod hostile;
 mod notes;
 mod sets;
+mod view;
 
 pub(super) const VIA: &str = "local-runner";
 
