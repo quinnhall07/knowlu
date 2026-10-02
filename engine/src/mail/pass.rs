@@ -6,10 +6,11 @@
 //! own, so a crash costs a repeat, never a lost message.
 //!
 //! **Apply.** Each round is viewed ([`super::view`]), planned by `mailreconcile::plan` (the only place
-//! card or direct is decided) and written through [`Writer`], in plan order. A message is acknowledged and
+//! card or direct is decided) and written through [`Writer`], in plan order. Before it plans, the ambiguous
+//! claims are asked of `mail-resolve`, one call per course ([`super::asks`], T6.4). A message is acknowledged and
 //! recorded in `state/ingest-seen.md` (under the fixed title `(email)`, never a mail-derived one: plan
 //! §10, R11) only when every claim of it was written or deliberately skipped. A write that failed, or a
-//! claim still ambiguous with a course (it waits on `mail-resolve`, T6.4), holds its message: nothing is
+//! claim still ambiguous with a course (unanswered, or asking failed), holds its message: nothing is
 //! acknowledged, so it comes back, and a claim written before is `AlreadyApplied` when it does. The server
 //! returns an undelivered claim on every later pull, so a held message that comes back in the same pass is
 //! skipped (not planned, written or counted again), and a page of nothing but held messages ends the pass:
@@ -32,7 +33,7 @@ use crate::ingest;
 use crate::journal::Journal;
 use crate::mailreconcile::{self, resolve, Action, ClaimRef, Message, NoticeAbout, Phase, SkipReason};
 
-use super::{heads, view, Source, Why, Wrote, Writer};
+use super::{asks, heads, view, Source, Why, Wrote, Writer};
 
 /// The pass over the vault's own clock (`config/ingest.yaml`'s zone, else the machine's), which is the
 /// clock `commitments::vault_day` counts the vault's days in.
@@ -45,7 +46,19 @@ pub fn pull_mail(vault: &Path, client: &CloudClient, opts: &Options<'_>, budget:
 pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budget: Duration, today: Date) -> Vec<String> {
     let started = Instant::now();
     let mut journal = Journal::new(vault);
-    let mut run = Run { vault, opts, today, tally: Tally::default(), boxes: BTreeMap::new(), connected: false, held: BTreeSet::new() };
+    let mut run = Run {
+        vault,
+        client,
+        opts,
+        today,
+        started,
+        budget,
+        tally: Tally::default(),
+        boxes: BTreeMap::new(),
+        connected: false,
+        held: BTreeSet::new(),
+        asking_failed: None,
+    };
     let (mut ack, mut round, mut batch, mut more) = (Vec::<String>::new(), 0usize, false, false);
     let mut failure: Option<String> = None;
     loop {
@@ -86,6 +99,9 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
     let held = mailreconcile::proposal(today, crate::commitments::vault_day(vault, today));
     let mut writer = Writer::new(vault, opts.via, opts.run_id, &mut journal, today, held);
     lines.extend(heads::keep(&mut writer, vault, &boxes, &today.to_string()));
+    if let Some(why) = run.asking_failed {
+        lines.push(format!("mail: could not ask which item ({why}); left for the next slot"));
+    }
     if more && failure.is_none() {
         lines.push("mail: more is waiting, left for the next slot".to_string());
     }
@@ -96,8 +112,11 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
 /// What one slot's rounds share.
 struct Run<'a> {
     vault: &'a Path,
+    client: &'a CloudClient,
     opts: &'a Options<'a>,
     today: Date,
+    started: Instant,
+    budget: Duration,
     tally: Tally,
     /// The latest report of each mailbox, by `address_id`.
     boxes: BTreeMap<String, MailboxReport>,
@@ -107,6 +126,9 @@ struct Run<'a> {
     /// held message that comes back is neither planned, written nor counted again (a notice written for
     /// it would otherwise be closed and reopened, and counted in `J` each round).
     held: BTreeSet<String>,
+    /// What ended the asking of `mail-resolve` (a failed call, no time left): the rest of the pass does not
+    /// ask again, since the next call would fail the same way, and the claims wait for the next slot.
+    asking_failed: Option<&'static str>,
 }
 
 impl Run<'_> {
@@ -158,6 +180,15 @@ impl Run<'_> {
     fn write_plan(&mut self, fresh: &[Message], pulled: &MailPull, journal: &mut Journal) -> BTreeSet<String> {
         let view = view::build(self.vault, journal);
         let vault_day = crate::commitments::vault_day(self.vault, self.today);
+        // §4.8 step 3: the ambiguous claims are asked, one call per course, and the answers stored on them
+        // before the plan reads them. What stays ambiguous (unanswered, or asking failed) waits.
+        let mut fresh = fresh.to_vec();
+        let asked: Vec<ClaimRef> = resolve::to_ask(&view, &fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
+        if !asked.is_empty() && self.asking_failed.is_none() {
+            let (started, budget) = (self.started, self.budget);
+            self.asking_failed = asks::settle(self.client, &view, &mut fresh, &asked, || started.elapsed() + CALL_TIMEOUT <= budget);
+        }
+        let fresh = &fresh[..];
         let waiting: BTreeSet<ClaimRef> =
             resolve::to_ask(&view, fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
         let actions = mailreconcile::plan(&view, fresh, self.today, vault_day);

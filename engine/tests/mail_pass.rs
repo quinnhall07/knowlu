@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,9 +47,15 @@ impl Loop {
         CloudClient::new(&cfg, "jwt-not-a-secret")
     }
 
-    /// The `ack` array of the n-th request's body.
+    /// The requests made to one endpoint (`mail-pull`, `mail-resolve`), in order.
+    fn calls(&mut self, endpoint: &str) -> Vec<String> {
+        let line = format!("POST /functions/v1/{endpoint} ");
+        self.requests().into_iter().filter(|r| r.starts_with(&line)).collect()
+    }
+
+    /// The `ack` array of the n-th `mail-pull` request's body.
     fn ack_of(&mut self, n: usize) -> Vec<String> {
-        let requests = self.requests();
+        let requests = self.calls("mail-pull");
         let body: Value = serde_json::from_str(body_of(&requests[n])).expect("a JSON body");
         body["ack"].as_array().expect("an ack array").iter().map(|u| u.as_str().unwrap().to_string()).collect()
     }
@@ -111,10 +117,24 @@ fn serve(answer: impl Fn(&str, usize) -> (u16, String) + Send + 'static) -> Loop
     Loop { base: format!("http://127.0.0.1:{port}/functions/v1"), stop, seen, handle: Some(handle) }
 }
 
-/// The mail-pull replies in order, then an empty pull.
+/// The mail-pull replies in order, then an empty pull. A `mail-resolve` call is answered with no answers
+/// (so a claim that needed one stays ambiguous) and takes no reply from the pulls.
 fn pulls(replies: Vec<Value>) -> Loop {
+    resolving(replies, |_| json!({ "answers": [] }))
+}
+
+/// [`pulls`] with `resolve` answering each `mail-resolve` request body.
+fn resolving(replies: Vec<Value>, resolve: impl Fn(&Value) -> Value + Send + 'static) -> Loop {
     let bodies: Vec<String> = replies.iter().map(knowlu_engine::ledger::dumps_value).collect();
-    serve(move |_, n| (200, bodies.get(n).cloned().unwrap_or_else(|| pull(vec![], json!([]), false).to_string())))
+    let pulled = AtomicUsize::new(0);
+    serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            let body: Value = serde_json::from_str(body_of(request)).unwrap_or(Value::Null);
+            return (200, knowlu_engine::ledger::dumps_value(&resolve(&body)));
+        }
+        let n = pulled.fetch_add(1, Ordering::SeqCst);
+        (200, bodies.get(n).cloned().unwrap_or_else(|| pull(vec![], json!([]), false).to_string()))
+    })
 }
 
 fn pull(rows: Vec<Value>, mailboxes: Value, more: bool) -> Value {
@@ -738,7 +758,7 @@ fn a_held_message_delivered_in_two_rounds_is_planned_once() {
     assert_eq!(journal_lines(&vault), one_journal, "the same journal records as one round");
     assert_eq!(open_items(&vault, "mail:CS 101:room").len(), 1);
     assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"));
-    assert_eq!(server.requests().len(), 2, "the second round held nothing new, so the pass stopped");
+    assert_eq!(server.calls("mail-pull").len(), 2, "the second round held nothing new, so the pass stopped");
     for v in [&control, &vault] {
         let _ = std::fs::remove_dir_all(v);
     }
@@ -755,7 +775,7 @@ fn a_page_of_only_held_messages_ends_the_drain() {
     let page = pull(vec![held_row], json!([]), true);
     let mut server = pulls(vec![page.clone(), page.clone(), page.clone(), page.clone(), page]);
     let lines = run(&vault, &server, today);
-    assert_eq!(server.requests().len(), 2, "the second page held nothing new, so the drain stopped: {lines:?}");
+    assert_eq!(server.calls("mail-pull").len(), 2, "the second page held nothing new, so the drain stopped: {lines:?}");
     assert!(lines.iter().any(|l| l.contains("more is waiting")), "{lines:?}");
     let _ = std::fs::remove_dir_all(&vault);
 }
@@ -778,4 +798,239 @@ fn a_reenabled_heads_up_that_failed_to_write_is_not_stamped_seen() {
     only_boxes(&vault, today, boxes);
     assert_eq!(open_items(&vault, "mail-reenabled:addr-1").len(), 1, "the next pass opens it");
     let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---------------------------------------------------------------------------
+// T6.4: ambiguity resolved per course (spec test 25), labels (28b), `judge` (30)
+// ---------------------------------------------------------------------------
+
+/// Two mail notes in each of two courses, so a claim naming `Lab` or `Quiz` is ambiguous and one naming
+/// `Ghost` matches nothing. Notes mail wrote are `created_by: mail`, so a backfill change is a direct set.
+fn labs_and_quizzes(vault: &Path) {
+    for (n, (course, title)) in [("CS 101", "Lab 5"), ("CS 101", "Lab 6"), ("MATH 220", "Quiz 1"), ("MATH 220", "Quiz 2")].into_iter().enumerate() {
+        let name = title.to_lowercase().replace(' ', "-");
+        let text = format!("---\ntitle: {title}\ncourse: {course}\ndue: 2030-01-01\nstatus: active\ncreated_by: mail\nsource_uid: \"mail:s{n}:0\"\n---\n\nx\n");
+        file(vault, &format!("tasks/{name}.md"), &text, "agent:knowlu.test");
+    }
+}
+
+/// The scripted resolver for [`ambiguous_message`]: `Lab 6` for its claim 0, `Quiz 2` for its claim 2, and
+/// "none" for claim 1.
+fn scripted(body: &Value) -> Value {
+    let course = body["course"].as_str().unwrap_or_default().to_string();
+    let pick = |title: &str| {
+        let found = body["candidates"].as_array().into_iter().flatten().find(|c| c["title"] == title);
+        found.map_or(Value::Null, |c| c["id"].clone())
+    };
+    let answers: Vec<Value> = body["claims"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let target = match (course.as_str(), c["index"].as_u64()) {
+                ("CS 101", Some(0)) => pick("Lab 6"),
+                ("MATH 220", Some(2)) => pick("Quiz 2"),
+                _ => Value::Null,
+            };
+            json!({ "uid": c["uid"], "index": c["index"], "target_id": target })
+        })
+        .collect();
+    json!({ "answers": answers })
+}
+
+fn ambiguous_message(today: Date) -> Value {
+    row("mail:aa11", T1, "backfill", vec![
+        change("Lab", "CS 101", &ahead(today, 9)),
+        change("Ghost", "CS 101", &ahead(today, 9)),
+        change("Quiz", "MATH 220", &ahead(today, 11)),
+    ])
+}
+
+/// §4.8 step 3, D12: one `mail-resolve` call per course, carrying references and the course's items
+/// (id, title, due) and none of the message's text; the answers land the claims, the "none" is a notice,
+/// and the message is acknowledged because every claim was settled.
+#[test]
+fn one_resolve_call_per_course() {
+    let vault = scratch("resolve");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let mut server = resolving(vec![pull(vec![ambiguous_message(today)], json!([]), false)], scripted);
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines, ["mail: 0 new, 2 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 1 unmatched".to_string()], "{lines:?}");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), ahead(today, 9));
+    assert_eq!(field(&vault, "tasks/quiz-2.md", "due").unwrap(), ahead(today, 11));
+    assert_eq!(field(&vault, "tasks/lab-5.md", "due").unwrap(), "2030-01-01");
+    assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "every claim settled, so the message is recorded");
+    assert_eq!(server.ack_of(1), ["mail:aa11"]);
+    let calls = server.calls("mail-resolve");
+    assert_eq!(calls.len(), 2, "one call per course: {calls:?}");
+    let bodies: Vec<Value> = calls.iter().map(|c| serde_json::from_str(body_of(c)).unwrap()).collect();
+    assert_eq!(bodies[0]["course"], "CS 101");
+    assert_eq!(bodies[1]["course"], "MATH 220");
+    assert_eq!(bodies[0]["claims"], json!([{ "uid": "mail:aa11", "index": 0 }, { "uid": "mail:aa11", "index": 1 }]));
+    assert_eq!(bodies[1]["claims"], json!([{ "uid": "mail:aa11", "index": 2 }]));
+    let titles = |body: &Value| -> Vec<String> { body["candidates"].as_array().unwrap().iter().map(|c| c["title"].as_str().unwrap().to_string()).collect() };
+    assert_eq!(titles(&bodies[0]), ["Lab 5", "Lab 6"], "only the course's own items are offered");
+    assert_eq!(titles(&bodies[1]), ["Quiz 1", "Quiz 2"]);
+    assert_eq!(bodies[0]["candidates"][1]["due"], "2030-01-01");
+    for call in &calls {
+        assert!(!call.contains("Lab 5 is now due Monday") && !call.contains("prof@example.edu"), "no message text or address travels: {call}");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D12: "none" is an info notice keyed by the claim's own uid, never a guess; nothing else is written.
+#[test]
+fn a_none_answer_is_a_notice() {
+    let vault = scratch("resolve-none");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let server = resolving(
+        vec![pull(vec![row("mail:aa11", T1, "backfill", vec![change("Ghost", "CS 101", &ahead(today, 9))])], json!([]), false)],
+        |body| {
+            let answers: Vec<Value> = body["claims"].as_array().unwrap().iter().map(|c| json!({ "uid": c["uid"], "index": c["index"], "target_id": null })).collect();
+            json!({ "answers": answers })
+        },
+    );
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines, ["mail: 0 new, 0 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 1 unmatched".to_string()]);
+    let notices = open_items(&vault, "mail:aa11:0");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].2, "agent:knowlu.mail");
+    assert_eq!(field(&vault, &notices[0].0, "title").unwrap(), "Knowlu could not match this to an item");
+    assert_eq!(field(&vault, "tasks/lab-5.md", "due").unwrap(), "2030-01-01");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), "2030-01-01");
+    assert!(files(&vault, "approvals").is_empty());
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D12: an answer the service stored comes back on the claim, so a re-pull replays it with no call: a
+/// stored id lands the change, a stored "none" is the notice.
+#[test]
+fn a_stored_resolution_replays_with_zero_calls() {
+    let vault = scratch("resolve-stored");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let lab_6 = field(&vault, "tasks/lab-6.md", "id").unwrap();
+    let mut chosen = change("Lab", "CS 101", &ahead(today, 9));
+    chosen["resolution"] = json!({ "target_id": lab_6 });
+    let mut none = change("Ghost", "CS 101", &ahead(today, 9));
+    none["resolution"] = json!({ "target_id": null });
+    let mut server = resolving(vec![pull(vec![row("mail:aa11", T1, "backfill", vec![chosen, none])], json!([]), false)], scripted);
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines, ["mail: 0 new, 1 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 1 unmatched".to_string()], "{lines:?}");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), ahead(today, 9));
+    assert_eq!(field(&vault, "tasks/lab-5.md", "due").unwrap(), "2030-01-01");
+    assert_eq!(open_items(&vault, "mail:aa11:1").len(), 1);
+    assert!(server.calls("mail-resolve").is_empty(), "a stored answer is replayed, never asked again");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// No answer (the call failed) leaves every claim asked: nothing is written for them, the message is held
+/// unacknowledged so it comes back, and the failure is one named line that carries no message text.
+#[test]
+fn a_failed_resolve_holds_the_message_and_is_named() {
+    let vault = scratch("resolve-down");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let body = knowlu_engine::ledger::dumps_value(&pull(vec![ambiguous_message(today)], json!([]), false));
+    let mut server = serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            (503, r#"{"error":"down"}"#.to_string())
+        } else {
+            (200, body.clone())
+        }
+    });
+    let lines = run(&vault, &server, today);
+    assert_eq!(server.calls("mail-resolve").len(), 1, "a failed call ends the asking: the rest would fail the same way");
+    assert!(lines.iter().any(|l| l == "mail: could not ask which item (the service refused); left for the next slot"), "{lines:?}");
+    assert!(lines[0].starts_with("mail: 0 new, 0 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 0 unmatched"), "{lines:?}");
+    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "held, so it comes back");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), "2030-01-01");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// Spec test 28b: the device never reports a label on a mail card. A rejected `mail_claim` card is no row
+/// (`labels_to_report` is unchanged), while a rejected `task` card beside it still is, so the test is not
+/// vacuous.
+#[test]
+fn a_rejected_mail_card_is_never_reported() {
+    const MAIL_JUDGMENT: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    const TASK_JUDGMENT: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let (vault, today) = day_two("labels");
+    let mut mail = row("mail:aa11", T1, "live", vec![new_item("Lab 5", "CS 101", Some(&ahead(today, 10)), "task")]);
+    mail["judgment_id"] = json!(MAIL_JUDGMENT);
+    run(&vault, &pulls(vec![pull(vec![mail], json!([]), false)]), today);
+    let card = "approvals/task-lab-5.md";
+    assert_eq!(field(&vault, card, "judgment_kind").unwrap(), "mail_claim");
+    assert_eq!(field(&vault, card, "judgment_id").unwrap(), MAIL_JUDGMENT, "the card is judged, so only its kind keeps it unreported");
+
+    let student = knowlu_engine::write::WriteContext::new(human(&vault), "dashboard");
+    let mut journal = knowlu_engine::journal::Journal::new(&vault);
+    let reject = |rel: &str, journal: &mut knowlu_engine::journal::Journal| {
+        let status = [("status".to_string(), "rejected".to_string())];
+        knowlu_engine::write::write_literals(&vault, rel, &status, &student, journal, &knowlu_engine::write::WriteOpts::default()).expect("the answer is written");
+    };
+    reject(card, &mut journal);
+    assert!(!knowlu_engine::enrich::labels_waiting(&vault), "a rejected mail card is no label");
+
+    let control = format!(
+        "---\ntype: approval\nkind: task\ntitle: A judged task\nstatus: pending\nsource_uid: \"gmail:1\"\nproposed_at: {today}\n\
+         first_proposed_at: {today}\nexpires: 2030-01-01\nsnooze_until: null\ncreated_by: gmail\njudgment_id: {TASK_JUDGMENT}\n\
+         judgment_kind: task\n---\n\nbody\n"
+    );
+    file(&vault, "approvals/task-control.md", &control, "agent:knowlu.enrich");
+    reject("approvals/task-control.md", &mut journal);
+    assert!(knowlu_engine::enrich::labels_waiting(&vault), "a rejected task card is");
+    let mut server = serve(|_, _| (200, r#"{"corrections":1,"unowned":0,"refused":0}"#.to_string()));
+    knowlu_engine::enrich::report_labels(&vault, &server.client(), &opts(), BATCH_BUDGET);
+    let sent = server.calls("telemetry");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains(TASK_JUDGMENT) && !sent[0].contains(MAIL_JUDGMENT), "only the task card's label travels: {}", sent[0]);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The cloud arm's endpoints for the `judge` tests, `mail_pull` answering as the test says.
+fn judge_server(mail_pull: impl Fn(usize) -> (u16, String) + Send + 'static) -> Loop {
+    let pulled = AtomicUsize::new(0);
+    serve(move |request, _| {
+        let line = request.lines().next().unwrap_or("");
+        if line.starts_with("GET /functions/v1/judge-rules") {
+            (200, r#"{"proposals":[]}"#.to_string())
+        } else if line.starts_with("POST /functions/v1/gmail-read") {
+            (200, r#"{"items":[],"read":0,"quiet":true,"reason":"no_gmail_scope","more":false}"#.to_string())
+        } else if line.starts_with("POST /functions/v1/mail-pull") {
+            mail_pull(pulled.fetch_add(1, Ordering::SeqCst))
+        } else {
+            (404, r#"{"error":"not found"}"#.to_string())
+        }
+    })
+}
+
+/// Spec test 30's `judge` half: the cloud arm runs the mail pass after the Gmail pull, inside the same
+/// gate, and exits 0 whatever the mail service answers; a refusal, a throttle, a server error and an
+/// unreadable body are each a named line, never a failed slot.
+#[test]
+fn judge_runs_the_mail_pass_after_the_gmail_pull_and_exits_zero_on_every_mail_failure() {
+    let vault = scratch("judge-mail");
+    let today = vault_today(&vault);
+    let first = pull(vec![row("mail:aa11", T1, "backfill", vec![new_item("Lab Nine", "CS 101", Some(&ahead(today, 10)), "task")])], json!([]), false);
+    let mut server = judge_server(move |n| (200, if n == 0 { first.to_string() } else { pull(vec![], json!([]), false).to_string() }));
+    let (code, lines) = knowlu_engine::enrich::run_lines_with(&vault, &opts(), Some(&server.client()));
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(lines.iter().any(|l| l == "mail: 1 new, 0 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 0 unmatched"), "{lines:?}");
+    assert_eq!(field(&vault, "tasks/cs-101-lab-nine.md", "created_by").unwrap(), "mail");
+    let requests = server.requests();
+    let at = |what: &str| requests.iter().position(|r| r.contains(what)).unwrap_or_else(|| panic!("no {what} request: {requests:?}"));
+    assert!(at("/functions/v1/gmail-read") < at("/functions/v1/mail-pull"), "the Gmail pull comes first");
+    let _ = std::fs::remove_dir_all(&vault);
+
+    for (code, body) in [(500, r#"{"error":"x"}"#), (401, r#"{"error":"x"}"#), (402, r#"{"error":"x"}"#), (403, r#"{"error":"x"}"#), (429, r#"{"error":"x"}"#), (200, "not json")] {
+        let vault = scratch("judge-mail-down");
+        let server = judge_server(move |_| (code, body.to_string()));
+        let (exit, lines) = knowlu_engine::enrich::run_lines_with(&vault, &opts(), Some(&server.client()));
+        assert_eq!(exit, 0, "{code}: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("mail: skipped (")), "{code}: a named line, {lines:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }

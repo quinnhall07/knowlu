@@ -1201,13 +1201,15 @@ fn the_probe_fires_when_only_a_label_is_waiting() {
     set_status(&v, "approvals/event-check-talk.md", "rejected", &console_ctx());
     assert!(knowlu_engine::enrich::labels_waiting(&v));
 
-    // The probe (`GET /judge-rules`), the Gmail pull (D4: answered `no_gmail_scope`),
-    // `pull_rules`' offer read, then the label report.
+    // The probe (`GET /judge-rules`), the Gmail pull (D4: answered `no_gmail_scope`), the mail pull
+    // (T6.4: an account with no mailbox), `pull_rules`' offer read, then the label report.
     let no_rules = r#"{"proposals":[]}"#.to_string();
     let no_scope = r#"{"items":[],"read":0,"quiet":true,"reason":"no_gmail_scope","more":false}"#.to_string();
+    let no_mail = r#"{"messages":[],"mailboxes":[],"more":false}"#.to_string();
     let mut server = loopback(vec![
         (200, no_rules.clone()),
         (200, no_scope),
+        (200, no_mail),
         (200, no_rules),
         (200, SAVED_ONE.to_string()),
     ]);
@@ -1216,10 +1218,11 @@ fn the_probe_fires_when_only_a_label_is_waiting() {
     assert_eq!(code, 0);
     assert!(lines.iter().any(|l| l == "labels: sent 1"), "{lines:?}");
     let sent = server.requests();
-    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert_eq!(sent.len(), 5, "{sent:?}");
     assert!(sent[1].starts_with("POST /functions/v1/gmail-read HTTP/1.1"), "{}", sent[1]);
-    assert!(sent[3].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[3]);
-    assert!(body_of(&sent[3]).contains(r#""theirs": "drop""#), "{}", sent[3]);
+    assert!(sent[2].starts_with("POST /functions/v1/mail-pull HTTP/1.1"), "{}", sent[2]);
+    assert!(sent[4].starts_with("POST /functions/v1/telemetry HTTP/1.1"), "{}", sent[4]);
+    assert!(body_of(&sent[4]).contains(r#""theirs": "drop""#), "{}", sent[4]);
     assert!(card_field(&v, "approvals/event-check-talk.md", "reported_at").is_some());
     let _ = std::fs::remove_dir_all(&v);
 }

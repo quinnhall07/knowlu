@@ -8,7 +8,8 @@
 //! T6.2 (this file's [`Writer`]) holds one writer per [`Action`] kind and decides nothing: card or
 //! direct was decided by `mailreconcile::plan` (D11), and the one thing a writer re-checks is that a
 //! student's `set` has not landed since the view was built, which can only turn a direct set into a
-//! card (plan §10, R10). T6.3 adds the pass; T6.4 its call from `enrich`.
+//! card (plan §10, R10). T6.3 adds the pass; T6.4 asks `mail-resolve` per course before it plans
+//! ([`asks`]) and calls it from `enrich`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +26,7 @@ use crate::journal::Journal;
 use crate::mailreconcile::{self, Action, Change, Claim, ClaimRef, Message, NewNote, Place, Proposal, SkipReason};
 use crate::write::{self, WriteContext, WriteError, WriteOpts};
 
+mod asks;
 mod cards;
 mod heads;
 mod pass;
