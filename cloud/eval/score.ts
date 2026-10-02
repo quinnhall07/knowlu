@@ -92,8 +92,10 @@ export const COST: Record<string, number> = {
 
 function cost(theirs: string, ours: string): number {
   if (theirs === ours) return 0;
-  // Task 14 fix (found running the brief's own test): a MISSING answer (the model failed, or a
-  // dry run's null verdict) is never assumed cheap. Falling through to the `?? 1` default below
+  // Task 14 fix (found running the brief's own test): a MISSING answer (a refusal, a truncation,
+  // an invalid or below-floor reply, or a dry run's null verdict) is never assumed cheap. A call
+  // that never answered at all (`model failed`) does not reach here: `run_eval.ts` leaves it
+  // unscored (see `providerError` below). Falling through to the `?? 1` default below
   // would score "no answer at all" as a mild, generic mismatch — cheaper than "obligation called
   // opportunity" — which contradicts this file's own asymmetry ("a model that gets 'safe' by
   // dropping everything scores worse"): an unusable answer is at least as bad as the worst named
@@ -162,6 +164,32 @@ export function score(kind: Kind, cases: Case[], answers: Array<Record<string, u
     higherIsBetter: true,
     n: contributing,
   }];
+}
+
+/**
+ * A case whose model call never answered — cause `model failed` (transport, auth, provider,
+ * timeout, an error envelope, an unparseable reply), still failing after `run_eval.ts`'s retries —
+ * is not scored at all: it says nothing about the model's judgment. PR #33's eval-gate
+ * (2026-10-02) scored such cases as the worst miss and read 0.564 where replays of the same seed
+ * read 0.897-0.936. A refusal or a truncation is the model answering and stays scored as before.
+ *
+ * A few unscored cases are noise and the kind is scored on the rest. More than
+ * `UNSCORED_ALLOWED_MIN` cases or `UNSCORED_ALLOWED_FRACTION` of them, whichever is larger, is an
+ * outage: the gate fails as a provider error, never quietly passes on what is left.
+ */
+export const UNSCORED_ALLOWED_MIN = 2;
+export const UNSCORED_ALLOWED_FRACTION = 0.1;
+
+/** How many of `total` cases may go unscored before the kind is a provider error. */
+export function unscoredAllowed(total: number): number {
+  return Math.max(UNSCORED_ALLOWED_MIN, total * UNSCORED_ALLOWED_FRACTION);
+}
+
+/** Whether `unscored` of `total` cases is an outage rather than a quality result: past the bound,
+ * or nothing left to score at all (a one-case kind whose case failed must not pass vacuously). */
+export function providerError(unscored: number, total: number): boolean {
+  if (unscored <= 0) return false;
+  return unscored > unscoredAllowed(total) || unscored >= total;
 }
 
 /**

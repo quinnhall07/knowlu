@@ -1,7 +1,8 @@
 import { assert, assertEquals, assertAlmostEquals } from "@std/assert";
+import { ModelRefused, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { validate } from "../supabase/functions/_shared/judge_validate.ts";
-import { dryRunAnswer, main } from "./run_eval.ts";
+import { dryRunAnswer, main, MAX_ATTEMPTS, RETRY_BACKOFF_MS } from "./run_eval.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
 
@@ -561,4 +562,122 @@ Deno.test("an unsure-labelled event case scores 1.0 on a dry run, so the eval de
     captured.restore();
   }
   assertEquals(values, [1]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// PR #33's eval-gate (2026-10-02) scored event.weighted_exact 0.564 in CI against 0.897-0.936 on
+// local and re-run replays of the same seed: provider blips (`model failed` — the model never
+// answered) were scored as the worst miss. A failed call is retried; a case still failing is
+// unscored and counted; past the bound the kind is a provider error, never a quality result. A
+// refusal or a truncation is the model answering and stays scored exactly as before.
+// ---------------------------------------------------------------------------------------------
+
+const ANSWER = { confidence: 1, why: "scripted", verdict: "obligation" };
+
+/** `n` event cases labelled `obligation`, a live (non-dry) run against `script`, no key, no sleep. */
+async function liveEventRun(n: number, script: Array<Record<string, unknown> | Error>) {
+  const request = { kind: "event" as const, item: { uid: "engage:1", title: "Lab report due" }, heuristics_seed: {} };
+  const rows = Array.from({ length: n }, (_, i) => ({ id: i + 1, kind: "event", request, ours: null, theirs: { verdict: "obligation" } }));
+  const evalRuns: Array<Record<string, unknown>> = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?kind=eq.event")) return Promise.resolve(rows);
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.event")) {
+        return Promise.resolve([{
+          kind: "event", provider: "openrouter", model_id: "scripted/model", prompt_version: "event-3",
+          grammar_version: "event-3", max_tokens: 256, sampling: {}, usd_per_m_in: 1, usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") evalRuns.push(row);
+      return Promise.resolve(null);
+    },
+  });
+  const model = new ScriptedModel(script);
+  const sleeps: number[] = [];
+  const records: SeedRecord[] = [{ id: "seed-e1", kind: "event", request, theirs: { verdict: "obligation" } }];
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(["--thresholds", "cloud/eval/thresholds.json"], {
+      db: () => db,
+      loadSeed: () => Promise.resolve(records),
+      envGet: () => undefined,
+      modelFor: () => model,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+    });
+  } finally {
+    captured.restore();
+  }
+  return { code, evalRuns, calls: model.seen.length, sleeps, log: captured.log, error: captured.error };
+}
+
+const blip = () => new Error("provider returned 503");
+
+Deno.test("a case whose call fails then answers is retried, and the answer is what is scored", async () => {
+  assertEquals(MAX_ATTEMPTS, 3);
+  const run = await liveEventRun(2, [blip(), blip(), ANSWER, ANSWER]);
+  assertEquals(run.code, 0);
+  assertEquals(run.calls, 4);
+  assertEquals(run.sleeps, [RETRY_BACKOFF_MS, RETRY_BACKOFF_MS]);
+  assertEquals(run.evalRuns.map((r) => [r.value, r.cases]), [[1, 2]]);
+  assert(run.log.includes("event: 2 cases, <= 6 model calls (3 attempts per case at most, cap 200)"), run.log.join(" | "));
+  assert(run.log.includes("event: 4 model calls made"), run.log.join(" | "));
+  assert(!run.log.some((l) => l.includes("unscored")), run.log.join(" | "));
+});
+
+Deno.test("cases that never answer are unscored, and an outage fails as a provider error, not a quality result", async () => {
+  const run = await liveEventRun(3, Array.from({ length: 9 }, blip));
+  assertEquals(run.code, 2);
+  assertEquals(run.calls, 9, "three attempts per case, never more");
+  assertEquals(run.evalRuns, [], "an outage writes no eval_runs row");
+  assert(run.log.includes("event: 3 of 3 cases unscored (model failed)"), run.log.join(" | "));
+  assert(
+    run.error.includes("event: provider error, 3 of 3 cases failed after 3 attempts each: not a quality result"),
+    run.error.join(" | "),
+  );
+  assert(!run.log.some((l) => l.includes("FAIL")), "never reported as a failed metric");
+});
+
+Deno.test("a long outage stops calling once the bound is passed", async () => {
+  // 30 cases allow 3 unscored; the fourth failed case decides the outcome, so the run stops there.
+  const run = await liveEventRun(30, Array.from({ length: 90 }, blip));
+  assertEquals(run.code, 2);
+  assertEquals(run.calls, 12);
+  assert(
+    run.error.includes("event: provider error, 4 of 30 cases failed after 3 attempts each (stopped early): not a quality result"),
+    run.error.join(" | "),
+  );
+  assertEquals(run.evalRuns, []);
+});
+
+Deno.test("failures within the bound are unscored and the kind is scored on the rest", async () => {
+  const run = await liveEventRun(10, [blip(), blip(), blip(), ...Array.from({ length: 9 }, () => ANSWER)]);
+  assertEquals(run.code, 0);
+  assertEquals(run.evalRuns.map((r) => [r.value, r.cases]), [[1, 9]]);
+  assert(run.log.includes("event: 1 of 10 cases unscored (model failed)"), run.log.join(" | "));
+  assert(run.log.some((l) => l.startsWith("event.weighted_exact = 1.000") && l.includes("n=9 of 10 cases")), run.log.join(" | "));
+  assertEquals(run.error, []);
+});
+
+Deno.test("a refusal is the model answering: scored as a miss, never retried", async () => {
+  const run = await liveEventRun(1, [new ModelRefused("refused")]);
+  assertEquals(run.code, 1);
+  assertEquals(run.calls, 1);
+  assertEquals(run.sleeps, []);
+  assertEquals(run.evalRuns.map((r) => [r.value, r.cases]), [[0, 1]]);
+  assert(!run.log.some((l) => l.includes("unscored")));
+});
+
+Deno.test("a truncation is the model answering: scored as a miss, never retried", async () => {
+  const run = await liveEventRun(1, [new Error("stop_reason max_tokens")]);
+  assertEquals(run.code, 1);
+  assertEquals(run.calls, 1);
+  assertEquals(run.evalRuns.map((r) => [r.value, r.cases]), [[0, 1]]);
 });

@@ -8,9 +8,9 @@
 // don't cover. This file writes out that full ruling as its OWN table — independently of
 // `score.ts`'s `COST` map — and checks every one of the 42 cells against it, then checks that no
 // off-diagonal pair of either kind is missing from `COST` at all.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { EMAIL_TIERS, EVENT_VERDICTS } from "../supabase/functions/_shared/judge_validate.ts";
-import { COST } from "./score.ts";
+import { COST, providerError, UNSCORED_ALLOWED_FRACTION, UNSCORED_ALLOWED_MIN, unscoredAllowed } from "./score.ts";
 
 // The event 4x4 (obligation, opportunity, drop, unsure), 12 off-diagonal cells.
 // obligation/opportunity/drop are `docs/notes/2026-09-22-cost-matrices.md` §3 (ratified); the six
@@ -110,4 +110,28 @@ Deno.test("no off-diagonal email pair is missing from COST", () => {
 
 Deno.test("COST carries exactly 42 off-diagonal cells (12 event + 30 email), nothing extra", () => {
   assertEquals(Object.keys(COST).length, 42);
+});
+
+// A case whose model call never answered (cause `model failed`, after `run_eval.ts`'s retries) is
+// not scored. A few of them are noise, and the kind is scored on the rest; more than the bound is
+// an outage, reported as a provider error and never as a quality result.
+Deno.test("the unscored bound is 2 cases or 10% of them, whichever is larger", () => {
+  assertEquals(UNSCORED_ALLOWED_MIN, 2);
+  assertEquals(UNSCORED_ALLOWED_FRACTION, 0.1);
+  assertEquals(unscoredAllowed(3), 2);
+  assertEquals(unscoredAllowed(26), 2.6);
+  assertEquals(unscoredAllowed(200), 20);
+});
+
+Deno.test("unscored cases within the bound are not a provider error; past it, or all of them, are", () => {
+  assertEquals(providerError(0, 26), false);
+  assertEquals(providerError(2, 26), false);
+  assertEquals(providerError(3, 26), true);
+  assertEquals(providerError(20, 200), false);
+  assertEquals(providerError(21, 200), true);
+  // A kind with nothing left to score is never a pass, however small the corpus.
+  assertEquals(providerError(1, 1), true);
+  assertEquals(providerError(2, 2), true);
+  assertEquals(providerError(2, 3), false);
+  assert(!providerError(0, 0));
 });

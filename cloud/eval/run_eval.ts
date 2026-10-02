@@ -44,13 +44,13 @@ import type { CapStore } from "../supabase/functions/_shared/judge_caps.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { serviceDb } from "../supabase/functions/_shared/judge_db.ts";
 import { type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
-import { modelRow } from "../supabase/functions/_shared/judge_models.ts";
+import { type ModelRow, modelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { judge, type Kind } from "../supabase/functions/_shared/judge_pipeline.ts";
 import { promptHash } from "../supabase/functions/_shared/judge_prompts.ts";
 import { modelFor } from "../supabase/functions/_shared/judge_provider.ts";
 import { loadSeed } from "./loader.ts";
 import type { SeedRecord } from "./schema.ts";
-import { type Case, failed, score } from "./score.ts";
+import { type Case, failed, providerError, score } from "./score.ts";
 
 const KINDS: Kind[] = ["task", "event", "email"];
 
@@ -63,11 +63,21 @@ const KINDS: Kind[] = ["task", "event", "email"];
  * unbounded by construction: `eval_cases` grows with every consented correction, and this gate
  * runs on every PR that touches a prompt, a schema or a model pin. Today the corpus is empty, so
  * the gate costs nothing — which is exactly when a ceiling is cheap to add and impossible to
- * remember later. 200 per kind is 600 calls, under a dollar, and far more than a regression needs
- * to show itself; it is applied as PostgREST's own `&limit=`, so the rows never leave the
- * database, and it is printed before the loop so a run always says what it is about to spend.
+ * remember later. 200 per kind is 600 cases, at most `MAX_ATTEMPTS` calls each (1,800 calls, about
+ * 36 cents), and far more than a regression needs to show itself; it is applied as PostgREST's
+ * own `&limit=`, so the rows never leave the database, and it is printed before the loop so a run
+ * always says what it is about to spend.
  */
 export const MAX_CASES = 200;
+
+/**
+ * How many times one case's call is tried before the case is left unscored: the first attempt and
+ * at most two retries, `RETRY_BACKOFF_MS` apart (fixed, no jitter: one sequential runner). Only a
+ * `model failed` reply is retried — the model never answered. A refusal, a truncation or an
+ * invalid reply is the model answering and is scored as it stands (`score.ts`'s `providerError`).
+ */
+export const MAX_ATTEMPTS = 3;
+export const RETRY_BACKOFF_MS = 1_000;
 
 /** The eval is not a user (R-C2-E9 / R-C2-E51 fix 1, finding 3): every stub below ignores this
  * value, and there is no real account behind an automated run, so it is the nil UUID rather than a
@@ -172,8 +182,13 @@ export interface Deps {
   envGet: EnvGet;
   db: () => Db;
   loadSeed: () => Promise<SeedRecord[]>;
+  /** Builds the live model for a kind's pinned row; a test hands in a `ScriptedModel`. */
+  modelFor: (row: ModelRow, envGet: EnvGet) => JudgeModel;
+  /** The wait between attempts; a test records it instead of waiting. */
+  sleep: (ms: number) => Promise<void>;
 }
-const REAL_DEPS: Deps = { envGet: realEnvGet, db: serviceDb, loadSeed };
+const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const REAL_DEPS: Deps = { envGet: realEnvGet, db: serviceDb, loadSeed, modelFor, sleep: realSleep };
 
 /**
  * The entry point, factored so `run_eval_test.ts` can drive it directly (ruling R-C2-E50 (2)):
@@ -181,7 +196,7 @@ const REAL_DEPS: Deps = { envGet: realEnvGet, db: serviceDb, loadSeed };
  * it a function that throws and prove the zero-case path never calls it.
  */
 export async function main(args: string[], deps: Partial<Deps> = {}): Promise<number> {
-  const { envGet, db: dbFactory, loadSeed: loadSeedFn } = { ...REAL_DEPS, ...deps };
+  const { envGet, db: dbFactory, loadSeed: loadSeedFn, modelFor: buildModel, sleep } = { ...REAL_DEPS, ...deps };
   const argSet = new Set(args);
 
   if (argSet.has("--load-seed")) {
@@ -263,9 +278,13 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       }
       continue;
     }
-    // S-5: what this run is about to spend, before it spends it. Tier 2 is off for the eval and
-    // `--dry-run` reaches no provider at all, so the model-call count is the case count exactly.
-    console.log(`${kind}: ${rows.length} cases, <= ${rows.length} model calls (cap ${MAX_CASES})`);
+    // S-5: what this run is about to spend, before it spends it. Tier 2 is off for the eval, so a
+    // case is one call plus at most `MAX_ATTEMPTS - 1` retries of a call that never answered; the
+    // count actually made is printed after the loop.
+    console.log(
+      `${kind}: ${rows.length} cases, <= ${rows.length * MAX_ATTEMPTS} model calls ` +
+        `(${MAX_ATTEMPTS} attempts per case at most, cap ${MAX_CASES})`,
+    );
     const row = await modelRow(db, kind);
     // R-PS-3: the model is built only now — the row is read, and there is at least one
     // non-dry-run case this kind is actually about to spend on. One build per kind (not per
@@ -273,7 +292,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     let liveModel: JudgeModel | undefined;
     if (!dry) {
       try {
-        liveModel = modelFor(row, envGet);
+        liveModel = buildModel(row, envGet);
       } catch (e) {
         // `modelFor`'s own message already names the row's provider and its secret (Step 6 of
         // the provider seam); this is that same "no key" fault, at the point a real spend was
@@ -284,41 +303,69 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
         continue;
       }
     }
-    const cases: Case[] = rows.map((r) => ({ kind, theirs: r.theirs }));
+    // Only the cases whose call the model answered are scored; a case still `model failed` after
+    // `MAX_ATTEMPTS` is counted in `unscored` and left out of every metric (`score.ts`).
+    const cases: Case[] = [];
     const answers: Array<Record<string, unknown> | null> = [];
-    let inputTokens = 0, outputTokens = 0;
-    for (const r of rows) {
-      const raw: JudgeModel = dry
-        ? new ScriptedModel([dryRunAnswer(kind, r.theirs)])
-        : liveModel!;
-      // Wraps whichever model answers, so the run's own token spend is recorded (ruling
-      // R-C2-E9) regardless of which branch produced the `ModelReply`.
-      const metered: JudgeModel = {
-        async complete(req) {
-          const reply = await raw.complete(req);
-          inputTokens += reply.inputTokens;
-          outputTokens += reply.outputTokens;
-          return reply;
-        },
-      };
-      // The eval speaks for the current engine, which declares `unsure` on every event request
-      // (final review item 2) — without this, `judge()` would answer every `unsure` case with the
-      // pre-T1 `below floor` shape and the eval would score the gate, not the model.
-      const accepts = kind === "event" ? ["unsure"] : [];
-      const reply = await judge(EVAL_ACCOUNT, { kind, item: r.request.item, heuristics_seed: r.request.heuristics_seed, accepts }, {
-        row,
-        model: metered,
-        // Tier 2 is deliberately OFF for the eval: a promoted rule would score the rule, not the
-        // model, and the gate exists to decide whether the MODEL still does the job.
-        rules: { lookup: () => Promise.resolve(null) },
-        caps: EVAL_CAPS,
-        // The eval's own judgments are not the product's: they would poison rule promotion and
-        // the correction rates with answers nobody ever saw.
-        log: { write: () => Promise.resolve(null) },
-        origin: "device",
-        now: () => Date.now(),
-      });
-      answers.push(reply.verdict);
+    let inputTokens = 0, outputTokens = 0, calls = 0, unscored = 0, stoppedEarly = false;
+    for (const [i, r] of rows.entries()) {
+      let reply;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) await sleep(RETRY_BACKOFF_MS);
+        const raw: JudgeModel = dry ? new ScriptedModel([dryRunAnswer(kind, r.theirs)]) : liveModel!;
+        // Wraps whichever model answers, so the run's own token spend is recorded (ruling
+        // R-C2-E9) regardless of which branch produced the `ModelReply`, and every call counted.
+        const metered: JudgeModel = {
+          async complete(req) {
+            calls += 1;
+            const answer = await raw.complete(req);
+            inputTokens += answer.inputTokens;
+            outputTokens += answer.outputTokens;
+            return answer;
+          },
+        };
+        // The eval speaks for the current engine, which declares `unsure` on every event request
+        // (final review item 2) — without this, `judge()` would answer every `unsure` case with
+        // the pre-T1 `below floor` shape and the eval would score the gate, not the model.
+        const accepts = kind === "event" ? ["unsure"] : [];
+        reply = await judge(EVAL_ACCOUNT, { kind, item: r.request.item, heuristics_seed: r.request.heuristics_seed, accepts }, {
+          row,
+          model: metered,
+          // Tier 2 is deliberately OFF for the eval: a promoted rule would score the rule, not
+          // the model, and the gate exists to decide whether the MODEL still does the job.
+          rules: { lookup: () => Promise.resolve(null) },
+          caps: EVAL_CAPS,
+          // The eval's own judgments are not the product's: they would poison rule promotion and
+          // the correction rates with answers nobody ever saw.
+          log: { write: () => Promise.resolve(null) },
+          origin: "device",
+          now: () => Date.now(),
+        });
+        if (reply.cause !== "model failed") break;
+      }
+      if (reply!.cause === "model failed") {
+        unscored += 1;
+        // Past the bound the outcome is already an outage: stop spending on it.
+        if (providerError(unscored, rows.length)) {
+          stoppedEarly = i < rows.length - 1;
+          break;
+        }
+        continue;
+      }
+      cases.push({ kind, theirs: r.theirs });
+      answers.push(reply!.verdict);
+    }
+    console.log(`${kind}: ${calls} model calls made`);
+    if (unscored > 0) console.log(`${kind}: ${unscored} of ${rows.length} cases unscored (model failed)`);
+    if (providerError(unscored, rows.length)) {
+      // Not a quality result: no metric is printed or written for this kind, and the exit names
+      // the provider, so an outage is red for the right reason (exit 2, beside the other faults).
+      console.error(
+        `${kind}: provider error, ${unscored} of ${rows.length} cases failed after ${MAX_ATTEMPTS} attempts each` +
+          `${stoppedEarly ? " (stopped early)" : ""}: not a quality result`,
+      );
+      worst = Math.max(worst, 2);
+      continue;
     }
     const hash = await promptHash(kind);
     for (const scored of score(kind, cases, answers)) {
