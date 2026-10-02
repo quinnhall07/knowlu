@@ -454,8 +454,8 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T9.2 | `contract-engineer` (Opus, xhigh) | yes | — | `app/src/mail.rs` (new), `app/tests/mail.rs` | S1–S3, T10.1, H3b | app |
 | T10.2a | `implementer` (Sonnet, high) | no | — | `app/assets/mail/m365/` (forwarding), `app/assets/mail/{deno.json,deno.lock,test_dom.ts}` | T9.2 | app |
 | T10.2b | `implementer` (Sonnet, high) | no | — | `app/assets/mail/m365/` (mailbox) | T10.2a | app |
-| T10.3a | `implementer` (Sonnet, high) | no | — | `app/assets/mail/google/` (forwarding) | T10.2b | app |
-| T10.3b | `implementer` (Sonnet, high) | no | — | `app/assets/mail/google/` (mailbox) | T10.3a | app |
+| T10.3a | `implementer` (Sonnet, high) | no | — | `app/assets/mail/gmail/` (forwarding) | T10.2b | app |
+| T10.3b | `implementer` (Sonnet, high) | no | — | `app/assets/mail/gmail/` (mailbox) | T10.3a | app |
 | T11.1 | `implementer` (Sonnet, high) | no | — | `app/src/mail_client.rs` (new), `app/tests/mail.rs` | T10.3b, H3d | app |
 | T11.2 | `implementer` (Sonnet, high) | no | — | `app/src/mail.rs` (recover, reconcile), `app/tests/mail.rs` | T11.1 | app |
 | T11.3 | `implementer` (Sonnet, high) | no | — | `app/src/mail.rs` (the setup runner), `app/tests/mail.rs` | T11.2; then H4 | app |
@@ -1616,6 +1616,23 @@ exactly `Knowlu <nonce>`; `sent_cleanup.js` deletes only a Sent Items row whose 
 and whose recipients are Knowlu's address alone, and only while Sent Items is the selected folder.
 (4) The result `{result: "refused", reason}` is the "first send failure" the step machine stops on.
 `received_at` is the page's own reading of the time element's title (its locale, the system's zone).
+
+**Live checks for T11 and T18c, Gmail forwarding scripts** (T10.3a; the synthetic page models the spikes'
+selectors, it is not Gmail; the folder is `gmail/`, the name `runs_for` and the D19 test already enforce, not
+the `google/` this plan first wrote): (1) the section is found by its `input[type=button]` named "Add a
+forwarding address", the radios by their label text ("Disable forwarding", "Forward a copy of incoming mail
+to"), the address list and the "keep Gmail's copy in the Inbox" list as the two `select`s beside the second
+radio, and Save by its text or value "Save Changes"; none of that is verified live. (2) The dialog's email
+field is `input[type=email]` inside `[role=dialog]`; `forwarding_add.js` ends after Next (and Proceed if
+asked) and the host runs `forwarding_add_done.js` once the popup has closed; the "confirmation link sent"
+dialog is found by the words confirmation and sent, its OK by value. (3) "Remove forwarding address" is a
+guess at the control's name and that it acts on the list's selected address, with a confirm dialog naming a
+removal: `forwarding_remove_address.js` selects ours, checks it is selected, and reads the list back after
+a round trip, but the real button needs one live run on a scratch mailbox before Disconnect uses it.
+(4) A script that must reload returns `{result: "reloading"}` after `location.reload()`; whether its
+result still reaches the host before the navigation must be seen live, and a host that gets no result
+after a navigation must treat it as "reloading": T11.3 re-runs the step once with `reloaded: true`, and a
+second miss is `not found` and the step's guided fallback.
 
 ### T10. Step machines and step scripts, in five dispatches
 

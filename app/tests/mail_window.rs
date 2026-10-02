@@ -316,6 +316,33 @@ fn the_m365_mailbox_scripts_run_for_m365_only() {
     }
 }
 
+/// T10.3a: Gmail's six forwarding scripts (read, add, add-done, set, off, remove) are compiled in, run for
+/// that provider alone, and carry the caller's arguments and the script's own source into the page.
+#[test]
+fn the_gmail_forwarding_scripts_run_for_gmail_only() {
+    let on = "https://mail.google.com/mail/u/0/#settings/fwdandpop";
+    let names = [
+        "gmail/forwarding_read.js",
+        "gmail/forwarding_add.js",
+        "gmail/forwarding_add_done.js",
+        "gmail/forwarding_set.js",
+        "gmail/forwarding_off.js",
+        "gmail/forwarding_remove_address.js",
+    ];
+    for name in names {
+        assert!(script(name).is_some(), "{name} is compiled in");
+        let m365 = Fake::at("https://outlook.cloud.microsoft/mail/").says(json!({ "state": "started" }));
+        assert_eq!(run(&m365, Provider::M365, name, &json!({}), WAIT), Err(Refusal::NotForProvider), "{name}");
+        assert!(m365.evals.borrow().is_empty(), "{name} was evaluated for Microsoft 365");
+        let page = Fake::at(on).says(json!({ "state": "started" })).says(json!({ "state": "done", "value": { "result": "ok" } }));
+        let args = json!({ "address": "box-1@in.example.invalid" });
+        assert_eq!(run(&page, Provider::Gmail, name, &args, WAIT), Ok(json!({ "result": "ok" })), "{name}");
+        let evals = page.evals.borrow();
+        assert!(evals[0].contains(script(name).unwrap().source()), "{name}: the compiled-in source runs");
+        assert!(evals[0].contains("box-1@in.example.invalid"), "{name}: the arguments reach the page");
+    }
+}
+
 // ---- X2's title signal -----------------------------------------------------------------------
 
 #[test]

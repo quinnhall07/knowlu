@@ -12,6 +12,9 @@ export interface Page {
   document: any;
   // deno-lint-ignore no-explicit-any
   Event: any;
+  /** The page's `location`, for the scripts that navigate by hash or reload; a test's page may bring its own. */
+  // deno-lint-ignore no-explicit-any
+  location?: any;
 }
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -29,12 +32,12 @@ export function load(html: string): Page {
 /**
  * Runs the script at `path` (relative to this folder) on `page`, as the app does: the text is the body
  * of an async function of `args`, and what it returns is the result. The script sees the page's
- * `document` and `Event`, and nothing else of the page.
+ * `document`, `Event` and `location`, and nothing else of the page.
  */
 export async function run(path: string, page: Page, args: Record<string, unknown> = {}) {
   const source = await Deno.readTextFile(new URL(path, import.meta.url));
-  const body = new AsyncFunction("args", "document", "Event", source);
-  return await body(args, page.document, page.Event);
+  const body = new AsyncFunction("args", "document", "Event", "location", source);
+  return await body(args, page.document, page.Event, page.location ?? { hash: "", host: "", reload() {} });
 }
 
 export function disable(el: El, on: boolean) {
