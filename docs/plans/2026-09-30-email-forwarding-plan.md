@@ -590,6 +590,8 @@ sign-in and phone tap. **Each check, and what passes it:**
   `navigator.registerProtocolHandler`, or a WebView2 setting. Pass: the prompt never shows across
   sign-in and settings.
 
+Done 2026-10-02: see docs/reports/2026-10-02-email-forwarding-s1-s3.md
+
 **No task that touches the window or a step script starts until S1–S3 pass** (P4). The report names
 the result channel, the hide mode and the popup route that T9.2 and T10.2a build on.
 
@@ -1580,6 +1582,8 @@ for `mail.json`.
 
 **After:** S1–S3. **Before it:** H3b. **Tests first** (spec tests 33 and 34, plus the pure pieces):
 - `the_mail_label_has_no_capability_grant` (33)
+- `no_capability_names_a_mail_window_or_a_remote_url` (33; Quinn's IPC ruling 2026-10-02: fails if any
+  `app/capabilities/*.json` names a mail window label or remote URL)
 - `one_mail_window_at_a_time` (33)
 - `the_runner_refuses_a_page_off_the_providers_origins` (33, a synthetic SSO origin)
 - `the_runner_runs_only_compiled_in_scripts` (D19)
@@ -1590,6 +1594,9 @@ for `mail.json`.
 **Behaviour.** D5, and §6.2's window pieces, on T0's recorded routes: the one label `mail`;
 `open_visible`; hidden or off-screen as S2 decided; stepping aside; coming back centred and focused;
 the popup per S1b; the protocol prompt per S3; the result channel per S1a, with a timeout.
+
+**Outlook's origins** include `outlook.cloud.microsoft` (`outlook.office.com` redirects there, S1c), besides
+`outlook.office.com` and the sign-in origins.
 
 ### T10. Step machines and step scripts, in five dispatches
 
