@@ -1529,7 +1529,8 @@ rebase onto them if they merged first (§10, R2).
 **Tests first** (spec test 10, and 13's validation half):
 - `evidence_not_verbatim_after_whitespace_folding_is_refused_incomplete`
 - `a_line_separator_or_control_character_in_title_from_or_evidence_is_refused` (§10, R11): `\r`, `\n`,
-  U+0085, U+2028, U+2029 and C0 controls other than tab.
+  U+0085, U+2028, U+2029 and C0 controls other than tab. Evidence is folded first (D9), so the breaks
+  JS `\s` folds (`\r`, `\n`, VT, FF, U+2028, U+2029) match as one space; the rest stay refused.
 - `an_unknown_course_reads_null`
 - `an_unresolvable_due_reads_null`
 - `a_sixth_claim_is_dropped`
@@ -2653,7 +2654,9 @@ the plan has been edited to match, and each edit names its R number.
   - T5.1 skips, as `noise`, any claim with a title, sender, why or evidence that
     `write::single_line_problem` refuses. The test is
     `a_claim_with_a_line_break_in_any_field_is_skipped_as_noise`.
-  - T3b refuses line separators and C0 controls in `title`, `from` and `evidence` at the service.
+  - T3b refuses line separators and C0 controls in `title`, `from`, `why` and `target` at the service.
+    `evidence` is whitespace-folded first (D9: a quote of hard-wrapped mail is verbatim), then held to
+    the same check, so no line break reaches the device (T3b review).
   - T6.2's literal test covers `\r`, U+0085 and U+2028 in every mail-derived field.
 
 ### R12. The contract-list check was too narrow and diffed a stale `main` (important)

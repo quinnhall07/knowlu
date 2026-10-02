@@ -108,6 +108,10 @@ Deno.test("evidence_not_verbatim_after_whitespace_folding_is_refused_incomplete"
   // Folding is whitespace only: a tab and a line break in the text match one space in the evidence.
   assertEquals(one(newItem({}, { evidence: "2026. The quiz is Friday." })).ok, true);
   assertEquals(one(change({ evidence: "  Lab 4:   Springs  " })).claims[0]?.evidence, "Lab 4: Springs");
+  // A quote of hard-wrapped mail, line break and all, is verbatim (D9) and reaches the device on one line.
+  const wrapped = one(change({ evidence: "Lab 4: Springs is now due\nOctober 9, 2026." }));
+  assertEquals(wrapped.claims[0]?.evidence, "Lab 4: Springs is now due October 9, 2026.");
+  assertEquals(one(change({ evidence: "now due\r\nOctober 9" })).claims[0]?.evidence, "now due October 9");
   // The subject is part of the message the model saw.
   assertEquals(one(change({ evidence: "Lab 4 moved" })).ok, true);
   for (
@@ -155,11 +159,10 @@ Deno.test("a_line_separator_or_control_character_in_title_from_or_evidence_is_re
     const name = JSON.stringify(ch);
     const text = `${CTX.text} Lab 4:${ch}Springs`;
     assertEquals(one(newItem({ title: `Quiz${ch}2` })).cause, "incomplete", `title ${name}`);
-    assertEquals(
-      one(change({ evidence: `Lab 4:${ch}Springs` }), "model", { ...CTX, text }).ok,
-      false,
-      `evidence ${name}`,
-    );
+    // Evidence is folded first (D9), so only a break that whitespace folding keeps is refused.
+    const evidence = one(change({ evidence: `Lab 4:${ch}Springs` }), "model", { ...CTX, text });
+    if (/\s/.test(ch)) assertEquals(evidence.claims[0]?.evidence, "Lab 4: Springs", `evidence ${name}`);
+    else assertEquals([evidence.ok, evidence.cause], [false, "incomplete"], `evidence ${name}`);
     assertEquals(one(change({ target: `Lab${ch}4` })).ok, false, `target ${name}`);
     assertEquals(one(change({ why: `moved${ch}the lab` })).ok, false, `why ${name}`);
     const forged = validateMailClaims({ claims: [change(), newItem()] }, {

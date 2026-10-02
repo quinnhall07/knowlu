@@ -292,10 +292,13 @@ function mailClaim(
   const confidence = num(a.confidence);
   if (confidence === null || typeof a.why !== "string" || typeof a.evidence !== "string") return INCOMPLETE;
   const target = typeof a.target === "string" ? a.target : "";
-  if ([a.why, a.evidence, target].some(breaksLine)) return INCOMPLETE;
+  if ([a.why, target].some(breaksLine)) return INCOMPLETE;
   // D9: the evidence occurs verbatim in the message after whitespace folding, or the claim is refused.
+  // It is folded before R11's check, so a quote of hard-wrapped mail holds; a break folding keeps
+  // (U+0085, a C0 control that is not whitespace, DEL) is still refused, and none reaches the device.
   const evidence = fold(a.evidence);
-  if (evidence === "" || !(folded.text.includes(evidence) || folded.subject.includes(evidence))) {
+  if (evidence === "" || breaksLine(evidence)) return INCOMPLETE;
+  if (!(folded.text.includes(evidence) || folded.subject.includes(evidence))) {
     return INCOMPLETE;
   }
   const why = oneLine(a.why, MAX_REASON_CHARS);
