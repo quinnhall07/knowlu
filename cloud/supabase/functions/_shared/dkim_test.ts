@@ -200,6 +200,11 @@ Deno.test("a_header_absent_from_h_is_not_covered", async () => {
   assertEquals(ra.covered.filter((f) => f.name === "from").map((f) => f.value), [
     "Jane Example <jane@example.test>",
   ]);
+  // ...and the result says a From exists that the signature does not cover. A header never in h= is
+  // not listed: it is covered by nothing, which signedHeaders already says.
+  assertEquals(ra.unsignedExtra, ["from"]);
+  assertEquals(r.unsignedExtra, []);
+  assertEquals((await verifyDkim(assemble(m), d))[0].unsignedExtra, []);
 });
 
 // ---------------------------------------------------------------- ARC messages
@@ -327,6 +332,54 @@ Deno.test("the_topmost_arc_instances_seal_and_its_ams_verify_and_report_the_seal
     reason: "cv",
     instance: 2,
   });
+});
+
+Deno.test("a_header_seeded_below_the_sealers_own_is_reported_as_an_unsigned_extra", async () => {
+  const d = await deps();
+  const genuine = await verifyArc(text(await twoHops()), d);
+  assert(genuine.result === "pass", JSON.stringify(genuine));
+  assertEquals(genuine.unsignedExtra, []);
+
+  // Spec §4.6 step 5(i), risk 10: the sender writes an X-Forwarded-For naming a victim. Google adds its
+  // own above it and signs x-forwarded-for once, so it signs the bottom one: the sender's line.
+  const SEEDED = "X-Forwarded-For: victim@school.test v1c7@in.example.test";
+  const seeded: Msg = { ...original(), head: [...original().head, SEEDED] };
+  const hop = {
+    ...GOOGLE_HOP,
+    covered: rc(SEEDED) + "\r\n" + GOOGLE_HOP.covered.slice(GOOGLE_HOP.covered.indexOf("from:")),
+  };
+  const r = await verifyArc(text(await seal(await seal(seeded, MS_HOP), hop)), d);
+  assert(r.result === "pass", JSON.stringify(r));
+  assertEquals(r.covered[0], { name: "x-forwarded-for", value: "victim@school.test v1c7@in.example.test" });
+  assertEquals(r.unsignedExtra, ["x-forwarded-for"], "binding must see the unsigned instance above");
+
+  // Over-signing (the name twice in h=) covers both instances, and nothing is left unsigned.
+  const both = {
+    ...GOOGLE_HOP,
+    h: "x-forwarded-for:x-forwarded-for:from:subject",
+    covered: rc(SEEDED) + "\r\n" + GOOGLE_HOP.covered,
+  };
+  const o = await verifyArc(text(await seal(await seal(seeded, MS_HOP), both)), d);
+  assert(o.result === "pass", JSON.stringify(o));
+  assertEquals(o.covered.filter((f) => f.name === "x-forwarded-for").length, 2);
+  assertEquals(o.unsignedExtra, []);
+
+  // Two seeded lines and h= naming it twice: both seeded lines are signed, Google's own is the one left
+  // over, and the name is listed once.
+  const SEEDED2 = "X-Forwarded-For: other@school.test o7h3@in.example.test";
+  const twice: Msg = { ...original(), head: [...original().head, SEEDED, SEEDED2] };
+  const t = await verifyArc(
+    text(
+      await seal(await seal(twice, MS_HOP), {
+        ...both,
+        covered: rc(SEEDED2) + "\r\n" + rc(SEEDED) + "\r\n" +
+          GOOGLE_HOP.covered.slice(GOOGLE_HOP.covered.indexOf("from:")),
+      }),
+    ),
+    d,
+  );
+  assert(t.result === "pass", JSON.stringify(t));
+  assertEquals(t.unsignedExtra, ["x-forwarded-for"]);
 });
 
 Deno.test("a_lower_arc_instance_is_never_read_as_the_topmost", async () => {

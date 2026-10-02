@@ -12,7 +12,10 @@
  *
  * A pass reports the signing domain and the **exact field instances** the signature covers (picked from
  * the bottom up, as a signer picks them), so binding (T2e, T2f) reads the covered value and never another
- * instance of the same name. A failure reports a fixed word from `REASONS` and nothing else: no field
+ * instance of the same name. That alone is not enough: bottom-up means a field the sender wrote below the
+ * provider's own is the one signed. So a pass also lists `unsignedExtra`, each signed name with an
+ * instance the signature leaves out, and binding refuses a header named there (spec §4.6 step 5(i),
+ * risk 10). A failure reports a fixed word from `REASONS` and nothing else: no field
  * of the message reaches a result's reason, an error or a log, and this file logs nothing.
  *
  * The key resolver is injected (`DkimDeps.resolveTxt`); production passes `dnsTxtResolver()`, the one
@@ -68,6 +71,9 @@ export interface SignatureResult {
   signedHeaders: string[];
   /** The field instances hashed, in `h=` order; empty unless the result is `pass`. */
   covered: CoveredField[];
+  /** Each name in `h=` (once, in `h=` order) the message holds more instances of than `h=` signs; empty
+   * unless the result is `pass`. The extra instances sit above the covered ones, unsigned. */
+  unsignedExtra: string[];
 }
 /** The topmost ARC instance. Only `pass` carries a domain, the covered fields or the AAR. */
 export type ArcResult =
@@ -81,6 +87,8 @@ export type ArcResult =
     amsDomain: string;
     signedHeaders: string[];
     covered: CoveredField[];
+    /** As on `SignatureResult`, for the topmost AMS. */
+    unsignedExtra: string[];
     /** The topmost `ARC-Authentication-Results`, after its `i=N;`, unfolded and trimmed. */
     authResults: string;
   };
@@ -273,20 +281,22 @@ function withoutB(raw: string): string {
 }
 
 /** The fields `names` sign, each name taking the bottom-most instance not yet taken (RFC 6376 §5.4.2).
- * A name with no instance left contributes nothing. */
-function select(fields: Field[], names: string[]): Field[] {
+ * A name with no instance left contributes nothing. `extra` is each signed name, once and in `h=`
+ * order, with an instance left over: one the signature does not cover, above the ones it does. */
+function select(fields: Field[], names: string[]): { selected: Field[]; extra: string[] } {
   const byName = new Map<string, Field[]>();
   for (const f of fields) {
     const list = byName.get(f.lower);
     if (list) list.push(f);
     else byName.set(f.lower, [f]);
   }
-  const out: Field[] = [];
+  const selected: Field[] = [];
   for (const n of names) {
     const f = byName.get(n)?.pop();
-    if (f) out.push(f);
+    if (f) selected.push(f);
   }
-  return out;
+  const extra = [...new Set(names)].filter((n) => (byName.get(n)?.length ?? 0) > 0);
+  return { selected, extra };
 }
 
 // ---------------------------------------------------------------- keys
@@ -429,6 +439,7 @@ async function verifySignature(
     selector: null,
     signedHeaders: [],
     covered: [],
+    unsignedExtra: [],
   };
   const done = (result: SignatureResult["result"], reason: Reason) => ({ ...out, result, reason });
   const dkim = header === "dkim-signature";
@@ -470,7 +481,7 @@ async function verifySignature(
   if (!sameBytes(await bodyHash(ctx, c.body, length), bh)) return done("fail", "body_hash");
   const k = await lookupKey(ctx, s, d);
   if (!("key" in k)) return done(k.result, k.reason);
-  const selected = select(ctx.msg.fields, names);
+  const { selected, extra } = select(ctx.msg.fields, names);
   let data = "";
   for (const f of selected) data += canonicalHeader(f.raw, c.header) + "\r\n";
   data += canonicalHeader(withoutB(sig.raw), c.header);
@@ -482,7 +493,7 @@ async function verifySignature(
   }
   if (!ok) return done("fail", "signature");
   const covered = selected.map((f) => ({ name: f.lower, value: headerText(unfolded(f.raw)) }));
-  return { ...out, result: "pass", reason: null, covered };
+  return { ...out, result: "pass", reason: null, covered, unsignedExtra: extra };
 }
 
 /** Every `DKIM-Signature`, top to bottom. Past `MAX_SIGNATURES`, a signature is `too_many`, unread. */
@@ -500,6 +511,7 @@ export async function verifyDkim(input: MailInput, deps: DkimDeps): Promise<Sign
         selector: null,
         signedHeaders: [],
         covered: [],
+        unsignedExtra: [],
       },
     );
   }
@@ -608,6 +620,7 @@ export async function verifyArc(input: MailInput, deps: DkimDeps): Promise<ArcRe
     amsDomain: ams.domain,
     signedHeaders: ams.signedHeaders,
     covered: ams.covered,
+    unsignedExtra: ams.unsignedExtra,
     authResults: trimWsp(aar.slice(aar.indexOf(";") + 1)),
   };
 }

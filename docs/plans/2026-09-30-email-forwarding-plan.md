@@ -1354,6 +1354,10 @@ and records pass or fail by case in the T0 report.
 - `an_m365_forward_binds_by_microsofts_arc_forwardingloop_and_srs_return_path`
 - `a_direct_send_with_a_forged_x_forwarded_for_is_unbound`
 - `a_forward_sealed_by_google_from_an_attackers_own_gmail_is_unbound`
+- `a_sender_seeded_x_forwarded_for_below_googles_own_is_unbound` (the sender writes an X-Forwarded-For
+  naming a victim; Google adds its own above it and signs the bottom one, so the AMS passes and covers
+  the forged line; the ARC pass's `unsignedExtra` names it, and binding refuses even with check (ii)
+  met)
 - `an_m365_forward_naming_another_tenant_than_forward_hint_is_unbound`
 - `a_dmarc_failing_original_with_an_aligned_provider_hop_result_is_aligned` (3)
 - `a_pass_only_in_a_sender_written_authentication_results_is_unaligned` (3)
@@ -1361,7 +1365,11 @@ and records pass or fail by case in the T0 report.
 - `no_authentication_result_ever_produces_a_non_2xx_answer` (3)
 
 **Behaviour.** §4.6 steps 5 (the live case and "anything else") and 6. The words recorded are
-`aligned` or `unaligned`, never a header.
+`aligned` or `unaligned`, never a header. A binding header is read only from the covered instance of a
+passing ARC (`dkim.ts`'s `covered`), and only when the pass's `unsignedExtra` does not name it. A signer
+picks fields from the bottom up (RFC 6376 §5.4.2), so a header the sender wrote below the provider's own
+is the one signed, and an unsigned instance of the same name means the binding is refused (T2d review,
+2026-10-02). Check (i) and check (ii) must each stop the seeded forgery alone (risk 10).
 
 **S0's facts (2026-10-02, `s0-captures.md`).**
 - **Gmail binding.** The envelope sender is `<user>+caf_=<knowlu-address-with-=>@gmail.com`: the
